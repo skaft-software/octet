@@ -8,7 +8,7 @@ found the tool fails closed with an `error unsupported_platform` message.
 
 ## Shell selection order
 
-`crates/octet-agent/src/tools/bash.rs:386` resolves the shell in this order:
+`crates/octet-agent/src/tools/bash.rs` resolves the shell in this order:
 
 1. an explicit `shell_path` — `--shell-path PATH`, `OCTET_SHELL_PATH`, or the
    `shell_path` configuration key ([configuration](configuration.md));
@@ -22,21 +22,17 @@ reinterpret it as `cmd.exe` or PowerShell.
 
 ## PowerShell
 
-The agent runtime implements an opt-in `powershell` tool
-(`crates/octet-agent/src/tools/powershell.rs`) that prefers `pwsh.exe` over
-Windows PowerShell and runs with `-NoProfile -NonInteractive
--ExecutionPolicy Bypass`, bounded output, and process-tree cleanup. It is **not**
-part of the coding agent's model-visible tool allowlist yet
-(`crates/octet-coding-agent/src/config.rs:119` lists `read`, `search`, `edit`,
-`write`, `bash`, and the skill tools), so on Windows today the model uses `bash`
-with a Bash-compatible shell. This is tracked as parity item `4.6` (opt-in
-PowerShell + Windows CI evidence, currently `Pending`) in
-[docs/parity/README.md](parity/README.md).
+Use `--powershell` to add the opt-in `powershell` tool on Windows. It prefers
+`pwsh.exe` over Windows PowerShell and runs with `-NoProfile -NonInteractive
+-ExecutionPolicy Bypass`, bounded output, and process-tree cleanup. This is
+additive: it does not replace Bash or relax the configured process/effect policy.
+The flag is inert on non-Windows hosts. Native Windows installed-package
+qualification is separate from source-level behavior.
 
 ## Interactive shell commands
 
 The interactive `!<command>` local command runs through `sh -c`
-(`crates/octet-coding-agent/src/modes/interactive.rs:5838`). On Windows this
+(`crates/octet-coding-agent/src/modes/interactive.rs`). On Windows this
 requires an `sh` on `PATH`; without one, use the `bash` tool instead.
 
 ## Paths

@@ -39,9 +39,8 @@ fn minimal_request() -> Request {
 async fn finished(stream: &mut octet_ai::ResponseStream) -> octet_ai::Response {
     let mut terminal = None;
     while let Some(event) = stream.next().await {
-        match event.expect("stream event") {
-            StreamEvent::Finished(response) => terminal = Some(response),
-            _ => {}
+        if let StreamEvent::Finished(response) = event.expect("stream event") {
+            terminal = Some(response);
         }
     }
     terminal.expect("stream must finish")
@@ -54,18 +53,15 @@ async fn faux_deferred_pending_ready_and_permit_consumption() {
         poll_after_ms: Some(7),
         ..FauxOptions::default()
     });
-    provider.set_responses(vec![FauxResponse::Message(FauxMessage::new("deferred done"))]);
+    provider.set_responses(vec![FauxResponse::Message(FauxMessage::new(
+        "deferred done",
+    ))]);
     let client = AiClient::new();
     provider.register(&client);
     let model = provider.model().clone();
 
     let mut stream = client
-        .submit_deferred(
-            &model,
-            minimal_request(),
-            RequestOverrides::default(),
-            None,
-        )
+        .submit_deferred(&model, minimal_request(), RequestOverrides::default(), None)
         .await
         .expect("deferred submission");
     let parked = finished(&mut stream).await;
@@ -148,12 +144,7 @@ async fn permits_fail_closed_before_any_provider_work() {
     let model = provider.model().clone();
 
     let mut stream = client
-        .submit_deferred(
-            &model,
-            minimal_request(),
-            RequestOverrides::default(),
-            None,
-        )
+        .submit_deferred(&model, minimal_request(), RequestOverrides::default(), None)
         .await
         .expect("deferred submission");
     let handle = finished(&mut stream).await.deferred.expect("handle");
@@ -176,7 +167,9 @@ async fn permits_fail_closed_before_any_provider_work() {
                 None
             )
             .await,
-        Err(AiError::Deferred(DeferredPollRefusalKind::StaleGeneration { .. }))
+        Err(AiError::Deferred(
+            DeferredPollRefusalKind::StaleGeneration { .. }
+        ))
     ));
     assert!(matches!(
         client
@@ -197,13 +190,7 @@ async fn permits_fail_closed_before_any_provider_work() {
     let mut foreign = handle.clone();
     foreign.model_id = "other-model".to_owned();
     assert!(client
-        .fetch_deferred(
-            &model,
-            foreign,
-            DeferredPollPermit::one("pass", 0),
-            0,
-            None
-        )
+        .fetch_deferred(&model, foreign, DeferredPollPermit::one("pass", 0), 0, None)
         .await
         .is_err());
     assert_eq!(provider.state().deferred_fetch_count, 0);
@@ -221,12 +208,7 @@ async fn faux_deferred_failure_and_cancellation_are_terminal() {
     let model = provider.model().clone();
 
     let mut stream = client
-        .submit_deferred(
-            &model,
-            minimal_request(),
-            RequestOverrides::default(),
-            None,
-        )
+        .submit_deferred(&model, minimal_request(), RequestOverrides::default(), None)
         .await
         .expect("deferred submission");
     let failed_handle = finished(&mut stream).await.deferred.expect("handle");
@@ -252,12 +234,7 @@ async fn faux_deferred_failure_and_cancellation_are_terminal() {
     assert!(matches!(error, AiError::Provider(_)));
 
     let mut stream = client
-        .submit_deferred(
-            &model,
-            minimal_request(),
-            RequestOverrides::default(),
-            None,
-        )
+        .submit_deferred(&model, minimal_request(), RequestOverrides::default(), None)
         .await
         .expect("second deferred submission");
     let cancelled_handle = finished(&mut stream).await.deferred.expect("handle");
@@ -284,17 +261,10 @@ async fn faux_deferred_failure_and_cancellation_are_terminal() {
     assert_eq!(provider.state().cancelled_deferred, vec![cancelled_handle]);
 
     // Unknown handles are refused, never treated as pending.
-    let unknown =
-        octet_ai::DeferredHandle::new("faux", "faux-1", "faux", "not-a-real-handle");
+    let unknown = octet_ai::DeferredHandle::new("faux", "faux-1", "faux", "not-a-real-handle");
     assert!(matches!(
         client
-            .fetch_deferred(
-                &model,
-                unknown,
-                DeferredPollPermit::one("pass", 0),
-                0,
-                None
-            )
+            .fetch_deferred(&model, unknown, DeferredPollPermit::one("pass", 0), 0, None)
             .await,
         Err(AiError::Provider(_))
     ));
@@ -310,12 +280,7 @@ async fn deferred_requests_require_a_deferred_capable_transport() {
     let client = AiClient::new();
     assert!(matches!(
         client
-            .submit_deferred(
-                &model,
-                minimal_request(),
-                RequestOverrides::default(),
-                None
-            )
+            .submit_deferred(&model, minimal_request(), RequestOverrides::default(), None)
             .await,
         Err(AiError::Unsupported(octet_ai::UnsupportedError::Deferred))
     ));
@@ -324,13 +289,7 @@ async fn deferred_requests_require_a_deferred_capable_transport() {
     let handle = octet_ai::DeferredHandle::new("none", spec.id.0.clone(), "none", "id");
     assert!(matches!(
         client
-            .fetch_deferred(
-                &model,
-                handle,
-                DeferredPollPermit::one("pass", 0),
-                0,
-                None
-            )
+            .fetch_deferred(&model, handle, DeferredPollPermit::one("pass", 0), 0, None)
             .await,
         Err(AiError::Unsupported(octet_ai::UnsupportedError::Deferred))
     ));
@@ -397,12 +356,8 @@ fn faux_provider_model_identity_is_self_consistent() {
     let model = provider.model();
     assert_eq!(model.spec.id.0, "faux-1");
     assert_eq!(model.endpoint.id.0, "faux");
-    let handle = octet_ai::DeferredHandle::new(
-        "faux",
-        model.spec.id.0.clone(),
-        "faux",
-        "faux-call-1",
-    );
+    let handle =
+        octet_ai::DeferredHandle::new("faux", model.spec.id.0.clone(), "faux", "faux-call-1");
     assert_eq!(provider.deferred_status(&handle), None);
     // `Arc` is only used to prove the provider is shareable/registerable.
     let provider = Arc::new(provider);

@@ -696,9 +696,9 @@ fn fleet_record(harness: &EnabledAgent, agent_id: &str) -> serde_json::Value {
 
 /// Whether any worker was silently retired at the run boundary.
 fn any_shutdown(events: &[serde_json::Value]) -> bool {
-    events.iter().any(|event| {
-        event["event"] == "agent_status" && event["status"]["state"] == "shutdown"
-    })
+    events
+        .iter()
+        .any(|event| event["event"] == "agent_status" && event["status"]["state"] == "shutdown")
 }
 
 fn listed_agent<'a>(value: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
@@ -1126,9 +1126,7 @@ async fn completing_a_root_run_detaches_and_keeps_the_worker_discoverable() {
     // The end of the owning run is an explicit, journaled boundary: the worker
     // survives it instead of being retired with the run.
     let events = wait_for_provenance(&provenance_path, |events| {
-        events
-            .iter()
-            .any(|event| event["event"] == "run_detached")
+        events.iter().any(|event| event["event"] == "run_detached")
     })
     .await;
     let detached = events
@@ -1194,9 +1192,7 @@ async fn aborting_or_dropping_a_root_run_keeps_delegated_workers_reattachable() 
     // Session-scoped lifetime: ending the turn - even by an explicit abort -
     // detaches the worker with `agent-1` instead of retiring it silently.
     let events = wait_for_provenance(&explicit_provenance, |events| {
-        events
-            .iter()
-            .any(|event| event["event"] == "run_detached")
+        events.iter().any(|event| event["event"] == "run_detached")
     })
     .await;
     let detached = events
@@ -1233,9 +1229,7 @@ async fn aborting_or_dropping_a_root_run_keeps_delegated_workers_reattachable() 
     .expect("spawn tool did not finish");
     drop(run);
     let events = wait_for_provenance(&dropped_provenance, |events| {
-        events
-            .iter()
-            .any(|event| event["event"] == "run_detached")
+        events.iter().any(|event| event["event"] == "run_detached")
     })
     .await;
     assert!(!any_shutdown(&events));
@@ -1422,9 +1416,7 @@ async fn a_worker_survives_the_owning_turn_and_a_later_turn_waits_steers_and_sto
     let first = harness.agent.complete("spawn survivor").await.unwrap();
     assert_eq!(first.text, "first turn complete");
     let events = wait_for_provenance(&provenance_path, |events| {
-        events
-            .iter()
-            .any(|event| event["event"] == "run_detached")
+        events.iter().any(|event| event["event"] == "run_detached")
     })
     .await;
     assert!(!any_shutdown(&events));

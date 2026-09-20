@@ -469,18 +469,25 @@ fn a_rendered_frame_shows_the_roster_exactly_once() {
             "nothing above the composer repeats the roster"
         );
 
-        // The same holds once the block sits far above the live tail: there is
-        // still no second surface to duplicate it. The native mutable-tail
-        // preview may clip worker rows entirely (absence is not a duplicate),
-        // so the one-surface invariant is the heading count plus the clean
-        // composer, and every worker name may appear at most once.
+        // A live roster cannot turn subsequent conversation into its preview.
+        // Even far above the live tail, every worker and later row is present
+        // exactly once in the native frame, with no duplicate composer surface.
         for n in 0..80 {
             shell.notice(format!("filler-{n}"));
         }
         let frame = frame_text(&shell, 120);
         assert_eq!(frame.matches("Subagents").count(), 1, "{frame}");
-        assert!(frame.matches("LIVE-WORKER").count() <= 1, "{frame}");
-        assert!(frame.matches("DONE-WORKER").count() <= 1, "{frame}");
+        assert_eq!(frame.matches("LIVE-WORKER").count(), 1, "{frame}");
+        assert_eq!(frame.matches("DONE-WORKER").count(), 1, "{frame}");
+        for n in 0..80 {
+            assert!(
+                frame
+                    .lines()
+                    .any(|row| row.ends_with(&format!("filler-{n}"))),
+                "{frame}"
+            );
+        }
+        assert!(!frame.contains("result pending"), "{frame}");
 
         publish_roster(
             &mut shell,
@@ -497,7 +504,7 @@ fn a_rendered_frame_shows_the_roster_exactly_once() {
 }
 
 #[test]
-fn an_active_roster_never_commits_into_native_history() {
+fn active_roster_preserves_the_complete_native_frame_and_pinned_commit_fence() {
     for native in [false, true] {
         let mut shell = InteractiveShell::test_shell();
         shell.set_size(80, 24);
@@ -521,10 +528,9 @@ fn an_active_roster_never_commits_into_native_history() {
         let start = shell.state.borrow().transcript_cache.borrow().block_starts[index];
         assert!(start > 0, "the prompt precedes the roster: {start}");
 
-        // The production path (row replacements consumed by the Pi renderer)
-        // keeps the active roster in the mutable tail seam. The bounded preview
-        // may clip its worker rows, but the seam and the block's own heading
-        // still start at the roster.
+        // Native row replacement must retain the complete conversation. The
+        // experimental pinned path below has a separate semantic commit fence;
+        // it must not be implemented by clipping the native logical frame.
         let mut frame = ShellFrameState::default();
         let update = super::native_scrollback::render_shell_update_without_cursor(
             &shell.state.borrow(),
@@ -533,20 +539,29 @@ fn an_active_roster_never_commits_into_native_history() {
             &mut frame,
         );
         assert!(update.stable_prefix <= start, "{}", update.stable_prefix);
-        assert!(update.replacement.join("\n").contains("Subagents"));
+        let mut materialized = update.replacement;
+        assert!(materialized.join("\n").contains("LIVE-WORKER"));
+        assert_eq!(frame.pending_tool_start, None);
         let update = super::native_scrollback::render_shell_update_without_cursor(
             &shell.state.borrow(),
             80,
             Instant::now(),
             &mut frame,
         );
-        assert!(
-            update.stable_prefix <= start,
-            "an active roster must stay in the mutable tail: {} <= {start}",
-            update.stable_prefix
-        );
-        assert_eq!(frame.pending_tool_start, Some(start));
-        assert!(update.replacement.join("\n").contains("Subagents"));
+        materialized.truncate(update.stable_prefix);
+        materialized.extend(update.replacement);
+        let text = materialized.join("\n");
+        assert_eq!(text.matches("Subagents").count(), 1, "{text}");
+        assert_eq!(text.matches("LIVE-WORKER").count(), 1, "{text}");
+        for n in 0..40 {
+            assert!(
+                strip_terminal_sequences(&text)
+                    .lines()
+                    .any(|row| row.ends_with(&format!("filler-{n}"))),
+                "{text}"
+            );
+        }
+        assert!(!text.contains("result pending"), "{text}");
 
         // The pinned/extended path owns the same invariant through its commit
         // ledger: no row of the active roster may be proven immutable and no

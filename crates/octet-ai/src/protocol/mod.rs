@@ -60,11 +60,11 @@ pub(crate) mod anthropic;
 pub(crate) mod bedrock;
 pub(crate) mod google;
 pub(crate) mod grammar;
-pub(crate) mod preset;
 pub(crate) mod mistral_conversations;
 pub(crate) mod openai_chat;
 pub(crate) mod openai_responses;
 pub(crate) mod pi_messages;
+pub(crate) mod preset;
 
 pub(crate) mod sse;
 
@@ -88,7 +88,8 @@ pub(crate) fn strict_mode_for(model: &crate::catalog::Model) -> bool {
     if model.spec.protocol == Protocol::OpenAiResponses {
         return matches!(
             model.endpoint.runtime.responses_profile,
-            crate::types::ResponsesRuntimeProfile::Azure | crate::types::ResponsesRuntimeProfile::Codex
+            crate::types::ResponsesRuntimeProfile::Azure
+                | crate::types::ResponsesRuntimeProfile::Codex
         );
     }
     if model.spec.protocol == Protocol::AnthropicMessages {
@@ -481,6 +482,7 @@ pub(crate) mod harness {
             model.spec.protocol,
             model.spec.pricing.clone(),
         );
+        builder.strict_tool_sampling = crate::protocol::strict_mode_for(model);
         if let Some(tool_definitions) = tool_definitions {
             if let Err(error) = builder.set_tool_definitions(tool_definitions) {
                 return (Vec::new(), Some(error));

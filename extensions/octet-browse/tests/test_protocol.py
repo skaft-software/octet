@@ -194,7 +194,7 @@ class ProtocolTests(unittest.TestCase):
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "api_version": "0.2",
+                    "api_version": "0.4",
                     "octet_version": "0.7.0",
                     "extension": {
                         "name": "octet-browse",
@@ -217,7 +217,7 @@ class ProtocolTests(unittest.TestCase):
                     },
                     "host": {},
                     "protocol": {
-                        "version": "0.2",
+                        "version": "0.4",
                         "required_features": ["request_cancellation", "content_parts"],
                         "optional_features": ["artifacts", "request_progress", "policy_intents"],
                         "limits": {"max_concurrent_requests": 8},
@@ -243,7 +243,7 @@ class ProtocolTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_initialize_has_exact_surface_and_bounded_schemas(self) -> None:
-        self.assertEqual(self.initialize["api_version"], "0.2")
+        self.assertEqual(self.initialize["api_version"], "0.4")
         self.assertEqual([tool["name"] for tool in self.initialize["tools"]], TOOLS)
         self.assertEqual([command["name"] for command in self.initialize["commands"]], ["browse"])
         self.assertEqual(

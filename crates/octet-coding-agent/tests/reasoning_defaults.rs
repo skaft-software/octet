@@ -123,8 +123,7 @@ fn persisted_reasoning(root: &Path) -> String {
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .filter(|record| record["value"]["type"] == "config")
-        .next_back()
+        .rfind(|record| record["value"]["type"] == "config")
         .unwrap()["value"]["reasoning"]
         .as_str()
         .unwrap()

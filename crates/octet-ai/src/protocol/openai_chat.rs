@@ -532,8 +532,13 @@ pub(crate) fn build_request(
                 | OpenAiChatReasoningMode::Together { .. }
         )
     );
-    let provider_uses_system_message = provider_uses_system_message || mistral_profile
-        || model.spec.preset.thinking_format.is_some_and(|format| format != crate::ThinkingFormat::OpenAi);
+    let provider_uses_system_message = provider_uses_system_message
+        || mistral_profile
+        || model
+            .spec
+            .preset
+            .thinking_format
+            .is_some_and(|format| format != crate::ThinkingFormat::OpenAi);
     let mut messages = Vec::new();
     let cache_marker = if matches!(
         model.spec.cache.cache_control_format,
@@ -715,7 +720,10 @@ pub(crate) fn build_request(
                         // (the API ignores it), and retaining the model check
                         // prevents cross-model Chat reasoning from leaking in.
                         AssistantPart::Reasoning(reasoning)
-                            if (deepseek_thinking || cerebras_reasoning || model.spec.preset.thinking_format == Some(crate::ThinkingFormat::StringThinking))
+                            if (deepseek_thinking
+                                || cerebras_reasoning
+                                || model.spec.preset.thinking_format
+                                    == Some(crate::ThinkingFormat::StringThinking))
                                 && assistant.protocol == Protocol::OpenAiChat
                                 && assistant.model == model.spec.id =>
                         {
@@ -736,8 +744,11 @@ pub(crate) fn build_request(
                             }
                         }
                         AssistantPart::ToolCall(ref tc) => {
-                            let property =
-                                super::grammar::input_property(&req.tools, &tc.name, super::grammar_tools_for(model))?;
+                            let property = super::grammar::input_property(
+                                &req.tools,
+                                &tc.name,
+                                super::grammar_tools_for(model),
+                            )?;
                             let custom = property
                                 .as_deref()
                                 .map(|property| {
@@ -891,7 +902,13 @@ pub(crate) fn build_request(
             ToolChoice::Required => Some(serde_json::Value::String("required".to_string())),
             ToolChoice::None => Some(serde_json::Value::String("none".to_string())),
             ToolChoice::Named(name) => Some(
-                if super::grammar::input_property(&req.tools, name, super::grammar_tools_for(model))?.is_some() {
+                if super::grammar::input_property(
+                    &req.tools,
+                    name,
+                    super::grammar_tools_for(model),
+                )?
+                .is_some()
+                {
                     serde_json::json!({"type": "custom", "custom": {"name": name}})
                 } else {
                     serde_json::json!({"type": "function", "function": {"name": name}})
@@ -1071,8 +1088,8 @@ pub(crate) fn build_request(
     let mut body = serde_json::to_value(&chat_req)
         .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
     super::preset::chat(model, &req, &mut body)?;
-    let body_bytes = serde_json::to_vec(&body)
-        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let body_bytes =
+        serde_json::to_vec(&body).map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "chat/completions")?;
 
@@ -1273,6 +1290,7 @@ fn decode_response_inner(
                     fallback.set_buffer_ambiguous_compatibility_content(true);
                     if let Some(tools) = tool_definitions {
                         fallback.set_tool_definitions(tools)?;
+                        fallback.strict_tool_sampling = super::strict_mode_for(model);
                     }
                     let mut ignored_events = Vec::new();
                     consume_qwen_xml_content(&mut ignored_events, &mut fallback, &text)?;
@@ -1327,7 +1345,7 @@ fn decode_response_inner(
     // 3. Map tool calls
     if let Some(ref tcs) = choice.message.tool_calls {
         for tc in tcs {
-            let (name, arguments_json) = match (&tc.function, &tc.custom) {
+            let (name, mut arguments_json) = match (&tc.function, &tc.custom) {
                 (Some(function), None) => (
                     &function.name,
                     crate::json_repair::normalize_json_object(&function.arguments)
@@ -1353,8 +1371,15 @@ fn decode_response_inner(
                 }
             };
             let argument_error = if let Some(tools) = tool_definitions {
-                let arguments = serde_json::from_str(&arguments_json)
+                let mut arguments = serde_json::from_str(&arguments_json)
                     .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+                crate::constrained_sampling::normalize_tool_arguments(
+                    name,
+                    &mut arguments,
+                    tools,
+                    super::strict_mode_for(model),
+                )?;
+                arguments_json = arguments.to_string();
                 match crate::json_repair::validate_tool_arguments(name, &arguments, tools)
                     .map_err(AiError::Decode)?
                 {

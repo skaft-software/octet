@@ -991,7 +991,11 @@ impl DeferredRunRecord {
 
     /// Refuses a record that cannot describe a real deferred run.
     pub fn validate(&self, limits: &DeferredRunLimits) -> Result<(), DeferredRunError> {
-        validate_deferred_segment("operation id", &self.operation_id, limits.max_operation_bytes)?;
+        validate_deferred_segment(
+            "operation id",
+            &self.operation_id,
+            limits.max_operation_bytes,
+        )?;
         match &self.state {
             DeferredRunState::Suspended { leaf } => {
                 validate_deferred_leaf(leaf, limits)?;
@@ -1068,8 +1072,16 @@ fn validate_deferred_leaf(
     leaf: &DeferredSuspended,
     limits: &DeferredRunLimits,
 ) -> Result<(), DeferredRunError> {
-    validate_deferred_segment("leaf operation id", &leaf.operation_id, limits.max_operation_bytes)?;
-    validate_deferred_segment("source entry id", &leaf.source_entry_id, limits.max_operation_bytes)?;
+    validate_deferred_segment(
+        "leaf operation id",
+        &leaf.operation_id,
+        limits.max_operation_bytes,
+    )?;
+    validate_deferred_segment(
+        "source entry id",
+        &leaf.source_entry_id,
+        limits.max_operation_bytes,
+    )?;
     validate_deferred_segment(
         "deferred handle id",
         &leaf.handle.id,
@@ -1223,7 +1235,8 @@ impl DeferredRunStore {
         source_entry_id: &str,
         declaration: DeferredResponseDeclaration,
     ) -> Result<DeferredSuspendDecision, DeferredRunError> {
-        let decision = suspend_deferred_response(identity, operation_id, source_entry_id, declaration);
+        let decision =
+            suspend_deferred_response(identity, operation_id, source_entry_id, declaration);
         let DeferredSuspendDecision::Suspended(leaf) = decision else {
             return Ok(decision);
         };
@@ -1267,10 +1280,9 @@ impl DeferredRunStore {
         if record.is_terminal() {
             return Ok(DeferredResumeStart::Finished(Box::new(record)));
         }
-        let leaf = record
-            .leaf()
-            .cloned()
-            .ok_or_else(|| DeferredRunError::Corrupt("non-terminal record without a leaf".into()))?;
+        let leaf = record.leaf().cloned().ok_or_else(|| {
+            DeferredRunError::Corrupt("non-terminal record without a leaf".into())
+        })?;
         let mut permit = match intent {
             DeferredResumeIntent::Poll => DeferredPollPermit::one(pass_id, record.generation),
             DeferredResumeIntent::Observe => DeferredPollPermit::none(pass_id, record.generation),
@@ -1290,16 +1302,13 @@ impl DeferredRunStore {
         let mut next_id = move || reserved.next().unwrap_or_default();
         match prepare_deferred_poll(&leaf, &mut permit, now_ms, &mut next_id) {
             DeferredPollPreparation::Waiting(observation) => {
-                Ok(DeferredResumeStart::Waiting(*observation))
+                Ok(DeferredResumeStart::Waiting(observation))
             }
-            DeferredPollPreparation::Refused(refusal) => {
-                Ok(DeferredResumeStart::Refused(refusal))
-            }
+            DeferredPollPreparation::Refused(refusal) => Ok(DeferredResumeStart::Refused(refusal)),
             DeferredPollPreparation::Admitted(intent) => {
-                let generation = record
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| DeferredRunError::BoundExceeded("deferred generations".into()))?;
+                let generation = record.generation.checked_add(1).ok_or_else(|| {
+                    DeferredRunError::BoundExceeded("deferred generations".into())
+                })?;
                 let next_leaf = DeferredSuspended {
                     operation_id: leaf.operation_id.clone(),
                     source_entry_id: leaf.source_entry_id.clone(),
@@ -1312,10 +1321,12 @@ impl DeferredRunStore {
                 };
                 let next = DeferredRunRecord::effect_pending(next_leaf)?;
                 self.write_locked(&mut state, next.clone())?;
-                Ok(DeferredResumeStart::Admitted(Box::new(AdmittedDeferredPoll {
-                    intent: *intent,
-                    effect_pending: next,
-                })))
+                Ok(DeferredResumeStart::Admitted(Box::new(
+                    AdmittedDeferredPoll {
+                        intent: *intent,
+                        effect_pending: next,
+                    },
+                )))
             }
         }
     }
@@ -1349,10 +1360,9 @@ impl DeferredRunStore {
                 actual: record.generation,
             });
         }
-        let leaf = record
-            .leaf()
-            .cloned()
-            .ok_or_else(|| DeferredRunError::Corrupt("effect-pending record lost its leaf".into()))?;
+        let leaf = record.leaf().cloned().ok_or_else(|| {
+            DeferredRunError::Corrupt("effect-pending record lost its leaf".into())
+        })?;
         let (response_id, usage_id) = match &poll.intent.phase {
             DeferredPhase::EffectPending {
                 response_id,
@@ -1372,10 +1382,9 @@ impl DeferredRunStore {
                 Ok(DeferredPollCompletion::Suspended(observation))
             }
             DeferredResume::Settled => {
-                let generation = record
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| DeferredRunError::BoundExceeded("deferred generations".into()))?;
+                let generation = record.generation.checked_add(1).ok_or_else(|| {
+                    DeferredRunError::BoundExceeded("deferred generations".into())
+                })?;
                 let next =
                     DeferredRunRecord::settled(&operation_id, generation, &response_id, &usage_id);
                 self.write_locked(&mut state, next)?;
@@ -1385,14 +1394,14 @@ impl DeferredRunStore {
                 })
             }
             DeferredResume::Failed(failure) => {
-                let generation = record
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| DeferredRunError::BoundExceeded("deferred generations".into()))?;
+                let generation = record.generation.checked_add(1).ok_or_else(|| {
+                    DeferredRunError::BoundExceeded("deferred generations".into())
+                })?;
                 // The tombstone must be bounded so a verbose provider message
                 // can never prevent the terminal write; an unwritten tombstone
                 // would leave the poll replaceable and could bill it twice.
-                let diagnostic = truncate_bounded(&failure.diagnostic, self.limits.max_operation_bytes);
+                let diagnostic =
+                    truncate_bounded(&failure.diagnostic, self.limits.max_operation_bytes);
                 let next = DeferredRunRecord::failed(&operation_id, generation, diagnostic);
                 self.write_locked(&mut state, next)?;
                 Ok(DeferredPollCompletion::Failed(failure))
@@ -1510,10 +1519,9 @@ impl DeferredRunStore {
                 return Err(DeferredRunError::OutcomeKnown(record.operation_id.clone()));
             }
             Some(existing) => {
-                let expected_next = existing
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| DeferredRunError::BoundExceeded("deferred generations".into()))?;
+                let expected_next = existing.generation.checked_add(1).ok_or_else(|| {
+                    DeferredRunError::BoundExceeded("deferred generations".into())
+                })?;
                 if record.generation != expected_next {
                     return Err(DeferredRunError::GenerationRegression {
                         operation: record.operation_id.clone(),
@@ -1606,8 +1614,8 @@ impl DeferredRunStore {
         let value = crate::session::SessionRecord::DeferredRun {
             record: record.clone(),
         };
-        let mut bytes =
-            serde_json::to_vec(&value).map_err(|error| DeferredRunError::Corrupt(error.to_string()))?;
+        let mut bytes = serde_json::to_vec(&value)
+            .map_err(|error| DeferredRunError::Corrupt(error.to_string()))?;
         bytes.push(b'\n');
         journal
             .persist(&bytes)
@@ -1648,7 +1656,7 @@ pub enum DeferredResumeStart {
     Finished(Box<DeferredRunRecord>),
     /// Observe-only pass: the run stays durably suspended and nothing is
     /// written.
-    Waiting(SuspendedRunObservation),
+    Waiting(Box<SuspendedRunObservation>),
     /// Exactly one poll is admitted and its effect-pending intent is durable.
     Admitted(Box<AdmittedDeferredPoll>),
     /// Fail closed: no durable write and no provider work.

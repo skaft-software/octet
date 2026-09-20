@@ -1,3 +1,5 @@
+//! Source-level ownership checks for the native host facade and its focused modules.
+
 use std::collections::BTreeMap;
 
 const FACADE: &str = include_str!("../src/host.rs");

@@ -12,9 +12,7 @@ interactive Octet UI, not in your shell.
 > contain candidate changes. Check `octet --version` and `octet --help` for the
 > binary you will run. The `octet setup` contract below is verified against this
 > checkout; do not assume a published binary has a candidate-only flag unless
-> its own help lists it. Source builds are not signed release artifacts. See the
-> [candidate qualification note](qualification/quickstart-current-candidate.md)
-> for source evidence and pending acceptance.
+> its own help lists it. Source builds are not signed release artifacts.
 
 ## 1. Choose an installation lane
 

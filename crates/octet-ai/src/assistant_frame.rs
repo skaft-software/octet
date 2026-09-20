@@ -184,7 +184,10 @@ impl AssistantMessageFrameEncoder {
     /// Returns an error for structurally impossible streams (a delta before its
     /// block starts, a block starting twice, or any blocking event after a
     /// terminal event), matching the stream state machine's fail-closed rule.
-    pub fn encode(&mut self, event: &StreamEvent) -> Result<Option<AssistantMessageFrame>, AiError> {
+    pub fn encode(
+        &mut self,
+        event: &StreamEvent,
+    ) -> Result<Option<AssistantMessageFrame>, AiError> {
         if self.terminal {
             return Err(frame_error(format!(
                 "assistant frame event follows a terminal event: {event:?}"
@@ -254,9 +257,7 @@ impl AssistantMessageFrameEncoder {
             StreamEvent::ReasoningEnd { index } => {
                 self.require_started("reasoning_end")?;
                 self.end_block(*index, BlockKind::Reasoning)?;
-                Ok(Some(AssistantMessageFrame::ReasoningEnd {
-                    index: *index,
-                }))
+                Ok(Some(AssistantMessageFrame::ReasoningEnd { index: *index }))
             }
 
             StreamEvent::ToolCallStart { index, id, name } => {

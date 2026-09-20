@@ -17,8 +17,8 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::providers::{
-    CopilotAvailabilityError as Error, CopilotDeviceLogin, CopilotDeviceLoginStatus,
-    CopilotEndpoint, CopilotHost, CopilotModel, CopilotProvider, CopilotSession,
+    CopilotAvailabilityError as Error, CopilotDeviceLogin, CopilotDeviceLoginStatus, CopilotHost,
+    CopilotModel, CopilotProvider, CopilotSession,
 };
 
 pub use store::{default_path, CredentialStore};
@@ -157,7 +157,10 @@ pub(crate) fn register_available_models_with_host_blocking(
 }
 
 /// Validate the production inference authority without making a request.
-pub fn validate_inference_endpoint(value: &str) -> Result<CopilotEndpoint, Error> {
+#[cfg(test)]
+pub fn validate_inference_endpoint(
+    value: &str,
+) -> Result<crate::providers::CopilotEndpoint, Error> {
     wire::validate_inference_endpoint(value)
 }
 
@@ -276,11 +279,10 @@ impl CopilotCodingHost {
         }
         state.session = None;
         state.credential_bytes = snapshot.bytes;
-        let replacement = self.client.exchange(&token).await.map_err(|error| {
-            if error == Error::InvalidEndpoint {
+        let replacement = self.client.exchange(&token).await.inspect_err(|error| {
+            if *error == Error::InvalidEndpoint {
                 state.origin_invalidated = true;
             }
-            error
         })?;
         self.check_snapshot(
             state
@@ -427,5 +429,26 @@ impl CopilotHost for CopilotCodingHost {
         let models = self.client.models(&session, &token).await?;
         self.check_snapshot(expected)?;
         Ok(models)
+    }
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    #[test]
+    fn fixture_credentials_stay_private_and_mock_origin_is_loopback() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("copilot.json");
+        let store = CredentialStore::new(path);
+        store.save("fixture-oauth-token").unwrap();
+        let host = CopilotCodingHost::with_mock_server(store, "http://127.0.0.1:1");
+        assert!(host.store.is_configured().unwrap());
+        assert!(validate_inference_endpoint("https://api.githubcopilot.com/").is_ok());
+        assert!(validate_inference_endpoint("http://127.0.0.1:1/").is_err());
     }
 }

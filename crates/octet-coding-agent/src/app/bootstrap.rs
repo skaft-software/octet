@@ -38,7 +38,7 @@ use crate::extensions::{
     provider_preflight_config, ExecutableExtensions, ExtensionProviderRuntime,
     SUBAGENTS_EXTENSION_NAME,
 };
-use crate::modes::interactive::run_blocking_lifecycle;
+use crate::modes::interactive::run_blocking_startup_lifecycle;
 use crate::prompts::PromptRegistry;
 use crate::providers::{
     ModelDiscovery, ModelFilter, ProviderAuthentication, ProviderDeclaration, ProviderRoute,
@@ -80,7 +80,7 @@ pub struct Bootstrap {
 /// one, recorded during catalog construction.
 ///
 /// Recording is not printing, and startup no longer prints either: a frontend
-/// pulls the note with [`Bootstrap::take_codex_context_note`] when the user can
+/// pulls the note with [`CodexContextNotes::note_for`] when the user can
 /// act on it (the first assistant turn, or an on-demand status/context surface),
 /// and the latch here makes it a once-per-session note even if a later pull
 /// repeats the lookup. See [`crate::codex_context::codex_context_session_note`]
@@ -111,6 +111,7 @@ impl CodexContextNotes {
     /// Returns `None` when this model needs no note (a non-Codex route) or when
     /// a note was already delivered for this session, so a lazy surface can be
     /// re-entered freely without ever repeating the note.
+    #[cfg(test)]
     pub fn take_for(&self, model: &ModelId) -> Option<String> {
         let note = self.notes.get(model)?;
         if self.delivered.replace(true) {
@@ -136,30 +137,12 @@ impl Bootstrap {
     /// The single Codex context note for the effective session model, if any.
     ///
     /// This is a read-only peek for tests and diagnostics; frontends deliver the
-    /// note with [`Bootstrap::take_codex_context_note`]. It returns nothing for a
+    /// note with [`CodexContextNotes::note_for`]. It returns nothing for a
     /// non-Codex model, so a session on another provider prints no Codex note at
     /// all. See [`crate::codex_context::codex_context_session_note`] for the
     /// wording contract.
     pub fn codex_context_note(&self, model: &ModelId) -> Option<&str> {
         self.codex_context_notes.note_for(model)
-    }
-
-    /// Take the one Codex context note for this session, lazily, at most once.
-    ///
-    /// Startup deliberately shows nothing: the note is not part of the initial
-    /// frame or the pre-ready transcript. A frontend calls this when the user can
-    /// act on it — attached to the first assistant turn after readiness, or from
-    /// an on-demand status/context surface — and gets the same bounded,
-    /// effective-model-only wording once; every later call returns `None`.
-    ///
-    /// The note is unchanged in substance: it still names the model, the
-    /// advertised/entitled/effective windows, the deliberate 272K policy and its
-    /// double-pricing cliff, and the remedy, and it still carries no internal
-    /// Rust API name or operation id. A Codex route above 272K is still marked as
-    /// uncertain usage at both session boundaries, independently of whether this
-    /// note has ever been shown.
-    pub fn take_codex_context_note(&self, model: &ModelId) -> Option<String> {
-        self.codex_context_notes.take_for(model)
     }
 
     /// Starts only provider-capable API 0.3 extensions when their declarations
@@ -637,6 +620,7 @@ fn inventory_checked_at() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(test)]
 fn save_provider_inventory_cache(
     path: &std::path::Path,
     provider_id: &str,
@@ -1932,6 +1916,7 @@ fn api_models_from_response_for(
     Ok(models)
 }
 
+#[cfg(test)]
 fn get_models_json_blocking(
     url: &str,
     headers: http::HeaderMap,
@@ -3270,7 +3255,7 @@ thread_local! {
     /// form of "an unrelated provider cannot delay readiness", with no timing
     /// threshold and no cross-test interference.
     static READINESS_FORBIDDEN_CONSULTATION: std::cell::RefCell<Option<&'static str>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Test-only guard that makes one declaration's consultation fail closed.
@@ -5403,16 +5388,6 @@ pub(crate) fn run_route_readiness<T: Send + 'static>(
     }
 }
 
-fn discover_codex_models(
-    store: crate::auth::codex::CredentialStore,
-) -> anyhow::Result<CodexDiscovery> {
-    discover_codex_models_with(
-        store,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        crate::auth::codex::REFRESH_LOCK_WAIT,
-    )
-}
-
 /// The bounded online discovery body.
 ///
 /// `refresh_lock_wait` bounds the cross-process refresh-lock acquisition; it is
@@ -5589,6 +5564,7 @@ fn record_codex_context_uncertainty(session: &mut Session, model: &Model) -> any
 /// account's current model inventory, but only for a validated subscription
 /// credential. Codex-specific headers are composed from static endpoint
 /// headers, request-scoped session affinity, and resolver account routing.
+#[cfg(test)]
 fn register_openai_codex(
     catalog: &mut ModelCatalog,
     store: crate::auth::codex::CredentialStore,
@@ -5827,7 +5803,7 @@ impl CatalogReadiness {
     pub(crate) fn includes(&self, provider_id: &str) -> bool {
         match self {
             Self::Fleet => true,
-            Self::Routes(routes) => routes.iter().any(|route| *route == provider_id),
+            Self::Routes(routes) => routes.contains(&provider_id),
         }
     }
 
@@ -6256,6 +6232,7 @@ impl Bootstrap {
     /// Idempotent: a launch that already took the fleet plan (or one that has
     /// already been enriched) returns immediately, so a second call can never
     /// duplicate a provider registration or re-run credential refresh.
+    #[cfg(test)]
     pub fn enrich_catalog(&mut self) -> anyhow::Result<()> {
         if self.readiness.is_fleet() {
             return Ok(());
@@ -6529,7 +6506,7 @@ pub async fn resolve_launch_interactive(
         ResumeSelector::Continue => {
             let sessions = boot.sessions.clone();
             let path =
-                run_blocking_lifecycle(shell, input, "finding latest session…", move || {
+                run_blocking_startup_lifecycle(shell, input, "latest session lookup", move || {
                     Ok(sessions.latest()?.path)
                 })
                 .await?;
@@ -6537,7 +6514,7 @@ pub async fn resolve_launch_interactive(
         }
         ResumeSelector::Resume(Some(id)) => {
             let sessions = boot.sessions.clone();
-            let path = run_blocking_lifecycle(shell, input, "opening session…", move || {
+            let path = run_blocking_startup_lifecycle(shell, input, "session lookup", move || {
                 sessions.path_by_id(&id)
             })
             .await?;
@@ -6547,14 +6524,14 @@ pub async fn resolve_launch_interactive(
             let source_path = if let Some(id) = source_id {
                 let sessions = boot.sessions.clone();
                 let config = boot.config.clone();
-                run_blocking_lifecycle(shell, input, "opening source session…", move || {
+                run_blocking_startup_lifecycle(shell, input, "source session lookup", move || {
                     resolve_fork_source_path(&config, &sessions, &id)
                 })
                 .await?
             } else {
                 let sessions = boot.sessions.clone();
                 let available =
-                    run_blocking_lifecycle(shell, input, "discovering sessions…", move || {
+                    run_blocking_startup_lifecycle(shell, input, "session discovery", move || {
                         Ok(sessions.list())
                     })
                     .await?;
@@ -6564,7 +6541,7 @@ pub async fn resolve_launch_interactive(
             };
             let store = boot.sessions.clone();
             let destination = boot.sessions.new_path(&crate::modes::timestamp());
-            let path = run_blocking_lifecycle(shell, input, "forking session…", move || {
+            let path = run_blocking_startup_lifecycle(shell, input, "session fork", move || {
                 fork_session_into(&store, &source_path, destination)
             })
             .await?;
@@ -6573,7 +6550,7 @@ pub async fn resolve_launch_interactive(
         ResumeSelector::Resume(None) => {
             let sessions = boot.sessions.clone();
             let available =
-                run_blocking_lifecycle(shell, input, "discovering sessions…", move || {
+                run_blocking_startup_lifecycle(shell, input, "session discovery", move || {
                     Ok(sessions.list())
                 })
                 .await?;
@@ -6583,8 +6560,6 @@ pub async fn resolve_launch_interactive(
                 .ok_or_else(|| anyhow::anyhow!("session selection cancelled"))?
         }
     };
-    let config = boot.config.clone();
-    let selected_session = session.clone();
     let (
         prepared,
         LaunchConfiguration {
@@ -6592,10 +6567,18 @@ pub async fn resolve_launch_interactive(
             reasoning,
             reasoning_mode,
         },
-    ) = run_blocking_lifecycle(shell, input, "replaying session…", move || {
-        launch_configuration_parts(&config, &selected_session)
-    })
-    .await?;
+    ) = if matches!(&session, SessionSelection::CreateNew(_)) {
+        // A fresh launch only copies configuration: no file exists to replay.
+        // Avoid cloning the whole Config and dispatching a blocking worker.
+        launch_configuration_parts(&boot.config, &session)?
+    } else {
+        let config = boot.config.clone();
+        let selected_session = session.clone();
+        run_blocking_startup_lifecycle(shell, input, "session replay", move || {
+            launch_configuration_parts(&config, &selected_session)
+        })
+        .await?
+    };
     startup_phase("session.replay");
     *boot.prepared_session.borrow_mut() = prepared;
     // Provider declarations are only needed before launch when no static model
@@ -6633,7 +6616,7 @@ pub async fn resolve_launch_interactive(
     };
     // The Codex context note is NOT emitted here: startup shows nothing, so the
     // note is delivered lazily by whoever owns the transcript
-    // (`Bootstrap::take_codex_context_note`: the first assistant turn after
+    // (`CodexContextNotes::note_for`: the first assistant turn after
     // readiness, or an on-demand context surface). Recording it stayed in
     // catalog construction, so the wording is still effective-model-only.
     Ok(LaunchSelection {

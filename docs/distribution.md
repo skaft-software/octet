@@ -13,10 +13,10 @@ Do not recreate the old name.
 
 ## Package identities
 
-These source identities do not establish publication of every channel.
-The distribution version does not establish publication or change independent
-API and schema versions. See the [0.7.6 release](releases/v0.7.6.md) for the
-version-matched assets and channel boundaries.
+This checkout's source distribution is **0.8.0 (release candidate)**, not a
+publication claim. The distribution version does not change independent API and
+schema versions. The [0.7.6 release](releases/v0.7.6.md) retains historical
+version-matched assets and channel evidence; it does not qualify this candidate.
 
 | Surface | Source identity |
 | --- | --- |
@@ -25,16 +25,21 @@ version-matched assets and channel boundaries.
 | Product library | `octet_sdk` |
 | Python distribution / import | `octet-extension-sdk` / `octet_extension` |
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
-| First-party extensions | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search`, `octet-pi-compat`, `octet-serve` |
+| Executable bundles | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
+| Independent source extensions | `octet-computer-use`, `octet-import-aider`, `octet-import-cline`, `octet-import-pi` |
+| Separate application package | `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK, Serve and four executable-bundle distribution versions | `0.7.6`; installed compatibility `requires_octet = "=0.7.6"` |
-| Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
+| Product, SDK, Serve and four executable-bundle distribution versions | `0.8.0` RC; installed compatibility `requires_octet = "=0.8.0"` |
+| Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
-Current extension authoring targets API 0.3. The four bundled executable-extension
-manifests still declare 0.2; the Python `Extension` runtime remains a legacy
-0.1/0.2 implementation. Generated 0.3 types are not a complete 0.3 runtime.
+Current extension authoring and the four executable-bundle manifests target API
+`0.4`, the feature-negotiated wire supported by the Python `Extension` runtime
+alongside retained `0.1`/`0.2`. Canonical API `0.3` remains a separate supported
+wire; generated `0.3` types are not a complete `0.3` process runtime. The minimal
+canonical process example and independent computer-use/Aider/Cline/Pi adapters
+retain version `0.1.0` with exact `=0.8.0` host pins.
 Renaming first-party wire fields such as `octet_version` does not renumber APIs
 or preserve old-name aliases. Historical releases, measurements, upstream
 copyrights, Pi pins, independent example versions and mismatch fixtures retain
@@ -74,7 +79,7 @@ The npm channel remains unpublished pending functional first-package bootstrap,
 trusted publishers and registry provenance verification. Its future command is:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.7.6
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.0
 ```
 
 ## Reviewed model metadata

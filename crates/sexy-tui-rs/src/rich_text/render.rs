@@ -2195,7 +2195,8 @@ impl AppendOnlyTail {
                         // semantic replacement, width/options/theme changes. Never
                         // hash, clone, or compare the growing paragraph here.
                         stats.checked_bytes += inline_source_bytes(prefix) as u64;
-                        let runs = renderer.inline_runs(prefix, renderer.theme.style(TextRole::Text));
+                        let runs =
+                            renderer.inline_runs(prefix, renderer.theme.style(TextRole::Text));
                         stats.copied_bytes += run_bytes(&runs) as u64;
                         let runs = renderer.expand_run_tabs(&runs);
                         stats.copied_bytes += run_bytes(&runs) as u64;

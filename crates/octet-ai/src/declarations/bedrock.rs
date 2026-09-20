@@ -67,9 +67,10 @@ fn valid_partition(value: &str) -> bool {
 fn valid_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+' | b'=' | b'/' | b':'))
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b'+' | b'=' | b'/' | b':')
+        })
 }
 
 /// Parse a Bedrock ARN, accepting every `arn:aws`-family partition.
@@ -163,9 +164,8 @@ pub fn resolve_bedrock_region(
 
 /// Whether an ARN selects the GovCloud partition.
 pub fn bedrock_arn_is_government(model_id: &str) -> bool {
-    parse_bedrock_arn(model_id).is_some_and(|arn| {
-        arn.partition.contains("us-gov") || arn.region.starts_with("us-gov-")
-    })
+    parse_bedrock_arn(model_id)
+        .is_some_and(|arn| arn.partition.contains("us-gov") || arn.region.starts_with("us-gov-"))
 }
 
 /// Standard runtime host for a region, preserving a `.cn` suffix for the
@@ -202,14 +202,19 @@ pub fn bedrock_runtime_endpoint(
         ));
     }
     let (standard_region, china) = match bedrock_endpoint_region(base_url) {
-        Some(region) => (Some(region), base_url.host_str().is_some_and(|host| host.ends_with(".cn"))),
+        Some(region) => (
+            Some(region),
+            base_url
+                .host_str()
+                .is_some_and(|host| host.ends_with(".cn")),
+        ),
         None => (None, false),
     };
     match standard_region {
         Some(region) if region == resolved => Ok(base_url.clone()),
         Some(_) => {
-            let china = china
-                || parse_bedrock_arn(model_id).is_some_and(|arn| arn.partition == "aws-cn");
+            let china =
+                china || parse_bedrock_arn(model_id).is_some_and(|arn| arn.partition == "aws-cn");
             let mut url = base_url.clone();
             url.set_host(Some(&bedrock_runtime_host(&resolved, china)))
                 .map_err(|_| DeclarationError::Invalid("invalid Bedrock endpoint host".into()))?;
@@ -267,9 +272,16 @@ mod tests {
     fn arn_region_wins_over_configured_and_endpoint_regions() {
         let model =
             "arn:aws:bedrock:ap-southeast-2:123456789012:application-inference-profile/profile-1";
-        assert_eq!(bedrock_model_region(model).as_deref(), Some("ap-southeast-2"));
         assert_eq!(
-            resolve_bedrock_region(Some("us-east-1"), model, &url("https://bedrock-runtime.us-east-1.amazonaws.com/")),
+            bedrock_model_region(model).as_deref(),
+            Some("ap-southeast-2")
+        );
+        assert_eq!(
+            resolve_bedrock_region(
+                Some("us-east-1"),
+                model,
+                &url("https://bedrock-runtime.us-east-1.amazonaws.com/")
+            ),
             Some("ap-southeast-2".to_owned())
         );
         // A foundation-model id uses the configured region.
@@ -283,16 +295,26 @@ mod tests {
         );
         // No configured region: the standard endpoint host supplies it.
         assert_eq!(
-            bedrock_endpoint_region(&url("https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com/")),
+            bedrock_endpoint_region(&url(
+                "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com/"
+            )),
             Some("us-gov-west-1".to_owned())
         );
         assert_eq!(
-            resolve_bedrock_region(None, "foundation-model", &url("https://bedrock-runtime.us-west-2.amazonaws.com/")),
+            resolve_bedrock_region(
+                None,
+                "foundation-model",
+                &url("https://bedrock-runtime.us-west-2.amazonaws.com/")
+            ),
             Some("us-west-2".to_owned())
         );
         // Nothing configured at all keeps the documented default.
         assert_eq!(
-            resolve_bedrock_region(None, "foundation-model", &url("https://bedrock.example.test/")),
+            resolve_bedrock_region(
+                None,
+                "foundation-model",
+                &url("https://bedrock.example.test/")
+            ),
             Some(DEFAULT_BEDROCK_REGION.to_owned())
         );
         assert!(bedrock_arn_is_government(

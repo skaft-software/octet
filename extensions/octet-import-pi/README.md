@@ -3,7 +3,7 @@
 A thin source package for API `0.3` `migration/detect` and `migration/import`.
 The launcher replaces itself with `octet migrate adapter pi`; it does not
 reimplement parsing, protocol negotiation, credential filtering or ingestion.
-Requires macOS/Linux, `/bin/sh`, and **octet 0.7.6** on the launcher's `PATH`.
+Requires macOS/Linux, `/bin/sh`, and **octet 0.8.0** on the launcher's `PATH`.
 Use the same reviewed host installation for both the parent and the launcher.
 There are no npm/Python runtime dependencies and no install scripts.
 
@@ -19,7 +19,7 @@ octet migrate import pi --source /reviewed/pi/agent
 
 For a typed protocol client, start `./extension.sh`, negotiate the optional
 `migration.adapter.v1` capability and its two methods using the
-[API 0.3 contract](../../docs/extensions/API-0.3-REFERENCE.md), then send an
+[API 0.3 contract](../../docs/extensions/API-0.4-REFERENCE.md), then send an
 absolute `source_root` to `migration/detect`. Pass the returned `config_paths`
 to `migration/import`. The result is bounded non-secret models, skill content,
 local stdio MCP declarations and diagnostics, not destination writes.
@@ -52,5 +52,5 @@ Tests stage only the launcher, bind a reviewed local binary through a temporary
 `PATH`, and use a fresh `HOME` and no ambient credentials. They check canonical
 negotiation/detect/import/shutdown, rejection boundaries, source immutability
 and absent destination writes. Missing local octet or non-POSIX platforms skip
-with an explicit reason. These are local fixtures, not installed-release or Pi
-runtime parity evidence. Results: [execution record](../../docs/swarm-audit/EXECUTION-pi.md).
+with an explicit reason. These are local fixtures, not installed-release
+qualification.

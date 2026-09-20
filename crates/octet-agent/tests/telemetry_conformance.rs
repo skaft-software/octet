@@ -138,7 +138,10 @@ fn serializable_schema_and_completion_usage_preserve_disjoint_buckets() {
     let turn = schema.spans.get(TurnSpan::NAME).expect("turn span");
     assert_eq!(turn.parents, ParentDefinition::Any);
     assert_eq!(
-        turn.end_attributes.get("cache_write_1h_tokens").unwrap().value_type,
+        turn.end_attributes
+            .get("cache_write_1h_tokens")
+            .unwrap()
+            .value_type,
         AttributeType::Number
     );
     assert_eq!(
@@ -177,7 +180,9 @@ fn serializable_schema_and_completion_usage_preserve_disjoint_buckets() {
     assert_eq!(encoded["cache_write_1h_tokens"], 20);
     assert_eq!(encoded["has_uncertain_usage"], true);
     // The typed start attributes round-trip through serde as plain data.
-    let tool = ToolAttributes { name: "read".into() };
+    let tool = ToolAttributes {
+        name: "read".into(),
+    };
     assert_eq!(serde_json::to_value(&tool).unwrap()["name"], "read");
     let request_start = RequestAttributes {
         operation: ProviderOperation::Summary,
@@ -277,7 +282,9 @@ fn usage_totals_include_tool_turns_and_summaries_and_keep_1h_distinct() {
             },
         ),
         record(
-            UsageRecordKind::TerminalGate { returned: Some(true) },
+            UsageRecordKind::TerminalGate {
+                returned: Some(true),
+            },
             Usage {
                 total_tokens: 5,
                 ..Usage::default()

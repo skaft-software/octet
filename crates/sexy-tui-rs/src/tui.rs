@@ -783,8 +783,8 @@ impl<'a> TUI<'a> {
             );
         }
         self.logical_cursor_position = logical_cursor_position;
-        self.cursor_row = logical_cursor_position
-            .map_or(rendered.len().saturating_sub(1), |cursor| cursor.row);
+        self.cursor_row =
+            logical_cursor_position.map_or(rendered.len().saturating_sub(1), |cursor| cursor.row);
         self.hardware_cursor_row = self.cursor_row;
         self.max_lines_rendered = rendered.len();
         self.previous_viewport_top = window_top;
@@ -4880,7 +4880,10 @@ mod tests {
             "the fixed viewport paints the tail window at absolute rows: {entered:?}"
         );
         assert!(entered.contains("\x1b[4;1H\x1b[2Kepsilon"), "{entered:?}");
-        assert!(!entered.contains("\x1b[?7h"), "autowrap stays off while active");
+        assert!(
+            !entered.contains("\x1b[?7h"),
+            "autowrap stays off while active"
+        );
         assert!(tui.alternate_screen_active());
         assert_eq!(
             tui.rendered_frame().len(),
@@ -4899,7 +4902,10 @@ mod tests {
             output.contains("\r\x1b[2Kalpha") && output.contains("\r\x1b[2Kepsilon"),
             "the final document is restored to the main screen: {output:?}"
         );
-        assert!(output.contains("\x1b[?7h"), "autowrap returns to the terminal: {output:?}");
+        assert!(
+            output.contains("\x1b[?7h"),
+            "autowrap returns to the terminal: {output:?}"
+        );
         assert!(output.contains("\x1b[?25h"), "{output:?}");
     }
 

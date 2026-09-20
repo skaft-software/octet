@@ -263,6 +263,27 @@ class _TokenProvider:
 
 
 class StreamableHttpTests(unittest.TestCase):
+    def test_terminal_sse_response_does_not_wait_for_connection_eof(self):
+        from octet_mcp.streamable_http import _HttpOperation
+        class OpenResponse:
+            def __init__(self):
+                from email.message import Message
+                self.headers = Message()
+                self.lines = iter([b'data: {"jsonrpc":"2.0","id":1,"result":{}}\n', b'\n'])
+            def getheader(self, name, default=None):
+                return default
+            def readline(self, limit):
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise AssertionError("read beyond the acknowledged terminal response")
+        client = McpStreamableHttpClient(_remote_config("http://127.0.0.1:1/mcp"),
+                                        limits(), resource_owner=OWNER)
+        result = client._read_sse(OpenResponse(), operation=_HttpOperation(), expected_id=1,
+                                  deadline=time.monotonic() + 1, redactions=())
+        self.assertTrue(result.complete)
+        self.assertEqual(result.messages, [{"jsonrpc": "2.0", "id": 1, "result": {}}])
+
     def setUp(self) -> None:
         self._fixtures: list[_LoopbackFixture] = []
 

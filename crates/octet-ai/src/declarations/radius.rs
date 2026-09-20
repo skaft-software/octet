@@ -110,7 +110,8 @@ impl RadiusGatewayModel {
         if !bounded_identifier(&self.name) {
             return Err(invalid("invalid Radius gateway model name"));
         }
-        if self.context_window == 0 || self.max_tokens == 0 || self.max_tokens > self.context_window {
+        if self.context_window == 0 || self.max_tokens == 0 || self.max_tokens > self.context_window
+        {
             return Err(invalid("invalid Radius gateway model limits"));
         }
         if !self.cost.is_valid() {
@@ -190,7 +191,8 @@ fn gateway_is_acceptable(url: &url::Url) -> bool {
 /// a configured gateway path prefix does not change the discovery endpoint.
 pub fn radius_config_url(gateway: &str) -> Result<url::Url, DeclarationError> {
     let normalized = normalize_radius_gateway_url(gateway);
-    let mut url = url::Url::parse(&normalized).map_err(|_| invalid("invalid Radius gateway URL"))?;
+    let mut url =
+        url::Url::parse(&normalized).map_err(|_| invalid("invalid Radius gateway URL"))?;
     if !gateway_is_acceptable(&url) {
         return Err(invalid(
             "Radius gateway requires HTTPS (or literal-loopback HTTP) without userinfo, query or fragment",
@@ -274,7 +276,10 @@ mod tests {
 
     #[test]
     fn gateway_normalization_and_discovery_url_are_absolute_and_credential_free() {
-        assert_eq!(normalize_radius_gateway_url("radius.pi.dev/"), "https://radius.pi.dev");
+        assert_eq!(
+            normalize_radius_gateway_url("radius.pi.dev/"),
+            "https://radius.pi.dev"
+        );
         assert_eq!(
             normalize_radius_gateway_url("http://127.0.0.1:8080///"),
             "http://127.0.0.1:8080"
@@ -320,7 +325,9 @@ mod tests {
             config.models[0].thinking_level_map["high"].as_deref(),
             Some("high")
         );
-        assert!(serde_json::to_string(&config).unwrap().contains("ignoredModels"));
+        assert!(serde_json::to_string(&config)
+            .unwrap()
+            .contains("ignoredModels"));
     }
 
     #[test]
@@ -331,7 +338,9 @@ mod tests {
             br#"{"baseUrl":"https://user:secret@x.example","models":[]}"#
         )
         .is_err());
-        assert!(parse_radius_gateway_config(br#"{"baseUrl":"http://x.example","models":[]}"#).is_err());
+        assert!(
+            parse_radius_gateway_config(br#"{"baseUrl":"http://x.example","models":[]}"#).is_err()
+        );
         let oversized = vec![b' '; MAX_RADIUS_CONFIG_BYTES + 1];
         assert!(parse_radius_gateway_config(&oversized).is_err());
     }
@@ -344,9 +353,15 @@ mod tests {
             ignored_models: 0,
         };
         assert!(radius_config_is_stale(&empty, Some(9_999), 10_000, 60_000));
-        let body = serde_json::json!({"baseUrl": "https://radius.example", "models": [model("auto")]});
+        let body =
+            serde_json::json!({"baseUrl": "https://radius.example", "models": [model("auto")]});
         let config = parse_radius_gateway_config(&serde_json::to_vec(&body).unwrap()).unwrap();
-        assert!(!radius_config_is_stale(&config, Some(10_000), 10_000, 60_000));
+        assert!(!radius_config_is_stale(
+            &config,
+            Some(10_000),
+            10_000,
+            60_000
+        ));
         assert!(radius_config_is_stale(&config, Some(0), 60_000, 60_000));
     }
 }

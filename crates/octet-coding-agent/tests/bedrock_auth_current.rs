@@ -1,9 +1,7 @@
 #![allow(missing_docs)]
 
 use octet_ai::{AwsCredentials, AwsSigV4Signer, Protocol, Secret};
-use octet_sdk::provider::{
-    builtin_provider_definitions, ProviderAccess, ProviderCatalogKind,
-};
+use octet_sdk::provider::{builtin_provider_definitions, ProviderAccess, ProviderCatalogKind};
 
 #[test]
 fn bedrock_definition_exposes_only_credential_free_chain_setup() {

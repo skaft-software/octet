@@ -846,6 +846,10 @@ async fn websocket_prewarm_reuses_only_matching_model_headers_and_authoritative_
             let (socket, _) = listener.accept().await.unwrap();
             let captured = captured.clone();
             handlers.push(tokio::spawn(async move {
+                #[expect(
+                    clippy::result_large_err,
+                    reason = "Tungstenite fixes the callback error type"
+                )]
                 let mut websocket = accept_hdr_async(
                     socket,
                     move |req: &UpgradeRequest, response: UpgradeResponse| {
@@ -947,19 +951,43 @@ async fn canonical_stop_beats_preset_and_responses_refuses_chat_only_sampling_be
     let server = MockServer::start().await;
     serve(&server, custom_sse(Protocol::OpenAiChat, "ok")).await;
     let mut selected = model(&server.uri(), Protocol::OpenAiChat);
-    Arc::make_mut(&mut selected.spec).preset.sampling_params.insert("stop".into(), json!(["preset-stop"]));
-    let client = AiClient::try_with_proxy_environment(Default::default()).unwrap().track_request_dispatch();
-    let mut explicit = request(); explicit.stop = vec!["caller-stop".into()];
+    Arc::make_mut(&mut selected.spec)
+        .preset
+        .sampling_params
+        .insert("stop".into(), json!(["preset-stop"]));
+    let client = AiClient::try_with_proxy_environment(Default::default())
+        .unwrap()
+        .track_request_dispatch();
+    let mut explicit = request();
+    explicit.stop = vec!["caller-stop".into()];
     client.complete(&selected, explicit).await.unwrap();
     client.complete(&selected, request()).await.unwrap();
     let received = server.received_requests().await.unwrap();
     assert_eq!(received.len(), 2);
-    assert_eq!(received[0].body_json::<Value>().unwrap()["stop"], json!(["caller-stop"]));
-    assert_eq!(received[1].body_json::<Value>().unwrap()["stop"], json!(["preset-stop"]));
-    for (name, value) in [("stop",json!(["bad"])), ("frequency_penalty",json!(0.5)), ("functions",json!([])), ("function_call",json!("auto")), ("web_search_options",json!({})), ("prompt",json!({"id":"hidden"}))] {
+    assert_eq!(
+        received[0].body_json::<Value>().unwrap()["stop"],
+        json!(["caller-stop"])
+    );
+    assert_eq!(
+        received[1].body_json::<Value>().unwrap()["stop"],
+        json!(["preset-stop"])
+    );
+    for (name, value) in [
+        ("stop", json!(["bad"])),
+        ("frequency_penalty", json!(0.5)),
+        ("functions", json!([])),
+        ("function_call", json!("auto")),
+        ("web_search_options", json!({})),
+        ("prompt", json!({"id":"hidden"})),
+    ] {
         let mut selected = model(&server.uri(), Protocol::OpenAiResponses);
-        Arc::make_mut(&mut selected.spec).preset.sampling_params.insert(name.into(), value);
-        Arc::make_mut(&mut selected.endpoint).auth = Auth::BearerEnv { var: "OCTET_PARITY_MISSING_AUTH".into() };
+        Arc::make_mut(&mut selected.spec)
+            .preset
+            .sampling_params
+            .insert(name.into(), value);
+        Arc::make_mut(&mut selected.endpoint).auth = Auth::BearerEnv {
+            var: "OCTET_PARITY_MISSING_AUTH".into(),
+        };
         let attempt = client.track_request_dispatch();
         let error = attempt.complete(&selected, request()).await.unwrap_err();
         assert!(matches!(error, AiError::Config(_)), "{name}: {error:?}");
@@ -967,7 +995,6 @@ async fn canonical_stop_beats_preset_and_responses_refuses_chat_only_sampling_be
     }
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
-
 
 struct CountingAuth {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -978,54 +1005,104 @@ struct CountingAuth {
 impl CredentialResolver for CountingAuth {
     async fn resolve(&self) -> Result<ResolvedCredential, AuthError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if !self.delay.is_zero() { tokio::time::sleep(self.delay).await; }
-        Ok(ResolvedCredential { scheme: CredentialScheme::Bearer, value: Secret::from("counted-auth"), extra_headers: Default::default() })
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        Ok(ResolvedCredential {
+            scheme: CredentialScheme::Bearer,
+            value: Secret::from("counted-auth"),
+            extra_headers: Default::default(),
+        })
     }
 }
 
 fn isolated_azure_env() -> std::collections::BTreeMap<String, String> {
-    ["AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_RESOURCE_NAME", "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_DEPLOYMENT_NAME_MAP"]
-        .into_iter().map(|name| (name.to_owned(), String::new())).collect()
+    [
+        "AZURE_OPENAI_BASE_URL",
+        "AZURE_OPENAI_RESOURCE_NAME",
+        "AZURE_OPENAI_API_VERSION",
+        "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+    ]
+    .into_iter()
+    .map(|name| (name.to_owned(), String::new()))
+    .collect()
 }
 
 #[tokio::test]
 async fn strict_responses_wire_cap_matches_reservation_contract_including_codex_omission() {
-    for profile in [ResponsesRuntimeProfile::Default, ResponsesRuntimeProfile::Codex] {
+    for profile in [
+        ResponsesRuntimeProfile::Default,
+        ResponsesRuntimeProfile::Codex,
+    ] {
         for unsupported in [false, true] {
             for cap in [1, 128] {
                 let server = MockServer::start().await;
                 serve(&server, sse(&[json!({"type":"response.created","response":{"id":"cap"}}), json!({"type":"response.completed","response":{"id":"cap","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}})])).await;
                 let mut selected = model(&server.uri(), Protocol::OpenAiResponses);
                 Arc::make_mut(&mut selected.spec).limits.max_output_tokens = 4096;
-                Arc::make_mut(&mut selected.spec).preset.supports_max_output_tokens = unsupported.then_some(false);
-                Arc::make_mut(&mut selected.endpoint).runtime.responses_profile = profile;
-                let expected = if unsupported || profile == ResponsesRuntimeProfile::Codex { None } else { Some(cap) };
+                Arc::make_mut(&mut selected.spec)
+                    .preset
+                    .supports_max_output_tokens = unsupported.then_some(false);
+                Arc::make_mut(&mut selected.endpoint)
+                    .runtime
+                    .responses_profile = profile;
+                let expected = if unsupported || profile == ResponsesRuntimeProfile::Codex {
+                    None
+                } else {
+                    Some(cap)
+                };
                 assert_eq!(effective_output_token_cap(&selected, Some(cap)), expected);
-                let mut req = tier_request(None); req.max_output_tokens = Some(cap);
+                let mut req = tier_request(None);
+                req.max_output_tokens = Some(cap);
                 req.compatibility = CompatibilityMode::Strict;
-                let overrides = RequestOverrides { sampling_params: std::collections::BTreeMap::from([("top_p".into(), json!(0.8))]), ..Default::default() };
-                AiClient::try_with_proxy_environment(Default::default()).unwrap()
-                    .complete_with_overrides(&selected, req, overrides).await.unwrap();
+                let overrides = RequestOverrides {
+                    sampling_params: std::collections::BTreeMap::from([(
+                        "top_p".into(),
+                        json!(0.8),
+                    )]),
+                    ..Default::default()
+                };
+                AiClient::try_with_proxy_environment(Default::default())
+                    .unwrap()
+                    .complete_with_overrides(&selected, req, overrides)
+                    .await
+                    .unwrap();
                 let requests = server.received_requests().await.unwrap();
                 assert_eq!(requests.len(), 1);
                 let body = requests[0].body_json::<Value>().unwrap();
-                assert_eq!(body.get("max_output_tokens").and_then(Value::as_u64), expected);
+                assert_eq!(
+                    body.get("max_output_tokens").and_then(Value::as_u64),
+                    expected
+                );
                 assert_eq!(selected.spec.limits.max_output_tokens, 4096);
                 assert_eq!(effective_output_token_cap(&selected, Some(cap)), expected);
             }
         }
     }
-    for protocol in [Protocol::OpenAiChat, Protocol::OpenAiResponses, Protocol::AnthropicMessages,
-        Protocol::GoogleGenerativeAi, Protocol::BedrockConverse, Protocol::MistralConversations] {
+    for protocol in [
+        Protocol::OpenAiChat,
+        Protocol::OpenAiResponses,
+        Protocol::AnthropicMessages,
+        Protocol::GoogleGenerativeAi,
+        Protocol::BedrockConverse,
+        Protocol::MistralConversations,
+    ] {
         let selected = model("http://127.0.0.1/", protocol);
         assert_eq!(effective_output_token_cap(&selected, Some(128)), Some(128));
-        assert_eq!(effective_output_token_cap(&selected, None),
-            matches!(protocol, Protocol::AnthropicMessages | Protocol::BedrockConverse).then_some(selected.spec.limits.max_output_tokens));
+        assert_eq!(
+            effective_output_token_cap(&selected, None),
+            matches!(
+                protocol,
+                Protocol::AnthropicMessages | Protocol::BedrockConverse
+            )
+            .then_some(selected.spec.limits.max_output_tokens)
+        );
     }
 }
 
 #[tokio::test]
-async fn request_overrides_consume_sampling_headers_and_environment_without_mutating_catalog_or_process() {
+async fn request_overrides_consume_sampling_headers_and_environment_without_mutating_catalog_or_process(
+) {
     let server = MockServer::start().await;
     serve(&server, custom_sse(Protocol::OpenAiChat, "ok")).await;
     let mut selected = model(&server.uri(), Protocol::OpenAiChat);
@@ -1033,33 +1110,56 @@ async fn request_overrides_consume_sampling_headers_and_environment_without_muta
     let before = std::env::var_os(variable);
     let endpoint = Arc::make_mut(&mut selected.endpoint);
     endpoint.auth = Auth::bearer_env(variable);
-    endpoint.default_headers.insert("x-order", "endpoint".parse().unwrap());
+    endpoint
+        .default_headers
+        .insert("x-order", "endpoint".parse().unwrap());
     let preset = &mut Arc::make_mut(&mut selected.spec).preset;
     preset.headers.insert("x-order".into(), "model".into());
     preset.sampling_params = std::collections::BTreeMap::from([
-        ("temperature".into(),json!(0.2)), ("top_p".into(),json!(0.3)), ("stop".into(),json!(["model-stop"]))]);
+        ("temperature".into(), json!(0.2)),
+        ("top_p".into(), json!(0.3)),
+        ("stop".into(), json!(["model-stop"])),
+    ]);
     let original_preset = preset.clone();
-    let mut req = request(); req.temperature = Some(0.9); req.stop = vec!["canonical-stop".into()]; req.max_output_tokens = Some(128);
+    let mut req = request();
+    req.temperature = Some(0.9);
+    req.stop = vec!["canonical-stop".into()];
+    req.max_output_tokens = Some(128);
     let overrides = RequestOverrides {
-        sampling_params: std::collections::BTreeMap::from([("temperature".into(),json!(0.7)), ("top_p".into(),json!(0.8)), ("stop".into(),json!(["override-stop"]))]),
-        headers: std::collections::BTreeMap::from([("X-ORDER".into(),"caller".into()), ("authorization".into(),"Bearer forged".into()), ("content-type".into(),"text/plain".into())]),
-        env: std::collections::BTreeMap::from([(variable.into(),"overlay-secret".into())]),
+        sampling_params: std::collections::BTreeMap::from([
+            ("temperature".into(), json!(0.7)),
+            ("top_p".into(), json!(0.8)),
+            ("stop".into(), json!(["override-stop"])),
+        ]),
+        headers: std::collections::BTreeMap::from([
+            ("X-ORDER".into(), "caller".into()),
+            ("authorization".into(), "Bearer forged".into()),
+            ("content-type".into(), "text/plain".into()),
+        ]),
+        env: std::collections::BTreeMap::from([(variable.into(), "overlay-secret".into())]),
         ..Default::default()
     };
     assert!(!format!("{overrides:?}").contains("overlay-secret"));
-    AiClient::try_with_proxy_environment(Default::default()).unwrap().complete_with_overrides(&selected, req, overrides).await.unwrap();
+    AiClient::try_with_proxy_environment(Default::default())
+        .unwrap()
+        .complete_with_overrides(&selected, req, overrides)
+        .await
+        .unwrap();
     let received = server.received_requests().await.unwrap();
-    assert_eq!(received.len(),1);
+    assert_eq!(received.len(), 1);
     let body = received[0].body_json::<Value>().unwrap();
-    assert!((body["temperature"].as_f64().unwrap()-0.7).abs()<0.0001);
-    assert_eq!(body["top_p"],0.8);
-    assert_eq!(body["stop"],json!(["canonical-stop"]));
-    assert_eq!(body["max_completion_tokens"],128);
-    assert_eq!(received[0].headers["x-order"],"caller");
-    assert_eq!(received[0].headers["authorization"],"Bearer overlay-secret");
-    assert_eq!(received[0].headers["content-type"],"application/json");
-    assert_eq!(selected.spec.preset,original_preset);
-    assert_eq!(std::env::var_os(variable),before);
+    assert!((body["temperature"].as_f64().unwrap() - 0.7).abs() < 0.0001);
+    assert_eq!(body["top_p"], 0.8);
+    assert_eq!(body["stop"], json!(["canonical-stop"]));
+    assert_eq!(body["max_completion_tokens"], 128);
+    assert_eq!(received[0].headers["x-order"], "caller");
+    assert_eq!(
+        received[0].headers["authorization"],
+        "Bearer overlay-secret"
+    );
+    assert_eq!(received[0].headers["content-type"], "application/json");
+    assert_eq!(selected.spec.preset, original_preset);
+    assert_eq!(std::env::var_os(variable), before);
 }
 
 #[tokio::test]
@@ -1067,31 +1167,77 @@ async fn preset_and_request_sampling_cannot_bypass_tools_or_caps_before_auth_or_
     use std::sync::atomic::{AtomicUsize, Ordering};
     let server = MockServer::start().await;
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut selected = model(&server.uri(),Protocol::OpenAiChat);
-    Arc::make_mut(&mut selected.endpoint).auth = Auth::dynamic(Arc::new(CountingAuth { calls: calls.clone(), delay: Duration::ZERO }));
+    let mut selected = model(&server.uri(), Protocol::OpenAiChat);
+    Arc::make_mut(&mut selected.endpoint).auth = Auth::dynamic(Arc::new(CountingAuth {
+        calls: calls.clone(),
+        delay: Duration::ZERO,
+    }));
     let client = AiClient::try_with_proxy_environment(Default::default()).unwrap();
-    for (name,value) in [("functions",json!([])), ("function_call",json!("auto")), ("web_search_options",json!({})),
-        ("prompt",json!({"id":"stored"})), ("max_completion_tokens",json!(999999)), ("max_output_tokens",json!(999999)),
-        ("supports_max_output_tokens",json!(false)), ("responses_profile",json!("codex")), ("future_control",json!({}))] {
-        for as_preset in [false,true] {
+    for (name, value) in [
+        ("functions", json!([])),
+        ("function_call", json!("auto")),
+        ("web_search_options", json!({})),
+        ("prompt", json!({"id":"stored"})),
+        ("max_completion_tokens", json!(999999)),
+        ("max_output_tokens", json!(999999)),
+        ("supports_max_output_tokens", json!(false)),
+        ("responses_profile", json!("codex")),
+        ("future_control", json!({})),
+    ] {
+        for as_preset in [false, true] {
             let mut target = selected.clone();
             let mut overrides = RequestOverrides::default();
-            if as_preset { Arc::make_mut(&mut target.spec).preset.sampling_params.insert(name.into(),value.clone()); }
-            else { overrides.sampling_params.insert(name.into(),value.clone()); }
+            if as_preset {
+                Arc::make_mut(&mut target.spec)
+                    .preset
+                    .sampling_params
+                    .insert(name.into(), value.clone());
+            } else {
+                overrides.sampling_params.insert(name.into(), value.clone());
+            }
             let attempt = client.track_request_dispatch();
-            assert!(matches!(attempt.complete_with_overrides(&target,request(),overrides).await.unwrap_err(),AiError::Config(_)),"{name}");
+            assert!(
+                matches!(
+                    attempt
+                        .complete_with_overrides(&target, request(), overrides)
+                        .await
+                        .unwrap_err(),
+                    AiError::Config(_)
+                ),
+                "{name}"
+            );
             assert!(!attempt.request_may_have_been_sent());
         }
     }
-    for overrides in [RequestOverrides { max_retries:Some(1),..Default::default() },
-        RequestOverrides { max_retry_delay_ms:Some(1),..Default::default() },
-        RequestOverrides { headers:std::collections::BTreeMap::from([("host".into(),"other.invalid".into())]),..Default::default() },
-        RequestOverrides { timeout_ms:Some(0),..Default::default() }] {
+    for overrides in [
+        RequestOverrides {
+            max_retries: Some(1),
+            ..Default::default()
+        },
+        RequestOverrides {
+            max_retry_delay_ms: Some(1),
+            ..Default::default()
+        },
+        RequestOverrides {
+            headers: std::collections::BTreeMap::from([("host".into(), "other.invalid".into())]),
+            ..Default::default()
+        },
+        RequestOverrides {
+            timeout_ms: Some(0),
+            ..Default::default()
+        },
+    ] {
         let attempt = client.track_request_dispatch();
-        assert!(matches!(attempt.complete_with_overrides(&selected,request(),overrides).await.unwrap_err(),AiError::Config(_)));
+        assert!(matches!(
+            attempt
+                .complete_with_overrides(&selected, request(), overrides)
+                .await
+                .unwrap_err(),
+            AiError::Config(_)
+        ));
         assert!(!attempt.request_may_have_been_sent());
     }
-    assert_eq!(calls.load(Ordering::SeqCst),0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
@@ -1100,12 +1246,29 @@ async fn request_local_timeout_cancels_credential_wait_before_dispatch() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let server = MockServer::start().await;
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut selected = model(&server.uri(),Protocol::OpenAiChat);
-    Arc::make_mut(&mut selected.endpoint).auth = Auth::dynamic(Arc::new(CountingAuth {calls:calls.clone(),delay:Duration::from_secs(1)}));
-    let client = AiClient::try_with_proxy_environment(Default::default()).unwrap().track_request_dispatch();
-    let result = tokio::time::timeout(Duration::from_secs(2),client.complete_with_overrides(&selected,request(),RequestOverrides {timeout_ms:Some(20),..Default::default()})).await.unwrap();
+    let mut selected = model(&server.uri(), Protocol::OpenAiChat);
+    Arc::make_mut(&mut selected.endpoint).auth = Auth::dynamic(Arc::new(CountingAuth {
+        calls: calls.clone(),
+        delay: Duration::from_secs(1),
+    }));
+    let client = AiClient::try_with_proxy_environment(Default::default())
+        .unwrap()
+        .track_request_dispatch();
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.complete_with_overrides(
+            &selected,
+            request(),
+            RequestOverrides {
+                timeout_ms: Some(20),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
     assert!(matches!(result.unwrap_err(),AiError::Transport(ref error) if error.timeout));
-    assert_eq!(calls.load(Ordering::SeqCst),1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(!client.request_may_have_been_sent());
     assert!(server.received_requests().await.unwrap().is_empty());
 }
@@ -1113,132 +1276,262 @@ async fn request_local_timeout_cancels_credential_wait_before_dispatch() {
 #[tokio::test]
 async fn request_local_proxy_is_consumed_and_transient_errors_are_redacted_without_retry() {
     let proxy = MockServer::start().await;
-    Mock::given(method("POST")).respond_with(ResponseTemplate::new(503)
-        .insert_header("retry-after","1").set_body_string("override-header-secret overlay-auth-secret"))
-        .mount(&proxy).await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("retry-after", "1")
+                .set_body_string("override-header-secret overlay-auth-secret"),
+        )
+        .mount(&proxy)
+        .await;
     let variable = "OCTET_PARITY_PROXY_AUTH";
-    let mut selected = model("http://target.invalid/v1/",Protocol::OpenAiChat);
+    let mut selected = model("http://target.invalid/v1/", Protocol::OpenAiChat);
     Arc::make_mut(&mut selected.endpoint).auth = Auth::bearer_env(variable);
     let client = AiClient::try_with_proxy_environment(Default::default()).unwrap();
     let overrides = RequestOverrides {
-        headers:std::collections::BTreeMap::from([("x-private".into(),"override-header-secret".into())]),
-        env:std::collections::BTreeMap::from([("HTTP_PROXY".into(),proxy.uri()), (variable.into(),"overlay-auth-secret".into())]),
-        max_retries:Some(0), max_retry_delay_ms:Some(0), ..Default::default()
+        headers: std::collections::BTreeMap::from([(
+            "x-private".into(),
+            "override-header-secret".into(),
+        )]),
+        env: std::collections::BTreeMap::from([
+            ("HTTP_PROXY".into(), proxy.uri()),
+            (variable.into(), "overlay-auth-secret".into()),
+        ]),
+        max_retries: Some(0),
+        max_retry_delay_ms: Some(0),
+        ..Default::default()
     };
-    let error = client.complete_with_overrides(&selected,request(),overrides).await.unwrap_err();
-    assert!(matches!(error,AiError::Http(_)));
+    let error = client
+        .complete_with_overrides(&selected, request(), overrides)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AiError::Http(_)));
     assert!(!format!("{error:?}").contains("override-header-secret"));
     assert!(!format!("{error:?}").contains("overlay-auth-secret"));
-    let received = proxy.received_requests().await.unwrap(); assert_eq!(received.len(),1);
-    assert_eq!(received[0].headers["host"],"target.invalid");
+    let received = proxy.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].headers["host"], "target.invalid");
 }
 
 #[tokio::test]
 async fn azure_overrides_select_deployment_version_and_explicit_destination_on_the_wire() {
     let original = MockServer::start().await;
     let destination = MockServer::start().await;
-    serve(&destination,sse(&[json!({"type":"response.created","response":{"id":"azure"}}),tier_terminal(None,true,false)])).await;
-    let mut selected = model(&original.uri(),Protocol::OpenAiResponses);
+    serve(
+        &destination,
+        sse(&[
+            json!({"type":"response.created","response":{"id":"azure"}}),
+            tier_terminal(None, true, false),
+        ]),
+    )
+    .await;
+    let mut selected = model(&original.uri(), Protocol::OpenAiResponses);
     let endpoint = Arc::make_mut(&mut selected.endpoint);
     endpoint.runtime.responses_profile = ResponsesRuntimeProfile::Azure;
-    endpoint.auth = Auth::header_env("api-key".parse().unwrap(),"AZURE_OPENAI_API_KEY");
+    endpoint.auth = Auth::header_env("api-key".parse().unwrap(), "AZURE_OPENAI_API_KEY");
     let original_url = endpoint.base_url.clone();
     let original_api = selected.spec.api_name.clone();
     let client = AiClient::try_with_proxy_environment(Default::default()).unwrap();
-    for (explicit,map,expected) in [(Some("deploy/with ?#\""),Some("mapped"),"deploy/with ?#\""),
-        (None,Some("mapped"),"mapped"),(None,None,"from-env")] {
+    for (explicit, map, expected) in [
+        (Some("deploy/with ?#\""), Some("mapped"), "deploy/with ?#\""),
+        (None, Some("mapped"), "mapped"),
+        (None, None, "from-env"),
+    ] {
         let mut env = isolated_azure_env();
-        env.insert("AZURE_OPENAI_API_KEY".into(),"azure-secret".into());
-        env.insert("AZURE_OPENAI_API_VERSION".into(),"environment-version".into());
-        env.insert("AZURE_OPENAI_DEPLOYMENT_NAME_MAP".into(),"fixture=from-env".into());
+        env.insert("AZURE_OPENAI_API_KEY".into(), "azure-secret".into());
+        env.insert(
+            "AZURE_OPENAI_API_VERSION".into(),
+            "environment-version".into(),
+        );
+        env.insert(
+            "AZURE_OPENAI_DEPLOYMENT_NAME_MAP".into(),
+            "fixture=from-env".into(),
+        );
         let azure = AzureRequestOptions {
-            deployment_name:explicit.map(str::to_owned),
-            deployment_map:map.map(|value|std::collections::BTreeMap::from([("fixture".into(),value.into())])).unwrap_or_default(),
-            base_url:Some(format!("{}/gateway%20path/",destination.uri())),
-            api_version:Some("v1-explicit".into()),..Default::default()
+            deployment_name: explicit.map(str::to_owned),
+            deployment_map: map
+                .map(|value| std::collections::BTreeMap::from([("fixture".into(), value.into())]))
+                .unwrap_or_default(),
+            base_url: Some(format!("{}/gateway%20path/", destination.uri())),
+            api_version: Some("v1-explicit".into()),
+            ..Default::default()
         };
-        client.complete_with_overrides(&selected,tier_request(None),RequestOverrides {azure:Some(azure),env,..Default::default()}).await.unwrap();
+        client
+            .complete_with_overrides(
+                &selected,
+                tier_request(None),
+                RequestOverrides {
+                    azure: Some(azure),
+                    env,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         let received = destination.received_requests().await.unwrap();
         let request = received.last().unwrap();
-        assert_eq!(request.url.path(),"/gateway%20path/responses");
-        assert_eq!(request.url.query(),Some("api-version=v1-explicit"));
-        assert_eq!(request.headers["api-key"],"azure-secret");
-        let body = request.body_json::<Value>().unwrap(); assert_eq!(body["model"],expected);
-        assert_eq!(body["store"],false);
+        assert_eq!(request.url.path(), "/gateway%20path/responses");
+        assert_eq!(request.url.query(), Some("api-version=v1-explicit"));
+        assert_eq!(request.headers["api-key"], "azure-secret");
+        let body = request.body_json::<Value>().unwrap();
+        assert_eq!(body["model"], expected);
+        assert_eq!(body["store"], false);
     }
     assert!(original.received_requests().await.unwrap().is_empty());
-    assert_eq!(selected.endpoint.base_url,original_url);
-    assert_eq!(selected.spec.api_name,original_api);
+    assert_eq!(selected.endpoint.base_url, original_url);
+    assert_eq!(selected.spec.api_name, original_api);
 }
 
 #[tokio::test]
 async fn azure_environment_cannot_forward_credentials_to_an_unselected_origin() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let origin = MockServer::start().await; let other = MockServer::start().await;
+    let origin = MockServer::start().await;
+    let other = MockServer::start().await;
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut selected = model(&origin.uri(),Protocol::OpenAiResponses);
+    let mut selected = model(&origin.uri(), Protocol::OpenAiResponses);
     let endpoint = Arc::make_mut(&mut selected.endpoint);
     endpoint.runtime.responses_profile = ResponsesRuntimeProfile::Azure;
-    endpoint.auth = Auth::dynamic(Arc::new(CountingAuth {calls:calls.clone(),delay:Duration::ZERO}));
+    endpoint.auth = Auth::dynamic(Arc::new(CountingAuth {
+        calls: calls.clone(),
+        delay: Duration::ZERO,
+    }));
     let client = AiClient::try_with_proxy_environment(Default::default()).unwrap();
-    for resource in [None,Some("unselected-explicit-resource".to_owned())] {
-        let mut env = isolated_azure_env(); env.insert("AZURE_OPENAI_BASE_URL".into(),other.uri());
-        let attempt = client.track_request_dispatch();
-        let error = attempt.complete_with_overrides(&selected,tier_request(None),RequestOverrides {
-            env, azure:Some(AzureRequestOptions {resource_name:resource,..Default::default()}),..Default::default()
-        }).await.unwrap_err();
-        assert!(matches!(error,AiError::Config(_))); assert!(!attempt.request_may_have_been_sent());
-    }
-    for (map,base) in [(Some("fixture=one,fixture=two"),None),
-        (None,Some("https://user:private-secret@resource.openai.azure.com/")),
-        (None,Some("https://resource.openai.azure.com/?token=private-secret")),
-        (None,Some("https://resource.openai.azure.com/?api-version=v1&api-version=v2"))] {
+    for resource in [None, Some("unselected-explicit-resource".to_owned())] {
         let mut env = isolated_azure_env();
-        if let Some(map) = map { env.insert("AZURE_OPENAI_DEPLOYMENT_NAME_MAP".into(),map.into()); }
-        let overrides = RequestOverrides { env, azure:Some(AzureRequestOptions {base_url:base.map(str::to_owned),..Default::default()}),..Default::default() };
+        env.insert("AZURE_OPENAI_BASE_URL".into(), other.uri());
+        let attempt = client.track_request_dispatch();
+        let error = attempt
+            .complete_with_overrides(
+                &selected,
+                tier_request(None),
+                RequestOverrides {
+                    env,
+                    azure: Some(AzureRequestOptions {
+                        resource_name: resource,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AiError::Config(_)));
+        assert!(!attempt.request_may_have_been_sent());
+    }
+    for (map, base) in [
+        (Some("fixture=one,fixture=two"), None),
+        (
+            None,
+            Some("https://user:private-secret@resource.openai.azure.com/"),
+        ),
+        (
+            None,
+            Some("https://resource.openai.azure.com/?token=private-secret"),
+        ),
+        (
+            None,
+            Some("https://resource.openai.azure.com/?api-version=v1&api-version=v2"),
+        ),
+    ] {
+        let mut env = isolated_azure_env();
+        if let Some(map) = map {
+            env.insert("AZURE_OPENAI_DEPLOYMENT_NAME_MAP".into(), map.into());
+        }
+        let overrides = RequestOverrides {
+            env,
+            azure: Some(AzureRequestOptions {
+                base_url: base.map(str::to_owned),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         assert!(!format!("{overrides:?}").contains("private-secret"));
         let attempt = client.track_request_dispatch();
-        let error = attempt.complete_with_overrides(&selected,tier_request(None),overrides).await.unwrap_err();
-        assert!(matches!(error,AiError::Config(_))); assert!(!attempt.request_may_have_been_sent());
+        let error = attempt
+            .complete_with_overrides(&selected, tier_request(None), overrides)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AiError::Config(_)));
+        assert!(!attempt.request_may_have_been_sent());
         assert!(!format!("{error:?}").contains("private-secret"));
     }
-    assert_eq!(calls.load(Ordering::SeqCst),0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(origin.received_requests().await.unwrap().is_empty());
     assert!(other.received_requests().await.unwrap().is_empty());
 }
 
-
 #[tokio::test]
 async fn request_local_body_deadline_and_stream_drop_close_the_single_provider_connection() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    for exhaust_deadline in [false,true] {
+    for exhaust_deadline in [false, true] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket,_) = listener.accept().await.unwrap();
-            let mut request = Vec::new(); let mut chunk = [0u8;4096];
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
             let header_end = loop {
-                let n = socket.read(&mut chunk).await.unwrap(); assert!(n>0);
-                request.extend_from_slice(&chunk[..n]); assert!(request.len()<64*1024);
-                if let Some(index) = request.windows(4).position(|v|v==b"\r\n\r\n") { break index+4; }
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                assert!(request.len() < 64 * 1024);
+                if let Some(index) = request.windows(4).position(|v| v == b"\r\n\r\n") {
+                    break index + 4;
+                }
             };
             let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
-            let length:usize = headers.lines().find_map(|line|line.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
-            while request.len()<header_end+length {
-                let n = socket.read(&mut chunk).await.unwrap(); assert!(n>0); request.extend_from_slice(&chunk[..n]);
+            let length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            while request.len() < header_end + length {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
             }
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100000\r\n\r\n").await.unwrap();
             socket.write_all(b"data: {\"id\":\"hold\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n").await.unwrap();
-            matches!(tokio::time::timeout(Duration::from_secs(2),socket.read(&mut chunk)).await,Ok(Ok(0))|Ok(Err(_)))
+            matches!(
+                tokio::time::timeout(Duration::from_secs(2), socket.read(&mut chunk)).await,
+                Ok(Ok(0)) | Ok(Err(_))
+            )
         });
-        let selected = model(&format!("http://{address}/"),Protocol::OpenAiChat);
-        let client = AiClient::try_with_proxy_environment(Default::default()).unwrap().track_request_dispatch();
-        let mut stream = client.stream_with_overrides(&selected,request(),RequestOverrides {timeout_ms:Some(250),..Default::default()}).await.unwrap();
-        assert!(matches!(stream.next().await.unwrap().unwrap(),StreamEvent::Started{..}));
+        let selected = model(&format!("http://{address}/"), Protocol::OpenAiChat);
+        let client = AiClient::try_with_proxy_environment(Default::default())
+            .unwrap()
+            .track_request_dispatch();
+        let mut stream = client
+            .stream_with_overrides(
+                &selected,
+                request(),
+                RequestOverrides {
+                    timeout_ms: Some(250),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            StreamEvent::Started { .. }
+        ));
         if exhaust_deadline {
-            let error = tokio::time::timeout(Duration::from_secs(2),async {
-                loop { if let Err(error) = stream.next().await.expect("deadline must report a terminal error") { break error; } }
-            }).await.unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Err(error) = stream
+                        .next()
+                        .await
+                        .expect("deadline must report a terminal error")
+                    {
+                        break error;
+                    }
+                }
+            })
+            .await
+            .unwrap();
             // The fixture emits one consumer-visible delta, so a failed body
             // deadline is annotated with bounded stream progress. The
             // underlying cause must still be the body timeout.
@@ -1253,38 +1546,72 @@ async fn request_local_body_deadline_and_stream_drop_close_the_single_provider_c
                 }
                 other => panic!("expected a body deadline: {other:?}"),
             };
-            assert!(transport.timeout && transport.phase == TransportPhase::Body, "{transport:?}");
+            assert!(
+                transport.timeout && transport.phase == TransportPhase::Body,
+                "{transport:?}"
+            );
         }
         drop(stream);
         assert!(client.request_may_have_been_sent());
-        assert!(tokio::time::timeout(Duration::from_secs(3),server).await.unwrap().unwrap());
+        assert!(tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap());
     }
 }
 
 #[tokio::test]
 async fn request_signer_receives_final_override_headers_body_and_unchanged_cap() {
-    struct Signer(Arc<std::sync::Mutex<Vec<(http::HeaderMap,Vec<u8>)>>>);
+    type SignedRequests = Vec<(http::HeaderMap, Vec<u8>)>;
+    struct Signer(Arc<std::sync::Mutex<SignedRequests>>);
     #[async_trait::async_trait]
     impl RequestSigner for Signer {
-        async fn sign(&self, request:&SigningRequest)->Result<SignedRequestHeaders,AuthError> {
-            self.0.lock().unwrap().push((request.headers().clone(),request.body().to_vec()));
-            let mut headers = http::HeaderMap::new(); headers.insert("authorization","signed-authority".parse().unwrap());
-            Ok(SignedRequestHeaders::new(headers,vec![Secret::from("signed-authority")]))
+        async fn sign(&self, request: &SigningRequest) -> Result<SignedRequestHeaders, AuthError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((request.headers().clone(), request.body().to_vec()));
+            let mut headers = http::HeaderMap::new();
+            headers.insert("authorization", "signed-authority".parse().unwrap());
+            Ok(SignedRequestHeaders::new(
+                headers,
+                vec![Secret::from("signed-authority")],
+            ))
         }
     }
-    let server = MockServer::start().await; serve(&server,custom_sse(Protocol::OpenAiChat,"ok")).await;
+    let server = MockServer::start().await;
+    serve(&server, custom_sse(Protocol::OpenAiChat, "ok")).await;
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut selected = model(&server.uri(),Protocol::OpenAiChat);
-    Arc::make_mut(&mut selected.endpoint).auth = Auth::request_signer(Arc::new(Signer(captured.clone())));
-    Arc::make_mut(&mut selected.spec).preset.headers.insert("x-order".into(),"model".into());
-    let mut req = request(); req.max_output_tokens=Some(128);
-    let overrides = RequestOverrides { headers:std::collections::BTreeMap::from([("x-order".into(),"caller".into()),("authorization".into(),"forged".into())]),
-        sampling_params:std::collections::BTreeMap::from([("top_p".into(),json!(0.8))]),..Default::default() };
-    AiClient::try_with_proxy_environment(Default::default()).unwrap().complete_with_overrides(&selected,req,overrides).await.unwrap();
-    let received=server.received_requests().await.unwrap(); assert_eq!(received.len(),1);
-    assert_eq!(received[0].headers["authorization"],"signed-authority");
-    let captured=captured.lock().unwrap(); assert_eq!(captured.len(),1);
-    assert_eq!(captured[0].0["x-order"],"caller"); assert_eq!(captured[0].1,received[0].body);
-    let body:Value=serde_json::from_slice(&captured[0].1).unwrap();
-    assert_eq!(body["top_p"],0.8); assert_eq!(body["max_completion_tokens"],128);
+    let mut selected = model(&server.uri(), Protocol::OpenAiChat);
+    Arc::make_mut(&mut selected.endpoint).auth =
+        Auth::request_signer(Arc::new(Signer(captured.clone())));
+    Arc::make_mut(&mut selected.spec)
+        .preset
+        .headers
+        .insert("x-order".into(), "model".into());
+    let mut req = request();
+    req.max_output_tokens = Some(128);
+    let overrides = RequestOverrides {
+        headers: std::collections::BTreeMap::from([
+            ("x-order".into(), "caller".into()),
+            ("authorization".into(), "forged".into()),
+        ]),
+        sampling_params: std::collections::BTreeMap::from([("top_p".into(), json!(0.8))]),
+        ..Default::default()
+    };
+    AiClient::try_with_proxy_environment(Default::default())
+        .unwrap()
+        .complete_with_overrides(&selected, req, overrides)
+        .await
+        .unwrap();
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].headers["authorization"], "signed-authority");
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].0["x-order"], "caller");
+    assert_eq!(captured[0].1, received[0].body);
+    let body: Value = serde_json::from_slice(&captured[0].1).unwrap();
+    assert_eq!(body["top_p"], 0.8);
+    assert_eq!(body["max_completion_tokens"], 128);
 }

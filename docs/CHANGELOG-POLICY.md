@@ -34,10 +34,10 @@ Links inside a release body are repository-root relative.
 
 ```sh
 # Normalized body of one exact release.
-python3 scripts/changelog.py extract --version 0.7.6
+python3 scripts/changelog.py extract --version 0.8.0
 
 # Normalized bodies of every release newer than a known version, in file order.
-python3 scripts/changelog.py since --last 0.7.5
+python3 scripts/changelog.py since --last 0.7.6
 ```
 
 `--changelog PATH` overrides the default `CHANGELOG.md`. An absent release exits

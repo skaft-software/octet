@@ -47,7 +47,8 @@ pub(crate) use catalog::{
 pub(crate) use compatibility::cache_compatibility;
 pub(crate) use contract::{
     InventoryCacheMode, ModelDiscovery, ModelFilter, ProviderAuthentication, ProviderDeclaration,
-    ProviderRoute, ProviderRuntimeConfiguration, BUILTIN_PROVIDER_DECLARATIONS, CODEX, DEEPSEEK,
+    ProviderRoute, ProviderRuntimeConfiguration, ALL_PROVIDER_DECLARATIONS,
+    BUILTIN_PROVIDER_DECLARATIONS, CODEX, DEEPSEEK,
 };
 #[cfg(test)]
 pub(crate) use contract::{OPENAI, OPENCODE, OPENROUTER};

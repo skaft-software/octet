@@ -149,7 +149,7 @@ class SourceDistributionVersionTests(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn(f'\nversion = "{self.version}"\n', manifest)
                 self.assertIn(f'\nrequires_octet = "={self.version}"\n', manifest)
-                self.assertIn('\napi_version = "0.2"\n', manifest)
+                self.assertIn('\napi_version = "0.4"\n', manifest)
 
     def test_current_notes_are_identical_and_in_the_finite_documentation_inventory(self):
         name = f"docs/releases/v{self.version}.md"
@@ -160,10 +160,11 @@ class SourceDistributionVersionTests(unittest.TestCase):
 
 
 class ReleaseDocumentationTests(unittest.TestCase):
-    """Bundled user docs must not describe the release as an unavailable candidate.
+    """Keep candidate and published installation guidance distinct and versioned.
 
-    These checks validate source prose, not publication, signatures or physical
-    acceptance. Those remain release-workflow and maintainer evidence.
+    A candidate's checked-in installer targets its source version, while public
+    download instructions retain the preceding release until explicit promotion.
+    These checks do not establish publication, signatures or live acceptance.
     """
 
     def test_current_version_has_release_only_notes(self):
@@ -183,10 +184,23 @@ class ReleaseDocumentationTests(unittest.TestCase):
                       "release gate — open", "acceptance is unrun"):
             self.assertNotIn(stale, normalized)
         self.assertRegex(notes, r"(?m)^## (Fixed|Added|Changed|Highlights)$")
+        changelog = (root / "CHANGELOG.md").read_text()
+        candidate = f"## [{version}] - Release candidate" in changelog.splitlines()
+        install_version = version
+        if candidate:
+            releases = re.findall(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\]", changelog, re.MULTILINE)
+            self.assertEqual(releases[0], version)
+            self.assertGreater(len(releases), 1)
+            install_version = releases[1]
+            self.assertIn("not published", normalized)
         for name in ("README.md", "docs/installation.md"):
             with self.subTest(path=name):
-                self.assertIn(f"/releases/download/v{version}/install-octet.sh",
-                              (root / name).read_text())
+                guide = (root / name).read_text()
+                self.assertIn(f"/releases/download/v{install_version}/install-octet.sh", guide)
+                if candidate:
+                    self.assertNotIn(f"/releases/download/v{version}/install-octet.sh", guide)
+                    self.assertIn(version, guide)
+                    self.assertRegex(guide.lower(), r"release candidate|local " + re.escape(version) + r" rc")
 
     def test_current_installation_guides_do_not_keep_candidate_gate_text(self):
         for name in ("README.md", "docs/README.md", "docs/installation.md",

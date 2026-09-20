@@ -34,6 +34,4 @@ python3 -m unittest discover -s extensions/octet-import-aider/tests -p 'test_*.p
 python3 -m py_compile extensions/octet-import-aider/extension.py
 ```
 
-Qualification notes are in `docs/qualification/import-aider-full.md`.
-Raw/private runtime captures are deliberately kept outside tracked
-qualification documentation.
+Keep raw/private runtime captures outside tracked documentation.

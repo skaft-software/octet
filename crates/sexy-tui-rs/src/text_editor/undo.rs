@@ -22,6 +22,27 @@ impl<S: Clone> UndoStack<S> {
         self.stack.push(state.clone());
     }
 
+    /// Keep the newest snapshots that fit the editor's count and byte limits.
+    pub(super) fn trim_to_budget(
+        &mut self,
+        max_count: usize,
+        max_bytes: usize,
+        size: impl Fn(&S) -> usize,
+    ) {
+        let mut bytes = 0usize;
+        let keep = self
+            .stack
+            .iter()
+            .rev()
+            .take(max_count)
+            .take_while(|state| {
+                bytes = bytes.saturating_add(size(state));
+                bytes <= max_bytes
+            })
+            .count();
+        self.stack.drain(..self.stack.len() - keep);
+    }
+
     /// Remove and return the newest snapshot.
     pub fn pop(&mut self) -> Option<S> {
         self.stack.pop()

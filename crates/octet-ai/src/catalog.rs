@@ -141,10 +141,19 @@ impl std::fmt::Debug for Model {
 /// a fictional inference bound from this function.
 pub fn effective_output_token_cap(model: &Model, requested: Option<u64>) -> Option<u64> {
     match model.spec.protocol {
-        crate::Protocol::OpenAiResponses if model.endpoint.runtime.responses_profile.omits_max_output_tokens()
-            || model.spec.preset.supports_max_output_tokens == Some(false) => None,
-        crate::Protocol::AnthropicMessages | crate::Protocol::BedrockConverse =>
-            Some(requested.unwrap_or(model.spec.limits.max_output_tokens)),
+        crate::Protocol::OpenAiResponses
+            if model
+                .endpoint
+                .runtime
+                .responses_profile
+                .omits_max_output_tokens()
+                || model.spec.preset.supports_max_output_tokens == Some(false) =>
+        {
+            None
+        }
+        crate::Protocol::AnthropicMessages | crate::Protocol::BedrockConverse => {
+            Some(requested.unwrap_or(model.spec.limits.max_output_tokens))
+        }
         _ => requested,
     }
 }
@@ -341,12 +350,18 @@ fn google_api_name_is_safe(name: &str) -> bool {
 }
 
 pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
-    spec.preset.validate().map_err(|_| ConfigError::InvalidModel(spec.id.clone()))?;
-    spec.preset.validate_protocol(spec.protocol)
+    spec.preset
+        .validate()
         .map_err(|_| ConfigError::InvalidModel(spec.id.clone()))?;
-    if ((spec.preset.thinking_format.is_some() || spec.preset.thinking_token_budget_field.is_some()
-        || spec.preset.chat_template_args.is_some() || spec.preset.chat_template_kwargs.is_some()
-        || spec.preset.mistral_reasoning.is_some() || !spec.preset.thinking_level_map.is_empty())
+    spec.preset
+        .validate_protocol(spec.protocol)
+        .map_err(|_| ConfigError::InvalidModel(spec.id.clone()))?;
+    if ((spec.preset.thinking_format.is_some()
+        || spec.preset.thinking_token_budget_field.is_some()
+        || spec.preset.chat_template_args.is_some()
+        || spec.preset.chat_template_kwargs.is_some()
+        || spec.preset.mistral_reasoning.is_some()
+        || !spec.preset.thinking_level_map.is_empty())
         && spec.capabilities.reasoning.is_none())
         || spec.api_name.is_empty()
         || spec.capabilities.deferred_tool_loading
@@ -388,11 +403,15 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
             // Anthropic supports both explicit token budgets (extended thinking)
             // and effort control (adaptive thinking + `output_config.effort`).
             Protocol::AnthropicMessages => true,
-            Protocol::OpenAiChat => matches!(
-                reasoning.control,
-                ReasoningControl::Effort | ReasoningControl::AlwaysOn | ReasoningControl::Toggle
-            ) || (reasoning.control == ReasoningControl::TokenBudget
-                && spec.preset.thinking_token_budget_field.is_some()),
+            Protocol::OpenAiChat => {
+                matches!(
+                    reasoning.control,
+                    ReasoningControl::Effort
+                        | ReasoningControl::AlwaysOn
+                        | ReasoningControl::Toggle
+                ) || (reasoning.control == ReasoningControl::TokenBudget
+                    && spec.preset.thinking_token_budget_field.is_some())
+            }
             Protocol::OpenAiResponses => reasoning.control == ReasoningControl::Effort,
             Protocol::GoogleGenerativeAi => matches!(
                 reasoning.control,

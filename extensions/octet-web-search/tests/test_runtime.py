@@ -167,7 +167,7 @@ def initialize():
         1,
         "initialize",
         {
-            "api_version": "0.2",
+            "api_version": "0.4",
             "contributes": {
                 "tools": ["web_search", "web_fetch", "web_find"],
                 "commands": ["web-search"],
@@ -175,7 +175,7 @@ def initialize():
                 "presentation": True,
             },
             "protocol": {
-                "version": "0.2",
+                "version": "0.4",
                 "required_features": ["request_cancellation", "content_parts"],
                 "optional_features": ["request_progress"],
                 "limits": {"max_concurrent_requests": 4},

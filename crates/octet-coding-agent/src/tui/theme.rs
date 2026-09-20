@@ -1,7 +1,10 @@
 #![allow(missing_docs)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(any(test, feature = "serve"))]
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 use octet_ai::{Model, ModelSpec};
@@ -14,6 +17,7 @@ use sexy_tui_rs::{
 use crate::config::{ColorMode, Config};
 use crate::resource_resolver::{ResourceKind, ResourceResolver};
 use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+#[cfg(test)]
 use crate::tui::theme_reload::{
     ReloadBoundary, ReloadDecision, ReloadFailureKind, ThemeChangeReceiver, ThemeChangeSender,
     ThemePathError, ThemeReloadEngine, ThemeReloadMode, ThemeWatch,
@@ -388,6 +392,7 @@ fn default_surfaces() -> BTreeMap<String, ThemeSurface> {
 /// test keeps the two in sync. Extensions contribute additional
 /// `extension.<namespace>.<role>` roles, which the schema accepts as open but
 /// typed names.
+#[cfg(test)]
 pub const SEMANTIC_ROLE_VOCABULARY: &[&str] = &[
     "text",
     "foreground",
@@ -1662,6 +1667,7 @@ fn theme_file_name(name: &str) -> Option<String> {
     })
 }
 
+#[cfg(any(test, feature = "serve"))]
 fn discover_themes(config: &Config) -> crate::resource_resolver::ResourceSnapshot {
     let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
     resolver.discover(ResourceKind::Theme, &config.theme_paths)
@@ -1669,6 +1675,7 @@ fn discover_themes(config: &Config) -> crate::resource_resolver::ResourceSnapsho
 
 /// Return best-effort diagnostics from the theme discovery pass. A diagnostic
 /// is inspectable by callers but never turns discovery into a startup error.
+#[cfg(test)]
 pub fn theme_discovery_diagnostics(
     config: &Config,
 ) -> Vec<crate::resource_resolver::ResourceDiagnostic> {
@@ -1692,6 +1699,7 @@ fn resolved_theme_resource(
 }
 
 /// Resolve a theme by name through the shared global/project/explicit resolver.
+#[cfg(test)]
 pub fn theme_path(name: &str, config: &Config) -> Option<PathBuf> {
     resolved_theme_resource(name, config)
         .ok()
@@ -1934,7 +1942,8 @@ pub fn load_resolved_theme(
     )
 }
 
-/// Production coordinator for bounded active-theme file reload (roadmap #418).
+/// Reference coordinator for active-theme reload conformance tests.
+/// Production file changes use the unified reload supervisor.
 ///
 /// The interactive frontend owns the `notify` adapter: it registers
 /// [`Self::watch_spec`] with the watcher and forwards ordinary file changes
@@ -1947,11 +1956,13 @@ pub fn load_resolved_theme(
 /// [`OctetTheme::reload`], and returns the decision to apply. Print, plain, and
 /// RPC modes stay inert, and a compiled-default source never creates a watcher.
 #[derive(Debug)]
+#[cfg(test)]
 pub struct ThemeFileReload {
     engine: ThemeReloadEngine<OctetTheme>,
     receiver: ThemeChangeReceiver,
 }
 
+#[cfg(test)]
 impl ThemeFileReload {
     /// Build the coordinator for the active `theme`. Returns the bounded sender
     /// the frontend's watcher callback must use, or an error when the active
@@ -2017,6 +2028,7 @@ impl ThemeFileReload {
 /// Map the existing bounded loader's error into the reload retention policy
 /// without changing that loader. Missing sources fall back to the compiled
 /// default; unsafe replacements and schema failures retain the last-good theme.
+#[cfg(test)]
 fn classify_reload_failure(error: &anyhow::Error) -> ReloadFailureKind {
     use octet_agent::secure_fs::SecureFileError;
     if let Some(secure) = error.downcast_ref::<SecureFileError>() {
@@ -2098,6 +2110,7 @@ pub fn load_theme(config: &Config) -> OctetTheme {
 
 /// Return the compiled default and all safe names selected by the shared
 /// resolver. Parsing is deferred to the loader so discovery stays best-effort.
+#[cfg(any(test, feature = "serve"))]
 pub fn available_themes(config: &Config) -> Vec<String> {
     let mut names = BTreeSet::from([DEFAULT_THEME_NAME.to_owned()]);
     for resource in discover_themes(config).resources() {
@@ -2650,6 +2663,10 @@ mod tests {
 
         let (mut reload, sender) =
             ThemeFileReload::new(&theme, ThemeReloadMode::Interactive, Duration::ZERO).unwrap();
+        assert!(
+            !reload.set_active_theme(&theme).unwrap(),
+            "same source is idempotent"
+        );
         let watch = reload.watch_spec().expect("interactive file theme watches");
         assert_eq!(watch.directory(), directory.path());
         assert!(!watch.recursive());

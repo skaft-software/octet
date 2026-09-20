@@ -12,9 +12,7 @@
 
 use sexy_tui_rs::rich_text::markdown;
 use sexy_tui_rs::rich_text::stream::{StreamingMarkdown, StreamingRenderCache};
-use sexy_tui_rs::{
-    Block, ColorDepth, RenderOptions, RichRenderer, TerminalCapabilities, Theme,
-};
+use sexy_tui_rs::{Block, ColorDepth, RenderOptions, RichRenderer, TerminalCapabilities, Theme};
 
 fn code_block(source: &str) -> sexy_tui_rs::rich_text::CodeBlock {
     let document = markdown::parse(source);
@@ -38,10 +36,21 @@ fn latex_fence_renders_the_box_drawing() {
 
     // The rendered rows survive the code-block layout used for fences.
     let rendered = RichRenderer::plain().render(&matrix, 80);
-    assert!(rendered.plain_text().contains("⎛ 1 │ 2 ⎞"), "{}", rendered.plain_text());
-    assert!(rendered.plain_text().contains("⎝ 3 │ 4 ⎠"), "{}", rendered.plain_text());
+    assert!(
+        rendered.plain_text().contains("⎛ 1 │ 2 ⎞"),
+        "{}",
+        rendered.plain_text()
+    );
+    assert!(
+        rendered.plain_text().contains("⎝ 3 │ 4 ⎠"),
+        "{}",
+        rendered.plain_text()
+    );
     // Provenance is kept: the block still carries the fence language.
-    assert_eq!(code_block(&fence("latex", "x = 1")).language.as_deref(), Some("latex"));
+    assert_eq!(
+        code_block(&fence("latex", "x = 1")).language.as_deref(),
+        Some("latex")
+    );
 }
 
 #[test]
@@ -81,14 +90,18 @@ fn unknown_fences_are_never_reinterpreted() {
     let code = code_block(latex_like);
     assert_eq!(code.language.as_deref(), Some("rust"));
     assert_eq!(code.code, "\\frac{1}{2}\n");
-    let rendered = RichRenderer::plain().render(&markdown::parse(latex_like), 80).plain_text();
+    let rendered = RichRenderer::plain()
+        .render(&markdown::parse(latex_like), 80)
+        .plain_text();
     assert!(rendered.contains("\\frac{1}{2}"), "{rendered}");
     assert!(!rendered.contains('─'), "{rendered}");
 
     // Mermaid-looking source in a non-diagram fence stays literal.
     let mermaid_like = "```text\ngraph LR\n  A[One] --> B[Two]\n```\n";
     assert_eq!(code_block(mermaid_like).language.as_deref(), Some("text"));
-    let rendered = RichRenderer::plain().render(&markdown::parse(mermaid_like), 80).plain_text();
+    let rendered = RichRenderer::plain()
+        .render(&markdown::parse(mermaid_like), 80)
+        .plain_text();
     assert!(rendered.contains("graph LR"), "{rendered}");
     assert!(rendered.contains("A[One] --> B[Two]"), "{rendered}");
     assert!(!rendered.contains('┌'), "{rendered}");
@@ -96,7 +109,10 @@ fn unknown_fences_are_never_reinterpreted() {
     // A malformed info line (`latexx`, not `latex`) is a different language.
     assert_eq!(code_block("```latexx\nx = 1\n```\n").code, "x = 1\n");
     // An indented (four-space) block is not a fence at all.
-    assert_eq!(code_block("    ```latex\n    x = 1\n    ```\n").code, "```latex\nx = 1\n```\n");
+    assert_eq!(
+        code_block("    ```latex\n    x = 1\n    ```\n").code,
+        "```latex\nx = 1\n```\n"
+    );
 }
 
 #[test]
@@ -106,7 +122,9 @@ fn unsupported_bodies_degrade_to_the_original_source() {
     let code = code_block(&latex);
     assert_eq!(code.language.as_deref(), Some("latex"));
     assert_eq!(code.code, "\\cfrac{1}{x}\n");
-    let rendered = RichRenderer::plain().render(&markdown::parse(&latex), 80).plain_text();
+    let rendered = RichRenderer::plain()
+        .render(&markdown::parse(&latex), 80)
+        .plain_text();
     assert!(rendered.contains("\\cfrac{1}{x}"), "{rendered}");
 
     // `pie` is outside the Mermaid subset: same degradation.
@@ -114,7 +132,9 @@ fn unsupported_bodies_degrade_to_the_original_source() {
     let code = code_block(&mermaid);
     assert_eq!(code.language.as_deref(), Some("mermaid"));
     assert_eq!(code.code, "pie\n  title Pets\n");
-    let rendered = RichRenderer::plain().render(&markdown::parse(&mermaid), 80).plain_text();
+    let rendered = RichRenderer::plain()
+        .render(&markdown::parse(&mermaid), 80)
+        .plain_text();
     assert!(rendered.contains("pie"), "{rendered}");
     assert!(rendered.contains("title Pets"), "{rendered}");
     assert!(!rendered.contains('┌'), "{rendered}");
@@ -166,7 +186,9 @@ fn oversized_and_unterminated_fences_stay_literal() {
     let unterminated = "```latex\n\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}\n";
     let code = code_block(unterminated);
     assert_eq!(code.code, "\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}\n");
-    let rendered = RichRenderer::plain().render(&markdown::parse(unterminated), 80).plain_text();
+    let rendered = RichRenderer::plain()
+        .render(&markdown::parse(unterminated), 80)
+        .plain_text();
     assert!(rendered.contains("\\begin{pmatrix}"), "{rendered}");
     assert!(!rendered.contains("⎛"), "{rendered}");
 }
@@ -259,7 +281,10 @@ fn streaming_publishes_the_diagram_only_when_the_fence_closes() {
 
     stream.push_str("```\n");
     let closed = cache.render_lines(&stream, &renderer, 80, false);
-    assert!(closed.join("\n").contains("│ Start ├───▶│ Done │"), "{closed:?}");
+    assert!(
+        closed.join("\n").contains("│ Start ├───▶│ Done │"),
+        "{closed:?}"
+    );
     assert!(!closed.join("\n").contains("graph LR"), "{closed:?}");
 
     // Re-rendering unchanged input is identical (no flicker), and trailing
@@ -288,7 +313,7 @@ fn unknown_and_alias_fences_never_reach_a_diagram_renderer() {
         "rust",
         "text",
         "plaintext",
-        "tex",        // a common LaTeX alias, deliberately not dispatched
+        "tex", // a common LaTeX alias, deliberately not dispatched
         "math",
         "latexish",
         "la",
@@ -372,8 +397,7 @@ fn crlf_and_tilde_fences_dispatch_the_same_way() {
 /// which is what keeps one colour per grapheme (and no background fills).
 #[test]
 fn a_rendered_diagram_is_never_syntax_styled() {
-    let capabilities =
-        TerminalCapabilities::interactive(ColorDepth::TrueColor, true);
+    let capabilities = TerminalCapabilities::interactive(ColorDepth::TrueColor, true);
     let renderer = RichRenderer::new(
         Theme::with_capabilities(capabilities),
         capabilities,
@@ -383,7 +407,10 @@ fn a_rendered_diagram_is_never_syntax_styled() {
             ..RenderOptions::default()
         },
     );
-    let rendered = renderer.render(&markdown::parse(&fence("latex", "\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}")), 80);
+    let rendered = renderer.render(
+        &markdown::parse(&fence("latex", "\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}")),
+        80,
+    );
     let rows: Vec<&str> = rendered
         .lines
         .iter()
@@ -419,8 +446,14 @@ fn streaming_never_dispatches_before_the_fence_is_complete() {
         for (index, chunk) in chunks.iter().enumerate() {
             stream.push_str(chunk);
             let lines = cache.render_lines(&stream, &renderer, 80, false).join("\n");
-            let glyphs = ["⎛", "┌", "─", "▶"].iter().any(|glyph| lines.contains(glyph));
-            assert_eq!(glyphs, index == last, "chunks={chunks:?} at {index}:\n{lines}");
+            let glyphs = ["⎛", "┌", "─", "▶"]
+                .iter()
+                .any(|glyph| lines.contains(glyph));
+            assert_eq!(
+                glyphs,
+                index == last,
+                "chunks={chunks:?} at {index}:\n{lines}"
+            );
         }
     }
 }
@@ -438,7 +471,10 @@ fn streaming_keeps_failed_diagram_fences_as_source() {
     for chunk in ["```latex\n", "\\cfrac{1}", "{x}\n"] {
         stream.push_str(chunk);
         let lines = cache.render_lines(&stream, &renderer, 80, false).join("\n");
-        assert!(!lines.contains('⎛'), "no partial render while open:\n{lines}");
+        assert!(
+            !lines.contains('⎛'),
+            "no partial render while open:\n{lines}"
+        );
         saw_source |= lines.contains("\\cfrac");
     }
     assert!(saw_source, "raw body visible while the fence is open");
@@ -446,8 +482,14 @@ fn streaming_keeps_failed_diagram_fences_as_source() {
     stream.push_str("```\n");
     let closed = cache.render_lines(&stream, &renderer, 80, false);
     let text = closed.join("\n");
-    assert!(text.contains("\\cfrac{1}{x}"), "source survives the close:\n{text}");
-    assert!(!text.contains('⎛'), "no diagram for a failed render:\n{text}");
+    assert!(
+        text.contains("\\cfrac{1}{x}"),
+        "source survives the close:\n{text}"
+    );
+    assert!(
+        !text.contains('⎛'),
+        "no diagram for a failed render:\n{text}"
+    );
     assert_eq!(closed, cache.render_lines(&stream, &renderer, 80, false));
 
     stream.push_str("\ntrailing prose\n");
@@ -465,7 +507,10 @@ fn streaming_keeps_failed_diagram_fences_as_source() {
 /// fence).
 fn parser_closes_fence(closer: &str, marker: char, count: usize) -> bool {
     let indent = closer.len() - closer.trim_start_matches(' ').len();
-    let run = closer[indent..].chars().take_while(|c| *c == marker).count();
+    let run = closer[indent..]
+        .chars()
+        .take_while(|c| *c == marker)
+        .count();
     let rest = &closer[indent + run..];
     indent <= 3 && run >= count && rest.chars().all(|c| c == ' ')
 }
@@ -556,7 +601,10 @@ fn streaming_prefix_scan_publishes_the_diagram_once() {
         Some(closing + "```\n".len()),
         "the diagram must appear exactly when its closing fence completes"
     );
-    assert!(lost_art.is_none(), "the diagram flickered away at {lost_art:?}");
+    assert!(
+        lost_art.is_none(),
+        "the diagram flickered away at {lost_art:?}"
+    );
     let committed = cache.render_lines(&stream, &renderer, 80, false);
     let direct: Vec<String> = renderer
         .render(&markdown::parse(source), 80)
@@ -564,7 +612,10 @@ fn streaming_prefix_scan_publishes_the_diagram_once() {
         .iter()
         .map(|line| line.styled.clone())
         .collect();
-    assert_eq!(committed, direct, "streamed rows diverged from the final render");
+    assert_eq!(
+        committed, direct,
+        "streamed rows diverged from the final render"
+    );
 }
 
 /// A closing line more than three spaces past the *container content* indent (a
@@ -609,7 +660,10 @@ fn deeply_indented_container_closers_stay_literal() {
     let renderer = RichRenderer::plain();
     let rendered = renderer.render(&document, 80).plain_text();
     assert!(rendered.contains("A[One] --> B[Two]"), "{rendered}");
-    assert!(!rendered.contains('┌'), "no art from an unproven closure:\n{rendered}");
+    assert!(
+        !rendered.contains('┌'),
+        "no art from an unproven closure:\n{rendered}"
+    );
 
     // Streaming must agree with the document render for the same source: the
     // literal rows are what the reader sees while the fence arrives and after

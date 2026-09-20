@@ -464,7 +464,7 @@ fn constrained_sampling_wire_shape_across_codecs() {
     assert_eq!(body["tools"][1]["type"], "custom");
     assert_eq!(body["tools"][1]["format"]["type"], "grammar");
 
-    // Anthropic: strict rewrite of the input schema (no separate flag on wire),
+    // Anthropic: strict schema and explicit provider-enforcement flag,
     // enabled by the declared Anthropic compat record.
     let mut anthropic = make_model(Protocol::AnthropicMessages, false, false, false, false);
     Arc::make_mut(&mut anthropic.spec).preset.anthropic_compat =
@@ -482,6 +482,8 @@ fn constrained_sampling_wire_shape_across_codecs() {
         body["tools"][0]["input_schema"]["additionalProperties"],
         false
     );
+    assert_eq!(body["tools"][0]["strict"], true);
+    assert!(body["tools"][1].get("strict").is_none());
     // Grammar is unsupported on Anthropic messages, so it stays a function tool
     // with its canonical schema.
     assert_eq!(body["tools"][1]["name"], "grammar_tool");
@@ -578,15 +580,21 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
         tune(&mut model);
         serde_json::from_slice::<serde_json::Value>(
             &match protocol {
-                Protocol::OpenAiChat => crate::protocol::openai_chat::build_request(&model, &request(tools)),
+                Protocol::OpenAiChat => {
+                    crate::protocol::openai_chat::build_request(&model, &request(tools))
+                }
                 Protocol::OpenAiResponses => {
                     crate::protocol::openai_responses::build_request(&model, &request(tools))
                 }
                 Protocol::AnthropicMessages => {
                     crate::protocol::anthropic::build_request(&model, &request(tools))
                 }
-                Protocol::BedrockConverse => crate::protocol::bedrock::build_request(&model, &request(tools)),
-                Protocol::GoogleGenerativeAi => crate::protocol::google::build_request(&model, &request(tools)),
+                Protocol::BedrockConverse => {
+                    crate::protocol::bedrock::build_request(&model, &request(tools))
+                }
+                Protocol::GoogleGenerativeAi => {
+                    crate::protocol::google::build_request(&model, &request(tools))
+                }
                 Protocol::MistralConversations => {
                     crate::protocol::mistral_conversations::build_request(&model, &request(tools))
                 }
@@ -618,21 +626,33 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
     // it on; the model declaration can override either way.
     let plain = body(Protocol::OpenAiResponses, vec![strict_tool.clone()], none);
     assert!(plain["tools"][0].get("strict").is_none());
-    let codex = body(Protocol::OpenAiResponses, vec![strict_tool.clone()], |model| {
-        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
-            crate::types::ResponsesRuntimeProfile::Codex;
-    });
+    let codex = body(
+        Protocol::OpenAiResponses,
+        vec![strict_tool.clone()],
+        |model| {
+            Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+                crate::types::ResponsesRuntimeProfile::Codex;
+        },
+    );
     assert_eq!(codex["tools"][0]["strict"], true);
-    let azure = body(Protocol::OpenAiResponses, vec![strict_tool.clone()], |model| {
-        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
-            crate::types::ResponsesRuntimeProfile::Azure;
-    });
+    let azure = body(
+        Protocol::OpenAiResponses,
+        vec![strict_tool.clone()],
+        |model| {
+            Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+                crate::types::ResponsesRuntimeProfile::Azure;
+        },
+    );
     assert_eq!(azure["tools"][0]["strict"], true);
-    let refused = body(Protocol::OpenAiResponses, vec![strict_tool.clone()], |model| {
-        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
-            crate::types::ResponsesRuntimeProfile::Codex;
-        Arc::make_mut(&mut model.spec).preset.supports_strict_mode = Some(false);
-    });
+    let refused = body(
+        Protocol::OpenAiResponses,
+        vec![strict_tool.clone()],
+        |model| {
+            Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+                crate::types::ResponsesRuntimeProfile::Codex;
+            Arc::make_mut(&mut model.spec).preset.supports_strict_mode = Some(false);
+        },
+    );
     assert!(refused["tools"][0].get("strict").is_none());
 
     // Anthropic: strict is off by default and enabled by the compat record.
@@ -640,37 +660,59 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
     assert!(anthropic["tools"][0]["input_schema"]
         .get("additionalProperties")
         .is_none());
-    let anthropic_strict = body(Protocol::AnthropicMessages, vec![strict_tool.clone()], |model| {
-        Arc::make_mut(&mut model.spec).preset.anthropic_compat =
-            Some(crate::declarations::AnthropicCompatPreset {
-                supports_strict_tools: Some(true),
-                ..Default::default()
-            });
-    });
+    let anthropic_strict = body(
+        Protocol::AnthropicMessages,
+        vec![strict_tool.clone()],
+        |model| {
+            Arc::make_mut(&mut model.spec).preset.anthropic_compat =
+                Some(crate::declarations::AnthropicCompatPreset {
+                    supports_strict_tools: Some(true),
+                    ..Default::default()
+                });
+        },
+    );
     assert_eq!(
         anthropic_strict["tools"][0]["input_schema"]["additionalProperties"],
         false
     );
+
+    assert!(anthropic["tools"][0].get("strict").is_none());
+    assert_eq!(anthropic_strict["tools"][0]["strict"], true);
 
     // Bedrock: strict is off by default and opt-in per model.
     let bedrock = body(Protocol::BedrockConverse, vec![strict_tool.clone()], none);
     assert!(bedrock["toolConfig"]["tools"][0]["toolSpec"]
         .get("strict")
         .is_none());
-    let bedrock_strict = body(Protocol::BedrockConverse, vec![strict_tool.clone()], |model| {
-        Arc::make_mut(&mut model.spec).preset.supports_strict_mode = Some(true);
-    });
+    let bedrock_strict = body(
+        Protocol::BedrockConverse,
+        vec![strict_tool.clone()],
+        |model| {
+            Arc::make_mut(&mut model.spec).preset.supports_strict_mode = Some(true);
+        },
+    );
     assert_eq!(
         bedrock_strict["toolConfig"]["tools"][0]["toolSpec"]["strict"],
         true
     );
 
     // Google: VALIDATED by default, plainly AUTO when the model refuses strict.
-    let google = body(Protocol::GoogleGenerativeAi, vec![strict_tool.clone()], none);
-    assert_eq!(google["toolConfig"]["functionCallingConfig"]["mode"], "VALIDATED");
-    let google_plain = body(Protocol::GoogleGenerativeAi, vec![strict_tool.clone()], |model| {
-        Arc::make_mut(&mut model.spec).preset.supports_strict_mode = Some(false);
-    });
+    let google = body(
+        Protocol::GoogleGenerativeAi,
+        vec![strict_tool.clone()],
+        none,
+    );
+    assert_eq!(
+        google["toolConfig"]["functionCallingConfig"]["mode"],
+        "VALIDATED"
+    );
+    let google_plain = body(
+        Protocol::GoogleGenerativeAi,
+        vec![strict_tool.clone()],
+        |model| {
+            Arc::make_mut(&mut model.spec).preset.supports_strict_mode = Some(false);
+        },
+    );
     assert_eq!(
         google_plain["toolConfig"]["functionCallingConfig"]["mode"],
         "AUTO"

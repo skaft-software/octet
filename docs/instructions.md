@@ -101,19 +101,20 @@ also defines managed-bundle admission, `--skill-dir` order, and diagnostics.
 
 Executable tools in any language belong at the subprocess boundary. Start with
 [extensions](extensions.md) and teach new code from
-[Extension API 0.3](extensions/API-0.3-REFERENCE.md). Existing API 0.2 SDK/runtime
-examples and the four bundled manifests are **legacy implementation references**;
-do not relabel their versions or wire IDs. Generated Python 0.3 types are not a
-complete 0.3 `Extension` runtime, so a qualified end-to-end current-API example
-remains missing. Native embedding uses the independent [host protocol 1](sdk.md).
+[Extension API 0.4](extensions/API-0.4-REFERENCE.md). The Python SDK implements
+the current feature-negotiated process wire; generated `api_v03` bindings and
+the retained canonical 0.3 example serve a distinct wire. Keep exact versions
+and negotiation—do not retag an old example. Extensions add tools and bounded
+host-shaped integrations, not arbitrary replacement of host policy or UI.
+Native embedding uses the independent [host protocol 1](sdk.md).
 
-For existing API 0.2 machinery—live tool registration/removal, request-frozen
+For retained feature-negotiated machinery (API 0.2/0.4)—live tool registration/removal, request-frozen
 catalogs, owner-bound child sessions, session/process ownership, artifacts,
 policy intents/one-use approvals, manifest-allowlisted secrets, and bounded
 post-handshake restart—keep the [legacy protocol reference](extensions/PROTOCOL-REFERENCE.md).
 The coding product does not configure approval issuance or secret brokerage:
 policy requests remain default-deny and `secrets` is not offered. This is not a
-promise that API 0.3 provides every legacy service. Discovery/trust/startup
+promise that every host or frontend offers every protocol service. Discovery/trust/startup
 and reload rules remain in [resources](resources.md) and [extensions](extensions.md).
 
 ## Self-documentation

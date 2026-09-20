@@ -84,41 +84,95 @@ const FAIL_CLOSED: &[(&str, &str)] = &[
     // no_header
     ("A --> B", "dropped, unsupported diagram type: \"A\""),
     // pie
-    ("pie\n  title Pets", "dropped, unsupported diagram type: \"pie\""),
+    (
+        "pie\n  title Pets",
+        "dropped, unsupported diagram type: \"pie\"",
+    ),
     // sequence_diagram
-    ("sequenceDiagram\n  A->>B: hi", "dropped, unsupported diagram type: \"sequenceDiagram\""),
+    (
+        "sequenceDiagram\n  A->>B: hi",
+        "dropped, unsupported diagram type: \"sequenceDiagram\"",
+    ),
     // bt_layout
-    ("graph BT\n  A --> B", "dropped, unsupported diagram type: \"BT\""),
+    (
+        "graph BT\n  A --> B",
+        "dropped, unsupported diagram type: \"BT\"",
+    ),
     // rl_layout
-    ("flowchart RL\n  A --> B", "dropped, unsupported diagram type: \"RL\""),
+    (
+        "flowchart RL\n  A --> B",
+        "dropped, unsupported diagram type: \"RL\"",
+    ),
     // unknown_direction
-    ("flowchart XY\n  A --> B", "dropped, unsupported diagram type: \"XY\""),
+    (
+        "flowchart XY\n  A --> B",
+        "dropped, unsupported diagram type: \"XY\"",
+    ),
     // inline_link_label
-    ("flowchart LR\n  A -- text --> B", "dropped, line 2: expected a link, found \"-- text --> B\""),
+    (
+        "flowchart LR\n  A -- text --> B",
+        "dropped, line 2: expected a link, found \"-- text --> B\"",
+    ),
     // node_list
-    ("flowchart LR\n  A --> B & C", "dropped, line 2: node lists with `&` are not supported"),
+    (
+        "flowchart LR\n  A --> B & C",
+        "dropped, line 2: node lists with `&` are not supported",
+    ),
     // subgraph
-    ("flowchart LR\n  subgraph S\n  A --> B\n  end", "dropped, line 2: `subgraph` statements are not supported"),
+    (
+        "flowchart LR\n  subgraph S\n  A --> B\n  end",
+        "dropped, line 2: `subgraph` statements are not supported",
+    ),
     // end_statement
-    ("flowchart LR\n  A --> B\n  end", "dropped, line 3: `end` statements are not supported"),
+    (
+        "flowchart LR\n  A --> B\n  end",
+        "dropped, line 3: `end` statements are not supported",
+    ),
     // direction_statement
-    ("flowchart LR\n  direction LR\n  A --> B", "dropped, line 2: `direction` statements are not supported"),
+    (
+        "flowchart LR\n  direction LR\n  A --> B",
+        "dropped, line 2: `direction` statements are not supported",
+    ),
     // unterminated_quoted_label
-    ("flowchart LR\n  A[\"oops] --> B", "dropped, line 2: unterminated quoted label opened with `[`"),
+    (
+        "flowchart LR\n  A[\"oops] --> B",
+        "dropped, line 2: unterminated quoted label opened with `[`",
+    ),
     // quoted_label_missing_delimiter
-    ("flowchart LR\n  A[\"oops\" --> B", "dropped, line 2: quoted label opened with `[` is not closed by `]`"),
+    (
+        "flowchart LR\n  A[\"oops\" --> B",
+        "dropped, line 2: quoted label opened with `[` is not closed by `]`",
+    ),
     // cycle
-    ("flowchart LR\n  A --> B --> C --> A", "dropped, cycle through node \"A\""),
+    (
+        "flowchart LR\n  A --> B --> C --> A",
+        "dropped, cycle through node \"A\"",
+    ),
     // skips_a_layer
-    ("flowchart LR\n  A --> C\n  A --> B\n  B --> C", "dropped, link A --> C spans 2 layers; only links between adjacent layers are supported"),
+    (
+        "flowchart LR\n  A --> C\n  A --> B\n  B --> C",
+        "dropped, link A --> C spans 2 layers; only links between adjacent layers are supported",
+    ),
     // unbalanced_label
-    ("flowchart LR\n  A[Unbalanced --> B", "dropped, line 2: unbalanced node label opened with `[`"),
+    (
+        "flowchart LR\n  A[Unbalanced --> B",
+        "dropped, line 2: unbalanced node label opened with `[`",
+    ),
     // trailing_link
-    ("flowchart LR\n  A -->", "dropped, line 2: trailing link without a target node"),
+    (
+        "flowchart LR\n  A -->",
+        "dropped, line 2: trailing link without a target node",
+    ),
     // unterminated_link_label
-    ("flowchart LR\n  A -->|oops B", "dropped, line 2: unterminated link label"),
+    (
+        "flowchart LR\n  A -->|oops B",
+        "dropped, line 2: unterminated link label",
+    ),
     // unknown_node_after_edge
-    ("flowchart LR\n  A --> :::x", "dropped, line 2: expected a node id at \":::x\""),
+    (
+        "flowchart LR\n  A --> :::x",
+        "dropped, line 2: expected a node id at \":::x\"",
+    ),
 ];
 
 #[test]
@@ -141,10 +195,18 @@ fn unsupported_input_fails_closed_with_a_typed_error() {
 fn every_rendered_row_fits_the_reported_width() {
     for (source, _) in SUPPORTED {
         let art = render_mermaid(source).expect(source);
-        let widest = art.lines.iter().map(|line| display_width(line)).max().unwrap_or(0);
+        let widest = art
+            .lines
+            .iter()
+            .map(|line| display_width(line))
+            .max()
+            .unwrap_or(0);
         assert_eq!(art.width, widest, "source = {source:?}");
         for line in &art.lines {
-            assert!(display_width(line) <= art.width, "source = {source:?} line = {line:?}");
+            assert!(
+                display_width(line) <= art.width,
+                "source = {source:?} line = {line:?}"
+            );
         }
     }
 }
@@ -187,7 +249,11 @@ fn link_labels_sit_on_the_connector() {
     let art = render_mermaid("flowchart LR\n  A -->|start| B\n  B --> C").expect("labels");
     assert!(art.plain().contains("start"), "observed:\n{}", art.plain());
     let down = render_mermaid("flowchart TD\n  A -->|start| B").expect("labels");
-    assert!(down.plain().contains("start"), "observed:\n{}", down.plain());
+    assert!(
+        down.plain().contains("start"),
+        "observed:\n{}",
+        down.plain()
+    );
 }
 
 #[test]
@@ -204,23 +270,59 @@ fn layouts_place_the_same_graph_differently() {
 
 #[test]
 fn size_limits_fail_closed() {
-    let many_nodes = format!("flowchart LR\n{}", (0..70).map(|i| format!("  n{i} --> n{}", i + 1)).collect::<Vec<_>>().join("\n"));
-    assert!(matches!(render_mermaid(&many_nodes), Err(MermaidError::TooLarge { .. })));
+    let many_nodes = format!(
+        "flowchart LR\n{}",
+        (0..70)
+            .map(|i| format!("  n{i} --> n{}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(matches!(
+        render_mermaid(&many_nodes),
+        Err(MermaidError::TooLarge { .. })
+    ));
 
     let wide_label = format!("flowchart LR\n  A[{}] --> B", "x".repeat(49));
-    assert!(matches!(render_mermaid(&wide_label), Err(MermaidError::TooLarge { .. })));
+    assert!(matches!(
+        render_mermaid(&wide_label),
+        Err(MermaidError::TooLarge { .. })
+    ));
 
-    let huge = format!("flowchart LR\n{}", (0..3000).map(|i| format!("  a{i} --> a{}", i + 1)).collect::<Vec<_>>().join("\n"));
-    assert!(matches!(render_mermaid(&huge), Err(MermaidError::TooLarge { .. })));
+    let huge = format!(
+        "flowchart LR\n{}",
+        (0..3000)
+            .map(|i| format!("  a{i} --> a{}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(matches!(
+        render_mermaid(&huge),
+        Err(MermaidError::TooLarge { .. })
+    ));
 }
 
 #[test]
 fn error_variants_are_typed() {
-    assert!(matches!(render_mermaid(""), Err(MermaidError::UnsupportedDiagram { .. }) | Err(MermaidError::MissingHeader)));
-    assert!(matches!(render_mermaid("pie\n  title Pets"), Err(MermaidError::UnsupportedDiagram { .. })));
-    assert!(matches!(render_mermaid("graph BT\n  A --> B"), Err(MermaidError::UnsupportedDiagram { .. })));
-    assert!(matches!(render_mermaid("flowchart LR\n  A -- text --> B"), Err(MermaidError::UnsupportedSyntax { .. })));
-    assert!(matches!(render_mermaid("flowchart LR\n  A --> B --> C --> A"), Err(MermaidError::Cycle { .. })));
+    assert!(matches!(
+        render_mermaid(""),
+        Err(MermaidError::UnsupportedDiagram { .. }) | Err(MermaidError::MissingHeader)
+    ));
+    assert!(matches!(
+        render_mermaid("pie\n  title Pets"),
+        Err(MermaidError::UnsupportedDiagram { .. })
+    ));
+    assert!(matches!(
+        render_mermaid("graph BT\n  A --> B"),
+        Err(MermaidError::UnsupportedDiagram { .. })
+    ));
+    assert!(matches!(
+        render_mermaid("flowchart LR\n  A -- text --> B"),
+        Err(MermaidError::UnsupportedSyntax { .. })
+    ));
+    assert!(matches!(
+        render_mermaid("flowchart LR\n  A --> B --> C --> A"),
+        Err(MermaidError::Cycle { .. })
+    ));
     assert!(matches!(
         render_mermaid("flowchart LR\n  A --> C\n  A --> B\n  B --> C"),
         Err(MermaidError::UnsupportedTopology { .. })
@@ -233,9 +335,43 @@ fn error_variants_are_typed() {
 #[test]
 fn random_token_soup_never_panics_and_stays_within_limits() {
     const TOKENS: &[&str] = &[
-        "graph", "flowchart", "TD", "TB", "LR", "BT", "RL", "-->", "---", "-.->", "==>", "->", "|", "|x|", "[",
-        "]", "(", ")", "{", "}", "\"", "%%", ";", "&", "subgraph", "end", "direction", ":::c", "classDef", "A", "B",
-        "node_1", "界", "\n", " ", "pie", "\t",
+        "graph",
+        "flowchart",
+        "TD",
+        "TB",
+        "LR",
+        "BT",
+        "RL",
+        "-->",
+        "---",
+        "-.->",
+        "==>",
+        "->",
+        "|",
+        "|x|",
+        "[",
+        "]",
+        "(",
+        ")",
+        "{",
+        "}",
+        "\"",
+        "%%",
+        ";",
+        "&",
+        "subgraph",
+        "end",
+        "direction",
+        ":::c",
+        "classDef",
+        "A",
+        "B",
+        "node_1",
+        "界",
+        "\n",
+        " ",
+        "pie",
+        "\t",
     ];
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut next = move || {
@@ -252,7 +388,11 @@ fn random_token_soup_never_panics_and_stays_within_limits() {
         }
         if let Ok(art) = render_mermaid(&source) {
             assert!(art.width <= 400, "width {} for {source:?}", art.width);
-            assert!(art.lines.len() <= 200, "rows {} for {source:?}", art.lines.len());
+            assert!(
+                art.lines.len() <= 200,
+                "rows {} for {source:?}",
+                art.lines.len()
+            );
         }
     }
 }

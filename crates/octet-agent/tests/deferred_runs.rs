@@ -189,7 +189,10 @@ fn parked_agent(
 }
 
 async fn drive_park(agent: &mut Agent) -> (String, u64, u64) {
-    let mut run = agent.prompt_without_tools("park this request").await.unwrap();
+    let mut run = agent
+        .prompt_without_tools("park this request")
+        .await
+        .unwrap();
     let mut events = Vec::new();
     while let Some(event) = run.next().await {
         events.push(event);
@@ -234,9 +237,7 @@ fn suspend_in_store(
     assert!(matches!(decision, DeferredSuspendDecision::Suspended(_)));
 }
 
-fn reserved_ids(
-    preparation: &DeferredResumeStart,
-) -> (String, String, Option<(String, String)>) {
+fn reserved_ids(preparation: &DeferredResumeStart) -> (String, String, Option<(String, String)>) {
     let DeferredResumeStart::Admitted(admitted) = preparation else {
         panic!("expected an admitted poll, got {preparation:?}")
     };
@@ -247,12 +248,16 @@ fn reserved_ids(
         } => (response_id.clone(), usage_id.clone()),
         other => panic!("an admitted poll is effect pending, got {other:?}"),
     };
-    let discarded = admitted.intent.discard_unknown_poll.as_ref().map(|replaced| {
-        (
-            replaced.abandoned_response_id.clone(),
-            replaced.abandoned_usage_id.clone(),
-        )
-    });
+    let discarded = admitted
+        .intent
+        .discard_unknown_poll
+        .as_ref()
+        .map(|replaced| {
+            (
+                replaced.abandoned_response_id.clone(),
+                replaced.abandoned_usage_id.clone(),
+            )
+        });
     (response_id, usage_id, discarded)
 }
 
@@ -300,7 +305,10 @@ async fn a_deferred_provider_response_parks_the_run_and_one_permitted_poll_settl
         other => panic!("expected a settled poll, got {other:?}"),
     }
     assert_eq!(transport.fetch_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(agent.deferred_run(&operation_id).unwrap().state_label(), "settled");
+    assert_eq!(
+        agent.deferred_run(&operation_id).unwrap().state_label(),
+        "settled"
+    );
     assert!(!agent.session().has_uncertain_usage());
 
     // The durable tombstone makes a second poll impossible: the run is terminal
@@ -381,7 +389,10 @@ async fn a_still_deferred_poll_keeps_the_poll_number_and_bumps_the_generation() 
         .begin_pass("op-1", "pass-2", DeferredResumeIntent::Poll, 0)
         .unwrap();
     let (second_response, second_usage, discarded) = reserved_ids(&second);
-    assert!(discarded.is_none(), "a suspended leaf has no abandoned poll");
+    assert!(
+        discarded.is_none(),
+        "a suspended leaf has no abandoned poll"
+    );
     assert_ne!(
         (first_response, first_usage),
         (second_response, second_usage)
@@ -444,12 +455,7 @@ async fn an_admitted_poll_replays_as_effect_pending_and_is_replaced_with_fresh_i
     // A plain permitted pass may not spend a second billable poll on an
     // unknown outcome: the leaf stays parked and the refusal writes nothing.
     let refused = store
-        .begin_pass(
-            "run:1:deferred:1",
-            "pass-b",
-            DeferredResumeIntent::Poll,
-            0,
-        )
+        .begin_pass("run:1:deferred:1", "pass-b", DeferredResumeIntent::Poll, 0)
         .unwrap();
     match refused {
         DeferredResumeStart::Refused(refusal) => {
@@ -631,7 +637,12 @@ async fn cancelling_an_effect_pending_leaf_records_exposure_once_without_repolli
 
     let source = ScriptedPollSource::new(Vec::new());
     let outcome = agent
-        .resume_deferred_run(&operation_id, "pass-after", DeferredResumeIntent::Poll, &source)
+        .resume_deferred_run(
+            &operation_id,
+            "pass-after",
+            DeferredResumeIntent::Poll,
+            &source,
+        )
         .await
         .unwrap();
     assert!(matches!(

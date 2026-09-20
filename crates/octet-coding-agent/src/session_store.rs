@@ -14,9 +14,8 @@ use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::session_catalog::{
-    CachedTranscriptSummary, CatalogFingerprint, CatalogUpdate, IndexedEntry, IndexedEntryHit,
-    IndexedEntryKind, IndexedEntryUpdate, SessionCatalog, MAX_INDEXED_ENTRIES_PER_SESSION,
-    MAX_INDEXED_ENTRY_CHARS,
+    CachedTranscriptSummary, CatalogFingerprint, CatalogUpdate, IndexedEntry, IndexedEntryKind,
+    IndexedEntryUpdate, SessionCatalog, MAX_INDEXED_ENTRIES_PER_SESSION, MAX_INDEXED_ENTRY_CHARS,
 };
 
 static NEXT_SESSION_SUFFIX: AtomicU64 = AtomicU64::new(1);
@@ -117,9 +116,6 @@ pub(crate) struct SessionCatalogInspection {
     pub catalog: SessionCatalogEntry,
     pub usage_records: Vec<SessionUsageRecord>,
     pub usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
-    /// Replaceable deferred-run state replayed by the same validation normal
-    /// resume applies, in stable operation order.
-    pub deferred_run_records: Vec<DeferredRunRecord>,
 }
 
 /// Small user-owned metadata kept next to, but separate from, append-only
@@ -828,6 +824,7 @@ pub enum DelegatedHandleRefusal {
 
 impl DelegatedHandleRefusal {
     /// Stable, bounded, machine-readable code for frontends and diagnostics.
+    #[cfg(test)]
     pub fn code(self) -> &'static str {
         match self {
             Self::MalformedHandle => "malformed_worker_handle",
@@ -1058,6 +1055,7 @@ struct TranscriptSummary {
     message_count: usize,
     usage_records: Vec<SessionUsageRecord>,
     usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
+    #[cfg(test)]
     deferred_run_records: Vec<DeferredRunRecord>,
 }
 
@@ -1118,6 +1116,7 @@ impl SummaryDeferredRuns {
         Ok(())
     }
 
+    #[cfg(test)]
     fn into_records(self) -> Vec<DeferredRunRecord> {
         self.records.into_values().collect()
     }
@@ -1470,6 +1469,7 @@ fn summarize_session_with_usage(
         message_count,
         usage_records,
         usage_uncertainty_records,
+        #[cfg(test)]
         deferred_run_records: deferred_runs.into_records(),
     })
 }
@@ -1513,10 +1513,12 @@ pub struct EntrySearchOutcome {
 /// The revision only advances when a session's fingerprint changed or a session
 /// vanished, so a repeated observation with no transcript change is silent.
 #[derive(Clone, Debug, Default)]
+#[cfg(test)]
 pub struct SessionSearchWatcher {
     last_revision: Option<i64>,
 }
 
+#[cfg(test)]
 impl SessionSearchWatcher {
     /// Observe the current revision. Returns `true` exactly once per change.
     pub fn observe(&mut self, revision: i64) -> bool {
@@ -1979,12 +1981,6 @@ impl SessionStore {
         self.search_entries_with(query, limit, index_session_entries)
     }
 
-    /// The current entry-index revision, for callers that poll for changes.
-    pub fn entry_index_revision(&self) -> anyhow::Result<i64> {
-        let (catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
-        catalog.entry_revision()
-    }
-
     pub(crate) fn search_entries_with<F>(
         &self,
         query: &str,
@@ -2065,6 +2061,7 @@ impl SessionStore {
     /// Reads the run's usage and unknown-usage records plus its cumulative cost
     /// and appends them to the workspace's accounting ledger. The conversation
     /// itself is never copied.
+    #[cfg(test)]
     pub fn record_ephemeral_accounting(
         &self,
         transcript: &Path,
@@ -2341,7 +2338,6 @@ impl SessionStore {
             },
             usage_records: transcript.usage_records,
             usage_uncertainty_records: transcript.usage_uncertainty_records,
-            deferred_run_records: transcript.deferred_run_records,
         })
     }
 

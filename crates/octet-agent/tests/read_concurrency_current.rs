@@ -17,8 +17,8 @@ use octet_agent::{
     ToolContext, ToolEffect, ToolError, ToolOutput,
 };
 use octet_ai::{
-    AiClient, Auth, Capabilities, CacheCompatibility, Endpoint, EndpointId, Model, ModelId,
-    ModelLimits, ModelSpec, Modality, ModalitySet, Protocol, ReasoningConfig, ReasoningMode,
+    AiClient, Auth, CacheCompatibility, Capabilities, Endpoint, EndpointId, Modality, ModalitySet,
+    Model, ModelId, ModelLimits, ModelSpec, Protocol, ReasoningConfig, ReasoningMode,
     RequestRuntime,
 };
 use tokio::sync::{oneshot, Barrier, Notify};
@@ -53,7 +53,12 @@ fn message_end(stop_reason: &str) -> String {
     ) + &frame("message_stop", serde_json::json!({"type": "message_stop"}))
 }
 
-fn anthropic_tool_block(index: usize, id: &str, name: &str, arguments: &serde_json::Value) -> String {
+fn anthropic_tool_block(
+    index: usize,
+    id: &str,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> String {
     frame(
         "content_block_start",
         serde_json::json!({
@@ -523,7 +528,9 @@ impl Tool for PhaseRead {
             signal(&self.state.second_signal);
             wait_release(&self.state.second_release, &self.state.release_notify).await;
         }
-        Ok(ToolOutput::new(arguments["tag"].as_str().unwrap_or("phase")))
+        Ok(ToolOutput::new(
+            arguments["tag"].as_str().unwrap_or("phase"),
+        ))
     }
 }
 
@@ -562,11 +569,7 @@ impl Tool for BarrierMutation {
     ) -> Result<ToolOutput, ToolError> {
         self.state.mutation_started.store(true, Ordering::Release);
         signal(&self.state.mutation_signal);
-        wait_release(
-            &self.state.mutation_release,
-            &self.state.release_notify,
-        )
-        .await;
+        wait_release(&self.state.mutation_release, &self.state.release_notify).await;
         Ok(ToolOutput::new("mutation"))
     }
 }
@@ -629,11 +632,27 @@ async fn read_waves_stop_at_mutation_barriers_and_serialize_hooks() {
         .respond_with(Script {
             bodies: vec![
                 anthropic_tool_turn(&[
-                    ("r1", "host_read_probe", serde_json::json!({"phase": 1, "tag": "r1"})),
-                    ("r2", "host_read_probe", serde_json::json!({"phase": 1, "tag": "r2"})),
+                    (
+                        "r1",
+                        "host_read_probe",
+                        serde_json::json!({"phase": 1, "tag": "r1"}),
+                    ),
+                    (
+                        "r2",
+                        "host_read_probe",
+                        serde_json::json!({"phase": 1, "tag": "r2"}),
+                    ),
                     ("m", "mutation_probe", serde_json::json!({"tag": "m"})),
-                    ("r3", "host_read_probe", serde_json::json!({"phase": 2, "tag": "r3"})),
-                    ("r4", "host_read_probe", serde_json::json!({"phase": 2, "tag": "r4"})),
+                    (
+                        "r3",
+                        "host_read_probe",
+                        serde_json::json!({"phase": 2, "tag": "r3"}),
+                    ),
+                    (
+                        "r4",
+                        "host_read_probe",
+                        serde_json::json!({"phase": 2, "tag": "r4"}),
+                    ),
                 ]),
                 anthropic_text_turn("barriers preserved"),
             ],
@@ -844,8 +863,7 @@ async fn abort_during_a_read_wave_keeps_pairing_and_stops_future_turns() {
         .iter()
         .filter_map(|event| match event {
             AgentEvent::ToolFinished {
-                result: Err(error),
-                ..
+                result: Err(error), ..
             } => Some(error.message.as_str()),
             _ => None,
         })
@@ -901,8 +919,16 @@ async fn text_image_and_audio_reads_retain_identity_in_ordered_slots() {
             bodies: vec![
                 openai_tool_turn(&[
                     ("call_text", "read", serde_json::json!({"path": "note.txt"})),
-                    ("call_image", "read", serde_json::json!({"path": "capture.png"})),
-                    ("call_audio", "read", serde_json::json!({"path": "memo.wav"})),
+                    (
+                        "call_image",
+                        "read",
+                        serde_json::json!({"path": "capture.png"}),
+                    ),
+                    (
+                        "call_audio",
+                        "read",
+                        serde_json::json!({"path": "memo.wav"}),
+                    ),
                 ]),
                 openai_text_turn("identity preserved"),
             ],
@@ -938,9 +964,8 @@ async fn text_image_and_audio_reads_retain_identity_in_ordered_slots() {
     let messages = second["messages"].as_array().unwrap();
     let result_ids: Vec<_> = messages
         .iter()
-        .filter_map(|message| {
-            (message["role"] == "tool").then(|| message["tool_call_id"].as_str().unwrap())
-        })
+        .filter(|message| message["role"] == "tool")
+        .map(|message| message["tool_call_id"].as_str().unwrap())
         .collect();
     assert_eq!(result_ids, vec!["call_text", "call_image", "call_audio"]);
 
@@ -1019,16 +1044,56 @@ async fn non_read_effects_are_ordered_barriers_without_parallel_admission() {
         .respond_with(Script {
             bodies: vec![
                 anthropic_tool_turn(&[
-                    ("r1", "host_read_probe", serde_json::json!({"phase": 1, "tag": "r1"})),
-                    ("r2", "host_read_probe", serde_json::json!({"phase": 1, "tag": "r2"})),
-                    ("u", "unknown_barrier", serde_json::json!({"tag": "unknown"})),
-                    ("m", "mutation_barrier", serde_json::json!({"tag": "mutation"})),
-                    ("p", "process_barrier", serde_json::json!({"tag": "process"})),
-                    ("n", "network_barrier", serde_json::json!({"tag": "network"})),
-                    ("d", "delegation_barrier", serde_json::json!({"tag": "delegation"})),
-                    ("x", "extension_barrier", serde_json::json!({"tag": "extension"})),
-                    ("r3", "host_read_probe", serde_json::json!({"phase": 2, "tag": "r3"})),
-                    ("r4", "host_read_probe", serde_json::json!({"phase": 2, "tag": "r4"})),
+                    (
+                        "r1",
+                        "host_read_probe",
+                        serde_json::json!({"phase": 1, "tag": "r1"}),
+                    ),
+                    (
+                        "r2",
+                        "host_read_probe",
+                        serde_json::json!({"phase": 1, "tag": "r2"}),
+                    ),
+                    (
+                        "u",
+                        "unknown_barrier",
+                        serde_json::json!({"tag": "unknown"}),
+                    ),
+                    (
+                        "m",
+                        "mutation_barrier",
+                        serde_json::json!({"tag": "mutation"}),
+                    ),
+                    (
+                        "p",
+                        "process_barrier",
+                        serde_json::json!({"tag": "process"}),
+                    ),
+                    (
+                        "n",
+                        "network_barrier",
+                        serde_json::json!({"tag": "network"}),
+                    ),
+                    (
+                        "d",
+                        "delegation_barrier",
+                        serde_json::json!({"tag": "delegation"}),
+                    ),
+                    (
+                        "x",
+                        "extension_barrier",
+                        serde_json::json!({"tag": "extension"}),
+                    ),
+                    (
+                        "r3",
+                        "host_read_probe",
+                        serde_json::json!({"phase": 2, "tag": "r3"}),
+                    ),
+                    (
+                        "r4",
+                        "host_read_probe",
+                        serde_json::json!({"phase": 2, "tag": "r4"}),
+                    ),
                 ]),
                 anthropic_text_turn("all effect barriers preserved"),
             ],
@@ -1087,7 +1152,10 @@ async fn non_read_effects_are_ordered_barriers_without_parallel_admission() {
         extensions,
     );
 
-    let mut run = agent.prompt("read around every non-read effect").await.unwrap();
+    let mut run = agent
+        .prompt("read around every non-read effect")
+        .await
+        .unwrap();
     let mut events = Vec::new();
     while events
         .iter()
@@ -1183,4 +1251,3 @@ async fn non_read_effects_are_ordered_barriers_without_parallel_admission() {
     ));
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
-

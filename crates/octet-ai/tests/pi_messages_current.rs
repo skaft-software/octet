@@ -14,9 +14,9 @@ use futures_util::StreamExt;
 use octet_ai::{
     AiClient, AiError, AssistantPart, Auth, CacheCompatibility, CacheRetention, Capabilities,
     CompatibilityMode, Endpoint, EndpointId, EndpointTransport, Message, ModalitySet, Model,
-    ModelId, ModelLimits, ModelSpec, OutputFormat, OutputModalities, Protocol,
-    ReasoningCapability, ReasoningConfig, ReasoningEffort, ReasoningMode, Request, Response,
-    StopReason, StreamEvent, StreamProtocolError, ToolChoice, ToolDef, UserMessage, UserPart,
+    ModelId, ModelLimits, ModelSpec, OutputFormat, OutputModalities, Protocol, ReasoningCapability,
+    ReasoningConfig, ReasoningEffort, ReasoningMode, Request, Response, StopReason, StreamEvent,
+    StreamProtocolError, ToolChoice, ToolDef, UserMessage, UserPart,
 };
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path};
@@ -273,8 +273,10 @@ async fn terminal_tool_call_replaces_the_streamed_preview() {
     assert!(error.is_none(), "{error:?}");
     let response = finished(&events);
     assert_eq!(response.stop_reason, StopReason::ToolUse);
-    assert!(matches!(&response.message.content[..], [AssistantPart::ToolCall(call)]
-        if call.id.0 == "call_1" && call.arguments_value().unwrap() == json!({"city": "Paris"})));
+    assert!(
+        matches!(&response.message.content[..], [AssistantPart::ToolCall(call)]
+        if call.id.0 == "call_1" && call.arguments_value().unwrap() == json!({"city": "Paris"}))
+    );
     assert_eq!(
         events
             .iter()

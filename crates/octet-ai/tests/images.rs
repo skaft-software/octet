@@ -136,8 +136,7 @@ async fn image_failures_map_to_typed_http_errors_and_error_results() {
             options_with_key(),
         )
         .await
-        .err()
-        .expect("500 must be an error");
+        .expect_err("500 must be an error");
     match error {
         AiError::Http(http) => {
             assert_eq!(http.status, http::StatusCode::INTERNAL_SERVER_ERROR);
@@ -221,8 +220,7 @@ async fn image_cancellation_reports_aborted_before_dispatch() {
     let error = client
         .generate_images_with_options(&model, ImageGenerationRequest::text("cat"), options)
         .await
-        .err()
-        .expect("cancelled request must not dispatch");
+        .expect_err("cancelled request must not dispatch");
     assert!(matches!(error, AiError::Canceled));
     assert!(server.received_requests().await.unwrap().is_empty());
 }
@@ -264,10 +262,9 @@ fn image_catalog_exposes_the_builtin_snapshot_models() {
     let catalog = ImageModelCatalog::builtin().unwrap();
     let models = catalog.models("openrouter");
     assert!(!models.is_empty());
-    assert!(models.iter().all(|model| model
-        .spec
-        .output
-        .contains(&octet_ai::ImageModality::Image)));
+    assert!(models
+        .iter()
+        .all(|model| model.spec.output.contains(&octet_ai::ImageModality::Image)));
     let dynamic = catalog
         .resolve("openrouter", "openrouter/auto")
         .expect("dynamic router is a valid image route");
@@ -276,4 +273,29 @@ fn image_catalog_exposes_the_builtin_snapshot_models() {
         .resolve("openrouter", "google/gemini-3-pro-image")
         .expect("priced image route");
     assert!(priced.spec.cost.is_some());
+}
+
+#[tokio::test]
+async fn image_errors_redact_credentials_in_typed_and_reporting_results() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header("x-request-id", "echo-test-image-key")
+                .set_body_string("rejected test-image-key"),
+        )
+        .mount(&server)
+        .await;
+    let model = model_for(&server);
+    let client = AiClient::new();
+    let request = || ImageGenerationRequest::new(vec![ImageInput::Text("test".into())]);
+    let error = client
+        .generate_images_with_options(&model, request(), options_with_key())
+        .await
+        .unwrap_err();
+    assert!(!format!("{error:?}").contains("test-image-key"));
+    let report = client
+        .generate_images_reporting(&model, request(), options_with_key())
+        .await;
+    assert!(!format!("{report:?}").contains("test-image-key"));
 }

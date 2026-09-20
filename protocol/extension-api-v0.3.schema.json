@@ -3328,8 +3328,15 @@
     },
     {
       "version": "0.3",
-      "status": "current",
+      "status": "supported",
       "wire": "canonical-json-rpc",
+      "runtime": "supported",
+      "bundles": "supported"
+    },
+    {
+      "version": "0.4",
+      "status": "current",
+      "wire": "legacy-json-rpc",
       "runtime": "supported",
       "bundles": "supported"
     }

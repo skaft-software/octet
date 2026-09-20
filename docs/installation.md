@@ -70,7 +70,7 @@ or the command to the model.
 
 ## Build from a checkout
 
-A source checkout can differ from the published release. Check `octet --version`
+This checkout is a local 0.8.0 RC, not a published release. Check `octet --version`
 and use matching executable bundles; source builds do not establish signed
 publication or replace an installed binary.
 
@@ -92,8 +92,10 @@ they do not refresh the catalog over the network. Continue with
 ## Optional packages
 
 The four official executable bundles and the separate Serve application must
-match octet 0.7.6. Their publication status is recorded on the GitHub release;
-installation never substitutes another host version. For example:
+match the running octet version exactly. Current source packages are `0.8.0`
+and require octet `=0.8.0`; published `0.7.6` packages retain their historical
+compatibility. Catalog installation requires verified matching published assets
+and never substitutes another host version. After that publication gate:
 
 ```sh
 octet extension install octet-web-search
@@ -120,13 +122,12 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
-The four executable bundles in this snapshot still declare API 0.2. They are
-legacy implementation references, not API 0.3 authoring examples. New authoring
-uses [Extension API 0.3](extensions/API-0.3-REFERENCE.md); generated Python 0.3
-types alone are not a complete 0.3 `Extension` runtime. The
-[API 0.3 minimal example](../examples/extensions/api-v03-minimal/README.md)
-provides a standard-library executable and a real-host conformance test; this
-is deterministic candidate evidence, not installed-release qualification.
+The four executable bundles in the working tree declare API `0.4`, distribution
+version `0.8.0`, and `requires_octet = "=0.8.0"`. These are independent version
+boundaries; an API number does not bypass the exact host pin. No matching RC
+catalog publication is claimed. See [current authoring](extensions.md) for the Python
+API 0.4 process recipe and retained API 0.3 conformance example; generated
+contract bindings alone are not a process runtime.
 
 ## Container
 

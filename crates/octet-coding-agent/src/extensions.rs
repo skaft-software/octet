@@ -23,32 +23,47 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use crossterm::event::Event;
 use octet_agent::extension_process::{
-    ConfirmationRequest, ConfirmationResponse, ContextContribution, ContextPlacement,
-    DiscoveredExtension, ExtensionAutocompleteRequest, ExtensionEditorRequest,
-    ExtensionEditorResponse, ExtensionEvent, ExtensionEventBus, ExtensionFlag,
-    ExtensionHealthSnapshot, ExtensionHealthState, ExtensionHook, ExtensionHookDisposition,
-    ExtensionHostState, ExtensionInputRequest, ExtensionInputResponse, ExtensionLifecycleEvent,
-    ExtensionLifecycleOutcome, ExtensionManifest, ExtensionPolicy,
-    ExtensionPolicyEvaluationResponse, ExtensionProcess, ExtensionRequestId,
-    ExtensionRuntimeConfig, ExtensionRuntimeSharing, ExtensionSessionLifecycleReceiver,
-    ExtensionSessionLifecycleRequest, ExtensionSessionLifecycleService, ExtensionSource,
-    ExtensionTerminalInput, ExtensionTerminalResize, ExtensionTrust, ExtensionUiContribution,
-    ExtensionUiSurface, ExtensionWidgetPlacement, ShortcutDefinition, ToolRenderRequest,
-    ToolRenderSegment, DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION_0_1,
-    EXTENSION_API_VERSION_0_3, EXTENSION_FEATURE_AGENT_SESSIONS,
+    ConfirmationRequest, ConfirmationResponse, ContextContribution, ContextPendingMessagesResult,
+    ContextPlacement, ContextSessionManagerResult, ContextSkillSummary, ContextSystemPromptResult,
+    DiscoveredExtension, ExtensionAutocompleteRequest, ExtensionComposerOperation,
+    ExtensionContextOperation, ExtensionEditorRequest, ExtensionEditorResponse, ExtensionEvent,
+    ExtensionEventBus, ExtensionFlag, ExtensionHealthSnapshot, ExtensionHealthState, ExtensionHook,
+    ExtensionHookDisposition, ExtensionHostState, ExtensionInputRequest, ExtensionInputResponse,
+    ExtensionLifecycleEvent, ExtensionLifecycleOutcome, ExtensionManifest,
+    ExtensionMessageInjection, ExtensionPolicy, ExtensionPolicyEvaluationResponse,
+    ExtensionProcess, ExtensionRequestFailure, ExtensionRequestId, ExtensionRequestOutcome,
+    ExtensionRuntimeConfig, ExtensionRuntimeSharing, ExtensionSessionEntryOperation,
+    ExtensionSessionLifecycleReceiver, ExtensionSessionLifecycleRequest,
+    ExtensionSessionLifecycleService, ExtensionSource, ExtensionStatusContribution,
+    ExtensionTerminalInput, ExtensionTerminalOperation, ExtensionTerminalResize, ExtensionTrust,
+    ExtensionUiContribution, ExtensionUiSurface, ExtensionWidgetPlacement, ShortcutDefinition,
+    TerminalAcquireResult, ToolRenderRequest, ToolRenderSegment, DELEGATION_TELEMETRY_SCHEMA,
+    EXTENSION_API_VERSION_0_1, EXTENSION_API_VERSION_0_3, EXTENSION_FEATURE_ACTIVE_TOOLS,
+    EXTENSION_FEATURE_AGENT_SESSIONS, EXTENSION_FEATURE_COMPOSER,
     EXTENSION_FEATURE_DELEGATION_TELEMETRY, EXTENSION_FEATURE_DYNAMIC_TOOLS,
-    EXTENSION_MANIFEST_FILENAME, MAX_EXTENSION_UI_ENTRIES, MAX_EXTENSION_UI_LINES,
+    EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, EXTENSION_FEATURE_MESSAGE_INJECTION,
+    EXTENSION_FEATURE_SESSION_CONTEXT, EXTENSION_FEATURE_SESSION_ENTRIES,
+    EXTENSION_FEATURE_SHORTCUTS, EXTENSION_FEATURE_SYSTEM_PROMPT_READ,
+    EXTENSION_FEATURE_TERMINAL_HANDOFF, EXTENSION_MANIFEST_FILENAME,
+    MAX_EXTENSION_BASH_COMMAND_BYTES, MAX_EXTENSION_COMPOSER_TEXT_BYTES,
+    MAX_EXTENSION_CONTEXT_ACTIVE_SKILLS, MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
+    MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES, MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES,
+    MAX_EXTENSION_SESSION_LABEL_BYTES, MAX_EXTENSION_SESSION_NAME_BYTES, MAX_EXTENSION_SHORTCUTS,
+    MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES, MAX_EXTENSION_SHORTCUT_ID_BYTES,
+    MAX_EXTENSION_SHORTCUT_KEY_BYTES, MAX_EXTENSION_TERMINAL_GRANT_ID_BYTES,
+    MAX_EXTENSION_UI_ENTRIES, MAX_EXTENSION_UI_KEY_BYTES, MAX_EXTENSION_UI_LINES,
 };
 use octet_agent::extension_runtime::{
     ExtensionRuntimeActivationOutcome, ExtensionRuntimeCatalog, ExtensionRuntimeDomain,
     ExtensionRuntimeManager, ExtensionSessionBinding,
 };
 use octet_agent::{
-    Agent, CancellationToken, ExtensionHost, ExtensionPolicyDecision,
+    Agent, CancellationToken, EntryId, ExtensionHost, ExtensionPolicyDecision,
     ExtensionPresentationSnapshot, ExtensionProviderAuthorizationPolicy,
     ExtensionProviderAuthorizationStatus, ExtensionProviderCatalogEntry, ExtensionProviderOwner,
     ExtensionProviderRegistry, PostMutationContext, PostMutationKind, PostMutationRescan,
-    PostMutationState, Session, ToolProgress, ToolProgressSink,
+    PostMutationState, Session, SessionError, ToolProgress, ToolProgressSink,
+    MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
 };
 use octet_ai::{
     AiClient, AssistantMessage, AssistantPart, Auth, CacheCompatibility, Capabilities, Endpoint,
@@ -67,6 +82,7 @@ use crate::resource_resolver::{
     ResolvedResource, ResourceDiagnosticLevel, ResourceKind, ResourceResolver, ResourceScope,
 };
 use crate::session_store::SessionStore;
+use crate::tui::composer::ComposedInput;
 use crate::tui::keymap::{
     extension_shortcut_key, is_reserved_extension_shortcut, parse_extension_shortcut,
     ExtensionShortcutKey,
@@ -139,6 +155,11 @@ const MAX_PROJECTED_EXTENSION_UI_LINES: usize = if MAX_EXTENSION_UI_ENTRIES > MA
     MAX_EXTENSION_UI_LINES
 };
 const SESSION_LIFECYCLE_QUEUE_CAPACITY: usize = 8;
+/// Upper bound for one `tools/set_active` name list. Individual names mirror
+/// the agent-side key cap; the list bound is host-local.
+const MAX_HOST_REQUEST_TOOL_NAMES: usize = 64;
+/// Upper bound for host requests queued between two shell drains.
+const HOST_REQUEST_QUEUE_CAPACITY: usize = 64;
 const CONTROLLED_EXTENSION_START_DIAGNOSTIC: &str = "executable extensions were not started: safe mode/controlled policies deny extension process startup even with explicit trust; full access (unsafe_host) is required and should be used only inside OS-level isolation";
 static NEXT_EXTENSION_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -451,6 +472,17 @@ fn load_extension_descriptor(
     })
 }
 
+/// One char-safe bounded slice of a user shell command for a fixed-shape
+/// extension notification. The bound is the same one the host applies, so a
+/// long escape never turns into a protocol failure diagnostic.
+fn bounded_notification_command(command: &str) -> &str {
+    let mut end = command.len().min(MAX_EXTENSION_BASH_COMMAND_BYTES);
+    while end > 0 && !command.is_char_boundary(end) {
+        end -= 1;
+    }
+    &command[..end]
+}
+
 pub trait ExtensionConfirmationHandler {
     /// Wait until the frontend asks to cancel the in-flight command. Dropping
     /// this future must leave the input source usable by `confirm`.
@@ -524,6 +556,44 @@ where
         request: &'a ExtensionInputRequest,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + 'a>> {
         self.inner.input(extension, request)
+    }
+}
+
+/// One frontend-owned snapshot of the live extension processes, taken before a
+/// host dialog borrows [`ExecutableExtensions`] mutably.
+///
+/// The confirmation and input handlers run under the same mutable borrow that
+/// drives the extension runtime, so they cannot call the `*_all` fan-out
+/// helpers. The snapshot holds the same process handles, and each host emitter
+/// is a no-op unless `lifecycle_events_v2` was negotiated and the process is
+/// live, so presenting a dialog never needs its own feature check.
+#[derive(Default)]
+pub struct ExtensionLifecycleSnapshot {
+    processes: Vec<ExtensionProcess>,
+}
+
+impl ExecutableExtensions {
+    /// Capture the current process handles for one frontend-owned broadcast.
+    pub fn lifecycle_snapshot(&self) -> ExtensionLifecycleSnapshot {
+        ExtensionLifecycleSnapshot {
+            processes: self.processes.clone(),
+        }
+    }
+}
+
+impl ExtensionLifecycleSnapshot {
+    /// Open one host-owned dialog boundary on every captured process.
+    pub fn dialog_started(&self, dialog: &str) {
+        for process in &self.processes {
+            let _ = process.notify_dialog_started(dialog);
+        }
+    }
+
+    /// Close one host-owned dialog boundary on every captured process.
+    pub fn dialog_settled(&self, dialog: &str) {
+        for process in &self.processes {
+            let _ = process.notify_dialog_settled(dialog);
+        }
     }
 }
 
@@ -734,6 +804,224 @@ fn admit_presentation_owner(
         return Err("discarded semantic presentation for another resource owner".into());
     }
     Ok(published)
+}
+
+/// Bounded wire name used in typed refusal messages.
+fn host_request_operation_name(operation: &HostRequestOperation) -> &'static str {
+    match operation {
+        HostRequestOperation::Composer(_) => "composer",
+        HostRequestOperation::SessionEntry(_) => "session_entries",
+        HostRequestOperation::MessageInjection(_) => "message_injection",
+        HostRequestOperation::Shortcut { .. } => "shortcuts",
+        HostRequestOperation::ActiveTools { .. } => "active_tools",
+        HostRequestOperation::Terminal(_) => "terminal_handoff",
+        HostRequestOperation::ContextSnapshot(operation) => match operation {
+            ExtensionContextOperation::SessionManager => "session_manager",
+            ExtensionContextOperation::PendingMessages => "pending_messages",
+            ExtensionContextOperation::SystemPrompt => "system_prompt",
+        },
+    }
+}
+
+/// The negotiated feature that gates one host-mediated operation.
+fn host_request_feature(operation: &HostRequestOperation) -> &'static str {
+    match operation {
+        HostRequestOperation::Composer(_) => EXTENSION_FEATURE_COMPOSER,
+        HostRequestOperation::SessionEntry(_) => EXTENSION_FEATURE_SESSION_ENTRIES,
+        HostRequestOperation::MessageInjection(_) => EXTENSION_FEATURE_MESSAGE_INJECTION,
+        HostRequestOperation::Shortcut { .. } => EXTENSION_FEATURE_SHORTCUTS,
+        HostRequestOperation::ActiveTools { .. } => EXTENSION_FEATURE_ACTIVE_TOOLS,
+        HostRequestOperation::Terminal(_) => EXTENSION_FEATURE_TERMINAL_HANDOFF,
+        HostRequestOperation::ContextSnapshot(ExtensionContextOperation::SystemPrompt) => {
+            EXTENSION_FEATURE_SYSTEM_PROMPT_READ
+        }
+        HostRequestOperation::ContextSnapshot(_) => EXTENSION_FEATURE_SESSION_CONTEXT,
+    }
+}
+
+/// One bounded, char-safe slice of a failure reason for a fixed-shape
+/// extension notification.
+fn bounded_notification_reason(reason: &str) -> &str {
+    const MAX_NOTIFICATION_REASON_BYTES: usize = 512;
+    if reason.len() <= MAX_NOTIFICATION_REASON_BYTES {
+        return reason;
+    }
+    let mut end = MAX_NOTIFICATION_REASON_BYTES;
+    while end > 0 && !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    &reason[..end]
+}
+
+/// Bound one header/footer surface text to the semantic-UI disclosure cap,
+/// truncating on a UTF-8 boundary rather than refusing the whole contribution.
+fn bounded_surface_text(text: &str) -> String {
+    const MAX_SURFACE_TEXT_BYTES: usize = 8 * 1024;
+    if text.len() <= MAX_SURFACE_TEXT_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_SURFACE_TEXT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// The host request fence: an owner must exist and it must be the foreground
+/// resource owner. A missing owner is a typed refusal, never a silent
+/// coercion into the foreground session.
+fn host_request_owner_is_foreground(
+    owner: Option<&octet_agent::extension_process::ExtensionResourceOwner>,
+    foreground: Option<&str>,
+) -> bool {
+    owner.is_some_and(|owner| foreground == Some(owner.session_id.as_str()))
+}
+
+/// Resolve one runtime shortcut binding. Host-reserved bindings are refused so
+/// the product keymap always wins, and the refusal stays bounded and visible.
+fn dynamic_shortcut_binding(
+    key: &str,
+) -> Result<ExtensionShortcutKey, (ExtensionRequestOutcome, String)> {
+    let parsed = parse_extension_shortcut(key).map_err(|error| {
+        (
+            ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("shortcut key {key:?} is not a supported binding: {error}"),
+            ),
+            format!("shortcut {key:?} was refused: {error}"),
+        )
+    })?;
+    if is_reserved_extension_shortcut(&parsed) {
+        return Err((
+            ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("shortcut key {key:?} is reserved by the host keymap"),
+            ),
+            format!("shortcut {key:?} was refused: the host keymap reserves this binding"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn bounded_host_request_text(
+    field: &str,
+    text: &str,
+    cap: usize,
+) -> Result<(), (ExtensionRequestFailure, String)> {
+    if text.len() > cap {
+        return Err((
+            ExtensionRequestFailure::BoundsExceeded,
+            format!("{field} exceeds {cap} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_host_request_name(
+    field: &str,
+    value: &str,
+    cap: usize,
+) -> Result<(), (ExtensionRequestFailure, String)> {
+    if value.is_empty() {
+        return Err((
+            ExtensionRequestFailure::InvalidRequest,
+            format!("{field} must not be empty"),
+        ));
+    }
+    if value.len() > cap {
+        return Err((
+            ExtensionRequestFailure::BoundsExceeded,
+            format!("{field} exceeds {cap} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate one extension request against the negotiated agent-side caps. No
+/// payload reaches host state until this passes.
+fn validate_host_request(
+    operation: &HostRequestOperation,
+) -> Result<(), (ExtensionRequestFailure, String)> {
+    match operation {
+        HostRequestOperation::Composer(operation) => match operation {
+            ExtensionComposerOperation::Get => Ok(()),
+            ExtensionComposerOperation::Set { text }
+            | ExtensionComposerOperation::Insert { text } => {
+                bounded_host_request_text("composer text", text, MAX_EXTENSION_COMPOSER_TEXT_BYTES)
+            }
+        },
+        HostRequestOperation::SessionEntry(operation) => match operation {
+            ExtensionSessionEntryOperation::Append { entry_type, data } => {
+                bounded_host_request_name(
+                    "entry_type",
+                    entry_type,
+                    MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES,
+                )?;
+                let encoded = serde_json::to_string(data).map_err(|error| {
+                    (
+                        ExtensionRequestFailure::InvalidRequest,
+                        format!("entry data is not serializable: {error}"),
+                    )
+                })?;
+                if encoded.len() > MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES {
+                    return Err((
+                        ExtensionRequestFailure::BoundsExceeded,
+                        format!(
+                            "entry data exceeds {MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES} bytes"
+                        ),
+                    ));
+                }
+                Ok(())
+            }
+            ExtensionSessionEntryOperation::SetName { name } => {
+                bounded_host_request_name("session name", name, MAX_EXTENSION_SESSION_NAME_BYTES)
+            }
+            ExtensionSessionEntryOperation::SetLabel { entry_id, label } => {
+                bounded_host_request_name("entry id", entry_id, MAX_EXTENSION_UI_KEY_BYTES)?;
+                bounded_host_request_text("entry label", label, MAX_EXTENSION_SESSION_LABEL_BYTES)
+            }
+        },
+        HostRequestOperation::MessageInjection(injection) => match injection {
+            ExtensionMessageInjection::Assistant { text }
+            | ExtensionMessageInjection::System { text }
+            | ExtensionMessageInjection::User { text } => bounded_host_request_text(
+                "injected message text",
+                text,
+                MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
+            ),
+        },
+        HostRequestOperation::Shortcut {
+            shortcut_id,
+            key,
+            description,
+        } => {
+            bounded_host_request_name("shortcut id", shortcut_id, MAX_EXTENSION_SHORTCUT_ID_BYTES)?;
+            bounded_host_request_name("shortcut key", key, MAX_EXTENSION_SHORTCUT_KEY_BYTES)?;
+            bounded_host_request_text(
+                "shortcut description",
+                description,
+                MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES,
+            )
+        }
+        HostRequestOperation::ActiveTools { names } => {
+            if names.len() > MAX_HOST_REQUEST_TOOL_NAMES {
+                return Err((
+                    ExtensionRequestFailure::BoundsExceeded,
+                    format!("tool name list exceeds {MAX_HOST_REQUEST_TOOL_NAMES} entries"),
+                ));
+            }
+            for name in names {
+                bounded_host_request_name("tool name", name, MAX_EXTENSION_UI_KEY_BYTES)?;
+            }
+            Ok(())
+        }
+        // The handoff carries no payload: the host mints the grant and reports
+        // the size it left the terminal in, so there is nothing to bound here.
+        HostRequestOperation::Terminal(_) => Ok(()),
+        // Read-only snapshots take no caller payload; the reply is bounded at
+        // the point the host composes it.
+        HostRequestOperation::ContextSnapshot(_) => Ok(()),
+    }
 }
 
 fn reduce_presentation_update(
@@ -1419,6 +1707,12 @@ pub struct ExecutableExtensions {
     renderer_tasks: Vec<JoinHandle<()>>,
     autocomplete_tasks: Vec<JoinHandle<()>>,
     pending_editor_requests: VecDeque<PendingEditorRequest>,
+    pending_host_requests: VecDeque<PendingHostRequest>,
+    pending_session_requests: VecDeque<PendingHostRequest>,
+    /// The one foreground terminal grant the host can cede, or `None` while the
+    /// host still owns its own raw terminal.
+    terminal_arbiter: TerminalGrantArbiter,
+    dynamic_shortcuts: Vec<RegisteredDynamicShortcut>,
     shortcut_tasks: Vec<JoinHandle<()>>,
     event_drain_cursor: usize,
     confirmation_denials: VecDeque<PendingConfirmationDenial>,
@@ -1430,6 +1724,12 @@ pub struct ExecutableExtensions {
     session_lifecycle_service: Option<ExtensionSessionLifecycleService>,
     session_lifecycle_receiver: Option<ExtensionSessionLifecycleReceiver>,
     session_id: Option<String>,
+    /// The latest host-state snapshot, refreshed whenever the model, reasoning,
+    /// or active session changes. Read-only context snapshots answer from here
+    /// so a shared process never discloses a stale per-session projection.
+    host_state: Mutex<ExtensionHostState>,
+    /// Host working directory for the active session, captured at discovery.
+    workspace: PathBuf,
     resource_owner: Option<String>,
     session_started_at: Instant,
     session_lifecycle_started: bool,
@@ -1628,6 +1928,181 @@ struct PendingEditorRequest {
     request: ExtensionEditorRequest,
 }
 
+/// One admitted extension request that a host surface still has to answer.
+/// Every entry is answered exactly once, or dropped with a bounded diagnostic
+/// when its process generation is gone.
+struct PendingHostRequest {
+    process: ExtensionProcess,
+    request_id: ExtensionRequestId,
+    generation: u64,
+    operation: HostRequestOperation,
+}
+
+/// Host-mediated operations an extension may request. Each one is gated on a
+/// negotiated additive feature and on foreground resource ownership.
+enum HostRequestOperation {
+    Composer(ExtensionComposerOperation),
+    SessionEntry(ExtensionSessionEntryOperation),
+    MessageInjection(ExtensionMessageInjection),
+    Shortcut {
+        shortcut_id: String,
+        key: String,
+        description: String,
+    },
+    ActiveTools {
+        names: Vec<String>,
+    },
+    Terminal(ExtensionTerminalOperation),
+    /// A read-only foreground context snapshot. `SystemPrompt` is resolved by
+    /// the product loop that owns the agent; the other operations resolve
+    /// against the live shell and the cached host state.
+    ContextSnapshot(ExtensionContextOperation),
+}
+
+/// Identity of the caller that owns, or wants, the foreground terminal grant.
+///
+/// The grant is fenced by foreground resource owner, extension instance and
+/// process generation, so a reload, a restarted process or a switched session
+/// can never inherit or release someone else's granted tty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TerminalHolder {
+    /// Host-derived foreground resource owner, or process scope when absent.
+    owner: Option<String>,
+    /// Extension instance that owns the holder process.
+    instance_id: String,
+    /// Process generation admitted for this grant.
+    generation: u64,
+    /// Manifest name, used only for bounded diagnostics.
+    name: String,
+}
+
+/// One live foreground terminal grant. The host keeps the record so it can
+/// always recognise the holder, and always take the terminal back.
+struct ActiveTerminalGrant {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retain the exact issued grant ID with its owner for terminal grant diagnostics."
+        )
+    )]
+    grant_id: String,
+    holder: TerminalHolder,
+}
+
+/// Single-slot arbiter for the one foreground raw terminal the host can cede.
+///
+/// The terminal stays host-owned: a second acquire is refused while a grant is
+/// live, only the recorded holder can release it, and every refusal is typed so
+/// no request is ever silently dropped. Revocation never waits on the previous
+/// holder.
+#[derive(Default)]
+struct TerminalGrantArbiter {
+    active: Option<ActiveTerminalGrant>,
+}
+
+impl TerminalGrantArbiter {
+    fn active(&self) -> Option<&ActiveTerminalGrant> {
+        self.active.as_ref()
+    }
+
+    /// Admit one acquire. The host mints the grant id and reports the size it
+    /// left the terminal in; it never trusts a child-supplied identity.
+    fn acquire(
+        &mut self,
+        holder: TerminalHolder,
+        columns: u16,
+        rows: u16,
+    ) -> Result<TerminalAcquireResult, (ExtensionRequestFailure, String)> {
+        if let Some(active) = self.active.as_ref() {
+            return Err((
+                ExtensionRequestFailure::InvalidRequest,
+                format!(
+                    "the foreground terminal is already granted to {}",
+                    active.holder.name
+                ),
+            ));
+        }
+        let grant_id = mint_terminal_grant_id(&holder.instance_id);
+        self.active = Some(ActiveTerminalGrant {
+            grant_id: grant_id.clone(),
+            holder,
+        });
+        Ok(TerminalAcquireResult {
+            grant_id,
+            columns,
+            rows,
+        })
+    }
+
+    /// Admit one release from the current holder only.
+    fn release(
+        &mut self,
+        holder: &TerminalHolder,
+    ) -> Result<(), (ExtensionRequestFailure, String)> {
+        let Some(active) = self.active.as_ref() else {
+            return Err((
+                ExtensionRequestFailure::InvalidRequest,
+                "no foreground terminal grant is active".to_owned(),
+            ));
+        };
+        if &active.holder != holder {
+            return Err((
+                ExtensionRequestFailure::InvalidRequest,
+                format!(
+                    "{} does not hold the active foreground terminal grant",
+                    holder.name
+                ),
+            ));
+        }
+        self.active = None;
+        Ok(())
+    }
+
+    /// Take the live grant when its holder stopped being valid.
+    fn revoke_if(
+        &mut self,
+        still_valid: impl FnOnce(&TerminalHolder) -> bool,
+    ) -> Option<ActiveTerminalGrant> {
+        let stale = {
+            let active = self.active.as_ref()?;
+            !still_valid(&active.holder)
+        };
+        if stale {
+            self.active.take()
+        } else {
+            None
+        }
+    }
+}
+
+/// Mint a bounded, host-owned grant identifier. The monotonic sequence keeps
+/// ids unique across grants handed to one long-lived extension instance.
+fn mint_terminal_grant_id(instance_id: &str) -> String {
+    static TERMINAL_GRANT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let sequence = TERMINAL_GRANT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let candidate = format!("terminal-grant-{sequence:016x}-{instance_id}");
+    let mut bounded = String::new();
+    for character in candidate.chars() {
+        if bounded.len() + character.len_utf8() > MAX_EXTENSION_TERMINAL_GRANT_ID_BYTES {
+            break;
+        }
+        bounded.push(character);
+    }
+    bounded
+}
+
+/// A keymap binding registered at runtime by a live extension generation.
+#[derive(Clone)]
+struct RegisteredDynamicShortcut {
+    extension: String,
+    shortcut_id: String,
+    key: ExtensionShortcutKey,
+    description: String,
+    process: ExtensionProcess,
+    generation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EditorStateDelivery {
     state: ExtensionEditorResponse,
@@ -1655,6 +2130,10 @@ struct SemanticUiView {
     generation: u64,
     statuses: BTreeMap<String, SemanticUiStatus>,
     widgets: BTreeMap<String, SemanticUiWidget>,
+    /// The extension-owned header surface, or `None` while it is cleared.
+    header: Option<SemanticUiStatus>,
+    /// The extension-owned footer surface, or `None` while it is cleared.
+    footer: Option<SemanticUiStatus>,
     working: Option<ShellExtensionWorking>,
     hidden_thinking_label: Option<String>,
 }
@@ -1694,6 +2173,10 @@ impl Default for ExecutableExtensions {
             renderer_tasks: Vec::new(),
             autocomplete_tasks: Vec::new(),
             pending_editor_requests: VecDeque::new(),
+            pending_host_requests: VecDeque::new(),
+            pending_session_requests: VecDeque::new(),
+            terminal_arbiter: TerminalGrantArbiter::default(),
+            dynamic_shortcuts: Vec::new(),
             shortcut_tasks: Vec::new(),
             event_drain_cursor: 0,
             confirmation_denials: VecDeque::new(),
@@ -1705,6 +2188,8 @@ impl Default for ExecutableExtensions {
             session_lifecycle_service: None,
             session_lifecycle_receiver: None,
             session_id: None,
+            host_state: Mutex::new(ExtensionHostState::default()),
+            workspace: PathBuf::new(),
             resource_owner: None,
             session_started_at: Instant::now(),
             session_lifecycle_started: false,
@@ -2215,6 +2700,8 @@ impl ExecutableExtensions {
         extensions.session_lifecycle_service = session_lifecycle_service;
         extensions.session_lifecycle_receiver = session_lifecycle_receiver;
         extensions.session_id = host_state.session_id.clone();
+        extensions.host_state = Mutex::new(host_state);
+        extensions.workspace = config.workspace.clone();
         extensions.resource_owner = Some(session.resource_owner_key());
         extensions.rescan_config = Some(config.clone());
         extensions.rescan_global_config = crate::cli::global_config_path();
@@ -2307,12 +2794,21 @@ impl ExecutableExtensions {
     }
 
     /// Resolve a host-validated extension shortcut from one terminal event.
+    /// Static manifest contributions win over runtime registrations.
     fn shortcut_for_event(&self, event: &Event) -> Option<ExtensionShortcutInvocation> {
         let key = extension_shortcut_key(event)?;
-        self.shortcuts
+        if let Some(shortcut) = self.shortcuts.iter().find(|shortcut| shortcut.key == key) {
+            return Some(shortcut.invocation.clone());
+        }
+        let dynamic = self
+            .dynamic_shortcuts
             .iter()
-            .find(|shortcut| shortcut.key == key)
-            .map(|shortcut| shortcut.invocation.clone())
+            .find(|shortcut| shortcut.key == key)?;
+        Some(ExtensionShortcutInvocation {
+            extension: dynamic.extension.clone(),
+            name: dynamic.shortcut_id.clone(),
+            description: dynamic.description.clone(),
+        })
     }
 
     /// Schedule a shortcut without blocking terminal input. Child confirmation
@@ -2323,6 +2819,32 @@ impl ExecutableExtensions {
         event: &Event,
     ) -> Option<ExtensionShortcutInvocation> {
         let invocation = self.shortcut_for_event(event)?;
+        if let Some(index) = self.dynamic_shortcuts.iter().position(|dynamic| {
+            dynamic.extension == invocation.extension && dynamic.shortcut_id == invocation.name
+        }) {
+            let dynamic = self.dynamic_shortcuts[index].clone();
+            if !dynamic.process.is_running()
+                || dynamic.process.health_snapshot().generation != dynamic.generation
+            {
+                self.dynamic_shortcuts.remove(index);
+                self.diagnostics.push(format!(
+                    "warning: extension shortcut {:?}/{} was dropped with its process generation",
+                    dynamic.extension, dynamic.shortcut_id
+                ));
+                return None;
+            }
+            if let Err(error) = dynamic
+                .process
+                .notify_shortcut_trigger(&dynamic.shortcut_id)
+            {
+                self.diagnostics.push(format!(
+                    "warning: extension shortcut {:?}/{} could not be delivered: {error}",
+                    dynamic.extension, dynamic.shortcut_id
+                ));
+                return None;
+            }
+            return Some(invocation);
+        }
         let Some(process) = self
             .processes
             .iter()
@@ -2656,6 +3178,26 @@ impl ExecutableExtensions {
         })
     }
 
+    /// Count nonterminal workers in the current owner-fenced subagents roster.
+    /// This must be observed before releasing the App binding, not on its replacement.
+    pub(crate) fn active_subagent_worker_count(&self) -> usize {
+        self.presentation_views()
+            .into_iter()
+            .filter(|view| view.extension == SUBAGENTS_EXTENSION_NAME)
+            .filter_map(|view| view.snapshot.collection)
+            .flat_map(|collection| collection.nodes)
+            .filter(|node| {
+                matches!(
+                    node.state,
+                    octet_agent::ExtensionPresentationState::Pending
+                        | octet_agent::ExtensionPresentationState::Active
+                        | octet_agent::ExtensionPresentationState::Running
+                        | octet_agent::ExtensionPresentationState::Degraded
+                )
+            })
+            .count()
+    }
+
     /// Returns the latest accepted semantic state for each running extension.
     pub fn presentation_views(&self) -> Vec<ExtensionPresentationView> {
         self.presentations
@@ -2895,7 +3437,7 @@ impl ExecutableExtensions {
     }
 
     pub fn refresh_host_state(
-        &self,
+        &mut self,
         session: &Session,
         model: &Model,
         reasoning: &ReasoningConfig,
@@ -2909,6 +3451,12 @@ impl ExecutableExtensions {
                 process.set_host_state(state.clone());
             }
         }
+        // Every session or model boundary refreshes this cache, so a read-only
+        // context snapshot never answers from the process-startup projection.
+        *self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
     }
 
     fn enqueue_context(&mut self, source: &str, contribution: ContextContribution) -> bool {
@@ -3884,6 +4432,7 @@ impl ExecutableExtensions {
     /// Dry-run scanners must never invoke this method. A committing ingestion
     /// path must have a safely bound extension owner, pass the same stable ID
     /// on retry, and call this only after commit or a completed rollback.
+    #[cfg(test)]
     pub async fn notify_migration_ingested(
         &mut self,
         mutation_id: impl Into<String>,
@@ -4073,7 +4622,8 @@ impl ExecutableExtensions {
     ///
     /// Isolated profiles are stopped. Explicitly shared workspace services are
     /// deliberately left with the runtime manager so a compatible replacement
-    /// App can bind them without a stop/restart gap.
+    /// App can bind them without a stop/restart gap. Interactive callers must
+    /// revoke the terminal grant with their shell before releasing this owner.
     pub async fn release_binding(&mut self) {
         // A replacement App must not inherit work queued against the old
         // owner. Isolated lifecycle processes are stopped below; shared and
@@ -4405,6 +4955,58 @@ impl ExecutableExtensions {
         Ok(())
     }
 
+    /// Apply one header/footer status surface against the live process
+    /// generation. Keyed `status` surfaces flow through
+    /// [`Self::apply_semantic_ui_contribution`] and are ignored here.
+    fn apply_status_surface(
+        &mut self,
+        extension: String,
+        process: &ExtensionProcess,
+        contribution: ExtensionStatusContribution,
+    ) {
+        self.record_status_surface(
+            extension,
+            process.extension_instance_id().to_owned(),
+            process.health_snapshot().generation,
+            contribution,
+        );
+    }
+
+    /// Store one header/footer surface under its exact instance and generation
+    /// fence. Split from [`Self::apply_status_surface`] so the store step is
+    /// testable without a live process.
+    fn record_status_surface(
+        &mut self,
+        extension: String,
+        instance_id: String,
+        generation: u64,
+        contribution: ExtensionStatusContribution,
+    ) {
+        let is_header = match contribution.surface {
+            ExtensionUiSurface::Header => true,
+            ExtensionUiSurface::Footer => false,
+            ExtensionUiSurface::Status => return,
+        };
+        let view = self.semantic_ui.entry(extension).or_default();
+        if view.generation != generation || view.extension_instance_id != instance_id {
+            *view = SemanticUiView {
+                extension_instance_id: instance_id,
+                generation,
+                ..SemanticUiView::default()
+            };
+        }
+        let slot = (!contribution.text.is_empty()).then(|| SemanticUiStatus {
+            text: bounded_surface_text(&contribution.text),
+            style_role: contribution.style_role,
+            priority: contribution.priority,
+        });
+        if is_header {
+            view.header = slot;
+        } else {
+            view.footer = slot;
+        }
+    }
+
     fn prune_semantic_ui(&mut self) {
         self.semantic_ui.retain(|extension, view| {
             self.processes.iter().any(|process| {
@@ -4427,12 +5029,21 @@ impl ExecutableExtensions {
 
     fn semantic_ui_projection(&mut self) -> ShellExtensionUi {
         self.prune_semantic_ui();
+        Self::project_semantic_ui(&self.semantic_ui)
+    }
+
+    /// Fold every retained semantic-UI view into one shell projection. Split
+    /// from [`Self::semantic_ui_projection`] so the fold is testable without a
+    /// live process fleet.
+    fn project_semantic_ui(views: &BTreeMap<String, SemanticUiView>) -> ShellExtensionUi {
         let mut statuses = Vec::new();
         let mut above_editor = Vec::new();
         let mut below_editor = Vec::new();
+        let mut header = Vec::new();
+        let mut footer = Vec::new();
         let mut working = None;
         let mut hidden_thinking_label = None;
-        for view in self.semantic_ui.values() {
+        for view in views.values() {
             for status in view.statuses.values() {
                 statuses.push(ShellExtensionUiLine {
                     text: status.text.clone(),
@@ -4463,6 +5074,20 @@ impl ExecutableExtensions {
             if hidden_thinking_label.is_none() {
                 hidden_thinking_label = view.hidden_thinking_label.clone();
             }
+            if let Some(surface) = &view.header {
+                header.push(ShellExtensionUiLine {
+                    text: surface.text.clone(),
+                    style_role: surface.style_role.clone(),
+                    priority: surface.priority,
+                });
+            }
+            if let Some(surface) = &view.footer {
+                footer.push(ShellExtensionUiLine {
+                    text: surface.text.clone(),
+                    style_role: surface.style_role.clone(),
+                    priority: surface.priority,
+                });
+            }
         }
         let sort = |left: &ShellExtensionUiLine, right: &ShellExtensionUiLine| {
             right
@@ -4473,13 +5098,19 @@ impl ExecutableExtensions {
         statuses.sort_by(sort);
         above_editor.sort_by(sort);
         below_editor.sort_by(sort);
+        header.sort_by(sort);
+        footer.sort_by(sort);
         statuses.truncate(MAX_PROJECTED_EXTENSION_UI_LINES);
         above_editor.truncate(MAX_PROJECTED_EXTENSION_UI_LINES);
         below_editor.truncate(MAX_PROJECTED_EXTENSION_UI_LINES);
+        header.truncate(MAX_PROJECTED_EXTENSION_UI_LINES);
+        footer.truncate(MAX_PROJECTED_EXTENSION_UI_LINES);
         ShellExtensionUi {
             statuses,
             above_editor,
             below_editor,
+            header,
+            footer,
             working,
             hidden_thinking_label,
         }
@@ -4604,6 +5235,759 @@ impl ExecutableExtensions {
         });
     }
 
+    /// Fan one host lifecycle notification out to every live process that
+    /// negotiated `feature`. Failures stay bounded diagnostics, never panics.
+    fn notify_lifecycle_v2(
+        &mut self,
+        feature: &str,
+        notify: impl Fn(&ExtensionProcess) -> Result<(), String>,
+    ) {
+        let mut failures = Vec::new();
+        for process in &self.processes {
+            if !process
+                .negotiated_features()
+                .iter()
+                .any(|negotiated| negotiated == feature)
+            {
+                continue;
+            }
+            if let Err(error) = notify(process) {
+                failures.push(format!(
+                    "warning: {}: lifecycle notification failed: {error}",
+                    process.descriptor().manifest.name
+                ));
+            }
+        }
+        for failure in failures {
+            self.diagnostics.push(failure);
+        }
+    }
+
+    /// Announce the start of one host compaction boundary.
+    pub fn notify_compaction_started_all(&mut self) {
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .notify_compaction_started()
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Announce the settled state of one host compaction boundary.
+    pub fn notify_compaction_settled_all(&mut self) {
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .notify_compaction_settled()
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Announce a failed host compaction boundary with a bounded reason.
+    pub fn notify_compaction_failed_all(&mut self, reason: &str) {
+        let reason = bounded_notification_reason(reason);
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .notify_compaction_failed(reason)
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Announce that the foreground model selection changed.
+    pub fn notify_model_selected_all(&mut self) {
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .notify_model_selected()
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Announce that the foreground reasoning selection changed.
+    pub fn notify_reasoning_selected_all(&mut self) {
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .notify_reasoning_selected()
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Announce that the foreground session metadata changed.
+    pub fn notify_session_info_changed_all(&mut self) {
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .notify_session_info_changed()
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Announce the first streamed increment of one assistant message.
+    pub fn notify_message_started_all(&mut self, message_id: &str) {
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .notify_message_started(message_id)
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Forward one streamed assistant increment to the host coalescer, which
+    /// owns every batching and flush decision.
+    pub fn push_message_delta_all(&mut self, delta: &str) {
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .push_message_delta(delta)
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Close one assistant message boundary after flushing coalesced deltas.
+    pub fn notify_message_settled_all(&mut self, message_id: &str) {
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .notify_message_settled(message_id)
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Announce one executed user `!`/`!!` shell escape with bounded text.
+    pub fn notify_user_bash_all(&mut self, command: &str) {
+        let command = bounded_notification_command(command);
+        self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
+            process
+                .notify_user_bash(command)
+                .map_err(|error| error.to_string())
+        });
+    }
+
+    /// Answer one host-mediated extension request exactly once without blocking
+    /// the terminal thread.
+    fn queue_host_request_response(
+        &mut self,
+        process: ExtensionProcess,
+        request_id: ExtensionRequestId,
+        generation: u64,
+        outcome: ExtensionRequestOutcome,
+    ) {
+        let name = process.descriptor().manifest.name.clone();
+        let Ok(handle) = Handle::try_current() else {
+            self.diagnostics.push(format!(
+                "warning: {name}: host-owned extension request response requires the Tokio runtime"
+            ));
+            return;
+        };
+        handle.spawn(async move {
+            let _ = tokio::time::timeout(
+                EXTENSION_UI_EDITOR_RESPONSE_DEADLINE,
+                process.respond_to_extension_request(request_id, generation, outcome),
+            )
+            .await;
+        });
+    }
+
+    /// Refuse one request without changing host state.
+    fn refuse_host_request(
+        &mut self,
+        process: ExtensionProcess,
+        request_id: ExtensionRequestId,
+        generation: u64,
+        failure: ExtensionRequestFailure,
+        message: impl Into<String>,
+    ) {
+        self.queue_host_request_response(
+            process,
+            request_id,
+            generation,
+            ExtensionRequestOutcome::Failed(failure, message.into()),
+        );
+    }
+
+    /// Fence one drained request on foreground resource ownership, negotiated
+    /// feature, and payload bounds before it can touch host state.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_host_request(
+        &mut self,
+        process: Option<ExtensionProcess>,
+        name: &str,
+        request_id: ExtensionRequestId,
+        generation: u64,
+        owner: Option<octet_agent::extension_process::ExtensionResourceOwner>,
+        operation: HostRequestOperation,
+        interactive: bool,
+    ) {
+        let Some(process) = process else {
+            self.diagnostics.push(format!(
+                "warning: {name}: host-owned extension request has no process"
+            ));
+            return;
+        };
+        let owner_is_foreground =
+            host_request_owner_is_foreground(owner.as_ref(), self.resource_owner.as_deref());
+        if !owner_is_foreground {
+            self.refuse_host_request(
+                process,
+                request_id,
+                generation,
+                ExtensionRequestFailure::NotForegroundOwner,
+                format!(
+                    "{} is refused: the request owner is not the foreground session",
+                    host_request_operation_name(&operation)
+                ),
+            );
+            return;
+        }
+        let feature = host_request_feature(&operation);
+        if !process
+            .negotiated_features()
+            .iter()
+            .any(|negotiated| negotiated == feature)
+        {
+            self.refuse_host_request(
+                process,
+                request_id,
+                generation,
+                ExtensionRequestFailure::UnsupportedFeature,
+                format!("{feature} is not a negotiated extension feature"),
+            );
+            return;
+        }
+        if let Err((failure, message)) = validate_host_request(&operation) {
+            self.refuse_host_request(process, request_id, generation, failure, message);
+            return;
+        }
+        if !interactive {
+            let message = match &operation {
+                HostRequestOperation::Composer(_) => {
+                    "no foreground composer is available in this host mode".to_owned()
+                }
+                _ => "no foreground session is available in this host mode".to_owned(),
+            };
+            self.refuse_host_request(
+                process,
+                request_id,
+                generation,
+                ExtensionRequestFailure::InvalidRequest,
+                message,
+            );
+            return;
+        }
+        if self.pending_host_requests.len() + self.pending_session_requests.len()
+            >= HOST_REQUEST_QUEUE_CAPACITY
+        {
+            self.refuse_host_request(
+                process,
+                request_id,
+                generation,
+                ExtensionRequestFailure::InvalidRequest,
+                "the host extension request queue is full".to_owned(),
+            );
+            return;
+        }
+        let pending = PendingHostRequest {
+            process,
+            request_id,
+            generation,
+            operation,
+        };
+        if matches!(
+            pending.operation,
+            HostRequestOperation::SessionEntry(_)
+                | HostRequestOperation::ActiveTools { .. }
+                | HostRequestOperation::ContextSnapshot(ExtensionContextOperation::SystemPrompt)
+        ) {
+            self.pending_session_requests.push_back(pending);
+        } else {
+            self.pending_host_requests.push_back(pending);
+        }
+    }
+
+    /// Maps one active-tool application result to the extension-facing outcome.
+    ///
+    /// Enforcement lives in the agent: only narrowing inside the host-policed
+    /// surface is accepted, and unknown or policy-excluded names are refused with
+    /// no state change. This keeps the wire vocabulary honest for either direction.
+    fn active_tools_outcome(
+        result: Result<(), octet_agent::AgentError>,
+    ) -> ExtensionRequestOutcome {
+        match result {
+            Ok(()) => ExtensionRequestOutcome::Ok(serde_json::json!({})),
+            Err(error) => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("the active tool set was refused: {error}"),
+            ),
+        }
+    }
+
+    /// Install one runtime shortcut binding for the foreground generation.
+    fn register_dynamic_shortcut(
+        &mut self,
+        name: &str,
+        process: ExtensionProcess,
+        generation: u64,
+        shortcut_id: String,
+        key: &str,
+        description: String,
+    ) -> ExtensionRequestOutcome {
+        let parsed = match dynamic_shortcut_binding(key) {
+            Ok(parsed) => parsed,
+            Err((outcome, diagnostic)) => {
+                // A host binding always wins. The refusal is typed and the
+                // diagnostic is visible in the extension status surface.
+                self.diagnostics
+                    .push(format!("warning: extension {name:?}: {diagnostic}"));
+                return outcome;
+            }
+        };
+        if self.shortcuts.iter().any(|existing| existing.key == parsed) {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("shortcut key {key:?} is already bound to an extension shortcut"),
+            );
+        }
+        if self
+            .dynamic_shortcuts
+            .iter()
+            .any(|existing| existing.key == parsed)
+        {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("shortcut key {key:?} is already registered"),
+            );
+        }
+        if self
+            .dynamic_shortcuts
+            .iter()
+            .any(|existing| existing.extension == name && existing.shortcut_id == shortcut_id)
+        {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("shortcut id {shortcut_id:?} is already registered"),
+            );
+        }
+        if self.dynamic_shortcuts.len() >= MAX_EXTENSION_SHORTCUTS {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::BoundsExceeded,
+                format!("at most {MAX_EXTENSION_SHORTCUTS} runtime shortcuts are supported"),
+            );
+        }
+        self.dynamic_shortcuts.push(RegisteredDynamicShortcut {
+            extension: name.to_owned(),
+            shortcut_id,
+            key: parsed,
+            description,
+            process,
+            generation,
+        });
+        ExtensionRequestOutcome::Ok(serde_json::json!({}))
+    }
+
+    /// Answer the requests the live shell can resolve. Session-entry requests
+    /// stay queued for the product loop that owns the session store.
+    fn drain_host_requests_into_shell(&mut self, shell: &mut InteractiveShell) {
+        while let Some(pending) = self.pending_host_requests.pop_front() {
+            if !pending.process.is_running()
+                || pending.process.health_snapshot().generation != pending.generation
+            {
+                self.diagnostics.push(format!(
+                    "warning: {}: discarded host-owned extension request from stale generation {}",
+                    pending.process.descriptor().manifest.name,
+                    pending.generation
+                ));
+                continue;
+            }
+            let name = pending.process.descriptor().manifest.name.clone();
+            let outcome = match pending.operation {
+                HostRequestOperation::Composer(operation) => match operation {
+                    ExtensionComposerOperation::Get => ExtensionRequestOutcome::Ok(
+                        serde_json::json!({ "text": shell.extension_editor_snapshot().text }),
+                    ),
+                    ExtensionComposerOperation::Set { text } => {
+                        shell.extension_set_editor(text);
+                        ExtensionRequestOutcome::Ok(serde_json::json!({}))
+                    }
+                    ExtensionComposerOperation::Insert { text } => {
+                        shell.extension_paste_editor(text);
+                        ExtensionRequestOutcome::Ok(serde_json::json!({}))
+                    }
+                },
+                HostRequestOperation::Shortcut {
+                    shortcut_id,
+                    key,
+                    description,
+                } => self.register_dynamic_shortcut(
+                    &name,
+                    pending.process.clone(),
+                    pending.generation,
+                    shortcut_id,
+                    &key,
+                    description,
+                ),
+                HostRequestOperation::MessageInjection(injection) => match injection {
+                    ExtensionMessageInjection::User { text } => {
+                        if text.trim().is_empty() {
+                            ExtensionRequestOutcome::Failed(
+                                ExtensionRequestFailure::InvalidRequest,
+                                "injected message text must not be empty".to_owned(),
+                            )
+                        } else {
+                            // The queued follow-up is admitted by the owning run
+                            // loop through the real user-turn path.
+                            shell.queue_follow_up(ComposedInput::from_text(text));
+                            ExtensionRequestOutcome::Ok(serde_json::json!({}))
+                        }
+                    }
+                    ExtensionMessageInjection::Assistant { .. } => ExtensionRequestOutcome::Failed(
+                        ExtensionRequestFailure::UnsupportedFeature,
+                        "this host build does not inject assistant messages".to_owned(),
+                    ),
+                    ExtensionMessageInjection::System { .. } => ExtensionRequestOutcome::Failed(
+                        ExtensionRequestFailure::UnsupportedFeature,
+                        "this host build does not inject system messages".to_owned(),
+                    ),
+                },
+                HostRequestOperation::SessionEntry(_) => {
+                    // Unreachable: session-entry requests use their own queue.
+                    continue;
+                }
+                HostRequestOperation::ActiveTools { .. } => ExtensionRequestOutcome::Failed(
+                    ExtensionRequestFailure::UnsupportedFeature,
+                    "this host build does not apply tools/set_active".to_owned(),
+                ),
+                HostRequestOperation::Terminal(operation) => self.apply_terminal_host_request(
+                    shell,
+                    pending.process.clone(),
+                    pending.generation,
+                    operation,
+                ),
+                HostRequestOperation::ContextSnapshot(operation) => {
+                    self.apply_context_snapshot_in_shell(shell, operation)
+                }
+            };
+            self.queue_host_request_response(
+                pending.process,
+                pending.request_id,
+                pending.generation,
+                outcome,
+            );
+        }
+    }
+
+    /// Answer one read-only foreground context snapshot the live shell can
+    /// resolve. `SystemPrompt` is routed to the session owner and can never
+    /// reach this path; the two session-context operations resolve against the
+    /// cached host state and the shell's admitted follow-up queue.
+    fn apply_context_snapshot_in_shell(
+        &self,
+        shell: &InteractiveShell,
+        operation: ExtensionContextOperation,
+    ) -> ExtensionRequestOutcome {
+        match operation {
+            ExtensionContextOperation::SessionManager => self.context_session_manager_outcome(),
+            ExtensionContextOperation::PendingMessages => {
+                Self::context_pending_messages_outcome(shell)
+            }
+            ExtensionContextOperation::SystemPrompt => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                "the system prompt is resolved by the session owner".to_owned(),
+            ),
+        }
+    }
+
+    /// Compose the active session-manager snapshot from the cached host state
+    /// and the workspace root. A missing session or workspace is refused rather
+    /// than answered with a fabricated placeholder.
+    fn context_session_manager_outcome(&self) -> ExtensionRequestOutcome {
+        let Some(session_id) = self.session_id.clone() else {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                "no foreground session is available".to_owned(),
+            );
+        };
+        if self.workspace.as_os_str().is_empty() {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                "no foreground workspace is available".to_owned(),
+            );
+        }
+        let state = self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let active_skills = state
+            .active_skills
+            .iter()
+            .take(MAX_EXTENSION_CONTEXT_ACTIVE_SKILLS)
+            .map(|skill| ContextSkillSummary {
+                id: skill.id.clone(),
+                name: skill.name.clone(),
+            })
+            .collect();
+        let reasoning = state
+            .reasoning
+            .as_ref()
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        let result = ContextSessionManagerResult {
+            session_id,
+            name: state.session_name,
+            model: state.model,
+            reasoning,
+            active_skills,
+            cwd: self.workspace.to_string_lossy().into_owned(),
+        };
+        match serde_json::to_value(result) {
+            Ok(value) => ExtensionRequestOutcome::Ok(value),
+            Err(error) => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("the session snapshot is not serializable: {error}"),
+            ),
+        }
+    }
+
+    /// Count the follow-up messages the foreground shell has queued but not yet
+    /// admitted to the agent. This is exactly the queue
+    /// `session/send_user_message` feeds, so the count is observed, never guessed.
+    fn context_pending_messages_outcome(shell: &InteractiveShell) -> ExtensionRequestOutcome {
+        let pending = u32::try_from(shell.queued_follow_up_len()).unwrap_or(u32::MAX);
+        match serde_json::to_value(ContextPendingMessagesResult { pending }) {
+            Ok(value) => ExtensionRequestOutcome::Ok(value),
+            Err(error) => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("the pending-message count is not serializable: {error}"),
+            ),
+        }
+    }
+
+    /// Compose the bounded system-prompt disclosure from the live agent. The
+    /// composed prompt is refused rather than truncated when it exceeds the wire
+    /// disclosure bound.
+    fn context_system_prompt_outcome(agent: &Agent) -> ExtensionRequestOutcome {
+        let result = ContextSystemPromptResult {
+            text: agent.system_prompt().to_owned(),
+        };
+        if let Err(error) = result.validate() {
+            return ExtensionRequestOutcome::Failed(ExtensionRequestFailure::BoundsExceeded, error);
+        }
+        match serde_json::to_value(result) {
+            Ok(value) => ExtensionRequestOutcome::Ok(value),
+            Err(error) => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("the system prompt snapshot is not serializable: {error}"),
+            ),
+        }
+    }
+
+    /// Answers one `session/append_entry` request against the durable
+    /// foreground session. The extension manifest name is the entry namespace
+    /// and the live process generation is the provenance attestation.
+    ///
+    /// The wire protocol admits 64 KiB of entry data, but the durable store
+    /// retains at most [`MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES`] encoded
+    /// envelope bytes, so the smaller effective cap is enforced here and named
+    /// in the refusal. A residual `SessionError::Limit` after that pre-check is
+    /// a malformed value (unusable namespace, control characters, excessive
+    /// nesting), never a size overflow, so it maps to `invalid_request`.
+    fn apply_extension_entry_append(
+        session: &mut Session,
+        namespace: &str,
+        process_generation: u64,
+        entry_type: &str,
+        data: Value,
+    ) -> ExtensionRequestOutcome {
+        if entry_type.is_empty() || entry_type.chars().any(char::is_control) {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                "entry_type must be a non-empty string without control characters".to_owned(),
+            );
+        }
+        if entry_type.len() > MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::BoundsExceeded,
+                format!("entry_type exceeds {MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES} bytes"),
+            );
+        }
+        let envelope = serde_json::json!({ "entry_type": entry_type, "data": &data });
+        let encoded = match serde_json::to_vec(&envelope) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                return ExtensionRequestOutcome::Failed(
+                    ExtensionRequestFailure::InvalidRequest,
+                    format!("entry data is not serializable: {error}"),
+                );
+            }
+        };
+        if encoded.len() > MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::BoundsExceeded,
+                format!(
+                    "entry data exceeds {MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES} stored bytes"
+                ),
+            );
+        }
+        match session.append_extension_entry(namespace, Some(process_generation), entry_type, data)
+        {
+            Ok(entry_id) => {
+                ExtensionRequestOutcome::Ok(serde_json::json!({ "entry_id": entry_id.0 }))
+            }
+            Err(error) => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("the extension session entry was refused: {error}"),
+            ),
+        }
+    }
+
+    /// Answers one `session/set_label` request against the durable foreground
+    /// session. An unknown entry id is refused with `invalid_request` and the
+    /// store's refusal path leaves the session file byte-identical; control
+    /// characters reach the store and are reported as a malformed request.
+    fn apply_extension_entry_label(
+        session: &mut Session,
+        entry_id: &str,
+        label: &str,
+    ) -> ExtensionRequestOutcome {
+        if label.len() > MAX_EXTENSION_SESSION_LABEL_BYTES {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::BoundsExceeded,
+                format!("entry label exceeds {MAX_EXTENSION_SESSION_LABEL_BYTES} bytes"),
+            );
+        }
+        match session.set_entry_label(&EntryId(entry_id.to_owned()), label) {
+            Ok(()) => ExtensionRequestOutcome::Ok(serde_json::json!({})),
+            Err(SessionError::UnknownEntry(id)) => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("no session entry {id:?} exists in the foreground session"),
+            ),
+            Err(SessionError::Limit(message)) => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("the extension entry label was refused: {message}"),
+            ),
+            Err(error) => ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("the extension entry label could not be stored: {error}"),
+            ),
+        }
+    }
+
+    /// Resolve admitted session-entry and active-tool requests against the
+    /// durable foreground session and the live session store. Returns true when
+    /// durable session presentation changed; extension entries, their labels,
+    /// and the active tool set are not part of the coding-agent shell
+    /// presentation.
+    ///
+    /// Both operations need the live [`Agent`] (the durable session for entries
+    /// and labels, the host-policed tool surface for `tools/set_active`), so the
+    /// caller hands over the foreground agent instead of a bare session.
+    pub fn apply_session_host_requests(
+        &mut self,
+        agent: &mut Agent,
+        sessions: &SessionStore,
+    ) -> bool {
+        let mut changed = false;
+        while let Some(pending) = self.pending_session_requests.pop_front() {
+            if !pending.process.is_running()
+                || pending.process.health_snapshot().generation != pending.generation
+            {
+                self.diagnostics.push(format!(
+                    "warning: {}: discarded host-owned session request from stale generation {}",
+                    pending.process.descriptor().manifest.name,
+                    pending.generation
+                ));
+                continue;
+            }
+            if let HostRequestOperation::ActiveTools { names } = pending.operation {
+                // Narrowing only: the agent refuses unknown or policy-excluded
+                // names and can never widen the host-policed tool surface.
+                let outcome =
+                    Self::active_tools_outcome(agent.set_active_tool_names(Some(
+                        names.iter().cloned().collect::<BTreeSet<_>>(),
+                    )));
+                self.queue_host_request_response(
+                    pending.process,
+                    pending.request_id,
+                    pending.generation,
+                    outcome,
+                );
+                continue;
+            }
+            if let HostRequestOperation::ContextSnapshot(operation) = pending.operation {
+                let outcome = match operation {
+                    ExtensionContextOperation::SystemPrompt => {
+                        Self::context_system_prompt_outcome(agent)
+                    }
+                    // The two session-context reads resolve against the shell
+                    // drain, never this agent-owning loop.
+                    ExtensionContextOperation::SessionManager
+                    | ExtensionContextOperation::PendingMessages => continue,
+                };
+                self.queue_host_request_response(
+                    pending.process,
+                    pending.request_id,
+                    pending.generation,
+                    outcome,
+                );
+                continue;
+            }
+            let session = agent.session_mut();
+            // The extension's own manifest name is the durable metadata
+            // namespace; the admitting generation is the provenance value.
+            let namespace = pending.process.descriptor().manifest.name.clone();
+            let HostRequestOperation::SessionEntry(operation) = pending.operation else {
+                continue;
+            };
+            let outcome = match operation {
+                ExtensionSessionEntryOperation::SetName { name } => {
+                    let session_id = self.session_id.clone();
+                    match session_id {
+                        None => ExtensionRequestOutcome::Failed(
+                            ExtensionRequestFailure::InvalidRequest,
+                            "no foreground session is available".to_owned(),
+                        ),
+                        Some(session_id) => {
+                            match sessions.rename(&session_id, &name) {
+                                Ok(_) => {
+                                    if pending.process.negotiated_features().iter().any(|feature| {
+                                        feature == EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2
+                                    }) {
+                                        if let Err(error) =
+                                            pending.process.notify_session_info_changed()
+                                        {
+                                            self.diagnostics.push(format!(
+                                            "warning: {}: session info notification failed: {error}",
+                                            pending.process.descriptor().manifest.name
+                                        ));
+                                        }
+                                    }
+                                    changed = true;
+                                    ExtensionRequestOutcome::Ok(serde_json::json!({}))
+                                }
+                                Err(error) => ExtensionRequestOutcome::Failed(
+                                    ExtensionRequestFailure::InvalidRequest,
+                                    format!("the session name could not be stored: {error}"),
+                                ),
+                            }
+                        }
+                    }
+                }
+                ExtensionSessionEntryOperation::Append { entry_type, data } => {
+                    Self::apply_extension_entry_append(
+                        session,
+                        &namespace,
+                        pending.generation,
+                        &entry_type,
+                        data,
+                    )
+                }
+                ExtensionSessionEntryOperation::SetLabel { entry_id, label } => {
+                    Self::apply_extension_entry_label(session, &entry_id, &label)
+                }
+            };
+            self.queue_host_request_response(
+                pending.process,
+                pending.request_id,
+                pending.generation,
+                outcome,
+            );
+        }
+        changed
+    }
+
     fn drain_editor_requests_into_shell(&mut self, shell: &mut InteractiveShell) {
         while let Some(pending) = self.pending_editor_requests.pop_front() {
             if !pending.process.is_running()
@@ -4635,12 +6019,168 @@ impl ExecutableExtensions {
         }
     }
 
+    /// Answers one `terminal/acquire` or `terminal/release` against the live
+    /// foreground shell. Every caller receives exactly one typed answer: the
+    /// minted grant, an empty release body, or a typed refusal.
+    ///
+    /// The terminal stays host-owned. The host leaves raw mode and parks its
+    /// input before it answers an acquire, and re-enters only after a release
+    /// it accepted; a refused caller never changes host terminal state.
+    fn apply_terminal_host_request(
+        &mut self,
+        shell: &mut InteractiveShell,
+        process: ExtensionProcess,
+        generation: u64,
+        operation: ExtensionTerminalOperation,
+    ) -> ExtensionRequestOutcome {
+        // Re-fence the generation even though the drain already discarded stale
+        // generations: a reload between admission and drain must never move the
+        // tty, and the child must never act on a grant it will not be told about.
+        if !process.is_running() || process.health_snapshot().generation != generation {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                "the terminal request belongs to a stale process generation".to_owned(),
+            );
+        }
+        let holder = TerminalHolder {
+            owner: self.resource_owner.clone(),
+            instance_id: process.extension_instance_id().to_owned(),
+            generation,
+            name: process.descriptor().manifest.name.clone(),
+        };
+        match operation {
+            ExtensionTerminalOperation::Acquire => {
+                // Read the size the host is leaving behind, then hand the tty
+                // over: the answer is the last thing the host does here.
+                let (columns, rows) = shell.terminal_dimensions();
+                let granted = match self.terminal_arbiter.acquire(holder, columns, rows) {
+                    Ok(granted) => granted,
+                    Err((failure, message)) => {
+                        return ExtensionRequestOutcome::Failed(failure, message);
+                    }
+                };
+                shell.cede_terminal_input();
+                shell.suspend();
+                ExtensionRequestOutcome::Ok(serde_json::json!({
+                    "grant_id": granted.grant_id,
+                    "columns": granted.columns,
+                    "rows": granted.rows,
+                }))
+            }
+            ExtensionTerminalOperation::Release => {
+                if let Err((failure, message)) = self.terminal_arbiter.release(&holder) {
+                    return ExtensionRequestOutcome::Failed(failure, message);
+                }
+                // The holder's own release is not a revocation: no
+                // `terminal/grant-lost` is fired for it.
+                shell.release_terminal_input();
+                match shell.resume() {
+                    Ok(()) => ExtensionRequestOutcome::Ok(serde_json::json!({})),
+                    Err(error) => ExtensionRequestOutcome::Failed(
+                        ExtensionRequestFailure::InvalidRequest,
+                        format!("the host could not re-enter its terminal: {error}"),
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Restore the host terminal when the live grant stopped being valid: the
+    /// holder died or restarted, or the foreground session moved on.
+    ///
+    /// The host revokes without waiting on the previous holder, so a crash
+    /// mid-grant can never wedge the TUI. A holder that outlived its own grant
+    /// is told through `terminal/grant-lost`; the holder's own release never
+    /// reaches here.
+    pub fn reconcile_terminal_grant_for_shell(&mut self, shell: &mut InteractiveShell) {
+        let owner = self.resource_owner.clone();
+        let live: BTreeSet<(String, u64)> = self
+            .processes
+            .iter()
+            .filter(|process| process.is_running())
+            .map(|process| {
+                (
+                    process.extension_instance_id().to_owned(),
+                    process.health_snapshot().generation,
+                )
+            })
+            .collect();
+        let Some(revoked) = self.terminal_arbiter.revoke_if(|holder| {
+            holder.owner == owner && live.contains(&(holder.instance_id.clone(), holder.generation))
+        }) else {
+            return;
+        };
+        let holder_still_live = live.contains(&(
+            revoked.holder.instance_id.clone(),
+            revoked.holder.generation,
+        ));
+        let reason = if holder_still_live {
+            "the foreground session changed while the terminal was ceded"
+        } else {
+            "the foreground terminal grant holder is no longer running"
+        };
+        self.restore_revoked_terminal_grant(shell, revoked, reason);
+    }
+
+    /// Revoke before dropping or replacing this binding. Reconciliation alone
+    /// cannot find the old grant after a replacement App owns a fresh arbiter.
+    pub fn revoke_terminal_grant_for_shell(&mut self, shell: &mut InteractiveShell, reason: &str) {
+        if let Some(revoked) = self.terminal_arbiter.revoke_if(|_| false) {
+            self.restore_revoked_terminal_grant(shell, revoked, reason);
+        }
+    }
+
+    fn restore_revoked_terminal_grant(
+        &mut self,
+        shell: &mut InteractiveShell,
+        revoked: ActiveTerminalGrant,
+        reason: &str,
+    ) {
+        shell.release_terminal_input();
+        if let Err(error) = shell.resume() {
+            self.diagnostics.push(format!(
+                "warning: {}: the host could not re-enter its terminal after the grant was revoked: {error}",
+                revoked.holder.name
+            ));
+        }
+        // Only a holder that is still alive can hear the revocation; a dead
+        // process is dropped instead of surfaced as a failed notification.
+        if let Some(process) = self
+            .processes
+            .iter()
+            .find(|process| {
+                process.is_running()
+                    && process.extension_instance_id() == revoked.holder.instance_id
+                    && process.health_snapshot().generation == revoked.holder.generation
+            })
+            .cloned()
+        {
+            if let Err(error) = process.notify_terminal_grant_lost(reason) {
+                self.diagnostics.push(format!(
+                    "warning: {}: terminal/grant-lost could not be delivered: {error}",
+                    revoked.holder.name
+                ));
+            }
+        }
+        self.diagnostics.push(format!(
+            "{}: the foreground terminal grant was revoked ({reason})",
+            revoked.holder.name
+        ));
+    }
+
+    /// Whether an extension currently holds the ceded foreground terminal.
+    pub fn terminal_grant_is_active(&self) -> bool {
+        self.terminal_arbiter.active().is_some()
+    }
+
     /// Drain extension events while an interactive shell owns the editor. This
     /// is deliberately separate from the generic event drain so headless hosts
     /// never accidentally grant an editor lease.
     pub fn drain_events_for_shell(&mut self, shell: &mut InteractiveShell) -> Vec<String> {
         let messages = self.drain_events_inner(true);
         self.drain_editor_requests_into_shell(shell);
+        self.drain_host_requests_into_shell(shell);
+        self.reconcile_terminal_grant_for_shell(shell);
         messages
     }
 
@@ -4686,10 +6226,18 @@ impl ExecutableExtensions {
                             contribution,
                         );
                     }
-                    Ok(ExtensionEvent::StatusContributed { .. }) => {
-                        // Header/status/footer contributions remain available as
-                        // protocol data, but the coding TUI never turns them
-                        // into ambient transcript or composer chrome.
+                    Ok(ExtensionEvent::StatusContributed { contribution }) => {
+                        // Header and footer surfaces become bounded chrome; any
+                        // other surface stays protocol-only. The source process
+                        // generation is the freshness fence.
+                        match process.as_ref() {
+                            Some(process) => {
+                                self.apply_status_surface(name.clone(), process, contribution);
+                            }
+                            None => self.diagnostics.push(format!(
+                                "warning: {name}: status surface source process is unavailable"
+                            )),
+                        }
                     }
                     Ok(ExtensionEvent::UiContributed {
                         generation,
@@ -4751,6 +6299,131 @@ impl ExecutableExtensions {
                             }
                         }
                     }
+                    Ok(ExtensionEvent::ComposerRequested {
+                        request_id,
+                        generation,
+                        owner,
+                        operation,
+                    }) => {
+                        self.admit_host_request(
+                            process.clone(),
+                            &name,
+                            request_id,
+                            generation,
+                            owner,
+                            HostRequestOperation::Composer(operation),
+                            interactive,
+                        );
+                    }
+                    Ok(ExtensionEvent::SessionEntryRequested {
+                        request_id,
+                        generation,
+                        owner,
+                        operation,
+                    }) => {
+                        self.admit_host_request(
+                            process.clone(),
+                            &name,
+                            request_id,
+                            generation,
+                            owner,
+                            HostRequestOperation::SessionEntry(operation),
+                            interactive,
+                        );
+                    }
+                    Ok(ExtensionEvent::MessageInjectionRequested {
+                        request_id,
+                        generation,
+                        owner,
+                        injection,
+                    }) => {
+                        self.admit_host_request(
+                            process.clone(),
+                            &name,
+                            request_id,
+                            generation,
+                            owner,
+                            HostRequestOperation::MessageInjection(injection),
+                            interactive,
+                        );
+                    }
+                    Ok(ExtensionEvent::ShortcutRequested {
+                        request_id,
+                        generation,
+                        owner,
+                        shortcut_id,
+                        key,
+                        description,
+                    }) => {
+                        self.admit_host_request(
+                            process.clone(),
+                            &name,
+                            request_id,
+                            generation,
+                            owner,
+                            HostRequestOperation::Shortcut {
+                                shortcut_id,
+                                key,
+                                description,
+                            },
+                            interactive,
+                        );
+                    }
+                    Ok(ExtensionEvent::ActiveToolsRequested {
+                        request_id,
+                        generation,
+                        owner,
+                        names,
+                    }) => {
+                        self.admit_host_request(
+                            process.clone(),
+                            &name,
+                            request_id,
+                            generation,
+                            owner,
+                            HostRequestOperation::ActiveTools { names },
+                            interactive,
+                        );
+                    }
+                    Ok(ExtensionEvent::TerminalRequested {
+                        request_id,
+                        generation,
+                        owner,
+                        operation,
+                    }) => {
+                        self.admit_host_request(
+                            process.clone(),
+                            &name,
+                            request_id,
+                            generation,
+                            owner,
+                            HostRequestOperation::Terminal(operation),
+                            interactive,
+                        );
+                    }
+                    Ok(ExtensionEvent::ContextSnapshotRequested {
+                        request_id,
+                        generation,
+                        owner,
+                        operation,
+                    }) => {
+                        self.admit_host_request(
+                            process.clone(),
+                            &name,
+                            request_id,
+                            generation,
+                            owner,
+                            HostRequestOperation::ContextSnapshot(operation),
+                            interactive,
+                        );
+                    }
+                    // Contract A's product half is still owed: there is no
+                    // `HostRequestOperation` for a model view yet, so this
+                    // request is not answered here. The Pi bridge does not issue
+                    // `context/model` until that lands, so no extension is left
+                    // waiting today; the arm keeps the drain exhaustive, matching
+                    // the agent crate's own `ModelViewRequested` arm.
+                    Ok(ExtensionEvent::ModelViewRequested { .. }) => {}
                     Ok(ExtensionEvent::AutocompleteRegistered {
                         request_id,
                         generation,
@@ -4915,6 +6588,13 @@ impl ExecutableExtensions {
                 })
         });
         self.prune_semantic_ui();
+        self.dynamic_shortcuts.retain(|shortcut| {
+            self.processes.iter().any(|process| {
+                process.extension_instance_id() == shortcut.process.extension_instance_id()
+                    && process.is_running()
+                    && process.health_snapshot().generation == shortcut.generation
+            })
+        });
         self.schedule_confirmation_denials();
         self.schedule_input_cancellations();
         messages
@@ -5336,9 +7016,107 @@ fn host_state(
         session_id,
         session_name,
         model: Some(model.spec.id.0.clone()),
+        model_view: extension_model_view(model),
         reasoning: Some(serde_json::Value::String(format!("{reasoning:?}"))),
         active_skills,
     }
+}
+
+/// Pi's wire-API name for one octet protocol.
+///
+/// Every octet protocol has an exact Pi `KnownApi` spelling, so this projection
+/// never invents a name.
+fn pi_api_name(protocol: &Protocol) -> &'static str {
+    match protocol {
+        Protocol::OpenAiChat => "openai-completions",
+        Protocol::OpenAiResponses => "openai-responses",
+        Protocol::AnthropicMessages => "anthropic-messages",
+        Protocol::BedrockConverse => "bedrock-converse-stream",
+        Protocol::GoogleGenerativeAi => "google-generative-ai",
+        Protocol::MistralConversations => "mistral-conversations",
+        Protocol::PiMessages => "pi-messages",
+    }
+}
+
+/// The Pi provider identity that owns a model's route.
+///
+/// Pi reports the provider rather than the wire route, so a multi-route
+/// declaration (`opencode-anthropic`) reports its declaring provider. Providers
+/// octet registers itself namespace their model id as `provider/model`, and an
+/// endpoint with no declaration falls back to the endpoint identity octet
+/// already knows.
+fn pi_provider_id(model: &Model) -> String {
+    let endpoint = model.endpoint.id.0.as_str();
+    if let Some(declaration) =
+        crate::providers::ALL_PROVIDER_DECLARATIONS
+            .iter()
+            .find(|declaration| {
+                declaration
+                    .routes
+                    .iter()
+                    .any(|route| route.endpoint_id == endpoint)
+            })
+    {
+        return declaration.id.to_owned();
+    }
+    match model.spec.id.0.split_once('/') {
+        Some((provider, _)) if !provider.is_empty() => provider.to_owned(),
+        _ => endpoint.to_owned(),
+    }
+}
+
+/// Whether one model-view field fits the bounded wire width.
+fn model_field_fits(value: &str) -> bool {
+    value.len() <= octet_agent::extension_process::MAX_EXTENSION_MODEL_FIELD_BYTES
+}
+
+/// Project one resolved model into Pi's `Model` shape.
+///
+/// Only fields octet can state truthfully are projected. The endpoint base URL
+/// and credentials stay host-owned, so `baseUrl` is absent rather than
+/// fabricated: a Pi extension observes `undefined`, never a URL octet did not
+/// disclose. A model whose identifier, name, or provider exceeds the bounded
+/// field width yields no view at all, so an extension never receives a
+/// truncated identifier.
+fn extension_model_view(
+    model: &Model,
+) -> Option<octet_agent::extension_process::ExtensionModelView> {
+    let spec = &model.spec;
+    let provider = pi_provider_id(model);
+    let name = spec
+        .display_name
+        .clone()
+        .or_else(|| octet_ai::model_metadata::model_display_name(&spec.id.0).map(str::to_owned))
+        .unwrap_or_else(|| spec.api_name.clone());
+    if !model_field_fits(&spec.id.0) || !model_field_fits(&provider) || !model_field_fits(&name) {
+        return None;
+    }
+    let mut input = vec!["text".to_owned()];
+    if spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image)
+    {
+        input.push("image".to_owned());
+    }
+    Some(octet_agent::extension_process::ExtensionModelView {
+        id: spec.id.0.clone(),
+        name: Some(name),
+        api: pi_api_name(&spec.protocol).to_owned(),
+        provider,
+        reasoning: spec.capabilities.reasoning.is_some(),
+        input,
+        cost: spec.pricing.as_ref().map(|pricing| {
+            octet_agent::extension_process::ExtensionModelCost {
+                input: pricing.input.0,
+                output: pricing.output.0,
+                cache_read: pricing.cache_read.0,
+                cache_write: pricing.cache_write_5m.0,
+            }
+        }),
+        context_window: spec.limits.context_window,
+        max_tokens: spec.limits.max_output_tokens,
+    })
 }
 
 fn block_on_runtime<F>(future: F) -> anyhow::Result<F::Output>
@@ -5396,6 +7174,121 @@ mod tests {
             name: name.to_owned(),
             description: format!("{name} action"),
         }
+    }
+
+    fn terminal_holder(instance_id: &str, name: &str, generation: u64) -> TerminalHolder {
+        TerminalHolder {
+            owner: Some("session-owner".to_owned()),
+            instance_id: instance_id.to_owned(),
+            generation,
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn terminal_acquire_hands_out_a_bounded_grant_and_the_host_size() {
+        let mut arbiter = TerminalGrantArbiter::default();
+        let granted = arbiter
+            .acquire(terminal_holder("instance-a", "fixture-a", 7), 120, 40)
+            .expect("first acquire is granted");
+        assert_eq!(granted.columns, 120);
+        assert_eq!(granted.rows, 40);
+        assert!(!granted.grant_id.is_empty());
+        assert!(granted.grant_id.len() <= MAX_EXTENSION_TERMINAL_GRANT_ID_BYTES);
+        assert!(granted
+            .grant_id
+            .chars()
+            .all(|character| !character.is_control()));
+        assert_eq!(
+            arbiter.active().map(|active| active.grant_id.as_str()),
+            Some(granted.grant_id.as_str())
+        );
+    }
+
+    #[test]
+    fn a_second_terminal_acquire_is_refused_with_a_typed_failure() {
+        let mut arbiter = TerminalGrantArbiter::default();
+        arbiter
+            .acquire(terminal_holder("instance-a", "fixture-a", 7), 80, 24)
+            .expect("first acquire is granted");
+        let (failure, message) = arbiter
+            .acquire(terminal_holder("instance-b", "fixture-b", 7), 80, 24)
+            .expect_err("a second acquire must be refused");
+        assert_eq!(failure, ExtensionRequestFailure::InvalidRequest);
+        assert_eq!(failure.code(), -32602);
+        assert!(message.contains("already granted"), "{message}");
+        // The refusal changed nothing: the original holder still owns it.
+        assert_eq!(
+            arbiter.active().map(|active| active.holder.name.as_str()),
+            Some("fixture-a")
+        );
+    }
+
+    #[test]
+    fn a_foreign_or_stale_terminal_release_is_refused_with_a_typed_failure() {
+        let mut arbiter = TerminalGrantArbiter::default();
+        arbiter
+            .acquire(terminal_holder("instance-a", "fixture-a", 7), 80, 24)
+            .expect("first acquire is granted");
+
+        // A different extension instance cannot release the live grant.
+        let (failure, message) = arbiter
+            .release(&terminal_holder("instance-b", "fixture-b", 7))
+            .expect_err("a foreign release must be refused");
+        assert_eq!(failure, ExtensionRequestFailure::InvalidRequest);
+        assert!(message.contains("does not hold"), "{message}");
+
+        // A holder that reloaded is a different generation of the same instance.
+        let (failure, _) = arbiter
+            .release(&terminal_holder("instance-a", "fixture-a", 8))
+            .expect_err("a stale release must be refused");
+        assert_eq!(failure, ExtensionRequestFailure::InvalidRequest);
+
+        // A release with no live grant is refused too, never a silent success.
+        let (failure, message) = TerminalGrantArbiter::default()
+            .release(&terminal_holder("instance-a", "fixture-a", 7))
+            .expect_err("a release without a grant must be refused");
+        assert_eq!(failure, ExtensionRequestFailure::InvalidRequest);
+        assert!(
+            message.contains("no foreground terminal grant"),
+            "{message}"
+        );
+
+        // The holder itself still releases cleanly.
+        arbiter
+            .release(&terminal_holder("instance-a", "fixture-a", 7))
+            .expect("the holder releases its own grant");
+        assert!(arbiter.active().is_none());
+    }
+
+    #[test]
+    fn a_dead_or_reloaded_holder_is_revoked_without_waiting_on_it() {
+        let mut arbiter = TerminalGrantArbiter::default();
+        arbiter
+            .acquire(terminal_holder("instance-a", "fixture-a", 7), 80, 24)
+            .expect("first acquire is granted");
+
+        // Still valid: the host must not touch a live grant.
+        assert!(arbiter.revoke_if(|_| true).is_none());
+        assert!(arbiter.active().is_some());
+
+        // Holder death: the host takes the grant back with no cooperation.
+        let revoked = arbiter
+            .revoke_if(|_| false)
+            .expect("a dead holder is revoked");
+        assert_eq!(revoked.holder.name, "fixture-a");
+        assert!(arbiter.active().is_none());
+
+        // Revoking again is a no-op rather than a second handback.
+        assert!(arbiter.revoke_if(|_| false).is_none());
+    }
+
+    #[test]
+    fn minted_terminal_grant_ids_stay_bounded_for_a_long_instance_id() {
+        let instance = "i".repeat(512);
+        let minted = mint_terminal_grant_id(&instance);
+        assert!(minted.len() <= MAX_EXTENSION_TERMINAL_GRANT_ID_BYTES);
+        assert_ne!(minted, mint_terminal_grant_id(&instance));
     }
 
     #[test]
@@ -5583,6 +7476,434 @@ args = ["--keep", "--experimental-streamable-http-mcp"]
                 EXPERIMENTAL_STREAMABLE_HTTP_MCP_ARGUMENT.to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn host_request_validation_enforces_bounds_and_required_names() {
+        assert!(validate_host_request(&HostRequestOperation::Composer(
+            ExtensionComposerOperation::Get
+        ))
+        .is_ok());
+
+        let oversized = "x".repeat(MAX_EXTENSION_COMPOSER_TEXT_BYTES + 1);
+        let error = validate_host_request(&HostRequestOperation::Composer(
+            ExtensionComposerOperation::Set { text: oversized },
+        ))
+        .unwrap_err();
+        assert!(matches!(error.0, ExtensionRequestFailure::BoundsExceeded));
+
+        let names = vec!["read".to_owned(); MAX_HOST_REQUEST_TOOL_NAMES + 1];
+        let error =
+            validate_host_request(&HostRequestOperation::ActiveTools { names }).unwrap_err();
+        assert!(matches!(error.0, ExtensionRequestFailure::BoundsExceeded));
+
+        let error = validate_host_request(&HostRequestOperation::ActiveTools {
+            names: vec![String::new()],
+        })
+        .unwrap_err();
+        assert!(matches!(error.0, ExtensionRequestFailure::InvalidRequest));
+
+        let error = validate_host_request(&HostRequestOperation::SessionEntry(
+            ExtensionSessionEntryOperation::Append {
+                entry_type: "note".to_owned(),
+                data: serde_json::json!({ "note": "y".repeat(MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES) }),
+            },
+        ))
+        .unwrap_err();
+        assert!(matches!(error.0, ExtensionRequestFailure::BoundsExceeded));
+    }
+
+    #[test]
+    fn extension_session_append_answers_a_real_durable_entry_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let outcome = ExecutableExtensions::apply_extension_entry_append(
+            &mut session,
+            "octet.todo",
+            41,
+            "note",
+            serde_json::json!({ "text": "remember" }),
+        );
+        let ExtensionRequestOutcome::Ok(response) = outcome else {
+            panic!("append must succeed: {outcome:?}");
+        };
+        let entry_id = response["entry_id"]
+            .as_str()
+            .expect("the response must carry the entry id as a string")
+            .to_owned();
+        assert!(!entry_id.is_empty());
+        let entry = session
+            .extension_entry(&EntryId(entry_id), "octet.todo")
+            .expect("the entry must be durable in its namespace");
+        assert_eq!(entry.entry_type, "note");
+        assert_eq!(entry.data["text"], "remember");
+    }
+
+    #[test]
+    fn extension_session_append_and_label_map_the_effective_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        // The wire allows 64 KiB but the durable store retains only the
+        // smaller effective cap; the refusal must name the real limit.
+        let oversized = serde_json::json!({
+            "text": "x".repeat(MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES)
+        });
+        match ExecutableExtensions::apply_extension_entry_append(
+            &mut session,
+            "octet.todo",
+            7,
+            "note",
+            oversized,
+        ) {
+            ExtensionRequestOutcome::Failed(ExtensionRequestFailure::BoundsExceeded, message) => {
+                assert!(
+                    message.contains(&MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES.to_string()),
+                    "{message}"
+                );
+            }
+            other => panic!("expected the effective store bound: {other:?}"),
+        }
+        let outcome = ExecutableExtensions::apply_extension_entry_append(
+            &mut session,
+            "octet.todo",
+            7,
+            &"t".repeat(MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES + 1),
+            serde_json::json!({}),
+        );
+        assert!(matches!(
+            outcome,
+            ExtensionRequestOutcome::Failed(ExtensionRequestFailure::BoundsExceeded, _)
+        ));
+        let outcome = ExecutableExtensions::apply_extension_entry_append(
+            &mut session,
+            "octet.todo",
+            7,
+            "bad\ntype",
+            serde_json::json!({}),
+        );
+        assert!(matches!(
+            outcome,
+            ExtensionRequestOutcome::Failed(ExtensionRequestFailure::InvalidRequest, _)
+        ));
+        let outcome = ExecutableExtensions::apply_extension_entry_label(
+            &mut session,
+            "any-entry",
+            &"l".repeat(MAX_EXTENSION_SESSION_LABEL_BYTES + 1),
+        );
+        assert!(matches!(
+            outcome,
+            ExtensionRequestOutcome::Failed(ExtensionRequestFailure::BoundsExceeded, _)
+        ));
+    }
+
+    #[test]
+    fn extension_session_label_refuses_unknown_entries_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let before = std::fs::read(session.path()).unwrap();
+        match ExecutableExtensions::apply_extension_entry_label(
+            &mut session,
+            "missing-entry",
+            "planning",
+        ) {
+            ExtensionRequestOutcome::Failed(ExtensionRequestFailure::InvalidRequest, message) => {
+                assert!(message.contains("missing-entry"), "{message}");
+            }
+            other => panic!("expected an invalid-request refusal: {other:?}"),
+        }
+        assert_eq!(std::fs::read(session.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn active_tools_outcome_reports_ok_and_typed_refusals() {
+        assert_eq!(
+            ExecutableExtensions::active_tools_outcome(Ok(())),
+            ExtensionRequestOutcome::Ok(serde_json::json!({}))
+        );
+        // The agent refuses unknown or policy-excluded names and never widens
+        // the host-policed surface; the wire answer stays a typed
+        // `invalid_request` naming the refusal.
+        let refused = ExecutableExtensions::active_tools_outcome(Err(
+            octet_agent::AgentError::UnknownActiveTools(vec!["nope".to_owned()]),
+        ));
+        match refused {
+            ExtensionRequestOutcome::Failed(ExtensionRequestFailure::InvalidRequest, detail) => {
+                assert!(detail.contains("nope"), "{detail}");
+                assert!(
+                    detail.starts_with("the active tool set was refused:"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extension_session_label_updates_and_clears_a_known_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let ExtensionRequestOutcome::Ok(response) =
+            ExecutableExtensions::apply_extension_entry_append(
+                &mut session,
+                "octet.todo",
+                9,
+                "note",
+                serde_json::json!({}),
+            )
+        else {
+            panic!("append must succeed");
+        };
+        let entry_id = response["entry_id"].as_str().unwrap().to_owned();
+        let id = EntryId(entry_id);
+        assert_eq!(
+            ExecutableExtensions::apply_extension_entry_label(&mut session, &id.0, "planning"),
+            ExtensionRequestOutcome::Ok(serde_json::json!({}))
+        );
+        assert_eq!(session.entry_label(&id), Some("planning"));
+        // Control characters are malformed, not a size overflow, and the
+        // previous label survives the refusal.
+        assert!(matches!(
+            ExecutableExtensions::apply_extension_entry_label(&mut session, &id.0, "bad\nlabel"),
+            ExtensionRequestOutcome::Failed(ExtensionRequestFailure::InvalidRequest, _)
+        ));
+        assert_eq!(session.entry_label(&id), Some("planning"));
+        assert_eq!(
+            ExecutableExtensions::apply_extension_entry_label(&mut session, &id.0, ""),
+            ExtensionRequestOutcome::Ok(serde_json::json!({}))
+        );
+        assert_eq!(session.entry_label(&id), None);
+    }
+
+    #[test]
+    fn host_request_features_and_operation_names_match_the_wire_contract() {
+        assert_eq!(
+            host_request_feature(&HostRequestOperation::Composer(
+                ExtensionComposerOperation::Insert {
+                    text: String::new(),
+                },
+            )),
+            "composer"
+        );
+        assert_eq!(EXTENSION_FEATURE_SHORTCUTS, "shortcuts");
+        assert_eq!(EXTENSION_FEATURE_SESSION_ENTRIES, "session_entries");
+        assert_eq!(EXTENSION_FEATURE_MESSAGE_INJECTION, "message_injection");
+        assert_eq!(EXTENSION_FEATURE_ACTIVE_TOOLS, "active_tools");
+        assert_eq!(
+            host_request_operation_name(&HostRequestOperation::ActiveTools { names: Vec::new() }),
+            "active_tools"
+        );
+    }
+
+    #[test]
+    fn context_snapshot_operations_match_the_wire_contract() {
+        let session_context =
+            HostRequestOperation::ContextSnapshot(ExtensionContextOperation::SessionManager);
+        assert_eq!(host_request_feature(&session_context), "session_context");
+        assert_eq!(
+            host_request_operation_name(&session_context),
+            "session_manager"
+        );
+        assert_eq!(EXTENSION_FEATURE_SESSION_CONTEXT, "session_context");
+
+        let pending =
+            HostRequestOperation::ContextSnapshot(ExtensionContextOperation::PendingMessages);
+        assert_eq!(host_request_feature(&pending), "session_context");
+        assert_eq!(host_request_operation_name(&pending), "pending_messages");
+
+        let prompt = HostRequestOperation::ContextSnapshot(ExtensionContextOperation::SystemPrompt);
+        assert_eq!(host_request_feature(&prompt), "system_prompt_read");
+        assert_eq!(host_request_operation_name(&prompt), "system_prompt");
+        assert_eq!(EXTENSION_FEATURE_SYSTEM_PROMPT_READ, "system_prompt_read");
+        assert!(validate_host_request(&session_context).is_ok());
+        assert!(validate_host_request(&pending).is_ok());
+        assert!(validate_host_request(&prompt).is_ok());
+    }
+
+    #[test]
+    fn session_manager_snapshot_is_composed_from_cached_host_state() {
+        let mut extensions = ExecutableExtensions::default();
+        extensions.session_id = Some("session-1".into());
+        extensions.workspace = PathBuf::from("/workspace/root");
+        {
+            let mut state = extensions.host_state.lock().unwrap();
+            state.session_name = Some("Refactor".into());
+            state.model = Some("gpt-test".into());
+            state.reasoning = Some(serde_json::Value::String("High".into()));
+            state.active_skills = vec![octet_agent::extension_process::ExtensionActiveSkill {
+                id: "skill-1".into(),
+                name: "Skill One".into(),
+                version: None,
+            }];
+        }
+        match extensions.context_session_manager_outcome() {
+            ExtensionRequestOutcome::Ok(value) => {
+                assert_eq!(value["session_id"], "session-1");
+                assert_eq!(value["name"], "Refactor");
+                assert_eq!(value["model"], "gpt-test");
+                assert_eq!(value["reasoning"], "High");
+                assert_eq!(value["cwd"], "/workspace/root");
+                assert_eq!(value["active_skills"][0]["id"], "skill-1");
+                assert_eq!(value["active_skills"][0]["name"], "Skill One");
+            }
+            other => panic!("expected a session snapshot, got {other:?}"),
+        }
+
+        // No foreground session is a typed refusal, never a fabricated id.
+        let none = ExecutableExtensions::default();
+        match none.context_session_manager_outcome() {
+            ExtensionRequestOutcome::Failed(ExtensionRequestFailure::InvalidRequest, _) => {}
+            other => panic!("expected an invalid_request refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_messages_counts_the_admitted_follow_up_queue() {
+        let mut shell = InteractiveShell::test_shell();
+        match ExecutableExtensions::context_pending_messages_outcome(&shell) {
+            ExtensionRequestOutcome::Ok(value) => assert_eq!(value["pending"], 0),
+            other => panic!("expected an empty queue, got {other:?}"),
+        }
+        shell.queue_follow_up(ComposedInput::from_text("first".to_string()));
+        shell.queue_follow_up(ComposedInput::from_text("second".to_string()));
+        match ExecutableExtensions::context_pending_messages_outcome(&shell) {
+            ExtensionRequestOutcome::Ok(value) => assert_eq!(value["pending"], 2),
+            other => panic!("expected two pending messages, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn system_prompt_snapshot_refuses_rather_than_truncates_over_bound_text() {
+        use octet_agent::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig};
+        use octet_ai::{AiClient, CacheRetention};
+
+        let temp = tempfile::tempdir().unwrap();
+        let session = Session::create(temp.path().join("session.jsonl")).unwrap();
+        let model = ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let mut agent = Agent::new(AgentConfig {
+            client: AiClient::new(),
+            model,
+            session,
+            system: "composed system prompt".into(),
+            sandbox: SandboxConfig::new(temp.path()),
+            effect_broker: EffectBroker::default(),
+            extensions: ExtensionHost::new(),
+            max_turns: None,
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: octet_ai::ReasoningMode::Standard,
+            cache_retention: CacheRetention::Short,
+            session_id: None,
+        })
+        .unwrap();
+        match ExecutableExtensions::context_system_prompt_outcome(&agent) {
+            ExtensionRequestOutcome::Ok(value) => {
+                assert_eq!(value["text"], "composed system prompt");
+            }
+            other => panic!("expected the composed prompt, got {other:?}"),
+        }
+
+        let bound = octet_agent::extension_process::MAX_EXTENSION_SYSTEM_PROMPT_BYTES;
+        agent.set_system_prompt("x".repeat(bound + 1));
+        match ExecutableExtensions::context_system_prompt_outcome(&agent) {
+            ExtensionRequestOutcome::Failed(ExtensionRequestFailure::BoundsExceeded, _) => {}
+            other => panic!("expected a bounds refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn header_and_footer_status_surfaces_project_into_shell_chrome() {
+        let mut extensions = ExecutableExtensions::default();
+        extensions.record_status_surface(
+            "fixture".into(),
+            "instance-a".into(),
+            3,
+            ExtensionStatusContribution {
+                surface: ExtensionUiSurface::Header,
+                text: "HEADER".into(),
+                style_role: Some("extension.pi.accent".into()),
+                priority: 1,
+            },
+        );
+        extensions.record_status_surface(
+            "fixture".into(),
+            "instance-a".into(),
+            3,
+            ExtensionStatusContribution {
+                surface: ExtensionUiSurface::Footer,
+                text: "FOOTER".into(),
+                style_role: None,
+                priority: 0,
+            },
+        );
+        let projected = ExecutableExtensions::project_semantic_ui(&extensions.semantic_ui);
+        assert_eq!(projected.header.len(), 1);
+        assert_eq!(projected.header[0].text, "HEADER");
+        assert_eq!(
+            projected.header[0].style_role.as_deref(),
+            Some("extension.pi.accent")
+        );
+        assert_eq!(projected.footer.len(), 1);
+        assert_eq!(projected.footer[0].text, "FOOTER");
+
+        // An empty text clears the surface rather than leaving a stale row.
+        extensions.record_status_surface(
+            "fixture".into(),
+            "instance-a".into(),
+            3,
+            ExtensionStatusContribution {
+                surface: ExtensionUiSurface::Header,
+                text: String::new(),
+                style_role: None,
+                priority: 0,
+            },
+        );
+        let projected = ExecutableExtensions::project_semantic_ui(&extensions.semantic_ui);
+        assert!(projected.header.is_empty());
+        assert_eq!(projected.footer.len(), 1);
+    }
+
+    #[test]
+    fn bounded_surface_text_truncates_on_a_character_boundary() {
+        assert_eq!(bounded_surface_text("plain"), "plain");
+        let long = "é".repeat(5000);
+        let bounded = bounded_surface_text(&long);
+        assert!(bounded.len() <= 8 * 1024);
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert_eq!(bounded.chars().count(), 4096);
+    }
+
+    #[test]
+    fn reserved_host_bindings_are_refused_with_a_typed_error() {
+        match dynamic_shortcut_binding("ctrl+shift+c") {
+            Ok(_) => panic!("the host keymap reserves ctrl+shift+c"),
+            Err((outcome, diagnostic)) => {
+                assert!(matches!(outcome, ExtensionRequestOutcome::Failed(..)));
+                assert!(diagnostic.contains("reserves this binding"));
+            }
+        }
+        assert!(dynamic_shortcut_binding("ctrl+shift+p").is_ok());
+        assert!(dynamic_shortcut_binding("shift+p").is_err());
+    }
+
+    #[test]
+    fn host_request_owner_fence_requires_the_foreground_owner() {
+        let owner = octet_agent::extension_process::ExtensionResourceOwner {
+            session_id: "owner-a".into(),
+            extension_instance_id: "instance-a".into(),
+            process_generation: 3,
+        };
+        assert!(host_request_owner_is_foreground(
+            Some(&owner),
+            Some("owner-a")
+        ));
+        assert!(!host_request_owner_is_foreground(
+            Some(&owner),
+            Some("owner-b")
+        ));
+        assert!(!host_request_owner_is_foreground(Some(&owner), None));
+        assert!(!host_request_owner_is_foreground(None, Some("owner-a")));
     }
 
     #[test]
@@ -8505,3 +10826,177 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "extensions/ui_transport_tests.rs"]
 mod ui_transport_tests;
+
+#[cfg(all(test, unix))]
+pub(crate) mod reload_lifecycle_test_support {
+    use super::*;
+
+    /// A real process/command owner with a deterministic worker projection.
+    /// No provider or actual child inference is used by these lifecycle tests.
+    pub(crate) async fn fixture(
+        workspace: &Path,
+        worker_state: Option<octet_agent::ExtensionPresentationState>,
+    ) -> (ExecutableExtensions, ExtensionProcess, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = workspace.join("reload-lifecycle.sh");
+        let wire_log = workspace.join("reload-lifecycle.jsonl");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+request_id() { sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }
+IFS= read -r initialize
+id=$(printf '%s' "$initialize" | request_id)
+printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.4","tools":[],"commands":[{"name":"worker-control","description":"Check retained control"}],"protocol":{"version":"0.4","features":["request_cancellation","content_parts","terminal_handoff"],"limits":{"max_concurrent_requests":1}}}}\n' "$id"
+while IFS= read -r request; do
+  printf '%s\n' "$request" >> "$OCTET_WORKSPACE/reload-lifecycle.jsonl"
+  case "$request" in
+    *'"method":"command/execute"'*)
+      id=$(printf '%s' "$request" | request_id)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"text":"control retained","notifications":[],"context":[]}}\n' "$id"
+      ;;
+    *'"method":"shutdown"'*)
+      id=$(printf '%s' "$request" | request_id)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest = ExtensionManifest::parse(
+            r#"
+name = "octet-subagents"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "reload-lifecycle.sh"
+[contributes]
+commands = ["worker-control"]
+"#,
+        )
+        .unwrap();
+        let mut config = ExtensionRuntimeConfig::new(workspace);
+        config.supervise = false;
+        let process = ExtensionProcess::start(
+            DiscoveredExtension {
+                manifest,
+                manifest_path: workspace.join("extension.toml"),
+                source: ExtensionSource::Explicit,
+                activation: octet_agent::extension_process::ExtensionActivation {
+                    enabled: true,
+                    trust: ExtensionTrust::Trusted,
+                },
+            },
+            config,
+        )
+        .await
+        .unwrap();
+        let mut extensions = ExecutableExtensions::default();
+        extensions.receivers.push(process.subscribe());
+        extensions.processes.push(process.clone());
+        if let Some(state) = worker_state {
+            let mut snapshot: ExtensionPresentationSnapshot =
+                serde_json::from_str(include_str!("../fixtures/extension-presentation.json"))
+                    .unwrap();
+            let nodes = &mut snapshot.collection.as_mut().unwrap().nodes;
+            nodes.truncate(1);
+            nodes[0].state = state;
+            nodes[0].references.clear();
+            extensions.presentations.insert(
+                SUBAGENTS_EXTENSION_NAME.into(),
+                ExtensionPresentationView {
+                    extension: SUBAGENTS_EXTENSION_NAME.into(),
+                    generation: process.health_snapshot().generation,
+                    extension_instance_id: process.extension_instance_id().to_owned(),
+                    resource_owner: None,
+                    snapshot,
+                },
+            );
+        }
+        (extensions, process, wire_log)
+    }
+
+    pub(crate) fn acquire_terminal(
+        extensions: &mut ExecutableExtensions,
+        shell: &mut InteractiveShell,
+        process: &ExtensionProcess,
+    ) {
+        // Keep the headless TestTerminal attached: suspending it and resuming
+        // would enter the developer's real tty. Exercise the same arbiter and
+        // input ownership as acquire; physical mode switching is PTY coverage.
+        extensions
+            .terminal_arbiter
+            .acquire(
+                TerminalHolder {
+                    owner: extensions.resource_owner.clone(),
+                    instance_id: process.extension_instance_id().to_owned(),
+                    generation: process.health_snapshot().generation,
+                    name: process.descriptor().manifest.name.clone(),
+                },
+                120,
+                40,
+            )
+            .unwrap();
+        shell.cede_terminal_input();
+        assert!(extensions.terminal_grant_is_active());
+        assert!(shell.terminal_input_parking().load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn terminal_reconciliation_restores_input_for_dead_or_changed_owner() {
+        for dead in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut extensions, process, wire) = fixture(directory.path(), None).await;
+            let mut shell = InteractiveShell::test_shell();
+            acquire_terminal(&mut extensions, &mut shell, &process);
+            if dead {
+                assert!(process.shutdown().await);
+            } else {
+                extensions.resource_owner = Some("replacement-owner".into());
+            }
+            extensions.reconcile_terminal_grant_for_shell(&mut shell);
+            assert!(!extensions.terminal_grant_is_active());
+            assert!(!shell.terminal_input_parking().load(Ordering::SeqCst));
+            extensions.reconcile_terminal_grant_for_shell(&mut shell);
+            extensions.shutdown().await;
+            if dead {
+                assert!(!std::fs::read_to_string(wire)
+                    .unwrap()
+                    .contains("terminal/grant-lost"));
+            } else {
+                assert_revoked_before_shutdown(&wire);
+            }
+        }
+    }
+
+    pub(crate) fn assert_revoked_before_shutdown(wire_log: &Path) {
+        let wire = std::fs::read_to_string(wire_log).unwrap();
+        let methods: Vec<String> = wire
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["method"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        let revoked = methods
+            .iter()
+            .position(|method| method == "terminal/grant-lost")
+            .unwrap();
+        let shutdown = methods
+            .iter()
+            .position(|method| method == "shutdown")
+            .unwrap();
+        assert!(revoked < shutdown, "{methods:?}");
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| *method == "terminal/grant-lost")
+                .count(),
+            1
+        );
+    }
+}

@@ -1018,6 +1018,12 @@ class McpStreamableHttpClient:
                 raise McpProtocolError("malformed_sse_event", "MCP SSE event was not UTF-8", permanent=True) from None
             if not text:
                 dispatch()
+                # An open-ended POST stream completes at the terminal RPC
+                # event; the peer need not close its connection. A declared
+                # finite body still validates its bounded HTTP framing (its
+                # read reaches logical EOF without waiting for socket close).
+                if result.complete and not permanent and length is None:
+                    return result
                 continue
             if text.startswith(":"):
                 continue

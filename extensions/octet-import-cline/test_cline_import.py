@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 FIXTURE = ROOT / "fixtures" / "representative"
@@ -235,6 +236,33 @@ class ClineImportTests(unittest.TestCase):
             self.assertIn(".cline/skills/linked", diagnostic_paths)
             self.assertIn(".cline/skills/file/SKILL.md", diagnostic_paths)
             self.assertNotIn("do not import this", json.dumps(result))
+
+    @unittest.skipUnless(os.open in os.supports_dir_fd, "descriptor-relative opens required")
+    def test_symlink_swap_after_path_validation_cannot_escape(self) -> None:
+        import cline_import
+        for swap_parent in (False, True):
+            with self.subTest(swap_parent=swap_parent), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                root, outside = base / "source", base / "outside"
+                source = root / ".clinerules" / "review.md"
+                source.parent.mkdir(parents=True)
+                outside.mkdir()
+                source.write_text("safe")
+                (outside / "review.md").write_text("PRIVATE_OUTSIDE_SOURCE")
+                original = os.lstat
+                def checked_then_replaced(*args):
+                    checked = original(*args)
+                    source.unlink()
+                    if swap_parent:
+                        source.parent.rmdir()
+                        source.parent.symlink_to(outside, target_is_directory=True)
+                    else:
+                        source.symlink_to(outside / "review.md")
+                    return checked
+                with patch.object(cline_import, "_safe_existing_path", return_value=source), \
+                     patch.object(os, "lstat", checked_then_replaced):
+                    with self.assertRaises(cline_import._UnreadableSourcePath):
+                        cline_import._read_optional_regular(root, ".clinerules/review.md", 1024)
 
     def test_initialize_applies_negotiated_frame_limit_to_response(self) -> None:
         completed = subprocess.run(

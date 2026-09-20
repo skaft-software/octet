@@ -22,30 +22,32 @@ pub struct RequestTimingSample {
 }
 
 impl RequestTimingSample {
+    #[cfg(test)]
     pub fn submitted_at(&self) -> Instant {
         self.submitted_at
     }
 
+    #[cfg(test)]
     pub fn stream_opened_at(&self) -> Option<Instant> {
         self.stream_opened_at
     }
 
+    #[cfg(test)]
     pub fn first_provider_event_at(&self) -> Option<Instant> {
         self.first_provider_event_at
     }
 
+    #[cfg(test)]
     pub fn first_generated_at(&self) -> Option<Instant> {
         self.first_generated_at
     }
 
-    pub fn last_generated_at(&self) -> Option<Instant> {
-        self.last_generated_at
-    }
-
+    #[cfg(test)]
     pub fn provider_finished_at(&self) -> Option<Instant> {
         self.provider_finished_at
     }
 
+    #[cfg(test)]
     pub fn committed_at(&self) -> Option<Instant> {
         self.committed_at
     }
@@ -57,20 +59,6 @@ impl RequestTimingSample {
         Some(
             self.last_generated_at?
                 .saturating_duration_since(self.first_generated_at?),
-        )
-    }
-
-    pub fn request_elapsed(&self) -> Option<Duration> {
-        Some(
-            self.provider_finished_at?
-                .saturating_duration_since(self.submitted_at),
-        )
-    }
-
-    pub fn commit_elapsed(&self) -> Option<Duration> {
-        Some(
-            self.committed_at?
-                .saturating_duration_since(self.submitted_at),
         )
     }
 }
@@ -98,10 +86,6 @@ impl RequestTiming {
 
     pub fn new() -> Self {
         Self::started_at(Instant::now())
-    }
-
-    pub fn reset_at(&mut self, now: Instant) {
-        *self = Self::started_at(now);
     }
 
     pub fn sample(&self) -> RequestTimingSample {
@@ -170,30 +154,19 @@ impl RequestThroughput {
         })
     }
 
+    #[cfg(test)]
     pub fn output_tokens(&self) -> u64 {
         self.output_tokens
     }
 
+    #[cfg(test)]
     pub fn generation_elapsed(&self) -> Duration {
         self.generation_elapsed
     }
 
+    #[cfg(test)]
     pub fn timing(&self) -> RequestTimingSample {
         self.timing
-    }
-
-    /// Exact floor of tokens per second scaled by 1,000. This integer form is
-    /// useful to consumers that must not introduce floating-point accounting.
-    pub fn tokens_per_second_milli(&self) -> u64 {
-        let numerator = u128::from(self.output_tokens).saturating_mul(1_000_000_000_000);
-        let value = numerator / self.generation_elapsed.as_nanos().max(1);
-        value.min(u128::from(u64::MAX)) as u64
-    }
-
-    /// Convert the already-authoritative sample for a display surface. This is
-    /// presentation conversion, not a token estimate or billing calculation.
-    pub fn tokens_per_second(&self) -> f64 {
-        self.output_tokens as f64 / self.generation_elapsed.as_secs_f64()
     }
 }
 
@@ -209,10 +182,6 @@ pub struct RequestThroughputTracker {
 }
 
 impl RequestThroughputTracker {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn begin_at(&mut self, now: Instant) {
         // A new physical request owns a fresh displayed sample. This prevents
         // a prior request's rate from surviving while a zero-token or failed
@@ -222,18 +191,16 @@ impl RequestThroughputTracker {
         self.latest_timing = None;
     }
 
-    pub fn begin(&mut self) {
-        self.begin_at(Instant::now());
-    }
-
     pub fn active(&self) -> Option<&RequestTiming> {
         self.active.as_ref()
     }
 
+    #[cfg(test)]
     pub fn latest(&self) -> Option<&RequestThroughput> {
         self.latest.as_ref()
     }
 
+    #[cfg(test)]
     pub fn latest_timing(&self) -> Option<RequestTimingSample> {
         self.latest_timing.as_ref().map(RequestTiming::sample)
     }
@@ -260,12 +227,6 @@ impl RequestThroughputTracker {
         };
         active.provider_event_at(now);
         true
-    }
-
-    pub fn has_generated_activity(&self) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|timing| timing.sample().last_generated_at().is_some())
     }
 
     /// Abandon a failed or rejected provider attempt without carrying its

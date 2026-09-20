@@ -1676,7 +1676,6 @@ Environment:
             "LICENSE",
             "extensions/octet-browse/REFERENCE.md",
             "extensions/octet-subagents/REFERENCE.md",
-            "extensions/octet-pi-compat/profiles/0.84.4.json",
             "crates/octet-ai/src/responses_ws.rs",
             "sdk/typescript/src/api_v03.ts",
             "sdk/typescript/src/api_v03.mjs",

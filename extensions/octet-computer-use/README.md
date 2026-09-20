@@ -4,8 +4,13 @@ Source-only API 0.3 entry point, scoped policy boundary, and a **trusted-local,
 mocked-native macOS composition**. This is not an installed/native-qualified
 computer-use product. Standalone startup remains inert.
 
+The host stages the executable separately from its sibling Python modules.
+`main.py` resolves those modules through the host-provided `OCTET_EXTENSION_DIR`,
+falling back to its own directory only for direct source execution. Successful
+API negotiation does not install a desktop backend or grant native-input authority.
+
 Read [CONTRACT.md](CONTRACT.md) before embedding. The exact extension wire is
-[API 0.3](../../docs/extensions/API-0.3-REFERENCE.md); capability ownership and
+[API 0.3](../../docs/extensions/API-0.4-REFERENCE.md); capability ownership and
 process trust remain governed by [extensions](../../docs/extensions.md) and
 [security](../../SECURITY.md).
 
@@ -106,7 +111,5 @@ python3 -m py_compile main.py octet_computer_use/*.py
 ```
 
 The suites use synthetic native fixtures only. They never open user applications,
-request permissions, run a code worker or contact a provider. Exact execution
-results and remaining host/native blockers are recorded in
-[the automation execution log](../../docs/swarm-audit/EXECUTION-automation.md).
-These checks do not establish Windows/macOS installed packaging parity.
+request permissions, run a code worker or contact a provider. These checks
+do not establish Windows/macOS installed-package or native-host qualification.

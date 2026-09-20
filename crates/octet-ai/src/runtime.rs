@@ -202,8 +202,9 @@ impl HostRequestOptions {
             )));
         }
         if !self.metadata.is_empty() {
-            let encoded = serde_json::to_vec(&self.metadata)
-                .map_err(|error| ConfigError::Parse(format!("invalid per-request metadata: {error}")))?;
+            let encoded = serde_json::to_vec(&self.metadata).map_err(|error| {
+                ConfigError::Parse(format!("invalid per-request metadata: {error}"))
+            })?;
             if encoded.len() > MAX_RUNTIME_METADATA_BYTES {
                 return Err(ConfigError::Parse(format!(
                     "per-request metadata exceeds the {MAX_RUNTIME_METADATA_BYTES}-byte limit"

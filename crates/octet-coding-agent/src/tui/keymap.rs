@@ -244,6 +244,7 @@ pub fn translate(event: Option<Event>, active: bool, editor_text: &str) -> Input
 }
 
 /// Translate an event while respecting application-owned popup dismissal.
+#[cfg(test)]
 pub fn translate_with_popup(
     event: Option<Event>,
     active: bool,

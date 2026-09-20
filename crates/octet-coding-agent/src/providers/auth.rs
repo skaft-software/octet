@@ -179,11 +179,7 @@ const AWS_BEDROCK_BEARER_VARIABLE: &str = "AWS_BEARER_TOKEN_BEDROCK";
 /// credentials to rotate without leaking the private source into provider
 /// declarations.
 pub(crate) fn aws_bedrock_auth(region: &str) -> anyhow::Result<Option<Auth>> {
-    aws_bedrock_auth_with(
-        region,
-        |variable| optional_bounded_env(variable),
-        resolve_aws_credentials,
-    )
+    aws_bedrock_auth_with(region, optional_bounded_env, resolve_aws_credentials)
 }
 
 fn aws_bedrock_auth_with<R, C>(
@@ -342,7 +338,7 @@ where
 }
 
 fn aws_environment_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
-    aws_environment_credentials_with(|variable| optional_bounded_env(variable))
+    aws_environment_credentials_with(optional_bounded_env)
 }
 
 fn aws_environment_credentials_with(
@@ -549,7 +545,7 @@ fn aws_metadata_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>
     aws_metadata_credentials_with(
         activation,
         inputs.profile_metadata_service_endpoint,
-        |variable| optional_bounded_env(variable),
+        optional_bounded_env,
         metadata_credentials_from_url,
         ec2_metadata_credentials,
     )
@@ -839,11 +835,9 @@ pub(crate) fn aws_metadata_activation_from(
 
 /// Read the activation inputs from the AWS environment and the effective profile.
 fn aws_metadata_activation_inputs() -> anyhow::Result<AwsMetadataActivationInputs> {
-    aws_metadata_activation_inputs_with(
-        |variable| optional_bounded_env(variable),
-        |config_file| aws_profile_values(config_file),
-        || aws_instance_identity_from(std::path::Path::new("/")),
-    )
+    aws_metadata_activation_inputs_with(optional_bounded_env, aws_profile_values, || {
+        aws_instance_identity_from(std::path::Path::new("/"))
+    })
 }
 
 fn aws_metadata_activation_inputs_with<R, P, I>(
@@ -1153,7 +1147,7 @@ where
 /// resolving the wrong role would sign requests for an account the operator did
 /// not select.
 fn aws_web_identity_credentials() -> anyhow::Result<Option<octet_ai::AwsCredentials>> {
-    let inputs = aws_web_identity_inputs_with(|variable| optional_bounded_env(variable))?;
+    let inputs = aws_web_identity_inputs_with(optional_bounded_env)?;
     let region = aws_bedrock_region()?;
     aws_web_identity_credentials_from(
         &inputs,
@@ -2642,7 +2636,7 @@ ignored key = ignored
                     Ok(_) => request.push(byte[0]),
                 }
             }
-            let head = String::from_utf8_lossy(&request).to_owned();
+            let head = String::from_utf8_lossy(&request).into_owned();
             let content_length = head
                 .lines()
                 .filter_map(|line| line.split_once(':'))

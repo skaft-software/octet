@@ -16,8 +16,8 @@ do the following in order:
 
 3. Update the owning documentation. User-facing topics link from
    [docs/README.md](../../README.md); provider behavior belongs in
-   `docs/providers.md`, themes in `docs/themes.md`, and Pi parity in
-   `docs/parity/README.md` / `docs/parity/repo-tooling.md`.
+   `docs/providers.md`, themes in `docs/themes.md`, and extension contracts in
+   `docs/extensions.md`.
 
 4. Inspect the diff (`git diff` for your paths only) and confirm nothing
    unrelated was touched. Do not touch another worker's paths.

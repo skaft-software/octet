@@ -51,12 +51,8 @@ pub struct ParityOptions {
 
 impl ParityOptions {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.no_session {
-            if self.name.is_some() {
-                anyhow::bail!(
-                    "--no-session cannot name a session because no transcript is persisted"
-                );
-            }
+        if self.no_session && self.name.is_some() {
+            anyhow::bail!("--no-session cannot name a session because no transcript is persisted");
         }
         if let Some(patterns) = &self.models {
             model_patterns(patterns)?;
@@ -203,8 +199,9 @@ impl ParityOptions {
         } else {
             match &config.resume {
                 ResumeSelector::New => {
-                    let id = crate::modes::timestamp();
-                    Session::create(store.new_path(&id))?;
+                    let path = store.new_path(&crate::modes::timestamp());
+                    let id = path.file_stem().expect("allocated session filename").to_string_lossy().into_owned();
+                    Session::create(path)?;
                     id
                 }
                 ResumeSelector::Continue => store.latest()?.id,

@@ -893,7 +893,8 @@ impl EventObserver for TelemetryObserver {
                     fields,
                 );
             }
-            AgentEvent::ToolProgress { .. }
+            AgentEvent::RecoveredOutput { .. }
+            | AgentEvent::ToolProgress { .. }
             | AgentEvent::OutputMedia { .. }
             | AgentEvent::ProviderLifecycle { .. } => {}
         }
@@ -1011,6 +1012,7 @@ fn event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::RunFinished { .. } => "run_finished",
         AgentEvent::DelegationUpdated { .. } => "delegation_updated",
         AgentEvent::OutputDelta { .. }
+        | AgentEvent::RecoveredOutput { .. }
         | AgentEvent::OutputMedia { .. }
         | AgentEvent::ProviderRetry { .. }
         | AgentEvent::ToolProgress { .. } => "event",

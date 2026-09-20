@@ -436,6 +436,648 @@
     "structured_output": true,
     "tool_call": true
   },
+  "baseten/deepseek-ai/DeepSeek-V4-Flash-0731": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Flash 0731",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/deepseek-ai/DeepSeek-V4-Pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/deepseek-ai/DeepSeek-V4-Pro-0813": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Pro 0813",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/deepseek-ai/DeepSeek-V4.1-Flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/moonshotai/Kimi-K2.5": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262000,
+      "output": 262000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/moonshotai/Kimi-K2.6": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262000,
+      "output": 262000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.6",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/moonshotai/Kimi-K2.7-Code": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262000,
+      "output": 262000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.7 Code",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/moonshotai/Kimi-K3": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K3",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 202800,
+      "output": 202800
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nemotron Ultra",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/nvidia/Nemotron-120B-A12B": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 202800,
+      "output": 202800
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nemotron Super",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/openai/gpt-oss-120b": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 128072,
+      "output": 128072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "OpenAI GPT 120B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/thinkingmachines/inkling": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Inkling",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/thinkingmachines/inkling-small": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Inkling Small",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-4.7": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 200000,
+      "output": 200000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 4.7",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-5": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 202800,
+      "output": 202800
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-5.1": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 202800,
+      "output": 202800
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.1",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-5.2": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.2",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-5.2-Fast": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.2 Fast",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-5.3": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.3",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-5.3-Fast": {
+    "limit": {
+      "context": 1048576,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.3 Fast",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "baseten/zai-org/GLM-5.3-Flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.3 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "cerebras/gpt-oss-120b": {
     "limit": {
       "context": 131072,
@@ -701,6 +1343,39 @@
     "structured_output": true,
     "tool_call": true
   },
+  "fireworks/accounts/fireworks/models/deepseek-v4-pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "fireworks/accounts/fireworks/models/deepseek-v4-pro-0813": {
     "interleaved": {
       "field": "reasoning_content"
@@ -843,9 +1518,7 @@
     "modalities": {
       "input": [
         "text",
-        "image",
-        "video",
-        "pdf"
+        "image"
       ],
       "output": [
         "text"
@@ -1005,6 +1678,36 @@
     "structured_output": true,
     "tool_call": true
   },
+  "fireworks/accounts/fireworks/models/minimax-m2p7": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 196608,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax-M2.7",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "fireworks/accounts/fireworks/models/minimax-m3": {
     "interleaved": {
       "field": "reasoning_content"
@@ -1015,9 +1718,7 @@
     },
     "modalities": {
       "input": [
-        "text",
-        "image",
-        "video"
+        "text"
       ],
       "output": [
         "text"
@@ -1035,24 +1736,6 @@
         ]
       }
     ],
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/models/mistral-large-3-fp8": {
-    "limit": {
-      "context": 262144,
-      "output": 262144
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Mistral Large 3 675B Instruct 2512",
-    "reasoning": false,
     "tool_call": true
   },
   "fireworks/accounts/fireworks/models/muse-glimmer-30b": {
@@ -1203,7 +1886,8 @@
     },
     "modalities": {
       "input": [
-        "text"
+        "text",
+        "image"
       ],
       "output": [
         "text"
@@ -1216,6 +1900,74 @@
         "type": "toggle"
       }
     ],
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/deepseek-flash-latest": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek Flash Latest",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/deepseek-pro-latest": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek Pro Latest",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
     "tool_call": true
   },
   "fireworks/accounts/fireworks/routers/glm-5p2-fast": {
@@ -1281,6 +2033,140 @@
     "structured_output": true,
     "tool_call": true
   },
+  "fireworks/accounts/fireworks/routers/glm-fast-latest": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048572,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.3 Fast (Latest)",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/glm-flash-latest": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048573,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM Flash Latest (GLM 5.3 Flash)",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/glm-latest": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048573,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM Latest",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/kimi-fast-latest": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi Fast Latest",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "min": 1024,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "fireworks/accounts/fireworks/routers/kimi-k3-fast": {
     "interleaved": {
       "field": "reasoning_content"
@@ -1319,6 +2205,99 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/kimi-latest": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi Latest",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "min": 1024,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/minimax-latest": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 512000,
+      "output": 512000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax Latest",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/qwen-max-latest": {
+    "limit": {
+      "context": 262144,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen Max Latest (Qwen3.8 Max)",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
     "tool_call": true
   },
   "groq/allam-2-7b": {
@@ -5660,6 +6639,71 @@
     "structured_output": true,
     "tool_call": true
   },
+  "nvidia/z-ai/glm-5.3": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.3",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "nvidia/z-ai/glm-5.3-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.3-Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openai/chatgpt-image-latest": {
     "limit": {
       "context": 0,
@@ -7445,6 +8489,38 @@
     "structured_output": true,
     "tool_call": true
   },
+  "opencode/deepseek-v4.1-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode/gemini-3-flash": {
     "limit": {
       "context": 1048576,
@@ -8531,7 +9607,7 @@
         "text"
       ]
     },
-    "name": "GPT-5.6 Sol (50% Off)",
+    "name": "GPT-5.6 Sol",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -8766,6 +9842,60 @@
     "reasoning": true,
     "reasoning_options": [],
     "tool_call": true
+  },
+  "opencode/jev-1.13": {
+    "limit": {
+      "context": 64000,
+      "output": 0
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Jev 1.13",
+    "reasoning": false,
+    "structured_output": true,
+    "tool_call": false
+  },
+  "opencode/jev-1.13-free": {
+    "limit": {
+      "context": 64000,
+      "output": 0
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Jev 1.13 Free",
+    "reasoning": false,
+    "structured_output": true,
+    "tool_call": false
+  },
+  "opencode/jev-latest": {
+    "limit": {
+      "context": 64000,
+      "output": 0
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Jev",
+    "reasoning": false,
+    "structured_output": true,
+    "tool_call": false
   },
   "opencode/kimi-k2": {
     "limit": {
@@ -9412,8 +10542,7 @@
           "low",
           "medium",
           "high",
-          "xhigh",
-          "max"
+          "xhigh"
         ]
       }
     ],
@@ -9647,6 +10776,42 @@
         "type": "budget_tokens"
       }
     ],
+    "tool_call": true
+  },
+  "opencode/qwen3.8-flash": {
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      {
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
     "tool_call": true
   },
   "opencode/ring-2.6-1t-free": {
@@ -10712,7 +11877,7 @@
   "openrouter/deepseek/deepseek-chat": {
     "limit": {
       "context": 163840,
-      "output": 16000
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -10784,7 +11949,7 @@
     "name": "DeepSeek-R1",
     "reasoning": true,
     "reasoning_options": [],
-    "structured_output": true,
+    "structured_output": false,
     "tool_call": true
   },
   "openrouter/deepseek/deepseek-r1-0528": {
@@ -10965,7 +12130,7 @@
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 262144
     },
     "modalities": {
       "input": [
@@ -11030,7 +12195,7 @@
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 384000
     },
     "modalities": {
       "input": [
@@ -11234,35 +12399,6 @@
       ]
     },
     "name": "Gemini 2.5 Pro Preview 06-05",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "max": 32768,
-        "min": 128,
-        "type": "budget_tokens"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/google/gemini-2.5-pro-preview-05-06": {
-    "limit": {
-      "context": 1048576,
-      "output": 65535
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "pdf",
-        "audio",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Gemini 2.5 Pro Preview 05-06",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -11834,7 +12970,7 @@
   "openrouter/google/gemma-4-26b-a4b-it": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -12373,7 +13509,7 @@
   "openrouter/meta-llama/llama-3.1-70b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 8192
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -12463,7 +13599,7 @@
   "openrouter/meta-llama/llama-4-maverick": {
     "limit": {
       "context": 1048576,
-      "output": 115200
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -12865,7 +14001,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 131072
+      "output": 128000
     },
     "modalities": {
       "input": [
@@ -13054,26 +14190,6 @@
       ]
     },
     "name": "Mistral Large 2407",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/mistralai/mistral-large-2512": {
-    "limit": {
-      "context": 262144,
-      "output": 209715
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Mistral Large 3",
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
@@ -13310,7 +14426,7 @@
   "openrouter/moonshotai/kimi-k2": {
     "limit": {
       "context": 131072,
-      "output": 100352
+      "output": 98304
     },
     "modalities": {
       "input": [
@@ -13328,7 +14444,7 @@
   "openrouter/moonshotai/kimi-k2-0905": {
     "limit": {
       "context": 262144,
-      "output": 100352
+      "output": 98304
     },
     "modalities": {
       "input": [
@@ -13349,7 +14465,7 @@
     },
     "limit": {
       "context": 262144,
-      "output": 100352
+      "output": 98304
     },
     "modalities": {
       "input": [
@@ -13680,7 +14796,7 @@
   "openrouter/nvidia/nemotron-3-super-120b-a12b": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -13746,7 +14862,7 @@
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 182520
     },
     "modalities": {
       "input": [
@@ -13860,7 +14976,7 @@
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "limit": {
       "context": 262144,
-      "output": 131072
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -14008,24 +15124,6 @@
       ]
     },
     "name": "GPT-4 Turbo",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/gpt-4-turbo-preview": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-4 Turbo Preview",
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
@@ -15212,7 +16310,7 @@
   "openrouter/openai/gpt-oss-120b": {
     "limit": {
       "context": 131072,
-      "output": 117964
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -15818,6 +16916,37 @@
     "structured_output": false,
     "tool_call": true
   },
+  "openrouter/prism-ml/ternary-bonsai-2-27b": {
+    "limit": {
+      "context": 262144,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ternary Bonsai 2 27B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "medium",
+          "xhigh"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/qwen/qwen-2.5-72b-instruct": {
     "limit": {
       "context": 32768,
@@ -15930,7 +17059,7 @@
   "openrouter/qwen/qwen3-14b": {
     "limit": {
       "context": 131072,
-      "output": 8192
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -16036,7 +17165,7 @@
   "openrouter/qwen/qwen3-30b-a3b-instruct-2507": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 32000
     },
     "modalities": {
       "input": [
@@ -16268,7 +17397,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-thinking": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -16326,7 +17455,7 @@
   "openrouter/qwen/qwen3-vl-30b-a3b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -16523,7 +17652,7 @@
   "openrouter/qwen/qwen3.5-9b": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -16863,6 +17992,39 @@
       ]
     },
     "name": "Qwen3.8 27B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/qwen/qwen3.8-27b:free": {
+    "limit": {
+      "context": 262144,
+      "output": 235929
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 27B (free)",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -17451,12 +18613,12 @@
     "name": "UnslopNemo 12B",
     "reasoning": false,
     "structured_output": true,
-    "tool_call": true
+    "tool_call": false
   },
   "openrouter/thinkingmachines/inkling": {
     "limit": {
       "context": 1048576,
-      "output": 32768
+      "output": 471859
     },
     "modalities": {
       "input": [
@@ -17585,6 +18747,25 @@
     "structured_output": false,
     "tool_call": true
   },
+  "openrouter/unbiased/pareto": {
+    "limit": {
+      "context": 262144,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Pareto",
+    "reasoning": false,
+    "structured_output": false,
+    "tool_call": true
+  },
   "openrouter/undi95/remm-slerp-l2-13b": {
     "limit": {
       "context": 6144,
@@ -17620,7 +18801,14 @@
     "reasoning": true,
     "reasoning_options": [
       {
-        "type": "toggle"
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
       }
     ],
     "structured_output": true,
@@ -17643,7 +18831,16 @@
     "reasoning": true,
     "reasoning_options": [
       {
-        "type": "toggle"
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
       }
     ],
     "structured_output": true,
@@ -18145,7 +19342,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 182476
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -18172,10 +19369,40 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/z-ai/glm-5.2:free": {
+    "limit": {
+      "context": 32768,
+      "output": 29491
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.2 (free)",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "xhigh"
+        ]
+      }
+    ],
+    "structured_output": false,
+    "tool_call": false
+  },
   "openrouter/z-ai/glm-5.3": {
     "limit": {
       "context": 1310720,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -18228,6 +19455,36 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/z-ai/glm-5.3-flashx": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.3 FlashX",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": false,
     "tool_call": true
   },
   "openrouter/z-ai/glm-5v-turbo": {
@@ -18302,7 +19559,7 @@
         "text"
       ]
     },
-    "name": "Anthropic Claude Haiku Latest",
+    "name": "Claude Haiku Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18362,7 +19619,7 @@
         "text"
       ]
     },
-    "name": "Anthropic Claude Sonnet Latest",
+    "name": "Claude Sonnet Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18375,6 +19632,69 @@
           "medium",
           "high",
           "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/~deepseek/deepseek-flash-latest": {
+    "limit": {
+      "context": 1048576,
+      "output": 943718
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek Flash Latest",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/~deepseek/deepseek-pro-latest": {
+    "limit": {
+      "context": 1048576,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek Pro Latest",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
           "max"
         ]
       }
@@ -18430,7 +19750,7 @@
         "text"
       ]
     },
-    "name": "Google Gemini Flash Latest",
+    "name": "Gemini Flash Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18462,7 +19782,7 @@
         "text"
       ]
     },
-    "name": "Google Gemini Pro Latest",
+    "name": "Gemini Pro Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18492,7 +19812,7 @@
         "text"
       ]
     },
-    "name": "MoonshotAI Kimi Latest",
+    "name": "Kimi Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18525,7 +19845,7 @@
         "text"
       ]
     },
-    "name": "OpenAI GPT Astra Latest",
+    "name": "GPT Astra Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18557,7 +19877,7 @@
         "text"
       ]
     },
-    "name": "OpenAI GPT Luna Latest",
+    "name": "GPT Luna Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18590,7 +19910,7 @@
         "text"
       ]
     },
-    "name": "OpenAI GPT Mini Latest",
+    "name": "GPT Mini Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18622,7 +19942,7 @@
         "text"
       ]
     },
-    "name": "OpenAI GPT Sol Latest",
+    "name": "GPT Sol Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18655,7 +19975,7 @@
         "text"
       ]
     },
-    "name": "OpenAI GPT Terra Latest",
+    "name": "GPT Terra Latest",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -18737,7 +20057,7 @@
   "openrouter/~z-ai/glm-latest": {
     "limit": {
       "context": 1310720,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -18757,6 +20077,1557 @@
           "high",
           "max"
         ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/MiniMax-M2.5": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 196608,
+      "input": 196601,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax-M2.5",
+    "reasoning": true,
+    "reasoning_options": [],
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/deepseek-v3.2": {
+    "limit": {
+      "context": 131072,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V3.2",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/deepseek-v4-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/deepseek-v4-flash-0731": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Flash 0731",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/deepseek-v4-pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/deepseek-v4-pro-0813": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Pro 0813",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/deepseek-v4.1-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/glm-5": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 202752,
+      "output": 16384
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/glm-5.1": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 202752,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.1",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/glm-5.2": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.2",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/glm-5.3": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.3",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/kimi-k2.5": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262144,
+      "output": 98304
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/kimi-k2.6": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262144,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.6",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/kimi-k2.7-code": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262144,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.7 Code",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/qwen3.6-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.6 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 131072,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/qwen3.6-plus": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.6 Plus",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 131072,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/qwen3.7-max": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.7 Max",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 262144,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/qwen3.7-plus": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.7 Plus",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 262144,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/qwen3.8-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      {
+        "max": 262144,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-cn/qwen3.8-max": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 Max",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      {
+        "max": 262144,
+        "min": 0,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/deepseek-v4-flash-0731": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Flash 0731",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/deepseek-v4-pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/deepseek-v4-pro-0813": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Pro 0813",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/glm-5.2": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.2",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/qwen3.6-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.6 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 131072,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/qwen3.7-max": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.7 Max",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 262144,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/qwen3.7-plus": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.7 Plus",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 262144,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/qwen3.8-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      {
+        "max": 262144,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan-individual/qwen3.8-max": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 Max",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      {
+        "max": 262144,
+        "min": 0,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/MiniMax-M2.5": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 196608,
+      "input": 196601,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax-M2.5",
+    "reasoning": true,
+    "reasoning_options": [],
+    "tool_call": true
+  },
+  "qwen-token-plan/deepseek-v3.2": {
+    "limit": {
+      "context": 131072,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V3.2",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/deepseek-v4-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/deepseek-v4-flash-0731": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Flash 0731",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/deepseek-v4-pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/deepseek-v4-pro-0813": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4 Pro 0813",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/deepseek-v4.1-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": false,
+    "tool_call": true
+  },
+  "qwen-token-plan/glm-5": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 202752,
+      "output": 16384
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/glm-5.1": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 202752,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.1",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/glm-5.2": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.2",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/glm-5.3": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.3",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/kimi-k2.5": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262144,
+      "output": 98304
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/kimi-k2.6": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262144,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.6",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/kimi-k2.7-code": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262144,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.7 Code",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/qwen3.6-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.6 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 131072,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/qwen3.6-plus": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.6 Plus",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 131072,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/qwen3.7-max": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.7 Max",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 262144,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/qwen3.7-plus": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.7 Plus",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "max": 262144,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/qwen3.8-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      {
+        "max": 262144,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "qwen-token-plan/qwen3.8-max": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 Max",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      {
+        "max": 262144,
+        "min": 0,
+        "type": "budget_tokens"
       }
     ],
     "structured_output": true,
@@ -19158,6 +22029,38 @@
       {
         "type": "toggle"
       },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "together/deepseek-ai/DeepSeek-V4.1-Flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
       {
         "type": "effort",
         "values": [
@@ -19840,46 +22743,6 @@
     "reasoning": false,
     "tool_call": false
   },
-  "xai/grok-imagine-image-2.0": {
-    "limit": {
-      "context": 64000,
-      "output": 0
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "pdf"
-      ],
-      "output": [
-        "image",
-        "pdf"
-      ]
-    },
-    "name": "Grok Imagine Image 2.0",
-    "reasoning": false,
-    "tool_call": false
-  },
-  "xai/grok-imagine-image-quality": {
-    "limit": {
-      "context": 16000,
-      "output": 0
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "pdf"
-      ],
-      "output": [
-        "image",
-        "pdf"
-      ]
-    },
-    "name": "Grok Imagine Image Quality",
-    "reasoning": false,
-    "tool_call": false
-  },
   "xai/grok-imagine-video": {
     "limit": {
       "context": 1024,
@@ -20075,6 +22938,126 @@
         "type": "toggle"
       }
     ],
+    "tool_call": true
+  },
+  "zai-coding-cn/glm-4.6v": {
+    "limit": {
+      "context": 128000,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-4.6V",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "tool_call": true
+  },
+  "zai-coding-cn/glm-5.3": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.3",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "zai-coding-cn/glm-5.3-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.3-Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "zai-coding-cn/glm-5.3-highspeed": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.3 Highspeed",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
     "tool_call": true
   }
 }

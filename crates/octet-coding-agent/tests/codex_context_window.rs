@@ -47,11 +47,21 @@ fn resolve(
 }
 
 fn default_tier(model_id: &str) -> CodexContextWindow {
-    resolve(model_id, CodexContextTier::Default, CodexContextOverride::NONE).unwrap()
+    resolve(
+        model_id,
+        CodexContextTier::Default,
+        CodexContextOverride::NONE,
+    )
+    .unwrap()
 }
 
 fn extended_tier(model_id: &str) -> CodexContextWindow {
-    resolve(model_id, CodexContextTier::Extended, CodexContextOverride::NONE).unwrap()
+    resolve(
+        model_id,
+        CodexContextTier::Extended,
+        CodexContextOverride::NONE,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -109,9 +119,12 @@ fn a_plus_plan_cannot_exceed_the_deliberate_cap_even_with_an_override() {
             CODEX_CONTEXT_WINDOW_CAP,
             "{model_id} without an entitlement stays on the deliberate cap"
         );
-        let error =
-            resolve(model_id, plus, CodexContextOverride::raising(requested, true))
-                .expect_err("a non-entitled plan must not raise above the deliberate cap");
+        let error = resolve(
+            model_id,
+            plus,
+            CodexContextOverride::raising(requested, true),
+        )
+        .expect_err("a non-entitled plan must not raise above the deliberate cap");
         assert!(
             matches!(
                 error,
@@ -215,7 +228,10 @@ fn an_override_above_entitlement_fails_closed() {
     )
     .expect_err("an unusable window must fail closed");
     assert!(
-        matches!(below_minimum, CodexContextWindowError::OverrideBelowMinimum { .. }),
+        matches!(
+            below_minimum,
+            CodexContextWindowError::OverrideBelowMinimum { .. }
+        ),
         "{below_minimum}"
     );
 
@@ -244,13 +260,19 @@ fn above_the_standard_tier_accounting_is_uncertain() {
         raised.uncertain_usage_operation(),
         Some("codex-context-above-272k")
     );
-    assert_eq!(default_tier("gpt-6-astra").uncertain_usage_operation(), None);
+    assert_eq!(
+        default_tier("gpt-6-astra").uncertain_usage_operation(),
+        None
+    );
 
     // Luna's documented 372K working window is above the standard tier too.
     let luna = extended_tier("gpt-5.6-luna");
     assert_eq!(luna.context_window, CODEX_5_6_CONTEXT_WINDOW);
     assert!(luna.has_uncertain_usage);
-    assert_eq!(luna.clamp, None, "372K luna is the documented window, not a clamp");
+    assert_eq!(
+        luna.clamp, None,
+        "372K luna is the documented window, not a clamp"
+    );
 }
 
 #[test]
@@ -298,9 +320,7 @@ fn clamp_notice_fires_once_per_transition_and_never_without_a_clamp() {
     assert_eq!(reporter.observe(None), None);
     assert_eq!(reporter.observe(Some(clamp.clone())), Some(clamp.clone()));
 
-    let other = extended_tier("gpt-5.4")
-        .clamp
-        .expect("gpt-5.4 is clamped");
+    let other = extended_tier("gpt-5.4").clamp.expect("gpt-5.4 is clamped");
     assert_ne!(other, clamp, "each model has its own advertised window");
     assert_eq!(reporter.observe(Some(other.clone())), Some(other));
 
@@ -322,7 +342,10 @@ fn clamp_notice_fires_once_per_transition_and_never_without_a_clamp() {
     assert!(message.contains("advertised 872K"), "{message}");
     assert!(message.contains("effective 272K"), "{message}");
     assert!(message.contains("272K Codex cap"), "{message}");
-    assert!(message.contains("reduces the advertised window by 600K"), "{message}");
+    assert!(
+        message.contains("reduces the advertised window by 600K"),
+        "{message}"
+    );
     assert!(message.contains("double-priced"), "{message}");
     assert!(message.contains("websocket"), "{message}");
     // The in-app remedy leads; the environment variables stay the scriptable
@@ -334,8 +357,15 @@ fn clamp_notice_fires_once_per_transition_and_never_without_a_clamp() {
         remedy < scriptable,
         "the in-app flag must be offered before the env vars: {message}"
     );
-    assert!(message.contains("OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF=1"), "{message}");
-    assert!(message.len() < 1024, "the notice is bounded: {}", message.len());
+    assert!(
+        message.contains("OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF=1"),
+        "{message}"
+    );
+    assert!(
+        message.len() < 1024,
+        "the notice is bounded: {}",
+        message.len()
+    );
 }
 
 /// The single session note is a catalog-free, effective-model-only value: it is
@@ -352,11 +382,17 @@ fn one_session_note_per_effective_model_and_none_for_an_unclamped_legacy_route()
     // A legacy route whose advertised window is the cap itself needs no note.
     let legacy = extended_tier("some-legacy-codex");
     assert_eq!(legacy.context_window, CODEX_CONTEXT_WINDOW_CAP);
-    assert_eq!(codex_context_session_note("some-legacy-codex", &legacy), None);
+    assert_eq!(
+        codex_context_session_note("some-legacy-codex", &legacy),
+        None
+    );
 
     // A non-Codex model never reaches this policy at all; there is no window to
     // note and nothing is emitted for one.
-    assert_eq!(codex_context_session_note("deepseek/v4.1-flash", &legacy), None);
+    assert_eq!(
+        codex_context_session_note("deepseek/v4.1-flash", &legacy),
+        None
+    );
 
     // The note is a pure function of the resolution: resolving the same session
     // model again yields the same single note, and the launch path calls it once.
@@ -398,7 +434,10 @@ fn the_luna_note_states_372k_consistently_and_never_reads_as_a_cap_to_272k() {
     assert_eq!(reduced.context_window, CODEX_5_6_CONTEXT_WINDOW);
     let note = codex_context_session_note("gpt-5.6-luna", &reduced).expect("still above the tier");
     assert!(note.contains("effective 372K"), "{note}");
-    assert!(note.contains("reduces the advertised window by 128K"), "{note}");
+    assert!(
+        note.contains("reduces the advertised window by 128K"),
+        "{note}"
+    );
     assert!(note.contains("above the 272K standard tier"), "{note}");
 }
 
@@ -481,7 +520,9 @@ fn the_acknowledgement_word_is_required_and_is_the_documented_wording() {
         "{error}"
     );
     assert!(
-        error.to_string().contains(CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING),
+        error
+            .to_string()
+            .contains(CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING),
         "the refusal must quote the exact wording a frontend renders: {error}"
     );
 
@@ -499,7 +540,10 @@ fn the_acknowledgement_word_is_required_and_is_the_documented_wording() {
 fn the_above_standard_tier_operation_id_is_stable() {
     // Frontends and the bootstrap notice pass this id to
     // `Session::record_usage_uncertainty`; it is part of the public contract.
-    assert_eq!(CODEX_ABOVE_STANDARD_TIER_OPERATION, "codex-context-above-272k");
+    assert_eq!(
+        CODEX_ABOVE_STANDARD_TIER_OPERATION,
+        "codex-context-above-272k"
+    );
 
     // The documented 372K luna window is above the standard tier without any
     // override, so its accounting is uncertain too — and it is not a clamp.
@@ -517,7 +561,10 @@ fn the_above_standard_tier_operation_id_is_stable() {
     // Every family that stays on the deliberate cap owes no obligation.
     for model_id in ["gpt-6-astra", "gpt-5.4", "gpt-5.6-sol", "legacy-codex"] {
         let resolved = extended_tier(model_id);
-        assert_eq!(resolved.context_window, CODEX_CONTEXT_WINDOW_CAP, "{model_id}");
+        assert_eq!(
+            resolved.context_window, CODEX_CONTEXT_WINDOW_CAP,
+            "{model_id}"
+        );
         assert_eq!(resolved.uncertain_usage_operation(), None, "{model_id}");
     }
 }

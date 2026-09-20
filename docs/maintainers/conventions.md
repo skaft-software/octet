@@ -1,6 +1,6 @@
 # octet agent conventions (tracked maintainer mirror)
 
-> This is the tracked mirror of the repository agent conventions required by parity row `6.2`.
+> This is the tracked mirror of the repository agent conventions.
 > The working copy at the repository root is `AGENTS.md`, which `.gitignore` keeps local-only
 > (agent instructions and runtime state are never committed), so a fresh clone must read this
 > mirror instead. When the working copy changes, update this file in the same change; the two
@@ -20,8 +20,7 @@ conventions agents need in a large, multi-writer checkout.
   TUI, serve, migrate), `octet-extension-host`, `sexy-tui-rs` (renderer).
 - `extensions/` — first-party executable extensions and source packages
   (`octet-import-*`, `octet-browse`, `octet-mcp`, `octet-subagents`, …).
-- `docs/` — product documentation; `docs/parity/README.md` is the additive Pi
-  parity ledger; `docs/swarm-audit/WORK-QUEUE.md` is the work queue.
+- `docs/` — user guides, API contracts, architecture, and release documentation.
 - `scripts/` — release, packaging, generator, and acceptance scripts (Python and
   shell), with fixture-based tests alongside them.
 - `sdk/python/` — the published Python extension SDK.
@@ -78,7 +77,7 @@ paths.
 
 - User-facing docs live in `docs/` and are linked from `docs/README.md`.
 - `docs/providers.md` owns provider behavior; `docs/themes.md` owns themes;
-  `docs/parity/README.md` and `docs/parity/repo-tooling.md` own Pi parity rows.
+  `docs/extensions.md` owns the extension authoring contract.
 - Record qualified, observed results (with the exact command) rather than
   inferred passes. Never present source-only checks as behavioral evidence.
 

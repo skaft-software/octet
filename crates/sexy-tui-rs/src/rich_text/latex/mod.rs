@@ -208,10 +208,7 @@ struct Layout {
 // Inline text formatting
 // ---------------------------------------------------------------------------
 
-fn replace_characters(
-    value: &str,
-    table: fn(char) -> Option<&'static str>,
-) -> Option<String> {
+fn replace_characters(value: &str, table: fn(char) -> Option<&'static str>) -> Option<String> {
     let mut result = String::new();
     for character in value.chars() {
         result.push_str(table(character)?);
@@ -264,7 +261,9 @@ fn format_script(value: &str, kind: ScriptKind) -> String {
     let single_character = value.chars().count() == 1;
     let plain_word = matches!(kind, ScriptKind::Sub)
         && !value.is_empty()
-        && value.chars().all(|character| character.is_ascii_alphabetic());
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphabetic());
     if single_character || plain_word {
         return format!("{prefix}{value}");
     }
@@ -273,9 +272,9 @@ fn format_script(value: &str, kind: ScriptKind) -> String {
 
 fn is_simple_math_word(value: &str) -> bool {
     !value.is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_alphabetic() || character.is_numeric() || character == '.')
+        && value.chars().all(|character| {
+            character.is_alphabetic() || character.is_numeric() || character == '.'
+        })
 }
 
 fn format_fraction(numerator: &str, denominator: &str) -> String {
@@ -393,12 +392,7 @@ fn normalize_output(value: &str) -> String {
 fn pad_layout_line(line: &str, width: usize, centered: bool) -> String {
     let padding = width.saturating_sub(visible_width(line));
     let left = if centered { padding / 2 } else { 0 };
-    format!(
-        "{}{}{}",
-        " ".repeat(left),
-        line,
-        " ".repeat(padding - left)
-    )
+    format!("{}{}{}", " ".repeat(left), line, " ".repeat(padding - left))
 }
 
 fn join_layouts(layouts: &[Layout]) -> Layout {
@@ -522,8 +516,8 @@ fn render_layout(source: &str, nodes: &[LayoutNode]) -> Layout {
                 let preserve_leading_space =
                     matches!(previous_node, Some(LayoutNode::Matrix { .. }))
                         && starts_with_whitespace(&sliced);
-                let preserve_trailing_space = matches!(node, LayoutNode::Matrix { .. })
-                    && ends_with_whitespace(&sliced);
+                let preserve_trailing_space =
+                    matches!(node, LayoutNode::Matrix { .. }) && ends_with_whitespace(&sliced);
                 let text = if !trimmed.is_empty() {
                     format!(
                         "{}{}{}",
@@ -595,7 +589,11 @@ fn render_layout(source: &str, nodes: &[LayoutNode]) -> Layout {
                     });
                 }
                 LayoutNode::Matrix { lines, baseline } => {
-                    let width = lines.iter().map(|line| visible_width(line)).max().unwrap_or(0);
+                    let width = lines
+                        .iter()
+                        .map(|line| visible_width(line))
+                        .max()
+                        .unwrap_or(0);
                     layouts.push(Layout {
                         lines: lines
                             .iter()
@@ -1138,16 +1136,14 @@ impl<'nodes> LatexParser<'nodes> {
     }
 
     fn parse_optional_argument(&mut self) -> Option<String> {
-        while self.position < self.source.len()
-            && matches!(self.source[self.position], ' ' | '\t')
+        while self.position < self.source.len() && matches!(self.source[self.position], ' ' | '\t')
         {
             self.position += 1;
         }
         if self.character_at(self.position) != Some('[') {
             return None;
         }
-        let end = ((self.position + 1)..self.source.len())
-            .find(|index| self.source[*index] == ']');
+        let end = ((self.position + 1)..self.source.len()).find(|index| self.source[*index] == ']');
         let Some(end) = end else {
             self.supported = false;
             return None;
@@ -1158,8 +1154,7 @@ impl<'nodes> LatexParser<'nodes> {
     }
 
     fn read_raw_group(&mut self) -> Option<String> {
-        while self.position < self.source.len()
-            && matches!(self.source[self.position], ' ' | '\t')
+        while self.position < self.source.len() && matches!(self.source[self.position], ' ' | '\t')
         {
             self.position += 1;
         }
@@ -1336,9 +1331,7 @@ impl<'nodes> LatexParser<'nodes> {
             .map(|column| {
                 matrix
                     .iter()
-                    .map(|row| {
-                        visible_width(row.get(column).map(String::as_str).unwrap_or(""))
-                    })
+                    .map(|row| visible_width(row.get(column).map(String::as_str).unwrap_or("")))
                     .max()
                     .unwrap_or(0)
             })
@@ -1401,7 +1394,8 @@ impl<'nodes> LatexParser<'nodes> {
             return lines.first().cloned().unwrap_or_default();
         }
         let index = self.layout_nodes.len();
-        self.layout_nodes.push(LayoutNode::Matrix { lines, baseline: 0 });
+        self.layout_nodes
+            .push(LayoutNode::Matrix { lines, baseline: 0 });
         format!("{LAYOUT_MARKER_START}{index}{LAYOUT_MARKER_END}")
     }
 
@@ -1443,7 +1437,9 @@ fn split_environment_rows(body: &str) -> Vec<String> {
             let mut next = index + 2;
             if characters.get(next) == Some(&'[') {
                 let mut close = next + 1;
-                while close < characters.len() && characters[close] != ']' && characters[close] != '\n'
+                while close < characters.len()
+                    && characters[close] != ']'
+                    && characters[close] != '\n'
                 {
                     close += 1;
                 }
@@ -1472,7 +1468,8 @@ fn strip_leading_group(body: &str) -> String {
     if characters.get(index) != Some(&'{') {
         return body.to_owned();
     }
-    let Some(close) = (index + 1..characters.len()).find(|cursor| characters[*cursor] == '}') else {
+    let Some(close) = (index + 1..characters.len()).find(|cursor| characters[*cursor] == '}')
+    else {
         return body.to_owned();
     };
     characters[close + 1..].iter().collect()

@@ -4,6 +4,8 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@xterm/xterm", () => ({ Terminal: class {} }));
+
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
 
@@ -69,6 +71,26 @@ describe("App transcript search workflow", () => {
     window.history.replaceState(null, "", "/");
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("Escape interrupts only the visible session, never a retained hidden task", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/session/session-live?transport=fixture");
+    const { OctetStore } = await import("./store");
+    const interrupt = vi.spyOn(OctetStore.prototype, "interrupt").mockResolvedValue(undefined);
+    const { default: App } = await import("./App");
+    render(<App />);
+    await screen.findByRole("searchbox", { name: "Search tasks and transcripts" });
+    await waitFor(() => expect(document.querySelector(".session-header strong")).toHaveTextContent("Refine onboarding preview"));
+    await user.keyboard("{Escape}");
+    expect(interrupt).toHaveBeenCalledOnce();
+    interrupt.mockClear();
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.keyboard("{Escape}");
+    expect(interrupt).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.keyboard("{Escape}");
+    expect(interrupt).not.toHaveBeenCalled();
   });
 
   it("searches session contents, selects another session, and jumps to the matched item", async () => {

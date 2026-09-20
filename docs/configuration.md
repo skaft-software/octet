@@ -63,7 +63,7 @@ runtime defaults.
 | `context_files` | Include instruction/context files; example `true`, project inputs still require trust. |
 | `offline` | Example `false`; `true` skips optional model discovery and remote reads, not inference. |
 | `strict_config` | Default behavior warns about unknown keys; `true` makes them errors, as does `--strict-config`. |
-| `reload` | Default `true`: the interactive prompt arms the live-reload supervisor, announces it once in the transcript, and applies reloads only at the idle prompt. `false` disables sampling for good. User level only; a trusted project layer may not arm it. |
+| `reload` | Default `true`: the interactive prompt silently arms the live-reload supervisor and applies reloads only at the idle prompt. `/reload --dry-run` shows watch counts, timing, and host re-exec policy; incomplete watch coverage still warns. `false` disables sampling for good. User level only; a trusted project layer may not arm it. |
 | `reload_poll_ms` | Default `1000`; interval between filesystem samples, clamped to `50..=300000`. Sampling covers the skill/prompt/theme/context/extension roots in use plus the resolved executable. |
 | `reload_debounce_ms` | Default `200`; save-burst debounce, clamped to `2000` maximum so a burst always flushes. |
 | `reload_max_files` | Default `512`; metadata inspections one poll may perform, clamped to `4096`. Directory reads and inspections stop at the bound, and the layer that was not fully inspected is reported as capped rather than as a change. |

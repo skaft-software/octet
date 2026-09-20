@@ -101,6 +101,26 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("\\\\u001b[31m", encoded)
         self.assertIn("\\\\u0000", encoded)
 
+    def test_joined_emoji_in_tasks_remains_valid_but_presentation_is_escaped(self):
+        from octet_subagents.model import sanitize_document, validate_plain_text
+        task = "Describe \U0001f469\u200d\U0001f4bb in the screenshot"
+        validate_plain_text(task, "task", allow_newline=True)
+        self.assertIn("\\u200d", sanitize_document(task, 8192))
+
+    def test_summary_invisible_formatting_is_escaped_for_host_validation(self):
+        from octet_subagents.model import sanitize_document
+        unsafe = [0x061C, *range(0x200B, 0x2010), *range(0x202A, 0x202F),
+                  0x2060, *range(0x2066, 0x206A), 0xFEFF]
+        for codepoint in unsafe:
+            with self.subTest(codepoint=codepoint):
+                worker = self.worker("done", summary=sanitize_document(
+                    "review" + chr(codepoint) + "result", 8192))
+                snapshot = build_snapshot([worker], selected_agent_id=worker.agent_id,
+                                          now_ms=1_700_000_001_000)
+                body = snapshot["collection"]["detail"]["body"]
+                self.assertNotIn(chr(codepoint), body)
+                self.assertIn("\\u%04x" % codepoint, body)
+
     def test_every_internal_state_maps_to_a_generic_host_state(self):
         expected = {
             "queued": "pending",

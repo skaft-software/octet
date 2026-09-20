@@ -196,7 +196,9 @@ impl ProxyEnvironment {
     pub(crate) fn overlay(&self, values: &BTreeMap<String, String>) -> Self {
         let mut env = self.0.clone();
         for name in Self::NAMES {
-            if let Some(value) = values.get(name) { env.insert(name.into(), value.clone()); }
+            if let Some(value) = values.get(name) {
+                env.insert(name.into(), value.clone());
+            }
         }
         Self(env)
     }

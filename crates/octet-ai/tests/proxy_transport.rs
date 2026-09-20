@@ -199,7 +199,11 @@ async fn no_proxy_excludes_loopback_and_root_domains_without_proxying() {
     let model = test_model(&format!("{}/", server.uri()));
     let client = AiClient::new();
     client
-        .complete_with_overrides(&model, request(), proxy_overrides(&proxy, Some("127.0.0.1")))
+        .complete_with_overrides(
+            &model,
+            request(),
+            proxy_overrides(&proxy, Some("127.0.0.1")),
+        )
         .await
         .unwrap();
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
@@ -227,10 +231,7 @@ async fn all_proxy_fallback_and_lowercase_names_reach_the_transport() {
     let (proxy_addr, captured) = spawn_recording_proxy().await;
     let model = test_model("http://provider.invalid/");
     let client = AiClient::new();
-    let env = BTreeMap::from([(
-        "all_proxy".to_owned(),
-        format!("http://{proxy_addr}"),
-    )]);
+    let env = BTreeMap::from([("all_proxy".to_owned(), format!("http://{proxy_addr}"))]);
     let response = client
         .complete_with_overrides(
             &model,
@@ -283,8 +284,7 @@ async fn malformed_proxy_environment_fails_closed_before_dispatch() {
         let error = client
             .complete_with_overrides(&model, request(), proxy_overrides(&malformed, None))
             .await
-            .err()
-            .expect("malformed proxy must fail closed");
+            .expect_err("malformed proxy must fail closed");
         assert!(matches!(error, AiError::Config(_)));
     }
     assert!(captured.lock().unwrap().is_empty());

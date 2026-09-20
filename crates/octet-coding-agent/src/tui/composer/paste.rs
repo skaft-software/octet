@@ -113,9 +113,7 @@ fn decode_shell_path_token(raw: &str) -> Option<String> {
             if character == delimiter {
                 quote = None;
             } else if delimiter == '"' && character == '\\' {
-                let Some(next) = characters.peek().copied() else {
-                    return None;
-                };
+                let next = characters.peek().copied()?;
                 if next == '\\' || next.is_whitespace() || matches!(next, '\'' | '"') {
                     decoded.push(next);
                     characters.next();
@@ -132,9 +130,7 @@ fn decode_shell_path_token(raw: &str) -> Option<String> {
 
         match character {
             '\\' => {
-                let Some(next) = characters.peek().copied() else {
-                    return None;
-                };
+                let next = characters.peek().copied()?;
                 if next == '\\' || next.is_whitespace() || matches!(next, '\'' | '"') {
                     decoded.push(next);
                     characters.next();
@@ -209,27 +205,6 @@ pub fn parse_dropped_path(text: &str) -> Option<PathBuf> {
     let mut paths = explicit_dropped_paths(text)?.into_iter();
     let path = paths.next()?.path;
     paths.next().is_none().then_some(path)
-}
-
-/// Parse every token in an explicit paste/drop payload in original order.
-/// A malformed or missing token rejects the whole batch.
-pub fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
-    Some(
-        explicit_dropped_paths(text)?
-            .into_iter()
-            .map(|dropped| dropped.path)
-            .collect(),
-    )
-}
-
-/// Classify all paths in an explicit paste/drop payload in original order.
-pub fn classify_paste_paths(text: &str) -> Option<Vec<PasteKind>> {
-    parse_dropped_paths(text).map(|paths| {
-        paths
-            .into_iter()
-            .map(classify_existing_path)
-            .collect::<Vec<_>>()
-    })
 }
 
 fn classify_existing_path(path: PathBuf) -> PasteKind {

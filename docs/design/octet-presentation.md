@@ -104,9 +104,8 @@ An approval panel is an enforcement surface, not decorative chrome.
 
 Terminal outcomes must remain distinguishable after animation stops:
 
-- normal completion uses the success glyph and `completed`;
-- completion with warnings uses the warning glyph and the explicit
-  `completed with warnings` label;
+- normal completion and completion with warnings use the success glyph and
+  `completed`; individual failed tool calls retain their own failure evidence;
 - interruption remains a warning-class terminal state; and
 - failure uses the error glyph plus `failed` and elapsed time.
 
@@ -129,5 +128,5 @@ without animation, and input never waits for it. Progressive
 disclosure keeps raw detail one action away without imposing a dashboard.
 
 A useful internal rule is: **calm by default, detail on demand, raw truth one
-keystroke away**. Any future theme or extension must preserve the default
+keystroke away**. Themes and extensions must preserve the default
 hierarchy before adding options.

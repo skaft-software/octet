@@ -8,16 +8,17 @@ Other languages launch `octet-host` and exchange UTF-8 JSON objects over
 stdin/stdout, keeping provider and agent behavior in Rust without an unstable
 Rust FFI ABI. Stdout is protocol-only; logs and diagnostics go to stderr.
 
-**Native-host protocol `1` is not extension API `0.3`.** It is a separate
+**Native-host protocol `1` is not an extension API version.** It is a separate
 application embedding interface. It reports extension discovery diagnostics but
 never starts executable extensions. For extension authoring, see
-[the API `0.3` guide](extensions.md).
+the [extension guide](extensions.md).
 
 ## Handshake
 
-The example reports this checkout's **0.7.6 source version**. For version-matched
-published native assets, see [installation](installation.md) and the
-[release record](releases/v0.7.6.md).
+The example uses this checkout's **0.8.0 RC** SDK version, not evidence of native
+publication. Validate the version reported by the actual host. For source builds
+and historical published assets, see [installation](installation.md); current
+release scope is in the [candidate notes](releases/v0.8.0.md).
 
 Send `hello` and validate the response before accepting work, including when the
 application uses a configured host path:
@@ -27,7 +28,7 @@ application uses a configured host path:
 ```
 
 ```json
-{"protocol_version":1,"request_id":"probe-1","seq":1,"type":"hello","data":{"sdk_version":"0.7.6","protocol_version":1,"max_frame_bytes":1048576,"max_concurrent_runs":1,"commands":["hello","models","run","shutdown"],"features":{"streaming":true,"persistent_sessions":true,"seed_history":true,"typed_media_input":true,"typed_image_input":true,"typed_audio_input":true,"prompt_display_text":true,"inline_models":true,"tools":true,"skills":true,"extensions":true,"process_group_abort":true,"in_band_abort":false}}}
+{"protocol_version":1,"request_id":"probe-1","seq":1,"type":"hello","data":{"sdk_version":"0.8.0","protocol_version":1,"max_frame_bytes":1048576,"max_concurrent_runs":1,"commands":["hello","models","run","shutdown"],"features":{"streaming":true,"persistent_sessions":true,"seed_history":true,"typed_media_input":true,"typed_image_input":true,"typed_audio_input":true,"prompt_display_text":true,"inline_models":true,"tools":true,"skills":true,"extensions":true,"process_group_abort":true,"in_band_abort":false}}}
 ```
 
 Reject a protocol mismatch, unknown request ID, run/session ID mismatch, or
@@ -95,7 +96,7 @@ supply eligible Copilot models to the shared online catalog, including NDJSON
 `models` and catalog-backed `run`. Offline catalog construction adds none. NDJSON
 protocol 1 has **no** new login/logout command or OAuth payload field, and this
 does not grant extension API 0.3 native-provider authority. See the
-[source-only candidate and unrun qualification](qualification/copilot-host-current-candidate.md).
+[provider guide](providers.md#github-copilot-unreleased-candidate).
 
 An embedding app implements `octet_sdk::provider::CopilotHost`, owns device-flow/
 OAuth state and durable credential storage, and constructs `CopilotProvider`
@@ -125,8 +126,8 @@ supports no custom Enterprise authority or environment endpoint override.
 must reject a deleted/replaced login. Explicit exchange/refresh share the
 resolver's invalidation lock and discard the old credential on failure or
 cancellation. Hosts still own active-run/device cancellation and catalog
-replacement; local logout is not remote revocation. Full provider parity,
-TUI slash auth, native/live acceptance and Rust verification remain open.
+replacement; local logout is not remote revocation. TUI slash auth is not
+available; this source contract does not establish native/live acceptance.
 
 ## Rust-owned recovery limits
 
@@ -138,11 +139,17 @@ in a logical turn, including subsequent request opening. `None` is the default
 delay beyond the remaining allowance stops recovery rather than retrying early.
 This is not a whole-job timeout and does not extend caller/child limits or
 provider body deadlines. The same setting is passed to auxiliary compaction
-and terminal-gate recovery and inherited by child agents. Historical integration
-checks and remaining limits are recorded in [v0.7.4 recovery qualification](qualification/v0.7.4-recovery.md).
+and terminal-gate recovery and inherited by child agents. See the
+[agent recovery contract](design/octet-agent.md#in-process-provider-recovery).
 
 This is a Rust host setter, not a new NDJSON run field, CLI flag, or persisted
 configuration setting. NDJSON applications retain process-group cancellation.
+
+Rust consumers may also receive `AgentEvent::RecoveredOutput { channel, text }`
+for a previous interrupted attempt's partial text or reasoning prefix. Keep
+this historical progress separate from current `OutputDelta`, the assembled
+answer, provider replay, and usage accounting. It does not establish a new
+NDJSON event contract.
 
 ## Run requests
 
@@ -283,7 +290,7 @@ additive uncertainty record evolves its record contract. CLI RPC uses the same
 event type
 with `delayMs`/`errorMessage`; finite retries use `auto_retry_start` with
 `maxAttempts`, rather than the native-host field casing. Plain/print diagnostics
-go to stderr; print stdout remains response-only. See [historical recovery qualification](qualification/v0.7.4-recovery.md).
+go to stderr; print stdout remains response-only.
 
 Auxiliary recovery has a separate core `AgentEvent::ProviderOperationRetry`:
 `operation` is `local_compaction`, `native_compaction`, or `terminal_gate`;
@@ -318,7 +325,6 @@ flag sticky when the live event arrives. Statistics sum the independent durable
 usage ledger rather than only the active conversation branch; when the flag is
 true, numeric tokens/cost are known subtotals. Native-host protocol `1` has no
 separate idle session-inspection command; its resumed runs emit the live warning.
-Historical qualification applies only to its recorded source.
 
 `final_result.data` contains `status`, `output`, `error`, `filesChanged`,
 `toolCalls`, `steps`, and `sessionFile`. Status is `completed`, `blocked`, or

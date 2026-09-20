@@ -850,7 +850,10 @@ pub(crate) async fn resolve_headers(auth: &Auth) -> Result<ResolvedHeaders, Auth
 }
 
 /// Reads a request-local environment overlay without changing process state.
-pub(crate) fn read_request_env(env: &BTreeMap<String, String>, var: &str) -> Result<Option<String>, ConfigError> {
+pub(crate) fn read_request_env(
+    env: &BTreeMap<String, String>,
+    var: &str,
+) -> Result<Option<String>, ConfigError> {
     match env.get(var) {
         Some(value) => bounded_env_value(var, Ok(value.clone())),
         None => read_bounded_env(var),
@@ -1066,9 +1069,7 @@ pub fn first_present_variable<'a>(
 /// `GOOGLE_APPLICATION_CREDENTIALS` selects [`VertexCredential::ApplicationDefault`]
 /// explicitly. `None` means no declared source; this function performs no I/O
 /// and never inspects the ambient process environment itself.
-pub fn select_vertex_credential(
-    env: &BTreeMap<String, String>,
-) -> Option<VertexCredential> {
+pub fn select_vertex_credential(env: &BTreeMap<String, String>) -> Option<VertexCredential> {
     if environment_variable_present(env, GOOGLE_VERTEX_API_KEY_VAR) {
         return Some(VertexCredential::ApiKey);
     }
@@ -1214,9 +1215,10 @@ mod tests {
             bounded_env_value(var, Ok(at_limit.clone()))
         };
 
-        let bearer = resolve_headers_with_env(&Auth::bearer_env("BEARER_KEY"), &read_at_limit, None)
-            .await
-            .unwrap();
+        let bearer =
+            resolve_headers_with_env(&Auth::bearer_env("BEARER_KEY"), &read_at_limit, None)
+                .await
+                .unwrap();
         assert_eq!(
             bearer.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
             format!("Bearer {at_limit}")
@@ -1522,7 +1524,10 @@ mod tests {
                 "/tmp/adc.json".to_owned(),
             ),
         ]);
-        assert_eq!(select_vertex_credential(&both), Some(VertexCredential::ApiKey));
+        assert_eq!(
+            select_vertex_credential(&both),
+            Some(VertexCredential::ApiKey)
+        );
 
         let blank_key = BTreeMap::from([
             (GOOGLE_VERTEX_API_KEY_VAR.to_owned(), "   ".to_owned()),
@@ -1566,10 +1571,8 @@ mod tests {
             Some(Auth::BearerEnv { var }) if var == "ANTHROPIC_AUTH_TOKEN"
         ));
 
-        let oauth_only = BTreeMap::from([(
-            "ANTHROPIC_OAUTH_TOKEN".to_owned(),
-            "oauth-token".to_owned(),
-        )]);
+        let oauth_only =
+            BTreeMap::from([("ANTHROPIC_OAUTH_TOKEN".to_owned(), "oauth-token".to_owned())]);
         assert!(matches!(
             anthropic_bearer_auth(&oauth_only),
             Some(Auth::BearerEnv { var }) if var == "ANTHROPIC_OAUTH_TOKEN"
@@ -1591,24 +1594,27 @@ mod tests {
         };
 
         let override_secret = Secret::from("override-value");
-        let resolved = resolve_headers_with_api_key(&auth, &BTreeMap::new(), Some(&override_secret))
-            .await
-            .unwrap();
-        assert_eq!(resolved.headers["x-api-key"].to_str().unwrap(), "override-value");
+        let resolved =
+            resolve_headers_with_api_key(&auth, &BTreeMap::new(), Some(&override_secret))
+                .await
+                .unwrap();
+        assert_eq!(
+            resolved.headers["x-api-key"].to_str().unwrap(),
+            "override-value"
+        );
         assert_eq!(resolved.redactor.redact("override-value"), "[REDACTED]");
         assert!(resolved.headers["x-api-key"].is_sensitive());
 
         // Without an override the request-local env map supplies the value.
         let env = BTreeMap::from([(var.to_owned(), "env-value".to_owned())]);
-        let resolved = resolve_headers_with_api_key(&auth, &env, None).await.unwrap();
+        let resolved = resolve_headers_with_api_key(&auth, &env, None)
+            .await
+            .unwrap();
         assert_eq!(resolved.headers["x-api-key"].to_str().unwrap(), "env-value");
 
         // A fixed credential, dynamic resolver, signer, or unauthenticated
         // endpoint refuses the override instead of silently ignoring it.
-        for refused in [
-            Auth::bearer("fixed"),
-            Auth::none(),
-        ] {
+        for refused in [Auth::bearer("fixed"), Auth::none()] {
             assert!(matches!(
                 resolve_headers_with_api_key(&refused, &BTreeMap::new(), Some(&override_secret))
                     .await,

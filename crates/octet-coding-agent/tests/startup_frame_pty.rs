@@ -195,6 +195,8 @@ enum StartupFixture<'a> {
     Model(&'a str),
     /// Online catalog discovery against a gated, credential-free loopback API.
     DiscoveringModel(&'a str),
+    /// Fresh/resumed/forked startup against one synthetic saved conversation.
+    Session(&'a [&'a str]),
     /// A persisted selection, resolved through the real registry with no auth.
     ConfiguredGemma,
     /// Empty inventory and no appearance preference: both onboarding owners run.
@@ -309,6 +311,24 @@ impl PtyOctet {
                 )
                 .unwrap();
             }
+            StartupFixture::Session(_) => {
+                // The on-disk session store uses the workspace's stable FNV-1a key.
+                let mut key = 0xcbf2_9ce4_8422_2325u64;
+                for byte in workspace.to_string_lossy().as_bytes() {
+                    key = (key ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                let directory = sessions.join(format!("{key:012x}"));
+                fs::create_dir_all(&directory).unwrap();
+                let mut session =
+                    octet_agent::Session::create(directory.join("startup-history.jsonl")).unwrap();
+                session
+                    .append(octet_agent::EntryValue::Message(octet_ai::Message::User(
+                        octet_ai::UserMessage {
+                            content: vec![octet_ai::UserPart::Text("OCTET_RESUMED_HISTORY".into())],
+                        },
+                    )))
+                    .unwrap();
+            }
             StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_) => {}
         }
 
@@ -369,6 +389,11 @@ impl PtyOctet {
         match fixture {
             StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model) => {
                 command.args(["--model", &format!("custom/{model}")]);
+            }
+            StartupFixture::Session(args) => {
+                command
+                    .args(["--model", "custom/probe", "--theme", "dark"])
+                    .args(args);
             }
             StartupFixture::Changelog { model, initial } => {
                 command.args(["--theme", "dark"]);
@@ -846,6 +871,148 @@ fn run_inline() -> InlineTrace {
         startup_screen,
         shrink_screen,
     }
+}
+
+#[test]
+fn real_octet_session_startup_is_silent_and_preserves_history() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        for args in [
+            &[][..],
+            &["--continue"][..],
+            &["--resume", "startup-history"][..],
+            &["--fork", "startup-history"][..],
+            &["--resume"][..],
+            &["--fork"][..],
+        ] {
+            let mut octet = PtyOctet::spawn_at(
+                Path::new(env!("CARGO_BIN_EXE_octet")),
+                mode,
+                None,
+                false,
+                (INITIAL_COLUMNS, INITIAL_ROWS),
+                (2, false, false),
+                StartupFixture::Session(args),
+            );
+            if args == ["--resume"] || args == ["--fork"] {
+                octet.wait_until(STARTUP_TIMEOUT, |output| {
+                    synchronized_frame_end_containing(output, b"Resume Session").is_some()
+                });
+                octet.pty.write_input(b"\r");
+            }
+            octet.wait_until(STARTUP_TIMEOUT, |output| {
+                synchronized_frame_end_containing(output, READY_MARKER).is_some()
+            });
+            octet.pty.drain_for(DRAIN_TIME);
+            // Inspect every emitted byte, not just the final frame: a fleeting
+            // phase label is still chatter even if readiness erases it later.
+            for noise in [
+                "starting session",
+                "restarting session",
+                "replaying session",
+                "opening session",
+                "finding latest session",
+                "discovering sessions",
+                "opening source session",
+                "forking session",
+                "starting extensions",
+                "discovering models",
+                "startup build",
+                "live reload armed",
+            ] {
+                assert!(
+                    !contains_bytes(&octet.pty.output, noise.as_bytes()),
+                    "{noise:?} painted during {mode:?} startup {args:?}"
+                );
+            }
+            let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+            parser.process(&octet.pty.output);
+            assert_eq!(
+                parser.screen().contents().contains("OCTET_RESUMED_HISTORY"),
+                !args.is_empty(),
+                "startup must preserve the selected conversation: {args:?}"
+            );
+            let capture = octet.shutdown();
+            assert!(capture.status.success());
+            assert!(capture.termios_restored);
+        }
+    }
+}
+
+#[test]
+fn real_octet_reload_is_quiet_until_details_are_requested() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut octet = PtyOctet::spawn(Path::new(env!("CARGO_BIN_EXE_octet")), MouseMode::Auto);
+    octet.wait_until(STARTUP_TIMEOUT, |output| {
+        contains_bytes(output, READY_MARKER)
+    });
+    // Wait beyond the default first poll so a silent baseline is established.
+    octet.pty.drain_for(Duration::from_millis(1300));
+    assert!(
+        !contains_bytes(&octet.pty.output, b"live reload armed"),
+        "routine reload startup banner: {}",
+        visible_bytes(&octet.pty.output)
+    );
+
+    let prompts = octet._root.path().join("home/.octet/prompts");
+    fs::create_dir_all(&prompts).unwrap();
+    fs::write(prompts.join("reload-probe.md"), "A local reload fixture.\n").unwrap();
+    // Prove the resource actually became available, not merely that no notice
+    // was printed. /prompt only inspects the loaded catalog; it never reloads
+    // resources or submits a provider request. Close it between observations so
+    // the watcher can apply its pass at the idle prompt.
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        octet.pty.drain_for(Duration::from_millis(350));
+        let before = octet.pty.output.len();
+        octet.pty.write_input(b"/prompt\r");
+        octet.wait_until(STARTUP_TIMEOUT, |output| {
+            contains_bytes(&output[before..], b"Prompt templates:")
+        });
+        octet.pty.drain_for(DRAIN_TIME);
+        let loaded = contains_bytes(&octet.pty.output[before..], b"/reload-probe");
+        octet.pty.write_input(b"\x1b");
+        octet.pty.drain_for(Duration::from_millis(100));
+        if loaded {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "automatic reload did not load the prompt"
+        );
+    }
+    for noise in [
+        "live reload armed",
+        "changed path(s)",
+        "live reload: applied",
+        "resources reloaded",
+        "reload pass #",
+        "instructions, prompts, skills, extensions, and keybindings reloaded",
+    ] {
+        assert!(
+            !contains_bytes(&octet.pty.output, noise.as_bytes()),
+            "unexpected routine notice {noise}: {}",
+            visible_bytes(&octet.pty.output)
+        );
+    }
+
+    // Explicit reload still acknowledges completion; details stay on demand.
+    let before = octet.pty.output.len();
+    octet.pty.write_input(b"/reload\r");
+    octet.wait_until(STARTUP_TIMEOUT, |output| {
+        contains_bytes(&output[before..], b"resources reloaded")
+    });
+    octet.pty.write_input(b"/reload --dry-run\r");
+    octet.wait_until(STARTUP_TIMEOUT, |output| {
+        contains_bytes(output, b"poll 1000 ms") && contains_bytes(output, b"reload preview")
+    });
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
 }
 
 #[test]

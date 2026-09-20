@@ -38,12 +38,6 @@ fn terminal_safe_output(text: &str, terminal: bool) -> std::borrow::Cow<'_, str>
     }
 }
 
-/// Stream a persistent Agent session to standard output without constructing a
-/// terminal UI.
-pub async fn run_print(boot: Bootstrap, prompt: String) -> anyhow::Result<()> {
-    run_invocation(boot, prompt, Vec::new(), Vec::new(), false).await
-}
-
 /// Persist durable accounting for an ephemeral (`--no-session`) run and report
 /// any unknown usage. A no-op for ordinary sessions.
 pub(crate) fn finish_ephemeral_accounting() -> anyhow::Result<()> {

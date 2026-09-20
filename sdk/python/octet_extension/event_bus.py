@@ -610,10 +610,13 @@ class EventBusKernel:
 class HostEventBus:
     """Binding-scoped API 0.3 participant with one bounded rebind worker.
 
-    ``request(method, params, cancelled)`` must be thread-safe, bounded in time,
-    and stop waiting when the supplied threading.Event is set. Its response is
-    delivered by the ordinary serial protocol reader. That reader calls
-    :meth:`accept_lifecycle` (never an RPC), and :meth:`accept_event`.
+    ``request(method, params, cancelled, accept_result)`` must be thread-safe,
+    bounded in time, and stop waiting when the supplied threading.Event is set.
+    For a live request's successful response, the serial protocol reader must
+    call ``accept_result(result)`` before reading the next frame, then return its
+    value (or propagate its exception) to the waiting requester. RPC errors and
+    late responses to cancelled/expired requests must not call ``accept_result``.
+    The reader also calls :meth:`accept_lifecycle` and :meth:`accept_event`.
     Explicit operations may block and must run outside the reader callback.
     Call :meth:`close` at process shutdown. No publication is queued or replayed.
     """
@@ -752,8 +755,9 @@ class HostEventBus:
                 raise
             raise BusError(INVALID_PARAMS, "invalid_lifecycle") from error
 
-    def _rpc(self, method: str, params: dict, parse: Any) -> dict:
-        """Send one binding-scoped request and validate its typed result.
+    def _rpc(self, method: str, params: dict, parse: Any,
+             apply: Optional[Callable[[dict], None]] = None) -> dict:
+        """Validate and apply one binding-scoped result in serial-reader order.
 
         `parse` is the generated parser for the reply model. Tagged unions have
         no single `from_wire`, so the generated `parse_*` selector is the only
@@ -766,14 +770,21 @@ class HostEventBus:
             # Capture here, never replace a queued operation's binding later.
             binding, cancelled = self._binding_id, self._cancelled
             params = {**params, "binding_id": binding}
-        response = self._request(method, params, cancelled)
-        try:
-            result = parse(response).to_wire()
-        except ContractError as error:
-            raise BusError(INVALID_PARAMS, "invalid_ack") from error
-        if result["binding_id"] != binding:
-            raise BusError(CAPABILITY_MISMATCH, "stale_ack")
-        return result
+
+        def accept_result(response: Any) -> dict:
+            try:
+                result = parse(response).to_wire()
+            except ContractError as error:
+                raise BusError(INVALID_PARAMS, "invalid_ack") from error
+            with self._condition:
+                if result["binding_id"] != binding:
+                    raise BusError(CAPABILITY_MISMATCH, "stale_ack")
+                self._ack_current(result)
+                if apply is not None:
+                    apply(result)
+            return result
+
+        return self._request(method, params, cancelled, accept_result)
 
     def _ack_current(self, result: dict) -> None:
         if self._closed or result["binding_id"] != self._binding_id:
@@ -825,15 +836,18 @@ class HostEventBus:
         with self._condition:
             if topic in self._interests:
                 return
-        reply = self._rpc("bus/subscribe", {"topic": topic}, parse_bus_subscribe_result)
-        with self._condition:
-            self._ack_current(reply)
+
+        def apply(reply: dict) -> None:
+            # The host can send an event immediately after this ACK. Install
+            # both the active ledger and desired interest before the reader
+            # dispatches that event or a replacement lifecycle notice.
             previous = self._observed.get(topic)
             if previous is not None and reply["topic_revision"] < previous[0]:
                 raise BusError(CAPABILITY_MISMATCH, "stale_ack")
             active = reply["state"] == "active"
             if active and (not reply["publisher_instance_id"] or reply["process_generation"] <= 0 or reply["topic_revision"] <= 0):
                 raise BusError(INVALID_PARAMS, "invalid_topic_provenance")
+            self._desired_interests.add(topic)
             self._interests.add(topic)
             if active:
                 principal = (reply["publisher_instance_id"], reply["process_generation"])
@@ -842,6 +856,8 @@ class HostEventBus:
             else:
                 self._subscribed.pop(topic, None)
 
+        self._rpc("bus/subscribe", {"topic": topic}, parse_bus_subscribe_result, apply)
+
     def subscribe(self, topic: Any) -> TopicSpec:
         with self._operation:
             with self._condition:
@@ -849,8 +865,6 @@ class HostEventBus:
                 if topic not in self._desired_interests and len(self._desired_interests) >= self._limits.max_subscriptions:
                     raise BusError(RESOURCE_EXHAUSTED, "subscription_limit")
             self._subscribe(topic)
-            with self._condition:
-                self._desired_interests.add(topic)
             return spec
 
     def unsubscribe(self, topic: Any) -> None:
@@ -860,13 +874,14 @@ class HostEventBus:
                 self._registry.get(topic)
                 if topic not in self._desired_interests:
                     return
-            reply = self._rpc("bus/unsubscribe", {"topic": topic}, parse_bus_ack)
-            with self._condition:
-                self._ack_current(reply)
+
+            def apply(reply: dict) -> None:
                 self._desired_interests.discard(topic)
                 self._interests.discard(topic)
                 self._subscribed.pop(topic, None)
                 self._sequences.pop(topic, None)
+
+            self._rpc("bus/unsubscribe", {"topic": topic}, parse_bus_ack, apply)
 
     def _rebind(self) -> None:
         while True:

@@ -569,6 +569,7 @@ impl App {
     ///
     /// Returns nothing for a model that needs no note (any non-Codex route, or
     /// a Codex route whose effective window is the deliberate 272K policy).
+    #[cfg(test)]
     pub fn codex_context_report(&self) -> Option<&str> {
         self.codex_context_notes.note_for(&self.model.spec.id)
     }
@@ -579,6 +580,7 @@ impl App {
     /// Startup renders nothing; the frontend calls this when the user can act on
     /// it (the first assistant turn after readiness) and every later call
     /// returns `None`, so the note can never repeat or leak into a second model.
+    #[cfg(test)]
     pub fn take_codex_context_note(&self) -> Option<String> {
         self.codex_context_notes.take_for(&self.model.spec.id)
     }

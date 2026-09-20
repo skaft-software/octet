@@ -54,9 +54,9 @@ or runtime.
 - The audio seed entry intentionally has `pricing: null` because this repository has no authoritative price snapshot for its separate text/audio token classes.
 
 Endpoint auth, protocol compatibility, and explicit catalog pricing remain octet
-configuration. The models.dev supplement fills missing display names and pricing
-only for actual inventory-returned built-in routes. Operational limits, modalities,
-tools, structured output and reasoning come from endpoint assertions and existing
+configuration. The models.dev supplement fills missing display names, pricing,
+input modalities and limits only for actual inventory-returned built-in routes.
+Tools, structured output and reasoning come from endpoint assertions and existing
 provider/protocol declarations, never from the snapshot. Explicit false, unknown,
 null and malformed assertions are not replaced with snapshot optimism. Exact
 provider/model keys never borrow names or prices by leaf ID. Configured catalogs
@@ -77,7 +77,36 @@ Synthetic custom-server Qwen profiles are independent endpoint assertions, not
 Cerebras contracts. Their fixture provenance is recorded in
 `crates/octet-coding-agent/fixtures/providers/thinking-hotfix.json`.
 
+## Reviewed metadata refresh (v0.8.0)
+
+The release-candidate refresh pins public `https://models.dev/api.json` source
+SHA-256 `cdd1df48d8daf6eea84662d89daf39a5774a3b90c447aaa011c850a43e077dba`.
+The four checked-in outputs include this source record and the following
+reviewed changes relative to the v0.7.6 snapshots:
+
+| Snapshot | Current records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing routes | 895 | 100 | 3 | 35 |
+| Canonical names | 385 | 5 | 2 | 0 |
+| Capability routes | 916 | 100 | 6 | 42 |
+
+Price changes cover 33 OpenRouter routes, one Fireworks route, and one opencode
+route. Additions primarily belong to already-supported Qwen-plan, Baseten, and
+Fireworks providers; catalog additions do not introduce new provider protocols
+or prove route availability. Direct DeepSeek schedule pricing remains deliberately
+excluded and unknown; no flat quote or schedule accounting is inferred.
+
+Six offline metadata-tooling tests passed via
+`python3 scripts/test_refresh_models_dev_metadata.py`. Reproduce or validate
+using the saved-source commands below with a response matching the new digest.
+Normal builds and runtime continue to consume checked-in metadata without
+fetching models.dev. This is reviewed public metadata, not live inference
+acceptance; endpoint assertions and explicit configured pricing retain precedence.
+
 ## Rich metadata refresh (v0.7.6)
+
+**Historical provenance:** the digest, counts, and pricing-review examples below
+belong to v0.7.6, not the current v0.8.0 snapshots.
 
 Saved public `https://models.dev/api.json` source SHA-256:
 `922e6f74093fa6562b29dde8cb145f34bf7f42f70e7cc46cc4660a7ace759869`.
@@ -98,10 +127,10 @@ total command deadline. Failed source validation and `--check` do not write outp
 The pinned digest identifies reviewed evidence, not a live availability promise.
 
 A sparse direct DeepSeek `deepseek-flash` entry receives the display name
-**DeepSeek V4.1 Flash**, not the snapshot's 1,000,000 context / 384,000 output,
-image input or structured-output support. Existing source defaults supply 128K
-context / 64K output and Off/low/high/max controls; endpoint assertions may narrow
-or disable them. Those controls use native `thinking.type` and exact effort
+**DeepSeek V4.1 Flash**, the snapshot's 1,000,000 context / 384,000 output,
+and image input when the endpoint asserts none of these fields. The snapshot
+does not supply structured-output support. Existing source defaults supply
+Off/low/high/max controls; endpoint assertions may narrow or disable them. Those controls use native `thinking.type` and exact effort
 values, including required `assistant.reasoning_content` replay. The separate
 legacy V4 family retains its declared 1M/384K and Off/high/xhigh/default-high
 contract; neither family obtains reasoning from this snapshot.
@@ -111,9 +140,8 @@ historical DeepSeek selector (including `OCTET_DEEPSEEK_MODEL` overrides) copies
 the admitted model, while explicit environment limits retain precedence. Raw
 version-1 provider caches retain their account/URL isolation and do not persist
 synthesized display fields. No snapshot or generated output changed for this
-contract correction. See the [provider guide](../../../docs/providers.md) and
-[bounded repair record](../../../docs/qualification/discovery-current-candidate.md)
-for current behavior and outstanding verification.
+contract correction. See the [provider guide](../../../docs/providers.md)
+for current discovery behavior.
 
 ### Pricing review and uncertainty
 

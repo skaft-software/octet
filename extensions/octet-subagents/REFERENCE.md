@@ -1,14 +1,14 @@
 # octet-subagents reference
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. This source checkout targets local octet 0.8.0 via its exact runtime pin;
-published 0.7.6 assets retain their historical compatibility.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Source distribution: 0.8.0 (release candidate).** This checkout and local
+archives require exactly octet 0.8.0. Catalog commands below require matching
+published assets; no 0.8.0 publication is claimed. Use a
+[source-built host](../../docs/installation.md#build-from-a-checkout) with a
+reviewed source checkout or local archive until matching assets are published.
 
-[Usage guide](README.md). This is the bundled API `0.2` runtime contract, not a
-current extension-authoring example. This local checkout retains distribution `0.7.6` and API `0.2` but targets
-exactly octet `0.8.0`; it does not announce a new public bundle release.
+[Usage guide](README.md). This is the bundled API `0.4` runtime contract, not a
+general extension-authoring tutorial. Source distribution `0.8.0` requires
+exactly octet `0.8.0`; it does not announce a public bundle release.
 
 The executable launches named, single-purpose child conversations through the
 host-owned `agent_sessions` service. It is not an agent team, graph/recipe runtime,
@@ -21,7 +21,7 @@ V1 is deliberately bounded, with the parent's full standard tool scope as the de
 - at most **eight active children** and thirty-two retained workers per parent owner;
 - depth one; a recursively admitted descendant is immediately interrupted when its host path/depth is observed;
 - four predefined profiles (`explore`, `review`, `test-analysis`, `research`);
-- per-worker `provider`/`model`/`reasoning` selection, defaulting to `inherit` (the API `0.2` service still carries no per-child model field, so a selection is accepted only when this session can confirm it and is otherwise refused with `unsupported_model`/`unsupported_reasoning`);
+- per-worker `provider`/`model`/`reasoning` selection, defaulting to `inherit` (the API `0.4` service still carries no per-child model field, so a selection is accepted only when this session can confirm it and is otherwise refused with `unsupported_model`/`unsupported_reasoning`);
 - requested tool scope is a non-empty duplicate-free subset of `read`, `search`, `edit`, `write`, and `bash`; the default grant is the full five-tool scope, and `tools: [read, search]` narrows a worker to hard read-only for pure investigations;
 - wall-time, turn, and cost ceilings are optional per spawn: when omitted they inherit the parent session's ceilings (an unlimited parent remains unlimited); explicit values are bounded to 5 s–24 h, 1–256 turns, and 1–50,000,000 microdollars; returned output is 512–16,384 bytes;
 - fresh child contexts inherit the parent's model, context/output limits, and optional session token ceiling exactly; an unlimited parent remains unlimited and the model-facing spawn schema has no separate token-budget field;
@@ -35,7 +35,7 @@ primitives, another agent primitive, and any other tool are rejected. The
 canonical child policy keeps repository content and task text as data, not
 policy, and never grants recursion or manager-generated commands.
 
-API `0.2` creates the child with inherited model, cwd/workspace, environment,
+API `0.4` creates the child with inherited model, cwd/workspace, environment,
 sandbox, approval policy, and extension policy, but `agent/spawn.policy` is the
 hard per-child boundary: octet installs a detached tool snapshot containing only
 the granted tools (never collaboration or agent primitives), applies the
@@ -75,7 +75,7 @@ octet owns:
 - persistence, cancellation, restart service continuity, and descendant shutdown;
 - completion mailbox claim/ack and delivery as a legal new parent event/turn.
 
-The extension calls only these SDK helpers, which map directly to API `0.2`:
+The extension calls only these SDK helpers, which map directly to API `0.4`:
 
 - `spawn_agent` → `agent/spawn`;
 - `list_agents` → `agent/list`;
@@ -91,15 +91,15 @@ use the graph/recipe spike, built-in team mailboxes, or another scheduler.
 ## Install, enable, and trust
 
 The source bundle requires local octet 0.8.0 and has one root directory named
-`octet-subagents`. With [octet 0.7.6](../../docs/installation.md) and
-version-matched published assets, use the catalog command:
+`octet-subagents`. With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout)
+and verified version-matched published assets, use the catalog command:
 
 ```console
 octet extension install octet-subagents
 ```
 
 For source testing with a locally built octet 0.8.0 and reviewed local
-archive, use `octet extension install --path ./octet-subagents-0.7.6.tar.gz`.
+archive, use `octet extension install --path ./octet-subagents-0.8.0.tar.gz`.
 
 Installation/discovery is inert: it never enables, persists a trust grant, or
 starts the process. The bundle is disabled by default. Default full access
@@ -171,7 +171,7 @@ already-normalized selection exactly, which is the recommended default. A
 selection is validated fail-closed and never silently coerced:
 
 - `provider` and `model` are accepted **only when this session can confirm them
-  as configured**. The API `0.2` service exposes neither a provider catalog nor a
+  as configured**. The API `0.4` service exposes neither a provider catalog nor a
   per-child model field, and the host reports exactly one model to the extension
   (the parent session's), so that is the only per-worker selection the extension
   can verify. A `model` that is not the confirmed model, a malformed or
@@ -193,7 +193,7 @@ selection is validated fail-closed and never silently coerced:
   an `Orchestration selection` line plus the clamp note. `inherit` renders as
   absence (the panel never prints placeholder text for an inherited value).
 
-If no key is supplied, the extension derives one from the complete canonical request. Keys are scoped by octet to the extension principal and durable session owner. Identical retries return the same host-present child. If a new owning run retires that live host record, the worker becomes **detached**: still owned by this parent session, no longer attached to a run. The extension retains the last bounded summary/error, usage, and the complete sibling roster as recoverable evidence, reports the worker as `detached` with a reattach affordance, and reattaches it automatically when the owning session republishes the live record (see *Session-scoped delegation*). An explicit identical retry may also replace that detached cache entry and ask the host to create a new authoritative worker. Reuse with different input fails. The orchestration fingerprint is also placed in the canonical child message so a restart cannot accidentally make host-visible input equality narrower than extension input equality.
+If no key is supplied, the extension derives one from the complete canonical request. Keys are scoped by octet to the extension principal and durable session owner. Identical retries return the same host-present child. Parent-turn completion does not retire live workers. If a reconstructed owner cannot yet attach a retained record, the worker is **detached**: still owned by this parent session, but not presently running in the host. The extension retains the last bounded summary/error, usage, and the complete sibling roster as recoverable evidence, reports the worker as `detached` with a reattach affordance, and reattaches it automatically when the owning session republishes the live record (see *Session-scoped delegation*). An explicit identical retry may also replace that detached cache entry and ask the host to create a new authoritative worker. Reuse with different input fails. The orchestration fingerprint is also placed in the canonical child message so a restart cannot accidentally make host-visible input equality narrower than extension input equality.
 
 The immediate result is an acknowledgement, not completion. Continue independent parent work and let octet deliver the worker's concise final output through its durable parent mailbox. Set `background: false` only when a bounded foreground wait is actually useful.
 
@@ -294,6 +294,7 @@ cross-process ownership transfer.
 Worker states are authoritative projections of `agent/list`/`agent/wait`:
 
 - `pending` → `queued`;
+- `idle` → `idle`, attached and awaiting an explicit follow-up;
 - `running` → `running` (temporarily `waiting` during a wait call);
 - `completed` → `done`, with bounded exact host output in detail/results;
 - `failed` → `failed`, with a bounded error;
@@ -301,8 +302,8 @@ Worker states are authoritative projections of `agent/list`/`agent/wait`:
 - `shutdown`/missing active record → `orphaned` (**detached**: still owned by this session, currently not attached to any run, reattachable);
 - an `awaiting_approval` park reported by the host → `awaiting_approval` (rendered explicitly, never resumed unattended).
 
-When an owning run removes records before another status/wait observation, the
-extension keeps its last bounded summaries, errors, usage, and complete sibling
+When an owner reconstruction leaves records absent from a status/wait observation,
+the extension keeps its last bounded summaries, errors, usage, and complete sibling
 roster instead of deleting the local tree. Previously active missing records
 become explicit `orphaned` rows that mean **detached, not dead**: `detached` is
 true, `reattachable` reflects whether the durable session reference was already
@@ -313,9 +314,12 @@ new execution.
 
 ### Session-scoped delegation (reattachment)
 
-A delegated child is not a detached OS process: the owning **run** owns the
-record and the host retires it when the run ends. The extension therefore treats
-a retired record as detachment, not death:
+A delegated child belongs to the parent **session** and survives its originating
+turn. Owner reconstruction may restore a record as detached rather than runnable;
+this is recoverable detachment, not proof that its work failed. Reattachment
+restores available workers as idle until an explicit follow-up. It preserves the
+host's persisted absolute deadline, including while idle or waiting for capacity;
+an explicit continuation after timeout can renew that deadline.
 
 - **Reattachment.** The next authoritative `agent/list`/`agent/wait` observation
   is the reattach surface. When the owning session republishes a live record for
@@ -345,7 +349,7 @@ A supervised extension restart receives a new process generation but the host se
 
 Outstanding API requests are cooperatively cancelled. Cancelling a wait does not stop the worker. If spawn cancellation races a durable host create, the required idempotency key makes the next identical call safe; unsafe ambiguous work is not replayed with new input.
 
-On extension shutdown the local projection settles, while octet's API `0.2` process shutdown stops every child tree owned by the extension service. The shutdown callback never reuses a stale parent request ID.
+On extension shutdown the local projection settles, while octet's API `0.4` process shutdown stops every child tree owned by the extension service. The shutdown callback never reuses a stale parent request ID.
 
 ## TUI and Serve presentation
 
@@ -390,10 +394,10 @@ Per-worker call counts remain retained telemetry, not transcript-row text. Input
 includes the three disjoint uncached/cache-read/cache-write buckets, while
 reasoning remains a subset of output.
 
-Before the root run settles, octet stops and briefly joins its children, sums each
-child session's durable usage/cost records including picodollar remainders, and
-writes one `delegated_agent` usage record per worker into the root session. The
-live child total is included in the footer only until that durable handoff, so
+The host mirrors settled child usage/cost into the root session as
+`delegated_agent` usage records, including picodollar remainders. Accounting does
+not stop workers when their originating parent turn ends. Live child totals must
+not be counted again once the corresponding durable usage is mirrored, so
 delegated spend contributes exactly once to cumulative session cost and later
 cost-limit checks.
 
@@ -425,7 +429,7 @@ Subagents · 1 running · 1 done
 ```
 
 Use `/subagents inspect <name-or-id>` for cached read-only detail. The octet coding
-host binds API `0.2` command requests to their host-derived owner, so an explicit
+host binds API `0.4` command requests to their host-derived owner, so an explicit
 `/subagents stop ...` and the generic TUI/Serve stop action use the same
 owner-checked `agent_sessions` path. A host or headless integration that omits
 `context.resource_owner` fails closed without issuing a stop. The extension

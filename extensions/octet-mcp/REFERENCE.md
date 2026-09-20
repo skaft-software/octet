@@ -1,13 +1,14 @@
 # octet-mcp reference
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Source distribution: 0.8.0 (release candidate).** This checkout and local
+archives require exactly octet 0.8.0. Catalog commands below require matching
+published assets; no 0.8.0 publication is claimed. Use a
+[source-built host](../../docs/installation.md#build-from-a-checkout) with a
+reviewed source checkout or local archive until matching assets are published.
 
-[Usage guide](README.md). This is the bundled API `0.2` implementation contract,
-not a current extension-authoring example. Distribution `0.7.6` requires exactly
-octet `0.7.6`; these version numbers are independent.
+[Usage guide](README.md). This is the bundled API `0.4` implementation contract,
+not a general extension-authoring tutorial. Distribution `0.8.0` requires exactly
+octet `0.8.0`; these version numbers are independent.
 
 One resident extension process owns every explicitly configured
 [Model Context Protocol](https://modelcontextprotocol.io/) server session and
@@ -15,7 +16,7 @@ maps its live tool catalog to transactional `tools/register` and
 `tools/unregister` calls.
 
 ```text
-octet <- API 0.2 JSON-RPC -> octet-mcp <- MCP JSON-RPC stdio -> local servers
+octet <- API 0.4 JSON-RPC -> octet-mcp <- MCP JSON-RPC stdio -> local servers
                                  \-> MCP Streamable HTTP -> explicit remote endpoint
 ```
 
@@ -53,7 +54,7 @@ An explicitly read-only tool may run without an additional prompt. Every
 `unknown` or `destructive` call goes through the negotiated host
 `policy/evaluate` service. If policy intents are unavailable, evaluation fails,
 or the host denies the intent, the bridge fails closed. It uses a one-use
-approval retry only when the host actually negotiates `approvals`; octet `0.7.6`'s
+approval retry only when the host actually negotiates `approvals`; octet `0.8.0`'s
 coding product does not currently enable approval issuance, so those calls are
 denied with an explanatory tool error. An MCP tool call is never automatically
 replayed after timeout, cancellation, crash, or an ambiguous disconnect.
@@ -187,7 +188,7 @@ permanent GET stream" defects are closed locally. Two gates remain open:
 - **OAuth/credential brokering is policy-gated, not missing by accident.** The
   exact missing primitive is a host-brokered authorization service negotiated
   over the extension API — a typed `authorization/request` capability with a
-  host-owned token store and refresh ownership. Nothing in the bundled API `0.2`
+  host-owned token store and refresh ownership. Nothing in the bundled API `0.4`
   surface can express it, and this package will not substitute a self-composed
   browser/OAuth flow or read an ambient provider token.
 - **No live remote qualification.** All stream/credential evidence comes from
@@ -198,20 +199,20 @@ An injected synchronous credential/progress callback is trusted application code
 Python cannot forcibly terminate it. Its operation remains bounded in admission
 and late network activity is fenced, but full cleanup cannot be guaranteed until
 it returns. An unresolved `bearer` reference still has no stock credential
-adapter. API `0.2` product integration and release qualification remain
+adapter. API `0.4` product integration and release qualification remain
 independent gates.
 
 ## Requirements and installation
 
-- octet exactly `0.7.6` (`requires_octet = "=0.7.6"`)
+- octet exactly `0.8.0` (`requires_octet = "=0.8.0"`)
 - Python 3.9 or newer on `PATH`
 - separately installed MCP server executables
 
 The release bundle includes the dependency-free Python extension SDK under
 `vendor/`; startup never runs `pip`, a browser download, or install code.
 
-With [octet 0.7.6 installed](../../docs/installation.md), install the matching
-signed public bundle, then explicitly enable it:
+With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout) and verified
+matching published assets, the catalog path is:
 
 ```console
 octet extension install octet-mcp
@@ -448,7 +449,7 @@ request.
 
 The initialize catalog is empty epoch `0`; configured servers start only after
 the octet initialize response has been flushed. Each successful server catalog
-change publishes complete dynamic definitions. The bundled API `0.2` SDK keeps
+change publishes complete dynamic definitions. The bundled API `0.4` SDK keeps
 eight committed octet schema/handler snapshots, so an older in-flight model turn
 uses the handler and validation schema from the `catalog_revision` it saw.
 Removed/restarted servers never alias an old epoch to a new connection.
@@ -459,13 +460,13 @@ activity. Cancellation requests cooperation and never claims rollback.
 Server-reported progress is reduced to bounded numeric progress; untrusted
 progress messages are not promoted to UI authority.
 
-MCP results cross the normal API `0.2` boundary:
+MCP results cross the normal API `0.4` boundary:
 
 - text remains ordered model-visible text;
 - an MCP `structuredContent` paired with `outputSchema` becomes validated octet
   `structured_content`;
 - schema-less structured content is retained in bounded, non-model-visible
-  metadata because API `0.2` forbids `structured_content` without a declaration;
+  metadata because API `0.4` forbids `structured_content` without a declaration;
 - supported image/audio base64 is written to the generation scratch directory,
   published through `artifact/publish`, then removed locally; and
 - malformed, unsupported, or oversized content returns a bounded tool error.
@@ -497,7 +498,7 @@ Use the narrow/headless fallback in every frontend:
 ```
 
 `/mcp snapshot` returns the same generic semantic snapshot published through API
-`0.2` `presentation/update`. Lifecycle actions route only to the manifest-
+`0.4` `presentation/update`. Lifecycle actions route only to the manifest-
 declared `mcp` command with literal bridge-authored arguments; server text and
 model output cannot manufacture an action.
 
@@ -534,7 +535,7 @@ The dependency-free suite covers strict config/trust, real and adversarial stdio
 servers, deterministic loopback Streamable HTTP framing/session/auth/SSE fixtures,
 add/replace/remove catalogs, epoch-pinned schemas, malformed/oversized frames,
 cancellation, timeout, crash/restart/parking, bounded redacted logs, media
-artifacts, policy failure, shutdown, API `0.2` wire behavior, generic
+artifacts, policy failure, shutdown, API `0.4` wire behavior, generic
 presentation fixtures, and release/package smoke checks. This inventory is not
 live remote-transport or release qualification. The local TLS fixture uses a
 [deliberately public test-only key](fixtures/tls/README.md), never a real credential.

@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Exact-version 0.7.6 release tooling. Published assets must match this version.
+# Exact-version 0.8.0 release tooling. Published assets must match this version.
 # See the version-pinned release record for publication and installation evidence.
 repository="skaft-software/octet"
-version="0.7.6"
+version="0.8.0"
 tag="v$version"
 release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"
 release_base="https://github.com/$repository/releases/download/$tag"
@@ -356,9 +356,9 @@ manifest_path, bundle_path, cosign_path = sys.argv[1:4]
 identity, repository, source_commit, archive_name = sys.argv[4:8]
 expected_names = {
     "install-octet.sh",
-    "octet-0.7.6-aarch64-apple-darwin.tar.gz",
-    "octet-0.7.6-x86_64-apple-darwin.tar.gz",
-    "octet-0.7.6-x86_64-unknown-linux-gnu.tar.gz",
+    "octet-0.8.0-aarch64-apple-darwin.tar.gz",
+    "octet-0.8.0-x86_64-apple-darwin.tar.gz",
+    "octet-0.8.0-x86_64-unknown-linux-gnu.tar.gz",
 }
 line_pattern = re.compile(r"^([0-9A-Fa-f]{64})  (?:\./)?([A-Za-z0-9_.-]+)$")
 
@@ -474,7 +474,6 @@ crates/octet-coding-agent/README.md
 crates/octet-coding-agent/src/providers/declarations.json
 crates/sexy-tui-rs/LICENSE
 crates/sexy-tui-rs/README.md
-crates/sexy-tui-rs/UPSTREAM-PARITY.md
 crates/sexy-tui-rs/VENDORED.md
 crates/sexy-tui-rs/docs/octet-integration.md
 crates/sexy-tui-rs/docs/rich-rendering.md
@@ -492,16 +491,11 @@ extensions/octet-mcp/fixtures/tls/README.md
 extensions/octet-import-aider/README.md
 extensions/octet-import-cline/README.md
 extensions/octet-import-pi/README.md
-extensions/octet-pi-compat/COMPATIBILITY.md
-extensions/octet-pi-compat/README.md
-extensions/octet-pi-compat/profiles/0.84.4.json
-extensions/octet-pi-compat/profiles/0.84.4.ledger.json
 extensions/octet-serve/README.md
 extensions/octet-subagents/README.md
 extensions/octet-subagents/REFERENCE.md
 extensions/octet-web-search/README.md
 extensions/octet-web-search/REFERENCE.md
-scripts/bench-pi-runtime.py
 scripts/bench-systems.py
 third_party/licenses/PI-MIT.txt
 third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt

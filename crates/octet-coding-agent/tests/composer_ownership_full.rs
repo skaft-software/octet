@@ -6,12 +6,28 @@
 //! loops and model/session/extension/subagent flows are intentionally not
 //! represented here: those remain owned by `tui/pickers.rs` and its callers.
 
+#[expect(
+    dead_code,
+    reason = "This standalone fixture compiles the complete owner but exercises only sibling handoffs; the remaining production API is covered by library tests."
+)]
 #[path = "../src/tui/composer/attachments.rs"]
 mod attachments;
+#[expect(
+    dead_code,
+    reason = "This standalone fixture compiles the complete owner but exercises only sibling handoffs; the remaining production API is covered by library tests."
+)]
 #[path = "../src/tui/composer/composition.rs"]
 mod composition;
+#[expect(
+    dead_code,
+    reason = "This standalone fixture compiles the complete owner but exercises only sibling handoffs; the remaining production API is covered by library tests."
+)]
 #[path = "../src/tui/composer/paste.rs"]
 mod paste;
+#[expect(
+    dead_code,
+    reason = "This standalone fixture compiles the complete owner but exercises only sibling handoffs; the remaining production API is covered by library tests."
+)]
 #[path = "../src/tui/composer/picker.rs"]
 mod picker;
 

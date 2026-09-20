@@ -154,19 +154,20 @@ mod tests {
     /// A priced session whose latest turn is settled, with the durable
     /// interrupted-usage flag under test.
     fn priced_state(usage_uncertain: bool) -> ShellState {
-        let mut state = ShellState::default();
-        state.usage_uncertain = usage_uncertain;
-        state.price_display = PriceDisplay::Priced;
-        state.run_cost_available = true;
-        state.run_cost_microdollars = 78_900;
-        state.session_cost_microdollars = Some(2_410_000);
-        state.last_turn_usage = Some(Usage {
-            input_tokens: 1_000,
-            output_tokens: 250,
-            total_tokens: 1_250,
-            ..Usage::default()
-        });
-        state
+        ShellState {
+            usage_uncertain,
+            price_display: PriceDisplay::Priced,
+            run_cost_available: true,
+            run_cost_microdollars: 78_900,
+            session_cost_microdollars: Some(2_410_000),
+            last_turn_usage: Some(Usage {
+                input_tokens: 1_000,
+                output_tokens: 250,
+                total_tokens: 1_250,
+                ..Usage::default()
+            }),
+            ..ShellState::default()
+        }
     }
 
     #[test]

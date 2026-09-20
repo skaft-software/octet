@@ -1,6 +1,7 @@
 {
   "alibaba/deepseek-v4-flash-0731": "DeepSeek V4 Flash 0731",
   "alibaba/glm-5.2": "GLM-5.2",
+  "alibaba/kimi-k3": "Kimi K3",
   "alibaba/qvq-max": "QVQ Max",
   "alibaba/qwen-flash": "Qwen Flash",
   "alibaba/qwen-max": "Qwen Max",
@@ -171,6 +172,7 @@
   "mistral/voxtral-mini-tts-latest": "Voxtral Mini TTS (latest)",
   "mistral/voxtral-small-latest": "Voxtral Small (latest)",
   "mistral/zai-glm-5-2": "GLM-5.2",
+  "mistral/zai-glm-5-3": "GLM-5.3",
   "moonshotai/kimi-k2.6": "Kimi K2.6",
   "moonshotai/kimi-k2.7-code": "Kimi K2.7 Code",
   "moonshotai/kimi-k2.7-code-highspeed": "Kimi K2.7 Code HighSpeed",
@@ -278,6 +280,8 @@
   "nvidia/thinkingmachines/inkling": "Inkling",
   "nvidia/upstage/solar-10.7b-instruct": "solar-10.7b-instruct",
   "nvidia/z-ai/glm-5.2": "GLM-5.2",
+  "nvidia/z-ai/glm-5.3": "GLM-5.3",
+  "nvidia/z-ai/glm-5.3-flash": "GLM-5.3-Flash",
   "openai/chatgpt-image-latest": "chatgpt-image-latest",
   "openai/gpt-3.5-turbo": "GPT-3.5-turbo",
   "openai/gpt-4": "GPT-4",
@@ -356,8 +360,6 @@
   "xai/grok-4.6": "Grok 4.6",
   "xai/grok-build-0.1": "Grok Build 0.1",
   "xai/grok-imagine-image": "Grok Imagine Image",
-  "xai/grok-imagine-image-2.0": "Grok Imagine Image 2.0",
-  "xai/grok-imagine-image-quality": "Grok Imagine Image Quality",
   "xai/grok-imagine-video": "Grok Imagine Video",
   "xai/grok-imagine-video-1.5": "Grok Imagine Video 1.5",
   "xiaomi/mimo-v2-flash": "MiMo-V2-Flash",
@@ -380,5 +382,6 @@
   "zhipuai/glm-5.2": "GLM-5.2",
   "zhipuai/glm-5.3": "GLM-5.3",
   "zhipuai/glm-5.3-flash": "GLM-5.3-Flash",
+  "zhipuai/glm-5.3-flashx": "GLM-5.3-FlashX",
   "zhipuai/glm-5v-turbo": "GLM-5V-Turbo"
 }

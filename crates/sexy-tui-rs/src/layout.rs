@@ -28,7 +28,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::mouse::{component_identity, dispatch_mouse_event, TuiMouseDispatchResult, TuiMouseEvent};
+use crate::mouse::{
+    component_identity, dispatch_mouse_event, TuiMouseDispatchResult, TuiMouseEvent,
+};
 use crate::tui::Component;
 use crate::utils::{slice_by_column, visible_width};
 
@@ -181,7 +183,7 @@ pub struct StackLayoutEntry<'a> {
 impl StackLayoutEntry<'_> {
     /// Whether the entry participates in this viewport.
     pub fn is_visible(&self, viewport: LayoutViewport) -> bool {
-        self.visible.map_or(true, |visible| visible(viewport))
+        self.visible.is_none_or(|visible| visible(viewport))
     }
 }
 
@@ -239,6 +241,9 @@ pub enum Scrollbar {
     Always,
 }
 
+/// Text styling callback for a scrollbar track or thumb cell.
+pub type ScrollbarStyle = Box<dyn Fn(&str) -> String>;
+
 /// Scroll view construction options.
 pub struct ScrollViewOptions {
     /// Follow the content end until the reader scrolls away.
@@ -252,9 +257,9 @@ pub struct ScrollViewOptions {
     /// Transient scrollbar hide delay.
     pub scrollbar_hide_delay: Duration,
     /// Track cell renderer.
-    pub scrollbar_track_style: Option<Box<dyn Fn(&str) -> String>>,
+    pub scrollbar_track_style: Option<ScrollbarStyle>,
     /// Thumb cell renderer.
-    pub scrollbar_thumb_style: Option<Box<dyn Fn(&str) -> String>>,
+    pub scrollbar_thumb_style: Option<ScrollbarStyle>,
 }
 
 impl Default for ScrollViewOptions {
@@ -334,7 +339,12 @@ pub trait ScrollLayoutState {
     /// Content width after reserving the scrollbar column when always-on.
     fn get_content_width(&self, width: i32) -> i32;
     /// Record the resolved layout geometry.
-    fn update_layout(&self, content_height: i32, viewport_height: i32, request_render: Rc<dyn Fn()>);
+    fn update_layout(
+        &self,
+        content_height: i32,
+        viewport_height: i32,
+        request_render: Rc<dyn Fn()>,
+    );
     /// Jump to a clamped offset.
     fn scroll_to(&self, scroll_top: i32, disable_follow: bool);
     /// Scroll by logical lines, returning the unconsumed remainder.
@@ -356,6 +366,7 @@ pub trait ScrollLayoutState {
     fn scrollbar_thumb_text(&self, text: &str) -> String;
 }
 
+#[derive(Default)]
 struct ScrollViewState {
     scroll_top: i32,
     content_height: i32,
@@ -376,7 +387,10 @@ impl std::fmt::Debug for ScrollViewState {
             .field("viewport_height", &self.viewport_height)
             .field("following_end", &self.following_end)
             .field("follow_suppressed_at_end", &self.follow_suppressed_at_end)
-            .field("transient_scrollbar_visible", &self.transient_scrollbar_visible)
+            .field(
+                "transient_scrollbar_visible",
+                &self.transient_scrollbar_visible,
+            )
             .field("scrollbar_active", &self.scrollbar_active)
             .field("transient_deadline", &self.transient_deadline)
             // The render callback is not printable; report its presence only.
@@ -385,22 +399,6 @@ impl std::fmt::Debug for ScrollViewState {
                 &self.request_render.as_ref().map(|_| "<callback>"),
             )
             .finish()
-    }
-}
-
-impl Default for ScrollViewState {
-    fn default() -> Self {
-        Self {
-            scroll_top: 0,
-            content_height: 0,
-            viewport_height: 0,
-            following_end: false,
-            follow_suppressed_at_end: false,
-            transient_scrollbar_visible: false,
-            scrollbar_active: false,
-            transient_deadline: None,
-            request_render: None,
-        }
     }
 }
 
@@ -448,8 +446,8 @@ pub struct ScrollView {
     overscroll: Overscroll,
     scrollbar: Cell<Scrollbar>,
     scrollbar_hide_delay: Duration,
-    scrollbar_track_style: Option<Box<dyn Fn(&str) -> String>>,
-    scrollbar_thumb_style: Option<Box<dyn Fn(&str) -> String>>,
+    scrollbar_track_style: Option<ScrollbarStyle>,
+    scrollbar_thumb_style: Option<ScrollbarStyle>,
 }
 
 impl ScrollView {
@@ -495,14 +493,13 @@ impl Component for ScrollView {
     fn render(&self, width: u16) -> Vec<String> {
         let width = i32::from(width.max(1));
         let content_width = self.get_content_width(width);
-        let lines = self.child.render(u16::try_from(content_width.max(1)).unwrap_or(u16::MAX));
+        let lines = self
+            .child
+            .render(u16::try_from(content_width.max(1)).unwrap_or(u16::MAX));
         if content_width == width {
             lines
         } else {
-            lines
-                .into_iter()
-                .map(|line| format!("{line} "))
-                .collect()
+            lines.into_iter().map(|line| format!("{line} ")).collect()
         }
     }
 
@@ -548,7 +545,9 @@ impl ScrollLayoutState for ScrollView {
     }
 
     fn is_scrollbar_visible(&self) -> bool {
-        self.state.borrow().is_scrollbar_visible(self.scrollbar.get())
+        self.state
+            .borrow()
+            .is_scrollbar_visible(self.scrollbar.get())
     }
 
     fn is_scrollbar_active(&self) -> bool {
@@ -582,7 +581,8 @@ impl ScrollLayoutState for ScrollView {
         if state.scroll_top < max_scroll_top {
             state.follow_suppressed_at_end = false;
         }
-        if self.follow_end && state.scroll_top == max_scroll_top && !state.follow_suppressed_at_end {
+        if self.follow_end && state.scroll_top == max_scroll_top && !state.follow_suppressed_at_end
+        {
             state.following_end = true;
         }
         if state.content_height <= state.viewport_height {
@@ -597,7 +597,8 @@ impl ScrollLayoutState for ScrollView {
         let max_scroll_top = state.max_scroll_top();
         let next = scroll_top.max(0).min(max_scroll_top);
         let next_follow_suppressed_at_end = disable_follow && next == max_scroll_top;
-        let next_following_end = !next_follow_suppressed_at_end && self.follow_end && next == max_scroll_top;
+        let next_following_end =
+            !next_follow_suppressed_at_end && self.follow_end && next == max_scroll_top;
         if next == state.scroll_top
             && next_following_end == state.following_end
             && next_follow_suppressed_at_end == state.follow_suppressed_at_end
@@ -650,7 +651,8 @@ impl ScrollLayoutState for ScrollView {
         let delay = self.scrollbar_hide_delay;
         let mut state = self.state.borrow_mut();
         let changed = state.scroll_top != 0
-            || state.following_end != (self.follow_end && state.content_height <= state.viewport_height);
+            || state.following_end
+                != (self.follow_end && state.content_height <= state.viewport_height);
         state.scroll_top = 0;
         state.following_end = self.follow_end && state.content_height <= state.viewport_height;
         state.follow_suppressed_at_end = false;
@@ -808,7 +810,8 @@ impl Stack {
     }
 
     fn push(&mut self, component: Box<dyn Component>, options: StackEntryOptions) {
-        self.entries.push(OwnedEntry::from_options(component, options));
+        self.entries
+            .push(OwnedEntry::from_options(component, options));
     }
 
     fn resolved_entries(&self) -> Vec<StackLayoutEntry<'_>> {
@@ -1029,7 +1032,7 @@ impl<'a> LayoutFrame<'a> {
         }
         let mut found: Vec<(&LayoutBox<'a>, usize)> = Vec::new();
         visit(&self.root, 0, x, y, &mut found);
-        found.sort_by(|left, right| right.1.cmp(&left.1));
+        found.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         found.into_iter().map(|(box_, _)| box_).collect()
     }
 
@@ -1054,7 +1057,7 @@ impl<'a> LayoutFrame<'a> {
             }
         }
         visit(&self.root, 0, x, y, &mut found);
-        found.sort_by(|left, right| right.1.cmp(&left.1));
+        found.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         found
             .into_iter()
             .filter_map(|(box_, _)| box_.scroll_view)
@@ -1142,7 +1145,10 @@ pub struct ScrollbarGeometry {
 }
 
 /// Resolve scrollbar geometry for a scroll viewport box.
-pub fn scrollbar_geometry(box_: &LayoutBox<'_>, include_hidden_auto: bool) -> Option<ScrollbarGeometry> {
+pub fn scrollbar_geometry(
+    box_: &LayoutBox<'_>,
+    include_hidden_auto: bool,
+) -> Option<ScrollbarGeometry> {
     let scroll_view = box_.scroll_view?;
     if box_.rect.width <= 0 || box_.rect.height <= 0 {
         return None;
@@ -1158,8 +1164,9 @@ pub fn scrollbar_geometry(box_: &LayoutBox<'_>, include_hidden_auto: bool) -> Op
         })
         .unwrap_or(0);
     let track_height = box_.rect.height;
-    let can_reveal_hidden_auto =
-        include_hidden_auto && scroll_view.scrollbar() == Scrollbar::Auto && content_height > track_height;
+    let can_reveal_hidden_auto = include_hidden_auto
+        && scroll_view.scrollbar() == Scrollbar::Auto
+        && content_height > track_height;
     if !scroll_view.is_scrollbar_visible() && !can_reveal_hidden_auto {
         return None;
     }
@@ -1167,9 +1174,9 @@ pub fn scrollbar_geometry(box_: &LayoutBox<'_>, include_hidden_auto: bool) -> Op
     let thumb_height = if content_height <= 0 {
         track_height
     } else {
-        let proportional =
-            ((i64::from(track_height) * i64::from(track_height)) as f64 / f64::from(content_height)).round()
-                as i64;
+        let proportional = ((i64::from(track_height) * i64::from(track_height)) as f64
+            / f64::from(content_height))
+        .round() as i64;
         i32::try_from(proportional)
             .unwrap_or(track_height)
             .clamp(min_thumb_height, track_height)
@@ -1179,8 +1186,9 @@ pub fn scrollbar_geometry(box_: &LayoutBox<'_>, include_hidden_auto: bool) -> Op
     let thumb_offset = if max_scroll_top == 0 {
         0
     } else {
-        ((f64::from(scroll_view.scroll_top()) / f64::from(max_scroll_top)) * f64::from(max_thumb_top)).round()
-            as i32
+        ((f64::from(scroll_view.scroll_top()) / f64::from(max_scroll_top))
+            * f64::from(max_thumb_top))
+        .round() as i32
     };
     let column = box_.rect.x + box_.rect.width - 1;
     if column < box_.clip.x || column >= box_.clip.x + box_.clip.width {
@@ -1327,9 +1335,11 @@ fn distribute(sizes: &mut [i32], entries: &[StackLayoutEntry<'_>], amount: i32, 
     }
 }
 
+type RenderCache = HashMap<(usize, i32), Rc<Vec<String>>>;
+
 struct LayoutContext<'a> {
     viewport: LayoutViewport,
-    render_cache: RefCell<HashMap<(usize, i32), Rc<Vec<String>>>>,
+    render_cache: RefCell<RenderCache>,
     request_render: Rc<dyn Fn()>,
     primary_scroll_view: RefCell<Option<&'a dyn ScrollLayoutState>>,
 }
@@ -1393,10 +1403,14 @@ fn layout_component<'a>(
     let safe_width = width.max(1);
     let Some(node) = component.layout_node() else {
         let lines = context.render_cached(component, safe_width);
-        let allocated_height = height.unwrap_or_else(|| i32::try_from(lines.len()).unwrap_or(i32::MAX));
+        let allocated_height =
+            height.unwrap_or_else(|| i32::try_from(lines.len()).unwrap_or(i32::MAX));
         let mut line_offset = 0;
         if lines.len() > usize::try_from(allocated_height).unwrap_or(0) && allocated_height > 0 {
-            if let Some(cursor_line) = lines.iter().position(|line| line.contains(crate::tui::CURSOR_MARKER)) {
+            if let Some(cursor_line) = lines
+                .iter()
+                .position(|line| line.contains(crate::tui::CURSOR_MARKER))
+            {
                 let cursor_line = i32::try_from(cursor_line).unwrap_or(i32::MAX);
                 if cursor_line >= allocated_height {
                     line_offset = usize::try_from(cursor_line - allocated_height + 1).unwrap_or(0);
@@ -1436,9 +1450,15 @@ fn layout_component<'a>(
             );
             let content_height = child_box.rect.height;
             let viewport_height = height.unwrap_or(content_height).max(0);
-            node.state
-                .update_layout(content_height, viewport_height, context.request_render.clone());
-            translate_box(&mut child_box, previous_scroll_top - node.state.scroll_top());
+            node.state.update_layout(
+                content_height,
+                viewport_height,
+                context.request_render.clone(),
+            );
+            translate_box(
+                &mut child_box,
+                previous_scroll_top - node.state.scroll_top(),
+            );
             context.note_primary(node.state);
             let rect = LayoutRect {
                 x,
@@ -1485,7 +1505,11 @@ fn layout_component<'a>(
             // sizing pass expects copies it; nothing large is duplicated.
             let resolved = entries.iter().map(|entry| **entry).collect::<Vec<_>>();
             let sizes = allocate_stack_sizes(&resolved, &intrinsic, height, gap);
-            let natural: i32 = sizes.iter().copied().fold(0, i32::saturating_add).saturating_add(gap_total);
+            let natural: i32 = sizes
+                .iter()
+                .copied()
+                .fold(0, i32::saturating_add)
+                .saturating_add(gap_total);
             let allocated_height = height.unwrap_or(natural).max(0);
             let rect = LayoutRect {
                 x,
@@ -1542,7 +1566,10 @@ fn layout_component<'a>(
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    context.measure_height(entry.component, widths.get(index).copied().unwrap_or(1).max(1))
+                    context.measure_height(
+                        entry.component,
+                        widths.get(index).copied().unwrap_or(1).max(1),
+                    )
                 })
                 .collect::<Vec<_>>();
             let allocated_height =
@@ -1660,7 +1687,12 @@ fn replace_scrollbar_cell(line: &str, column: i32, total_width: i32, replacement
     let total_width = usize::try_from(total_width).unwrap_or(0);
     let before = slice_by_column(line, 0, column, true);
     let before_width = visible_width(&before);
-    let after = slice_by_column(line, column + 1, total_width.saturating_sub(column + 1), true);
+    let after = slice_by_column(
+        line,
+        column + 1,
+        total_width.saturating_sub(column + 1),
+        true,
+    );
     let mut out = String::new();
     out.push_str(&before);
     if before_width < column {
@@ -1702,12 +1734,8 @@ fn paint_scrollbar(box_: &LayoutBox<'_>, screen: &mut [String], total_width: i32
         };
         let index = usize::try_from(row).unwrap_or(0);
         let current = screen.get(index).cloned().unwrap_or_default();
-        screen[index] = replace_scrollbar_cell(
-            &current,
-            geometry.column,
-            total_width,
-            &replacement,
-        );
+        screen[index] =
+            replace_scrollbar_cell(&current, geometry.column, total_width, &replacement);
     }
 }
 
@@ -1719,10 +1747,11 @@ fn paint_box(box_: &LayoutBox<'_>, screen: &mut [String], total_width: i32) {
             .min(i32::try_from(screen.len()).unwrap_or(i32::MAX));
         let mut row = first_row;
         while row < last_row {
-            let source_index = i64::try_from(box_.line_offset).unwrap_or(0)
-                + i64::from(row - box_.rect.y);
+            let source_index =
+                i64::try_from(box_.line_offset).unwrap_or(0) + i64::from(row - box_.rect.y);
             if source_index >= 0 {
-                if let Some(source) = lines.get(usize::try_from(source_index).unwrap_or(usize::MAX)) {
+                if let Some(source) = lines.get(usize::try_from(source_index).unwrap_or(usize::MAX))
+                {
                     let index = usize::try_from(row).unwrap_or(0);
                     let current = screen.get(index).cloned().unwrap_or_default();
                     let full_width = box_.rect.x <= 0 && box_.rect.width >= total_width;
@@ -1776,18 +1805,15 @@ pub fn render_layout_frame<'a>(
     );
     let mut lines = vec![String::new(); usize::try_from(safe_height).unwrap_or(0)];
     paint_box(&root_box, &mut lines, safe_width);
-    // Copy the retained primary view out of its `Ref` before the frame literal:
-    // the borrow must end while the frame is still a local, not at the tail
-    // expression of this block.
+    // End the retained primary view's borrow before the tail frame literal.
     let primary_scroll_view = *context.primary_scroll_view.borrow();
-    let frame = LayoutFrame {
+    LayoutFrame {
         root: root_box,
         width: safe_width,
         height: safe_height,
         lines,
         primary_scroll_view,
-    };
-    frame
+    }
 }
 
 /// Route a wheel delta through the nested scroll views under the pointer and
@@ -1912,8 +1938,14 @@ mod tests {
                 .with_grow(3),
         );
         let frame = frame_of(&stack, 20, 10);
-        assert_eq!(frame.root.children[0].rect.height, 3, "max size caps growth");
-        assert_eq!(frame.root.children[1].rect.height, 7, "grow fills the remainder");
+        assert_eq!(
+            frame.root.children[0].rect.height, 3,
+            "max size caps growth"
+        );
+        assert_eq!(
+            frame.root.children[1].rect.height, 7,
+            "grow fills the remainder"
+        );
         assert_eq!(frame.root.children[1].rect.y, 3);
 
         let mut shrink = VStack::new();
@@ -1945,16 +1977,19 @@ mod tests {
         assert_eq!(tall.root.children[1].rect.y, 1);
         let short = frame_of(&stack, 20, 4);
         assert_eq!(short.root.children.len(), 1, "hidden entry is not laid out");
-        assert_eq!(*seen.borrow(), vec![
-            LayoutViewport {
-                width: 20,
-                height: 10
-            },
-            LayoutViewport {
-                width: 20,
-                height: 4
-            }
-        ]);
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                LayoutViewport {
+                    width: 20,
+                    height: 10
+                },
+                LayoutViewport {
+                    width: 20,
+                    height: 4
+                }
+            ]
+        );
     }
 
     #[test]
@@ -2017,7 +2052,10 @@ mod tests {
         assert_eq!(views.len(), 2, "both nested viewports contain the point");
         let outer_box = frame.scroll_view_box(views[1]).expect("outer box");
         let inner_box = &outer_box.children[0].children[1];
-        assert_eq!(inner_box.rect.height, 4, "the inner viewport is constrained");
+        assert_eq!(
+            inner_box.rect.height, 4,
+            "the inner viewport is constrained"
+        );
         assert!(
             inner_box.clip.height <= outer_box.clip.height,
             "the inner viewport is clipped by the outer viewport"
@@ -2029,7 +2067,11 @@ mod tests {
         let remaining = route_wheel_delta(&frame, 1, 3, -2);
         assert_eq!(remaining, -2, "contain stops the chain");
         assert_eq!(views[0].scroll_top(), 0);
-        assert_eq!(views[1].scroll_top(), 18, "the outer follow position is untouched");
+        assert_eq!(
+            views[1].scroll_top(),
+            18,
+            "the outer follow position is untouched"
+        );
 
         // Chain: the untouched remainder is passed outward, so the ancestor
         // consumes it and the caller sees nothing left over.
@@ -2075,10 +2117,7 @@ mod tests {
                 .with_basis(StackBasis::Fixed(2))
                 .with_shrink(0),
         );
-        stack.push_with(
-            Box::new(primary),
-            StackEntryOptions::new().with_grow(1),
-        );
+        stack.push_with(Box::new(primary), StackEntryOptions::new().with_grow(1));
         let frame = frame_of(&stack, 20, 6);
         let primary = frame.primary_scroll_view.expect("primary view");
         assert_eq!(primary.viewport_height(), 4);
@@ -2114,10 +2153,7 @@ mod tests {
                 .with_grow(0)
                 .with_shrink(0),
         );
-        stack.push_with(
-            Box::new(inner),
-            StackEntryOptions::new().with_grow(1),
-        );
+        stack.push_with(Box::new(inner), StackEntryOptions::new().with_grow(1));
         let frame = frame_of(&stack, 20, 5);
         let boxes = frame.boxes_at(2, 2);
         assert!(boxes.len() >= 3, "stack, scroll view, and content box");
@@ -2217,7 +2253,10 @@ mod tests {
         stack.push(Box::new(view));
         let frame = frame_of(&stack, 20, 5);
         let state = frame.primary_scroll_view.expect("primary");
-        assert!(!state.is_scrollbar_visible(), "idle auto scrollbar is hidden");
+        assert!(
+            !state.is_scrollbar_visible(),
+            "idle auto scrollbar is hidden"
+        );
         state.scroll_to(10, false);
         assert!(state.is_scrollbar_visible(), "activity reveals it");
         let box_ = frame

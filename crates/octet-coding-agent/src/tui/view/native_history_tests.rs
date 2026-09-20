@@ -290,6 +290,89 @@ fn publish_workers(
 }
 
 #[test]
+fn native_active_roster_preserves_interleaved_answers_and_tool_results_in_history() {
+    for (width, height) in [(80, 8), (80, 24), (120, 40)] {
+        for settled in [false, true] {
+            let mut replay = NativeReplay::with_size(width, height);
+            let run = replay.shell.begin_run("openai");
+            let mut children = vec![worker("BACKGROUND-WORKER")];
+            publish_workers(&mut replay, children.clone());
+            replay.render(true);
+            for index in 0..12 {
+                let id = ToolCallId(format!("interleaved-{index}"));
+                replay.shell.on_run_event(
+                    run,
+                    &AgentEvent::ToolStarted {
+                        id: id.clone(),
+                        name: "bash".into(),
+                        args: serde_json::json!({"command": format!("COMMAND-{index:02}")}),
+                    },
+                );
+                replay.render(true);
+                replay.shell.on_run_event(
+                    run,
+                    &AgentEvent::ToolProgress {
+                        id: id.clone(),
+                        progress: ToolProgress::Output {
+                            stream: octet_agent::OutputStream::Stdout,
+                            bytes: bytes::Bytes::from(format!("TRANSIENT-{index:02}\n")),
+                        },
+                    },
+                );
+                replay.render(true);
+                replay.shell.on_run_event(
+                    run,
+                    &AgentEvent::ToolFinished {
+                        id,
+                        result: Ok(octet_agent::ToolOutput::new(format!(
+                            "TOOL-RESULT-{index:02}"
+                        ))),
+                        duration: Duration::from_millis(10),
+                    },
+                );
+                replay.render(true);
+                replay.shell.on_run_event(
+                    run,
+                    &AgentEvent::OutputDelta {
+                        channel: OutputChannel::Text,
+                        text: format!("ANSWER-{index:02}\n\n"),
+                    },
+                );
+                replay.render(true);
+            }
+            // A real historical telemetry update must retain the complete
+            // conversation on replay, not replace it with a viewport-sized
+            // suffix. Check both while the worker is live and after settlement.
+            children[0].output_tokens += 100;
+            if settled {
+                children[0].state = "completed".into();
+            }
+            publish_workers(&mut replay, children);
+            replay.render(false);
+            replay.render(true);
+            let physical = replay.history();
+            for index in 0..12 {
+                for prefix in ["COMMAND", "TOOL-RESULT", "ANSWER"] {
+                    let marker = format!("{prefix}-{index:02}");
+                    assert_eq!(
+                        physical.matches(&marker).count(),
+                        1,
+                        "{width}x{height}, settled={settled}, {marker}: {physical}"
+                    );
+                }
+            }
+            assert_eq!(
+                physical.matches("BACKGROUND-WORKER").count(),
+                1,
+                "{physical}"
+            );
+            assert!(!physical.contains("result pending"), "{physical}");
+            assert!(!physical.contains("TRANSIENT-"), "{physical}");
+        }
+    }
+}
+
+#[test]
 fn native_offscreen_concurrent_roster_animation_is_quiet_and_state_is_not_frozen() {
     let mut replay = NativeReplay::new();
     let mut children = vec![worker("ROSTER-A"), worker("ROSTER-B")];

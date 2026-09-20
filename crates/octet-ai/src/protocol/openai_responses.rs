@@ -1014,7 +1014,10 @@ pub(crate) fn encode_replay_input(
                 // verbatim so the caller's tool result for that `call_id` is
                 // replayed as `computer_call_output`.
                 for item in output.items() {
-                    if item.as_json().get("type").and_then(serde_json::Value::as_str)
+                    if item
+                        .as_json()
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
                         == Some("computer_call")
                     {
                         if let Some(call_id) = item
@@ -1082,7 +1085,10 @@ pub(crate) fn build_request(
     // never a provider-name branch: a route whose profile does not declare the
     // tool fails closed instead of silently dropping the caller's declaration.
     // Responses Lite cannot carry tools at all, so it fails closed too.
-    let computer_use = req.responses.as_ref().and_then(|options| options.computer_use);
+    let computer_use = req
+        .responses
+        .as_ref()
+        .and_then(|options| options.computer_use);
     if let Some(tool) = computer_use {
         if responses_lite {
             return Err(ConfigError::Parse(
@@ -1098,14 +1104,14 @@ pub(crate) fn build_request(
         {
             return Err(crate::error::UnsupportedError::ComputerUse.into());
         }
-        tools_opt.get_or_insert_with(Vec::new).push(ResponsesToolWire::Computer(
-            ResponsesComputerTool {
+        tools_opt
+            .get_or_insert_with(Vec::new)
+            .push(ResponsesToolWire::Computer(ResponsesComputerTool {
                 r#type: COMPUTER_TOOL_NAME,
                 display_width: tool.display_width,
                 display_height: tool.display_height,
                 environment: tool.environment.wire_value(),
-            },
-        ));
+            }));
     }
 
     let tool_choice_opt = if !model.spec.capabilities.tools {
@@ -1232,8 +1238,8 @@ pub(crate) fn build_request(
     let mut body = serde_json::to_value(&responses_req)
         .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
     super::preset::sampling(model, &req, &mut body)?;
-    let body_bytes = serde_json::to_vec(&body)
-        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let body_bytes =
+        serde_json::to_vec(&body).map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "responses")?;
 
@@ -1278,7 +1284,9 @@ fn map_grammar_replay(
             && item.get("type").and_then(serde_json::Value::as_str) == Some("function_call")
         {
             if let Some(name) = item.get("name").and_then(serde_json::Value::as_str) {
-                if let Some(property) = super::grammar::input_property(&req.tools, name, grammar_tools)? {
+                if let Some(property) =
+                    super::grammar::input_property(&req.tools, name, grammar_tools)?
+                {
                     let arguments = item
                         .get("arguments")
                         .and_then(serde_json::Value::as_str)
@@ -1680,13 +1688,9 @@ fn close_open_tool_calls(
         // A computer call whose action never validated is not a representable
         // exchange: fail closed before the terminal response instead of
         // surfacing an actionless call for a caller to guess at.
-        if builder
-            .tool_call_builders
-            .get(&index)
-            .is_some_and(|call| {
-                call.name == COMPUTER_TOOL_NAME && call.arguments_json.trim().is_empty()
-            })
-        {
+        if builder.tool_call_builders.get(&index).is_some_and(|call| {
+            call.name == COMPUTER_TOOL_NAME && call.arguments_json.trim().is_empty()
+        }) {
             return Err(computer_action_error("missing"));
         }
         emit_event(
@@ -1830,7 +1834,9 @@ fn canonical_computer_action(arguments_json: &str) -> Option<serde_json::Value> 
     let parsed: serde_json::Value = serde_json::from_str(arguments_json).ok()?;
     let action = parsed.get("action").unwrap_or(&parsed);
     let kind = action.get("type").and_then(serde_json::Value::as_str)?;
-    COMPUTER_ACTION_TYPES.contains(&kind).then(|| action.clone())
+    COMPUTER_ACTION_TYPES
+        .contains(&kind)
+        .then(|| action.clone())
 }
 
 /// Decodes a streaming SSE event from OpenAI Responses, emitting StreamEvents.
@@ -2279,10 +2285,12 @@ pub(crate) fn decode_stream_event(
                         let prior: Option<serde_json::Value> =
                             serde_json::from_str(&call.arguments_json).ok();
                         let arguments = computer_call_arguments(
-                            item.action.as_ref().or_else(|| prior.as_ref()?.get("action")),
-                            item.pending_safety_checks.as_ref().or_else(|| {
-                                prior.as_ref()?.get("pending_safety_checks")
-                            }),
+                            item.action
+                                .as_ref()
+                                .or_else(|| prior.as_ref()?.get("action")),
+                            item.pending_safety_checks
+                                .as_ref()
+                                .or_else(|| prior.as_ref()?.get("pending_safety_checks")),
                         )?;
                         if let Some(prior) = prior {
                             let terminal: serde_json::Value = serde_json::from_str(&arguments)
@@ -3454,7 +3462,8 @@ mod tests {
     fn computer_use_req() -> Request {
         let mut req = user_req(vec![], CompatibilityMode::Lossy);
         req.responses = Some(
-            crate::responses::ResponsesOptions::default().with_computer_use(declared_computer_use()),
+            crate::responses::ResponsesOptions::default()
+                .with_computer_use(declared_computer_use()),
         );
         req
     }
@@ -3613,7 +3622,10 @@ mod tests {
         // Canonical text has no wire slot in a screenshot-only output, so the
         // item stays a well-formed, empty screenshot rather than unbounded prose
         // or a fabricated image.
-        assert_eq!(output["output"], serde_json::json!({"type": "computer_screenshot"}));
+        assert_eq!(
+            output["output"],
+            serde_json::json!({"type": "computer_screenshot"})
+        );
     }
 
     #[test]
@@ -3627,7 +3639,8 @@ mod tests {
                 Some(Media::Image(ImageMedia {
                     source: ImageSource::Inline(bytes::Bytes::from(vec![
                         0_u8;
-                        MAX_COMPUTER_SCREENSHOT_BYTES + 1
+                        MAX_COMPUTER_SCREENSHOT_BYTES
+                            + 1
                     ])),
                     media_type: Some(mime::IMAGE_PNG),
                     detail: None,
@@ -3641,7 +3654,10 @@ mod tests {
             .iter()
             .find(|item| item["type"] == "computer_call_output")
             .expect("computer_call_output item");
-        assert_eq!(output["output"], serde_json::json!({"type": "computer_screenshot"}));
+        assert_eq!(
+            output["output"],
+            serde_json::json!({"type": "computer_screenshot"})
+        );
     }
 
     #[test]
@@ -3688,7 +3704,10 @@ mod tests {
             ],
         );
         let rendered = serde_json::to_string(input.items()).unwrap();
-        assert!(rendered.contains("\"type\":\"computer_call\""), "{rendered}");
+        assert!(
+            rendered.contains("\"type\":\"computer_call\""),
+            "{rendered}"
+        );
         let output = input
             .items()
             .iter()
@@ -4288,7 +4307,8 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output
 "#;
         let error = run(data, 0).await.unwrap_err();
         assert!(
-            format!("{error}").contains("unsupported OpenAI Responses computer action `shell_exec`"),
+            format!("{error}")
+                .contains("unsupported OpenAI Responses computer action `shell_exec`"),
             "unexpected error: {error}"
         );
     }
@@ -4347,7 +4367,10 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output
 
     #[tokio::test]
     async fn computer_safety_checks_must_be_an_array() {
-        for checks in [serde_json::json!({"id":"check"}), serde_json::json!("check")] {
+        for checks in [
+            serde_json::json!({"id":"check"}),
+            serde_json::json!("check"),
+        ] {
             let item = serde_json::json!({
                 "type":"computer_call", "id":"cc_1", "call_id":"call_c1",
                 "action":{"type":"screenshot"}, "pending_safety_checks":checks,
@@ -4357,7 +4380,10 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output
                  data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{item}}}\n\n"
             );
             let error = run(data.as_bytes(), 0).await.unwrap_err();
-            assert!(error.to_string().contains("safety checks must be an array"), "{error}");
+            assert!(
+                error.to_string().contains("safety checks must be an array"),
+                "{error}"
+            );
         }
     }
 

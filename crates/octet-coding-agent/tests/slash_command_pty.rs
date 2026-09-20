@@ -530,7 +530,9 @@ fn real_octet_settings_and_scoped_models_report_while_a_response_is_streaming() 
     let (api, mut octet) = streaming_octet();
     octet.pty.write_input(b"/settings\r");
     octet.pty.wait_for(b"octet settings");
-    octet.pty.wait_for(b"Project trust is deliberately not persisted here");
+    octet
+        .pty
+        .wait_for(b"Project trust is deliberately not persisted here");
     assert!(
         !contains_bytes(&octet.pty.output, TAIL_MARKER),
         "settings rendered only after the response finished; transcript: {}",
@@ -544,7 +546,9 @@ fn real_octet_settings_and_scoped_models_report_while_a_response_is_streaming() 
     octet.pty.wait_for(b"Model cycling scope");
     octet.pty.write_input(b"\r");
     octet.pty.write_input(b"/scoped-models all\r");
-    octet.pty.wait_for(b"model scope change queued for the next idle boundary");
+    octet
+        .pty
+        .wait_for(b"model scope change queued for the next idle boundary");
 
     api.release();
     octet.pty.wait_for(TAIL_MARKER);

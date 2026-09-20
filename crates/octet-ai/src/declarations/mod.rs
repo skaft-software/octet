@@ -29,11 +29,11 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod azure;
 pub mod bedrock;
 pub mod codex;
 pub mod proxy;
 pub mod radius;
-pub(crate) mod azure;
 pub use azure::AzureRequestOptions;
 
 /// Maximum serialized size of a single declaration object.
@@ -79,10 +79,22 @@ fn check_headers(headers: &BTreeMap<String, String>) -> Result<(), DeclarationEr
     for (name, value) in headers {
         let parsed = http::HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| DeclarationError::InvalidHeaderName(name.clone()))?;
-        if !names.insert(parsed.as_str().to_owned()) || matches!(parsed.as_str(),
-            "host" | "content-length" | "transfer-encoding" | "connection" | "upgrade"
-            | "proxy-authorization" | "content-encoding") || parsed.as_str().starts_with("sec-websocket-") {
-            return Err(DeclarationError::Invalid("duplicate or transport-owned request header".into()));
+        if !names.insert(parsed.as_str().to_owned())
+            || matches!(
+                parsed.as_str(),
+                "host"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "connection"
+                    | "upgrade"
+                    | "proxy-authorization"
+                    | "content-encoding"
+            )
+            || parsed.as_str().starts_with("sec-websocket-")
+        {
+            return Err(DeclarationError::Invalid(
+                "duplicate or transport-owned request header".into(),
+            ));
         }
         http::HeaderValue::from_str(value)
             .map_err(|_| DeclarationError::InvalidHeaderValue { name: name.clone() })?;
@@ -91,35 +103,61 @@ fn check_headers(headers: &BTreeMap<String, String>) -> Result<(), DeclarationEr
 }
 
 fn check_object_size(value: &impl Serialize) -> Result<(), DeclarationError> {
-    if serde_json::to_vec(value).map_err(|_| DeclarationError::Invalid("invalid declaration".into()))?.len() > MAX_DECLARATION_BYTES {
-        return Err(DeclarationError::TooLarge { max: MAX_DECLARATION_BYTES });
+    if serde_json::to_vec(value)
+        .map_err(|_| DeclarationError::Invalid("invalid declaration".into()))?
+        .len()
+        > MAX_DECLARATION_BYTES
+    {
+        return Err(DeclarationError::TooLarge {
+            max: MAX_DECLARATION_BYTES,
+        });
     }
     Ok(())
 }
 
-pub(crate) fn check_sampling(values: &BTreeMap<String, serde_json::Value>) -> Result<(), DeclarationError> {
+pub(crate) fn check_sampling(
+    values: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), DeclarationError> {
     // Deliberately closed: new provider controls need explicit admission here.
     // An unknown key must never become a tool/prompt/billing side channel.
     for (name, value) in values {
-        let number_in = |min: f64, max: f64| value.as_f64().is_some_and(|v| v.is_finite() && v >= min && v <= max);
+        let number_in = |min: f64, max: f64| {
+            value
+                .as_f64()
+                .is_some_and(|v| v.is_finite() && v >= min && v <= max)
+        };
         let valid = match name.as_str() {
             "temperature" => number_in(0.0, 2.0),
             "top_p" | "min_p" | "typical_p" => number_in(0.0, 1.0),
             "frequency_penalty" | "presence_penalty" => number_in(-2.0, 2.0),
             "repetition_penalty" => value.as_f64().is_some_and(|v| v.is_finite() && v > 0.0),
-            "top_k" => value.as_i64().is_some_and(|v| (-1..=i64::from(i32::MAX)).contains(&v)),
+            "top_k" => value
+                .as_i64()
+                .is_some_and(|v| (-1..=i64::from(i32::MAX)).contains(&v)),
             "seed" => value.as_i64().is_some(),
             "logprobs" => value.is_boolean(),
             "top_logprobs" => value.as_u64().is_some_and(|v| v <= 20),
-            "logit_bias" => value.as_object().is_some_and(|values| values.iter().all(|(key, value)| {
-                !key.is_empty() && key.bytes().all(|b| b.is_ascii_digit())
-                    && value.as_f64().is_some_and(|v| v.is_finite() && (-100.0..=100.0).contains(&v))
-            })),
-            "stop" => value.is_string() || value.as_array().is_some_and(|values| values.iter().all(serde_json::Value::is_string)),
+            "logit_bias" => value.as_object().is_some_and(|values| {
+                values.iter().all(|(key, value)| {
+                    !key.is_empty()
+                        && key.bytes().all(|b| b.is_ascii_digit())
+                        && value
+                            .as_f64()
+                            .is_some_and(|v| v.is_finite() && (-100.0..=100.0).contains(&v))
+                })
+            }),
+            "stop" => {
+                value.is_string()
+                    || value
+                        .as_array()
+                        .is_some_and(|values| values.iter().all(serde_json::Value::is_string))
+            }
             _ => false,
         };
         if !valid {
-            return Err(DeclarationError::Invalid("unsupported or invalid sampling parameter".into()));
+            return Err(DeclarationError::Invalid(
+                "unsupported or invalid sampling parameter".into(),
+            ));
         }
     }
     Ok(())
@@ -261,9 +299,7 @@ impl ChatTemplateValue {
                 }
                 match variable.variable {
                     ThinkingVariable::Enabled => Some(serde_json::Value::Bool(thinking.enabled)),
-                    ThinkingVariable::Budget => thinking
-                        .budget
-                        .map(|budget| serde_json::Value::from(budget)),
+                    ThinkingVariable::Budget => thinking.budget.map(serde_json::Value::from),
                     ThinkingVariable::Effort => {
                         let raw = thinking.effort.as_deref()?;
                         match thinking.level_map.get(raw) {
@@ -514,31 +550,49 @@ impl std::fmt::Debug for ModelPreset {
 
 // Config serialization remains explicit configuration, like EndpointConfig's
 // default headers. Runtime ModelSpec projections must never serialize secrets.
-pub(crate) fn serialize_public_preset<S: serde::Serializer>(preset: &ModelPreset, serializer: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn serialize_public_preset<S: serde::Serializer>(
+    preset: &ModelPreset,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     let mut public = preset.clone();
     public.headers.clear();
     public.serialize(serializer)
 }
 
 impl ModelPreset {
-    pub(crate) fn validate_protocol(&self, protocol: crate::Protocol) -> Result<(), DeclarationError> {
-        let chat = self.vllm_priority.is_some() || self.thinking_format.is_some()
-            || self.thinking_token_budget_field.is_some() || self.chat_template_args.is_some()
-            || self.chat_template_kwargs.is_some() || self.supports_reasoning_effort.is_some();
+    pub(crate) fn validate_protocol(
+        &self,
+        protocol: crate::Protocol,
+    ) -> Result<(), DeclarationError> {
+        let chat = self.vllm_priority.is_some()
+            || self.thinking_format.is_some()
+            || self.thinking_token_budget_field.is_some()
+            || self.chat_template_args.is_some()
+            || self.chat_template_kwargs.is_some()
+            || self.supports_reasoning_effort.is_some();
         if (chat && protocol != crate::Protocol::OpenAiChat)
-            || (self.supports_max_output_tokens.is_some() && protocol != crate::Protocol::OpenAiResponses)
+            || (self.supports_max_output_tokens.is_some()
+                && protocol != crate::Protocol::OpenAiResponses)
             || (self.mistral_reasoning.is_some()
-                && !matches!(protocol, crate::Protocol::OpenAiChat | crate::Protocol::MistralConversations))
+                && !matches!(
+                    protocol,
+                    crate::Protocol::OpenAiChat | crate::Protocol::MistralConversations
+                ))
             || (self.anthropic_compat.is_some() && protocol != crate::Protocol::AnthropicMessages)
-            || (!self.sampling_params.is_empty() && match protocol {
-                crate::Protocol::OpenAiChat => false,
-                crate::Protocol::OpenAiResponses => self.sampling_params.keys().any(|name| !matches!(name.as_str(), "temperature" | "top_p" | "top_logprobs")),
-                _ => true,
-            })
-            || (!self.thinking_level_map.is_empty() && !matches!(protocol,
-                crate::Protocol::OpenAiChat))
+            || (!self.sampling_params.is_empty()
+                && match protocol {
+                    crate::Protocol::OpenAiChat => false,
+                    crate::Protocol::OpenAiResponses => self.sampling_params.keys().any(|name| {
+                        !matches!(name.as_str(), "temperature" | "top_p" | "top_logprobs")
+                    }),
+                    _ => true,
+                })
+            || (!self.thinking_level_map.is_empty()
+                && !matches!(protocol, crate::Protocol::OpenAiChat))
         {
-            return Err(DeclarationError::Invalid("model preset is unsupported by this protocol".into()));
+            return Err(DeclarationError::Invalid(
+                "model preset is unsupported by this protocol".into(),
+            ));
         }
         Ok(())
     }
@@ -552,10 +606,19 @@ impl ModelPreset {
             anthropic.validate()?;
         }
         if self.mistral_reasoning.is_some() && self.thinking_format.is_some() {
-            return Err(DeclarationError::Invalid("Mistral reasoning and generic thinking formats are mutually exclusive".into()));
+            return Err(DeclarationError::Invalid(
+                "Mistral reasoning and generic thinking formats are mutually exclusive".into(),
+            ));
         }
-        if self.thinking_level_map.iter().any(|(key,value)| key.is_empty() || value.as_ref().is_some_and(|v| v.is_empty() || v.len() > 128)) {
-            return Err(DeclarationError::Invalid("invalid thinking level mapping".into()));
+        if self.thinking_level_map.iter().any(|(key, value)| {
+            key.is_empty()
+                || value
+                    .as_ref()
+                    .is_some_and(|v| v.is_empty() || v.len() > 128)
+        }) {
+            return Err(DeclarationError::Invalid(
+                "invalid thinking level mapping".into(),
+            ));
         }
         for values in [&self.chat_template_args, &self.chat_template_kwargs]
             .into_iter()
@@ -699,7 +762,9 @@ impl RequestOverrides {
     pub fn validate(&self) -> Result<(), DeclarationError> {
         check_object_size(self)?;
         check_sampling(&self.sampling_params)?;
-        if let Some(azure) = &self.azure { azure.validate()?; }
+        if let Some(azure) = &self.azure {
+            azure.validate()?;
+        }
         check_headers(&self.headers)?;
         if self.timeout_ms == Some(0) {
             return Err(DeclarationError::Invalid(
@@ -715,12 +780,20 @@ impl RequestOverrides {
             }
         }
         for variable in self.env.keys() {
-            if variable.is_empty() || variable.len() > 256
-                || !variable.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                return Err(DeclarationError::Invalid("invalid provider environment variable name".into()));
+            if variable.is_empty()
+                || variable.len() > 256
+                || !variable
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err(DeclarationError::Invalid(
+                    "invalid provider environment variable name".into(),
+                ));
             }
             if self.env[variable].len() > crate::auth::MAX_ENV_VALUE_BYTES {
-                return Err(DeclarationError::Invalid("provider environment value exceeds its byte limit".into()));
+                return Err(DeclarationError::Invalid(
+                    "provider environment value exceeds its byte limit".into(),
+                ));
             }
         }
         Ok(())

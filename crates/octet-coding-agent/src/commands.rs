@@ -189,16 +189,6 @@ impl ScopeMove {
             _ => None,
         }
     }
-
-    /// User-facing wording for a move report.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Up => "up",
-            Self::Down => "down",
-            Self::Top => "to the top",
-            Self::Bottom => "to the bottom",
-        }
-    }
 }
 
 /// One parsed local shell escape (`!command` / `!!command`).
@@ -549,19 +539,9 @@ impl CodexContextSurface {
         })
     }
 
-    /// Model this surface describes.
-    pub fn model_id(&self) -> &str {
-        &self.model_id
-    }
-
     /// Window the live session budgets against.
     pub fn effective_window(&self) -> u64 {
         self.effective_window
-    }
-
-    /// Whether the account's plan carries the Pro/ProLite entitlement.
-    pub fn entitled(&self) -> bool {
-        self.entitled
     }
 
     /// The deliberate reduction of the advertised window, when the cap (rather
@@ -586,6 +566,7 @@ impl CodexContextSurface {
 
     /// The `Session::record_usage_uncertainty` operation to record for this
     /// route, when its accounting is uncertain.
+    #[cfg(test)]
     pub fn uncertain_usage_operation(&self) -> Option<&'static str> {
         self.has_uncertain_usage()
             .then_some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
@@ -1203,14 +1184,12 @@ impl ShellEscapeRecord {
         }
     }
 
-    pub fn command(&self) -> &str {
-        &self.command
-    }
-
+    #[cfg(test)]
     pub fn output(&self) -> &str {
         &self.output
     }
 
+    #[cfg(test)]
     pub fn exit_code(&self) -> i32 {
         self.exit_code
     }

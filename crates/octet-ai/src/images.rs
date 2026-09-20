@@ -565,7 +565,10 @@ impl std::fmt::Debug for ImageGenerationOptions {
             .field("headers", &self.headers.keys().collect::<Vec<_>>())
             .field("env", &self.env.keys().collect::<Vec<_>>())
             .field("timeout_ms", &self.timeout_ms)
-            .field("cancel", &self.cancel.as_ref().map(|cancel| cancel.is_cancelled()))
+            .field(
+                "cancel",
+                &self.cancel.as_ref().map(|cancel| cancel.is_cancelled()),
+            )
             .field("max_retries", &self.max_retries)
             .field("max_retry_delay_ms", &self.max_retry_delay_ms)
             .finish()
@@ -595,10 +598,9 @@ impl ImageGenerationOptions {
             .into());
         }
         if self.timeout_ms == Some(0) {
-            return Err(ConfigError::Parse(
-                "timeout_ms must be greater than zero".to_owned(),
-            )
-            .into());
+            return Err(
+                ConfigError::Parse("timeout_ms must be greater than zero".to_owned()).into(),
+            );
         }
         if self.headers.len() > MAX_IMAGE_HEADER_OVERRIDES {
             return Err(ConfigError::Parse(format!(
@@ -607,9 +609,8 @@ impl ImageGenerationOptions {
             .into());
         }
         for (name, value) in &self.headers {
-            let parsed = http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                ConfigError::Parse("invalid image header override name".to_owned())
-            })?;
+            let parsed = http::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| ConfigError::Parse("invalid image header override name".to_owned()))?;
             if crate::runtime::is_reserved_header(&parsed) {
                 return Err(ConfigError::ReservedHeader(parsed).into());
             }
@@ -619,8 +620,9 @@ impl ImageGenerationOptions {
                 ))
                 .into());
             }
-            http::HeaderValue::from_str(value)
-                .map_err(|_| ConfigError::Parse("invalid image header override value".to_owned()))?;
+            http::HeaderValue::from_str(value).map_err(|_| {
+                ConfigError::Parse("invalid image header override value".to_owned())
+            })?;
         }
         for (name, value) in &self.env {
             if name.is_empty()
@@ -727,22 +729,15 @@ fn image_usage(raw: &serde_json::Value) -> Option<crate::types::Usage> {
 
 fn decode_generated_image(url: &str) -> Result<GeneratedImage, AiError> {
     let Some(rest) = url.strip_prefix("data:") else {
-        return Err(ConfigError::Parse(
-            "generated image URL is not a data: URL".to_owned(),
-        )
-        .into());
+        return Err(ConfigError::Parse("generated image URL is not a data: URL".to_owned()).into());
     };
     let Some((meta, payload)) = rest.split_once(',') else {
-        return Err(ConfigError::Parse(
-            "generated image data URL has no payload".to_owned(),
-        )
-        .into());
+        return Err(
+            ConfigError::Parse("generated image data URL has no payload".to_owned()).into(),
+        );
     };
     let Some(media_type) = meta.strip_suffix(";base64") else {
-        return Err(ConfigError::Parse(
-            "generated image data URL is not base64".to_owned(),
-        )
-        .into());
+        return Err(ConfigError::Parse("generated image data URL is not base64".to_owned()).into());
     };
     let media_type: mime::Mime = media_type
         .parse()
@@ -777,9 +772,9 @@ pub fn parse_openrouter_images_response(
     model: &ImageModel,
     value: &serde_json::Value,
 ) -> Result<ImageGenerationResponse, AiError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| AiError::Decode(DecodeError::Json("image response is not an object".into())))?;
+    let object = value.as_object().ok_or_else(|| {
+        AiError::Decode(DecodeError::Json("image response is not an object".into()))
+    })?;
     let response_id = object
         .get("id")
         .and_then(serde_json::Value::as_str)
@@ -814,16 +809,13 @@ pub fn parse_openrouter_images_response(
     let mut image_count = 0usize;
     if let Some(images) = message.get("images").and_then(serde_json::Value::as_array) {
         for image in images {
-            let Some(url) = image
-                .get("image_url")
-                .and_then(|value| match value {
-                    serde_json::Value::String(url) => Some(url.as_str()),
-                    serde_json::Value::Object(object) => {
-                        object.get("url").and_then(serde_json::Value::as_str)
-                    }
-                    _ => None,
-                })
-            else {
+            let Some(url) = image.get("image_url").and_then(|value| match value {
+                serde_json::Value::String(url) => Some(url.as_str()),
+                serde_json::Value::Object(object) => {
+                    object.get("url").and_then(serde_json::Value::as_str)
+                }
+                _ => None,
+            }) else {
                 continue;
             };
             if !url.starts_with("data:") {
@@ -881,7 +873,10 @@ fn empty_response(model: &ImageModel, error_message: String) -> ImageGenerationR
 }
 
 /// Bounded body read for the images adapter.
-async fn read_bounded_body(res: &mut reqwest::Response, max_bytes: usize) -> Result<bytes::Bytes, AiError> {
+async fn read_bounded_body(
+    res: &mut reqwest::Response,
+    max_bytes: usize,
+) -> Result<bytes::Bytes, AiError> {
     if let Some(length) = res.content_length() {
         if length > max_bytes as u64 {
             return Err(ConfigError::Parse(format!(
@@ -891,27 +886,20 @@ async fn read_bounded_body(res: &mut reqwest::Response, max_bytes: usize) -> Res
         }
     }
     let mut body = Vec::new();
-    loop {
-        match res
-            .chunk()
-            .await
-            .map_err(|error| AiError::Transport(TransportError {
-                phase: TransportPhase::Body,
-                timeout: error.is_timeout(),
-                message: format!("image response body failed: {error}"),
-            }))?
-        {
-            Some(chunk) => {
-                if body.len().saturating_add(chunk.len()) > max_bytes {
-                    return Err(ConfigError::Parse(format!(
-                        "image response body exceeds the {max_bytes}-byte limit"
-                    ))
-                    .into());
-                }
-                body.extend_from_slice(&chunk);
-            }
-            None => break,
+    while let Some(chunk) = res.chunk().await.map_err(|error| {
+        AiError::Transport(TransportError {
+            phase: TransportPhase::Body,
+            timeout: error.is_timeout(),
+            message: format!("image response body failed: {error}"),
+        })
+    })? {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(ConfigError::Parse(format!(
+                "image response body exceeds the {max_bytes}-byte limit"
+            ))
+            .into());
         }
+        body.extend_from_slice(&chunk);
     }
     Ok(bytes::Bytes::from(body))
 }
@@ -1013,8 +1001,9 @@ impl AiClient {
         for (name, value) in &options.headers {
             let name = http::HeaderName::from_bytes(name.as_bytes())
                 .map_err(|_| ConfigError::Parse("invalid image header override name".to_owned()))?;
-            let mut value = http::HeaderValue::from_str(value)
-                .map_err(|_| ConfigError::Parse("invalid image header override value".to_owned()))?;
+            let mut value = http::HeaderValue::from_str(value).map_err(|_| {
+                ConfigError::Parse("invalid image header override value".to_owned())
+            })?;
             value.set_sensitive(true);
             headers.insert(name, value);
         }
@@ -1037,10 +1026,13 @@ impl AiClient {
                 }
             }
         }
-        let resolved =
-            crate::auth::resolve_headers_with_api_key(&model.endpoint.auth, &options.env, options.runtime.api_key.as_ref())
-                .await
-                .map_err(AiError::Auth)?;
+        let resolved = crate::auth::resolve_headers_with_api_key(
+            &model.endpoint.auth,
+            &options.env,
+            options.runtime.api_key.as_ref(),
+        )
+        .await
+        .map_err(AiError::Auth)?;
         let mut redactor = resolved.redactor;
         redactor.include_header_values(&headers);
         if let Some(proxy) = &proxy {
@@ -1056,80 +1048,84 @@ impl AiClient {
             }
         }
 
-        let timeout = options
-            .timeout_ms
-            .map(Duration::from_millis)
-            .unwrap_or(model.endpoint.timeout);
-        client.mark_request_dispatch();
-        let mut response = match client
-            .http_transport()
-            .post(url)
-            .headers(headers)
-            .body(body)
-            .timeout(timeout)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                return Err(AiError::Transport(TransportError {
-                    phase: if error.is_timeout() {
-                        TransportPhase::ResponseHeaders
-                    } else {
-                        TransportPhase::Connect
-                    },
-                    timeout: error.is_timeout(),
-                    message: format!("image request failed: {error}"),
+        let result = async {
+            let timeout = options
+                .timeout_ms
+                .map(Duration::from_millis)
+                .unwrap_or(model.endpoint.timeout);
+            client.mark_request_dispatch();
+            let mut response = match client
+                .http_transport()
+                .post(url)
+                .headers(headers)
+                .body(body)
+                .timeout(timeout)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    return Err(AiError::Transport(TransportError {
+                        phase: if error.is_timeout() {
+                            TransportPhase::ResponseHeaders
+                        } else {
+                            TransportPhase::Connect
+                        },
+                        timeout: error.is_timeout(),
+                        message: format!("image request failed: {error}"),
+                    }));
+                }
+            };
+            let status = response.status();
+            if options
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.is_cancelled())
+            {
+                return Err(AiError::Canceled);
+            }
+            if let Some(hook) = &options.runtime.on_response {
+                let context = HookModelContext {
+                    id: model.spec.id.clone(),
+                    provider: model.spec.provider.clone(),
+                    api: model.spec.api.as_str().to_owned(),
+                };
+                hook.on_response(status, response.headers(), &context);
+            }
+            if !status.is_success() {
+                let request_id = response
+                    .headers()
+                    .get("x-request-id")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(Duration::from_secs);
+                let snippet = read_bounded_body(&mut response, 4096)
+                    .await
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+                    .map(|body| body.chars().take(2048).collect::<String>());
+                return Err(AiError::Http(HttpError {
+                    status,
+                    request_id,
+                    retry_after,
+                    provider_code: None,
+                    body_snippet: snippet,
+                    retryable: status.is_server_error()
+                        || status == http::StatusCode::TOO_MANY_REQUESTS,
                 }));
             }
-        };
-        let status = response.status();
-        if options
-            .cancel
-            .as_ref()
-            .is_some_and(|cancel| cancel.is_cancelled())
-        {
-            return Err(AiError::Canceled);
+            let body = read_bounded_body(&mut response, MAX_IMAGE_RESPONSE_BYTES).await?;
+            let value: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+            parse_openrouter_images_response(model, &value)
         }
-        if let Some(hook) = &options.runtime.on_response {
-            let context = HookModelContext {
-                id: model.spec.id.clone(),
-                provider: model.spec.provider.clone(),
-                api: model.spec.api.as_str().to_owned(),
-            };
-            hook.on_response(status, response.headers(), &context);
-        }
-        if !status.is_success() {
-            let request_id = response
-                .headers()
-                .get("x-request-id")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs);
-            let snippet = read_bounded_body(&mut response, 4096)
-                .await
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
-                .map(|body| body.chars().take(2048).collect::<String>());
-            return Err(AiError::Http(HttpError {
-                status,
-                request_id,
-                retry_after,
-                provider_code: None,
-                body_snippet: snippet,
-                retryable: status.is_server_error()
-                    || status == http::StatusCode::TOO_MANY_REQUESTS,
-            }));
-        }
-        let body = read_bounded_body(&mut response, MAX_IMAGE_RESPONSE_BYTES).await?;
-        let value: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-        parse_openrouter_images_response(model, &value)
+        .await;
+        result.map_err(|error| crate::client::sanitize_ai_error(&redactor, error))
     }
 }
 
@@ -1174,7 +1170,9 @@ mod tests {
             }"#,
         )
         .unwrap();
-        catalog.resolve("openrouter", "test/dynamic-router").unwrap()
+        catalog
+            .resolve("openrouter", "test/dynamic-router")
+            .unwrap()
     }
 
     #[test]
@@ -1297,8 +1295,10 @@ mod tests {
 
     #[test]
     fn options_refuse_host_owned_fields() {
-        let mut options = ImageGenerationOptions::default();
-        options.max_retries = Some(1);
+        let options = ImageGenerationOptions {
+            max_retries: Some(1),
+            ..Default::default()
+        };
         assert!(options.validate().is_err());
         let options = ImageGenerationOptions {
             timeout_ms: Some(0),

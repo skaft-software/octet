@@ -52,10 +52,7 @@ impl std::fmt::Debug for DeferredHandle {
             .field("id", &self.id)
             .field("expires_at_ms", &self.expires_at_ms)
             .field("poll_after_ms", &self.poll_after_ms)
-            .field(
-                "data",
-                &self.data.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("data", &self.data.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -185,10 +182,7 @@ impl std::fmt::Display for DeferredHandleRejection {
                 "the deferred handle belongs to {handle_provider}/{handle_model_id} but the run is \
                  configured for {configured_provider}/{configured_model_id}"
             ),
-            Self::ForeignApi {
-                configured,
-                handle,
-            } => write!(
+            Self::ForeignApi { configured, handle } => write!(
                 formatter,
                 "the deferred handle is for api {handle} but the response used api {configured}"
             ),
@@ -215,7 +209,9 @@ pub enum DeferredPollRefusalKind {
     #[error("deferred poll refused: the permit was already consumed")]
     AlreadyConsumed,
     /// The permit was minted for a different (older or newer) durable leaf.
-    #[error("deferred poll refused: permit generation {permit} does not match leaf generation {leaf}")]
+    #[error(
+        "deferred poll refused: permit generation {permit} does not match leaf generation {leaf}"
+    )]
     StaleGeneration {
         /// Generation carried by the permit.
         permit: u64,
@@ -333,7 +329,10 @@ mod tests {
     #[test]
     fn handle_rejection_matches_identity_and_expiry() {
         let handle = DeferredHandle::new("anthropic", "claude", "anthropic-messages", "resp-1");
-        assert_eq!(handle.rejection("anthropic", "claude", "anthropic-messages", 0), None);
+        assert_eq!(
+            handle.rejection("anthropic", "claude", "anthropic-messages", 0),
+            None
+        );
         assert_eq!(
             DeferredHandle::new("anthropic", "claude", "anthropic-messages", "").rejection(
                 "anthropic",
@@ -352,10 +351,12 @@ mod tests {
             Some(DeferredHandleRejection::ForeignApi { .. })
         ));
         assert!(matches!(
-            handle
-                .clone()
-                .with_expires_at_ms(10)
-                .rejection("anthropic", "claude", "anthropic-messages", 10),
+            handle.clone().with_expires_at_ms(10).rejection(
+                "anthropic",
+                "claude",
+                "anthropic-messages",
+                10
+            ),
             Some(DeferredHandleRejection::Expired { .. })
         ));
     }

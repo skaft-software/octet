@@ -56,6 +56,14 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/help [command]` | Local command help and self-documentation. |
 | `/exit` | Exit octet. |
 
+Automatic reloads do not add success summaries, startup banners, or debounce
+bookkeeping to the transcript. Explicit `/reload` commands still acknowledge
+completion. Extension diagnostics, failures, watch-limit warnings, and work-loss
+notices remain visible. `/reload --dry-run` shows watch counts,
+poll/debounce timing, host re-exec policy, and the pending per-layer preview
+without applying changes. Re-exec confirmations and worker-detach warnings are
+not suppressed.
+
 ### Local shell escapes
 
 A draft beginning with `!` is a **local** command, not model input: `!command`

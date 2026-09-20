@@ -87,8 +87,8 @@ impl CredentialStore {
         Ok(self.snapshot()?.token()?.is_some())
     }
 
-    /// Save a GitHub OAuth token, never a short-lived Copilot inference token.
-    /// Concurrent replacement is refused instead of overwriting another login.
+    /// Save a fixture credential through the same private, conditional write path.
+    #[cfg(test)]
     pub fn save(&self, github_token: &str) -> Result<()> {
         self.save_if_unchanged(&self.snapshot()?, github_token)
     }

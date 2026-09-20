@@ -16,9 +16,6 @@ Only the loader, reporter, and their parent-facing types cross this private
 boundary. The duplicated setting/key inventory remains: this extraction does
 not unify the deserialized fields and diagnostic schema.
 
-Credential-free process coverage and qualification commands are documented in
-[configuration diagnostics qualification](../qualification/configuration-diagnostics-full.md).
-
 ## Sources and trust
 
 Diagnostics retain the source that introduced a key:

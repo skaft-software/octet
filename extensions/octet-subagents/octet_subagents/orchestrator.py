@@ -586,12 +586,15 @@ class Orchestrator:
         self._refresh(client, state, cancellation)
         with self._lock:
             if stop_all:
-                targets = [worker for worker in state.workers.values() if worker.active]
+                targets = [
+                    worker for worker in state.workers.values()
+                    if worker.active or worker.state == "idle"
+                ]
             else:
                 targets = [self._resolve_locked(state, target)]
             target_ids = [worker.agent_id for worker in targets]
             for worker in targets:
-                if worker.active:
+                if worker.active or worker.state == "idle":
                     worker.stop_requested = True
                     worker.state = "stopping"
                     worker.phase = "host interrupt requested"
@@ -650,7 +653,7 @@ class Orchestrator:
         arguments: Mapping[str, Any],
         cancellation: Optional[Cancellation] = None,
     ) -> Dict[str, Any]:
-        """Continue one owned worker: steer it if active, resume it if settled."""
+        """Steer active work; submit a new task to idle or settled workers."""
         if not isinstance(arguments, Mapping):
             raise SubagentError("subagent_continue arguments must be an object")
         unknown = set(arguments) - {"target", "message"}
@@ -700,8 +703,12 @@ class Orchestrator:
                     "or stop it explicitly" % display,
                     code="worker_awaiting_approval",
                 )
-            action = "resumed" if worker.terminal else "steered"
-            if worker.terminal:
+            # Reattachment can restore a live receiver with no queued task.
+            # Steering alone only buffers information there; a follow-up starts
+            # work in the retained child conversation.
+            resume = worker.terminal or worker.state == "idle"
+            action = "resumed" if resume else "steered"
+            if resume:
                 client.follow_up_agent(worker.agent_id, message)
                 # The host accepted the resume, so the previous run is closed.
                 # Clear the sticky flags or the next refresh would re-map the
@@ -973,7 +980,7 @@ class Orchestrator:
             for state in self._owners.values():
                 state.pending_spawns.clear()
                 for worker in state.workers.values():
-                    if worker.active:
+                    if worker.active or worker.state == "idle":
                         worker.state = "orphaned"
                         worker.phase = "extension shutdown; host cleanup requested"
                         worker.completed_at_ms = now
@@ -1123,7 +1130,7 @@ class Orchestrator:
                 # record before the extension gets another list/wait call. Keep
                 # the last bounded summary/error and sibling roster as terminal
                 # evidence instead of making the entire tree disappear.
-                if worker.active:
+                if worker.active or worker.state == "idle":
                     worker.state = "orphaned"
                     worker.detached_at_ms = now
                     worker.phase = DETACHED_PHASE
@@ -1242,6 +1249,7 @@ class Orchestrator:
         state_name, status = host_state(record)
         mapped = {
             "pending": "queued",
+            "idle": "idle",
             "queued": "queued",
             "running": "running",
             "waiting": "waiting",
@@ -1269,9 +1277,9 @@ class Orchestrator:
                 mapped = "timed_out"
             elif worker.stop_requested:
                 mapped = "stopped"
-        if worker.timeout_requested and mapped in {"running", "queued", "waiting"}:
+        if worker.timeout_requested and mapped in {"running", "queued", "waiting", "idle"}:
             mapped = "timed_out"
-        elif worker.stop_requested and mapped in {"running", "queued", "waiting"}:
+        elif worker.stop_requested and mapped in {"running", "queued", "waiting", "idle"}:
             mapped = "stopping"
         elif worker.state == "waiting" and mapped == "running":
             mapped = "waiting"
@@ -1350,6 +1358,7 @@ class Orchestrator:
             worker.current_tool = None
             worker.phase = {
                 "queued": "queued by host",
+                "idle": "idle; waiting for a follow-up task",
                 "running": "running in host session",
                 "waiting": "waiting for host completion",
                 "done": "completed",

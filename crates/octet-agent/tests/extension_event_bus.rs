@@ -33,7 +33,10 @@ tools = ["probe"]
         directory.path().join("peer.py"),
         include_str!("support/extension_bus_peer.py")
             .replace("__EXTENSION_NAME__", name)
-            .replace("__SDK_PATH__", &format!("{}/../../sdk/python", env!("CARGO_MANIFEST_DIR"))),
+            .replace(
+                "__SDK_PATH__",
+                &format!("{}/../../sdk/python", env!("CARGO_MANIFEST_DIR")),
+            ),
     )
     .unwrap();
     let descriptor = DiscoveredExtension {
@@ -213,7 +216,127 @@ async fn two_process_bus_delivers_only_validated_subscriptions_and_fences_reload
     // three events from the two accepted publications plus the new generation.
     let after_reset = events(&beta, 3).await;
     assert_eq!(after_reset.as_array().unwrap().len(), 3);
-    assert_eq!(after_reset[2]["payload"], json!({"summary":"new generation"}));
+    assert_eq!(
+        after_reset[2]["payload"],
+        json!({"summary":"new generation"})
+    );
+    assert!(alpha.shutdown().await);
+    assert!(beta.shutdown().await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_reader_accepts_immediate_publication_while_subscribe_requester_is_held() {
+    let bus = Arc::new(ExtensionEventBus::default());
+    let (_alpha_dir, alpha) = start("alpha", Some(bus.clone())).await;
+    let (_beta_dir, beta) = start("beta", Some(bus)).await;
+    let declared = call(&alpha, "sdk/declare", json!({})).await;
+    assert_eq!(declared["result"]["declared"], json!(["bus.alpha.status"]));
+
+    for count in 1..=8 {
+        let subscribe = call(&beta, "sdk/subscribe", json!({"wait_for_events":count}));
+        let publish = async {
+            // Observe the ACK on the actual child reader, while its requesting
+            // tool worker is deterministically unable to return from request().
+            // Publication by the independent alpha host reader must still be
+            // delivered, with no scheduler-dependent grace period or replay.
+            let held = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let state = call(&beta, "sdk/reader-state", json!({})).await;
+                    if state["subscribe_held"] == true {
+                        break state;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("subscription ACK must arrive while its requester is held");
+            assert_eq!(held["state"]["subscribed"], json!(["bus.alpha.status"]));
+            call(
+                &alpha,
+                "sdk/publish",
+                json!({"payload":{"summary":"immediate"}}),
+            )
+            .await
+        };
+        let (subscribed, published) = tokio::join!(subscribe, publish);
+        assert_eq!(
+            subscribed["result"]["subscribed"],
+            json!(["bus.alpha.status"])
+        );
+        assert_eq!(published["result"]["sequence"], count * 2 - 1);
+        let delivered = events(&beta, count).await;
+        assert_eq!(delivered.as_array().unwrap().len(), count);
+        assert_eq!(delivered[count - 1]["sequence"], count * 2 - 1);
+        assert_eq!(
+            delivered[count - 1]["payload"],
+            json!({"summary":"immediate"})
+        );
+
+        let unsubscribed = call(&beta, "sdk/unsubscribe", json!({})).await;
+        assert_eq!(unsubscribed["result"]["subscribed"], json!([]));
+        call(
+            &alpha,
+            "sdk/publish",
+            json!({"payload":{"summary":"unsubscribed"}}),
+        )
+        .await;
+        assert_eq!(events(&beta, count).await.as_array().unwrap().len(), count);
+    }
+    let trace = call(&beta, "sdk/reader-state", json!({})).await;
+    let expected: Vec<_> = (0..8).flat_map(|_| ["subscribe_ack", "event"]).collect();
+    assert_eq!(trace["wire_order"], json!(expected));
+    assert!(alpha.shutdown().await);
+    assert!(beta.shutdown().await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_process_publications_never_overtake_the_subscription_ack() {
+    let bus = Arc::new(ExtensionEventBus::default());
+    let (_alpha_dir, alpha) = start("alpha", Some(bus.clone())).await;
+    let (_beta_dir, beta) = start("beta", Some(bus)).await;
+    call(&alpha, "sdk/declare", json!({})).await;
+    let subscribe = call(&beta, "sdk/subscribe", json!({"wait_for_events":1}));
+    let publish = async {
+        // Race independent protocol readers without waiting for subscription
+        // admission. Publications before activation may have no recipient;
+        // every event actually put on beta's writer must follow its ACK.
+        for sequence in 1..=8 {
+            let reply = call(
+                &alpha,
+                "sdk/publish",
+                json!({"payload":{"summary":"concurrent"}}),
+            )
+            .await;
+            assert_eq!(reply["result"]["sequence"], sequence);
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let state = call(&beta, "sdk/reader-state", json!({})).await;
+                if state["state"]["subscribed"] == json!(["bus.alpha.status"]) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("subscription must become active");
+        call(&alpha, "sdk/publish", json!({"payload":{"summary":"last"}})).await
+    };
+    let (subscribed, published) = tokio::join!(subscribe, publish);
+    assert_eq!(
+        subscribed["result"]["subscribed"],
+        json!(["bus.alpha.status"])
+    );
+    assert_eq!(published["result"]["sequence"], 9);
+    let delivered = events(&beta, 1).await;
+    assert_eq!(delivered.as_array().unwrap().last().unwrap()["sequence"], 9);
+    let trace = call(&beta, "sdk/reader-state", json!({})).await;
+    let order = trace["wire_order"].as_array().unwrap();
+    assert_eq!(order[0], "subscribe_ack", "{trace}");
+    assert!(order[1..].iter().all(|kind| kind == "event"), "{trace}");
+    // Rejected SDK events are also traced, so this catches pre-ACK delivery
+    // even when the reader would otherwise silently discard it.
+    assert_eq!(order.len(), delivered.as_array().unwrap().len() + 1);
     assert!(alpha.shutdown().await);
     assert!(beta.shutdown().await);
 }

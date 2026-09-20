@@ -222,6 +222,7 @@ pub(crate) struct ResponseBuilder {
     /// against the exact snapshot while unknown names remain available for
     /// the agent's bounded unknown-tool recovery path.
     pub(crate) tool_definitions: Option<Vec<ToolDef>>,
+    pub(crate) strict_tool_sampling: bool,
     pub(crate) response_id: Option<String>,
     /// Authoritative terminal OpenAI Responses output, if supplied.
     pub(crate) responses_output: Option<crate::responses::ResponsesOutput>,
@@ -302,6 +303,7 @@ impl ResponseBuilder {
             requested_service_tier: None,
             response_cost: None,
             tool_definitions: None,
+            strict_tool_sampling: false,
             response_id: None,
             responses_output: None,
             deferred: None,
@@ -623,14 +625,49 @@ impl ResponseBuilder {
         Ok(())
     }
 
+    /// Atomically replace a provider's argument preview within both limits.
+    pub(crate) fn replace_tool_arguments(
+        &mut self,
+        index: usize,
+        arguments: String,
+    ) -> Result<(), AiError> {
+        if arguments.len() > MAX_TOOL_ARGUMENT_BYTES {
+            return Err(AiError::Decode(DecodeError::ResponseTooLarge));
+        }
+        let old = self.tool_call_builders[&index].arguments_json.len();
+        let aggregate = (self.aggregate_content_bytes - old)
+            .checked_add(arguments.len())
+            .ok_or(AiError::Decode(DecodeError::ResponseTooLarge))?;
+        aggregate
+            .checked_add(self.buffered_content_bytes)
+            .filter(|total| *total <= MAX_RESPONSE_CONTENT_BYTES)
+            .ok_or(AiError::Decode(DecodeError::ResponseTooLarge))?;
+        self.aggregate_content_bytes = aggregate;
+        let call = self
+            .tool_call_builders
+            .get_mut(&index)
+            .expect("open tool call");
+        call.arguments_json = arguments;
+        call.arguments_normalized = false;
+        Ok(())
+    }
+
     fn apply_normalized_tool_arguments(
         builder: &mut ToolCallBuilder,
-        arguments_json: String,
+        mut arguments_json: String,
         tool_definitions: Option<&[ToolDef]>,
+        strict_tool_sampling: bool,
     ) -> Result<(), AiError> {
         let argument_error = if let Some(definitions) = tool_definitions {
-            let arguments = serde_json::from_str(&arguments_json)
+            let mut arguments = serde_json::from_str(&arguments_json)
                 .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+            crate::constrained_sampling::normalize_tool_arguments(
+                &builder.name,
+                &mut arguments,
+                definitions,
+                strict_tool_sampling,
+            )?;
+            arguments_json = arguments.to_string();
             match crate::json_repair::validate_tool_arguments(
                 &builder.name,
                 &arguments,
@@ -677,7 +714,12 @@ impl ResponseBuilder {
                 Err(_) => return Ok(()),
             }
         };
-        Self::apply_normalized_tool_arguments(builder, arguments_json, tool_definitions)
+        Self::apply_normalized_tool_arguments(
+            builder,
+            arguments_json,
+            tool_definitions,
+            self.strict_tool_sampling,
+        )
     }
 
     /// Returns the schema-mismatch marker computed for an explicitly completed
@@ -754,7 +796,12 @@ impl ResponseBuilder {
                     }
                     Err(error) => return Err(AiError::Decode(error)),
                 };
-                Self::apply_normalized_tool_arguments(builder, arguments_json, tool_definitions)?;
+                Self::apply_normalized_tool_arguments(
+                    builder,
+                    arguments_json,
+                    tool_definitions,
+                    self.strict_tool_sampling,
+                )?;
             }
         }
         if discarded_truncated_arguments {
@@ -1478,6 +1525,96 @@ mod tests {
             .unwrap();
 
         assert!(builder.finish().is_err());
+    }
+
+    #[test]
+    fn strict_optional_nulls_are_omitted_in_streamed_and_completed_calls() {
+        let definition = ToolDef {
+            name: "lookup".into(),
+            description: String::new(),
+            constrained_sampling: Some(crate::types::ConstrainedSampling::JsonSchema {
+                strict: crate::types::ConstrainedSamplingStrict::Require,
+            }),
+            parameters: serde_json::json!({"type":"object", "properties":{
+                "city":{"type":"string"}, "note":{"type":"string"},
+                "nullable":{"type":["string","null"]},
+                "rows":{"type":"array", "items":{"type":"object", "properties":{"optional":{"type":"integer"}}}},
+                "variant":{"anyOf":[{"type":"string"},{"type":"null"}]}
+            }, "required":["city"]}),
+        };
+        for explicit_end in [false, true] {
+            for strict in [false, true] {
+                let mut builder =
+                    ResponseBuilder::new(ModelId("test".into()), Protocol::OpenAiChat, None);
+                builder
+                    .set_tool_definitions(std::slice::from_ref(&definition))
+                    .unwrap();
+                builder.strict_tool_sampling = strict;
+                builder
+                    .on_event(&StreamEvent::ToolCallStart {
+                        index: 0,
+                        id: ToolCallId("call".into()),
+                        name: "lookup".into(),
+                    })
+                    .unwrap();
+                builder.on_event(&StreamEvent::ToolCallArgsDelta { index:0,
+                    delta: serde_json::json!({"city":"Paris","note":null,"nullable":null,"rows":[{"optional":null}],"variant":null}).to_string() }).unwrap();
+                if explicit_end {
+                    builder
+                        .on_event(&StreamEvent::ToolCallEnd {
+                            index: 0,
+                            argument_error: None,
+                        })
+                        .unwrap();
+                }
+                builder.set_stop_reason(StopReason::ToolUse);
+                let response = builder.finish().unwrap();
+                let AssistantPart::ToolCall(call) = &response.message.content[0] else {
+                    panic!("tool call");
+                };
+                if strict {
+                    assert!(call.argument_error.is_none());
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&call.arguments_json).unwrap(),
+                        serde_json::json!({"city":"Paris","nullable":null,"rows":[{}],"variant":null})
+                    );
+                } else {
+                    assert_eq!(
+                        call.argument_error,
+                        Some(ToolCallArgumentError::SchemaMismatch)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_tool_arguments_reclaims_preview_budget_and_fails_atomically() {
+        let mut builder = ResponseBuilder::new(ModelId("test".into()), Protocol::PiMessages, None);
+        builder
+            .on_event(&StreamEvent::ToolCallStart {
+                index: 0,
+                id: ToolCallId("id".into()),
+                name: "t".into(),
+            })
+            .unwrap();
+        builder
+            .on_event(&StreamEvent::ToolCallArgsDelta {
+                index: 0,
+                delta: "1234".into(),
+            })
+            .unwrap();
+        builder
+            .reserve_buffered_content(MAX_RESPONSE_CONTENT_BYTES - builder.aggregate_content_bytes)
+            .unwrap();
+        assert!(builder.replace_tool_arguments(0, "12345".into()).is_err());
+        assert_eq!(builder.tool_call_builders[&0].arguments_json, "1234");
+        builder.replace_tool_arguments(0, "{}".into()).unwrap();
+        builder.replace_tool_arguments(0, "1234".into()).unwrap();
+        assert!(builder
+            .replace_tool_arguments(0, "x".repeat(MAX_TOOL_ARGUMENT_BYTES + 1))
+            .is_err());
+        assert_eq!(builder.tool_call_builders[&0].arguments_json, "1234");
     }
 
     #[test]

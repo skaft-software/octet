@@ -40,9 +40,7 @@ impl octet_ai::HostStreamTransport for FinishTransport {
         // the terminal item so the abort branch was already polled Pending when
         // the accepted result becomes Ready in that same poll.
         Ok(Box::pin(futures_util::stream::iter(vec![
-            Ok(StreamEvent::Started {
-                response_id: None,
-            }),
+            Ok(StreamEvent::Started { response_id: None }),
             once_finished(model, cancel),
         ])))
     }

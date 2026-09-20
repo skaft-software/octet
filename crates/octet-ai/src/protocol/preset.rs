@@ -33,8 +33,12 @@ pub(super) fn request_defaults<'a>(
             req.to_mut().stop = if let Some(value) = value.as_str() {
                 vec![value.to_owned()]
             } else {
-                value.as_array().expect("validated stop array").iter()
-                    .map(|value| value.as_str().expect("validated stop string").to_owned()).collect()
+                value
+                    .as_array()
+                    .expect("validated stop array")
+                    .iter()
+                    .map(|value| value.as_str().expect("validated stop string").to_owned())
+                    .collect()
             };
         }
     }

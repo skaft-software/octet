@@ -553,6 +553,67 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIsNone(worker["last_error"], "the detachment note is cleared on reattach")
         self.assertEqual(worker["session"], fake_session_reference(agent_id))
 
+    def test_reattached_idle_worker_continues_with_follow_up_not_steering(self):
+        agent_id = self.spawn("restored-worker")["worker"]["id"]
+        record = self.host.agents[agent_id]
+        record.status = {"state": "detached"}
+        self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        record.status = {"state": "idle"}
+        record.phase = "idle"
+        status = self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        self.assertEqual(status["worker"]["state"], "idle")
+        self.assertFalse(status["worker"]["detached"])
+        self.assertEqual(status["worker"]["reattach_count"], 1)
+        self.assertEqual(status["counts"], {"active": 0, "terminal": 0, "total": 1})
+        continued = self.orchestrator.continue_worker(
+            self.client, self.owner, {"target": agent_id, "message": "Continue after restart."}
+        )
+        self.assertEqual(continued["action"], "resumed")
+        self.assertEqual(continued["worker"]["state"], "queued")
+        self.assertEqual(continued["worker"]["session"], status["worker"]["session"])
+        self.assertEqual(self.host.follow_ups, [(agent_id, "Continue after restart.")])
+        self.assertEqual(self.host.steers, [])
+
+    def test_missing_idle_worker_is_detached_and_cannot_be_continued(self):
+        agent_id = self.spawn("idle-worker")["worker"]["id"]
+        self.host.agents[agent_id].status = {"state": "idle"}
+        self.orchestrator.status(self.client, self.owner, {})
+        self.host.owners[("octet-subagents@test", "owner-a")] = []
+        self.host.agents.clear()
+        with self.assertRaises(SubagentError) as raised:
+            self.orchestrator.continue_worker(
+                self.client, self.owner, {"target": agent_id, "message": "Do not send stale work."}
+            )
+        self.assertEqual(raised.exception.code, "detached")
+        self.assertEqual(self.host.follow_ups, [])
+        self.assertEqual(self.host.steers, [])
+
+    def test_timeout_and_cancelled_continuations_clear_sticky_stop_flags(self):
+        for host_state in ("timed_out", "interrupted"):
+            with self.subTest(host_state=host_state):
+                agent_id = self.spawn("settled-" + host_state)["worker"]["id"]
+                record = self.host.agents[agent_id]
+                record.status = {"state": host_state}
+                record.completed_at_ms = self.clock()
+                cached = self.orchestrator._owner_state(self.owner).workers[agent_id]
+                cached.stop_requested = host_state == "interrupted"
+                cached.timeout_requested = host_state == "timed_out"
+                result = self.orchestrator.continue_worker(
+                    self.client, self.owner, {"target": agent_id, "message": "Resume the retained task."}
+                )
+                self.assertEqual(result["action"], "resumed")
+                self.assertEqual(result["worker"]["state"], "queued")
+                self.assertFalse(cached.stop_requested)
+                self.assertFalse(cached.timeout_requested)
+                self.assertEqual(self.host.follow_ups[-1], (agent_id, "Resume the retained task."))
+        self.assertEqual(self.host.steers, [])
+
+    def test_stop_all_includes_an_idle_reattached_worker(self):
+        agent_id = self.spawn("idle-worker")["worker"]["id"]
+        self.host.agents[agent_id].status = {"state": "idle"}
+        self.orchestrator.stop(self.client, self.owner, {"all": True})
+        self.assertEqual(self.host.calls[-1][2], "interrupt")
+
     def test_explicit_wait_reports_detachment_reattachment_and_approval_parks(self):
         agent_id = self.spawn("parked-worker")["worker"]["id"]
         self.host.start(agent_id)

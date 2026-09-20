@@ -12,7 +12,9 @@ use super::changed_files::{
     output_contains_hash_token, project_candidates, reported_output_hash, ChangedFileCandidate,
     WorkspaceSnapshot,
 };
-use super::request::{RequestThroughput, RequestThroughputTracker, RequestTimingSample};
+use super::request::RequestThroughputTracker;
+#[cfg(test)]
+use super::request::{RequestThroughput, RequestTimingSample};
 use super::tool_display::{summarize_tool_with_workspace, tool_result_is_failure};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -43,6 +45,13 @@ pub enum RunOutcome {
     Interrupted {
         elapsed: Duration,
     },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retain the needs-input outcome contract and renderer; the current run producer has no needs-input terminal event."
+        )
+    )]
     NeedsInput {
         prompt: String,
     },
@@ -155,24 +164,14 @@ impl RunPresentation {
         }
     }
 
-    pub fn changed_files(&self) -> &BTreeSet<String> {
-        &self.changed_files
-    }
-
-    pub fn usage_uncertain(&self) -> bool {
-        self.usage_uncertain
-    }
-
+    #[cfg(test)]
     pub fn request_throughput(&self) -> Option<&RequestThroughput> {
         self.request.latest()
     }
 
+    #[cfg(test)]
     pub fn request_timing(&self) -> Option<RequestTimingSample> {
         self.request.latest_timing()
-    }
-
-    pub fn active_request_timing(&self) -> Option<RequestTimingSample> {
-        self.request.active().map(|timing| timing.sample())
     }
 
     fn summary(&self) -> RunSummary {
@@ -336,15 +335,6 @@ impl RunTracker {
         true
     }
 
-    pub fn awaiting_approval(&mut self, id: RunId, prompt: impl Into<String>) -> bool {
-        self.set_phase(
-            id,
-            RunPhase::AwaitingApproval {
-                prompt: prompt.into(),
-            },
-        )
-    }
-
     pub fn set_phase(&mut self, id: RunId, phase: RunPhase) -> bool {
         self.set_phase_at(id, phase, Instant::now())
     }
@@ -357,23 +347,6 @@ impl RunTracker {
             return false;
         };
         run.transition(phase, now);
-        true
-    }
-
-    /// Attach actual pre/post workspace snapshots. Changed-file counts remain
-    /// empty until both snapshots validate a completed mutation candidate.
-    pub fn set_workspace_snapshots(
-        &mut self,
-        id: RunId,
-        before: WorkspaceSnapshot,
-        after: WorkspaceSnapshot,
-    ) -> bool {
-        let Some(run) = self.current_mut(id) else {
-            return false;
-        };
-        run.workspace_before = Some(before);
-        run.workspace_after = Some(after);
-        run.reproject_changed_files();
         true
     }
 
@@ -405,26 +378,6 @@ impl RunTracker {
             RunOutcome::Failed {
                 elapsed,
                 reason: reason.into(),
-            },
-            now,
-        )
-    }
-
-    pub fn needs_input(&mut self, id: RunId, prompt: impl Into<String>) -> Option<RunOutcome> {
-        self.needs_input_at(id, prompt, Instant::now())
-    }
-
-    pub fn needs_input_at(
-        &mut self,
-        id: RunId,
-        prompt: impl Into<String>,
-        now: Instant,
-    ) -> Option<RunOutcome> {
-        let run = self.active_mut(id)?;
-        run.request.abort_attempt();
-        run.finish(
-            RunOutcome::NeedsInput {
-                prompt: prompt.into(),
             },
             now,
         )
@@ -592,7 +545,7 @@ impl RunTracker {
             // Policy diagnostics are emitted to telemetry and the host
             // protocol; they do not alter the interactive phase machine.
             AgentEvent::ToolPolicyDecision { .. } | AgentEvent::ToolProgress { .. } => {}
-            AgentEvent::DelegationUpdated { .. } => {}
+            AgentEvent::DelegationUpdated { .. } | AgentEvent::RecoveredOutput { .. } => {}
             AgentEvent::ToolFinished { id, result, .. } => {
                 run.pending_tools.remove(&id.0);
                 if let Some(tool) = run.tools.get(&id.0) {

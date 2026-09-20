@@ -1,8 +1,8 @@
 //! Host-resolved session metadata for shell invocations, never global environment mutation.
-use std::sync::Arc;
-use crate::tool::{Tool, ToolContext, ToolError, ToolOutput};
-use crate::effect::ToolEffect;
 use super::{BashTool, PowerShellTool};
+use crate::effect::ToolEffect;
+use crate::tool::{Tool, ToolContext, ToolError, ToolOutput};
+use std::sync::Arc;
 
 /// Current session/model metadata. Empty fields remove inherited parent metadata.
 #[derive(Clone, Default)]
@@ -19,12 +19,20 @@ pub struct ShellSessionEnvironment {
     pub reasoning_level: Option<String>,
 }
 impl ShellSessionEnvironment {
-    pub(super) fn apply(&self, command: &mut tokio::process::Command) -> Result<(),ToolError> {
-        for (key,value) in [("PI_SESSION_ID",&self.session_id),("PI_SESSION_FILE",&self.session_file),("PI_PROVIDER",&self.provider),("PI_MODEL",&self.model),("PI_REASONING_LEVEL",&self.reasoning_level)] {
+    pub(super) fn apply(&self, command: &mut tokio::process::Command) -> Result<(), ToolError> {
+        for (key, value) in [
+            ("PI_SESSION_ID", &self.session_id),
+            ("PI_SESSION_FILE", &self.session_file),
+            ("PI_PROVIDER", &self.provider),
+            ("PI_MODEL", &self.model),
+            ("PI_REASONING_LEVEL", &self.reasoning_level),
+        ] {
             command.env_remove(key);
             if let Some(value) = value {
-                if value.len() > 32*1024 || value.contains('\0') { return Err(ToolError::new("invalid shell session metadata")); }
-                command.env(key,value);
+                if value.len() > 32 * 1024 || value.contains('\0') {
+                    return Err(ToolError::new("invalid shell session metadata"));
+                }
+                command.env(key, value);
             }
         }
         Ok(())
@@ -34,6 +42,7 @@ impl ShellSessionEnvironment {
 /// Shell tool whose host callback resolves metadata anew immediately before execution.
 /// Return `ShellSessionEnvironment::default()` to opt out and clear inherited values.
 pub struct SessionShellTool {
+    bash: BashTool,
     resolve: Arc<dyn Fn() -> ShellSessionEnvironment + Send + Sync>,
     command_prefix: Option<Arc<str>>,
     powershell: bool,
@@ -68,21 +77,45 @@ impl SessionShellTool {
 }
 impl BashTool {
     /// Attach a host-owned live session resolver; it is not called during effect classification.
-    pub fn with_session_environment(resolve: impl Fn() -> ShellSessionEnvironment + Send + Sync + 'static) -> SessionShellTool {
-        SessionShellTool { resolve: Arc::new(resolve), command_prefix: None, powershell:false }
+    pub fn with_session_environment(
+        resolve: impl Fn() -> ShellSessionEnvironment + Send + Sync + 'static,
+    ) -> SessionShellTool {
+        SessionShellTool {
+            bash: BashTool::default(),
+            resolve: Arc::new(resolve),
+            command_prefix: None,
+            powershell: false,
+        }
     }
 }
 impl PowerShellTool {
     /// Attach the same live session metadata resolver used for Bash.
-    pub fn with_session_environment(resolve: impl Fn() -> ShellSessionEnvironment + Send + Sync + 'static) -> SessionShellTool {
-        SessionShellTool { resolve: Arc::new(resolve), command_prefix: None, powershell:true }
+    pub fn with_session_environment(
+        resolve: impl Fn() -> ShellSessionEnvironment + Send + Sync + 'static,
+    ) -> SessionShellTool {
+        SessionShellTool {
+            bash: BashTool::default(),
+            resolve: Arc::new(resolve),
+            command_prefix: None,
+            powershell: true,
+        }
     }
 }
 #[async_trait::async_trait]
 impl Tool for SessionShellTool {
-    fn definition(&self)->octet_ai::ToolDef { if self.powershell { PowerShellTool.definition() } else { BashTool.definition() } }
+    fn definition(&self) -> octet_ai::ToolDef {
+        if self.powershell {
+            super::powershell::definition(&self.bash)
+        } else {
+            self.bash.definition()
+        }
+    }
     fn prompt_snippet(&self) -> Option<&str> {
-        if self.powershell { Some("Execute PowerShell commands") } else { BashTool.prompt_snippet() }
+        if self.powershell {
+            Some("Execute PowerShell commands")
+        } else {
+            self.bash.prompt_snippet()
+        }
     }
     fn prompt_guidelines(&self) -> &[&str] {
         // Mirrors Pi's `exposeSessionEnvironment && promptGuidelines` gate: only
@@ -90,19 +123,38 @@ impl Tool for SessionShellTool {
         // because the plain Bash/PowerShell tools clear the inherited values.
         &["You can inspect PI_* environment variables for current model and session details."]
     }
-    fn effect(&self,args:&serde_json::Value,ctx:&ToolContext<'_>)->Result<ToolEffect,ToolError> { BashTool.effect(args,ctx) }
-    async fn execute(&self,args:serde_json::Value,ctx:&ToolContext<'_>)->Result<ToolOutput,ToolError> {
-        self.effect(&args,ctx)?;
+    fn effect(
+        &self,
+        args: &serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        self.bash.effect(args, ctx)
+    }
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.effect(&args, ctx)?;
         let args = self.apply_command_prefix(args);
         let environment = (self.resolve)();
         #[cfg(windows)]
-        { BashTool.execute_windows(args,ctx,self.powershell,&environment,None).await }
+        {
+            self.bash
+                .execute_windows(args, ctx, self.powershell, &environment, None)
+                .await
+        }
         #[cfg(unix)]
         {
-            if self.powershell { return Err(ToolError::new("powershell is available only on Windows")); }
-            BashTool.execute_unix(args,ctx,&environment,None).await
+            if self.powershell {
+                return Err(ToolError::new("powershell is available only on Windows"));
+            }
+            self.bash.execute_unix(args, ctx, &environment, None).await
         }
-        #[cfg(not(any(unix,windows)))]
-        { let _ = environment; Err(ToolError::new("shell is unavailable on this platform")) }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = environment;
+            Err(ToolError::new("shell is unavailable on this platform"))
+        }
     }
 }

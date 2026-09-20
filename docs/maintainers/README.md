@@ -1,9 +1,9 @@
 # Maintainer prompts and skills
 
 This directory holds the tracked maintainer-facing prompt templates and skills
-for octet. It mirrors the parity item `6.2` requirement (maintainer prompts plus
-`release`, `add-provider`, and `interactive-testing` skills; agent conventions in
-[`conventions.md`](conventions.md)).
+for octet: prompt templates, `release`, `add-provider`, and
+`interactive-testing` skills, and agent conventions in
+[`conventions.md`](conventions.md).
 
 [`conventions.md`](conventions.md) is the tracked mirror of the repository-root
 agent conventions. The working `AGENTS.md` at the root stays local-only

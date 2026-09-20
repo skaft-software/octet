@@ -10,7 +10,9 @@ separate; their execution is parent-owned and is not implied by SDK checks.
 
 from __future__ import annotations
 
+import queue
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -320,21 +322,23 @@ class HostEventBusClientTests(unittest.TestCase):
         self.calls = []
 
     def make_bus(self, extension_id: str, responder=None) -> HostEventBus:
-        def request(method, params, cancelled):
+        def request(method, params, cancelled, accept_result):
             self.calls.append((method, params))
             if responder is not None:
-                return responder(method, params, cancelled)
-            if method == "bus/publish":
-                return {"binding_id": BINDING_ID, "sequence": 7, "published_at_ms": 5000}
-            if method == "bus/subscribe":
-                return {
+                response = responder(method, params, cancelled)
+            elif method == "bus/publish":
+                response = {"binding_id": BINDING_ID, "sequence": 7, "published_at_ms": 5000}
+            elif method == "bus/subscribe":
+                response = {
                     "state": "active",
                     "binding_id": BINDING_ID,
                     "topic_revision": 1,
                     "publisher_instance_id": "instance-alpha",
                     "process_generation": 1,
                 }
-            return {"binding_id": BINDING_ID}
+            else:
+                response = {"binding_id": BINDING_ID}
+            return accept_result(response)
 
         return bind(
             HostEventBus(
@@ -469,6 +473,216 @@ class HostEventBusClientTests(unittest.TestCase):
             self.make_bus("gamma").publish("bus.alpha.status", {"summary": "ok", "count": 1, "phase": "ready"})
 
 
+class _BusReply:
+    """A response slot whose requester cannot resume until the test permits it."""
+
+    def __init__(self, method, params, accept_result):
+        self.method, self.params, self.accept_result = method, params, accept_result
+        self.release = threading.Event()
+        self.settled = threading.Event()
+        self.result = None
+        self.error = None
+
+    def respond(self, result=None, error=None):
+        # This is the serial-reader dispatch, not the waiting request thread.
+        try:
+            if error is not None:
+                raise error
+            self.result = self.accept_result(result)
+        except Exception as caught:
+            self.error = caught
+        finally:
+            self.settled.set()
+
+
+class HostEventBusOrderingTests(unittest.TestCase):
+    topic = "bus.alpha.status"
+
+    def setUp(self):
+        self.requests = queue.Queue(maxsize=1)
+        registry = TopicRegistry()
+        registry.declare(status_topic())
+        self.bus = bind(HostEventBus(self.request, registry, extension_id="beta"))
+        self.addCleanup(self.bus.close)
+        self.assertTrue(self.bus.wait_rebound())
+
+    def request(self, method, params, cancelled, accept_result):
+        reply = _BusReply(method, params, accept_result)
+        self.requests.put_nowait(reply)
+        for _ in range(500):
+            if reply.release.wait(0.01):
+                if reply.error is not None:
+                    raise reply.error
+                return reply.result
+            if cancelled.is_set() and not reply.settled.is_set():
+                raise BusError(CAPABILITY_MISMATCH, "request_cancelled")
+        raise TimeoutError("test request was not released")
+
+    def start(self, operation):
+        outcome = []
+
+        def run():
+            try:
+                outcome.append(operation(self.topic))
+            except Exception as error:
+                outcome.append(error)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        self.addCleanup(worker.join, 2)
+        reply = self.requests.get(timeout=2)
+        self.addCleanup(reply.release.set)
+        return worker, reply, outcome
+
+    def finish(self, worker, reply, outcome):
+        reply.release.set()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(1, len(outcome))
+        return outcome[0]
+
+    def active_ack(self, **overrides):
+        return {"state": "active", "binding_id": BINDING_ID, "topic_revision": 1,
+                "publisher_instance_id": "instance-alpha", "process_generation": 1, **overrides}
+
+    def event(self, **overrides):
+        return {"topic": self.topic, "publisher": "alpha", "sequence": 1,
+                "published_at_ms": 4900, "binding_id": BINDING_ID,
+                "publisher_instance_id": "instance-alpha", "process_generation": 1,
+                "payload": {"summary": "ok", "count": 1, "phase": "ready"}, **overrides}
+
+    def subscribe(self):
+        worker, reply, outcome = self.start(self.bus.subscribe)
+        reply.respond(self.active_ack())
+        self.assertIsInstance(self.finish(worker, reply, outcome), TopicSpec)
+
+    def test_subscribe_ack_then_immediate_event_before_requester_resumes(self):
+        worker, reply, outcome = self.start(self.bus.subscribe)
+        self.assertEqual("bus/subscribe", reply.method)
+        self.assertEqual([], self.bus.snapshot()["subscribed"])
+        with self.assertRaisesRegex(BusError, "not_subscribed"):
+            self.bus.accept_event(self.event())
+        reply.respond(self.active_ack())
+        # Model the ACK and next event on one serial reader. The requester is
+        # deterministically parked in request(), so it cannot install the ACK.
+        self.assertTrue(worker.is_alive())
+        self.assertEqual([], outcome)
+        event = self.bus.accept_event(self.event())
+        self.assertEqual(1, event.sequence)
+        self.assertEqual([self.topic], self.bus.snapshot()["subscribed"])
+        with self.assertRaisesRegex(BusError, "stale_sequence"):
+            self.bus.accept_event(self.event())
+        self.assertIsInstance(self.finish(worker, reply, outcome), TopicSpec)
+
+    def test_pending_ack_does_not_allow_an_immediate_event(self):
+        worker, reply, outcome = self.start(self.bus.subscribe)
+        reply.respond({"state": "pending", "binding_id": BINDING_ID, "topic_revision": 0})
+        self.assertEqual([self.topic], self.bus.snapshot()["pending"])
+        with self.assertRaisesRegex(BusError, "not_subscribed"):
+            self.bus.accept_event(self.event())
+        self.assertIsInstance(self.finish(worker, reply, outcome), TopicSpec)
+
+    def test_failed_subscribe_acks_never_install_interest(self):
+        for result, error in (
+            ({}, None),
+            (self.active_ack(binding_id="old-binding"), None),
+            (self.active_ack(process_generation=0), None),
+            (None, RpcError(-32601, "unknown or unnegotiated method")),
+        ):
+            with self.subTest(result=result, error=error):
+                worker, reply, outcome = self.start(self.bus.subscribe)
+                reply.respond(result, error)
+                self.assertEqual([], self.bus.snapshot()["subscribed"])
+                self.assertEqual([], self.bus.snapshot()["pending"])
+                with self.assertRaisesRegex(BusError, "not_subscribed"):
+                    self.bus.accept_event(self.event())
+                self.assertIsInstance(self.finish(worker, reply, outcome), (BusError, RpcError))
+                self.assertFalse(self.bus._desired_interests)
+
+    def test_unsubscribe_ack_fences_immediate_event_and_rebinding(self):
+        self.subscribe()
+        worker, reply, outcome = self.start(self.bus.unsubscribe)
+        # Events before the unsubscribe ACK still belong to the live ledger.
+        self.assertEqual(1, self.bus.accept_event(self.event()).sequence)
+        reply.respond({"binding_id": BINDING_ID})
+        self.assertEqual([], outcome)
+        self.assertEqual([], self.bus.snapshot()["subscribed"])
+        with self.assertRaisesRegex(BusError, "not_subscribed"):
+            self.bus.accept_event(self.event(sequence=2))
+        bind(self.bus, "replacement-binding", 2)
+        self.assertIsNone(self.finish(worker, reply, outcome))
+        self.assertTrue(self.bus.wait_rebound())
+        self.assertTrue(self.requests.empty())
+
+    def test_failed_unsubscribe_preserves_active_interest(self):
+        self.subscribe()
+        for result, error in (
+            ({}, None),
+            ({"binding_id": "old-binding"}, None),
+            (None, RpcError(-32601, "unknown or unnegotiated method")),
+        ):
+            with self.subTest(result=result, error=error):
+                worker, reply, outcome = self.start(self.bus.unsubscribe)
+                reply.respond(result, error)
+                self.assertEqual([self.topic], self.bus.snapshot()["subscribed"])
+                self.assertIsInstance(self.finish(worker, reply, outcome), (BusError, RpcError))
+        self.assertEqual(1, self.bus.accept_event(self.event()).sequence)
+        self.assertEqual({self.topic}, self.bus._desired_interests)
+
+    def test_binding_after_ack_preserves_interest_before_requester_resumes(self):
+        worker, reply, outcome = self.start(self.bus.subscribe)
+        reply.respond(self.active_ack())
+        bind(self.bus, "replacement-binding", 2)
+        self.assertEqual([], self.bus.snapshot()["subscribed"])
+        self.assertIsInstance(self.finish(worker, reply, outcome), TopicSpec)
+        rebound = self.requests.get(timeout=2)
+        self.addCleanup(rebound.release.set)
+        self.assertEqual("replacement-binding", rebound.params["binding_id"])
+        rebound.respond(self.active_ack(binding_id="replacement-binding"))
+        event = self.bus.accept_event(self.event(binding_id="replacement-binding"))
+        self.assertEqual(1, event.sequence)
+        rebound.release.set()
+        self.assertTrue(self.bus.wait_rebound())
+
+    def test_topic_unavailable_after_ack_is_not_undone_by_requester(self):
+        worker, reply, outcome = self.start(self.bus.subscribe)
+        reply.respond(self.active_ack())
+        self.bus.accept_lifecycle({"kind": "topic_unavailable", "binding_id": BINDING_ID,
+            "topic": self.topic, "topic_revision": 2,
+            "publisher_instance_id": "instance-alpha", "process_generation": 1})
+        self.assertEqual([], self.bus.snapshot()["subscribed"])
+        with self.assertRaisesRegex(BusError, "not_subscribed"):
+            self.bus.accept_event(self.event())
+        self.assertIsInstance(self.finish(worker, reply, outcome), TopicSpec)
+        self.assertTrue(self.bus.wait_rebound())
+        self.assertEqual([self.topic], self.bus.snapshot()["pending"])
+        self.assertEqual([], self.bus.snapshot()["subscribed"])
+
+    def test_ack_older_than_observed_topic_revision_never_activates(self):
+        worker, reply, outcome = self.start(self.bus.subscribe)
+        self.bus.accept_lifecycle({"kind": "topic_unavailable", "binding_id": BINDING_ID,
+            "topic": self.topic, "topic_revision": 2,
+            "publisher_instance_id": "instance-alpha", "process_generation": 1})
+        reply.respond(self.active_ack())
+        self.assertIsInstance(self.finish(worker, reply, outcome), BusError)
+        self.assertEqual([], self.bus.snapshot()["subscribed"])
+        self.assertFalse(self.bus._desired_interests)
+
+    def test_ack_after_binding_change_or_close_cannot_activate(self):
+        for close in (False, True):
+            with self.subTest(close=close):
+                worker, reply, outcome = self.start(self.bus.subscribe)
+                binding = reply.params["binding_id"]
+                if close:
+                    self.bus.close(wait=False)
+                else:
+                    bind(self.bus, "replacement-binding", 2)
+                reply.respond(self.active_ack(binding_id=binding))
+                self.assertIsInstance(self.finish(worker, reply, outcome), BusError)
+                self.assertEqual([], self.bus.snapshot()["subscribed"])
+                self.assertFalse(self.bus._desired_interests)
+
+
 class ContractStatusTests(unittest.TestCase):
     def test_defaults_are_bounded(self) -> None:
         self.assertLessEqual(DEFAULT_LIMITS.max_message_bytes, 64 * 1024)
@@ -533,9 +747,9 @@ class HostMediationRegressions(unittest.TestCase):
         registry = TopicRegistry()
         calls = []
         bus = bind(HostEventBus(
-            lambda method, params, cancelled: (
+            lambda method, params, cancelled, accept_result: (
                 calls.append((method, params)),
-                {"binding_id": BINDING_ID},
+                accept_result({"binding_id": BINDING_ID}),
             )[1],
             registry,
             extension_id="alpha",
@@ -544,7 +758,7 @@ class HostMediationRegressions(unittest.TestCase):
         self.assertEqual("bus/declare", calls[0][0])
         from octet_extension.api_v03 import BusDeclareParams
         BusDeclareParams.from_wire(calls[0][1])
-        def fail(method, params, cancelled):
+        def fail(method, params, cancelled, accept_result):
             raise RpcError(-32601, "unknown or unnegotiated method")
         empty = TopicRegistry()
         bus = bind(HostEventBus(fail, empty, extension_id="alpha"))
@@ -569,7 +783,7 @@ class HostMediationRegressions(unittest.TestCase):
             # A binding-scoped ack must still carry the captured incarnation and
             # a positive integer sequence; anything else is refused.
             bus = bind(HostEventBus(
-                lambda method, params, cancelled, reply=reply: {"binding_id": BINDING_ID, **reply},
+                lambda method, params, cancelled, accept_result, reply=reply: accept_result({"binding_id": BINDING_ID, **reply}),
                 registry,
                 extension_id="alpha",
             ))

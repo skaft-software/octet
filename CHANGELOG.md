@@ -1,16 +1,20 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.0] - Release candidate
 
-Additive Pi-parity pass against `earendil-works/pi` @
-`8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`, plus the tracked roadmap. Per-row
-status is in [`docs/parity/README.md`](docs/parity/README.md); the adversarial
-verification pass is in
-[`docs/parity/VERIFICATION.md`](docs/parity/VERIFICATION.md). This is a
-review candidate, not a completed-parity or release-qualification claim. The
-ledger separates tested behavior, partial implementations and blocked contracts.
+Changes in the local 0.8.0 release candidate. This build is not published; see
+[release notes](docs/releases/v0.8.0.md) for availability and current limits.
 
 ### Interaction
+
+- Silence routine session lookup/replay/fork progress during startup, including
+  resumed launches. Keep input, setup, errors, and coordinated shutdown live.
+  Fresh launches skip the unnecessary session-replay worker and full-config copy.
+
+- Quiet routine reload output: remove the startup arming banner, queued-path
+  chatter, and automatic success summaries. Only explicit reload commands get a
+  completion summary. Watch/timing details remain available through `/reload --dry-run`;
+  failures, limits, work-loss notices, and re-exec confirmations remain visible.
 
 - Ease the resting activity colours off the profile extremes: the dark theme's
   Working/Thinking label now rests at a slightly greyed off-white (about #f9
@@ -82,8 +86,8 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   the fixed order resources → extensions → host. Saves are debounced (200 ms,
   2 s hard ceiling) and coalesced; a pass is never admitted while a run owns the
   session, so evidence queued behind a busy boundary is applied at the next idle
-  prompt. It is enabled by default and announces itself once (`live reload
-  armed: N watched paths, poll …`) with a per-layer report on every applied pass;
+  prompt. It is enabled silently by default; `/reload --dry-run` exposes watch
+  settings and per-layer details, while automatic passes omit success summaries;
   `reload`, `reload_poll_ms`, `reload_debounce_ms`, and `reload_max_files` are
   user-level settings, `/reload --dry-run` previews a pass without changing
   anything, and `/reload --force` takes one immediately while naming the four
@@ -104,7 +108,7 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   the new image can re-lock its own session, and nothing ever locks the
   executable — so several panes and a running `serve` reload independently.
 - Late `providers/register`, `providers/update` and `providers/unregister`
-  take effect in the running session without a reload, matching Pi. Credentials,
+  take effect in the running session without a reload. Credentials,
   endpoints, headers, transports, callbacks and OAuth payloads stay host-owned;
   a late registration never overrides a built-in the user did not opt into;
   pricing and capability validation still run before a model becomes routable;
@@ -135,11 +139,13 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 - Settle completed workers once into their owning transcript block, avoid replay
   on later turns, and preserve history anchors while live workers update.
-- Make the transcript block the single live roster surface: the duplicate pinned
-  chrome strip is deleted, an active roster stays in the mutable tail (never
-  committed as immutable native history) and updates in place while the reader
-  scrolls back, and the marker dot pulses while any child is live and resolves
-  to success/failure/stopped once the roster settles.
+- Make the transcript block the single live roster surface, without duplicate
+  pinned chrome. Fix the native scrollback regression that clipped unrelated
+  commands, results, and answers after an active roster: restore the v0.7.6 rule
+  that `live preview (result pending)` applies only to an ordinary trailing
+  pending tool, never a roster or its following conversation. Genuine historical
+  updates may still require full replay; deterministic Shell/renderer/VT checks
+  are not live-emulator qualification.
 - Stop truncating worker model ids: worker/state/model are mandatory columns
   that never ellipsize, optional metrics drop first, and the compact fallback
   line still prints the full model. The `/subagents` picker header is now the
@@ -165,6 +171,11 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Providers, codecs and tools
 
+- Refresh reviewed models.dev metadata to 895 pricing routes, 385 canonical names,
+  and 916 capability routes; preserve the [source provenance](crates/octet-ai/models/SOURCES.md).
+  Builds and runtime remain offline, direct DeepSeek schedule pricing remains
+  excluded/unknown, and public metadata does not establish live inference acceptance.
+
 - Decode the reasoning a provider advertises through accepted request parameters
   (`supported_parameters` containing `reasoning`, `reasoning_effort` or
   `reasoning.effort`). It was read as an undecodable assertion, so a newly
@@ -188,7 +199,7 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 - Add strict JSON-schema and grammar/regex request declarations, and remove a
   declared-but-unimplemented deferred-tool capability claim. Grammar custom-call
   decoding and history/result replay remain incomplete; declarations alone do
-  not establish codec parity.
+  not establish complete codec support.
 - Land Anthropic caller-beta merge, refusal fallbacks, and the Mistral
   Conversations finish/base-URL classification fixes that previously failed
   assertions.
@@ -219,12 +230,9 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   session environment contract; original-file non-overlapping multi-edit with
   legacy normalization; preview coalescing and unanimous finalized-result batch
   termination; invocation-memo and deferred-handle primitives; summarization
-  retry distinct from compaction failure. The ledger identifies missing durable
-  consumers separately from these primitives. The agent tool surface
-  stays `read`/`write`/`edit`/`bash` with ripgrep-backed `search`, matching
-  0.7.6: the Pi-parity `ls`, `find` and `grep` tools were withdrawn by
-  maintainer decision, and their behaviours are served by `search` (rg) plus
-  `bash`.
+  retry distinct from compaction failure. The agent tool surface stays
+  `read`/`write`/`edit`/`bash` with opt-in ripgrep-backed `search`; `ls`, `find`,
+  and `grep` operations use `search` (rg) or `bash`.
 
 ### CLI and sessions
 
@@ -275,26 +283,18 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 - Add `scripts/changelog.py` (release extraction and link repair) and
   `scripts/create-source-archive.py` (deterministic source artifact).
-- Add the additive-parity ledger, per-domain detail documents, independent review
-  reports, and Codex context documentation. Remove accidentally tracked Swift
-  build caches and reject them in deterministic source archives.
+- Add Codex context documentation; remove obsolete planning, comparison, and
+  task-handoff records from public documentation. Remove accidentally tracked
+  Swift build caches and reject them in deterministic source archives.
 - Keep benchmark measurement verdicts separate from release approval: an external
   PID snapshot cannot satisfy inference attribution or cross-platform review.
 
-### Known gaps at this checkpoint
+### Candidate limits
 
-- See the final verification report for exact executed checks and unresolved
-  failures. An interrupted disk-full test run is not a pass; formatting and other
-  qualification failures are not waived by a successful compile.
-- Rows recorded as blocked name an exact missing primitive rather than a
-  timeframe: the radius/`pi-messages` codec, `GOOGLE_CLOUD_API_KEY` for
-  vertex (ADC-only today), deferred additional-tools/tool-search emit paths,
-  host-mediated extension services, and atomic live-session writer handover.
-  Ephemeral accounting and other partial contracts require their own behavioral
-  evidence, not a neighboring test's result.
-- Windows PowerShell execution evidence, native Firefox/Safari operation,
-  physical terminal paint/scroll acceptance and the Serve/companion security
-  audit are hardware-, human- or authority-gated and remain unqualified.
+This candidate is not published or live-qualified. Native companion apps remain
+source-only; signed installation, real-terminal behavior, Windows PowerShell,
+and live-provider acceptance are not established by deterministic fixtures.
+The [candidate notes](docs/releases/v0.8.0.md) describe remaining scope limits.
 
 ## [0.7.6]
 
@@ -1260,3 +1260,5 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 [0.2.0-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.2.0-alpha
 [0.1.1-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.1.1-alpha
 [0.1.0-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.1.0-alpha
+
+[0.8.0]: docs/releases/v0.8.0.md

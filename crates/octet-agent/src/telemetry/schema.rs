@@ -301,7 +301,8 @@ impl CompletionAttributes {
 /// traffic is unavailable, not a fabricated zero-rate observation. 1h writes
 /// are a subset of writes, and reasoning a subset of output; neither is added.
 pub fn cache_hit_rate(usage: &octet_ai::Usage) -> Option<f64> {
-    let input = usage.input_tokens as f64 + usage.cache_read_tokens as f64
+    let input = usage.input_tokens as f64
+        + usage.cache_read_tokens as f64
         + usage.cache_write_tokens as f64;
     (input > 0.0).then(|| usage.cache_read_tokens as f64 / input)
 }
@@ -350,8 +351,9 @@ impl UsageTotals {
         for record in records {
             let usage = &record.usage;
             totals.input_tokens = totals.input_tokens.saturating_add(usage.input_tokens);
-            totals.cache_read_tokens =
-                totals.cache_read_tokens.saturating_add(usage.cache_read_tokens);
+            totals.cache_read_tokens = totals
+                .cache_read_tokens
+                .saturating_add(usage.cache_read_tokens);
             totals.cache_write_tokens = totals
                 .cache_write_tokens
                 .saturating_add(usage.cache_write_tokens);
@@ -397,8 +399,9 @@ impl UsageTotals {
 
     /// Cache-hit fraction over these totals, or `None` without prompt traffic.
     pub fn cache_hit_rate(&self) -> Option<f64> {
-        let input =
-            self.input_tokens as f64 + self.cache_read_tokens as f64 + self.cache_write_tokens as f64;
+        let input = self.input_tokens as f64
+            + self.cache_read_tokens as f64
+            + self.cache_write_tokens as f64;
         (input > 0.0).then(|| self.cache_read_tokens as f64 / input)
     }
 }
@@ -516,22 +519,36 @@ pub fn agent_telemetry_schema() -> TelemetrySchema {
                     "Durable deferred-run operation identity",
                 ),
             );
-            let mut stop_reason =
-                attribute(AttributeType::String, true, "Normalized provider stop reason");
-            stop_reason.values = ["deferred", "settled", "failed", "aborted", "waiting", "refused"]
-                .map(|s| AttributeValue::String(s.into()))
-                .into();
+            let mut stop_reason = attribute(
+                AttributeType::String,
+                true,
+                "Normalized provider stop reason",
+            );
+            stop_reason.values = [
+                "deferred", "settled", "failed", "aborted", "waiting", "refused",
+            ]
+            .map(|s| AttributeValue::String(s.into()))
+            .into();
             start_attributes.insert("stop_reason".into(), stop_reason);
             let mut phase = attribute(AttributeType::String, true, "Durable leaf state");
-            phase.values = ["suspended", "effect_pending", "settled", "cancelled", "failed"]
-                .map(|s| AttributeValue::String(s.into()))
-                .into();
+            phase.values = [
+                "suspended",
+                "effect_pending",
+                "settled",
+                "cancelled",
+                "failed",
+            ]
+            .map(|s| AttributeValue::String(s.into()))
+            .into();
             start_attributes.insert("phase".into(), phase);
             for (field, description) in [
                 ("poll", "Poll number at this boundary"),
                 ("generation", "Durable generation at this boundary"),
             ] {
-                start_attributes.insert(field.into(), attribute(AttributeType::Number, true, description));
+                start_attributes.insert(
+                    field.into(),
+                    attribute(AttributeType::Number, true, description),
+                );
             }
             start_attributes.insert(
                 "recovery".into(),
@@ -616,7 +633,9 @@ mod tests {
     fn dropped_scope_guard_settles_as_error() {
         let fixture = InMemoryTelemetryContext::default();
         {
-            let _guard = fixture.context().begin_typed::<SummarySpan>(EmptyAttributes {});
+            let _guard = fixture
+                .context()
+                .begin_typed::<SummarySpan>(EmptyAttributes {});
         }
         let spans = fixture.get_spans();
         assert_eq!(spans.len(), 1);

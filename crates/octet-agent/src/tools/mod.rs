@@ -24,44 +24,43 @@
 mod bash;
 mod edit;
 mod powershell;
-mod shell_environment;
 mod read;
 mod search;
+mod shell_environment;
 mod write;
 
-pub mod durability;
 pub mod deferred;
+pub mod durability;
 pub mod summarization;
 
 pub use bash::{
     BashCheckpointPublisher, BashCheckpointStats, BashTool, CheckpointedBashTool,
     BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES, MIN_BASH_CHECKPOINT_INTERVAL,
 };
-pub use edit::EditTool;
-pub use powershell::PowerShellTool;
-pub use shell_environment::{ShellSessionEnvironment, SessionShellTool};
-pub use read::ReadTool;
-pub use search::SearchTool;
-pub use write::WriteTool;
+pub use deferred::{
+    prepare_deferred_poll, suspend_deferred_response, DeferredHandle, DeferredHandleRejection,
+    DeferredPhase, DeferredPollIntent, DeferredPollOutcome, DeferredPollPermit,
+    DeferredPollPreparation, DeferredPollRefusal, DeferredPollRefusalKind,
+    DeferredResponseDeclaration, DeferredResume, DeferredStopReason, DeferredSuspendDecision,
+    DeferredSuspendFailure, DeferredSuspendFailureKind, DeferredSuspended, ModelIdentity,
+    SuspendedRunObservation, UnknownPollReplacement, INVALID_DEFERRED_HANDLE_DIAGNOSTIC,
+};
 pub use durability::{
     DurableInvocationStore, InterruptedInvocation, InvocationError, InvocationHandle,
     InvocationOutcome, InvocationScope, InvocationState, MemoLookup, Settlement, StoreLimits,
     UnsafeRecovery, INTERRUPTED_OUTCOME_UNKNOWN_MARKER, MEMO_NAMESPACE, PARTIAL_OUTPUT_NAMESPACE,
 };
-pub use deferred::{
-    prepare_deferred_poll, suspend_deferred_response, DeferredHandle, DeferredHandleRejection,
-    DeferredPhase, DeferredPollIntent, DeferredPollOutcome, DeferredPollPermit,
-    DeferredPollPreparation, DeferredPollRefusal, DeferredPollRefusalKind, DeferredResume,
-    DeferredResponseDeclaration, DeferredStopReason, DeferredSuspendDecision,
-    DeferredSuspendFailure, DeferredSuspendFailureKind, DeferredSuspended, ModelIdentity,
-    SuspendedRunObservation, UnknownPollReplacement, INVALID_DEFERRED_HANDLE_DIAGNOSTIC,
-};
+pub use edit::EditTool;
+pub use powershell::PowerShellTool;
+pub use read::ReadTool;
+pub use search::SearchTool;
+pub use shell_environment::{SessionShellTool, ShellSessionEnvironment};
 pub use summarization::{
-    run_summarization_with_retry, CompactionFailure, CompactionFailureKind,
-    CompactionStepOutcome, SummarizationAttempt, SummarizationDiagnostic, SummarizationFailure,
-    SummarizationFailureKind, SummarizationOutcome, SummarizationRetryPolicy,
-    SummarizationRetryScheduled, SummarizationRun,
+    run_summarization_with_retry, CompactionFailure, CompactionFailureKind, CompactionStepOutcome,
+    SummarizationAttempt, SummarizationDiagnostic, SummarizationFailure, SummarizationFailureKind,
+    SummarizationOutcome, SummarizationRetryPolicy, SummarizationRetryScheduled, SummarizationRun,
 };
+pub use write::WriteTool;
 
 use crate::effect::ToolPolicyDenialCode;
 use crate::extension::{Extension, ExtensionHost};
@@ -162,13 +161,13 @@ impl Extension for CoreTools {
         host.tool(ReadTool);
         host.tool(EditTool);
         host.tool(WriteTool);
-        host.tool(BashTool);
+        host.tool(BashTool::default());
         // The coding product disables this redundant schema by default, while
         // keeping it available to embedders and explicit tool allowlists.
         host.tool(SearchTool);
         // Optional at the product allowlist boundary; never a bash fallback.
         #[cfg(windows)]
-        host.tool(PowerShellTool);
+        host.tool(PowerShellTool::default());
     }
 }
 

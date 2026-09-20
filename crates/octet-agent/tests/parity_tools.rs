@@ -108,7 +108,8 @@ async fn bash_truncated_output_spills_the_full_stream_to_a_readable_path() {
     let mut f = fixture();
     f.sandbox.max_output_bytes = 4096;
 
-    let output = BashTool
+    let tool = BashTool::default();
+    let output = tool
         .execute(
             json!({"command": "i=0; while [ $i -lt 400 ]; do printf 'line-%04d-payload\\n' $i; i=$((i+1)); done"}),
             &f.ctx(),
@@ -131,14 +132,94 @@ async fn bash_truncated_output_spills_the_full_stream_to_a_readable_path() {
     assert!(!output.text.contains("spill_error=true"), "{}", output.text);
     // The advertised description names the path field the model can follow.
     assert!(
-        BashTool
+        BashTool::default()
             .definition()
             .description
             .contains("full_output_path"),
         "{}",
-        BashTool.definition().description
+        BashTool::default().definition().description
     );
-    let _ = std::fs::remove_file(spill);
+    drop(tool);
+    assert!(!spill.exists(), "tool must own spill cleanup");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_wrappers_retain_spills_until_the_wrapper_is_dropped() {
+    let _serial = serial().await;
+    let mut f = fixture();
+    f.sandbox.max_output_bytes = 1024;
+    let tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(BashTool::with_session_environment(
+            ShellSessionEnvironment::default,
+        )),
+        Box::new(CheckpointedBashTool::with_default_checkpoints(
+            RecordingCheckpointSink::new(),
+        )),
+    ];
+    for tool in tools {
+        let mut paths = Vec::new();
+        for _ in 0..2 {
+            let output = tool.execute(
+                json!({"command": "i=0; while [ $i -lt 1000 ]; do printf 'payload\\n'; printf 'error-payload\\n' >&2; i=$((i+1)); done"}),
+                &f.ctx(),
+            ).await.unwrap();
+            let spills: Vec<PathBuf> = output
+                .text
+                .lines()
+                .filter_map(|line| line.strip_prefix("full_output_path="))
+                .map(PathBuf::from)
+                .collect();
+            assert_eq!(spills.len(), 2, "{}", output.text);
+            paths.extend(spills);
+        }
+        assert_eq!(
+            std::fs::read_to_string(&paths[0]).unwrap(),
+            "payload\n".repeat(1000)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths[1]).unwrap(),
+            "error-payload\n".repeat(1000)
+        );
+        assert!(paths.iter().all(|path| path.exists()));
+        drop(tool);
+        assert!(paths.iter().all(|path| !path.exists()));
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_wrappers_retain_spills_until_the_wrapper_is_dropped() {
+    let mut f = fixture();
+    f.sandbox.max_output_bytes = 1024;
+    let tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(PowerShellTool::default()),
+        Box::new(PowerShellTool::with_session_environment(
+            ShellSessionEnvironment::default,
+        )),
+    ];
+    for tool in tools {
+        let output = tool
+            .execute(
+                json!({"command": "1..1000 | ForEach-Object { Write-Output 'payload' }"}),
+                &f.ctx(),
+            )
+            .await
+            .unwrap();
+        let path = PathBuf::from(
+            output
+                .text
+                .lines()
+                .find_map(|line| line.strip_prefix("full_output_path="))
+                .unwrap(),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            1000
+        );
+        drop(tool);
+        assert!(!path.exists());
+    }
 }
 
 #[cfg(unix)]
@@ -146,7 +227,7 @@ async fn bash_truncated_output_spills_the_full_stream_to_a_readable_path() {
 async fn bash_untruncated_output_leaks_no_spill_path() {
     let _serial = serial().await;
     let f = fixture();
-    let output = BashTool
+    let output = BashTool::default()
         .execute(json!({"command": "printf 'small\\n'"}), &f.ctx())
         .await
         .unwrap();
@@ -285,17 +366,17 @@ async fn session_shell_clears_inherited_metadata_and_rereads_the_resolver() {
 async fn powershell_is_opt_in_and_never_a_bash_fallback() {
     // Addressable by name for an explicit product allowlist, and shaped like
     // the shell schema it shares bounded capture with.
-    assert_eq!(PowerShellTool.definition().name, "powershell");
+    assert_eq!(PowerShellTool::default().definition().name, "powershell");
     assert_eq!(
-        PowerShellTool.definition().parameters,
-        BashTool.definition().parameters
+        PowerShellTool::default().definition().parameters,
+        BashTool::default().definition().parameters
     );
 
     let f = fixture();
 
     #[cfg(not(windows))]
     {
-        let error = PowerShellTool
+        let error = PowerShellTool::default()
             .execute(json!({"command": "Write-Output hi"}), &f.ctx())
             .await
             .unwrap_err();
@@ -306,7 +387,7 @@ async fn powershell_is_opt_in_and_never_a_bash_fallback() {
         // Classification is shared with bash, so the broker never mistakes it
         // for a narrower capability.
         assert_eq!(
-            PowerShellTool
+            PowerShellTool::default()
                 .effect(&json!({"command": "Write-Output hi"}), &f.ctx())
                 .unwrap(),
             ToolEffect::HostProcess
@@ -315,7 +396,7 @@ async fn powershell_is_opt_in_and_never_a_bash_fallback() {
 
     #[cfg(windows)]
     {
-        let output = PowerShellTool
+        let output = PowerShellTool::default()
             .execute(json!({"command": "Write-Output pwsh-ok"}), &f.ctx())
             .await
             .unwrap();
@@ -637,7 +718,8 @@ fn batch_termination_requires_unanimous_finalized_results() {
 fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
     use octet_agent::tool::collect_tool_prompt_contributions;
 
-    let tools: Vec<&dyn Tool> = vec![&BashTool, &ReadTool, &EditTool, &WriteTool, &SearchTool];
+    let bash = BashTool::default();
+    let tools: Vec<&dyn Tool> = vec![&bash, &ReadTool, &EditTool, &WriteTool, &SearchTool];
     let contributions = collect_tool_prompt_contributions(tools);
     let by_name = |name: &str| {
         contributions
@@ -1302,7 +1384,10 @@ fn deferred_polls_need_one_permit_per_pass_and_fail_closed_on_stale_duplicate_or
     }
 
     // An unknown-outcome poll is replaced under fresh ids at the SAME poll
-    // number, and its abandoned frame list is deleted.
+    // number, and its abandoned frame list is deleted. Since 71c85e9f a plain
+    // permit refuses this (spending a second billable poll on an effect that
+    // may already have been accepted needs an explicit replacement decision),
+    // so recovery is admitted only under `one_replacing_unknown`.
     let mut unknown = valid_suspension();
     unknown.poll = 3;
     unknown.generation = 1;
@@ -1310,7 +1395,16 @@ fn deferred_polls_need_one_permit_per_pass_and_fail_closed_on_stale_duplicate_or
         response_id: "resp-unknown".to_string(),
         usage_id: "usage-unknown".to_string(),
     };
-    let mut permit = DeferredPollPermit::one("pass-recovery", unknown.generation);
+    let mut plain = DeferredPollPermit::one("pass-plain", unknown.generation);
+    match prepare_deferred_poll(&unknown, &mut plain, 0, &mut fresh_ids) {
+        DeferredPollPreparation::Refused(refusal) => assert_eq!(
+            refusal.kind,
+            DeferredPollRefusalKind::UnknownPollOutcome { poll: 3 },
+            "a plain permit must fail closed on an unknown outcome"
+        ),
+        other => panic!("a plain permit must fail closed, got {other:?}"),
+    }
+    let mut permit = DeferredPollPermit::one_replacing_unknown("pass-recovery", unknown.generation);
     let admitted = match prepare_deferred_poll(&unknown, &mut permit, 0, &mut fresh_ids) {
         DeferredPollPreparation::Admitted(intent) => *intent,
         other => panic!("recovery must admit one poll, got {other:?}"),

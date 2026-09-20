@@ -36,5 +36,4 @@ Focus: ${@:-all user-visible commits since the last release}
    with no user-visible effect, and any entry that overstates unverified
    behavior (source-only or unrun checks must not be described as qualified).
 
-Do not run the repository-wide formatter, do not commit, and do not edit
-`docs/providers.md` (another owner) as part of a changelog audit.
+Do not run the repository-wide formatter or commit as part of a changelog audit.

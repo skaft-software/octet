@@ -56,14 +56,7 @@ impl ThemeReloadMode {
     }
 }
 
-/// The only boundary at which a loaded theme may be applied.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReloadBoundary {
-    /// The prompt is idle and no active run or modal owns the shell.
-    Idle,
-    /// Input, a model run, or a modal currently owns the shell.
-    Busy,
-}
+pub use crate::reload::ReloadBoundary;
 
 /// File operations which can make the active path worth reloading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -725,6 +718,26 @@ mod tests {
             Some(Path::new("/themes/active.toml"))
         );
         assert_eq!(engine.debounce(), DEFAULT_DEBOUNCE);
+    }
+
+    #[test]
+    fn atomic_replacement_events_are_bounded_and_admitted() {
+        for kind in [FileChangeKind::Create, FileChangeKind::Rename] {
+            let mut engine = interactive();
+            let now = Instant::now();
+            let event = FileChangeEvent::bounded("/themes/active.toml", kind).unwrap();
+            assert_eq!(event.kind(), kind);
+            assert!(engine.observe(&event, now));
+            let request = engine
+                .begin_if_ready(now + DEFAULT_DEBOUNCE, ReloadBoundary::Idle)
+                .unwrap();
+            assert_eq!(request.token().sequence(), 0);
+        }
+        assert!(FileChangeEvent::bounded(
+            "x".repeat(MAX_THEME_PATH_BYTES + 1),
+            FileChangeKind::Create,
+        )
+        .is_none());
     }
 
     #[test]

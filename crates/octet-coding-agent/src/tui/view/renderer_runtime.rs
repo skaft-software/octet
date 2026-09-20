@@ -55,6 +55,9 @@ impl SharedState {
 pub(super) enum RenderCommand {
     Render,
     Stop,
+    /// Flush one final frame, hand the terminal back, and acknowledge before the
+    /// renderer thread exits. The owner re-enters with a fresh renderer.
+    Suspend(mpsc::Sender<()>),
     /// Hand the current composed frame to a diagnostics surface. The renderer
     /// thread owns the terminal, so `/debug` can only read the frame here.
     DumpFrame(mpsc::Sender<Vec<String>>),
@@ -204,6 +207,7 @@ fn coalesce_render_commands(
     rx: &Receiver<RenderCommand>,
     last_render: Option<Instant>,
     tui: &TUI<'_>,
+    suspended: &mut Option<mpsc::Sender<()>>,
 ) -> bool {
     let now = Instant::now();
     let deadline = now + frame_coalesce_delay(last_render, now);
@@ -218,6 +222,12 @@ fn coalesce_render_commands(
                     let _ = reply.send(tui.rendered_frame().to_vec());
                     true
                 }
+                // A suspend is a Stop that also acknowledges: the caller owns
+                // the final frame and the terminal handback.
+                Ok(RenderCommand::Suspend(reply)) => {
+                    *suspended = Some(reply);
+                    false
+                }
                 Ok(RenderCommand::Render) | Err(mpsc::TryRecvError::Empty) => true,
                 Ok(RenderCommand::Stop) | Err(mpsc::TryRecvError::Disconnected) => false,
             };
@@ -228,11 +238,24 @@ fn coalesce_render_commands(
             Ok(RenderCommand::DumpFrame(reply)) => {
                 let _ = reply.send(tui.rendered_frame().to_vec());
             }
+            Ok(RenderCommand::Suspend(reply)) => {
+                *suspended = Some(reply);
+                return false;
+            }
             Ok(RenderCommand::Render) => {}
             Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return false,
             Err(mpsc::RecvTimeoutError::Timeout) => return true,
         }
     }
+}
+
+/// Flush the retained final frame, restore the process terminal through the
+/// same idempotent lifecycle path used by exit and panic, and acknowledge once.
+/// The caller (not this thread) re-enters on resume.
+fn suspend_terminal(tui: &mut TUI<'_>, acknowledged: mpsc::Sender<()>) {
+    tui.request_render();
+    tui.stop();
+    let _ = acknowledged.send(());
 }
 
 /// Reconcile the renderer's shared dimensions with the terminal itself. This
@@ -290,9 +313,11 @@ pub(super) fn render_loop(
         state,
         size,
         rx,
-        application_viewport,
-        clear_on_start,
-        alternate_screen_opt_in(),
+        RenderLoopOptions {
+            application_viewport,
+            clear_on_start,
+            alternate_screen: alternate_screen_opt_in(),
+        },
         synchronize_terminal_size,
     );
 }
@@ -314,6 +339,13 @@ fn alternate_screen_opt_in() -> bool {
     })
 }
 
+#[derive(Default)]
+pub(super) struct RenderLoopOptions {
+    pub application_viewport: bool,
+    pub clear_on_start: bool,
+    pub alternate_screen: bool,
+}
+
 // The same loop is exercised with an in-memory terminal and resize probe in
 // tests, without reading/changing the test runner's physical terminal state.
 pub(super) fn render_loop_with_terminal(
@@ -321,11 +353,14 @@ pub(super) fn render_loop_with_terminal(
     state: SharedState,
     size: TerminalSize,
     rx: Receiver<RenderCommand>,
-    application_viewport: bool,
-    clear_on_start: bool,
-    alternate_screen: bool,
+    options: RenderLoopOptions,
     synchronize_size: impl Fn(&SharedState, &TerminalSize) -> bool,
 ) {
+    let RenderLoopOptions {
+        application_viewport,
+        clear_on_start,
+        alternate_screen,
+    } = options;
     let mut tui = TUI::new(Box::new(terminal));
     // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
     // policy in `native_scrollback` (not native history) decides which rows stay
@@ -352,6 +387,9 @@ pub(super) fn render_loop_with_terminal(
 
     let mut last_render: Option<Instant> = None;
     let mut animations = AnimationSchedule::new();
+    // A suspend is decided by the coalescer but finalized here, where the
+    // final frame and the terminal handback belong.
+    let mut suspended: Option<mpsc::Sender<()>> = None;
     loop {
         let welcome = {
             let shell = state.borrow();
@@ -375,6 +413,10 @@ pub(super) fn render_loop_with_terminal(
         };
         if matches!(command, Some(RenderCommand::Stop)) {
             break;
+        }
+        if let Some(RenderCommand::Suspend(reply)) = command {
+            suspend_terminal(&mut tui, reply);
+            return;
         }
         if let Some(RenderCommand::DumpFrame(reply)) = command {
             // Diagnostics read the retained frame; they never request a repaint
@@ -402,7 +444,10 @@ pub(super) fn render_loop_with_terminal(
             continue;
         }
 
-        if !coalesce_render_commands(&rx, last_render, &tui) {
+        if !coalesce_render_commands(&rx, last_render, &tui, &mut suspended) {
+            if let Some(reply) = suspended.take() {
+                suspend_terminal(&mut tui, reply);
+            }
             break;
         }
         {
@@ -718,10 +763,12 @@ mod scheduler_tests {
         // The request is answered from the retained frame and never dropped.
         let (reply, receive) = mpsc::channel();
         tx.send(RenderCommand::DumpFrame(reply)).unwrap();
+        let mut suspended = None;
         assert!(coalesce_render_commands(
             &rx,
             Some(Instant::now()),
-            &renderer
+            &renderer,
+            &mut suspended,
         ));
         let frame = receive
             .recv_timeout(Duration::from_millis(50))
@@ -738,16 +785,53 @@ mod scheduler_tests {
             tx.send(RenderCommand::Render).unwrap();
         }
         let renderer = test_renderer();
-        assert!(coalesce_render_commands(&rx, None, &renderer));
+        let mut suspended = None;
+        assert!(coalesce_render_commands(
+            &rx,
+            None,
+            &renderer,
+            &mut suspended,
+        ));
         assert_eq!(rx.try_iter().count(), 999);
         tx.send(RenderCommand::Stop).unwrap();
         assert!(!coalesce_render_commands(
             &rx,
             Some(Instant::now()),
-            &renderer
+            &renderer,
+            &mut suspended,
         ));
+        assert!(suspended.is_none());
         drop(tx);
-        assert!(!coalesce_render_commands(&rx, None, &renderer));
+        assert!(!coalesce_render_commands(
+            &rx,
+            None,
+            &renderer,
+            &mut suspended,
+        ));
+    }
+
+    #[test]
+    fn suspend_flushes_the_final_frame_and_is_acknowledged_exactly_once() {
+        let mut renderer = test_renderer();
+        let (tx, rx) = mpsc::channel();
+        let (reply, receive) = mpsc::channel();
+        tx.send(RenderCommand::Suspend(reply)).unwrap();
+        let mut suspended = None;
+        // The coalescer never consumes a suspend: it hands the ack to the owner.
+        assert!(!coalesce_render_commands(
+            &rx,
+            None,
+            &renderer,
+            &mut suspended,
+        ));
+        let reply = suspended.take().expect("suspend is handed to the owner");
+        suspend_terminal(&mut renderer, reply);
+        receive
+            .recv_timeout(Duration::from_millis(50))
+            .expect("suspend is acknowledged");
+        // Exactly one acknowledgement: a superseded renderer must not answer
+        // a later resume with a stale suspend.
+        assert!(receive.try_recv().is_err());
     }
 
     #[test]

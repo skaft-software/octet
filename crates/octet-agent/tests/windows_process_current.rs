@@ -32,7 +32,10 @@ fn bash_path() -> Option<PathBuf> {
 }
 
 fn is_legacy_wsl_bash_path(path: &Path) -> bool {
-    let normalized = path.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    let normalized = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
     normalized.ends_with("\\windows\\system32\\bash.exe")
         || normalized.ends_with("\\windows\\sysnative\\bash.exe")
 }
@@ -57,7 +60,10 @@ async fn explicit_windows_bash_preserves_bash_c_and_cwd_semantics() {
         return;
     };
     let directory = tempfile::tempdir().expect("temporary workspace");
-    let workspace = directory.path().canonicalize().expect("canonical workspace");
+    let workspace = directory
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
     std::fs::create_dir(workspace.join("subdir")).expect("subdirectory");
 
     let mut sandbox = SandboxConfig::new(&workspace);
@@ -65,7 +71,7 @@ async fn explicit_windows_bash_preserves_bash_c_and_cwd_semantics() {
     sandbox.allow_shell = true;
     sandbox.shell_path = Some(shell);
     sandbox.bash_timeout = Duration::from_secs(5);
-    let output = BashTool
+    let output = BashTool::default()
         .execute(
             json!({
                 "command": "printf 'brace-%s\\n' brace-{one,two}; test -d .",
@@ -88,7 +94,10 @@ async fn windows_job_cleanup_bounds_an_infinite_bash_command() {
         return;
     };
     let directory = tempfile::tempdir().expect("temporary workspace");
-    let workspace = directory.path().canonicalize().expect("canonical workspace");
+    let workspace = directory
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
     let mut sandbox = SandboxConfig::new(&workspace);
     sandbox.allow_process = true;
     sandbox.allow_shell = true;
@@ -96,7 +105,7 @@ async fn windows_job_cleanup_bounds_an_infinite_bash_command() {
     sandbox.bash_timeout = Duration::from_secs(5);
 
     let started = Instant::now();
-    let error = BashTool
+    let error = BashTool::default()
         .execute(
             json!({
                 "command": "while true; do :; done",

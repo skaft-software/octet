@@ -198,6 +198,16 @@ pub enum AgentEvent {
         text: String,
     },
 
+    /// Uncommitted text recovered from an interrupted previous attempt.
+    /// This is historical progress, never part of the current answer, usage,
+    /// or provider replay. Consumers may display it in a separate recovery view.
+    RecoveredOutput {
+        /// The recovered content's channel.
+        channel: OutputChannel,
+        /// The durable partial prefix, not a completed assistant response.
+        text: String,
+    },
+
     /// A complete generated media part from the current provider attempt.
     ///
     /// Like [`AgentEvent::OutputDelta`], this is provisional until the matching

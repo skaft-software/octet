@@ -271,7 +271,7 @@ use sessions::*;
 mod routing;
 mod startup;
 
-pub use startup::{run, run_with_session_name};
+pub use startup::run_with_session_name;
 
 fn authority_profiles_from_sandbox(
     sandbox: &crate::config::SandboxPolicy,
@@ -1031,6 +1031,7 @@ enum PullRequestObservation {
 }
 
 impl OctetHost {
+    #[cfg(test)]
     fn new(config: Config) -> anyhow::Result<Self> {
         Self::new_with_session_name(config, None)
     }
@@ -8357,7 +8358,7 @@ async fn project_agent_event(
                 messages.len(),
             )?;
         }
-        AgentEvent::DelegationUpdated { .. } => {
+        AgentEvent::RecoveredOutput { .. } | AgentEvent::DelegationUpdated { .. } => {
             // Serve projects owner-fenced subagent state through extension
             // presentation snapshots; native telemetry is TUI-local run chrome.
         }

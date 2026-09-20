@@ -188,12 +188,12 @@ const ACTIVITY_NEUTRAL_SATURATION: f64 = 0.06;
 /// `ACTIVITY_RAMP_SATURATION_STEPS` boost. Between this and
 /// [`ACTIVITY_NEUTRAL_SATURATION`] a single kernel - [`activity_chromatic_weight`]
 /// - scales both, so a colour that is only just not grey can never be pushed a
-/// whole hue span away from itself. That is this ramp's version of the reported
-/// warm `Working` shimmer: the defect was a hue set applied *regardless* of the
-/// identity, and a near-neutral identity is the one case where the ramp has no
-/// chroma of its own to spend. Every compiled-in lab colour other than the exact
-/// grey of `OpenAi` resolves to at least 0.37 (`Cohere`) on every terminal
-/// profile, so no shipped model identity loses the treatment.
+///   whole hue span away from itself. That is this ramp's version of the reported
+///   warm `Working` shimmer: the defect was a hue set applied *regardless* of the
+///   identity, and a near-neutral identity is the one case where the ramp has no
+///   chroma of its own to spend. Every compiled-in lab colour other than the exact
+///   grey of `OpenAi` resolves to at least 0.37 (`Cohere`) on every terminal
+///   profile, so no shipped model identity loses the treatment.
 const ACTIVITY_CHROMATIC_SATURATION: f64 = 0.25;
 
 impl ActivityRamp {
@@ -645,9 +645,7 @@ fn activity_shimmer_color(
     // a single blinking cell. Every step is monotone in distance, so the centre
     // remains the most distinct cell.
     let sweep_strength = match (index - center).unsigned_abs() {
-        distance if distance < ACTIVITY_SWEEP_FALLOFF.len() => {
-            ACTIVITY_SWEEP_FALLOFF[distance as usize]
-        }
+        distance if distance < ACTIVITY_SWEEP_FALLOFF.len() => ACTIVITY_SWEEP_FALLOFF[distance],
         _ => match background {
             TerminalBackground::Unknown => 28,
             TerminalBackground::Dark | TerminalBackground::Light => 0,
@@ -1789,7 +1787,7 @@ mod tests {
                             // whatever the hue rotation, so the highlight can only
                             // take chroma away from the theme's placeholder accent.
                             let ramp = ActivityRamp::of(label).expect("status ramp");
-                            for step in 0..ACTIVITY_RAMP_ENTRIES {
+                            for (step, hue_step) in ACTIVITY_RAMP_HUE_STEPS.iter().enumerate() {
                                 let entry =
                                     ramp.accent(ActivityIdentity { color: None }, step, 0.5);
                                 assert_eq!(
@@ -1798,7 +1796,7 @@ mod tests {
                                     "{background:?}/{depth:?}/{label}: ramp entry {step} must be an \
                                      exact grey when the session has no model identity, got \
                                      {entry:?} for hue rotation {:.0} degrees",
-                                    ACTIVITY_RAMP_HUE_SPAN * ACTIVITY_RAMP_HUE_STEPS[step]
+                                    ACTIVITY_RAMP_HUE_SPAN * hue_step
                                 );
                             }
                             let most_chromatic = colors
@@ -1983,9 +1981,9 @@ mod tests {
     /// boost are scaled by the **model colour's own** HSV saturation, so an
     /// identity that is only just not grey gets only a fraction of the hue span
     /// - and a themed model colour that is nearly grey, or a future lab colour
-    /// that is, stays nearly luminance-only. Nothing here reads a model id or a
-    /// lab name: the fixture is a custom theme and the weight is read back from
-    /// whatever colour that theme resolves.
+    ///   that is, stays nearly luminance-only. Nothing here reads a model id or a
+    ///   lab name: the fixture is a custom theme and the weight is read back from
+    ///   whatever colour that theme resolves.
     #[test]
     fn near_neutral_model_colours_rotate_only_as_far_as_their_own_chroma_allows() {
         // Equal red/green with a hint of blue: not grey (HSV saturation 0.08 on

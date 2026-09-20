@@ -9,6 +9,10 @@ import sys
 from pathlib import PurePosixPath
 from typing import Any, BinaryIO, Optional
 
+# The host stages the executable privately; sibling modules remain in the
+# host-provided extension root rather than beside the staged __file__.
+sys.path.insert(0, os.environ.get("OCTET_EXTENSION_DIR", os.path.dirname(os.path.abspath(__file__))))
+
 from cline_import import AdapterError, detect, import_setup
 
 

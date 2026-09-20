@@ -355,13 +355,23 @@ pub struct TextEditor {
     /// Undo history of detached pre-edit snapshots.
     undo: UndoStack<EditorSnapshot>,
     /// Redo history, filled by undo and cleared by any new edit.
-    redo: Vec<EditorSnapshot>,
+    redo: UndoStack<EditorSnapshot>,
     /// Emacs-style kill ring shared by every kill and yank action.
     kill_ring: KillRing,
     /// Kind of the most recent action, for coalescing and accumulation.
     last_action: Option<LastAction>,
     /// Byte range replaced by the most recent yank, for yank-pop.
     last_yank: Option<Range<usize>>,
+}
+
+// Bounds apply separately to undo and redo, including snapshot overhead.
+const MAX_HISTORY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_HISTORY_ENTRIES: usize = 256;
+
+fn bound_history(history: &mut UndoStack<EditorSnapshot>) {
+    history.trim_to_budget(MAX_HISTORY_ENTRIES, MAX_HISTORY_BYTES, |snapshot| {
+        snapshot.text.capacity() + std::mem::size_of::<EditorSnapshot>()
+    });
 }
 
 impl Default for TextEditor {
@@ -374,7 +384,7 @@ impl Default for TextEditor {
             text_revision: 0,
             cached_layout: RefCell::new(None),
             undo: UndoStack::new(),
-            redo: Vec::new(),
+            redo: UndoStack::new(),
             kill_ring: KillRing::new(),
             last_action: None,
             last_yank: None,
@@ -402,7 +412,7 @@ impl TextEditor {
             text_revision: 0,
             cached_layout: RefCell::new(None),
             undo: UndoStack::new(),
-            redo: Vec::new(),
+            redo: UndoStack::new(),
             kill_ring: KillRing::new(),
             last_action: None,
             last_yank: None,
@@ -783,7 +793,9 @@ impl TextEditor {
         let needle = character.to_string();
         let target = if forward {
             let start = next_grapheme_boundary(&self.text, self.cursor);
-            self.text[start..].find(&needle).map(|offset| start + offset)
+            self.text[start..]
+                .find(&needle)
+                .map(|offset| start + offset)
         } else {
             self.text[..self.cursor].rfind(&needle)
         };
@@ -937,7 +949,8 @@ impl TextEditor {
         let Some(snapshot) = self.undo.pop() else {
             return false;
         };
-        self.redo.push(self.snapshot());
+        self.redo.push(&self.snapshot());
+        bound_history(&mut self.redo);
         self.restore(snapshot);
         true
     }
@@ -948,6 +961,7 @@ impl TextEditor {
             return false;
         };
         self.undo.push(&self.snapshot());
+        bound_history(&mut self.undo);
         self.restore(snapshot);
         true
     }
@@ -961,6 +975,7 @@ impl TextEditor {
 
     fn push_undo(&mut self) {
         self.undo.push(&self.snapshot());
+        bound_history(&mut self.undo);
         self.redo.clear();
     }
 
@@ -1768,6 +1783,33 @@ mod tests {
             assert!(cursor.row() < projection.lines().len());
             assert!(is_grapheme_boundary(editor.text(), cursor.offset()));
         }
+    }
+
+    #[test]
+    fn large_draft_deletions_keep_undo_and_redo_within_byte_budgets() {
+        let mut editor = TextEditor::with_text("x".repeat(65_536));
+        for _ in 0..2048 {
+            editor.apply(TextEditAction::Backspace, 80);
+        }
+        assert!(
+            editor.undo.len() < 70,
+            "history must be byte-bounded, not one full draft per deletion"
+        );
+        let mut undo_bytes = 0;
+        let mut history = editor.undo.clone();
+        while let Some(snapshot) = history.pop() {
+            undo_bytes += snapshot.text.capacity() + std::mem::size_of::<EditorSnapshot>();
+        }
+        assert!(undo_bytes <= MAX_HISTORY_BYTES);
+        while editor.undo() {}
+        let mut redo_bytes = 0;
+        let mut history = editor.redo.clone();
+        while let Some(snapshot) = history.pop() {
+            redo_bytes += snapshot.text.capacity() + std::mem::size_of::<EditorSnapshot>();
+        }
+        assert!(redo_bytes <= MAX_HISTORY_BYTES);
+        while editor.redo() {}
+        assert_eq!(editor.text().len(), 65_536 - 2048);
     }
 
     #[test]

@@ -180,64 +180,171 @@ const UPSTREAM_FAILURES: &[&str] = &[
 
 /// `(source, expected, display)` — captured from the upstream implementation.
 const UPSTREAM_OBSERVED: &[(&str, Option<&str>, bool)] = &[
-    ("\\begin{pmatrix}a & b \\\\ c & d\\end{pmatrix}", Some("⎛ a │ b ⎞\n⎝ c │ d ⎠"), true),
-    ("\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}", Some("∞              √π\n∫ e^(-x²) dx = ──\n0              2"), true),
-    ("x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}", Some("    -b ± √(b²-4ac)\nx = ──────────────\n          2a"), true),
-    ("\\begin{cases} x & x > 0 \\\\ -x & x \\le 0 \\end{cases}", Some("⎧ x if x > 0\n⎩ -x if x ≤ 0"), false),
-    ("\\lim_{n\\to\\infty}\\left(1+\\frac{1}{n}\\right)^n = e", Some("        1\nlim (1+ ─ )ⁿ = e\nn→∞     n"), true),
-    ("\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}", Some(" n      n(n+1)\n ∑  i = ──────\ni=1       2"), true),
-    ("\\begin{aligned} a &= b + c \\\\ d &= e \\end{aligned}", Some("a = b + c\nd = e"), false),
+    (
+        "\\begin{pmatrix}a & b \\\\ c & d\\end{pmatrix}",
+        Some("⎛ a │ b ⎞\n⎝ c │ d ⎠"),
+        true,
+    ),
+    (
+        "\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}",
+        Some("∞              √π\n∫ e^(-x²) dx = ──\n0              2"),
+        true,
+    ),
+    (
+        "x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}",
+        Some("    -b ± √(b²-4ac)\nx = ──────────────\n          2a"),
+        true,
+    ),
+    (
+        "\\begin{cases} x & x > 0 \\\\ -x & x \\le 0 \\end{cases}",
+        Some("⎧ x if x > 0\n⎩ -x if x ≤ 0"),
+        false,
+    ),
+    (
+        "\\lim_{n\\to\\infty}\\left(1+\\frac{1}{n}\\right)^n = e",
+        Some("        1\nlim (1+ ─ )ⁿ = e\nn→∞     n"),
+        true,
+    ),
+    (
+        "\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}",
+        Some(" n      n(n+1)\n ∑  i = ──────\ni=1       2"),
+        true,
+    ),
+    (
+        "\\begin{aligned} a &= b + c \\\\ d &= e \\end{aligned}",
+        Some("a = b + c\nd = e"),
+        false,
+    ),
     ("\\hat{H}\\psi = E\\psi", Some("Ĥψ = Eψ"), false),
     ("\\vec{F} = m\\vec{a}", Some("F⃗ = ma⃗"), false),
     ("\\sqrt[3]{x+1}", Some("∛(x+1)"), false),
-    ("\\nabla \\cdot \\vec{E} = \\frac{\\rho}{\\varepsilon_0}", Some("        ρ\n∇ · E⃗ = ──\n        ε₀"), true),
-    ("\\mathcal{L} = \\bar{\\psi}(i\\gamma^\\mu \\partial_\\mu - m)\\psi", Some("L = ψ̅(iγ^μ ∂_μ - m)ψ"), true),
-    ("\\begin{tikzpicture}\\draw (0,0);\\end{tikzpicture}", None, false),
+    (
+        "\\nabla \\cdot \\vec{E} = \\frac{\\rho}{\\varepsilon_0}",
+        Some("        ρ\n∇ · E⃗ = ──\n        ε₀"),
+        true,
+    ),
+    (
+        "\\mathcal{L} = \\bar{\\psi}(i\\gamma^\\mu \\partial_\\mu - m)\\psi",
+        Some("L = ψ̅(iγ^μ ∂_μ - m)ψ"),
+        true,
+    ),
+    (
+        "\\begin{tikzpicture}\\draw (0,0);\\end{tikzpicture}",
+        None,
+        false,
+    ),
     ("\\frac{1}{", None, false),
     ("\\unknown{x}", None, false),
     ("\\text{if } x > 0", Some("if x > 0"), false),
     ("\\frac{\\hat{x}}{\\vec{y}}", Some("x̂\n─\ny⃗"), true),
-    ("\\begin{pmatrix}界&a\\\\b&c\\end{pmatrix}", Some("⎛ 界 │ a ⎞\n⎝ b  │ c ⎠"), true),
-    ("\\underbrace{c_n\\sqrt{2}}_{\\text{mode}}", Some("cₙ√2_mode"), true),
+    (
+        "\\begin{pmatrix}界&a\\\\b&c\\end{pmatrix}",
+        Some("⎛ 界 │ a ⎞\n⎝ b  │ c ⎠"),
+        true,
+    ),
+    (
+        "\\underbrace{c_n\\sqrt{2}}_{\\text{mode}}",
+        Some("cₙ√2_mode"),
+        true,
+    ),
 ];
-
 
 /// `(source, expected)` in display mode: operator limits, stacked fractions and
 /// every matrix environment the port supports. Captured from the upstream
 /// reference implementation.
 const DISPLAY_LAYOUT_CORPUS: &[(&str, &str)] = &[
-    (r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}", " n      n(n+1)\n ∑  i = ──────\ni=1       2"),
+    (
+        r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}",
+        " n      n(n+1)\n ∑  i = ──────\ni=1       2",
+    ),
     (r"\prod_{i=1}^{n} a_i", " n\n ∏  aᵢ\ni=1"),
-    (r"\prod_{k=0}^{\infty} \frac{1}{k!}", " ∞   1\n ∏   ──\nk=0  k!"),
+    (
+        r"\prod_{k=0}^{\infty} \frac{1}{k!}",
+        " ∞   1\n ∏   ──\nk=0  k!",
+    ),
     (r"\oint_C \frac{dz}{z}", "   dz\n∮  ──\nC  z"),
     (r"\bigcup_{i=1}^{n} A_i", " n\n ⋃  Aᵢ\ni=1"),
     (r"\bigcap_{i \in I} B_i", " ⋂  Bᵢ\ni∈I"),
-    (r"\lim_{x\to\infty} \frac{1}{x} = 0", "     1\nlim  ─ = 0\nx→∞  x"),
+    (
+        r"\lim_{x\to\infty} \frac{1}{x} = 0",
+        "     1\nlim  ─ = 0\nx→∞  x",
+    ),
     (r"\max_{1 \le i \le n} x_i", " max  xᵢ\n1≤i≤n"),
-    (r"\operatorname*{arg\,max}_{x \in X} f(x)", "arg max f(x)\n  x∈X"),
+    (
+        r"\operatorname*{arg\,max}_{x \in X} f(x)",
+        "arg max f(x)\n  x∈X",
+    ),
     (r"\frac{\partial f}{\partial x}", "∂ f\n───\n∂ x"),
-    (r"\frac{\partial^2 f}{\partial x \partial y}", " ∂² f\n───────\n∂ x ∂ y"),
-    (r"\frac{1+\frac{1}{x}}{1-\frac{1}{x}}", "1+1/x\n─────\n1-1/x"),
+    (
+        r"\frac{\partial^2 f}{\partial x \partial y}",
+        " ∂² f\n───────\n∂ x ∂ y",
+    ),
+    (
+        r"\frac{1+\frac{1}{x}}{1-\frac{1}{x}}",
+        "1+1/x\n─────\n1-1/x",
+    ),
     (r"\frac{\frac{a}{b}}{\frac{c}{d}}", "a/b\n───\nc/d"),
     (r"\begin{matrix}a&b\\c&d\end{matrix}", "a │ b\nc │ d"),
-    (r"\begin{bmatrix}a&b\\c&d\end{bmatrix}", "⎡ a │ b ⎤\n⎣ c │ d ⎦"),
-    (r"\begin{Bmatrix}a&b\\c&d\end{Bmatrix}", "⎧ a │ b ⎫\n⎩ c │ d ⎭"),
-    (r"\begin{vmatrix}a&b\\c&d\end{vmatrix}", "│ a │ b │\n│ c │ d │"),
-    (r"\begin{Vmatrix}a&b\\c&d\end{Vmatrix}", "║ a │ b ║\n║ c │ d ║"),
-    (r"\begin{smallmatrix}a&b\\c&d\end{smallmatrix}", "a │ b\nc │ d"),
+    (
+        r"\begin{bmatrix}a&b\\c&d\end{bmatrix}",
+        "⎡ a │ b ⎤\n⎣ c │ d ⎦",
+    ),
+    (
+        r"\begin{Bmatrix}a&b\\c&d\end{Bmatrix}",
+        "⎧ a │ b ⎫\n⎩ c │ d ⎭",
+    ),
+    (
+        r"\begin{vmatrix}a&b\\c&d\end{vmatrix}",
+        "│ a │ b │\n│ c │ d │",
+    ),
+    (
+        r"\begin{Vmatrix}a&b\\c&d\end{Vmatrix}",
+        "║ a │ b ║\n║ c │ d ║",
+    ),
+    (
+        r"\begin{smallmatrix}a&b\\c&d\end{smallmatrix}",
+        "a │ b\nc │ d",
+    ),
     (r"\begin{array}{c|c}a&b\\c&d\end{array}", "a │ b\nc │ d"),
     (r"\begin{array}{ll}a&b\\c&d\end{array}", "a │ b\nc │ d"),
-    (r"\begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix}", "⎛ 1 │ 2 │ 3 ⎞\n⎜ 4 │ 5 │ 6 ⎟\n⎝ 7 │ 8 │ 9 ⎠"),
+    (
+        r"\begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix}",
+        "⎛ 1 │ 2 │ 3 ⎞\n⎜ 4 │ 5 │ 6 ⎟\n⎝ 7 │ 8 │ 9 ⎠",
+    ),
     (r"\begin{pmatrix}a\\b\end{pmatrix}", "⎛ a ⎞\n⎝ b ⎠"),
     (r"\begin{pmatrix}a&b\end{pmatrix}", "⎛ a │ b ⎞"),
-    (r"\left(\begin{matrix}a&b\\c&d\end{matrix}\right)", "(a │ b)\n c │ d"),
-    (r"\left[\begin{matrix}a&b\\c&d\end{matrix}\right]", "[a │ b]\n c │ d"),
-    (r"\begin{pmatrix}\frac{1}{2}&\sqrt{2}\\\pi&e\end{pmatrix}", "⎛ 1/2 │ √2 ⎞\n⎝ π   │ e  ⎠"),
-    (r"\begin{pmatrix}\frac{\partial f_1}{\partial x}&\frac{\partial f_1}{\partial y}\\\frac{\partial f_2}{\partial x}&\frac{\partial f_2}{\partial y}\end{pmatrix}", "⎛ (∂ f₁)/(∂ x) │ (∂ f₁)/(∂ y) ⎞\n⎝ (∂ f₂)/(∂ x) │ (∂ f₂)/(∂ y) ⎠"),
-    (r"\begin{pmatrix}界&a\\b&c\end{pmatrix}", "⎛ 界 │ a ⎞\n⎝ b  │ c ⎠"),
-    (r"\begin{alignedat}{2}a&=b&\quad c&=d\\e&=f&g&=h\end{alignedat}", "a = b c = d\ne = f g = h"),
-    (r"\begin{equation}\begin{split}a&=b\\&=c\end{split}\end{equation}", "a = b\n= c"),
-    (r"\int_{-\infty}^{+\infty} e^{-x^2}\,dx = \sqrt{\pi}", "+∞\n∫  e^(-x²) dx = √π\n-∞"),
+    (
+        r"\left(\begin{matrix}a&b\\c&d\end{matrix}\right)",
+        "(a │ b)\n c │ d",
+    ),
+    (
+        r"\left[\begin{matrix}a&b\\c&d\end{matrix}\right]",
+        "[a │ b]\n c │ d",
+    ),
+    (
+        r"\begin{pmatrix}\frac{1}{2}&\sqrt{2}\\\pi&e\end{pmatrix}",
+        "⎛ 1/2 │ √2 ⎞\n⎝ π   │ e  ⎠",
+    ),
+    (
+        r"\begin{pmatrix}\frac{\partial f_1}{\partial x}&\frac{\partial f_1}{\partial y}\\\frac{\partial f_2}{\partial x}&\frac{\partial f_2}{\partial y}\end{pmatrix}",
+        "⎛ (∂ f₁)/(∂ x) │ (∂ f₁)/(∂ y) ⎞\n⎝ (∂ f₂)/(∂ x) │ (∂ f₂)/(∂ y) ⎠",
+    ),
+    (
+        r"\begin{pmatrix}界&a\\b&c\end{pmatrix}",
+        "⎛ 界 │ a ⎞\n⎝ b  │ c ⎠",
+    ),
+    (
+        r"\begin{alignedat}{2}a&=b&\quad c&=d\\e&=f&g&=h\end{alignedat}",
+        "a = b c = d\ne = f g = h",
+    ),
+    (
+        r"\begin{equation}\begin{split}a&=b\\&=c\end{split}\end{equation}",
+        "a = b\n= c",
+    ),
+    (
+        r"\int_{-\infty}^{+\infty} e^{-x^2}\,dx = \sqrt{\pi}",
+        "+∞\n∫  e^(-x²) dx = √π\n-∞",
+    ),
     (r"\int\limits_0^1 f(x)\,dx", "1\n∫ f(x) dx\n0"),
     (r"\int\nolimits_0^1 f(x)\,dx", "∫₀¹ f(x) dx"),
 ];
@@ -245,10 +352,22 @@ const DISPLAY_LAYOUT_CORPUS: &[(&str, &str)] = &[
 /// `(source, expected)` in inline mode: environments, scripts and delimiters.
 /// Captured from the upstream reference implementation.
 const INLINE_LAYOUT_CORPUS: &[(&str, &str)] = &[
-    (r"\begin{cases}a&x<0\\b&x=0\\c&x>0\end{cases}", "⎧ a if x < 0\n⎨ b if x = 0\n⎩ c if x > 0"),
-    (r"\begin{pmatrix}a&b\\c&d\end{pmatrix}", "⎛ a │ b ⎞\n⎝ c │ d ⎠"),
-    (r"\begin{cases}x^2 & x \ge 0 \\ -x^2 & x < 0\end{cases}", "⎧ x² if x ≥ 0\n⎩ -x² if x < 0"),
-    (r"\begin{aligned} a &= b + c \\ d &= e \end{aligned}", "a = b + c\nd = e"),
+    (
+        r"\begin{cases}a&x<0\\b&x=0\\c&x>0\end{cases}",
+        "⎧ a if x < 0\n⎨ b if x = 0\n⎩ c if x > 0",
+    ),
+    (
+        r"\begin{pmatrix}a&b\\c&d\end{pmatrix}",
+        "⎛ a │ b ⎞\n⎝ c │ d ⎠",
+    ),
+    (
+        r"\begin{cases}x^2 & x \ge 0 \\ -x^2 & x < 0\end{cases}",
+        "⎧ x² if x ≥ 0\n⎩ -x² if x < 0",
+    ),
+    (
+        r"\begin{aligned} a &= b + c \\ d &= e \end{aligned}",
+        "a = b + c\nd = e",
+    ),
     (r"\overbrace{a+b}^{n}", "a+bⁿ"),
     (r"\underbrace{a+b}_{n}", "a+bₙ"),
     (r"\binom{n}{k}", "(n choose k)"),
@@ -264,406 +383,406 @@ const INLINE_LAYOUT_CORPUS: &[(&str, &str)] = &[
 /// Captured from the upstream reference implementation (see module docs);
 /// the `// group` comment on each row names the upstream table it came from.
 const TABLE_GOLDENS: &[(&str, &str)] = &[
-    ("\\alpha", "α"), // symbol
-    ("\\beta", "β"), // symbol
-    ("\\gamma", "γ"), // symbol
-    ("\\delta", "δ"), // symbol
-    ("\\epsilon", "ϵ"), // symbol
-    ("\\varepsilon", "ε"), // symbol
-    ("\\zeta", "ζ"), // symbol
-    ("\\eta", "η"), // symbol
-    ("\\theta", "θ"), // symbol
-    ("\\vartheta", "ϑ"), // symbol
-    ("\\iota", "ι"), // symbol
-    ("\\kappa", "κ"), // symbol
-    ("\\varkappa", "ϰ"), // symbol
-    ("\\lambda", "λ"), // symbol
-    ("\\mu", "μ"), // symbol
-    ("\\nu", "ν"), // symbol
-    ("\\xi", "ξ"), // symbol
-    ("\\pi", "π"), // symbol
-    ("\\varpi", "ϖ"), // symbol
-    ("\\rho", "ρ"), // symbol
-    ("\\varrho", "ϱ"), // symbol
-    ("\\sigma", "σ"), // symbol
-    ("\\varsigma", "ς"), // symbol
-    ("\\tau", "τ"), // symbol
-    ("\\upsilon", "υ"), // symbol
-    ("\\phi", "ϕ"), // symbol
-    ("\\varphi", "φ"), // symbol
-    ("\\chi", "χ"), // symbol
-    ("\\psi", "ψ"), // symbol
-    ("\\omega", "ω"), // symbol
-    ("\\Gamma", "Γ"), // symbol
-    ("\\Delta", "Δ"), // symbol
-    ("\\Theta", "Θ"), // symbol
-    ("\\Lambda", "Λ"), // symbol
-    ("\\Xi", "Ξ"), // symbol
-    ("\\Pi", "Π"), // symbol
-    ("\\Sigma", "Σ"), // symbol
-    ("\\Upsilon", "Υ"), // symbol
-    ("\\Phi", "Φ"), // symbol
-    ("\\Psi", "Ψ"), // symbol
-    ("\\Omega", "Ω"), // symbol
-    ("\\pm", "±"), // symbol
-    ("\\mp", "∓"), // symbol
-    ("\\times", "×"), // symbol
-    ("\\div", "÷"), // symbol
-    ("\\cdot", "·"), // symbol
-    ("\\ast", "∗"), // symbol
-    ("\\star", "⋆"), // symbol
-    ("\\circ", "∘"), // symbol
-    ("\\bullet", "•"), // symbol
-    ("\\oplus", "⊕"), // symbol
-    ("\\ominus", "⊖"), // symbol
-    ("\\otimes", "⊗"), // symbol
-    ("\\oslash", "⊘"), // symbol
-    ("\\odot", "⊙"), // symbol
-    ("\\bigcirc", "○"), // symbol
-    ("\\dagger", "†"), // symbol
-    ("\\ddagger", "‡"), // symbol
-    ("\\amalg", "⨿"), // symbol
-    ("\\uplus", "⊎"), // symbol
-    ("\\sqcap", "⊓"), // symbol
-    ("\\sqcup", "⊔"), // symbol
-    ("\\bowtie", "⋈"), // symbol
-    ("\\Join", "⋈"), // symbol
-    ("\\ltimes", "⋉"), // symbol
-    ("\\rtimes", "⋊"), // symbol
-    ("\\leftouterjoin", "⟕"), // symbol
-    ("\\rightouterjoin", "⟖"), // symbol
-    ("\\fullouterjoin", "⟗"), // symbol
-    ("\\triangleleft", "◁"), // symbol
-    ("\\triangleright", "▷"), // symbol
-    ("\\wr", "≀"), // symbol
-    ("\\cap", "∩"), // symbol
-    ("\\cup", "∪"), // symbol
-    ("\\bigcap", "⋂"), // symbol
-    ("\\bigcup", "⋃"), // symbol
-    ("\\bigwedge", "⋀"), // symbol
-    ("\\bigvee", "⋁"), // symbol
-    ("\\bigsqcup", "⨆"), // symbol
-    ("\\biguplus", "⨄"), // symbol
-    ("\\bigoplus", "⨁"), // symbol
-    ("\\bigotimes", "⨂"), // symbol
-    ("\\bigodot", "⨀"), // symbol
-    ("\\setminus", "∖"), // symbol
-    ("\\in", "∈"), // symbol
-    ("\\notin", "∉"), // symbol
-    ("\\ni", "∋"), // symbol
-    ("\\subset", "⊂"), // symbol
-    ("\\supset", "⊃"), // symbol
-    ("\\subseteq", "⊆"), // symbol
-    ("\\supseteq", "⊇"), // symbol
-    ("\\sqsubset", "⊏"), // symbol
-    ("\\sqsupset", "⊐"), // symbol
-    ("\\sqsubseteq", "⊑"), // symbol
-    ("\\sqsupseteq", "⊒"), // symbol
-    ("\\prec", "≺"), // symbol
-    ("\\preceq", "≼"), // symbol
-    ("\\succ", "≻"), // symbol
-    ("\\succeq", "≽"), // symbol
-    ("\\ll", "≪"), // symbol
-    ("\\gg", "≫"), // symbol
-    ("\\le", "≤"), // symbol
-    ("\\leq", "≤"), // symbol
-    ("\\leqslant", "≤"), // symbol
-    ("\\ge", "≥"), // symbol
-    ("\\geq", "≥"), // symbol
-    ("\\geqslant", "≥"), // symbol
-    ("\\ne", "≠"), // symbol
-    ("\\neq", "≠"), // symbol
-    ("\\equiv", "≡"), // symbol
-    ("\\approx", "≈"), // symbol
-    ("\\sim", "∼"), // symbol
-    ("\\simeq", "≃"), // symbol
-    ("\\cong", "≅"), // symbol
-    ("\\asymp", "≍"), // symbol
-    ("\\doteq", "≐"), // symbol
-    ("\\propto", "∝"), // symbol
-    ("\\parallel", "∥"), // symbol
-    ("\\perp", "⊥"), // symbol
-    ("\\mid", "∣"), // symbol
-    ("\\vdash", "⊢"), // symbol
-    ("\\dashv", "⊣"), // symbol
-    ("\\models", "⊨"), // symbol
-    ("\\Vdash", "⊩"), // symbol
-    ("\\Vvdash", "⊪"), // symbol
-    ("\\nvdash", "⊬"), // symbol
-    ("\\nvDash", "⊭"), // symbol
-    ("\\forall", "∀"), // symbol
-    ("\\exists", "∃"), // symbol
-    ("\\nexists", "∄"), // symbol
-    ("\\neg", "¬"), // symbol
-    ("\\land", "∧"), // symbol
-    ("\\wedge", "∧"), // symbol
-    ("\\lor", "∨"), // symbol
-    ("\\vee", "∨"), // symbol
-    ("\\to", "→"), // symbol
-    ("\\rightarrow", "→"), // symbol
-    ("\\longrightarrow", "→"), // symbol
-    ("\\leftarrow", "←"), // symbol
-    ("\\longleftarrow", "←"), // symbol
-    ("\\gets", "←"), // symbol
-    ("\\leftrightarrow", "↔"), // symbol
-    ("\\longleftrightarrow", "↔"), // symbol
-    ("\\hookleftarrow", "↩"), // symbol
-    ("\\hookrightarrow", "↪"), // symbol
-    ("\\twoheadleftarrow", "↞"), // symbol
-    ("\\twoheadrightarrow", "↠"), // symbol
-    ("\\leftharpoonup", "↼"), // symbol
-    ("\\leftharpoondown", "↽"), // symbol
-    ("\\rightharpoonup", "⇀"), // symbol
-    ("\\rightharpoondown", "⇁"), // symbol
-    ("\\rightleftharpoons", "⇌"), // symbol
-    ("\\leftrightharpoons", "⇋"), // symbol
-    ("\\nearrow", "↗"), // symbol
-    ("\\searrow", "↘"), // symbol
-    ("\\swarrow", "↙"), // symbol
-    ("\\nwarrow", "↖"), // symbol
-    ("\\rightsquigarrow", "⇝"), // symbol
-    ("\\leadsto", "⇝"), // symbol
-    ("\\Rightarrow", "⇒"), // symbol
-    ("\\Longrightarrow", "⇒"), // symbol
-    ("\\Leftarrow", "⇐"), // symbol
-    ("\\Longleftarrow", "⇐"), // symbol
-    ("\\Leftrightarrow", "⇔"), // symbol
-    ("\\Longleftrightarrow", "⇔"), // symbol
-    ("\\implies", "⇒"), // symbol
-    ("\\iff", "⇔"), // symbol
-    ("\\mapsto", "↦"), // symbol
-    ("\\longmapsto", "↦"), // symbol
-    ("\\uparrow", "↑"), // symbol
-    ("\\downarrow", "↓"), // symbol
-    ("\\partial", "∂"), // symbol
-    ("\\nabla", "∇"), // symbol
-    ("\\int", "∫"), // symbol
-    ("\\iint", "∬"), // symbol
-    ("\\iiint", "∭"), // symbol
-    ("\\oint", "∮"), // symbol
-    ("\\sum", "∑"), // symbol
-    ("\\prod", "∏"), // symbol
-    ("\\coprod", "∐"), // symbol
-    ("\\infty", "∞"), // symbol
-    ("\\emptyset", "∅"), // symbol
-    ("\\varnothing", "∅"), // symbol
-    ("\\angle", "∠"), // symbol
-    ("\\therefore", "∴"), // symbol
-    ("\\because", "∵"), // symbol
-    ("\\aleph", "ℵ"), // symbol
-    ("\\beth", "ℶ"), // symbol
-    ("\\gimel", "ℷ"), // symbol
-    ("\\daleth", "ℸ"), // symbol
-    ("\\top", "⊤"), // symbol
-    ("\\bot", "⊥"), // symbol
-    ("\\triangle", "△"), // symbol
-    ("\\square", "□"), // symbol
-    ("\\lozenge", "◊"), // symbol
-    ("\\checkmark", "✓"), // symbol
-    ("\\complement", "∁"), // symbol
-    ("\\wp", "℘"), // symbol
-    ("\\prime", "′"), // symbol
-    ("\\ldots", "…"), // symbol
-    ("\\dots", "…"), // symbol
-    ("\\cdots", "⋯"), // symbol
-    ("\\vdots", "⋮"), // symbol
-    ("\\ddots", "⋱"), // symbol
-    ("\\ell", "ℓ"), // symbol
-    ("\\hbar", "ℏ"), // symbol
-    ("\\Im", "ℑ"), // symbol
-    ("\\Re", "ℜ"), // symbol
-    ("\\langle", "⟨"), // symbol
-    ("\\rangle", "⟩"), // symbol
-    ("\\vert", "|"), // symbol
-    ("\\lvert", "|"), // symbol
-    ("\\rvert", "|"), // symbol
-    ("\\Vert", "‖"), // symbol
-    ("\\lVert", "‖"), // symbol
-    ("\\rVert", "‖"), // symbol
-    ("\\lbrace", "{"), // symbol
-    ("\\rbrace", "}"), // symbol
-    ("\\backslash", "\\"), // symbol
-    ("\\lfloor", "⌊"), // symbol
-    ("\\rfloor", "⌋"), // symbol
-    ("\\lceil", "⌈"), // symbol
-    ("\\rceil", "⌉"), // symbol
-    ("\\colon", ":"), // symbol
-    ("a \\Leftarrow b", "a ⇐ b"), // relation
-    ("a \\Leftrightarrow b", "a ⇔ b"), // relation
-    ("a \\Longleftarrow b", "a ⇐ b"), // relation
+    ("\\alpha", "α"),                      // symbol
+    ("\\beta", "β"),                       // symbol
+    ("\\gamma", "γ"),                      // symbol
+    ("\\delta", "δ"),                      // symbol
+    ("\\epsilon", "ϵ"),                    // symbol
+    ("\\varepsilon", "ε"),                 // symbol
+    ("\\zeta", "ζ"),                       // symbol
+    ("\\eta", "η"),                        // symbol
+    ("\\theta", "θ"),                      // symbol
+    ("\\vartheta", "ϑ"),                   // symbol
+    ("\\iota", "ι"),                       // symbol
+    ("\\kappa", "κ"),                      // symbol
+    ("\\varkappa", "ϰ"),                   // symbol
+    ("\\lambda", "λ"),                     // symbol
+    ("\\mu", "μ"),                         // symbol
+    ("\\nu", "ν"),                         // symbol
+    ("\\xi", "ξ"),                         // symbol
+    ("\\pi", "π"),                         // symbol
+    ("\\varpi", "ϖ"),                      // symbol
+    ("\\rho", "ρ"),                        // symbol
+    ("\\varrho", "ϱ"),                     // symbol
+    ("\\sigma", "σ"),                      // symbol
+    ("\\varsigma", "ς"),                   // symbol
+    ("\\tau", "τ"),                        // symbol
+    ("\\upsilon", "υ"),                    // symbol
+    ("\\phi", "ϕ"),                        // symbol
+    ("\\varphi", "φ"),                     // symbol
+    ("\\chi", "χ"),                        // symbol
+    ("\\psi", "ψ"),                        // symbol
+    ("\\omega", "ω"),                      // symbol
+    ("\\Gamma", "Γ"),                      // symbol
+    ("\\Delta", "Δ"),                      // symbol
+    ("\\Theta", "Θ"),                      // symbol
+    ("\\Lambda", "Λ"),                     // symbol
+    ("\\Xi", "Ξ"),                         // symbol
+    ("\\Pi", "Π"),                         // symbol
+    ("\\Sigma", "Σ"),                      // symbol
+    ("\\Upsilon", "Υ"),                    // symbol
+    ("\\Phi", "Φ"),                        // symbol
+    ("\\Psi", "Ψ"),                        // symbol
+    ("\\Omega", "Ω"),                      // symbol
+    ("\\pm", "±"),                         // symbol
+    ("\\mp", "∓"),                         // symbol
+    ("\\times", "×"),                      // symbol
+    ("\\div", "÷"),                        // symbol
+    ("\\cdot", "·"),                       // symbol
+    ("\\ast", "∗"),                        // symbol
+    ("\\star", "⋆"),                       // symbol
+    ("\\circ", "∘"),                       // symbol
+    ("\\bullet", "•"),                     // symbol
+    ("\\oplus", "⊕"),                      // symbol
+    ("\\ominus", "⊖"),                     // symbol
+    ("\\otimes", "⊗"),                     // symbol
+    ("\\oslash", "⊘"),                     // symbol
+    ("\\odot", "⊙"),                       // symbol
+    ("\\bigcirc", "○"),                    // symbol
+    ("\\dagger", "†"),                     // symbol
+    ("\\ddagger", "‡"),                    // symbol
+    ("\\amalg", "⨿"),                      // symbol
+    ("\\uplus", "⊎"),                      // symbol
+    ("\\sqcap", "⊓"),                      // symbol
+    ("\\sqcup", "⊔"),                      // symbol
+    ("\\bowtie", "⋈"),                     // symbol
+    ("\\Join", "⋈"),                       // symbol
+    ("\\ltimes", "⋉"),                     // symbol
+    ("\\rtimes", "⋊"),                     // symbol
+    ("\\leftouterjoin", "⟕"),              // symbol
+    ("\\rightouterjoin", "⟖"),             // symbol
+    ("\\fullouterjoin", "⟗"),              // symbol
+    ("\\triangleleft", "◁"),               // symbol
+    ("\\triangleright", "▷"),              // symbol
+    ("\\wr", "≀"),                         // symbol
+    ("\\cap", "∩"),                        // symbol
+    ("\\cup", "∪"),                        // symbol
+    ("\\bigcap", "⋂"),                     // symbol
+    ("\\bigcup", "⋃"),                     // symbol
+    ("\\bigwedge", "⋀"),                   // symbol
+    ("\\bigvee", "⋁"),                     // symbol
+    ("\\bigsqcup", "⨆"),                   // symbol
+    ("\\biguplus", "⨄"),                   // symbol
+    ("\\bigoplus", "⨁"),                   // symbol
+    ("\\bigotimes", "⨂"),                  // symbol
+    ("\\bigodot", "⨀"),                    // symbol
+    ("\\setminus", "∖"),                   // symbol
+    ("\\in", "∈"),                         // symbol
+    ("\\notin", "∉"),                      // symbol
+    ("\\ni", "∋"),                         // symbol
+    ("\\subset", "⊂"),                     // symbol
+    ("\\supset", "⊃"),                     // symbol
+    ("\\subseteq", "⊆"),                   // symbol
+    ("\\supseteq", "⊇"),                   // symbol
+    ("\\sqsubset", "⊏"),                   // symbol
+    ("\\sqsupset", "⊐"),                   // symbol
+    ("\\sqsubseteq", "⊑"),                 // symbol
+    ("\\sqsupseteq", "⊒"),                 // symbol
+    ("\\prec", "≺"),                       // symbol
+    ("\\preceq", "≼"),                     // symbol
+    ("\\succ", "≻"),                       // symbol
+    ("\\succeq", "≽"),                     // symbol
+    ("\\ll", "≪"),                         // symbol
+    ("\\gg", "≫"),                         // symbol
+    ("\\le", "≤"),                         // symbol
+    ("\\leq", "≤"),                        // symbol
+    ("\\leqslant", "≤"),                   // symbol
+    ("\\ge", "≥"),                         // symbol
+    ("\\geq", "≥"),                        // symbol
+    ("\\geqslant", "≥"),                   // symbol
+    ("\\ne", "≠"),                         // symbol
+    ("\\neq", "≠"),                        // symbol
+    ("\\equiv", "≡"),                      // symbol
+    ("\\approx", "≈"),                     // symbol
+    ("\\sim", "∼"),                        // symbol
+    ("\\simeq", "≃"),                      // symbol
+    ("\\cong", "≅"),                       // symbol
+    ("\\asymp", "≍"),                      // symbol
+    ("\\doteq", "≐"),                      // symbol
+    ("\\propto", "∝"),                     // symbol
+    ("\\parallel", "∥"),                   // symbol
+    ("\\perp", "⊥"),                       // symbol
+    ("\\mid", "∣"),                        // symbol
+    ("\\vdash", "⊢"),                      // symbol
+    ("\\dashv", "⊣"),                      // symbol
+    ("\\models", "⊨"),                     // symbol
+    ("\\Vdash", "⊩"),                      // symbol
+    ("\\Vvdash", "⊪"),                     // symbol
+    ("\\nvdash", "⊬"),                     // symbol
+    ("\\nvDash", "⊭"),                     // symbol
+    ("\\forall", "∀"),                     // symbol
+    ("\\exists", "∃"),                     // symbol
+    ("\\nexists", "∄"),                    // symbol
+    ("\\neg", "¬"),                        // symbol
+    ("\\land", "∧"),                       // symbol
+    ("\\wedge", "∧"),                      // symbol
+    ("\\lor", "∨"),                        // symbol
+    ("\\vee", "∨"),                        // symbol
+    ("\\to", "→"),                         // symbol
+    ("\\rightarrow", "→"),                 // symbol
+    ("\\longrightarrow", "→"),             // symbol
+    ("\\leftarrow", "←"),                  // symbol
+    ("\\longleftarrow", "←"),              // symbol
+    ("\\gets", "←"),                       // symbol
+    ("\\leftrightarrow", "↔"),             // symbol
+    ("\\longleftrightarrow", "↔"),         // symbol
+    ("\\hookleftarrow", "↩"),              // symbol
+    ("\\hookrightarrow", "↪"),             // symbol
+    ("\\twoheadleftarrow", "↞"),           // symbol
+    ("\\twoheadrightarrow", "↠"),          // symbol
+    ("\\leftharpoonup", "↼"),              // symbol
+    ("\\leftharpoondown", "↽"),            // symbol
+    ("\\rightharpoonup", "⇀"),             // symbol
+    ("\\rightharpoondown", "⇁"),           // symbol
+    ("\\rightleftharpoons", "⇌"),          // symbol
+    ("\\leftrightharpoons", "⇋"),          // symbol
+    ("\\nearrow", "↗"),                    // symbol
+    ("\\searrow", "↘"),                    // symbol
+    ("\\swarrow", "↙"),                    // symbol
+    ("\\nwarrow", "↖"),                    // symbol
+    ("\\rightsquigarrow", "⇝"),            // symbol
+    ("\\leadsto", "⇝"),                    // symbol
+    ("\\Rightarrow", "⇒"),                 // symbol
+    ("\\Longrightarrow", "⇒"),             // symbol
+    ("\\Leftarrow", "⇐"),                  // symbol
+    ("\\Longleftarrow", "⇐"),              // symbol
+    ("\\Leftrightarrow", "⇔"),             // symbol
+    ("\\Longleftrightarrow", "⇔"),         // symbol
+    ("\\implies", "⇒"),                    // symbol
+    ("\\iff", "⇔"),                        // symbol
+    ("\\mapsto", "↦"),                     // symbol
+    ("\\longmapsto", "↦"),                 // symbol
+    ("\\uparrow", "↑"),                    // symbol
+    ("\\downarrow", "↓"),                  // symbol
+    ("\\partial", "∂"),                    // symbol
+    ("\\nabla", "∇"),                      // symbol
+    ("\\int", "∫"),                        // symbol
+    ("\\iint", "∬"),                       // symbol
+    ("\\iiint", "∭"),                      // symbol
+    ("\\oint", "∮"),                       // symbol
+    ("\\sum", "∑"),                        // symbol
+    ("\\prod", "∏"),                       // symbol
+    ("\\coprod", "∐"),                     // symbol
+    ("\\infty", "∞"),                      // symbol
+    ("\\emptyset", "∅"),                   // symbol
+    ("\\varnothing", "∅"),                 // symbol
+    ("\\angle", "∠"),                      // symbol
+    ("\\therefore", "∴"),                  // symbol
+    ("\\because", "∵"),                    // symbol
+    ("\\aleph", "ℵ"),                      // symbol
+    ("\\beth", "ℶ"),                       // symbol
+    ("\\gimel", "ℷ"),                      // symbol
+    ("\\daleth", "ℸ"),                     // symbol
+    ("\\top", "⊤"),                        // symbol
+    ("\\bot", "⊥"),                        // symbol
+    ("\\triangle", "△"),                   // symbol
+    ("\\square", "□"),                     // symbol
+    ("\\lozenge", "◊"),                    // symbol
+    ("\\checkmark", "✓"),                  // symbol
+    ("\\complement", "∁"),                 // symbol
+    ("\\wp", "℘"),                         // symbol
+    ("\\prime", "′"),                      // symbol
+    ("\\ldots", "…"),                      // symbol
+    ("\\dots", "…"),                       // symbol
+    ("\\cdots", "⋯"),                      // symbol
+    ("\\vdots", "⋮"),                      // symbol
+    ("\\ddots", "⋱"),                      // symbol
+    ("\\ell", "ℓ"),                        // symbol
+    ("\\hbar", "ℏ"),                       // symbol
+    ("\\Im", "ℑ"),                         // symbol
+    ("\\Re", "ℜ"),                         // symbol
+    ("\\langle", "⟨"),                     // symbol
+    ("\\rangle", "⟩"),                     // symbol
+    ("\\vert", "|"),                       // symbol
+    ("\\lvert", "|"),                      // symbol
+    ("\\rvert", "|"),                      // symbol
+    ("\\Vert", "‖"),                       // symbol
+    ("\\lVert", "‖"),                      // symbol
+    ("\\rVert", "‖"),                      // symbol
+    ("\\lbrace", "{"),                     // symbol
+    ("\\rbrace", "}"),                     // symbol
+    ("\\backslash", "\\"),                 // symbol
+    ("\\lfloor", "⌊"),                     // symbol
+    ("\\rfloor", "⌋"),                     // symbol
+    ("\\lceil", "⌈"),                      // symbol
+    ("\\rceil", "⌉"),                      // symbol
+    ("\\colon", ":"),                      // symbol
+    ("a \\Leftarrow b", "a ⇐ b"),          // relation
+    ("a \\Leftrightarrow b", "a ⇔ b"),     // relation
+    ("a \\Longleftarrow b", "a ⇐ b"),      // relation
     ("a \\Longleftrightarrow b", "a ⇔ b"), // relation
-    ("a \\Longrightarrow b", "a ⇒ b"), // relation
-    ("a \\Rightarrow b", "a ⇒ b"), // relation
-    ("a \\Join b", "a ⋈ b"), // relation
-    ("a \\Vdash b", "a ⊩ b"), // relation
-    ("a \\Vvdash b", "a ⊪ b"), // relation
-    ("a \\approx b", "a ≈ b"), // relation
-    ("a \\asymp b", "a ≍ b"), // relation
-    ("a \\bowtie b", "a ⋈ b"), // relation
-    ("a \\cong b", "a ≅ b"), // relation
-    ("a \\dashv b", "a ⊣ b"), // relation
-    ("a \\fullouterjoin b", "a ⟗ b"), // relation
-    ("a \\doteq b", "a ≐ b"), // relation
-    ("a \\downarrow b", "a ↓ b"), // relation
-    ("a \\equiv b", "a ≡ b"), // relation
-    ("a \\ge b", "a ≥ b"), // relation
-    ("a \\geq b", "a ≥ b"), // relation
-    ("a \\geqslant b", "a ≥ b"), // relation
-    ("a \\gets b", "a ← b"), // relation
-    ("a \\gg b", "a ≫ b"), // relation
-    ("a \\hookleftarrow b", "a ↩ b"), // relation
-    ("a \\hookrightarrow b", "a ↪ b"), // relation
-    ("a \\iff b", "a ⇔ b"), // relation
-    ("a \\implies b", "a ⇒ b"), // relation
-    ("a \\in b", "a ∈ b"), // relation
-    ("a \\leadsto b", "a ⇝ b"), // relation
-    ("a \\le b", "a ≤ b"), // relation
-    ("a \\leftarrow b", "a ← b"), // relation
-    ("a \\leftharpoondown b", "a ↽ b"), // relation
-    ("a \\leftharpoonup b", "a ↼ b"), // relation
-    ("a \\leftrightarrow b", "a ↔ b"), // relation
-    ("a \\leftrightharpoons b", "a ⇋ b"), // relation
-    ("a \\leftouterjoin b", "a ⟕ b"), // relation
-    ("a \\leq b", "a ≤ b"), // relation
-    ("a \\leqslant b", "a ≤ b"), // relation
-    ("a \\ll b", "a ≪ b"), // relation
-    ("a \\longleftarrow b", "a ← b"), // relation
+    ("a \\Longrightarrow b", "a ⇒ b"),     // relation
+    ("a \\Rightarrow b", "a ⇒ b"),         // relation
+    ("a \\Join b", "a ⋈ b"),               // relation
+    ("a \\Vdash b", "a ⊩ b"),              // relation
+    ("a \\Vvdash b", "a ⊪ b"),             // relation
+    ("a \\approx b", "a ≈ b"),             // relation
+    ("a \\asymp b", "a ≍ b"),              // relation
+    ("a \\bowtie b", "a ⋈ b"),             // relation
+    ("a \\cong b", "a ≅ b"),               // relation
+    ("a \\dashv b", "a ⊣ b"),              // relation
+    ("a \\fullouterjoin b", "a ⟗ b"),      // relation
+    ("a \\doteq b", "a ≐ b"),              // relation
+    ("a \\downarrow b", "a ↓ b"),          // relation
+    ("a \\equiv b", "a ≡ b"),              // relation
+    ("a \\ge b", "a ≥ b"),                 // relation
+    ("a \\geq b", "a ≥ b"),                // relation
+    ("a \\geqslant b", "a ≥ b"),           // relation
+    ("a \\gets b", "a ← b"),               // relation
+    ("a \\gg b", "a ≫ b"),                 // relation
+    ("a \\hookleftarrow b", "a ↩ b"),      // relation
+    ("a \\hookrightarrow b", "a ↪ b"),     // relation
+    ("a \\iff b", "a ⇔ b"),                // relation
+    ("a \\implies b", "a ⇒ b"),            // relation
+    ("a \\in b", "a ∈ b"),                 // relation
+    ("a \\leadsto b", "a ⇝ b"),            // relation
+    ("a \\le b", "a ≤ b"),                 // relation
+    ("a \\leftarrow b", "a ← b"),          // relation
+    ("a \\leftharpoondown b", "a ↽ b"),    // relation
+    ("a \\leftharpoonup b", "a ↼ b"),      // relation
+    ("a \\leftrightarrow b", "a ↔ b"),     // relation
+    ("a \\leftrightharpoons b", "a ⇋ b"),  // relation
+    ("a \\leftouterjoin b", "a ⟕ b"),      // relation
+    ("a \\leq b", "a ≤ b"),                // relation
+    ("a \\leqslant b", "a ≤ b"),           // relation
+    ("a \\ll b", "a ≪ b"),                 // relation
+    ("a \\longleftarrow b", "a ← b"),      // relation
     ("a \\longleftrightarrow b", "a ↔ b"), // relation
-    ("a \\longmapsto b", "a ↦ b"), // relation
-    ("a \\longrightarrow b", "a → b"), // relation
-    ("a \\ltimes b", "a ⋉ b"), // relation
-    ("a \\mapsto b", "a ↦ b"), // relation
-    ("a \\mid b", "a ∣ b"), // relation
-    ("a \\models b", "a ⊨ b"), // relation
-    ("a \\ne b", "a ≠ b"), // relation
-    ("a \\nearrow b", "a ↗ b"), // relation
-    ("a \\neq b", "a ≠ b"), // relation
-    ("a \\ni b", "a ∋ b"), // relation
-    ("a \\notin b", "a ∉ b"), // relation
-    ("a \\nvdash b", "a ⊬ b"), // relation
-    ("a \\nvDash b", "a ⊭ b"), // relation
-    ("a \\nwarrow b", "a ↖ b"), // relation
-    ("a \\parallel b", "a ∥ b"), // relation
-    ("a \\perp b", "a ⊥ b"), // relation
-    ("a \\prec b", "a ≺ b"), // relation
-    ("a \\preceq b", "a ≼ b"), // relation
-    ("a \\propto b", "a ∝ b"), // relation
-    ("a \\rightharpoondown b", "a ⇁ b"), // relation
-    ("a \\rightharpoonup b", "a ⇀ b"), // relation
-    ("a \\rightleftharpoons b", "a ⇌ b"), // relation
-    ("a \\rightouterjoin b", "a ⟖ b"), // relation
-    ("a \\rightarrow b", "a → b"), // relation
-    ("a \\rightsquigarrow b", "a ⇝ b"), // relation
-    ("a \\rtimes b", "a ⋊ b"), // relation
-    ("a \\searrow b", "a ↘ b"), // relation
-    ("a \\sim b", "a ∼ b"), // relation
-    ("a \\simeq b", "a ≃ b"), // relation
-    ("a \\sqsubset b", "a ⊏ b"), // relation
-    ("a \\sqsubseteq b", "a ⊑ b"), // relation
-    ("a \\sqsupset b", "a ⊐ b"), // relation
-    ("a \\sqsupseteq b", "a ⊒ b"), // relation
-    ("a \\subset b", "a ⊂ b"), // relation
-    ("a \\subseteq b", "a ⊆ b"), // relation
-    ("a \\succ b", "a ≻ b"), // relation
-    ("a \\succeq b", "a ≽ b"), // relation
-    ("a \\supset b", "a ⊃ b"), // relation
-    ("a \\supseteq b", "a ⊇ b"), // relation
-    ("a \\swarrow b", "a ↙ b"), // relation
-    ("a \\to b", "a → b"), // relation
-    ("a \\triangleleft b", "a ◁ b"), // relation
-    ("a \\triangleright b", "a ▷ b"), // relation
-    ("a \\twoheadleftarrow b", "a ↞ b"), // relation
-    ("a \\twoheadrightarrow b", "a ↠ b"), // relation
-    ("a \\uparrow b", "a ↑ b"), // relation
-    ("a \\vdash b", "a ⊢ b"), // relation
-    ("\\arccos x", "arccos x"), // operator
-    ("\\arcsin x", "arcsin x"), // operator
-    ("\\arctan x", "arctan x"), // operator
-    ("\\arg x", "arg x"), // operator
-    ("\\cos x", "cos x"), // operator
-    ("\\cosh x", "cosh x"), // operator
-    ("\\cot x", "cot x"), // operator
-    ("\\coth x", "coth x"), // operator
-    ("\\csc x", "csc x"), // operator
-    ("\\deg x", "deg x"), // operator
-    ("\\det x", "det x"), // operator
-    ("\\dim x", "dim x"), // operator
-    ("\\exp x", "exp x"), // operator
-    ("\\gcd x", "gcd x"), // operator
-    ("\\hom x", "hom x"), // operator
-    ("\\inf x", "inf x"), // operator
-    ("\\ker x", "ker x"), // operator
-    ("\\lg x", "lg x"), // operator
-    ("\\lim x", "lim x"), // operator
-    ("\\liminf x", "liminf x"), // operator
-    ("\\limsup x", "limsup x"), // operator
-    ("\\ln x", "ln x"), // operator
-    ("\\log x", "log x"), // operator
-    ("\\max x", "max x"), // operator
-    ("\\min x", "min x"), // operator
-    ("\\Pr x", "Pr x"), // operator
-    ("\\sec x", "sec x"), // operator
-    ("\\sin x", "sin x"), // operator
-    ("\\sinh x", "sinh x"), // operator
-    ("\\sup x", "sup x"), // operator
-    ("\\tan x", "tan x"), // operator
-    ("\\tanh x", "tanh x"), // operator
-    ("\\acute{x}", "x́"), // accent
-    ("\\bar{x}", "x̅"), // accent
-    ("\\breve{x}", "x̆"), // accent
-    ("\\check{x}", "x̌"), // accent
-    ("\\ddot{x}", "ẍ"), // accent
-    ("\\dot{x}", "ẋ"), // accent
-    ("\\grave{x}", "x̀"), // accent
-    ("\\hat{x}", "x̂"), // accent
-    ("\\mathring{x}", "x̊"), // accent
-    ("\\overleftarrow{x}", "x⃖"), // accent
-    ("\\overleftrightarrow{x}", "x⃡"), // accent
-    ("\\overline{x}", "x̅"), // accent
-    ("\\overrightarrow{x}", "x⃗"), // accent
-    ("\\tilde{x}", "x̃"), // accent
-    ("\\underline{x}", "x̲"), // accent
-    ("\\vec{x}", "x⃗"), // accent
-    ("\\widehat{x}", "x̂"), // accent
-    ("\\widetilde{x}", "x̃"), // accent
-    ("\\emph{ab}", "ab"), // wrapper
-    ("\\mathcal{ab}", "ab"), // wrapper
-    ("\\mathbf{ab}", "ab"), // wrapper
-    ("\\mathfrak{ab}", "ab"), // wrapper
-    ("\\mathit{ab}", "ab"), // wrapper
-    ("\\mathrm{ab}", "ab"), // wrapper
-    ("\\mathnormal{ab}", "ab"), // wrapper
-    ("\\mathscr{ab}", "ab"), // wrapper
-    ("\\mathsf{ab}", "ab"), // wrapper
-    ("\\mathtt{ab}", "ab"), // wrapper
-    ("\\mathup{ab}", "ab"), // wrapper
-    ("\\mbox{ab}", "ab"), // wrapper
-    ("\\overbrace{ab}", "ab"), // wrapper
-    ("\\pmb{ab}", "ab"), // wrapper
-    ("\\smash{ab}", "ab"), // wrapper
-    ("\\substack{ab}", "ab"), // wrapper
-    ("\\text{ab}", "ab"), // wrapper
-    ("\\textbf{ab}", "ab"), // wrapper
-    ("\\textit{ab}", "ab"), // wrapper
-    ("\\textmd{ab}", "ab"), // wrapper
-    ("\\textnormal{ab}", "ab"), // wrapper
-    ("\\textrm{ab}", "ab"), // wrapper
-    ("\\textsc{ab}", "ab"), // wrapper
-    ("\\textsf{ab}", "ab"), // wrapper
-    ("\\textsl{ab}", "ab"), // wrapper
-    ("\\texttt{ab}", "ab"), // wrapper
-    ("\\textup{ab}", "ab"), // wrapper
-    ("\\underbrace{ab}", "ab"), // wrapper
-    ("\\bm{ab}", "ab"), // wrapper
-    ("\\boldsymbol{ab}", "ab"), // wrapper
-    ("\\mathbb{C}", "ℂ"), // blackboard
-    ("\\mathbb{H}", "ℍ"), // blackboard
-    ("\\mathbb{N}", "ℕ"), // blackboard
-    ("\\mathbb{P}", "ℙ"), // blackboard
-    ("\\mathbb{Q}", "ℚ"), // blackboard
-    ("\\mathbb{R}", "ℝ"), // blackboard
-    ("\\mathbb{Z}", "ℤ"), // blackboard
-    ("a\\!b", "ab"), // negative-spacing
+    ("a \\longmapsto b", "a ↦ b"),         // relation
+    ("a \\longrightarrow b", "a → b"),     // relation
+    ("a \\ltimes b", "a ⋉ b"),             // relation
+    ("a \\mapsto b", "a ↦ b"),             // relation
+    ("a \\mid b", "a ∣ b"),                // relation
+    ("a \\models b", "a ⊨ b"),             // relation
+    ("a \\ne b", "a ≠ b"),                 // relation
+    ("a \\nearrow b", "a ↗ b"),            // relation
+    ("a \\neq b", "a ≠ b"),                // relation
+    ("a \\ni b", "a ∋ b"),                 // relation
+    ("a \\notin b", "a ∉ b"),              // relation
+    ("a \\nvdash b", "a ⊬ b"),             // relation
+    ("a \\nvDash b", "a ⊭ b"),             // relation
+    ("a \\nwarrow b", "a ↖ b"),            // relation
+    ("a \\parallel b", "a ∥ b"),           // relation
+    ("a \\perp b", "a ⊥ b"),               // relation
+    ("a \\prec b", "a ≺ b"),               // relation
+    ("a \\preceq b", "a ≼ b"),             // relation
+    ("a \\propto b", "a ∝ b"),             // relation
+    ("a \\rightharpoondown b", "a ⇁ b"),   // relation
+    ("a \\rightharpoonup b", "a ⇀ b"),     // relation
+    ("a \\rightleftharpoons b", "a ⇌ b"),  // relation
+    ("a \\rightouterjoin b", "a ⟖ b"),     // relation
+    ("a \\rightarrow b", "a → b"),         // relation
+    ("a \\rightsquigarrow b", "a ⇝ b"),    // relation
+    ("a \\rtimes b", "a ⋊ b"),             // relation
+    ("a \\searrow b", "a ↘ b"),            // relation
+    ("a \\sim b", "a ∼ b"),                // relation
+    ("a \\simeq b", "a ≃ b"),              // relation
+    ("a \\sqsubset b", "a ⊏ b"),           // relation
+    ("a \\sqsubseteq b", "a ⊑ b"),         // relation
+    ("a \\sqsupset b", "a ⊐ b"),           // relation
+    ("a \\sqsupseteq b", "a ⊒ b"),         // relation
+    ("a \\subset b", "a ⊂ b"),             // relation
+    ("a \\subseteq b", "a ⊆ b"),           // relation
+    ("a \\succ b", "a ≻ b"),               // relation
+    ("a \\succeq b", "a ≽ b"),             // relation
+    ("a \\supset b", "a ⊃ b"),             // relation
+    ("a \\supseteq b", "a ⊇ b"),           // relation
+    ("a \\swarrow b", "a ↙ b"),            // relation
+    ("a \\to b", "a → b"),                 // relation
+    ("a \\triangleleft b", "a ◁ b"),       // relation
+    ("a \\triangleright b", "a ▷ b"),      // relation
+    ("a \\twoheadleftarrow b", "a ↞ b"),   // relation
+    ("a \\twoheadrightarrow b", "a ↠ b"),  // relation
+    ("a \\uparrow b", "a ↑ b"),            // relation
+    ("a \\vdash b", "a ⊢ b"),              // relation
+    ("\\arccos x", "arccos x"),            // operator
+    ("\\arcsin x", "arcsin x"),            // operator
+    ("\\arctan x", "arctan x"),            // operator
+    ("\\arg x", "arg x"),                  // operator
+    ("\\cos x", "cos x"),                  // operator
+    ("\\cosh x", "cosh x"),                // operator
+    ("\\cot x", "cot x"),                  // operator
+    ("\\coth x", "coth x"),                // operator
+    ("\\csc x", "csc x"),                  // operator
+    ("\\deg x", "deg x"),                  // operator
+    ("\\det x", "det x"),                  // operator
+    ("\\dim x", "dim x"),                  // operator
+    ("\\exp x", "exp x"),                  // operator
+    ("\\gcd x", "gcd x"),                  // operator
+    ("\\hom x", "hom x"),                  // operator
+    ("\\inf x", "inf x"),                  // operator
+    ("\\ker x", "ker x"),                  // operator
+    ("\\lg x", "lg x"),                    // operator
+    ("\\lim x", "lim x"),                  // operator
+    ("\\liminf x", "liminf x"),            // operator
+    ("\\limsup x", "limsup x"),            // operator
+    ("\\ln x", "ln x"),                    // operator
+    ("\\log x", "log x"),                  // operator
+    ("\\max x", "max x"),                  // operator
+    ("\\min x", "min x"),                  // operator
+    ("\\Pr x", "Pr x"),                    // operator
+    ("\\sec x", "sec x"),                  // operator
+    ("\\sin x", "sin x"),                  // operator
+    ("\\sinh x", "sinh x"),                // operator
+    ("\\sup x", "sup x"),                  // operator
+    ("\\tan x", "tan x"),                  // operator
+    ("\\tanh x", "tanh x"),                // operator
+    ("\\acute{x}", "x́"),                   // accent
+    ("\\bar{x}", "x̅"),                     // accent
+    ("\\breve{x}", "x̆"),                   // accent
+    ("\\check{x}", "x̌"),                   // accent
+    ("\\ddot{x}", "ẍ"),                    // accent
+    ("\\dot{x}", "ẋ"),                     // accent
+    ("\\grave{x}", "x̀"),                   // accent
+    ("\\hat{x}", "x̂"),                     // accent
+    ("\\mathring{x}", "x̊"),                // accent
+    ("\\overleftarrow{x}", "x⃖"),           // accent
+    ("\\overleftrightarrow{x}", "x⃡"),      // accent
+    ("\\overline{x}", "x̅"),                // accent
+    ("\\overrightarrow{x}", "x⃗"),          // accent
+    ("\\tilde{x}", "x̃"),                   // accent
+    ("\\underline{x}", "x̲"),               // accent
+    ("\\vec{x}", "x⃗"),                     // accent
+    ("\\widehat{x}", "x̂"),                 // accent
+    ("\\widetilde{x}", "x̃"),               // accent
+    ("\\emph{ab}", "ab"),                  // wrapper
+    ("\\mathcal{ab}", "ab"),               // wrapper
+    ("\\mathbf{ab}", "ab"),                // wrapper
+    ("\\mathfrak{ab}", "ab"),              // wrapper
+    ("\\mathit{ab}", "ab"),                // wrapper
+    ("\\mathrm{ab}", "ab"),                // wrapper
+    ("\\mathnormal{ab}", "ab"),            // wrapper
+    ("\\mathscr{ab}", "ab"),               // wrapper
+    ("\\mathsf{ab}", "ab"),                // wrapper
+    ("\\mathtt{ab}", "ab"),                // wrapper
+    ("\\mathup{ab}", "ab"),                // wrapper
+    ("\\mbox{ab}", "ab"),                  // wrapper
+    ("\\overbrace{ab}", "ab"),             // wrapper
+    ("\\pmb{ab}", "ab"),                   // wrapper
+    ("\\smash{ab}", "ab"),                 // wrapper
+    ("\\substack{ab}", "ab"),              // wrapper
+    ("\\text{ab}", "ab"),                  // wrapper
+    ("\\textbf{ab}", "ab"),                // wrapper
+    ("\\textit{ab}", "ab"),                // wrapper
+    ("\\textmd{ab}", "ab"),                // wrapper
+    ("\\textnormal{ab}", "ab"),            // wrapper
+    ("\\textrm{ab}", "ab"),                // wrapper
+    ("\\textsc{ab}", "ab"),                // wrapper
+    ("\\textsf{ab}", "ab"),                // wrapper
+    ("\\textsl{ab}", "ab"),                // wrapper
+    ("\\texttt{ab}", "ab"),                // wrapper
+    ("\\textup{ab}", "ab"),                // wrapper
+    ("\\underbrace{ab}", "ab"),            // wrapper
+    ("\\bm{ab}", "ab"),                    // wrapper
+    ("\\boldsymbol{ab}", "ab"),            // wrapper
+    ("\\mathbb{C}", "ℂ"),                  // blackboard
+    ("\\mathbb{H}", "ℍ"),                  // blackboard
+    ("\\mathbb{N}", "ℕ"),                  // blackboard
+    ("\\mathbb{P}", "ℙ"),                  // blackboard
+    ("\\mathbb{Q}", "ℚ"),                  // blackboard
+    ("\\mathbb{R}", "ℝ"),                  // blackboard
+    ("\\mathbb{Z}", "ℤ"),                  // blackboard
+    ("a\\!b", "ab"),                       // negative-spacing
     ("a\\negmedspace b", "a b"),
     ("a\\negthickspace b", "a b"),
     ("a\\negthinspace b", "a b"),
@@ -748,22 +867,37 @@ fn operator_limits_stack_over_their_operator() {
         Some(" n\n ∏  aᵢ\ni=1")
     );
     assert_eq!(
-        render_latex(r"\oint_C \frac{dz}{z}", RenderLatexOptions { display: true }).as_deref(),
+        render_latex(
+            r"\oint_C \frac{dz}{z}",
+            RenderLatexOptions { display: true }
+        )
+        .as_deref(),
         Some("   dz\n∮  ──\nC  z")
     );
     assert_eq!(
-        render_latex(r"\lim_{x\to\infty} \frac{1}{x} = 0", RenderLatexOptions { display: true })
-            .as_deref(),
+        render_latex(
+            r"\lim_{x\to\infty} \frac{1}{x} = 0",
+            RenderLatexOptions { display: true }
+        )
+        .as_deref(),
         Some("     1\nlim  ─ = 0\nx→∞  x")
     );
     // `\nolimits` keeps the bounds as scripts; `\limits` forces the stacked
     // form even for operators that default to inline limits.
     assert_eq!(
-        render_latex(r"\int\nolimits_0^1 f(x)\,dx", RenderLatexOptions { display: true }).as_deref(),
+        render_latex(
+            r"\int\nolimits_0^1 f(x)\,dx",
+            RenderLatexOptions { display: true }
+        )
+        .as_deref(),
         Some("∫₀¹ f(x) dx")
     );
     assert_eq!(
-        render_latex(r"\int\limits_0^1 f(x)\,dx", RenderLatexOptions { display: true }).as_deref(),
+        render_latex(
+            r"\int\limits_0^1 f(x)\,dx",
+            RenderLatexOptions { display: true }
+        )
+        .as_deref(),
         Some("1\n∫ f(x) dx\n0")
     );
 }
@@ -771,11 +905,26 @@ fn operator_limits_stack_over_their_operator() {
 #[test]
 fn matrix_environments_draw_their_delimiters() {
     let cases = [
-        (r"\begin{pmatrix}a&b\\c&d\end{pmatrix}", "⎛ a │ b ⎞\n⎝ c │ d ⎠"),
-        (r"\begin{bmatrix}a&b\\c&d\end{bmatrix}", "⎡ a │ b ⎤\n⎣ c │ d ⎦"),
-        (r"\begin{Bmatrix}a&b\\c&d\end{Bmatrix}", "⎧ a │ b ⎫\n⎩ c │ d ⎭"),
-        (r"\begin{vmatrix}a&b\\c&d\end{vmatrix}", "│ a │ b │\n│ c │ d │"),
-        (r"\begin{Vmatrix}a&b\\c&d\end{Vmatrix}", "║ a │ b ║\n║ c │ d ║"),
+        (
+            r"\begin{pmatrix}a&b\\c&d\end{pmatrix}",
+            "⎛ a │ b ⎞\n⎝ c │ d ⎠",
+        ),
+        (
+            r"\begin{bmatrix}a&b\\c&d\end{bmatrix}",
+            "⎡ a │ b ⎤\n⎣ c │ d ⎦",
+        ),
+        (
+            r"\begin{Bmatrix}a&b\\c&d\end{Bmatrix}",
+            "⎧ a │ b ⎫\n⎩ c │ d ⎭",
+        ),
+        (
+            r"\begin{vmatrix}a&b\\c&d\end{vmatrix}",
+            "│ a │ b │\n│ c │ d │",
+        ),
+        (
+            r"\begin{Vmatrix}a&b\\c&d\end{Vmatrix}",
+            "║ a │ b ║\n║ c │ d ║",
+        ),
         (r"\begin{matrix}a&b\\c&d\end{matrix}", "a │ b\nc │ d"),
     ];
     for (source, expected) in cases {
@@ -892,7 +1041,11 @@ fn matrix_column_width_is_cell_correct_for_wide_and_combining_glyphs() {
         Some("⎛ 界 │ a ⎞\n⎝ b  │ c ⎠")
     );
     assert_eq!(
-        render_latex(r"\frac{\hat{x}}{\vec{y}}", RenderLatexOptions { display: true }).as_deref(),
+        render_latex(
+            r"\frac{\hat{x}}{\vec{y}}",
+            RenderLatexOptions { display: true }
+        )
+        .as_deref(),
         Some("x̂\n─\ny⃗")
     );
 }
@@ -919,7 +1072,11 @@ fn unsupported_and_malformed_input_fails_closed() {
         r"\begin{matrix}1 & 2",
         "x\\",
     ] {
-        assert_eq!(render_latex(source, RenderLatexOptions::default()), None, "source = {source:?}");
+        assert_eq!(
+            render_latex(source, RenderLatexOptions::default()),
+            None,
+            "source = {source:?}"
+        );
     }
 }
 
@@ -932,7 +1089,10 @@ fn nesting_is_bounded_and_never_panics() {
     for _ in 0..32 {
         source = format!("{{{source}}}");
     }
-    assert_eq!(render_latex(&source, RenderLatexOptions::default()).as_deref(), Some("x"));
+    assert_eq!(
+        render_latex(&source, RenderLatexOptions::default()).as_deref(),
+        Some("x")
+    );
 
     let mut nested = String::new();
     for _ in 0..32 {
@@ -949,7 +1109,10 @@ fn nesting_is_bounded_and_never_panics() {
     // process, which is why the assertion is "no panic, `None`" rather than a
     // rendered value.
     let deep_braces = "{".repeat(MAX_LATEX_NESTING_DEPTH + 1);
-    assert_eq!(render_latex(&deep_braces, RenderLatexOptions::default()), None);
+    assert_eq!(
+        render_latex(&deep_braces, RenderLatexOptions::default()),
+        None
+    );
 
     let mut deep_fractions = String::new();
     for _ in 0..10_000 {
@@ -959,22 +1122,34 @@ fn nesting_is_bounded_and_never_panics() {
     for _ in 0..10_000 {
         deep_fractions.push_str("}{2}");
     }
-    assert_eq!(render_latex(&deep_fractions, RenderLatexOptions::default()), None);
+    assert_eq!(
+        render_latex(&deep_fractions, RenderLatexOptions::default()),
+        None
+    );
     assert_eq!(
         render_latex(&deep_fractions, RenderLatexOptions { display: true }),
         None
     );
 
     let deep_environments = r"\begin{cases}".repeat(2_000);
-    assert_eq!(render_latex(&deep_environments, RenderLatexOptions::default()), None);
+    assert_eq!(
+        render_latex(&deep_environments, RenderLatexOptions::default()),
+        None
+    );
 
     // Unbalanced input never panics either.
-    assert_eq!(render_latex("}".repeat(1_000).as_str(), RenderLatexOptions::default()), None);
+    assert_eq!(
+        render_latex("}".repeat(1_000).as_str(), RenderLatexOptions::default()),
+        None
+    );
 }
 
 #[test]
 fn default_options_are_inline() {
-    assert_eq!(RenderLatexOptions::default(), RenderLatexOptions { display: false });
+    assert_eq!(
+        RenderLatexOptions::default(),
+        RenderLatexOptions { display: false }
+    );
     assert_eq!(
         render_latex(r"\frac{1}{2}", RenderLatexOptions::default()).as_deref(),
         Some("1/2")

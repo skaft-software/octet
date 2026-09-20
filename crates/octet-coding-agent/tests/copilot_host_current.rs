@@ -4,6 +4,11 @@
 
 #[path = "../src/auth/copilot.rs"]
 mod copilot;
+#[expect(
+    unused_macros,
+    unused_imports,
+    reason = "The standalone Copilot adapter fixture uses output functions, not the production stderr macro."
+)]
 #[path = "../src/output.rs"]
 mod output;
 
@@ -55,7 +60,9 @@ async fn exchange_mock(server: &MockServer, token: &str) {
     Mock::given(method("GET"))
         .and(path("/copilot_internal/v2/token"))
         .and(header("authorization", format!("token {OAUTH}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(token_response(&server.uri(), token)))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(token_response(&server.uri(), token)),
+        )
         .mount(server)
         .await;
 }
@@ -152,12 +159,16 @@ async fn copilot_blocking_catalog_bridge_keeps_the_live_host_after_runtime_exit(
     let host = Arc::new(CopilotCodingHost::with_mock_server(store, &server.uri()));
     let mut catalog = ModelCatalog::default();
     copilot::register_available_models_blocking(&mut catalog, true).unwrap();
-    copilot::register_available_models_with_host_blocking(&mut catalog, host.clone(), true).unwrap();
+    copilot::register_available_models_with_host_blocking(&mut catalog, host.clone(), true)
+        .unwrap();
     assert_no_advertisement(&catalog);
     assert!(server.received_requests().await.unwrap().is_empty());
 
-    copilot::register_available_models_with_host_blocking(&mut catalog, host.clone(), false).unwrap();
-    let resolved = catalog.resolve(&ModelId("github-copilot/runtime-bridge".into())).unwrap();
+    copilot::register_available_models_with_host_blocking(&mut catalog, host.clone(), false)
+        .unwrap();
+    let resolved = catalog
+        .resolve(&ModelId("github-copilot/runtime-bridge".into()))
+        .unwrap();
     assert_eq!(resolved.spec.protocol, Protocol::OpenAiResponses);
     let Auth::Dynamic(resolver) = &resolved.endpoint.auth else {
         panic!("the scoped runtime must not replace the host resolver with a static token");
@@ -197,8 +208,15 @@ async fn copilot_cli_logout_aliases_use_only_the_isolated_selected_store() {
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true)
                 .output(),
-        ).await.expect("CLI logout must settle").unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        )
+        .await
+        .expect("CLI logout must settle")
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(output.stdout, b"Signed out of GitHub Copilot.\n");
         assert!(!path.exists());
         assert_eq!(std::fs::read(sibling).unwrap(), b"unrelated-provider");
@@ -248,7 +266,8 @@ fn copilot_store_rejects_malformed_oversized_and_invalid_credentials_without_ech
         json!({"version": 1, "github_token": OAUTH, "endpoint": "https://attacker.test"}),
         json!({"version": 1, "github_token": format!("{OAUTH}\n")}),
     ] {
-        secure_fs::write_private_atomic(&path, &serde_json::to_vec(&value).unwrap(), 16384).unwrap();
+        secure_fs::write_private_atomic(&path, &serde_json::to_vec(&value).unwrap(), 16384)
+            .unwrap();
         let error = store.is_configured().unwrap_err();
         assert!(!format!("{error:#} {error:?}").contains(OAUTH));
         store.delete().unwrap();
@@ -476,7 +495,11 @@ async fn copilot_registration_preserves_explicit_protocols_and_never_catalogs_se
         .unwrap();
     assert_eq!(catalog.models().count(), 2);
     for (id, protocol, endpoint_id) in [
-        ("gpt-looking-chat", Protocol::OpenAiChat, "github-copilot-chat"),
+        (
+            "gpt-looking-chat",
+            Protocol::OpenAiChat,
+            "github-copilot-chat",
+        ),
         (
             "claude-looking-responses",
             Protocol::OpenAiResponses,
@@ -500,7 +523,10 @@ async fn copilot_registration_preserves_explicit_protocols_and_never_catalogs_se
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 3); // Endpoint binding, resolver exchange, inventory.
     assert_eq!(
-        requests.iter().filter(|r| r.url.path() == "/models").count(),
+        requests
+            .iter()
+            .filter(|r| r.url.path() == "/models")
+            .count(),
         1
     );
 }
@@ -598,10 +624,17 @@ async fn copilot_fresh_catalog_credentials_reject_logout_account_change_and_inva
             ]})))
             .mount(&server)
             .await;
-        let host = Arc::new(CopilotCodingHost::with_mock_server(store.clone(), &server.uri()));
+        let host = Arc::new(CopilotCodingHost::with_mock_server(
+            store.clone(),
+            &server.uri(),
+        ));
         let mut catalog = ModelCatalog::default();
-        host.register_available_models(&mut catalog, false).await.unwrap();
-        let resolved = catalog.resolve(&ModelId("github-copilot/fresh-session".into())).unwrap();
+        host.register_available_models(&mut catalog, false)
+            .await
+            .unwrap();
+        let resolved = catalog
+            .resolve(&ModelId("github-copilot/fresh-session".into()))
+            .unwrap();
         let Auth::Dynamic(resolver) = &resolved.endpoint.auth else {
             panic!("Copilot must retain the live host resolver");
         };
@@ -611,18 +644,29 @@ async fn copilot_fresh_catalog_credentials_reject_logout_account_change_and_inva
             "logout" => copilot::logout(&store).await.unwrap(),
             "account-change" => store.save("different-account-oauth").unwrap(),
             "invalid-store" => secure_fs::write_private_atomic(
-                &credential_path, b"invalid-private-credential", 16384,
-            ).unwrap(),
+                &credential_path,
+                b"invalid-private-credential",
+                16384,
+            )
+            .unwrap(),
             _ => unreachable!(),
         }
         for _ in 0..2 {
-            let error = resolver.resolve().await.err().expect("fresh cache must not outlive its login");
+            let error = resolver
+                .resolve()
+                .await
+                .err()
+                .expect("fresh cache must not outlive its login");
             let diagnostic = format!("{error:?} {error}");
             for secret in [OAUTH, INFERENCE, "different-account-oauth"] {
                 assert!(!diagnostic.contains(secret));
             }
         }
-        assert_eq!(server.received_requests().await.unwrap().len(), 3, "{mutation}");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            3,
+            "{mutation}"
+        );
     }
 }
 
@@ -698,8 +742,12 @@ async fn copilot_refresh_cannot_rebind_an_existing_origin() {
         .await;
     let host = Arc::new(CopilotCodingHost::with_mock_server(store, &server.uri()));
     let mut catalog = ModelCatalog::default();
-    host.register_available_models(&mut catalog, false).await.unwrap();
-    let resolved = catalog.resolve(&ModelId("github-copilot/pinned-origin".into())).unwrap();
+    host.register_available_models(&mut catalog, false)
+        .await
+        .unwrap();
+    let resolved = catalog
+        .resolve(&ModelId("github-copilot/pinned-origin".into()))
+        .unwrap();
     let Auth::Dynamic(resolver) = &resolved.endpoint.auth else {
         panic!("Copilot must retain the live host resolver");
     };
@@ -717,7 +765,10 @@ async fn copilot_refresh_cannot_rebind_an_existing_origin() {
         host.refresh().await.unwrap_err(),
         Error::TokenRefreshUnavailable
     );
-    assert_eq!(host.availability().await.unwrap_err(), Error::InvalidEndpoint);
+    assert_eq!(
+        host.availability().await.unwrap_err(),
+        Error::InvalidEndpoint
+    );
     assert_eq!(
         host.discover_models().await.unwrap_err(),
         Error::InvalidEndpoint
@@ -745,7 +796,8 @@ async fn copilot_exchange_rejects_redirects_bad_destinations_expired_and_oversiz
     let responses = vec![
         ResponseTemplate::new(302).insert_header("location", sink.uri()),
         ResponseTemplate::new(200).set_body_json(token_response(&sink.uri(), INFERENCE)),
-        ResponseTemplate::new(200).set_body_json(token_response("https://api.evil.test/", INFERENCE)),
+        ResponseTemplate::new(200)
+            .set_body_json(token_response("https://api.evil.test/", INFERENCE)),
         ResponseTemplate::new(200).set_body_json(expired),
         ResponseTemplate::new(200).set_body_json(token_response(&server.uri(), OAUTH)),
         ResponseTemplate::new(200).set_body_string(INFERENCE.repeat(4000)),

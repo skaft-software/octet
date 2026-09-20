@@ -1,3 +1,5 @@
+//! Session-owner lifecycle, generation fencing, and attachment integration tests.
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -10,7 +12,8 @@ use octet_serve_backend::{
     ContextUsage, DeviceId, DriverCommandOutcome, EventPayload, HostId, JournalConfig,
     ModelSelection, PromptInput, ReplayResponse, ServiceError, SessionActor, SessionActorCore,
     SessionCommand, SessionCommandEnvelope, SessionCursor, SessionDriver, SessionId,
-    SessionLiveState, SessionSeed, SessionSnapshot, SessionSummary, TimestampedEvent, UsageSnapshot,
+    SessionLiveState, SessionSeed, SessionSnapshot, SessionSummary, TimestampedEvent,
+    UsageSnapshot,
 };
 
 fn seed(index: usize) -> SessionSeed {

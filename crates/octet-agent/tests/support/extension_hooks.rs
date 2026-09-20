@@ -122,11 +122,12 @@ async fn before_persistence_metadata_is_namespaced_durable_and_never_model_conte
         assert_eq!(value.provenance.process_generation, None);
     }
     assert!(metadata.display_text.is_none());
-    let observed = contexts.lock().unwrap();
-    assert_eq!(observed.len(), 3);
-    assert_eq!(observed[0].text_bytes, "canonical-answer".len());
-    assert_eq!(observed[0].tool_call_count, 0);
-    drop(observed);
+    {
+        let observed = contexts.lock().unwrap();
+        assert_eq!(observed.len(), 3);
+        assert_eq!(observed[0].text_bytes, "canonical-answer".len());
+        assert_eq!(observed[0].tool_call_count, 0);
+    }
     agent.complete("second-prompt").await.unwrap();
     let requests = format!("{:?}", transport.requests.lock().unwrap());
     assert!(!requests.contains("private-sentinel"));

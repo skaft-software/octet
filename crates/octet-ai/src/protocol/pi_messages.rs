@@ -35,9 +35,9 @@ use crate::protocol::sse::SseEvent;
 use crate::protocol::HttpRequestParts;
 use crate::stream::{ResponseBuilder, StreamEvent};
 use crate::types::{
-    CacheRetention, CompatibilityMode, Media, Message, OutputFormat, OutputModalities, ReasoningConfig,
-    ReasoningMode, ReasoningState, ReasoningStateKind, Request, StopReason, ToolCallId,
-    ToolChoice, ToolResultPart, Usage, UserPart,
+    CacheRetention, CompatibilityMode, Media, Message, OutputFormat, OutputModalities,
+    ReasoningConfig, ReasoningMode, ReasoningState, ReasoningStateKind, Request, StopReason,
+    ToolCallId, ToolChoice, ToolResultPart, Usage, UserPart,
 };
 
 /// Upper bound for a provider response identifier copied into the response.
@@ -193,7 +193,8 @@ fn assistant_part_value(
                 }
                 None => None,
             };
-            let mut value = json!({"type": "thinking", "thinking": reasoning.text.clone().unwrap_or_default()});
+            let mut value =
+                json!({"type": "thinking", "thinking": reasoning.text.clone().unwrap_or_default()});
             if let Some(signature) = signature {
                 value["thinkingSignature"] = json!(signature);
             }
@@ -214,17 +215,16 @@ fn assistant_part_value(
             if !arguments.is_object() {
                 return Err(malformed("replayed tool call arguments must be an object"));
             }
-            Ok(Some(json!({"type": "toolCall", "id": call.id.0, "name": call.name, "arguments": arguments})))
+            Ok(Some(
+                json!({"type": "toolCall", "id": call.id.0, "name": call.name, "arguments": arguments}),
+            ))
         }
         crate::types::AssistantPart::Media(_) => {
             drop_unsupported(UnsupportedError::AudioOutput, "dropped_assistant_media")?;
             Ok(None)
         }
         crate::types::AssistantPart::ProviderMetadata(_) => {
-            drop_unsupported(
-                UnsupportedError::Reasoning,
-                "dropped_provider_metadata",
-            )?;
+            drop_unsupported(UnsupportedError::Reasoning, "dropped_provider_metadata")?;
             Ok(None)
         }
     }
@@ -233,7 +233,9 @@ fn assistant_part_value(
 fn tool_result_name(messages: &[Message], id: &str) -> Option<String> {
     messages.iter().find_map(|message| match message {
         Message::Assistant(assistant) => assistant.content.iter().find_map(|part| match part {
-            crate::types::AssistantPart::ToolCall(call) if call.id.0 == id => Some(call.name.clone()),
+            crate::types::AssistantPart::ToolCall(call) if call.id.0 == id => {
+                Some(call.name.clone())
+            }
             _ => None,
         }),
         Message::User(_) => None,
@@ -314,7 +316,8 @@ fn encode_context(
                     }
                 }
                 if !content.is_empty() {
-                    messages.push(json!({"role": "user", "content": content, "timestamp": timestamp}));
+                    messages
+                        .push(json!({"role": "user", "content": content, "timestamp": timestamp}));
                 }
             }
             Message::Assistant(assistant) => {
@@ -390,7 +393,8 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         || base.fragment().is_some()
     {
         return Err(ConfigError::InvalidBaseUrl(
-            "pi-messages requires HTTPS (or literal loopback HTTP) without userinfo or fragment".into(),
+            "pi-messages requires HTTPS (or literal loopback HTTP) without userinfo or fragment"
+                .into(),
         )
         .into());
     }
@@ -406,7 +410,10 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         &model.spec.id,
         req.compatibility,
     )?;
-    let drop = |diagnostics: &mut Vec<Diagnostic>, error: UnsupportedError, code: &str| -> Result<(), AiError> {
+    let drop = |diagnostics: &mut Vec<Diagnostic>,
+                error: UnsupportedError,
+                code: &str|
+     -> Result<(), AiError> {
         if lossy {
             if !diagnostics.iter().any(|diagnostic| diagnostic.code == code) {
                 diagnostics.push(Diagnostic {
@@ -420,7 +427,11 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         }
     };
     if !req.stop.is_empty() {
-        drop(&mut diagnostics, UnsupportedError::StopSequences, "dropped_stop_sequences")?;
+        drop(
+            &mut diagnostics,
+            UnsupportedError::StopSequences,
+            "dropped_stop_sequences",
+        )?;
     }
     if !matches!(req.output_format, OutputFormat::Text) {
         drop(
@@ -441,7 +452,11 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         ReasoningConfig::On => Some("high".to_owned()),
         ReasoningConfig::Effort(effort) => Some(pi_thinking_level(*effort).to_owned()),
         ReasoningConfig::Budget(_) => {
-            drop(&mut diagnostics, UnsupportedError::Reasoning, "dropped_reasoning_budget")?;
+            drop(
+                &mut diagnostics,
+                UnsupportedError::Reasoning,
+                "dropped_reasoning_budget",
+            )?;
             None
         }
     };
@@ -489,7 +504,10 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         options.insert("sessionId".to_owned(), json!(session_id));
     }
     if model.spec.capabilities.tools {
-        options.insert("toolChoice".to_owned(), tool_choice_value(&req.tool_choice)?);
+        options.insert(
+            "toolChoice".to_owned(),
+            tool_choice_value(&req.tool_choice)?,
+        );
     }
     let body = json!({
         "model": model.spec.api_name,
@@ -534,13 +552,12 @@ fn existing_index(builder: &ResponseBuilder, content_index: usize) -> Result<usi
         .ok_or_else(|| malformed("content delta arrived before its block start"))
 }
 
-fn ensure_started(builder: &mut ResponseBuilder, events: &mut Vec<StreamEvent>) -> Result<(), AiError> {
+fn ensure_started(
+    builder: &mut ResponseBuilder,
+    events: &mut Vec<StreamEvent>,
+) -> Result<(), AiError> {
     if !builder.started {
-        crate::protocol::emit_event(
-            events,
-            builder,
-            StreamEvent::Started { response_id: None },
-        )?;
+        crate::protocol::emit_event(events, builder, StreamEvent::Started { response_id: None })?;
     }
     Ok(())
 }
@@ -566,11 +583,9 @@ fn decode_usage(value: &Value) -> Result<Usage, AiError> {
     })
 }
 
-fn record_terminal_metadata(
-    builder: &mut ResponseBuilder,
-    value: &Value,
-) -> Result<(), AiError> {
-    if let Some(level) = optional_string(value, "providerThinkingLevel", MAX_THINKING_LEVEL_BYTES)? {
+fn record_terminal_metadata(builder: &mut ResponseBuilder, value: &Value) -> Result<(), AiError> {
+    if let Some(level) = optional_string(value, "providerThinkingLevel", MAX_THINKING_LEVEL_BYTES)?
+    {
         if !level.is_empty() {
             builder.add_diagnostic(Diagnostic {
                 code: "pi_messages_provider_thinking_level".to_owned(),
@@ -579,12 +594,21 @@ fn record_terminal_metadata(
         }
     }
     if let Some(rewrite) = value.get("rewrite").filter(|value| !value.is_null()) {
-        let policy = optional_string(rewrite, "policyId", MAX_REWRITE_POLICY_BYTES)?
-            .unwrap_or_default();
-        let version = rewrite.get("policyVersion").and_then(Value::as_i64).unwrap_or(0);
+        let policy =
+            optional_string(rewrite, "policyId", MAX_REWRITE_POLICY_BYTES)?.unwrap_or_default();
+        let version = rewrite
+            .get("policyVersion")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         let changed = optional_bool(rewrite, "changed")?;
-        let token_change = rewrite.get("tokenCountChange").and_then(Value::as_i64).unwrap_or(0);
-        let message_change = rewrite.get("messageCountChange").and_then(Value::as_i64).unwrap_or(0);
+        let token_change = rewrite
+            .get("tokenCountChange")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let message_change = rewrite
+            .get("messageCountChange")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         let system_changed = optional_bool(rewrite, "systemPromptChanged")?;
         builder.add_diagnostic(Diagnostic {
             code: "pi_messages_rewrite".to_owned(),
@@ -611,7 +635,11 @@ fn close_text(
     index: usize,
     content: &str,
 ) -> Result<(), AiError> {
-    let assembled = builder.text_buffers.get(&index).cloned().unwrap_or_default();
+    let assembled = builder
+        .text_buffers
+        .get(&index)
+        .cloned()
+        .unwrap_or_default();
     if builder.ended_indices.contains(&index) {
         return if assembled == content {
             Ok(())
@@ -687,15 +715,14 @@ fn close_open_parts(
             // A native terminal can only close a call whose arguments the
             // provider already completed; otherwise the provider truncated the
             // turn and the call must not be exposed as executable.
-            let completed = builder
-                .tool_call_builders
-                .get(&index)
-                .is_some_and(|call| {
-                    serde_json::from_str::<Value>(&call.arguments_json)
-                        .is_ok_and(|value| value.is_object())
-                });
+            let completed = builder.tool_call_builders.get(&index).is_some_and(|call| {
+                serde_json::from_str::<Value>(&call.arguments_json)
+                    .is_ok_and(|value| value.is_object())
+            });
             if !completed {
-                return Err(malformed("terminal arrived before tool arguments completed"));
+                return Err(malformed(
+                    "terminal arrived before tool arguments completed",
+                ));
             }
             crate::protocol::emit_event(
                 events,
@@ -733,7 +760,11 @@ pub(crate) fn decode_stream_event(
             if builder.started {
                 return Err(StreamProtocolError::DuplicateStart.into());
             }
-            emit_event(&mut events, builder, StreamEvent::Started { response_id: None })?;
+            emit_event(
+                &mut events,
+                builder,
+                StreamEvent::Started { response_id: None },
+            )?;
         }
         "text_start" => {
             ensure_started(builder, &mut events)?;
@@ -744,7 +775,11 @@ pub(crate) fn decode_stream_event(
             {
                 return Err(malformed("duplicate content index"));
             }
-            emit_event(&mut events, builder, StreamEvent::TextStart { index: canonical })?;
+            emit_event(
+                &mut events,
+                builder,
+                StreamEvent::TextStart { index: canonical },
+            )?;
         }
         "text_delta" => {
             ensure_started(builder, &mut events)?;
@@ -850,7 +885,11 @@ pub(crate) fn decode_stream_event(
                     },
                 )?;
             } else if redacted {
-                unsupported_field(builder, UnsupportedError::Reasoning, "dropped_redacted_thinking")?;
+                unsupported_field(
+                    builder,
+                    UnsupportedError::Reasoning,
+                    "dropped_redacted_thinking",
+                )?;
             }
         }
         "toolcall_start" => {
@@ -924,7 +963,11 @@ pub(crate) fn decode_stream_event(
             if optional_string(call, "thoughtSignature", MAX_SIGNATURE_BYTES)?
                 .is_some_and(|signature| !signature.is_empty())
             {
-                unsupported_field(builder, UnsupportedError::Reasoning, "dropped_tool_signature")?;
+                unsupported_field(
+                    builder,
+                    UnsupportedError::Reasoning,
+                    "dropped_tool_signature",
+                )?;
             }
             let started = &builder.tool_call_builders[&canonical];
             if started.id.0 != id || started.name != name {
@@ -936,11 +979,7 @@ pub(crate) fn decode_stream_event(
             // deltas were a preview (arguments are only canonical at closure),
             // and the replacement is the provider's own terminal value: no
             // fabricated or spliced arguments are introduced.
-            builder
-                .tool_call_builders
-                .get_mut(&canonical)
-                .expect("checked above")
-                .arguments_json = authoritative;
+            builder.replace_tool_arguments(canonical, authoritative)?;
             emit_event(
                 &mut events,
                 builder,
@@ -1056,6 +1095,42 @@ mod tests {
             }),
             constrained_sampling: None,
         }]
+    }
+
+    #[test]
+    fn terminal_only_tool_arguments_obey_aggregate_response_limit() {
+        let model = fixture_model();
+        let mut builder = ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, None);
+        let event = |value: Value| crate::protocol::sse::SseEvent {
+            event: None,
+            data: value.to_string(),
+        };
+        decode_stream_event(&model, &event(json!({"type":"start"})), &mut builder).unwrap();
+        decode_stream_event(
+            &model,
+            &event(json!({"type":"toolcall_start", "contentIndex":0,
+            "id":"call", "toolName":"lookup"})),
+            &mut builder,
+        )
+        .unwrap();
+        builder
+            .reserve_buffered_content(
+                crate::stream::MAX_RESPONSE_CONTENT_BYTES - builder.aggregate_content_bytes - 2,
+            )
+            .unwrap();
+        let before = builder.aggregate_content_bytes;
+        let result = decode_stream_event(
+            &model,
+            &event(json!({"type":"toolcall_end", "contentIndex":0,
+            "toolCall":{"id":"call", "name":"lookup", "arguments":{"city":"Paris"}}})),
+            &mut builder,
+        );
+        assert!(matches!(
+            result,
+            Err(AiError::Decode(crate::error::DecodeError::ResponseTooLarge))
+        ));
+        assert_eq!(builder.aggregate_content_bytes, before);
+        assert!(builder.tool_call_builders[&0].arguments_json.is_empty());
     }
 
     #[test]
@@ -1209,7 +1284,10 @@ mod tests {
         assert_eq!(messages[2]["role"], "toolResult");
         assert_eq!(messages[2]["toolCallId"], "call_1");
         assert_eq!(messages[2]["toolName"], "lookup");
-        assert_eq!(messages[2]["content"][0], json!({"type": "text", "text": "found"}));
+        assert_eq!(
+            messages[2]["content"][0],
+            json!({"type": "text", "text": "found"})
+        );
         assert_eq!(messages[2]["addedToolNames"], json!(["extra"]));
     }
 
@@ -1229,7 +1307,9 @@ mod tests {
         let events = drive(&model, decode_stream_event, wire.as_bytes(), 0)
             .await
             .unwrap();
-        assert!(matches!(&events[0], StreamEvent::Started { response_id } if response_id.is_none()));
+        assert!(
+            matches!(&events[0], StreamEvent::Started { response_id } if response_id.is_none())
+        );
         assert!(matches!(&events[2], StreamEvent::TextDelta { delta, .. } if delta == "Hel"));
         let response = match events.last().unwrap() {
             StreamEvent::Finished(response) => response,
@@ -1240,7 +1320,9 @@ mod tests {
         assert_eq!(response.usage.input_tokens, 10);
         assert_eq!(response.usage.output_tokens, 5);
         assert_eq!(response.usage.total_tokens, 15);
-        assert!(matches!(&response.message.content[..], [AssistantPart::Text(text)] if text == "Hello"));
+        assert!(
+            matches!(&response.message.content[..], [AssistantPart::Text(text)] if text == "Hello")
+        );
         assert!(response
             .diagnostics
             .iter()
@@ -1254,7 +1336,9 @@ mod tests {
             + &sse(json!({"type": "text_start", "contentIndex": 0}))
             + &sse(json!({"type": "text_delta", "contentIndex": 0, "delta": "Hel"}))
             + &sse(json!({"type": "text_end", "contentIndex": 0, "content": "Hello"}))
-            + &sse(json!({"type": "done", "reason": "stop", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}));
+            + &sse(
+                json!({"type": "done", "reason": "stop", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}),
+            );
         let events = drive(&model, decode_stream_event, ok.as_bytes(), 0)
             .await
             .unwrap();
@@ -1266,7 +1350,9 @@ mod tests {
             + &sse(json!({"type": "text_start", "contentIndex": 0}))
             + &sse(json!({"type": "text_delta", "contentIndex": 0, "delta": "Hel"}))
             + &sse(json!({"type": "text_end", "contentIndex": 0, "content": "World"}))
-            + &sse(json!({"type": "done", "reason": "stop", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}));
+            + &sse(
+                json!({"type": "done", "reason": "stop", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}),
+            );
         assert!(drive(&model, decode_stream_event, bad.as_bytes(), 0)
             .await
             .is_err());
@@ -1282,7 +1368,9 @@ mod tests {
                 "type": "thinking_end", "contentIndex": 0, "content": "thinking",
                 "contentSignature": "sig-1"
             }))
-            + &sse(json!({"type": "done", "reason": "stop", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}));
+            + &sse(
+                json!({"type": "done", "reason": "stop", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}),
+            );
         let events = drive(&model, decode_stream_event, wire.as_bytes(), 0)
             .await
             .unwrap();
@@ -1307,14 +1395,18 @@ mod tests {
     async fn terminal_tool_call_replaces_the_streamed_preview() {
         let model = fixture_model();
         let wire = sse(json!({"type": "start"}))
-            + &sse(json!({"type": "toolcall_start", "contentIndex": 0, "id": "call_1", "toolName": "lookup"}))
+            + &sse(
+                json!({"type": "toolcall_start", "contentIndex": 0, "id": "call_1", "toolName": "lookup"}),
+            )
             + &sse(json!({"type": "toolcall_delta", "contentIndex": 0, "delta": "{\"city\":"}))
             + &sse(json!({"type": "toolcall_delta", "contentIndex": 0, "delta": "\"Pa"}))
             + &sse(json!({
                 "type": "toolcall_end", "contentIndex": 0,
                 "toolCall": {"type": "toolCall", "id": "call_1", "name": "lookup", "arguments": {"city": "Paris"}}
             }))
-            + &sse(json!({"type": "done", "reason": "toolUse", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}));
+            + &sse(
+                json!({"type": "done", "reason": "toolUse", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}),
+            );
         let events = drive(&model, decode_stream_event, wire.as_bytes(), 0)
             .await
             .unwrap();
@@ -1323,8 +1415,10 @@ mod tests {
             other => panic!("expected Finished, got {other:?}"),
         };
         assert_eq!(response.stop_reason, StopReason::ToolUse);
-        assert!(matches!(&response.message.content[..], [AssistantPart::ToolCall(call)]
-            if call.id.0 == "call_1" && call.arguments_value().unwrap() == json!({"city": "Paris"})));
+        assert!(
+            matches!(&response.message.content[..], [AssistantPart::ToolCall(call)]
+            if call.id.0 == "call_1" && call.arguments_value().unwrap() == json!({"city": "Paris"}))
+        );
         assert_eq!(
             events
                 .iter()
@@ -1338,12 +1432,16 @@ mod tests {
     async fn tool_identity_change_is_rejected() {
         let model = fixture_model();
         let wire = sse(json!({"type": "start"}))
-            + &sse(json!({"type": "toolcall_start", "contentIndex": 0, "id": "call_1", "toolName": "lookup"}))
+            + &sse(
+                json!({"type": "toolcall_start", "contentIndex": 0, "id": "call_1", "toolName": "lookup"}),
+            )
             + &sse(json!({
                 "type": "toolcall_end", "contentIndex": 0,
                 "toolCall": {"type": "toolCall", "id": "call_2", "name": "lookup", "arguments": {}}
             }))
-            + &sse(json!({"type": "done", "reason": "toolUse", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}));
+            + &sse(
+                json!({"type": "done", "reason": "toolUse", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}),
+            );
         assert!(drive(&model, decode_stream_event, wire.as_bytes(), 0)
             .await
             .is_err());
@@ -1427,8 +1525,12 @@ mod tests {
         for bad in [
             sse(json!({"type": "start"})) + &sse(json!({"type": "unknown_event"})),
             sse(json!({"type": "text_delta", "contentIndex": 0, "delta": "x"})),
-            sse(json!({"type": "start"})) + &sse(json!({"type": "done", "reason": "weird", "usage": {}})),
-            sse(json!({"type": "start"})) + &sse(json!({"type": "done", "reason": "toolUse", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}})),
+            sse(json!({"type": "start"}))
+                + &sse(json!({"type": "done", "reason": "weird", "usage": {}})),
+            sse(json!({"type": "start"}))
+                + &sse(
+                    json!({"type": "done", "reason": "toolUse", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}),
+                ),
             sse(json!({"type": "start"})) + &sse(json!({"type": "start"})),
         ] {
             assert!(
@@ -1447,19 +1549,17 @@ mod tests {
             + &sse(json!({"type": "text_start", "contentIndex": 0}))
             + &sse(json!({"type": "text_delta", "contentIndex": 0, "delta": "done"}))
             + &sse(json!({"type": "text_end", "contentIndex": 0, "content": "done"}))
-            + &sse(json!({"type": "done", "reason": "stop", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}));
+            + &sse(
+                json!({"type": "done", "reason": "stop", "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2}}),
+            );
         let events = drive(&model, decode_stream_event, wire.as_bytes(), 0)
             .await
             .unwrap();
-        assert!(matches!(
-            events.last().unwrap(),
-            StreamEvent::Finished(_)
-        ));
+        assert!(matches!(events.last().unwrap(), StreamEvent::Finished(_)));
     }
     const FIXTURE_TEXT_TOOL: &str =
         include_str!("../../tests/fixtures/pi_messages/text_tool_done.sse");
-    const FIXTURE_ERROR: &str =
-        include_str!("../../tests/fixtures/pi_messages/error_terminal.sse");
+    const FIXTURE_ERROR: &str = include_str!("../../tests/fixtures/pi_messages/error_terminal.sse");
     const FIXTURE_THINKING: &str =
         include_str!("../../tests/fixtures/pi_messages/thinking_signature_done.sse");
 
@@ -1506,9 +1606,14 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_error_terminal_is_typed_and_prose_free() {
-        let error = drive(&fixture_model(), decode_stream_event, FIXTURE_ERROR.as_bytes(), 0)
-            .await
-            .unwrap_err();
+        let error = drive(
+            &fixture_model(),
+            decode_stream_event,
+            FIXTURE_ERROR.as_bytes(),
+            0,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(&error, AiError::Provider(provider)
             if provider.kind.as_deref() == Some("pi_messages_error")));
         assert!(!format!("{error:?} {error}").contains("provider-private"));
@@ -1516,9 +1621,14 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_thinking_signature_and_terminal_metadata_survive() {
-        let events = drive(&fixture_model(), decode_stream_event, FIXTURE_THINKING.as_bytes(), 0)
-            .await
-            .unwrap();
+        let events = drive(
+            &fixture_model(),
+            decode_stream_event,
+            FIXTURE_THINKING.as_bytes(),
+            0,
+        )
+        .await
+        .unwrap();
         let response = match events.last().unwrap() {
             StreamEvent::Finished(response) => response,
             other => panic!("expected Finished, got {other:?}"),
@@ -1539,7 +1649,9 @@ mod tests {
             }
             other => panic!("expected reasoning, got {other:?}"),
         }
-        assert!(matches!(&response.message.content[1], AssistantPart::Text(text) if text == "answer"));
+        assert!(
+            matches!(&response.message.content[1], AssistantPart::Text(text) if text == "answer")
+        );
         let codes: Vec<&str> = response
             .diagnostics
             .iter()
@@ -1548,5 +1660,4 @@ mod tests {
         assert!(codes.contains(&"pi_messages_provider_thinking_level"));
         assert!(codes.contains(&"pi_messages_rewrite"));
     }
-
 }

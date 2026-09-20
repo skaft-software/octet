@@ -24,6 +24,12 @@ const POST_KILL_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// Leave room for exit/capture metadata inside the per-tool result cap.
 #[cfg(any(unix, windows))]
 const CAPTURE_ENVELOPE_RESERVE: usize = 256;
+#[cfg(any(unix, windows))]
+const MAX_SPILL_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(any(unix, windows))]
+const MAX_RETAINED_SPILL_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(any(unix, windows))]
+const MAX_SPILL_FILES: usize = 32;
 use bytes::Bytes;
 use octet_ai::ToolDef;
 use serde::Deserialize;
@@ -31,10 +37,10 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::effect::{ToolEffect, ToolPolicyDenialCode};
-#[cfg(unix)]
-use crate::extension_process::{wait_for_bash_process, BashProcessLaunch};
 #[cfg(windows)]
 use crate::extension_process::WindowsProcessLaunch;
+#[cfg(unix)]
+use crate::extension_process::{wait_for_bash_process, BashProcessLaunch};
 #[cfg(unix)]
 use crate::sandbox::resolve_shell;
 use crate::tool::{
@@ -66,7 +72,14 @@ struct BashArgs {
 /// stdout/stderr capture and a timeout.
 /// The child's entire process tree is killed on timeout or cancellation. On
 /// Windows, the child is assigned to a private Job Object before it resumes.
-pub struct BashTool;
+/// Spill paths are temporary: this tool owns at most 64 MiB / 32 files,
+/// including active captures, with a 16 MiB prefix limit per stream. Oldest
+/// retained files are evicted first; dropping the tool removes the remainder.
+#[derive(Default)]
+pub struct BashTool {
+    #[cfg(any(unix, windows))]
+    spills: Arc<Mutex<SpillStore>>,
+}
 
 #[async_trait::async_trait]
 impl Tool for BashTool {
@@ -78,7 +91,10 @@ impl Tool for BashTool {
                           Omit cwd to run at the workspace root. Output reports the exit \
                           status and bounded stdout/stderr. Complete streams end with \
                           complete_<stream>=true; truncated_<stream>=... means bytes \
-                          were omitted. Truncated output includes a full_output_path to a private spill file."
+                          were omitted. Truncated output may include a private full_output_path, \
+                          or partial_output_path containing only a prefix if spill storage was capped \
+                          or failed. Spills are limited to 16 MiB per stream and 64 MiB / 32 files \
+                          per tool; paths expire on oldest-first eviction or tool shutdown."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -170,7 +186,9 @@ impl Tool for BashTool {
         Ok(ToolEffect::HostProcess)
     }
 
-    fn prompt_snippet(&self) -> Option<&str> { Some("Execute bash commands (prefer rg/ripgrep for file and content search)") }
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Execute bash commands (prefer rg/ripgrep for file and content search)")
+    }
 
     async fn execute(
         &self,
@@ -296,14 +314,16 @@ impl BashTool {
                     capture_budget,
                     &stdout_progress,
                     OutputStream::Stdout,
-                    checkpoints
+                    checkpoints,
+                    &self.spills,
                 ),
                 read_bounded_with_progress(
                     &mut stderr_pipe,
                     capture_budget,
                     &stderr_progress,
                     OutputStream::Stderr,
-                    checkpoints
+                    checkpoints,
+                    &self.spills,
                 ),
                 wait_for_bash_process(&mut child, handoff),
             );
@@ -667,6 +687,7 @@ impl BashCheckpoints {
 /// unchanged and no other consumer pays for this.
 #[cfg(any(unix, windows))]
 pub struct CheckpointedBashTool {
+    bash: BashTool,
     checkpoints: Arc<BashCheckpoints>,
 }
 
@@ -679,6 +700,7 @@ impl CheckpointedBashTool {
         interval: Duration,
     ) -> Self {
         Self {
+            bash: BashTool::default(),
             checkpoints: BashCheckpoints::new(sink, interval),
         }
     }
@@ -703,7 +725,7 @@ impl CheckpointedBashTool {
 #[async_trait::async_trait]
 impl Tool for CheckpointedBashTool {
     fn definition(&self) -> ToolDef {
-        BashTool.definition()
+        self.bash.definition()
     }
 
     fn effect(
@@ -711,23 +733,23 @@ impl Tool for CheckpointedBashTool {
         args: &serde_json::Value,
         ctx: &ToolContext<'_>,
     ) -> Result<ToolEffect, ToolError> {
-        BashTool.effect(args, ctx)
+        self.bash.effect(args, ctx)
     }
 
     fn replay_safety(&self) -> crate::tool::ReplaySafety {
-        BashTool.replay_safety()
+        self.bash.replay_safety()
     }
 
     fn concurrency(&self) -> crate::tool::ToolConcurrency {
-        BashTool.concurrency()
+        self.bash.concurrency()
     }
 
     fn prompt_snippet(&self) -> Option<&str> {
-        BashTool.prompt_snippet()
+        self.bash.prompt_snippet()
     }
 
     fn prompt_guidelines(&self) -> &[&str] {
-        BashTool.prompt_guidelines()
+        self.bash.prompt_guidelines()
     }
 
     async fn execute(
@@ -737,7 +759,7 @@ impl Tool for CheckpointedBashTool {
     ) -> Result<ToolOutput, ToolError> {
         #[cfg(windows)]
         {
-            BashTool
+            self.bash
                 .execute_windows(
                     args,
                     ctx,
@@ -749,7 +771,7 @@ impl Tool for CheckpointedBashTool {
         }
         #[cfg(unix)]
         {
-            BashTool
+            self.bash
                 .execute_unix(
                     args,
                     ctx,
@@ -785,9 +807,7 @@ fn resolve_windows_shell(configured: Option<&std::path::Path>) -> Result<PathBuf
 
     candidates
         .into_iter()
-        .find(|candidate| {
-            candidate.is_file() && !is_legacy_wsl_bash_path(candidate)
-        })
+        .find(|candidate| candidate.is_file() && !is_legacy_wsl_bash_path(candidate))
         .ok_or_else(|| {
             ToolError::new(
                 "error unsupported_platform\nWindows bash execution requires an explicit \
@@ -799,7 +819,10 @@ fn resolve_windows_shell(configured: Option<&std::path::Path>) -> Result<PathBuf
 
 #[cfg(windows)]
 fn is_legacy_wsl_bash_path(path: &std::path::Path) -> bool {
-    let normalized = path.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    let normalized = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
     normalized.ends_with("\\windows\\system32\\bash.exe")
         || normalized.ends_with("\\windows\\sysnative\\bash.exe")
 }
@@ -816,7 +839,11 @@ impl BashTool {
     ) -> Result<ToolOutput, ToolError> {
         self.effect(&args, ctx)?;
         let args: BashArgs = parse_args(args)?;
-        let shell = if powershell { super::powershell::resolve_shell()? } else { resolve_windows_shell(ctx.sandbox.shell_path.as_deref())? };
+        let shell = if powershell {
+            super::powershell::resolve_shell()?
+        } else {
+            resolve_windows_shell(ctx.sandbox.shell_path.as_deref())?
+        };
         let mut command = tokio::process::Command::new(&shell);
 
         // Honour the per-call timeout when present, bounded by sandbox max.
@@ -854,8 +881,11 @@ impl BashTool {
                 shell.display()
             ))
         })?;
-        if powershell { super::powershell::configure_command(&mut command, &args.command); }
-        else { command.arg("-c").arg(&args.command); }
+        if powershell {
+            super::powershell::configure_command(&mut command, &args.command);
+        } else {
+            command.arg("-c").arg(&args.command);
+        }
 
         let start = Instant::now();
         let mut child = command.spawn().map_err(|error| {
@@ -892,14 +922,16 @@ impl BashTool {
                     capture_budget,
                     &stdout_progress,
                     OutputStream::Stdout,
-                    checkpoints
+                    checkpoints,
+                    &self.spills,
                 ),
                 read_bounded_with_progress(
                     &mut stderr_pipe,
                     capture_budget,
                     &stderr_progress,
                     OutputStream::Stderr,
-                    checkpoints
+                    checkpoints,
+                    &self.spills,
                 ),
                 child.wait(),
             );
@@ -928,9 +960,10 @@ impl BashTool {
                             message.push_str(&err.render("stderr"));
                         }
                         if let Ok(status) = status {
-                            let exit = status
-                                .code()
-                                .map_or_else(|| "exit=unknown".to_owned(), |code| format!("exit={code}"));
+                            let exit = status.code().map_or_else(
+                                || "exit=unknown".to_owned(),
+                                |code| format!("exit={code}"),
+                            );
                             message.push_str(&format!("\n{exit}"));
                         }
                     }
@@ -976,6 +1009,114 @@ impl BashTool {
     }
 }
 
+/// Owns retained files and accounts for both retained and in-flight storage.
+/// Active captures cannot be evicted; pressure discards further spill bytes
+/// instead of blocking pipe draining or exceeding the aggregate bound.
+#[cfg(any(unix, windows))]
+#[derive(Default)]
+struct SpillStore {
+    retained: VecDeque<(tempfile::NamedTempFile, usize)>,
+    bytes: usize,
+    active_files: usize,
+}
+
+#[cfg(any(unix, windows))]
+impl SpillStore {
+    fn evict_oldest(&mut self) -> bool {
+        let Some((file, bytes)) = self.retained.pop_front() else {
+            return false;
+        };
+        // Close/unlink before releasing its allowance.
+        drop(file);
+        self.bytes -= bytes;
+        true
+    }
+}
+
+/// RAII reservation: cancellation, abandoned drains and complete small results
+/// delete their active file and release all quota. Only truncated final results
+/// transfer ownership to the tool's bounded retained queue, never `keep()`.
+#[cfg(any(unix, windows))]
+struct Spill {
+    owner: Arc<Mutex<SpillStore>>,
+    file: Option<tempfile::NamedTempFile>,
+    charged_bytes: usize,
+}
+
+#[cfg(any(unix, windows))]
+impl Spill {
+    fn start(owner: &Arc<Mutex<SpillStore>>) -> std::io::Result<Option<Self>> {
+        let mut store = owner.lock().unwrap_or_else(|poison| poison.into_inner());
+        while store.retained.len() + store.active_files >= MAX_SPILL_FILES {
+            if !store.evict_oldest() {
+                return Ok(None);
+            }
+        }
+        let file = tempfile::Builder::new()
+            .prefix("octet-bash-")
+            .suffix(".log")
+            .tempfile()?;
+        store.active_files += 1;
+        Ok(Some(Self {
+            owner: Arc::clone(owner),
+            file: Some(file),
+            charged_bytes: 0,
+        }))
+    }
+
+    /// Reserve before writing, including possible partial writes on I/O failure.
+    /// Returns false when only a prefix could fit in the storage allowance.
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<bool> {
+        use std::io::Write;
+        let wanted = bytes.len().min(MAX_SPILL_BYTES - self.charged_bytes);
+        let granted = {
+            let mut store = self
+                .owner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            while store.bytes + wanted > MAX_RETAINED_SPILL_BYTES {
+                if !store.evict_oldest() {
+                    break;
+                }
+            }
+            let granted = wanted.min(MAX_RETAINED_SPILL_BYTES - store.bytes);
+            store.bytes += granted;
+            self.charged_bytes += granted;
+            granted
+        };
+        self.file.as_mut().unwrap().write_all(&bytes[..granted])?;
+        Ok(granted == bytes.len())
+    }
+
+    fn retain(mut self) -> (PathBuf, bool) {
+        let file = self.file.take().unwrap();
+        let sync_failed = file.as_file().sync_data().is_err();
+        let path = file.path().to_owned();
+        let mut store = self
+            .owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        store.active_files -= 1;
+        store.retained.push_back((file, self.charged_bytes));
+        (path, sync_failed)
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl Drop for Spill {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            drop(file);
+            let mut store = self
+                .owner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            store.active_files -= 1;
+            store.bytes -= self.charged_bytes;
+        }
+    }
+}
+
 /// Byte-bounded stream capture keeping the head and tail halves of the budget.
 #[cfg(any(unix, windows))]
 struct Capture {
@@ -983,9 +1124,10 @@ struct Capture {
     tail: VecDeque<u8>,
     total_bytes: usize,
     truncated: bool,
-    spill: Option<tempfile::NamedTempFile>,
+    spill: Option<Spill>,
     spill_path: Option<PathBuf>,
     spill_error: bool,
+    spill_truncated: bool,
 }
 
 #[cfg(any(unix, windows))]
@@ -999,6 +1141,7 @@ impl Capture {
             spill: None,
             spill_path: None,
             spill_error: false,
+            spill_truncated: false,
         }
     }
 
@@ -1020,12 +1163,10 @@ impl Capture {
             self.tail.drain(..self.tail.len() - tail_cap);
         }
         self.truncated = true;
-        if let Some(file) = self.spill.take() {
-            if file.as_file().sync_data().is_err() { self.spill_error = true; }
-            match file.keep() {
-                Ok((_file,path)) => self.spill_path = Some(path),
-                Err(_) => self.spill_error = true,
-            }
+        if let Some(spill) = self.spill.take() {
+            let (path, sync_failed) = spill.retain();
+            self.spill_path = Some(path);
+            self.spill_error |= sync_failed;
         }
     }
 
@@ -1050,9 +1191,19 @@ impl Capture {
         let mut text = self.render_capture(name);
         if self.truncated {
             if let Some(path) = &self.spill_path {
-                text.push_str(&format!("\n{}_output_path={}", if self.spill_error { "partial" } else { "full" }, path.display()));
+                let kind = if self.spill_error || self.spill_truncated {
+                    "partial"
+                } else {
+                    "full"
+                };
+                text.push_str(&format!("\n{kind}_output_path={}", path.display()));
             }
-            if self.spill_error { text.push_str("\nspill_error=true (full output could not be retained)"); }
+            if self.spill_truncated {
+                text.push_str("\nspill_truncated=true");
+            }
+            if self.spill_error {
+                text.push_str("\nspill_error=true (full output could not be retained)");
+            }
         }
         text
     }
@@ -1106,6 +1257,7 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     progress: &ToolProgressSink,
     stream: OutputStream,
     checkpoints: Option<&BashCheckpoints>,
+    spills: &Arc<Mutex<SpillStore>>,
 ) -> Capture {
     let Some(reader) = reader.as_mut() else {
         return Capture::empty();
@@ -1118,17 +1270,25 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
-            Err(_) => { capture.spill_error = true; break; },
+            Err(_) => {
+                capture.spill_error = true;
+                break;
+            }
             Ok(n) => {
-                if capture.spill.is_none() && !capture.spill_error {
-                    match tempfile::Builder::new().prefix("octet-bash-").suffix(".log").tempfile() {
-                        Ok(file) => capture.spill = Some(file),
-                        Err(_) => capture.spill_error = true,
+                if !capture.spill_error && !capture.spill_truncated {
+                    if capture.spill.is_none() {
+                        match Spill::start(spills) {
+                            Ok(Some(spill)) => capture.spill = Some(spill),
+                            Ok(None) => capture.spill_truncated = true,
+                            Err(_) => capture.spill_error = true,
+                        }
                     }
-                }
-                if let Some(file) = &mut capture.spill {
-                    use std::io::Write;
-                    if file.write_all(&buf[..n]).is_err() { capture.spill_error = true; }
+                    if let Some(spill) = &mut capture.spill {
+                        match spill.append(&buf[..n]) {
+                            Ok(complete) => capture.spill_truncated = !complete,
+                            Err(_) => capture.spill_error = true,
+                        }
+                    }
                 }
                 progress.output(stream, Bytes::copy_from_slice(&buf[..n]));
                 capture.total_bytes += n;
@@ -1230,6 +1390,235 @@ mod tests {
         }
     }
 
+    async fn capture_repeated(tool: &BashTool, bytes: usize, budget: usize) -> Capture {
+        let mut reader = Some(tokio::io::repeat(b'x').take(bytes as u64));
+        read_bounded_with_progress(
+            &mut reader,
+            budget,
+            &ToolProgressSink::null(),
+            OutputStream::Stdout,
+            None,
+            &tool.spills,
+        )
+        .await
+    }
+
+    fn spill_path(text: &str, kind: &str) -> PathBuf {
+        let prefix = format!("{kind}_output_path=");
+        PathBuf::from(
+            text.lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn spill_caps_each_stream_and_labels_full_versus_partial_prefixes() {
+        for bytes in [MAX_SPILL_BYTES, MAX_SPILL_BYTES + 8192] {
+            let tool = BashTool::default();
+            let mut capture = capture_repeated(&tool, bytes, 1024).await;
+            // Still drain/count every byte after the on-disk prefix fills.
+            assert_eq!(capture.total_bytes, bytes);
+            capture.fit_to_budget(1024);
+            let text = capture.render("stdout");
+            let limited = bytes > MAX_SPILL_BYTES;
+            let path = spill_path(&text, if limited { "partial" } else { "full" });
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                MAX_SPILL_BYTES as u64
+            );
+            assert_eq!(text.contains("spill_truncated=true"), limited);
+            assert_eq!(text.contains("full_output_path="), !limited);
+            assert!(!text.contains("spill_error=true"));
+            assert_eq!(tool.spills.lock().unwrap().bytes, MAX_SPILL_BYTES);
+            drop(capture);
+            assert!(path.exists(), "final result must outlive its capture");
+            drop(tool);
+            assert!(!path.exists(), "tool owns retained spill cleanup");
+        }
+    }
+
+    #[tokio::test]
+    async fn spill_small_output_is_exact_and_deletes_its_provisional_file() {
+        let tool = BashTool::default();
+        let bytes = b"one\ntwo\n\n";
+        let mut reader = Some(&bytes[..]);
+        let mut capture = read_bounded_with_progress(
+            &mut reader,
+            bytes.len(),
+            &ToolProgressSink::null(),
+            OutputStream::Stdout,
+            None,
+            &tool.spills,
+        )
+        .await;
+        let path = capture
+            .spill
+            .as_ref()
+            .unwrap()
+            .file
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_owned();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        capture.fit_to_budget(bytes.len());
+        assert_eq!(capture.head, bytes);
+        assert_eq!(
+            capture.render("stdout"),
+            "stdout: 2 lines\none\ntwo\n\ncomplete_stdout=true"
+        );
+        assert!(!path.exists());
+        let store = tool.spills.lock().unwrap();
+        assert_eq!(
+            (store.bytes, store.active_files, store.retained.len()),
+            (0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn spill_aggregate_limit_evicts_oldest_retained_files() {
+        let tool = BashTool::default();
+        let mut paths = Vec::new();
+        for _ in 0..MAX_RETAINED_SPILL_BYTES / MAX_SPILL_BYTES {
+            let mut capture = capture_repeated(&tool, MAX_SPILL_BYTES, 1024).await;
+            capture.fit_to_budget(1024);
+            paths.push(spill_path(&capture.render("stdout"), "full"));
+        }
+        assert!(paths.iter().all(|path| path.exists()));
+        assert_eq!(tool.spills.lock().unwrap().bytes, MAX_RETAINED_SPILL_BYTES);
+        let mut capture = capture_repeated(&tool, 2048, 1024).await;
+        capture.fit_to_budget(1024);
+        let newest = spill_path(&capture.render("stdout"), "full");
+        assert!(!paths[0].exists());
+        assert!(paths[1..].iter().all(|path| path.exists()));
+        assert_eq!(
+            tool.spills.lock().unwrap().bytes,
+            MAX_RETAINED_SPILL_BYTES - MAX_SPILL_BYTES + 2048
+        );
+        drop(tool);
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert!(!newest.exists());
+    }
+
+    #[tokio::test]
+    async fn spill_active_captures_share_the_aggregate_limit_and_cleanup() {
+        let tool = BashTool::default();
+        let mut active = Vec::new();
+        let mut paths = Vec::new();
+        for _ in 0..MAX_RETAINED_SPILL_BYTES / MAX_SPILL_BYTES {
+            let capture = capture_repeated(&tool, MAX_SPILL_BYTES, 1024).await;
+            paths.push(
+                capture
+                    .spill
+                    .as_ref()
+                    .unwrap()
+                    .file
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .to_owned(),
+            );
+            active.push(capture);
+        }
+        let mut overflow = capture_repeated(&tool, 4096, 1024).await;
+        assert_eq!(overflow.total_bytes, 4096);
+        overflow.fit_to_budget(1024);
+        let text = overflow.render("stdout");
+        let path = spill_path(&text, "partial");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert!(text.contains("spill_truncated=true"));
+        assert!(!text.contains("full_output_path="));
+        assert_eq!(tool.spills.lock().unwrap().bytes, MAX_RETAINED_SPILL_BYTES);
+        drop(active);
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert_eq!(tool.spills.lock().unwrap().bytes, 0);
+        assert_eq!(tool.spills.lock().unwrap().active_files, 0);
+        drop(tool);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn spill_file_count_limit_evicts_and_owners_are_isolated() {
+        let tool = BashTool::default();
+        let independent = BashTool::default();
+        let mut other = capture_repeated(&independent, 16, 8).await;
+        other.fit_to_budget(8);
+        let other_path = spill_path(&other.render("stdout"), "full");
+        let mut paths = Vec::new();
+        for _ in 0..=MAX_SPILL_FILES {
+            let mut capture = capture_repeated(&tool, 16, 8).await;
+            capture.fit_to_budget(8);
+            paths.push(spill_path(&capture.render("stdout"), "full"));
+        }
+        assert!(!paths[0].exists());
+        assert!(paths[1..].iter().all(|path| path.exists()));
+        assert_eq!(tool.spills.lock().unwrap().retained.len(), MAX_SPILL_FILES);
+        drop(tool);
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert!(other_path.exists());
+        drop(independent);
+        assert!(!other_path.exists());
+    }
+
+    #[tokio::test]
+    async fn spill_active_file_count_limit_still_drains_without_a_path() {
+        let tool = BashTool::default();
+        let mut active = Vec::new();
+        for _ in 0..MAX_SPILL_FILES {
+            active.push(capture_repeated(&tool, 16, 8).await);
+        }
+        let mut overflow = capture_repeated(&tool, 4096, 1024).await;
+        overflow.fit_to_budget(1024);
+        let text = overflow.render("stdout");
+        assert_eq!(overflow.total_bytes, 4096);
+        assert!(!text.contains("_output_path="));
+        assert!(text.contains("spill_truncated=true"));
+        assert_eq!(tool.spills.lock().unwrap().active_files, MAX_SPILL_FILES);
+        drop(active);
+        assert_eq!(tool.spills.lock().unwrap().active_files, 0);
+        assert_eq!(tool.spills.lock().unwrap().bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn spill_cancelled_reader_releases_in_flight_quota() {
+        use tokio::io::AsyncWriteExt;
+        let tool = BashTool::default();
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        writer.write_all(b"unfinished").await.unwrap();
+        let mut reader = Some(reader);
+        let progress = ToolProgressSink::null();
+        let mut reading = Box::pin(read_bounded_with_progress(
+            &mut reader,
+            1024,
+            &progress,
+            OutputStream::Stdout,
+            None,
+            &tool.spills,
+        ));
+        assert!(futures_util::poll!(&mut reading).is_pending());
+        assert_eq!(tool.spills.lock().unwrap().active_files, 1);
+        assert_eq!(tool.spills.lock().unwrap().bytes, 10);
+        drop(reading);
+        let store = tool.spills.lock().unwrap();
+        assert_eq!(
+            (store.bytes, store.active_files, store.retained.len()),
+            (0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn spill_io_error_never_advertises_a_full_file() {
+        let tool = BashTool::default();
+        let mut capture = capture_repeated(&tool, 4096, 1024).await;
+        capture.spill_error = true;
+        capture.fit_to_budget(1024);
+        let text = capture.render("stdout");
+        assert!(spill_path(&text, "partial").exists());
+        assert!(text.contains("spill_error=true"));
+        assert!(!text.contains("full_output_path="));
+    }
+
     fn process_is_alive(pid: i32) -> bool {
         crate::extension_process::process_is_live_for_test(pid)
     }
@@ -1246,7 +1635,7 @@ mod tests {
     fn effect_validates_capabilities_and_arguments_before_approval() {
         let f = fixture();
         assert_eq!(
-            BashTool
+            BashTool::default()
                 .effect(&json!({"command": "printf ok"}), &f.ctx())
                 .unwrap(),
             ToolEffect::HostProcess
@@ -1260,11 +1649,11 @@ mod tests {
             json!({"command": "bad\0command"}),
         ] {
             assert!(
-                BashTool.effect(&arguments, &f.ctx()).is_err(),
+                BashTool::default().effect(&arguments, &f.ctx()).is_err(),
                 "{arguments}"
             );
         }
-        assert!(BashTool
+        assert!(BashTool::default()
             .effect(
                 &json!({"command": "x".repeat(MAX_BASH_COMMAND_BYTES + 1)}),
                 &f.ctx(),
@@ -1273,7 +1662,7 @@ mod tests {
 
         let mut disabled = fixture();
         disabled.sandbox.allow_shell = false;
-        let error = BashTool
+        let error = BashTool::default()
             .effect(&json!({"command": "printf ok"}), &disabled.ctx())
             .unwrap_err();
         assert!(error.message.contains("allow_shell=true"));
@@ -1284,7 +1673,7 @@ mod tests {
 
         disabled.sandbox.allow_shell = true;
         disabled.sandbox.allow_process = false;
-        let error = BashTool
+        let error = BashTool::default()
             .effect(&json!({"command": "printf ok"}), &disabled.ctx())
             .unwrap_err();
         assert!(error.message.contains("allow_process=true"));
@@ -1297,7 +1686,7 @@ mod tests {
     #[tokio::test]
     async fn every_command_uses_bash_semantics() {
         let f = fixture();
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 json!({"command": "printf '%s\\n' brace-{one,two} \"$BASH_VERSION\""}),
                 &f.ctx(),
@@ -1333,7 +1722,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
         f.sandbox.shell_path = Some(shell);
-        let out = BashTool
+        let out = BashTool::default()
             .execute(json!({"command": "printf 'command-output\\n'"}), &f.ctx())
             .await
             .unwrap();
@@ -1344,7 +1733,7 @@ mod tests {
     #[tokio::test]
     async fn successful_command_without_descendants_releases_its_registry_entry() {
         let f = fixture();
-        BashTool
+        BashTool::default()
             .execute(json!({"command": "printf '%s' $$ > leader.pid"}), &f.ctx())
             .await
             .unwrap();
@@ -1376,7 +1765,7 @@ mod tests {
             resource_owner: "bash-detached-descendant-test",
         };
 
-        let output = BashTool
+        let output = BashTool::default()
             .execute(
                 json!({
                     "command": r#"printf '%s' $$ > leader.pid
@@ -1450,7 +1839,7 @@ rm descendant.ready"#
             "python3 -c 'print(1)'",
             "env /bin/sh -c true",
         ] {
-            let err = BashTool
+            let err = BashTool::default()
                 .execute(json!({"command": command}), &ctx)
                 .await
                 .unwrap_err();
@@ -1473,7 +1862,7 @@ rm descendant.ready"#
             execution_scope: "bash-permission-test",
             resource_owner: "bash-permission-test",
         };
-        let err = BashTool
+        let err = BashTool::default()
             .execute(json!({"command": "true"}), &ctx)
             .await
             .unwrap_err();
@@ -1483,7 +1872,7 @@ rm descendant.ready"#
     #[tokio::test]
     async fn nonzero_exit_and_stderr_are_reported_as_an_error() {
         let f = fixture();
-        let error = BashTool
+        let error = BashTool::default()
             .execute(json!({"command": "echo oops >&2; exit 3"}), &f.ctx())
             .await
             .unwrap_err();
@@ -1509,7 +1898,7 @@ rm descendant.ready"#
             execution_scope: "bash-shared-budget-test",
             resource_owner: "bash-shared-budget-test",
         };
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 json!({"command": "i=0; while [ $i -lt 150 ]; do printf 'abcdefghij\\n'; i=$((i+1)); done"}),
                 &ctx,
@@ -1526,19 +1915,19 @@ rm descendant.ready"#
     async fn cwd_is_workspace_bounded() {
         let f = fixture();
         std::fs::create_dir(f.workspace.join("sub")).unwrap();
-        let out = BashTool
+        let out = BashTool::default()
             .execute(json!({"command": "pwd", "cwd": "sub"}), &f.ctx())
             .await
             .unwrap();
         assert!(out.text.contains("/sub"), "{}", out.text);
 
-        let err = BashTool
+        let err = BashTool::default()
             .execute(json!({"command": "pwd", "cwd": "../"}), &f.ctx())
             .await
             .unwrap_err();
         assert!(err.message.contains(".."), "{err}");
 
-        let err = BashTool
+        let err = BashTool::default()
             .execute(json!({"command": "pwd", "cwd": "missing"}), &f.ctx())
             .await
             .unwrap_err();
@@ -1562,7 +1951,7 @@ rm descendant.ready"#
             cancellation: Default::default(),
         };
 
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 json!({"command": "pwd", "cwd": outside.path().to_string_lossy()}),
                 &ctx,
@@ -1592,7 +1981,7 @@ rm descendant.ready"#
             execution_scope: "bash-output-test",
             resource_owner: "bash-output-test",
         };
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 json!({"command": "i=0; while [ $i -lt 2000 ]; do echo \"line $i\"; i=$((i+1)); done"}),
                 &ctx,
@@ -1631,7 +2020,7 @@ rm descendant.ready"#
             resource_owner: "bash-timeout-test",
         };
         let started = std::time::Instant::now();
-        let err = BashTool
+        let err = BashTool::default()
             .execute(
                 json!({"command": "printf 'partial-before-timeout\\n'; sleep 30"}),
                 &ctx,
@@ -1665,7 +2054,7 @@ rm descendant.ready"#
             resource_owner: "bash-per-call-timeout-test",
         };
         let started = std::time::Instant::now();
-        let err = BashTool
+        let err = BashTool::default()
             .execute(json!({"command": "sleep 30", "timeout_ms": 200}), &ctx)
             .await
             .unwrap_err();
@@ -1692,7 +2081,7 @@ rm descendant.ready"#
             resource_owner: "bash-escaped-pipe-test",
         };
         let started = std::time::Instant::now();
-        let error = BashTool
+        let error = BashTool::default()
             .execute(
                 json!({"command": "python3 -c 'import os,time; os.setsid(); open(\"escaped.pid\", \"w\").write(str(os.getpid())); time.sleep(30)' & sleep 30"}),
                 &ctx,
@@ -1729,7 +2118,8 @@ rm descendant.ready"#
 
         {
             let ctx = f.ctx();
-            let bash = BashTool.execute(args, &ctx);
+            let tool = BashTool::default();
+            let bash = tool.execute(args, &ctx);
             tokio::pin!(bash);
             let _ = tokio::time::timeout(Duration::from_millis(500), &mut bash).await;
         }

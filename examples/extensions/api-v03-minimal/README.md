@@ -1,15 +1,15 @@
 # api-v03-minimal executable extension
 
-This is the qualified API `0.3` reference extension. It is an ordinary local
+This is the retained canonical API `0.3` reference extension. It is an ordinary local
 process, not a Python SDK runtime: `extension.py` uses only the Python standard
 library and speaks the canonical JSON-RPC wire directly.
 
 ## Prerequisites
 
-- octet **0.7.6** with executable extensions enabled by policy;
+- source-built octet **0.8.0 RC** with executable extensions enabled by policy;
 - Python **3.9 or newer** available as `python3` (no third-party packages);
-- a host API **0.3** contract. The manifest's `requires_octet = "=0.7.6"`
-  intentionally rejects a different released host version.
+- a host API **0.3** contract. The manifest's `requires_octet = "=0.8.0"`
+  intentionally rejects a different host version.
 
 The process selects only the required API `0.3` capabilities and methods:
 `core`, `content_parts`, `request_cancellation`, `tool_call`, `initialize`,
@@ -85,16 +85,14 @@ generated API and cross-language fixture check remains:
 python3 scripts/generate-extension-api-v03.py --check
 ```
 
-For host-side qualification, run the Rust `api_v03_runnable` integration test
-from the repository's permitted build/test slot. It first verifies that this
-published manifest retains its exact `=0.7.6` runtime pin and rejects a
-nonmatching host. It then stages a **private temporary copy**, preserves the
-executable source bytes, extension version `0.1.0`, and API `0.3`, and changes
-only that copy's runtime requirement to the current crate's exact Cargo version.
-The ordinary host runs negotiation, tool, cancellation, and shutdown checks
-against the staged copy.
+For host-side qualification, run the `octet-agent` crate's `api_v03_runnable`
+integration test from the repository's permitted build/test slot. It verifies
+this source manifest's exact `=0.8.0` runtime pin and rejects a nonmatching host.
+It stages a **private temporary copy**, preserves the executable source bytes,
+extension version `0.1.0`, and API `0.3`, and sets only that copy's runtime
+requirement to the current crate's exact Cargo version. The ordinary host runs
+negotiation, tool, cancellation, and shutdown checks against the staged copy.
 
-A passing staged test on a newer development host is source/wire qualification,
-**not** evidence that the unchanged `0.7.6` release example installs or runs on
-that host. The published manifest, SDK distribution versions, and runtime-pin
-validation are not changed by the test.
+A passing staged test is source/wire qualification, **not** evidence of published
+0.8.0 assets or cross-version installability. The checked-in manifest and runtime
+pin validation are not changed by the test.

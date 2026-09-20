@@ -489,9 +489,10 @@ impl MouseRouter {
                 .capture
                 .or(self.press_target)
                 .expect("one gesture target is present");
-            if self.press_point.is_some_and(|point| {
-                point != (event.screen_x, event.screen_y)
-            }) {
+            if self
+                .press_point
+                .is_some_and(|point| point != (event.screen_x, event.screen_y))
+            {
                 self.press_moved = true;
                 self.last_click = None;
             }
@@ -735,10 +736,11 @@ mod tests {
         );
         let component: &dyn Component = &region;
         let dispatch = dispatch_mouse_event(component, &press(1, 1)).expect("handled");
-        assert_eq!(dispatch.result.capture, true);
-        assert_eq!(dispatch.target.component as *const dyn Component as *const (), {
-            component as *const dyn Component as *const ()
-        });
+        assert!(dispatch.result.capture);
+        assert_eq!(
+            dispatch.target.component as *const dyn Component as *const (),
+            { component as *const dyn Component as *const () }
+        );
         assert_eq!(*seen.borrow(), 1);
     }
 
@@ -754,7 +756,7 @@ mod tests {
 
     #[test]
     fn layout_dispatch_targets_the_deepest_component_and_retargets_coordinates() {
-        let seen: Rc<RefCell<Vec<(i32, i32, i32, i32)>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::new(RefCell::new(Vec::<(i32, i32, i32, i32)>::new()));
         let inner_seen = seen.clone();
         let inner = MouseRegion::new(
             Box::new(Lines::new(&["inner"])),
@@ -783,7 +785,8 @@ mod tests {
 
     #[test]
     fn capture_routes_drag_and_release_to_the_pressed_component() {
-        let seen: Rc<RefCell<Vec<(TuiMouseEventType, i32, i32)>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen: Rc<RefCell<Vec<(TuiMouseEventType, i32, i32)>>> =
+            Rc::new(RefCell::new(Vec::new()));
         let region_seen = seen.clone();
         let region = MouseRegion::new(
             Box::new(Lines::new(&["leaf"])),
@@ -811,9 +814,9 @@ mod tests {
         let routing = router.handle(&frame, &release(2, 6), now);
         assert!(routing.handled);
         assert!(
-            seen.borrow().iter().any(|(kind, x, y)| *kind == TuiMouseEventType::Drag
-                && *x == 2
-                && *y == 5),
+            seen.borrow()
+                .iter()
+                .any(|(kind, x, y)| *kind == TuiMouseEventType::Drag && *x == 2 && *y == 5),
             "the drag was retargeted into the captured component: {:?}",
             seen.borrow()
         );
@@ -852,7 +855,11 @@ mod tests {
         let _ = router.handle(&frame, &press(1, 0), now + Duration::from_millis(2_000));
         let _ = router.handle(&frame, &drag(1, 3), now + Duration::from_millis(2_010));
         let _ = router.handle(&frame, &release(1, 3), now + Duration::from_millis(2_020));
-        assert_eq!(*clicks.borrow(), vec![1, 2], "dragged releases are not clicks");
+        assert_eq!(
+            *clicks.borrow(),
+            vec![1, 2],
+            "dragged releases are not clicks"
+        );
 
         // A click after the window restarts at one.
         let _ = router.handle(&frame, &press(1, 0), now + Duration::from_millis(9_000));
@@ -978,14 +985,20 @@ mod tests {
             .with_wheel_delta(2);
         let routing = router.handle(&frame, &wheel, Instant::now());
         assert_eq!(routing.wheel_remaining, Some(0));
-        assert_eq!(views[0].scroll_top(), 2, "the wheel scrolled the view itself");
+        assert_eq!(
+            views[0].scroll_top(),
+            2,
+            "the wheel scrolled the view itself"
+        );
     }
 
     #[test]
     fn frame_dispatch_and_link_lookup_use_the_last_rendered_rows() {
         let mut stack = VStack::new();
         stack.push(Box::new(Lines::new(&["plain"])));
-        stack.push(Box::new(Lines::new(&["\x1b]8;;https://a.test\x07a\x1b]8;;\x07"])));
+        stack.push(Box::new(Lines::new(&[
+            "\x1b]8;;https://a.test\x07a\x1b]8;;\x07",
+        ])));
         let frame = test_frame(&stack, 20, 4);
         assert_eq!(frame.dispatch_at(&press(1, 1)).map(|_| ()), None);
         assert_eq!(

@@ -25,9 +25,8 @@ use crate::error::{AiError, Diagnostic, ProviderError};
 use crate::host_transport::{HostStreamModel, HostStreamTransport};
 use crate::stream::{CanonicalStreamAssembler, ResponseStream, StreamEvent};
 use crate::types::{
-    AssistantMessage, Capabilities, Endpoint, EndpointId, EndpointTransport, ModelId,
-    ModelLimits, ModelSpec, ModalitySet, Protocol, Request, Response, StopReason, ToolCallId,
-    Usage,
+    AssistantMessage, Capabilities, Endpoint, EndpointId, EndpointTransport, ModalitySet, ModelId,
+    ModelLimits, ModelSpec, Protocol, Request, Response, StopReason, ToolCallId, Usage,
 };
 
 /// Scripted assistant content for one faux response.
@@ -104,7 +103,11 @@ impl FauxToolCall {
     }
 
     /// Creates a tool call with an explicit id.
-    pub fn with_id(id: impl Into<String>, name: impl Into<String>, arguments: serde_json::Value) -> Self {
+    pub fn with_id(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -334,10 +337,8 @@ impl FauxProvider {
 
     /// Registers this provider as the host stream transport for its endpoint.
     pub fn register(&self, client: &AiClient) {
-        client.register_host_stream_transport(
-            self.model.endpoint.id.clone(),
-            Arc::new(self.clone()),
-        );
+        client
+            .register_host_stream_transport(self.model.endpoint.id.clone(), Arc::new(self.clone()));
     }
 
     fn lock(&self) -> MutexGuard<'_, FauxInner> {
@@ -506,7 +507,11 @@ fn message_events(
         index += 1;
     }
     if message.usage != Usage::default() {
-        push(&mut assembler, &mut events, StreamEvent::Usage(message.usage));
+        push(
+            &mut assembler,
+            &mut events,
+            StreamEvent::Usage(message.usage),
+        );
     }
     let stop_reason = match message.stop_reason {
         Some(reason) => reason,
@@ -607,10 +612,9 @@ impl HostStreamTransport for FauxProvider {
     ) -> Result<ResponseStream, AiError> {
         let mut inner = self.lock();
         inner.deferred_fetch_count += 1;
-        let entry = inner
-            .deferred
-            .get_mut(&handle.id)
-            .ok_or_else(|| provider_failure(format!("unknown faux deferred response: {}", handle.id)))?;
+        let entry = inner.deferred.get_mut(&handle.id).ok_or_else(|| {
+            provider_failure(format!("unknown faux deferred response: {}", handle.id))
+        })?;
         if entry.handle.provider != handle.provider
             || entry.handle.model_id != handle.model_id
             || entry.handle.api != handle.api

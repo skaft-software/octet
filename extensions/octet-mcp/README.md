@@ -1,9 +1,10 @@
 # octet-mcp
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Source distribution: 0.8.0 (release candidate).** This checkout and local
+archives require exactly octet 0.8.0. Catalog commands below require matching
+published assets; no 0.8.0 publication is claimed. Use a
+[source-built host](../../docs/installation.md#build-from-a-checkout) with a
+reviewed source checkout or local archive until matching assets are published.
 
 Connect explicitly configured [MCP](https://modelcontextprotocol.io/) tool servers
 to octet. Start with a local stdio server you have reviewed and installed
@@ -32,8 +33,8 @@ paths with your reviewed local paths. Protect the file with `chmod 600`.
 }
 ```
 
-With [octet 0.7.6 installed](../../docs/installation.md) and Python 3.9+ on
-`PATH`, install the matching signed public bundle and validate your configuration:
+With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout), Python 3.9+
+on `PATH`, and verified matching published assets, the catalog path is:
 
 ```console
 octet extension install octet-mcp
@@ -72,7 +73,7 @@ same semantic state used by the TUI and Serve.
 A local server runs with your OS authority. Neither configuration nor tool
 approval is a sandbox. Server trust does not approve every tool: only an exact,
 uncontradicted JSON `readOnlyHint: true` gets read-only classification. Unknown
-or destructive calls require host policy. The octet `0.7.6` coding product does
+or destructive calls require host policy. The octet `0.8.0` coding product does
 not issue approvals for those calls, so they fail closed with a tool error.
 Calls are never automatically replayed after an ambiguous failure; cancellation
 does not promise rollback.
@@ -100,8 +101,8 @@ and ambient discovery are unsupported.
 
 ## Reference
 
-The bundle requires exactly octet `0.7.6`; its API remains `0.2`. The following
-is a retained bundled-runtime contract, not a current SDK authoring guide.
+The bundle requires exactly octet `0.8.0` and uses API `0.4`. The following
+is a retained bundled-runtime contract, not a general SDK authoring guide.
 
 - <a id="security-and-authority"></a>[Security and authority](REFERENCE.md#security-and-authority).
   - <a id="experimental-streamable-http-gate"></a>[Experimental Streamable HTTP gate](REFERENCE.md#experimental-streamable-http-gate).

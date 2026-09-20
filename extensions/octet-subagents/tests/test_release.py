@@ -25,8 +25,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertIsNotNone(tomllib)
         manifest = tomllib.loads((ROOT / "extension.toml").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "octet-subagents")
-        self.assertEqual(manifest["version"], "0.7.6")
-        self.assertEqual(manifest["api_version"], "0.2")
+        self.assertEqual(manifest["version"], "0.8.0")
+        self.assertEqual(manifest["api_version"], "0.4")
         self.assertEqual(manifest["requires_octet"], "=0.8.0")
         self.assertEqual(manifest["entrypoint"]["command"], "octet-subagents")
         self.assertEqual(manifest["capabilities"]["filesystem"], "none")
@@ -102,7 +102,7 @@ class ReleaseTests(unittest.TestCase):
         messages = [json.loads(line) for line in completed.stdout.splitlines() if line]
         initialized = next(message for message in messages if message.get("id") == 1)
         shutdown = next(message for message in messages if message.get("id") == 900)
-        self.assertEqual(initialized["result"]["api_version"], "0.2")
+        self.assertEqual(initialized["result"]["api_version"], "0.4")
         self.assertIn("agent_sessions", initialized["result"]["protocol"]["features"])
         self.assertEqual(shutdown["result"], {})
         self.assertTrue(os.access(ROOT / "octet-subagents", os.X_OK))
@@ -110,7 +110,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_release_archive_has_one_regular_portable_root(self):
         with tempfile.TemporaryDirectory() as directory:
-            archive = Path(directory) / "octet-subagents-0.7.6.tar.gz"
+            archive = Path(directory) / "octet-subagents-0.8.0.tar.gz"
             with tarfile.open(archive, "w:gz") as bundle:
                 for path in sorted(ROOT.rglob("*")):
                     if "__pycache__" in path.parts or ".pytest_cache" in path.parts:
@@ -237,7 +237,7 @@ class ReleaseTests(unittest.TestCase):
             "completion mailbox claim/ack",
             "presentation/update",
             "/subagents",
-            "host binds API `0.2` command requests",
+            "host binds API `0.4` command requests",
             "complete process-host rebuild creates a new service boundary",
             "release-smoke.py",
         ):

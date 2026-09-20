@@ -19,11 +19,12 @@ the host scanner, not the model, owns discovery and classification.
    package needs targeted inspection.
 2. Never read Pi credential/model stores, install dependencies, execute Pi
    package code, or send setup contents to a network service.
-3. Treat `direct` resources as already portable, `bridge` resources as
-   candidates for `octet pi install PATH`, and `native_port`/`manual`/`blocked`
-   resources as explicit residual work.
-4. Only link a source after the user has reviewed it. `octet pi install PATH`
-   creates an inert wrapper; it does not enable or trust the process.
-5. Report the exact source path, compatibility classification, unsupported
-   surfaces, and the enable/trust command. Do not claim that an extension is
-   compatible until `/extensions status` shows a healthy process.
+3. Treat `direct` resources as portable candidates requiring review. `bridge`
+   is a historical scanner label, not an execution path. Pi extensions cannot
+   run unchanged; `native_port`/`manual`/`blocked` need explicit residual work.
+4. Preview portable setup import with `octet migrate import pi --dry-run`.
+   Apply only after explicit user approval; never infer permission to install,
+   enable, trust, or execute code from an inventory result.
+5. Report source paths, classifications, unsupported surfaces, and the next
+   bounded review or porting step. Keep native provider configuration separate
+   from Pi extension compatibility. A healthy octet process is not Pi parity.

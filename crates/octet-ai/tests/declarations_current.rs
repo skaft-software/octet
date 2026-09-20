@@ -15,11 +15,12 @@ use octet_ai::declarations::bedrock::{
 };
 use octet_ai::declarations::codex::{
     effective_codex_connect_timeout_ms, normalize_codex_timeout_ms, resolve_codex_transport,
-    CodexTransport, CodexTransportReason, CodexWebSocketDebugStats, MAX_CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS,
+    CodexTransport, CodexTransportReason, CodexWebSocketDebugStats,
+    MAX_CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS,
 };
 use octet_ai::declarations::radius::{
-    normalize_radius_gateway_url, parse_radius_gateway_config, radius_config_url,
-    radius_config_is_stale, DEFAULT_RADIUS_GATEWAY, MAX_RADIUS_CONFIG_BYTES,
+    normalize_radius_gateway_url, parse_radius_gateway_config, radius_config_is_stale,
+    radius_config_url, DEFAULT_RADIUS_GATEWAY, MAX_RADIUS_CONFIG_BYTES,
 };
 use octet_ai::declarations::{
     AnthropicCompatPreset, AnthropicFallbackCost, AnthropicFallbackModel, DeclarationError,
@@ -30,7 +31,10 @@ use serde_json::json;
 
 #[test]
 fn radius_gateway_discovery_is_bounded_credential_free_and_normalized() {
-    assert_eq!(normalize_radius_gateway_url(" radius.pi.dev/ "), DEFAULT_RADIUS_GATEWAY);
+    assert_eq!(
+        normalize_radius_gateway_url(" radius.pi.dev/ "),
+        DEFAULT_RADIUS_GATEWAY
+    );
     assert_eq!(
         radius_config_url("radius.pi.dev").unwrap().as_str(),
         "https://radius.pi.dev/v1/config"
@@ -59,7 +63,12 @@ fn radius_gateway_discovery_is_bounded_credential_free_and_normalized() {
     assert_eq!(config.models.len(), 1);
     assert_eq!(config.ignored_models, 0);
     assert!(radius_config_is_stale(&config, None, 1_000, 60_000));
-    assert!(!radius_config_is_stale(&config, Some(999_000), 1_000_000, 60_000));
+    assert!(!radius_config_is_stale(
+        &config,
+        Some(999_000),
+        1_000_000,
+        60_000
+    ));
     let oversized = vec![b' '; MAX_RADIUS_CONFIG_BYTES + 1];
     assert!(declaration_error(parse_radius_gateway_config(&oversized)));
     assert!(declaration_error(parse_radius_gateway_config(
@@ -69,10 +78,14 @@ fn radius_gateway_discovery_is_bounded_credential_free_and_normalized() {
 
 #[test]
 fn bedrock_profile_arn_regions_drive_endpoint_and_signing_scope_together() {
-    let model = "arn:aws:bedrock:ap-southeast-2:123456789012:application-inference-profile/profile-1";
+    let model =
+        "arn:aws:bedrock:ap-southeast-2:123456789012:application-inference-profile/profile-1";
     let arn = parse_bedrock_arn(model).unwrap();
     assert!(arn.is_application_inference_profile());
-    assert_eq!(bedrock_model_region(model).as_deref(), Some("ap-southeast-2"));
+    assert_eq!(
+        bedrock_model_region(model).as_deref(),
+        Some("ap-southeast-2")
+    );
     assert_eq!(
         resolve_bedrock_region(
             Some("us-east-1"),
@@ -96,15 +109,26 @@ fn bedrock_profile_arn_regions_drive_endpoint_and_signing_scope_together() {
         moved.as_str(),
         "https://bedrock-runtime.ap-southeast-2.amazonaws.com/"
     );
-    assert_eq!(bedrock_runtime_host("ap-southeast-2", false), "bedrock-runtime.ap-southeast-2.amazonaws.com");
     assert_eq!(
-        bedrock_endpoint_region(&"https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com/".parse().unwrap())
-            .as_deref(),
+        bedrock_runtime_host("ap-southeast-2", false),
+        "bedrock-runtime.ap-southeast-2.amazonaws.com"
+    );
+    assert_eq!(
+        bedrock_endpoint_region(
+            &"https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com/"
+                .parse()
+                .unwrap()
+        )
+        .as_deref(),
         Some("us-gov-west-1")
     );
     assert_eq!(
-        resolve_bedrock_region(None, "anthropic.claude-3-5-sonnet-20240620-v1:0", &"https://proxy.internal/".parse().unwrap())
-            .as_deref(),
+        resolve_bedrock_region(
+            None,
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
+            &"https://proxy.internal/".parse().unwrap()
+        )
+        .as_deref(),
         Some(DEFAULT_BEDROCK_REGION)
     );
     for malformed in [
@@ -127,7 +151,12 @@ fn codex_transport_selection_is_per_request_and_endpoint_declared() {
     let resolved = resolve_codex_transport(CodexTransport::WebSocketCached, ws, false, false);
     assert_eq!(resolved.transport, CodexTransport::WebSocket);
     assert_eq!(resolved.reason, CodexTransportReason::NoSession);
-    let resolved = resolve_codex_transport(CodexTransport::WebSocket, EndpointTransport::Http, false, true);
+    let resolved = resolve_codex_transport(
+        CodexTransport::WebSocket,
+        EndpointTransport::Http,
+        false,
+        true,
+    );
     assert_eq!(resolved.transport, CodexTransport::Sse);
     assert_eq!(resolved.requested, CodexTransport::WebSocket);
     assert_eq!(resolved.reason, CodexTransportReason::EndpointDeclaresHttp);
@@ -146,11 +175,17 @@ fn codex_transport_selection_is_per_request_and_endpoint_declared() {
     assert_eq!(encoded["codex_transport"], json!("websocket-cached"));
     assert_eq!(encoded["codex_connect_timeout_ms"], json!(2_500));
     let decoded: RequestOverrides = serde_json::from_value(encoded).unwrap();
-    assert_eq!(decoded.codex_transport, Some(CodexTransport::WebSocketCached));
+    assert_eq!(
+        decoded.codex_transport,
+        Some(CodexTransport::WebSocketCached)
+    );
     overrides.codex_connect_timeout_ms = Some(MAX_CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS + 1);
     assert!(declaration_error(overrides.validate()));
     assert!(normalize_codex_timeout_ms(Some(0)).unwrap() == Some(0));
-    assert_eq!(effective_codex_connect_timeout_ms(None).unwrap(), Some(15_000));
+    assert_eq!(
+        effective_codex_connect_timeout_ms(None).unwrap(),
+        Some(15_000)
+    );
     assert_eq!(effective_codex_connect_timeout_ms(Some(0)).unwrap(), None);
 }
 

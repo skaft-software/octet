@@ -298,6 +298,9 @@ async fn a_run_ending_on_a_tool_batch_still_reports_the_tool_usage() {
     assert!(matches!(output.reason, FinishReason::Completed));
     // The run ends on the tool batch, after the last `TurnFinished`, so the
     // settled output folds the trailing tool usage into the billed total.
-    assert_eq!(output.usage.total_tokens, provider_usage.total_tokens + tool_usage.total_tokens);
+    assert_eq!(
+        output.usage.total_tokens,
+        provider_usage.total_tokens + tool_usage.total_tokens
+    );
     assert_eq!(output.usage.cache_read_tokens, tool_usage.cache_read_tokens);
 }

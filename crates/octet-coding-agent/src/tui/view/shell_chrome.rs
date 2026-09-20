@@ -93,10 +93,15 @@ fn render_extension_line(state: &ShellState, text: &str, role: Option<&str>, wid
 fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<String>) {
     let mut above = state
         .extension_ui
-        .above_editor
+        .header
         .iter()
         .map(|line| render_extension_line(state, &line.text, line.style_role.as_deref(), width))
         .collect::<Vec<_>>();
+    above.extend(
+        state.extension_ui.above_editor.iter().map(|line| {
+            render_extension_line(state, &line.text, line.style_role.as_deref(), width)
+        }),
+    );
     above.extend(
         state.extension_ui.statuses.iter().map(|line| {
             render_extension_line(state, &line.text, line.style_role.as_deref(), width)
@@ -130,12 +135,17 @@ fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<Stri
             ));
         }
     }
-    let below = state
+    let mut below = state
         .extension_ui
         .below_editor
         .iter()
         .map(|line| render_extension_line(state, &line.text, line.style_role.as_deref(), width))
-        .collect();
+        .collect::<Vec<_>>();
+    below.extend(
+        state.extension_ui.footer.iter().map(|line| {
+            render_extension_line(state, &line.text, line.style_role.as_deref(), width)
+        }),
+    );
     (above, below)
 }
 

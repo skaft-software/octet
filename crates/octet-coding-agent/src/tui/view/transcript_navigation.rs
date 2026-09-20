@@ -523,14 +523,11 @@ impl ShellState {
         let mut nav = self.transcript_navigation.borrow_mut();
         let scrollbar = if nav.mode != TranscriptScrollbar::Hidden && rows > 0 && width > 1 {
             let thumb_rows = (rows.saturating_mul(rows) / length.max(rows)).clamp(1, rows);
-            let thumb_top = if maximum == 0 {
-                0
-            } else {
-                maximum
-                    .saturating_sub(scroll)
-                    .saturating_mul(rows - thumb_rows)
-                    / maximum
-            };
+            let thumb_top = maximum
+                .saturating_sub(scroll)
+                .saturating_mul(rows - thumb_rows)
+                .checked_div(maximum)
+                .unwrap_or(0);
             let visible = nav.mode == TranscriptScrollbar::Always
                 || (maximum > 0
                     && (nav.hover
@@ -956,11 +953,9 @@ impl InteractiveShell {
             {
                 let travel = bar.rows.saturating_sub(bar.thumb_rows);
                 let offset = usize::from(mouse.row).saturating_sub(grab).min(travel);
-                let top = if travel == 0 {
-                    0
-                } else {
-                    (offset.saturating_mul(bar.maximum) + travel / 2) / travel
-                };
+                let top = (offset.saturating_mul(bar.maximum) + travel / 2)
+                    .checked_div(travel)
+                    .unwrap_or(0);
                 nav.activity(now);
                 drop(nav);
                 state.pending_selection_anchor = None;
@@ -1046,7 +1041,7 @@ mod tests {
         let mut shell = InteractiveShell::test_shell();
         shell.set_size(80, 20);
         for index in 0..35 {
-            shell.notice(&format!("visible needle {index} and more text"));
+            shell.notice(format!("visible needle {index} and more text"));
         }
         shell.apply_edit(EditAction::Paste("preserved draft".into()));
         shell
@@ -1474,7 +1469,7 @@ mod tests {
         ));
         let mut shell = InteractiveShell::test_shell_with_theme(theme);
         for index in 0..50 {
-            shell.notice(&format!("needle {index}"));
+            shell.notice(format!("needle {index}"));
         }
         shell.apply_edit(EditAction::Paste("draft".into()));
         dispatch(&mut shell, key(KeyCode::PageUp, KeyModifiers::CONTROL));

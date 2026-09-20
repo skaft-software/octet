@@ -4,6 +4,7 @@ use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write as IoWrite};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -124,6 +125,10 @@ fn is_subagent_tool(name: &str) -> bool {
 const COMPACT_EXEC_OUTPUT_ROWS: usize = 5;
 /// Maximum physical rows one inline tool image can reserve inside its tool card.
 const MAX_TOOL_IMAGE_RENDER_ROWS: u16 = 16;
+/// Bounded wait for one renderer-thread suspension acknowledgement. The join
+/// that follows is the hard fence, so this only keeps a wedged frame from
+/// blocking the terminal handoff for longer than a couple of frames.
+const RENDERER_SUSPEND_ACK_DEADLINE: Duration = Duration::from_millis(250);
 
 /// Output from an interactive `!` shell command, stored as a collapsible
 /// block so the transcript is not overwhelmed by long command output.
@@ -1107,18 +1112,6 @@ impl SubagentStateGroup {
         !matches!(self, Self::Running)
     }
 
-    /// Next declared-state narrowing in the cycle `All -> Running -> Completed
-    /// -> Failed -> Stopped -> All`. The cycle is fixed rather than derived
-    /// from the current roster so the control never changes shape mid-run.
-    fn next_filter(self) -> Option<Self> {
-        match self {
-            Self::Running => Some(Self::Completed),
-            Self::Completed => Some(Self::Failed),
-            Self::Failed => Some(Self::Stopped),
-            Self::Stopped => None,
-        }
-    }
-
     fn filter_label(self) -> &'static str {
         self.declared()
     }
@@ -1836,6 +1829,11 @@ pub struct ShellExtensionUi {
     pub statuses: Vec<ShellExtensionUiLine>,
     pub above_editor: Vec<ShellExtensionUiLine>,
     pub below_editor: Vec<ShellExtensionUiLine>,
+    /// Extension-owned header surface lines, rendered above every other
+    /// extension chrome row.
+    pub header: Vec<ShellExtensionUiLine>,
+    /// Extension-owned footer surface lines, rendered below every composer row.
+    pub footer: Vec<ShellExtensionUiLine>,
     pub working: Option<ShellExtensionWorking>,
     pub hidden_thinking_label: Option<String>,
 }
@@ -3633,6 +3631,9 @@ pub struct InteractiveShell {
     render_tx: Arc<Mutex<Option<SyncSender<RenderCommand>>>>,
     render_thread: Option<JoinHandle<()>>,
     capture_mouse: bool,
+    /// Shared with the one input stream: while set, the host reads no raw bytes
+    /// because an extension grant owns the terminal.
+    terminal_ceded: Arc<AtomicBool>,
 }
 
 impl InteractiveShell {
@@ -3693,6 +3694,7 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(Some(render_tx))),
             render_thread: Some(render_thread),
             capture_mouse,
+            terminal_ceded: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -3724,6 +3726,53 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(None)),
             render_thread: None,
             capture_mouse: false,
+            terminal_ceded: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The shared parking flag for the host's one input stream.
+    pub fn terminal_input_parking(&self) -> Arc<AtomicBool> {
+        self.terminal_ceded.clone()
+    }
+
+    /// Park the host input stream: the raw terminal is ceded to an extension.
+    ///
+    /// The host stops reading raw bytes instead of racing the granted child on
+    /// `/dev/tty`; [`Self::release_terminal_input`] returns ownership.
+    pub fn cede_terminal_input(&self) {
+        self.terminal_ceded.store(true, Ordering::SeqCst);
+    }
+
+    /// Return input ownership to the host after a released or revoked grant.
+    pub fn release_terminal_input(&self) {
+        self.terminal_ceded.store(false, Ordering::SeqCst);
+    }
+
+    /// The process terminal dimensions the host currently renders at.
+    pub fn terminal_dimensions(&self) -> (u16, u16) {
+        *self.size.lock().expect("terminal size mutex poisoned")
+    }
+
+    /// Suspend the renderer with an explicit final-frame acknowledgement.
+    fn suspend_renderer(&mut self) {
+        let render_tx = self
+            .render_tx
+            .lock()
+            .expect("renderer sender mutex poisoned")
+            .take();
+        if let Some(render_tx) = render_tx {
+            let (acknowledge, acknowledged) = mpsc::channel();
+            if render_tx.send(RenderCommand::Suspend(acknowledge)).is_ok() {
+                // Bounded: the renderer owes exactly one acknowledgement, and
+                // the join below is the hard fence for a wedged frame.
+                let _ = acknowledged.recv_timeout(RENDERER_SUSPEND_ACK_DEADLINE);
+            }
+        }
+        if let Some(render_thread) = self.render_thread.take() {
+            let _ = render_thread.join();
+        }
+        if let Some(mut tui) = self.tui.take() {
+            tui.stop();
         }
     }
 
@@ -3748,7 +3797,7 @@ impl InteractiveShell {
     /// OAuth uses this so the hosted verification code and browser fallback are
     /// visible in an ordinary terminal.
     pub fn suspend(&mut self) {
-        self.stop_renderer();
+        self.suspend_renderer();
         force_restore();
     }
 
@@ -4017,7 +4066,7 @@ impl InteractiveShell {
         // finished run rejects further run events, but the live workers must
         // keep counting in place until they settle.
         if let AgentEvent::DelegationUpdated { snapshot } = event {
-            Self::apply_delegation_snapshot(&mut *state, snapshot);
+            Self::apply_delegation_snapshot(&mut state, snapshot);
         }
         let update = state.run.apply_event(id, event);
         if !update.accepted {
@@ -4043,6 +4092,11 @@ impl InteractiveShell {
         }
         match event {
             AgentEvent::ProviderUsageUncertain => state.usage_uncertain = true,
+            AgentEvent::RecoveredOutput { channel, text } => {
+                state.push_block(TranscriptBlock::Notice(format!(
+                    "Recovered partial {channel:?} from an interrupted attempt (not this answer):\n{text}"
+                )));
+            }
             AgentEvent::OutputDelta { channel, text } => {
                 if state.turn_generation_started_at.is_none() {
                     state.turn_generation_started_at = Some(Instant::now());
@@ -4498,6 +4552,7 @@ impl InteractiveShell {
 
     /// Add a locally submitted prompt immediately; Agent persistence follows
     /// only after `Agent::prompt` succeeds.
+    #[cfg(test)]
     pub fn on_prompt_submitted(&mut self, prompt: &str) {
         let composed = ComposedInput::from_text(prompt.to_owned());
         self.on_composed_prompt_submitted(&composed);
@@ -4580,6 +4635,12 @@ impl InteractiveShell {
         if !composed.is_empty() {
             self.state.borrow_mut().follow_up_queue.push_back(composed);
         }
+    }
+
+    /// Number of follow-up messages queued but not yet admitted to the Agent.
+    /// This is the exact queue `session/send_user_message` feeds.
+    pub fn queued_follow_up_len(&self) -> usize {
+        self.state.borrow().follow_up_queue.len()
     }
 
     /// Only authoritative completion or an explicit Escape dispatch arms the
@@ -5365,6 +5426,7 @@ impl InteractiveShell {
         true
     }
 
+    #[cfg(test)]
     pub fn pending_is_empty(&self) -> bool {
         self.state.borrow().editor.is_empty()
     }
@@ -5583,6 +5645,7 @@ impl InteractiveShell {
     /// owned by pinned chrome return `None`, so a footer or composer row can
     /// never be mistaken for transcript content. The caller owns activation:
     /// this reports the validated target and never opens or fetches anything.
+    #[cfg(test)]
     pub fn transcript_link_at_screen_cell(&self, row: u16, col: u16) -> Option<String> {
         let state = self.state.borrow();
         let chrome = shell_chrome(&state, state.size.0, Instant::now());
@@ -5924,49 +5987,6 @@ impl InteractiveShell {
     /// Toggle the one global transcript disclosure mode (ctrl+o).
     pub fn toggle_disclosure(&mut self) {
         self.toggle_verbose_tools();
-    }
-
-    /// Cycle the settled delegation event's declared-state narrowing:
-    /// `all -> running -> completed -> failed -> stopped -> all`. Display-only;
-    /// the roster the host reports is untouched, and the settled block stays
-    /// exactly where it happened. Returns the label now in effect (`"all"` when
-    /// no narrowing is active).
-    pub(crate) fn cycle_subagent_activity_filter(&mut self) -> &'static str {
-        let mut state = self.state.borrow_mut();
-        let next = match state
-            .subagent_activity
-            .as_ref()
-            .and_then(|view| view.state_filter)
-            .or_else(|| {
-                state.subagent_activity_block.and_then(|index| {
-                    state.transcript.get(index).and_then(|block| match block {
-                        TranscriptBlock::Tool(panel) => {
-                            panel.subagent_activity.as_ref()?.state_filter
-                        }
-                        _ => None,
-                    })
-                })
-            }) {
-            None => Some(SubagentStateGroup::Running),
-            Some(current) => current.next_filter(),
-        };
-        Self::apply_subagent_activity_controls(&mut state, |view| view.state_filter = next);
-        next.map_or("all", SubagentStateGroup::filter_label)
-    }
-
-    /// Cycle the settled delegation event's row ordering:
-    /// `state -> elapsed -> tokens -> state`. Ordering is display-only and
-    /// survives refreshes of the same event.
-    pub(crate) fn cycle_subagent_activity_sort(&mut self) -> &'static str {
-        let mut state = self.state.borrow_mut();
-        let current = state
-            .subagent_activity
-            .as_ref()
-            .map(|view| view.sort)
-            .unwrap_or_default();
-        let next = current.next();
-        Self::apply_subagent_activity_controls(&mut state, |view| view.sort = next);
-        next.label()
     }
 
     /// Apply one display-only control to every live copy of the delegation
@@ -7361,7 +7381,7 @@ mod terminal_text;
 mod tool_render;
 mod transcript_cache;
 mod transcript_navigation;
-pub use transcript_navigation::TranscriptScrollbar;
+
 mod transcript_commit;
 mod transcript_document;
 mod transcript_history;

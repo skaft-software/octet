@@ -2723,7 +2723,10 @@ mod tests {
 
             let command_id = format!("command-session-{index}");
             let prompt = command(session_id.clone(), &command_id, &format!("session-{index}"));
-            let first = supervisor.command(prompt.clone(), 100 + index as u64).await.unwrap();
+            let first = supervisor
+                .command(prompt.clone(), 100 + index as u64)
+                .await
+                .unwrap();
             let repeated = supervisor
                 .command(prompt, 200 + index as u64)
                 .await
@@ -2767,7 +2770,9 @@ mod tests {
             assert_eq!(gap.latest_available.sequence, 3);
             assert_eq!(snapshot.session_id, *session_id);
 
-            let ReplayResponse::Events { events, through, .. } = supervisor
+            let ReplayResponse::Events {
+                events, through, ..
+            } = supervisor
                 .replay_after(
                     session_id,
                     SessionCursor {

@@ -1,4 +1,4 @@
-# octet AI design
+# octet AI architecture
 
 ## Canonical model
 
@@ -203,8 +203,7 @@ even after provisional generation. The agent separates finite
 streamed-inference replacement and HTTP-admission budgets; neither authorizes
 blanket retry or establishes the number of accepted generations or charges.
 Transport fallback does not reset these logical-turn budgets. See the
-[recovery boundary](../tools.md#recovery-and-security) and
-[historical v0.7.4 recovery qualification](../qualification/v0.7.4-recovery.md).
+[recovery boundary](../tools.md#recovery-and-security).
 The coding product uses a
 fifteen-minute response-header default for built-in and custom routes; custom
 providers can override that startup allowance for their own cold-start profile.

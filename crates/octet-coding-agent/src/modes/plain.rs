@@ -163,7 +163,9 @@ fn outcome_text(outcome: &RunOutcome) -> String {
         // model for exit status and telemetry. It is never transcript wording,
         // so the two variants cannot drift apart.
         RunOutcome::Completed { elapsed, summary }
-        | RunOutcome::CompletedWithWarnings { elapsed, summary, .. } => {
+        | RunOutcome::CompletedWithWarnings {
+            elapsed, summary, ..
+        } => {
             let mut parts = vec![format!("[completed] {}", format_duration(*elapsed))];
             if summary.files_changed > 0 {
                 parts.push(format!(
@@ -521,7 +523,8 @@ async fn run_prompt(
                             }
                         }
                     }
-                    AgentEvent::SteeringDelivered { .. }
+                    AgentEvent::RecoveredOutput { .. }
+                    | AgentEvent::SteeringDelivered { .. }
                     | AgentEvent::FollowUpDelivered { .. }
                     | AgentEvent::DelegationUpdated { .. }
                     | AgentEvent::TurnStarted => {}

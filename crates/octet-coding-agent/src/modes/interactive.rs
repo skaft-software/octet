@@ -19,8 +19,8 @@ use octet_agent::extension_process::{
 };
 use octet_agent::{
     analyze_session_cache_stats, AgentCompactionMode, AgentError, AgentEvent, EffectBroker,
-    EffectIntent, EntryId, GoalDecision, GoalStatus, GoalTurnSource, Run, RunControl, Session,
-    ToolEffect, ToolProgress, ToolProgressSink,
+    EffectIntent, EntryId, GoalDecision, GoalStatus, GoalTurnSource, OutputChannel, Run,
+    RunControl, Session, ToolEffect, ToolProgress, ToolProgressSink,
 };
 use octet_ai::{Model, ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
@@ -34,9 +34,9 @@ use crate::app::{
     thinking_to_reasoning_with_subagents, App, Reconfig,
 };
 use crate::commands::{self, Command};
-use crate::compaction::{
-    attempt_compaction, context_window, estimate_next_request_tokens, CompactionOutcome,
-};
+#[cfg(test)]
+use crate::compaction::attempt_compaction;
+use crate::compaction::{context_window, estimate_next_request_tokens, CompactionOutcome};
 use crate::config::{CompactionMode, Config, SandboxPolicy, ThinkingLevel};
 use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
@@ -73,9 +73,45 @@ enum ControlIntent {
 
 type ControlFuture = Pin<Box<dyn Future<Output = Result<(), AgentError>>>>;
 
+/// The narrow broadcast seam that brackets one frontend-owned host dialog with
+/// exactly one `dialog/started`/`dialog/settled` pair, whatever its outcome.
+trait DialogLifecycleSink {
+    fn open_dialog(&self, dialog: &str);
+    fn close_dialog(&self, dialog: &str);
+}
+
+impl DialogLifecycleSink for crate::extensions::ExtensionLifecycleSnapshot {
+    fn open_dialog(&self, dialog: &str) {
+        crate::extensions::ExtensionLifecycleSnapshot::dialog_started(self, dialog);
+    }
+
+    fn close_dialog(&self, dialog: &str) {
+        crate::extensions::ExtensionLifecycleSnapshot::dialog_settled(self, dialog);
+    }
+}
+
+/// Present one host-owned dialog under a single dialog boundary.
+///
+/// The settled boundary is published on every outcome, including refusal,
+/// cancellation, picker errors, and shutdown, and it is published exactly once
+/// because the boundary is not part of the picker's own control flow.
+async fn present_host_dialog<S, F, T>(dialogs: &S, dialog: &'static str, present: F) -> T
+where
+    S: DialogLifecycleSink + ?Sized,
+    F: Future<Output = T>,
+{
+    dialogs.open_dialog(dialog);
+    let outcome = present.await;
+    dialogs.close_dialog(dialog);
+    outcome
+}
+
 struct InteractiveExtensionConfirmations<'a> {
     shell: &'a mut InteractiveShell,
     input: &'a mut EventStream,
+    /// Process handles captured before the extension runtime took its mutable
+    /// borrow, so a presented dialog can still announce its boundary.
+    dialogs: &'a crate::extensions::ExtensionLifecycleSnapshot,
 }
 
 impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionConfirmations<'_> {
@@ -138,7 +174,8 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
         extension: &'a str,
         request: &'a octet_agent::extension_process::ConfirmationRequest,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
-        Box::pin(async move {
+        let dialogs = self.dialogs;
+        Box::pin(present_host_dialog(dialogs, "confirm", async move {
             tokio::select! {
                 biased;
                 _ = crate::tui::terminal::wait_for_shutdown_signal() => {
@@ -151,7 +188,7 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
                     request,
                 ) => result,
             }
-        })
+        }))
     }
 
     fn input<'a>(
@@ -159,7 +196,8 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
         _extension: &'a str,
         request: &'a octet_agent::extension_process::ExtensionInputRequest,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + 'a>> {
-        Box::pin(async move {
+        let dialogs = self.dialogs;
+        Box::pin(present_host_dialog(dialogs, "input", async move {
             tokio::select! {
                 biased;
                 _ = crate::tui::terminal::wait_for_shutdown_signal() => {
@@ -167,7 +205,7 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
                 }
                 result = extension_input_picker(self.shell, self.input, request) => result,
             }
-        })
+        }))
     }
 }
 
@@ -508,8 +546,10 @@ where
                     reload_watcher.poll(reload, &crate::reload::SystemMetadata, now)
                 {
                     if observed.first_observation {
-                        shell.notice(reload_watcher.watches().arming_notice(reload.settings()));
-                        shell.render();
+                        if let Some(notice) = reload_watcher.watches().limit_notice() {
+                            shell.notice(notice);
+                            shell.render();
+                        }
                     }
                     if let Some(notice) = observed.cap_notice() {
                         shell.notice(notice);
@@ -523,17 +563,6 @@ where
                             reload.deadline().is_some(),
                             "queued live-reload evidence must carry a debounce deadline"
                         );
-                        shell.notice(format!(
-                            "live reload: {} changed path(s) in {}; queued until the idle prompt",
-                            observed.changed_paths,
-                            observed
-                                .queued_layers
-                                .iter()
-                                .map(|layer| layer.label())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
-                        shell.render();
                     }
                 }
                 if reload.is_due(now) {
@@ -953,6 +982,7 @@ async fn compact_interactively<S>(
     }
     shell.set_run_label("compacting…");
     shell.render();
+    app.executable_extensions.notify_compaction_started_all();
     let original_keep = app.config.compaction.keep_recent_tokens;
     if force {
         app.config.compaction.keep_recent_tokens = 1;
@@ -968,9 +998,20 @@ async fn compact_interactively<S>(
     // settled frame, including errors and cancellation of a held-open response.
     shell.set_run_label("idle");
     match result {
-        Some(Ok(outcome)) => report_compaction(shell, &outcome, app.agent.session()),
-        Some(Err(error)) => shell.error(format!("compaction failed: {error}")),
-        None => shell.notice("compaction cancelled · completed work is retained"),
+        Some(Ok(outcome)) => {
+            app.executable_extensions.notify_compaction_settled_all();
+            report_compaction(shell, &outcome, app.agent.session());
+        }
+        Some(Err(error)) => {
+            app.executable_extensions
+                .notify_compaction_failed_all(&error.to_string());
+            shell.error(format!("compaction failed: {error}"));
+        }
+        None => {
+            // A cancelled boundary still settles; nothing failed.
+            app.executable_extensions.notify_compaction_settled_all();
+            shell.notice("compaction cancelled · completed work is retained");
+        }
     }
     if let Some(message) = cost_limit_message(app) {
         shell.error(message);
@@ -1371,6 +1412,11 @@ fn observe_extension_terminal_event(
     executable_extensions: &mut crate::extensions::ExecutableExtensions,
     event: &Event,
 ) {
+    if executable_extensions.terminal_grant_is_active() {
+        // A ceded holder owns raw input. A second observer must never see the
+        // same keystroke, and the host must not answer a resize the child owns.
+        return;
+    }
     match event {
         Event::Resize(columns, rows) => {
             executable_extensions.observe_terminal_resize(*columns, *rows);
@@ -2012,7 +2058,7 @@ async fn handle_active_command<S, F>(
 ) -> anyhow::Result<()>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
-    F: Fn(&str, &str) -> Result<Option<Session>, AgentError>,
+    F: Fn(&str, &str) -> Result<Option<Session>, Box<AgentError>>,
 {
     match command {
         Command::Status => {
@@ -2307,6 +2353,7 @@ where
             ) {
                 shell.error(format!("{prefix} command was not approved"));
             } else {
+                extensions.notify_user_bash_all(&escape.command);
                 shell.on_local_command_submitted(&format!("{prefix}{}", escape.command));
                 let outcome = run_local_shell(
                     shell,
@@ -2391,6 +2438,7 @@ where
         goal_deadline,
         |principal: &str, reference: &str| {
             run.open_delegated_session_reference(principal, reference)
+                .map_err(Box::new)
         },
         input,
         queue,
@@ -2438,6 +2486,83 @@ fn confirmation_notice(tool_name: Option<&str>, confirmed: bool) -> String {
     )
 }
 
+/// The fan-out seam the run driver uses to publish assistant message
+/// boundaries without owning any batching decision.
+trait MessageLifecycleSink {
+    fn message_started(&mut self, message_id: &str);
+    fn message_delta(&mut self, delta: &str);
+    fn message_settled(&mut self, message_id: &str);
+}
+
+impl MessageLifecycleSink for crate::extensions::ExecutableExtensions {
+    fn message_started(&mut self, message_id: &str) {
+        self.notify_message_started_all(message_id);
+    }
+
+    fn message_delta(&mut self, delta: &str) {
+        self.push_message_delta_all(delta);
+    }
+
+    fn message_settled(&mut self, message_id: &str) {
+        self.notify_message_settled_all(message_id);
+    }
+}
+
+/// Producer-side state for one assistant message boundary.
+///
+/// One boundary covers one logical model turn: the first streamed text
+/// increment opens it, a provider retry keeps it open (the retry is the same
+/// logical turn), and the turn's terminal event settles it. Deltas are handed
+/// to the host verbatim; the host coalescer owns every batching and flush
+/// decision, so this producer never opens a second batching layer and never
+/// causes one host notification per streamed increment.
+#[derive(Default)]
+struct AssistantMessageLifecycle {
+    sequence: u64,
+    message_id: Option<String>,
+}
+
+impl AssistantMessageLifecycle {
+    /// Fold one run event into the assistant message boundary.
+    fn observe(&mut self, sink: &mut impl MessageLifecycleSink, event: &AgentEvent) {
+        match event {
+            AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text,
+            } => self.delta(sink, text),
+            // The turn commit and any terminal run outcome close an open
+            // boundary exactly once; settling an already-settled boundary is a
+            // no-op, and a turn that never streamed text never opens one.
+            AgentEvent::TurnFinished { .. } | AgentEvent::RunFinished { .. } => {
+                self.settle(sink);
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the boundary on the first non-empty text increment, then forward
+    /// the increment unchanged.
+    fn delta(&mut self, sink: &mut impl MessageLifecycleSink, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.message_id.is_none() {
+            self.sequence += 1;
+            let message_id = format!("assistant-{}", self.sequence);
+            sink.message_started(&message_id);
+            self.message_id = Some(message_id);
+        }
+        sink.message_delta(text);
+    }
+
+    /// Close the open boundary, if any.
+    fn settle(&mut self, sink: &mut impl MessageLifecycleSink) {
+        if let Some(message_id) = self.message_id.take() {
+            sink.message_settled(&message_id);
+        }
+    }
+}
+
 /// Drive one active frozen-Agent run. Control sends are queued locally, and
 /// their bounded sends are polled alongside input and the run stream. Channel
 /// admission is not a delivery acknowledgement; only SteeringDelivered is.
@@ -2475,6 +2600,7 @@ where
     extension_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut tool_calls =
         std::collections::HashMap::<ToolCallId, (String, serde_json::Value)>::new();
+    let mut assistant_message = AssistantMessageLifecycle::default();
 
     loop {
         if shell.close_requested() && !*quit_requested {
@@ -2759,7 +2885,7 @@ where
                                 input,
                                 executable_extensions,
                                 |principal: &str, reference: &str| {
-                                    run.open_delegated_session_reference(principal, reference)
+                                    run.open_delegated_session_reference(principal, reference).map_err(Box::new)
                                 },
                             )
                             .await
@@ -2784,7 +2910,7 @@ where
                             &context,
                             goal_deadline,
                             |principal: &str, reference: &str| {
-                                run.open_delegated_session_reference(principal, reference)
+                                run.open_delegated_session_reference(principal, reference).map_err(Box::new)
                             },
                             input,
                             pending_actions,
@@ -2968,6 +3094,7 @@ where
                         }
                     }
                     shell.on_run_event(run_id, &event);
+                    assistant_message.observe(executable_extensions, &event);
                     if let AgentEvent::ToolFinished { id, result, .. } = &event {
                         if let Some((name, arguments)) = tool_calls.remove(id) {
                             let (output, is_error) = match result {
@@ -3046,6 +3173,7 @@ where
                     }
                 }
                 None => {
+                    assistant_message.settle(executable_extensions);
                     shell.restore_queued_steering();
                     shell.fail_run(run_id, RUN_STREAM_LOST_MESSAGE);
                     shell.render();
@@ -3128,6 +3256,12 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
     );
     for message in app.executable_extensions.drain_events_for_shell(shell) {
         shell.notice(message);
+    }
+    if app
+        .executable_extensions
+        .apply_session_host_requests(&mut app.agent, &app.sessions)
+    {
+        shell.notice("extension updated the session metadata");
     }
     let _ = app.executable_extensions.sync_semantic_ui(shell);
     app.executable_extensions
@@ -3387,11 +3521,21 @@ async fn persist_configuration<T>(
     Ok(result)
 }
 
-async fn reload_resources(
-    app: App,
+async fn reload_resources<S>(
+    mut app: App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
-) -> anyhow::Result<App> {
+    input: &mut S,
+) -> anyhow::Result<(App, bool)>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    // Rebuilding drops the Agent and shuts down its delegated tasks. Check the
+    // original owner before recomposing resources or releasing any binding.
+    if refuse_resource_reload(&app, shell) {
+        return Ok((app, false));
+    }
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(shell, "the application resources are being reloaded");
     let _diagnostics = crate::output::defer_tui_diagnostics();
     let background = shell.theme().background();
     let (app, theme) = run_blocking_lifecycle(shell, input, "reloading resources…", move || {
@@ -3410,7 +3554,18 @@ async fn reload_resources(
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(shell, &app);
-    Ok(app)
+    Ok((app, true))
+}
+
+fn refuse_resource_reload(app: &App, shell: &mut InteractiveShell) -> bool {
+    let count = active_subagent_workers(app);
+    if count == 0 {
+        return false;
+    }
+    shell.notice(format!(
+        "reload refused: {count} host worker tasks remain attached; reload is unavailable while they are attached. Finish or stop the work, then exit and resume the session to replace the owning host. The current application and workers are unchanged"
+    ));
+    true
 }
 
 /// How one `/reload`-family caller wants the host layer handled.
@@ -3436,28 +3591,33 @@ enum HostPass {
 /// Returns `Some(plan)` when the caller must leave the TUI and call
 /// `plan.exec()` after the loop settles. `None` covers a resources-only reload
 /// and every refusal or validation failure, all of which leave this process
-/// fully live.
-async fn reload_resources_with_reexec(
+/// fully live. The final boolean reports whether the resource rebuild applied;
+/// a worker refusal returns the original App and must not be acknowledged as success.
+async fn reload_resources_with_reexec<S>(
     app: App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     reexec: Option<&mut crate::reexec::ReexecController>,
     host: HostPass,
-) -> anyhow::Result<(App, Option<crate::reexec::ReexecPlan>)> {
-    let mut app = reload_resources(app, shell, input).await?;
+) -> anyhow::Result<(App, Option<crate::reexec::ReexecPlan>, bool)>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let (mut app, applied) = reload_resources(app, shell, input).await?;
+    if !applied {
+        return Ok((app, None, false));
+    }
     request_extension_ui(shell, &mut app);
     let Some(reexec) = reexec else {
         // A host that cannot report its own executable keeps the resource
-        // reload and never re-execs.
-        shell.notice("instructions, prompts, skills, extensions, and keybindings reloaded");
-        return Ok((app, None));
+        // reload and never re-execs. The caller owns the completion notice.
+        return Ok((app, None, true));
     };
     if host == HostPass::ResourcesOnly {
         // Plain `/reload` never probes or replaces the process image. The host
         // layer needs `/reload --force` or `reload_host = true`; without that a
         // binary change is not even resolved here.
-        shell.notice("instructions, prompts, skills, extensions, and keybindings reloaded");
-        return Ok((app, None));
+        return Ok((app, None, true));
     }
     let session_id = match crate::app::bootstrap::terminal_goal_session_id(app.agent.session()) {
         Ok(id) => id,
@@ -3465,7 +3625,7 @@ async fn reload_resources_with_reexec(
             shell.error(format!(
                 "reload: the active session cannot be resumed: {error}"
             ));
-            return Ok((app, None));
+            return Ok((app, None, true));
         }
     };
     reexec.set_session_id(session_id);
@@ -3476,10 +3636,9 @@ async fn reload_resources_with_reexec(
     // exec, and the notice, and reports an update that is still in flight as its
     // own blocked notice instead of an opaque error.
     let observed = reexec.observe_generation();
-    let workers = active_subagent_workers(&app);
-    let safety = live_reexec_inputs(&workers);
-    // The two consents a host pass can need. A typed `/reload --force` already
-    // carries the retarget consent; every other host pass must ask before a
+    let safety = live_reexec_inputs(active_subagent_workers(&app));
+    // A typed `/reload --force` already carries the retarget consent;
+    // every other host pass must ask before a
     // retargeted image is probed.
     let mut options = crate::reexec::ReexecOptions::refusing_workers();
     if matches!(
@@ -3490,16 +3649,10 @@ async fn reload_resources_with_reexec(
     ) {
         options = options.confirming_redirect();
     }
-    // Live workers refuse the reload by default. The one explicit opt-in is the
-    // user's decision to detach them, and it is offered only when every worker
-    // that would be detached already resolves in this session's durable roster:
-    // extension shutdown detaches them, the replacement image reattaches them
-    // from that roster alone, and a worker without a durable record would be
-    // lost rather than detached. A retargeted image is confirmed the same way
-    // *before* it is probed, because the probe is its first execution.
+    // Rebuilds cannot hand live tasks to a replacement owner. There is no
+    // detach opt-in: durable transcripts do not preserve running execution.
     let decision = loop {
-        let decision =
-            reexec_decision(&mut app, reexec, &observed, &safety, options, &workers).await;
+        let decision = reexec_decision(&mut app, reexec, &observed, &safety, options).await;
         match decision {
             crate::reexec::ReexecDecision::ConfirmationRequired { redirect, .. }
                 if !options.redirect_confirmed =>
@@ -3511,24 +3664,7 @@ async fn reload_resources_with_reexec(
                 shell.notice(
                     "reload cancelled · the replaced binary was not probed or entered; this process is unchanged",
                 );
-                return Ok((app, None));
-            }
-            crate::reexec::ReexecDecision::Refused {
-                reason: crate::reexec::RefusalReason::BackgroundWorkers(count),
-                notice,
-            } if !options.detach_background_workers => {
-                if workers.references.len() != count {
-                    shell.error(format!(
-                        "reload: {count} background workers are active and do not all disclose a durable session reference; detaching them could lose work, so the reload stays refused"
-                    ));
-                    return Ok((app, None));
-                }
-                if confirm_worker_detach(shell, input, count).await? {
-                    options = options.with_detaching_workers();
-                    continue;
-                }
-                shell.notice(notice);
-                return Ok((app, None));
+                return Ok((app, None, true));
             }
             other => break other,
         }
@@ -3536,47 +3672,42 @@ async fn reload_resources_with_reexec(
     match decision {
         crate::reexec::ReexecDecision::ResourcesOnly => {
             shell.notice(crate::reexec::notice::RESOURCES_ONLY);
-            Ok((app, None))
+            Ok((app, None, true))
         }
         crate::reexec::ReexecDecision::Refused { notice, .. } => {
             shell.notice(notice);
-            Ok((app, None))
+            Ok((app, None, true))
         }
         crate::reexec::ReexecDecision::Blocked { notice, .. } => {
             shell.error(notice);
-            Ok((app, None))
+            Ok((app, None, true))
         }
         crate::reexec::ReexecDecision::Ready(plan) => {
-            // The detach warning comes first so both messages stay in the
-            // transcript, and it names the count that is being handed over.
-            if let Some(detach) = plan.detach_notice() {
-                shell.notice(detach);
-            }
             shell.notice(plan.notice());
             shell.render();
-            Ok((app, Some(plan)))
+            Ok((app, Some(*plan), true))
         }
         crate::reexec::ReexecDecision::ExecFailed { notice, .. } => {
             // `exec` runs only after this function returns and the TUI is
             // left; treat an unexpected failure as a blocked reload instead of
             // panicking in the idle loop.
             shell.error(notice);
-            Ok((app, None))
+            Ok((app, None, true))
         }
         crate::reexec::ReexecDecision::ConfirmationRequired { notice, .. } => {
             // Unreachable with the loop above, which answers a confirmation
             // before this match; fail closed if a future edit ever lets one
             // through.
             shell.error(notice);
-            Ok((app, None))
+            Ok((app, None, true))
         }
     }
 }
 
 /// One `/reload` decision taken against the live session and extension manager.
 ///
-/// The hooks borrow the session, the extension manager, and the worker
-/// references for the duration of the decision only; nothing below the validated
+/// The hooks borrow the session and extension manager for the duration of
+/// the decision only; nothing below the validated
 /// `Ready` moves the application.
 async fn reexec_decision(
     app: &mut App,
@@ -3584,12 +3715,10 @@ async fn reexec_decision(
     observed: &crate::reexec::ExecutableObservation,
     safety: &crate::reexec::LiveSafetyInputs,
     options: crate::reexec::ReexecOptions,
-    workers: &ActiveWorkers,
 ) -> crate::reexec::ReexecDecision {
     let mut hooks = InteractiveReexecHooks {
         session: app.agent.session(),
         extensions: &mut app.executable_extensions,
-        worker_references: &workers.references,
     };
     reexec
         .reexec_if_changed(observed, safety, options, &mut hooks)
@@ -3601,11 +3730,14 @@ async fn reexec_decision(
 /// The probe executes the candidate image, so a retargeted image is never
 /// probed before this answer. The suggested choice is to keep the current
 /// process, and a denied confirmation leaves the binary unexecuted.
-async fn confirm_binary_retarget(
+async fn confirm_binary_retarget<S>(
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     redirect: &crate::reexec::ExecutableRedirect,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<bool>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     let detail = "The new image has not been probed or executed yet. Approving runs it once as a \
                   probe and then replaces this process image.";
     let prompt = match redirect {
@@ -3627,71 +3759,6 @@ async fn confirm_binary_retarget(
         default: false,
     };
     extension_confirmation_picker(shell, input, "octet", &request).await
-}
-
-/// The explicit opt-in that lets one `/reload` detach live background workers.
-///
-/// Refusing is the default policy, and this prompt is the only path that turns
-/// the worker refusal into the detach warning. It names the count and states the
-/// consequence plainly: the workers keep their durable records and are
-/// reattachable in the new image. The suggested choice is to keep the current
-/// process.
-async fn confirm_worker_detach(
-    shell: &mut InteractiveShell,
-    input: &mut EventStream,
-    count: usize,
-) -> anyhow::Result<bool> {
-    let request = octet_agent::extension_process::ConfirmationRequest {
-        parent_request_id: None,
-        prompt: format!(
-            "Reload into the newer binary and detach {count} background worker{}?",
-            if count == 1 { "" } else { "s" }
-        ),
-        detail: Some(crate::reexec::notice::detaching_workers(count)),
-        destructive: false,
-        default: false,
-    };
-    extension_confirmation_picker(shell, input, "octet", &request).await
-}
-
-/// Private delegation directory that owns this session's durable worker roster.
-///
-/// It mirrors the host's layout rather than inventing one: `app::bootstrap`
-/// enables V2 delegation with
-/// `DelegationConfig::new(session_parent.join(".delegation"))`, `session_store`
-/// owns the same private directory, and the roster itself is
-/// `<session dir>/.delegation/fleet.json`.
-const DELEGATION_DIRECTORY: &str = ".delegation";
-
-/// The approval boundary a worker detach must pass before it is offered.
-///
-/// The detach itself belongs to extension shutdown, which is why the ordering
-/// `crate::reexec` enforces matters: the durable-head hook runs first, and it is
-/// this function that makes every worker record durable *before* the workers are
-/// handed over. A worker whose durable roster record or transcript is missing
-/// fails the reload closed instead of being detached into nothing; the
-/// replacement image reattaches workers from that roster alone.
-fn verify_worker_records_are_durable(
-    session: &Session,
-    references: &[String],
-) -> anyhow::Result<()> {
-    if references.is_empty() {
-        return Ok(());
-    }
-    let directory = session.path().parent().map_or_else(
-        || PathBuf::from(DELEGATION_DIRECTORY),
-        |parent| parent.join(DELEGATION_DIRECTORY),
-    );
-    for reference in references {
-        octet_agent::delegation::resolve_launchable_child_session(&directory, reference).map_err(
-            |error| {
-                anyhow::anyhow!(
-                    "background worker {reference} has no durable record to reattach: {error}"
-                )
-            },
-        )?;
-    }
-    Ok(())
 }
 
 /// Apply one admitted live-reload pass at the interactive idle boundary.
@@ -3719,17 +3786,6 @@ async fn apply_live_reload_plan(
     use crate::reload::{LayerOutcome, ReloadLayer, SkipReason};
 
     let mut app = app;
-    if plan.is_forced() {
-        shell.notice(format!(
-            "{}: taking a pass now over {}",
-            crate::reload::ReloadUserAction::Force.label(),
-            plan.layers()
-                .iter()
-                .map(|layer| layer.label())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
     let wants_resources = plan.contains(ReloadLayer::Resources);
     let wants_extensions = plan.contains(ReloadLayer::Extensions);
     let wants_host = plan.contains(ReloadLayer::Host);
@@ -3748,9 +3804,24 @@ async fn apply_live_reload_plan(
         // `reload_resources_with_reexec` owns the transactional resource reload
         // and the re-exec decision. The replacement image is started only after
         // this function returns and the TUI is left.
-        let (next, host_plan) =
+        let (next, host_plan, applied) =
             reload_resources_with_reexec(app, shell, input, reexec, host_pass).await?;
         app = next;
+        if !applied {
+            // Do not proceed to extension shutdown or report a success after a
+            // resource refusal. Finish the watch pass without changing owners.
+            for layer in [
+                ReloadLayer::Resources,
+                ReloadLayer::Extensions,
+                ReloadLayer::Host,
+            ] {
+                if plan.contains(layer) {
+                    plan.record(layer, LayerOutcome::Failed);
+                }
+            }
+            reload.finish(plan);
+            return Ok(app);
+        }
         if wants_resources {
             plan.record_reload(ReloadLayer::Resources);
         }
@@ -3785,6 +3856,8 @@ async fn apply_live_reload_plan(
             .into_iter()
             .map(|summary| summary.name)
             .collect::<Vec<_>>();
+        app.executable_extensions
+            .revoke_terminal_grant_for_shell(shell, "the extensions are being reloaded");
         let mut messages = await_lifecycle(shell, input, "reloading extensions…", async {
             Ok(app.executable_extensions.reload().await)
         })
@@ -3808,21 +3881,13 @@ async fn apply_live_reload_plan(
             !reload.is_in_flight(),
             "finishing a pass always clears the in-flight plan"
         );
-        let applied = report.reloaded_layers();
-        if !applied.is_empty() {
-            shell.notice(format!(
-                "live reload: applied {}",
-                applied
-                    .iter()
-                    .map(|layer| layer.label())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        for notice in report.notices() {
+        for notice in report.diagnostics() {
             shell.notice(notice);
         }
-        if report.is_noop() {
+        // Background maintenance should not add success chatter to the chat.
+        // Explicit /reload --force still gets a completion report; plain
+        // /reload and --dry-run own their feedback at their command sites.
+        if report.forced {
             shell.notice(report.summary());
         }
         update_status(shell, &app);
@@ -3835,10 +3900,6 @@ async fn apply_live_reload_plan(
 struct InteractiveReexecHooks<'a> {
     session: &'a Session,
     extensions: &'a mut crate::extensions::ExecutableExtensions,
-    /// Durable session references of the workers this reload would detach. Empty
-    /// on every path except the detach opt-in, where they are the records the
-    /// replacement image reattaches from.
-    worker_references: &'a [String],
 }
 
 #[async_trait::async_trait(?Send)]
@@ -3855,10 +3916,7 @@ impl crate::reexec::ReexecHooks for InteractiveReexecHooks<'_> {
             reopened.head_ref() == head.as_ref(),
             "the durable session head does not match the live head"
         );
-        // Worker records before the detach, in this hook and nowhere later: the
-        // extension shutdown below is what detaches the running workers, so
-        // every one of them must already resolve durably by now.
-        verify_worker_records_are_durable(self.session, self.worker_references)
+        Ok(())
     }
 
     async fn shutdown_extensions(&mut self) -> anyhow::Result<()> {
@@ -3871,15 +3929,6 @@ impl crate::reexec::ReexecHooks for InteractiveReexecHooks<'_> {
     }
 }
 
-/// The live delegated workers one `/reload` decision must account for.
-struct ActiveWorkers {
-    /// Every worker that still counts as live, whether or not its durable
-    /// session reference is visible.
-    count: usize,
-    /// Durable session references (`agent-session:<sha256>`) of those workers.
-    references: Vec<String>,
-}
-
 /// Live-state inputs for a re-exec decision taken by `/reload`.
 ///
 /// `/reload` is dispatched only at the interactive idle boundary: the main
@@ -3889,58 +3938,24 @@ struct ActiveWorkers {
 /// inside the run pipeline. The five run-owned fields are therefore
 /// observations of this boundary rather than guesses. Delegated workers
 /// outlive the root run, so their count is read from live state.
-fn live_reexec_inputs(workers: &ActiveWorkers) -> crate::reexec::LiveSafetyInputs {
+fn live_reexec_inputs(background_workers: usize) -> crate::reexec::LiveSafetyInputs {
     crate::reexec::LiveSafetyInputs {
         model_turn_active: false,
         tool_call_active: false,
         shell_child_active: false,
         pending_effect: false,
         session_persistence_in_flight: false,
-        background_workers: workers.count,
+        background_workers,
     }
 }
 
-/// Live delegated workers reported by the octet-subagents presentation view.
-///
-/// Only read-only presentation state is consulted: no extension command is
-/// dispatched and no worker is touched. A worker counts while it is not
-/// terminal (`pending`, `active`, `running`, `degraded`), and its durable session
-/// reference is collected when the extension disclosed one. A missing view means
-/// no worker state is visible at all, which counts as zero.
-fn active_subagent_workers(app: &App) -> ActiveWorkers {
-    let mut workers = ActiveWorkers {
-        count: 0,
-        references: Vec::new(),
-    };
-    let Some(view) = app
-        .executable_extensions
-        .presentation_views()
-        .into_iter()
-        .find(|view| view.extension == "octet-subagents")
-    else {
-        return workers;
-    };
-    let Some(collection) = view.snapshot.collection else {
-        return workers;
-    };
-    for node in &collection.nodes {
-        if !matches!(
-            node.state,
-            octet_agent::ExtensionPresentationState::Pending
-                | octet_agent::ExtensionPresentationState::Active
-                | octet_agent::ExtensionPresentationState::Running
-                | octet_agent::ExtensionPresentationState::Degraded
-        ) {
-            continue;
-        }
-        workers.count += 1;
-        if let Some(reference) = node.references.iter().find(|reference| {
-            reference.kind == octet_agent::ExtensionPresentationReferenceKind::Session
-        }) {
-            workers.references.push(reference.id.clone());
-        }
-    }
-    workers
+/// Observe host-owned tasks before replacing any App or extension owner.
+/// Presentation may be missing or stale, and idle workers retain live control
+/// receivers. Keep its count only as an additional conservative refusal signal.
+fn active_subagent_workers(app: &App) -> usize {
+    app.agent
+        .active_delegated_worker_count()
+        .max(app.executable_extensions.active_subagent_worker_count())
 }
 
 #[derive(Clone, Debug)]
@@ -4151,7 +4166,12 @@ async fn web_search_management_menu(
     }
     let provider = if index == 0 { "brave" } else { "searxng" };
     let output = {
-        let mut interaction = InteractiveExtensionConfirmations { shell, input };
+        let dialogs = app.executable_extensions.lifecycle_snapshot();
+        let mut interaction = InteractiveExtensionConfirmations {
+            shell,
+            input,
+            dialogs: &dialogs,
+        };
         app.executable_extensions
             .execute_command_with_confirmation(
                 WEB_SEARCH_COMMAND_NAME,
@@ -4264,6 +4284,9 @@ async fn extension_management_menu(
             continue;
         }
 
+        if refuse_resource_reload(&app, shell) {
+            continue;
+        }
         let enabled = !choice.enabled;
         let config_path = crate::cli::global_config_path();
         let before_config = config_path.as_deref().and_then(configuration_snapshot);
@@ -4279,7 +4302,7 @@ async fn extension_management_menu(
         };
         app.config.enabled_extensions = persisted;
         app = match reload_resources(app, shell, input).await {
-            Ok(app) => app,
+            Ok((app, _)) => app,
             Err(error) => {
                 let rollback = crate::cli::persist_extension_enabled(&choice.name, choice.enabled);
                 return match rollback {
@@ -4627,7 +4650,7 @@ async fn active_subagents_view<S, F>(
 ) -> anyhow::Result<()>
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
-    F: Fn(&str, &str) -> Result<Option<Session>, octet_agent::AgentError>,
+    F: Fn(&str, &str) -> Result<Option<Session>, Box<AgentError>>,
 {
     loop {
         if subagent_view_entries(extensions).is_none_or(|(_, entries)| entries.is_empty()) {
@@ -4918,14 +4941,46 @@ async fn subagents_view(
     }
 }
 
+#[cfg(test)]
 fn restore_session_head(path: &std::path::Path, head: EntryId) -> anyhow::Result<()> {
     let mut session = Session::open(path)?;
     session.checkout(head)?;
     Ok(())
 }
 
+/// Which additive lifecycle notification one reconfiguration owes extensions.
+#[derive(Clone, Copy)]
+enum HostNotification {
+    ModelSelected,
+    ReasoningSelected,
+    SessionInfoChanged,
+}
+
+impl HostNotification {
+    /// Classify one reconfiguration before it consumes its payload.
+    fn of(reconfig: &Reconfig) -> Self {
+        match reconfig {
+            Reconfig::Model(_) => Self::ModelSelected,
+            Reconfig::Thinking(_) | Reconfig::ThinkingMode { .. } => Self::ReasoningSelected,
+            Reconfig::NewSession | Reconfig::Resume(_) => Self::SessionInfoChanged,
+        }
+    }
+
+    /// Publish the notification to the negotiated v2 subscribers.
+    fn publish(self, extensions: &mut crate::extensions::ExecutableExtensions) {
+        match self {
+            Self::ModelSelected => {
+                extensions.notify_model_selected_all();
+                extensions.notify_session_info_changed_all();
+            }
+            Self::ReasoningSelected => extensions.notify_reasoning_selected_all(),
+            Self::SessionInfoChanged => extensions.notify_session_info_changed_all(),
+        }
+    }
+}
+
 async fn transition<S>(
-    app: App,
+    mut app: App,
     shell: &mut InteractiveShell,
     input: &mut S,
     reconfig: Reconfig,
@@ -4934,8 +4989,11 @@ where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let _diagnostics = crate::output::defer_tui_diagnostics();
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(shell, "the model or foreground session is changing");
     let had_fast = app.agent.service_tier().is_some();
-    let app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
+    let host_notification = HostNotification::of(&reconfig);
+    let mut app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
         apply_reconfig(app, reconfig)
     })
     .await?;
@@ -4948,6 +5006,7 @@ where
     }
     app.executable_extensions
         .activate_session_lifecycle_driver();
+    host_notification.publish(&mut app.executable_extensions);
     Ok(app)
 }
 
@@ -5038,6 +5097,8 @@ async fn switch_extension_session(
     if request.is_cancelled() {
         return Ok(None);
     }
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(shell, "the foreground session is being replaced");
     replace_extension_active_session(app, session).map(Some)
 }
 
@@ -5052,6 +5113,8 @@ async fn reload_extension_session(
     if request.is_cancelled() {
         return Ok(None);
     }
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(shell, "the foreground session is being replaced");
     replace_extension_active_session(app, session).map(Some)
 }
 
@@ -5390,7 +5453,7 @@ async fn apply_pending_actions(
                 shell.show_context_report(crate::tui::context::ContextReport::capture(&app, &[]));
             }
             PendingIdleAction::ReloadResources => {
-                let (next, plan) = reload_resources_with_reexec(
+                let (next, plan, applied) = reload_resources_with_reexec(
                     app,
                     shell,
                     input,
@@ -5398,6 +5461,9 @@ async fn apply_pending_actions(
                     HostPass::ResourcesOnly,
                 )
                 .await?;
+                if applied {
+                    shell.notice("resources reloaded");
+                }
                 app = next;
                 if let Some(plan) = plan {
                     *pending_reexec = Some(plan);
@@ -5438,8 +5504,11 @@ async fn apply_pending_actions(
             }
             PendingIdleAction::Skills(sub) => {
                 if sub == commands::SkillsSubcommand::Reload {
-                    app = reload_resources(app, shell, input).await?;
-                    shell.notice("queued skills and prompt templates reload applied");
+                    let (next, applied) = reload_resources(app, shell, input).await?;
+                    app = next;
+                    if applied {
+                        shell.notice("queued skills and prompt templates reload applied");
+                    }
                 } else {
                     execute_skills_command(&mut app, shell, sub).await?;
                 }
@@ -5676,7 +5745,7 @@ enum InteractiveExit {
     /// No process replacement was requested.
     Finished,
     /// The terminal was left and the wrapper above must `exec` the plan.
-    Reexec(crate::reexec::ReexecPlan),
+    Reexec(Box<crate::reexec::ReexecPlan>),
 }
 
 fn prompt_templates_text(app: &App) -> String {
@@ -5876,7 +5945,7 @@ fn record_shell_escape(app: &mut App, record: &commands::ShellEscapeRecord) -> a
 /// same picker the model run uses; a denial is reported, never swallowed.
 enum ShellEscapeApproval {
     Approved,
-    Denied(String),
+    Denied,
 }
 
 async fn approve_shell_escape<S>(
@@ -5899,11 +5968,7 @@ where
         &arguments,
     ) {
         Ok(intent) => intent,
-        Err(error) => {
-            return Ok(ShellEscapeApproval::Denied(format!(
-                "shell command could not be classified: {error}"
-            )));
-        }
+        Err(_) => return Ok(ShellEscapeApproval::Denied),
     };
     let broker = EffectBroker::new(policy);
     let (sink, mut progress) = ToolProgressSink::bounded_channel();
@@ -5913,9 +5978,7 @@ where
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
                 shell.request_close();
-                return Ok(ShellEscapeApproval::Denied(
-                    "shell command stopped during shutdown".to_owned(),
-                ));
+                return Ok(ShellEscapeApproval::Denied);
             }
             result = &mut authorization => break result,
             update = progress.recv() => match update {
@@ -5930,7 +5993,7 @@ where
     };
     match result {
         Ok(_receipt) => Ok(ShellEscapeApproval::Approved),
-        Err(error) => Ok(ShellEscapeApproval::Denied(error.to_string())),
+        Err(_) => Ok(ShellEscapeApproval::Denied),
     }
 }
 
@@ -6500,6 +6563,8 @@ async fn run_idle_shell_escape(
         shell.error(format!("{prefix} command was not approved"));
         return Ok(IdleCommandOutcome::Continue(Box::new(app)));
     }
+    app.executable_extensions
+        .notify_user_bash_all(&escape.command);
     shell.on_local_command_submitted(&format!("{prefix}{}", escape.command));
     let outcome = run_local_shell(
         shell,
@@ -6682,6 +6747,8 @@ async fn run_idle_command(
             shell.show_overlay_text(app.executable_extensions.inspect_text());
         }
         Command::Extensions(commands::ExtensionsSubcommand::Reload) => {
+            app.executable_extensions
+                .revoke_terminal_grant_for_shell(shell, "the extensions are being reloaded");
             let mut messages = await_lifecycle(shell, input, "reloading extensions…", async {
                 Ok(app.executable_extensions.reload().await)
             })
@@ -6733,7 +6800,12 @@ async fn run_idle_command(
         }
         Command::Extensions(commands::ExtensionsSubcommand::Action { extension, action }) => {
             let result = {
-                let mut confirmations = InteractiveExtensionConfirmations { shell, input };
+                let dialogs = app.executable_extensions.lifecycle_snapshot();
+                let mut confirmations = InteractiveExtensionConfirmations {
+                    shell,
+                    input,
+                    dialogs: &dialogs,
+                };
                 app.executable_extensions
                     .execute_presentation_action_with_confirmation(
                         &extension,
@@ -6883,14 +6955,12 @@ async fn run_idle_command(
             // Plain `/reload` is resources-only: it never probes or replaces
             // the process image. `/reload --force` is handled before
             // `commands::parse` and is the explicit host path.
-            let (next, plan) = reload_resources_with_reexec(
-                app,
-                shell,
-                input,
-                reexec,
-                HostPass::ResourcesOnly,
-            )
-            .await?;
+            let (next, plan, applied) =
+                reload_resources_with_reexec(app, shell, input, reexec, HostPass::ResourcesOnly)
+                    .await?;
+            if applied {
+                shell.notice("resources reloaded");
+            }
             app = next;
             if let Some(plan) = plan {
                 return Ok(IdleCommandOutcome::Reexec {
@@ -6910,9 +6980,12 @@ async fn run_idle_command(
             }
         }
         Command::Skills(commands::SkillsSubcommand::Reload) => {
-            app = reload_resources(app, shell, input).await?;
-            request_extension_ui(shell, &mut app);
-            shell.notice("skills and prompt templates reloaded");
+            let (next, applied) = reload_resources(app, shell, input).await?;
+            app = next;
+            if applied {
+                request_extension_ui(shell, &mut app);
+                shell.notice("skills and prompt templates reloaded");
+            }
         }
         Command::Skills(sub) => {
             execute_skills_command(&mut app, shell, sub).await?;
@@ -6946,7 +7019,12 @@ async fn run_idle_command(
                 && extension_arguments.is_empty()
                 && presentation_owner.as_deref() == Some("octet-subagents");
             let result = {
-                let mut confirmations = InteractiveExtensionConfirmations { shell, input };
+                let dialogs = app.executable_extensions.lifecycle_snapshot();
+                let mut confirmations = InteractiveExtensionConfirmations {
+                    shell,
+                    input,
+                    dialogs: &dialogs,
+                };
                 app.executable_extensions
                     .execute_command_with_confirmation(
                         &extension_name,
@@ -8213,11 +8291,6 @@ fn startup_update_task(
     tasks
 }
 
-/// Run the interactive frontend with explicit idle and active borrow phases.
-pub async fn run_interactive(config: Config) -> anyhow::Result<()> {
-    run_interactive_with_model_scope(config, None).await
-}
-
 /// Interactive launch retaining the ordered `--models` patterns, including
 /// reasoning suffixes that cannot be recovered from a list of bare ModelIds.
 ///
@@ -8277,7 +8350,7 @@ async fn run_interactive_once(
         crate::update::startup_available_update(),
         shell.startup_update_notifier(),
     );
-    let mut input = EventStream::new();
+    let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
     apply_detected_terminal_background(&mut shell, &mut input, &config).await;
     if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
@@ -8528,6 +8601,7 @@ async fn run_interactive_once(
                     let now = std::time::Instant::now();
                     match action {
                         crate::reload::ReloadUserAction::DryRun => {
+                            shell.notice(reload_watcher.watches().arming_notice(reload.settings()));
                             let report = reload.dry_run(now, crate::reload::ReloadBoundary::Idle);
                             for notice in report.notices() {
                                 shell.notice(notice);
@@ -8886,7 +8960,7 @@ async fn run_interactive_once(
     shell.leave();
     print_resume_command(resume_command.as_deref());
     match pending_reexec {
-        Some(plan) => Ok(InteractiveExit::Reexec(plan)),
+        Some(plan) => Ok(InteractiveExit::Reexec(Box::new(plan))),
         None => Ok(InteractiveExit::Finished),
     }
 }
@@ -8895,6 +8969,347 @@ async fn run_interactive_once(
 mod tests {
     use super::*;
     use octet_agent::EntryValue;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resource_reload_refusal_preserves_worker_owner_and_control() {
+        use crate::extensions::reload_lifecycle_test_support::fixture;
+        use octet_agent::ExtensionPresentationState as State;
+
+        for state in [
+            State::Pending,
+            State::Active,
+            State::Running,
+            State::Degraded,
+        ] {
+            for host in [
+                HostPass::ResourcesOnly,
+                HostPass::Allowed {
+                    redirect_confirmed: true,
+                },
+            ] {
+                let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+                let (extensions, process, wire) = fixture(directory.path(), Some(state)).await;
+                app.executable_extensions = extensions;
+                let before = app.executable_extensions.presentation_views();
+                let path = app.agent.session().path().to_owned();
+                let session = std::fs::read(&path).unwrap();
+                let system = app.system.clone();
+                let skills = app.skills.clone();
+                let generation = process.health_snapshot().generation;
+                let mut shell = InteractiveShell::test_shell();
+                let mut input = EventStream::from_stream(futures_util::stream::pending());
+                let mut reexec = crate::reexec::ReexecController::capture().ok();
+                let (mut app, plan, applied) = reload_resources_with_reexec(
+                    app,
+                    &mut shell,
+                    &mut input,
+                    reexec.as_mut(),
+                    host,
+                )
+                .await
+                .unwrap();
+
+                assert!(!applied);
+                assert!(plan.is_none());
+                assert_eq!(app.system, system);
+                assert!(Arc::ptr_eq(&skills, &app.skills), "the App was rebuilt");
+                assert_eq!(std::fs::read(&path).unwrap(), session);
+                assert_eq!(app.executable_extensions.presentation_views(), before);
+                assert_eq!(active_subagent_workers(&app), 1);
+                assert!(process.is_running());
+                assert_eq!(process.health_snapshot().generation, generation);
+                assert!(!std::fs::read_to_string(&wire)
+                    .unwrap_or_default()
+                    .contains("shutdown"));
+                assert_eq!(
+                    app.executable_extensions
+                        .execute_command_without_confirmation("worker-control", Vec::new(),)
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some("control retained"),
+                );
+                app.executable_extensions.shutdown().await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resource_reload_refuses_host_worker_without_presentation_and_retains_control() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn tool_turn(name: &str, arguments: serde_json::Value) -> String {
+            [
+                serde_json::json!({"type":"message_start", "message":{
+                    "id":"reload-worker", "usage":{"input_tokens":1,"output_tokens":0}}}),
+                serde_json::json!({"type":"content_block_start", "index":0,
+                    "content_block":{"type":"tool_use", "id":name, "name":name}}),
+                serde_json::json!({"type":"content_block_delta", "index":0,
+                    "delta":{"type":"input_json_delta", "partial_json":arguments.to_string()}}),
+                serde_json::json!({"type":"content_block_stop", "index":0}),
+                serde_json::json!({"type":"message_delta", "delta":{"stop_reason":"tool_use"},
+                    "usage":{"output_tokens":1}}),
+                serde_json::json!({"type":"message_stop"}),
+            ]
+            .into_iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect()
+        }
+
+        // Exercise a real host-owned worker, with all inference restricted to
+        // deterministic loopback responses and no subagents extension at all.
+        let server = MockServer::start().await;
+        let root_turns = Arc::new(AtomicUsize::new(0));
+        let child_turns = Arc::new(AtomicUsize::new(0));
+        let roots = root_turns.clone();
+        let children = child_turns.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let response = if body["system"]
+                    .to_string()
+                    .contains("You are /root/survivor")
+                {
+                    let turn = children.fetch_add(1, Ordering::SeqCst) + 1;
+                    text_turn().replace("done", &format!("worker task {turn} complete"))
+                } else {
+                    match roots.fetch_add(1, Ordering::SeqCst) {
+                        0 => tool_turn(
+                            "spawn_agent",
+                            serde_json::json!({
+                            "task_name":"survivor", "message":"complete the first task"}),
+                        ),
+                        1 | 4 => tool_turn("wait_agent", serde_json::json!({"timeout_ms":3000})),
+                        2 | 5 => text_turn(),
+                        3 => tool_turn(
+                            "followup_task",
+                            serde_json::json!({
+                            "target":"/root/survivor", "message":"continue after refused reload"}),
+                        ),
+                        unexpected => panic!("unexpected root turn {unexpected}"),
+                    }
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(response)
+            })
+            .mount(&server)
+            .await;
+        let (directory, mut app) = fast_test_app(scripted_model(&server.uri()));
+        // Native delegation tools require explicit host authority; only the
+        // fixed local script above can request tools in this fixture.
+        app.config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        app = rebuild_app(app, None, None, None, None).unwrap();
+        app.agent
+            .enable_v2_delegation(octet_agent::DelegationConfig::new(
+                directory.path().join("delegation"),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.agent.complete("start survivor").await.unwrap().text,
+            "done"
+        );
+        for entry in app.agent.session().entries() {
+            if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
+                for part in &message.content {
+                    if let octet_ai::UserPart::ToolResult(result) = part {
+                        assert!(!result.is_error, "{result:?}");
+                    }
+                }
+            }
+        }
+        assert_eq!(child_turns.load(Ordering::SeqCst), 1);
+        // The first task has settled, but its live receiver must still block
+        // destructive reloads, even though no presentation roster exists.
+        assert_eq!(app.agent.active_delegated_worker_count(), 1);
+        assert!(app.executable_extensions.presentation_views().is_empty());
+        assert_eq!(app.executable_extensions.active_subagent_worker_count(), 0);
+        let team = app.agent.delegation_team_directory().unwrap().to_path_buf();
+        let child_path = team.join("0001-survivor.jsonl");
+        let child_before = std::fs::read(&child_path).unwrap();
+        let root_path = app.agent.session().path().to_owned();
+        let root_before = std::fs::read(&root_path).unwrap();
+        let owner = app.agent.session().resource_owner_key();
+        let skills = app.skills.clone();
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = EventStream::from_stream(futures_util::stream::pending());
+        let mut reexec = crate::reexec::ReexecController::capture().ok();
+        for host in [
+            HostPass::ResourcesOnly,
+            HostPass::Allowed {
+                redirect_confirmed: true,
+            },
+        ] {
+            let (next, plan, applied) =
+                reload_resources_with_reexec(app, &mut shell, &mut input, reexec.as_mut(), host)
+                    .await
+                    .unwrap();
+            app = next;
+            assert!(!applied);
+            assert!(plan.is_none());
+            assert!(Arc::ptr_eq(&skills, &app.skills));
+            assert_eq!(app.agent.session().resource_owner_key(), owner);
+            assert_eq!(app.agent.active_delegated_worker_count(), 1);
+            assert_eq!(std::fs::read(&root_path).unwrap(), root_before);
+            assert_eq!(std::fs::read(&child_path).unwrap(), child_before);
+        }
+        let notice = shell.debug_snapshot();
+        assert!(notice.contains("host worker tasks remain attached"));
+        assert!(notice.contains("then exit and resume the session to replace the owning host"));
+        assert!(notice.contains("The current application and workers are unchanged"));
+        // Control still targets the original child task/session, not a worker
+        // reconstructed from durable records after destroying the old owner.
+        assert_eq!(
+            app.agent.complete("continue survivor").await.unwrap().text,
+            "done"
+        );
+        assert_eq!(child_turns.load(Ordering::SeqCst), 2);
+        assert_eq!(root_turns.load(Ordering::SeqCst), 6);
+        assert_eq!(app.agent.active_delegated_worker_count(), 1);
+        assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
+        assert!(std::fs::read_to_string(child_path)
+            .unwrap()
+            .contains("worker task 2 complete"));
+        for entry in app.agent.session().entries() {
+            if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
+                for part in &message.content {
+                    if let octet_ai::UserPart::ToolResult(result) = part {
+                        assert!(!result.is_error, "{result:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn forced_watch_reload_refusal_does_not_restart_extensions_or_claim_success() {
+        use crate::extensions::reload_lifecycle_test_support::fixture;
+        use octet_agent::ExtensionPresentationState as State;
+        let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let (extensions, process, wire) = fixture(directory.path(), Some(State::Running)).await;
+        app.executable_extensions = extensions;
+        let skills = app.skills.clone();
+        let mut shell = InteractiveShell::test_shell();
+        // A refusal must not poll raw input or enter any lifecycle worker.
+        shell.cede_terminal_input();
+        let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
+        let mut pending_reexec = None;
+        let mut supervisor = crate::reload::ReloadSupervisor::new(Default::default());
+        let plan = supervisor.force();
+        let mut app = tokio::time::timeout(
+            Duration::from_secs(2),
+            apply_live_reload_plan(
+                app,
+                &mut shell,
+                &mut input,
+                &mut supervisor,
+                plan,
+                None,
+                &mut pending_reexec,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!supervisor.is_in_flight());
+        assert!(pending_reexec.is_none());
+        assert!(Arc::ptr_eq(&skills, &app.skills));
+        assert!(process.is_running());
+        assert!(!std::fs::read_to_string(wire)
+            .unwrap_or_default()
+            .contains("shutdown"));
+        let visible = shell.debug_snapshot();
+        assert!(visible.contains("reload refused"), "{visible}");
+        assert!(
+            !visible.contains("reloaded") && !visible.contains("reload applied"),
+            "{visible}"
+        );
+        app.executable_extensions.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
+        use crate::extensions::reload_lifecycle_test_support::{
+            acquire_terminal, assert_revoked_before_shutdown, fixture,
+        };
+
+        for operation in [
+            "resources",
+            "model",
+            "reasoning",
+            "new",
+            "resume",
+            "extensions",
+        ] {
+            let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+            let (extensions, process, wire) = fixture(directory.path(), None).await;
+            app.executable_extensions = extensions;
+            let mut shell = InteractiveShell::test_shell();
+            acquire_terminal(&mut app.executable_extensions, &mut shell, &process);
+            let parking = shell.terminal_input_parking();
+            let mut input = EventStream::from_stream(futures_util::stream::pending())
+                .with_cede_flag(parking.clone());
+            let mut app = match operation {
+                "resources" => {
+                    let (next, applied) =
+                        reload_resources(app, &mut shell, &mut input).await.unwrap();
+                    assert!(applied);
+                    next
+                }
+                "extensions" => {
+                    app.executable_extensions.revoke_terminal_grant_for_shell(
+                        &mut shell,
+                        "the extensions are being reloaded",
+                    );
+                    app.executable_extensions.reload().await;
+                    app
+                }
+                _ => {
+                    let reconfig = match operation {
+                        "model" => Reconfig::Model(app.model.spec.id.clone()),
+                        "reasoning" => Reconfig::Thinking(ReasoningConfig::Off),
+                        "new" => Reconfig::NewSession,
+                        "resume" => Reconfig::Resume(app.agent.session().path().to_owned()),
+                        _ => unreachable!(),
+                    };
+                    transition(app, &mut shell, &mut input, reconfig)
+                        .await
+                        .unwrap()
+                }
+            };
+            assert!(
+                !parking.load(std::sync::atomic::Ordering::SeqCst),
+                "{operation}"
+            );
+            assert!(
+                !app.executable_extensions.terminal_grant_is_active(),
+                "{operation}"
+            );
+            assert_revoked_before_shutdown(&wire);
+            // Test input uses the same restored ownership flag as the live stream.
+            let key = theme_picker_key(KeyCode::Char('x'));
+            let mut restored =
+                EventStream::from_stream(tokio_stream::iter([key])).with_cede_flag(parking);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), restored.next())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            app.executable_extensions.shutdown().await;
+        }
+    }
 
     fn test_theme() -> crate::tui::theme::OctetTheme {
         crate::tui::theme::test_theme()
@@ -10650,7 +11065,7 @@ mod tests {
         let active = app.model.spec.id.clone();
         let narrowed = app.catalog.models().count();
         // The plan a proven startup selection leaves behind.
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex".into()]);
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
         assert!(
             ActiveRunInspection::capture(&app).is_narrowed(),
             "an active run must detect the partial catalog and defer the picker"
@@ -13107,7 +13522,7 @@ mod tests {
                 "{expected:?} missing: {painted}"
             );
         }
-        assert_eq!(paused_deadline.is_none(), true);
+        assert!(paused_deadline.is_none());
     }
 
     #[tokio::test]
@@ -13230,5 +13645,167 @@ mod tests {
             .expect("idle /goal clear");
         assert!(store.get(&session_id).unwrap().is_none());
         assert!(goal_deadline.is_none());
+    }
+
+    #[derive(Default)]
+    struct RecordingLifecycle {
+        events: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl RecordingLifecycle {
+        fn events(&self) -> Vec<String> {
+            self.events.borrow().clone()
+        }
+    }
+
+    impl MessageLifecycleSink for RecordingLifecycle {
+        fn message_started(&mut self, message_id: &str) {
+            self.events
+                .borrow_mut()
+                .push(format!("started:{message_id}"));
+        }
+
+        fn message_delta(&mut self, delta: &str) {
+            self.events.borrow_mut().push(format!("delta:{delta}"));
+        }
+
+        fn message_settled(&mut self, message_id: &str) {
+            self.events
+                .borrow_mut()
+                .push(format!("settled:{message_id}"));
+        }
+    }
+
+    impl DialogLifecycleSink for RecordingLifecycle {
+        fn open_dialog(&self, dialog: &str) {
+            self.events.borrow_mut().push(format!("started:{dialog}"));
+        }
+
+        fn close_dialog(&self, dialog: &str) {
+            self.events.borrow_mut().push(format!("settled:{dialog}"));
+        }
+    }
+
+    fn text_delta(text: &str) -> AgentEvent {
+        AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: text.to_owned(),
+        }
+    }
+
+    fn completed_run() -> AgentEvent {
+        AgentEvent::RunFinished {
+            head: EntryId("entry-1".to_owned()),
+            reason: octet_agent::FinishReason::Completed,
+        }
+    }
+
+    #[test]
+    fn assistant_message_lifecycle_brackets_one_message_per_text_turn() {
+        let mut lifecycle = AssistantMessageLifecycle::default();
+        let mut sink = RecordingLifecycle::default();
+        lifecycle.observe(&mut sink, &text_delta(""));
+        assert!(sink.events().is_empty(), "an empty delta opens nothing");
+        lifecycle.observe(&mut sink, &text_delta("Hel"));
+        lifecycle.observe(
+            &mut sink,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Reasoning,
+                text: "hidden reasoning".to_owned(),
+            },
+        );
+        lifecycle.observe(&mut sink, &text_delta("lo"));
+        assert_eq!(
+            sink.events(),
+            ["started:assistant-1", "delta:Hel", "delta:lo"]
+        );
+        // Every terminal run outcome settles the open boundary exactly once.
+        lifecycle.observe(&mut sink, &completed_run());
+        lifecycle.observe(&mut sink, &completed_run());
+        assert_eq!(sink.events().len(), 4);
+        assert_eq!(
+            sink.events().last().map(String::as_str),
+            Some("settled:assistant-1")
+        );
+        // A later turn opens a fresh, still bounded identifier.
+        lifecycle.observe(&mut sink, &text_delta("again"));
+        assert_eq!(
+            sink.events().last().map(String::as_str),
+            Some("delta:again")
+        );
+        assert!(sink.events().contains(&"started:assistant-2".to_owned()));
+    }
+
+    #[test]
+    fn assistant_message_lifecycle_keeps_one_boundary_across_provider_retry() {
+        let mut lifecycle = AssistantMessageLifecycle::default();
+        let mut sink = RecordingLifecycle::default();
+        lifecycle.observe(&mut sink, &text_delta("partial"));
+        lifecycle.observe(
+            &mut sink,
+            &AgentEvent::ProviderRetry {
+                attempt: 1,
+                max_attempts: 3,
+                delay: Duration::from_millis(1),
+                error: "stream reset".to_owned(),
+            },
+        );
+        lifecycle.observe(&mut sink, &text_delta("final"));
+        assert_eq!(
+            sink.events(),
+            ["started:assistant-1", "delta:partial", "delta:final"]
+        );
+        lifecycle.settle(&mut sink);
+        assert_eq!(
+            sink.events().last().map(String::as_str),
+            Some("settled:assistant-1")
+        );
+    }
+
+    #[test]
+    fn assistant_message_lifecycle_forwards_each_delta_verbatim() {
+        let mut lifecycle = AssistantMessageLifecycle::default();
+        let mut sink = RecordingLifecycle::default();
+        for index in 0..64 {
+            lifecycle.observe(&mut sink, &text_delta(&format!("t{index}")));
+        }
+        let events = sink.events();
+        assert_eq!(events[0], "started:assistant-1");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("delta:"))
+                .count(),
+            64,
+            "the producer forwards every increment; the host owns coalescing"
+        );
+        assert!(
+            !events.iter().any(|event| event.starts_with("settled:")),
+            "no notification per delta is issued before the terminal boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn present_host_dialog_settles_once_on_every_outcome() {
+        let sink = RecordingLifecycle::default();
+        let value = present_host_dialog(&sink, "confirm", async { Ok::<_, anyhow::Error>(true) })
+            .await
+            .expect("approved dialog");
+        assert!(value);
+        assert_eq!(sink.events(), ["started:confirm", "settled:confirm"]);
+        let refused = present_host_dialog(&sink, "input", async {
+            Err::<Option<String>, _>(anyhow::anyhow!("dismissed"))
+        })
+        .await;
+        assert!(refused.is_err());
+        assert_eq!(
+            sink.events(),
+            [
+                "started:confirm",
+                "settled:confirm",
+                "started:input",
+                "settled:input",
+            ]
+        );
     }
 }

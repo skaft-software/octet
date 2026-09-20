@@ -78,7 +78,9 @@ impl SetupServer {
                         thread_requests.fetch_add(1, Ordering::SeqCst);
                         // macOS may inherit O_NONBLOCK from the listener.
                         // Header/body deadlines below require blocking reads.
-                        stream.set_nonblocking(false).expect("blocking setup socket");
+                        stream
+                            .set_nonblocking(false)
+                            .expect("blocking setup socket");
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                         let mut request = Vec::new();

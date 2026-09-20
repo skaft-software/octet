@@ -22,7 +22,6 @@ mod hydrate;
 mod migrate;
 mod modes;
 mod output;
-mod pi;
 mod presentation;
 mod prompts;
 mod provider_setup;
@@ -113,9 +112,6 @@ async fn run() -> anyhow::Result<()> {
         return run_auth_command(provider, AuthCommand::Logout).await;
     }
 
-    if let Some(cli::TopLevelCommand::Pi { command }) = top_level_command.clone() {
-        return pi::run(command, &std::env::current_dir()?);
-    }
     if let Some(cli::TopLevelCommand::Migrate { command }) = top_level_command.clone() {
         return migrate::run(command, &std::env::current_dir()?);
     }

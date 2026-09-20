@@ -1442,7 +1442,10 @@ mod tests {
             let stats = stream.stats();
             assert!(stats.fence_scanned_bytes <= 2 * total as u64, "{stats:?}");
             assert!(stats.preview_copied_bytes <= 3 * total as u64, "{stats:?}");
-            assert!(stats.preview_classified_bytes <= 3 * total as u64, "{stats:?}");
+            assert!(
+                stats.preview_classified_bytes <= 3 * total as u64,
+                "{stats:?}"
+            );
             let expected = chunk.repeat(30_000);
             assert_eq!(stream.raw_bytes(), expected.as_bytes());
             if chunk == "word line\n" {
@@ -1538,7 +1541,9 @@ mod tests {
         assert_ne!(frame, previous);
         assert_eq!(
             frame,
-            renderer.render(&markdown::parse(stream.raw_text()), 40).plain_lines()
+            renderer
+                .render(&markdown::parse(stream.raw_text()), 40)
+                .plain_lines()
         );
 
         // A trailing blank line proves the paragraph boundary, but the
@@ -1551,7 +1556,9 @@ mod tests {
         assert_eq!(cache.committed_rows(), 0);
         assert_eq!(
             frame,
-            renderer.render(&markdown::parse(stream.raw_text()), 40).plain_lines()
+            renderer
+                .render(&markdown::parse(stream.raw_text()), 40)
+                .plain_lines()
         );
 
         let previous = frame.clone();
@@ -1559,7 +1566,7 @@ mod tests {
         let update = cache.render_line_update(&stream, &renderer, 40, false);
         frame.truncate(update.stable_prefix);
         frame.extend(update.replacement);
-        assert!(stream.committed().blocks.len() >= 1);
+        assert!(!stream.committed().blocks.is_empty());
         assert!(cache.committed_rows() > 0);
         assert!(cache.committed_rows() <= previous.len());
         assert_eq!(
@@ -1568,7 +1575,9 @@ mod tests {
         );
         assert_eq!(
             frame,
-            renderer.render(&markdown::parse(stream.raw_text()), 40).plain_lines()
+            renderer
+                .render(&markdown::parse(stream.raw_text()), 40)
+                .plain_lines()
         );
     }
 

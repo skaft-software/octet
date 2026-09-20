@@ -1,9 +1,10 @@
 # octet Browse
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Source distribution: 0.8.0 (release candidate).** This checkout and local
+archives require exactly octet 0.8.0. Catalog commands below require matching
+published assets; no 0.8.0 publication is claimed. Use a
+[source-built host](../../docs/installation.md#build-from-a-checkout) with a
+reviewed source checkout or local archive until matching assets are published.
 
 Use a visible, isolated Chromium window to inspect pages and perform bounded
 browser actions. Sign in manually; octet Browse never uses your normal browser
@@ -13,8 +14,8 @@ profile.
 
 ## Install the bundle
 
-With [octet 0.7.6 installed](../../docs/installation.md), install the matching
-signed public bundle, then explicitly enable it:
+With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout) and verified
+matching published assets, the catalog path is:
 
 ```console
 octet extension install octet-browse
@@ -89,9 +90,9 @@ before removing only the locked, sentinel-verified isolated profile.
 
 ## Reference
 
-The bundled runtime still uses API `0.2`; these are usage and implementation
-references, not current extension-authoring examples. Bundle `0.7.6` requires
-exactly octet `0.7.6` and `playwright==1.57.0`.
+The bundled runtime uses API `0.4`; these are usage and implementation
+references, not general extension-authoring tutorials. Bundle `0.8.0` requires
+exactly octet `0.8.0` and `playwright==1.57.0`.
 
 - <a id="install-and-activate"></a>[Install and activate](REFERENCE.md#install-and-activate): inert installation, persistent activation, and skill readiness.
 - <a id="commands"></a>[Commands](REFERENCE.md#commands): setup, status, open, close, and reset.

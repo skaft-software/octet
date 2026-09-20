@@ -879,14 +879,14 @@ impl ExtensionRuntimeManager {
                     Some(entry)
                         if !Self::entry_is_eligible(entry)
                             || entry.lifecycle() != starting.provenance.lifecycle
-                            || match (&key.scope, entry.sharing()) {
+                            || !matches!(
+                                (&key.scope, entry.sharing()),
                                 (RuntimeScope::Shared, ExtensionRuntimeSharing::Workspace)
-                                | (
-                                    RuntimeScope::Binding(_) | RuntimeScope::OneShot(_),
-                                    ExtensionRuntimeSharing::Isolated,
-                                ) => false,
-                                _ => true,
-                            } =>
+                                    | (
+                                        RuntimeScope::Binding(_) | RuntimeScope::OneShot(_),
+                                        ExtensionRuntimeSharing::Isolated,
+                                    )
+                            ) =>
                     {
                         Some(ExtensionManagedRuntimeState::Inactive)
                     }

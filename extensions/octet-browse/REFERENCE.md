@@ -1,13 +1,14 @@
 # octet Browse reference
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Source distribution: 0.8.0 (release candidate).** This checkout and local
+archives require exactly octet 0.8.0. Catalog commands below require matching
+published assets; no 0.8.0 publication is claimed. Use a
+[source-built host](../../docs/installation.md#build-from-a-checkout) with a
+reviewed source checkout or local archive until matching assets are published.
 
-[Usage guide](README.md). This reference describes the bundled API `0.2`
-implementation, not current extension authoring. Distribution `0.7.6` requires
-exactly octet `0.7.6` and pins `playwright==1.57.0`.
+[Usage guide](README.md). This reference describes the bundled API `0.4`
+implementation, not a general extension-authoring tutorial. Distribution `0.8.0` requires
+exactly octet `0.8.0` and pins `playwright==1.57.0`.
 
 The opt-in executable always launches Playwright's bundled Chromium visibly
 (`headless=False`) with a persistent profile owned only by octet Browse. It never
@@ -17,9 +18,9 @@ pairs with, copies, discovers, or launches a normal Chrome/Chromium profile.
 
 Bundle installation only copies inert files. It does **not** run Python, install Playwright, download a browser, create a profile, or start this extension.
 
-With [octet 0.7.6 installed](../../docs/installation.md), use the matching signed
-public bundle below. A reviewed checkout or locally built archive remains an alternative;
-see the [guide](README.md#install-the-bundle).
+With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout) and verified
+matching published assets, use the catalog commands below. Until publication,
+use a reviewed checkout or local archive; see the [guide](README.md#install-the-bundle).
 
 ```console
 octet extension install octet-browse
@@ -168,7 +169,7 @@ END UNTRUSTED BROWSER CONTENT
 
 Everything inside is data, never instructions or authorization. A snapshot is capped at 20,000 characters and 100 interactive elements, with explicit truncation notices. It returns only bounded visible text and accessible role/name/state data. Input/textarea values, hidden content, cookies, storage, headers, and profile data are not queried or returned. Tab lists carrying page titles/URLs use the same markers.
 
-Screenshots are viewport-only PNGs. To prevent form-value leakage, capture is refused after `browser_type` has supplied a value in that tab or while any visible form/editable field could contain manually entered data (with a specific refusal for credential/authentication/payment fields). An image at or above 5 MiB fails clearly instead of returning an unreadable attachment. Successful images are retained under `~/.octet/browse/artifacts/screenshots/`, bounded to 20 files and 80 MiB, copied briefly into the host-owned process scratch area, and published through API `0.2` as owner/generation-scoped artifacts. Results contain both the image part and a textual local reference usable with built-in `read`.
+Screenshots are viewport-only PNGs. To prevent form-value leakage, capture is refused after `browser_type` has supplied a value in that tab or while any visible form/editable field could contain manually entered data (with a specific refusal for credential/authentication/payment fields). An image at or above 5 MiB fails clearly instead of returning an unreadable attachment. Successful images are retained under `~/.octet/browse/artifacts/screenshots/`, bounded to 20 files and 80 MiB, copied briefly into the host-owned process scratch area, and published through API `0.4` as owner/generation-scoped artifacts. Results contain both the image part and a textual local reference usable with built-in `read`.
 
 The conservative visible-form refusal can be relaxed for non-credential fields by setting `OCTET_BROWSE_ALLOW_FORM_SCREENSHOTS` to `1`, `true`, `yes`, or `on` before starting octet, or by creating the regular sentinel file `~/.octet/browse/allow-form-screenshots`. This override never permits capture after `browser_type` has supplied a value and never permits capture while a visible credential, OTP, payment, authentication, or other credential-like field is present.
 

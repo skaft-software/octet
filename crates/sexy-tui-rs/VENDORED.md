@@ -24,17 +24,6 @@ Historical Pi reference retained from the earlier port documentation:
 - Pi license: MIT; the upstream notice is preserved in this crate's `LICENSE`
   and in the workspace `THIRD_PARTY_NOTICES.md`.
 
-The current Pi parity target is `0.84.4`. Its exact revision, 33-test-file
-inventory, and incomplete audit status (`release_status: in_progress`) are
-recorded in [`UPSTREAM-PARITY.md`](UPSTREAM-PARITY.md) and the
-[`0.84.4 ledger`](upstream/pi-tui-0.84.4.json). The historical `0.81.1` reference
-above does not mean the older ports were imported from `0.84.4`, nor does the
-current target imply complete parity.
-
-Core ports must cite and reproduce the pinned Pi tests. Rust-only rich rendering
-and octet native-scrollback behavior are additive layers and must not redefine
-core Pi APIs or semantics. See `UPSTREAM-PARITY.md` for the port gate and order.
-
 The vendored source includes octet-specific integration changes maintained in
 this workspace. Future updates should be imported deliberately and validated
 with the full octet workspace test, formatting, and lint gates.

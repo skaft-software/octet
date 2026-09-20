@@ -45,16 +45,6 @@ async fn wait_for_serve_shutdown_signal() -> std::io::Result<()> {
     }
 }
 
-/// Starts the graphical Serve host with no startup session name.
-pub async fn run(
-    config: Config,
-    port: u16,
-    no_open: bool,
-    web_root: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    run_with_session_name(config, port, no_open, web_root, None).await
-}
-
 /// Starts the graphical Serve host and applies `session_name` to the first
 /// provisional session created by the root-client bootstrap.
 ///

@@ -166,6 +166,7 @@ pub(crate) mod notice {
 
     /// Prefix of the warning presented when live workers are detached instead
     /// of refusing the reload.
+    #[cfg(test)]
     pub(crate) const DETACHING_PREFIX: &str = "reload detaching workers · ";
 
     /// Prefix of every candidate-validation failure notice.
@@ -187,6 +188,7 @@ pub(crate) mod notice {
 
     /// The exact warning for one detaching reload: what happens to the running
     /// workers, that they are reattachable, and how many there are.
+    #[cfg(test)]
     pub(crate) fn detaching_workers(count: usize) -> String {
         if count == 1 {
             format!(
@@ -293,7 +295,7 @@ pub(crate) mod notice {
             RefusalReason::SessionPersistenceInFlight => {
                 "session persistence is still in flight".to_owned()
             }
-            RefusalReason::BackgroundWorkers(count) if count == 1 => {
+            RefusalReason::BackgroundWorkers(1) => {
                 "1 background worker is active; stop it from the /subagents menu, or reload with the worker-detach opt-in"
                     .to_owned()
             }
@@ -315,7 +317,7 @@ pub(crate) mod notice {
 /// device, inode, and ctime (nanoseconds) are included, so replacing a file
 /// with same-length content is detected even when a coarse filesystem clock
 /// makes size and mtime identical. The non-Unix fallback is path + size + mtime
-/// + best-effort creation time; it is weaker because it cannot see an inode,
+/// plus best-effort creation time; it is weaker because it cannot see an inode,
 /// and it is documented as such rather than silently implied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BinaryGeneration {
@@ -791,6 +793,7 @@ pub(crate) struct LiveSafetyInputs {
 
 impl LiveSafetyInputs {
     /// The first active state, in a fixed order, or `None`.
+    #[cfg(test)]
     pub(crate) fn refusal(&self) -> Option<RefusalReason> {
         self.refusal_with(ReexecOptions::default())
     }
@@ -865,22 +868,11 @@ impl ReexecOptions {
     }
 
     /// The explicit opt-in: live workers are detached and named in a warning.
+    #[cfg(test)]
     pub(crate) fn detaching_workers() -> Self {
         Self {
             detach_background_workers: true,
             ..Self::default()
-        }
-    }
-
-    /// The same consent, widened to detach live workers.
-    ///
-    /// Used when the caller already confirmed a retarget and is now answering
-    /// the worker prompt, so the retarget consent is not lost between the two
-    /// decisions.
-    pub(crate) fn with_detaching_workers(self) -> Self {
-        Self {
-            detach_background_workers: true,
-            ..self
         }
     }
 
@@ -1000,12 +992,26 @@ pub(crate) enum ReexecDecision {
     /// Candidate validation or preparation failed; the current process is
     /// still fully live.
     Blocked {
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "Retain the typed blocked cause alongside its user-safe notice for diagnostic consumers."
+            )
+        )]
         reason: BlockedReason,
         notice: String,
     },
     /// Live state makes replacing the process unsafe; the current process is
     /// still fully live.
     Refused {
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "Retain the typed refusal alongside its user-safe notice for diagnostic consumers."
+            )
+        )]
         reason: RefusalReason,
         notice: String,
     },
@@ -1020,12 +1026,19 @@ pub(crate) enum ReexecDecision {
     },
     /// Everything validated. The caller unwinds the TUI, then calls
     /// [`ReexecPlan::exec`].
-    Ready(ReexecPlan),
+    Ready(Box<ReexecPlan>),
     /// `exec` returned, which means the image was not replaced. The caller
     /// must re-enter the TUI, rebuild extension processes, and leave the
     /// terminal usable.
     ExecFailed {
         notice: String,
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "Retain the original exec failure for diagnostics; the UI shows its safe notice."
+            )
+        )]
         source: std::io::Error,
     },
 }
@@ -1079,11 +1092,13 @@ pub(crate) struct ReexecPlan {
     version: String,
     probed_generation: BinaryGeneration,
     /// Live workers this plan detaches, or `0` when nothing is detached.
+    #[cfg(test)]
     detached_workers: usize,
 }
 
 impl ReexecPlan {
     /// The canonical restart argv, including `argv[0]`.
+    #[cfg(test)]
     pub(crate) fn argv(&self) -> &[OsString] {
         &self.argv
     }
@@ -1095,6 +1110,7 @@ impl ReexecPlan {
 
     /// The resolved executable this plan enters: exactly the path that was just
     /// probed and re-pinned.
+    #[cfg(test)]
     pub(crate) fn executable(&self) -> &Path {
         &self.exe
     }
@@ -1112,11 +1128,13 @@ impl ReexecPlan {
     ///
     /// Used by [`Self::detach_notice`] and by the tests that pin the detach
     /// contract; the caller presents the notice, not the number.
+    #[cfg(test)]
     fn detached_workers(&self) -> usize {
         self.detached_workers
     }
 
     /// The warning to present when this plan detaches live workers, or `None`.
+    #[cfg(test)]
     pub(crate) fn detach_notice(&self) -> Option<String> {
         (self.detached_workers() > 0).then(|| notice::detaching_workers(self.detached_workers()))
     }
@@ -1273,6 +1291,7 @@ impl ReexecController {
     }
 
     /// The executable image captured at startup.
+    #[cfg(test)]
     pub(crate) fn executable(&self) -> &Path {
         &self.startup_exe
     }
@@ -1380,19 +1399,20 @@ impl ReexecController {
                 "{error:#}"
             )));
         }
-        ReexecDecision::Ready(ReexecPlan {
+        ReexecDecision::Ready(Box::new(ReexecPlan {
             exe: candidate,
             startup_exe: self.startup_exe.clone(),
             argv,
             session_id: session_id.to_owned(),
             version: payload.version,
             probed_generation: probed,
+            #[cfg(test)]
             detached_workers: if options.detach_background_workers {
                 safety.background_workers
             } else {
                 0
             },
-        })
+        }))
     }
 
     /// How `candidate`/`probed` differs from the image this process started
@@ -1496,9 +1516,7 @@ fn descriptor_directory() -> &'static str {
 fn open_descriptor_numbers() -> std::io::Result<Vec<libc::c_int>> {
     let directory = descriptor_directory();
     let entries = std::fs::read_dir(directory).map_err(|error| {
-        std::io::Error::other(format!(
-            "cannot list descriptors in {directory}: {error}"
-        ))
+        std::io::Error::other(format!("cannot list descriptors in {directory}: {error}"))
     })?;
     let mut descriptors = Vec::new();
     for entry in entries {
@@ -1543,6 +1561,7 @@ fn open_descriptor_numbers() -> std::io::Result<Vec<libc::c_int>> {
 /// Returns `Ok(true)` when the descriptor was already close-on-exec and
 /// `Ok(false)` when this call set it.
 #[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn ensure_close_on_exec(
     descriptor: std::os::fd::BorrowedFd<'_>,
 ) -> std::io::Result<bool> {
@@ -1616,21 +1635,19 @@ fn seal_one_descriptor(descriptor: libc::c_int) -> std::io::Result<()> {
         None => {}
         // Already sealed.
         Some(true) => {}
-        Some(false) => {
-            if seal_raw_descriptor(descriptor)? {
-                match descriptor_close_on_exec_state(descriptor)? {
-                    Some(true) => {}
-                    // Closed between the set and the read-back: nothing is
-                    // left to inherit.
-                    None => {}
-                    Some(false) => {
-                        return Err(std::io::Error::other(format!(
-                            "descriptor {descriptor} is open and still not close-on-exec"
-                        )))
-                    }
+        Some(false) if seal_raw_descriptor(descriptor)? => {
+            match descriptor_close_on_exec_state(descriptor)? {
+                Some(true) => {}
+                // Closed between the set and the read-back: nothing is left to inherit.
+                None => {}
+                Some(false) => {
+                    return Err(std::io::Error::other(format!(
+                        "descriptor {descriptor} is open and still not close-on-exec"
+                    )))
                 }
             }
         }
+        Some(false) => {}
     }
     Ok(())
 }
@@ -2070,7 +2087,7 @@ mod tests {
         match decision {
             ReexecDecision::Ready(plan) => {
                 let exe = plan.executable().to_path_buf();
-                (plan, observed, exe)
+                (*plan, observed, exe)
             }
             other => panic!("expected a ready plan, got {other:?}"),
         }
@@ -2319,7 +2336,7 @@ mod tests {
         old_format.session_format = 0;
         assert!(old_format.check_compatible().is_err());
 
-        let mut newer_format = payload("0.9.0", SESSION_FORMAT_VERSION + 1);
+        let newer_format = payload("0.9.0", SESSION_FORMAT_VERSION + 1);
         newer_format.check_compatible().unwrap();
     }
 
@@ -2427,15 +2444,16 @@ mod tests {
             .await;
         match unconfirmed {
             ReexecDecision::ConfirmationRequired {
-                redirect: ExecutableRedirect::Moved { from: seen_from, to: seen_to },
+                redirect:
+                    ExecutableRedirect::Moved {
+                        from: seen_from,
+                        to: seen_to,
+                    },
                 notice,
             } => {
                 assert_eq!(seen_from, startup);
                 assert_eq!(seen_to, moved);
-                assert!(
-                    notice.starts_with(notice::CONFIRMATION_PREFIX),
-                    "{notice}"
-                );
+                assert!(notice.starts_with(notice::CONFIRMATION_PREFIX), "{notice}");
             }
             other => panic!("a moved image must ask before it is probed, got {other:?}"),
         }
@@ -2531,10 +2549,7 @@ mod tests {
                 notice,
             } => {
                 assert_eq!(path, link);
-                assert!(
-                    notice.starts_with(notice::CONFIRMATION_PREFIX),
-                    "{notice}"
-                );
+                assert!(notice.starts_with(notice::CONFIRMATION_PREFIX), "{notice}");
             }
             other => panic!("a retargeted symlink must ask before it is probed, got {other:?}"),
         }
@@ -3589,9 +3604,7 @@ mod tests {
             }
         };
         if !raised {
-            eprintln!(
-                "skipping: cannot raise RLIMIT_NOFILE to own a descriptor above {ABOVE_CAP}"
-            );
+            eprintln!("skipping: cannot raise RLIMIT_NOFILE to own a descriptor above {ABOVE_CAP}");
             return;
         }
 

@@ -6,8 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use octet_agent::extension_process::{
-    ExtensionActiveSkill, ExtensionRequestId, EXTENSION_API_VERSION_0_2,
-    EXTENSION_FEATURE_REQUEST_PROGRESS,
+    ExtensionActiveSkill, ExtensionRequestId, EXTENSION_FEATURE_REQUEST_PROGRESS,
 };
 use octet_agent::{
     CancellationToken, DiscoveredExtension, ExtensionActivation, ExtensionConfirmationResponse,
@@ -93,6 +92,7 @@ confirmations = true
         session_id: Some("session-wire-1".into()),
         session_name: Some("Wire contract".into()),
         model: Some("local/model".into()),
+        model_view: None,
         reasoning: Some(json!({"effort": "high"})),
         active_skills: vec![ExtensionActiveSkill {
             id: "skill-1".into(),
@@ -371,6 +371,7 @@ hooks = ["before_prompt"]
         session_id: Some("python-sdk-session".into()),
         session_name: Some("Python SDK conformance".into()),
         model: Some("local/python-proof".into()),
+        model_view: None,
         reasoning: None,
         active_skills: Vec::new(),
     };
@@ -451,6 +452,15 @@ hooks = ["before_prompt"]
 
 #[tokio::test]
 async fn rust_host_runs_a_real_python_sdk_api_0_2_extension_end_to_end() {
+    python_sdk_feature_negotiated_round_trip("0.2").await;
+}
+
+#[tokio::test]
+async fn rust_host_runs_a_real_python_sdk_api_0_4_extension_end_to_end() {
+    python_sdk_feature_negotiated_round_trip("0.4").await;
+}
+
+async fn python_sdk_feature_negotiated_round_trip(api_version: &str) {
     let temp = TempDir::new().expect("tempdir");
     let child_path = temp.path().join("python-sdk-v02-extension.py");
     let shutdown_marker = temp.path().join("python-sdk-v02-shutdown.txt");
@@ -460,13 +470,13 @@ async fn rust_host_runs_a_real_python_sdk_api_0_2_extension_end_to_end() {
         .expect("canonical Python SDK path");
     write_executable(
         &child_path,
-        r#"#!/usr/bin/env python3
+        &r#"#!/usr/bin/env python3
 import os
 from pathlib import Path
 
 from octet_extension import Extension, text_content, tool_result
 
-extension = Extension(api_version="0.2")
+extension = Extension(api_version="__API_VERSION__")
 
 @extension.tool(
     name="sdk_v02_echo",
@@ -489,7 +499,7 @@ def sdk_v02_echo(arguments, context):
     return tool_result(
         text_content("echo:" + value),
         structured_content={"echo": value},
-        metadata={"sdk": "python", "api": "0.2"},
+        metadata={"sdk": "python", "api": "__API_VERSION__"},
     )
 
 @extension.on_shutdown
@@ -497,7 +507,8 @@ def on_shutdown(params, context):
     Path(os.environ["OCTET_TEST_SHUTDOWN_MARKER"]).write_text("shutdown", encoding="utf-8")
 
 extension.run()
-"#,
+"#
+        .replace("__API_VERSION__", api_version),
     );
 
     let mut manifest = ExtensionManifest::parse(
@@ -514,6 +525,8 @@ tools = ["sdk_v02_echo"]
 "#,
     )
     .expect("manifest");
+    manifest.api_version = api_version.to_owned();
+    manifest.validate().expect("selected API manifest");
     manifest.entrypoint.args = vec![child_path.to_string_lossy().into_owned()];
     manifest.entrypoint.env.insert(
         "PYTHONPATH".into(),
@@ -531,9 +544,9 @@ tools = ["sdk_v02_echo"]
         config,
     )
     .await
-    .expect("start real Python SDK API 0.2 extension");
+    .expect("start real Python SDK feature-negotiated extension");
 
-    assert_eq!(process.api_version(), EXTENSION_API_VERSION_0_2);
+    assert_eq!(process.api_version(), api_version);
     assert!(process
         .negotiated_features()
         .contains(EXTENSION_FEATURE_REQUEST_PROGRESS));
@@ -544,10 +557,13 @@ tools = ["sdk_v02_echo"]
             process.current_context(),
         )
         .await
-        .expect("API 0.2 Python tool call");
+        .expect("feature-negotiated Python tool call");
     assert_eq!(output.content, "echo:hello");
     assert_eq!(output.structured_content, Some(json!({"echo": "hello"})));
-    assert_eq!(output.metadata, json!({"sdk": "python", "api": "0.2"}));
+    assert_eq!(
+        output.metadata,
+        json!({"sdk": "python", "api": api_version})
+    );
     assert!(
         process.shutdown().await,
         "Python SDK should drain and shut down"

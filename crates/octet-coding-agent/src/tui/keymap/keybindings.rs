@@ -68,12 +68,20 @@ pub fn default_definitions(platform: &str, wsl: bool) -> Vec<KeybindingDefinitio
                 } else {
                     "ctrl+-".to_owned()
                 }],
-                "tui.altScreen.previousPrompt" => windows
-                    .then(|| vec!["ctrl+up".to_owned()])
-                    .unwrap_or_else(|| strings(keys)),
-                "tui.altScreen.nextPrompt" => windows
-                    .then(|| vec!["ctrl+down".to_owned()])
-                    .unwrap_or_else(|| strings(keys)),
+                "tui.altScreen.previousPrompt" => {
+                    if windows {
+                        vec!["ctrl+up".to_owned()]
+                    } else {
+                        strings(keys)
+                    }
+                }
+                "tui.altScreen.nextPrompt" => {
+                    if windows {
+                        vec!["ctrl+down".to_owned()]
+                    } else {
+                        strings(keys)
+                    }
+                }
                 "tui.altScreen.search" => vec![if windows {
                     "ctrl+f".to_owned()
                 } else {
@@ -322,6 +330,7 @@ impl KeybindingsManager {
 
     /// Every id with its resolved keys.
     #[must_use]
+    #[cfg(test)]
     pub fn get_resolved_bindings(&self) -> BTreeMap<String, Vec<String>> {
         self.definitions
             .iter()

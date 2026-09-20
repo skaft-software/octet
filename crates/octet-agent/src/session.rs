@@ -55,7 +55,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 /// Identifier of a session entry. Unique within one session file.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct EntryId(pub String);
 
 /// A durable restore point written after one submitted prompt completes.
@@ -206,6 +206,78 @@ pub const MAX_EXTENSION_ENTRY_METADATA_BYTES: usize = 128 * 1024;
 const MAX_EXTENSION_ENTRY_METADATA_DEPTH: usize = 16;
 const MAX_EXTENSION_ENTRY_METADATA_NODES: usize = 256;
 const MAX_EXTENSION_ENTRY_METADATA_KEY_BYTES: usize = 256;
+/// Maximum bytes retained for one extension-owned entry type identifier.
+pub const MAX_EXTENSION_ENTRY_TYPE_BYTES: usize = 128;
+/// Maximum bytes retained for one durable entry label.
+pub const MAX_ENTRY_LABEL_BYTES: usize = 4 * 1024;
+
+/// Durable extension-owned payload from the extension append protocol.
+///
+/// This is opaque, inert data owned by the extension namespace that appended
+/// it. It is retained in that namespace's entry metadata exactly like every
+/// other extension-owned value — bounded by the same rules and never part of
+/// provider context — and decoded again by [`Session::extension_entry`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionEntry {
+    /// Caller-declared entry type from the extension protocol.
+    pub entry_type: String,
+    /// Bounded inert JSON payload owned by the entry type.
+    pub data: serde_json::Value,
+}
+
+impl ExtensionEntry {
+    /// Encodes this payload into its namespace value envelope.
+    fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({ "entry_type": self.entry_type, "data": self.data })
+    }
+
+    /// Decodes a namespace value envelope written by [`Self::to_value`].
+    ///
+    /// A namespace may also carry values from other host paths, so only the
+    /// exact two-key envelope decodes; anything else is not an entry.
+    fn from_value(value: &serde_json::Value) -> Option<Self> {
+        let object = value.as_object()?;
+        if object.len() != 2 {
+            return None;
+        }
+        let entry_type = object.get("entry_type")?.as_str()?.to_owned();
+        let data = object.get("data")?.clone();
+        valid_extension_entry_type(&entry_type).then_some(Self { entry_type, data })
+    }
+}
+
+/// Returns whether `entry_type` is a usable extension-owned entry type.
+fn valid_extension_entry_type(entry_type: &str) -> bool {
+    !entry_type.is_empty()
+        && entry_type.len() <= MAX_EXTENSION_ENTRY_TYPE_BYTES
+        && !entry_type.chars().any(char::is_control)
+}
+
+/// Validates an extension entry payload and returns its encoded envelope size.
+///
+/// The shape rules are exactly [`valid_extension_metadata_value`] and the size
+/// bound is exactly [`MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES`], so a payload
+/// accepted here is retained verbatim by the namespace metadata sanitizer — an
+/// extension entry can never widen what durable extension state may contain.
+fn valid_extension_entry_payload(entry: &ExtensionEntry) -> Option<usize> {
+    if !valid_extension_entry_type(&entry.entry_type) {
+        return None;
+    }
+    let mut nodes = 0usize;
+    if !valid_extension_metadata_value(&entry.data, 0, &mut nodes) {
+        return None;
+    }
+    let encoded = serde_json::to_vec(&entry.to_value()).ok()?;
+    (encoded.len() <= MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES).then_some(encoded.len())
+}
+
+/// Returns whether `label` is a bounded, control-character-free entry label.
+///
+/// An empty label is valid and clears the entry's label.
+fn valid_entry_label(label: &str) -> bool {
+    label.len() <= MAX_ENTRY_LABEL_BYTES && !label.chars().any(char::is_control)
+}
 
 /// Host-attested provenance for one extension-owned metadata value.
 ///
@@ -692,6 +764,16 @@ pub enum SessionRecord {
         /// The durable deferred-run record, keyed by operation id.
         record: DeferredRunRecord,
     },
+    /// Replaceable label for one existing entry. JSONL entries are immutable,
+    /// so this record never rewrites history: the last record for one entry is
+    /// authoritative on replay and an empty `label` clears it. Labels never
+    /// change the active head, branch ancestry, or model-visible context.
+    EntryLabel {
+        /// The labeled entry. Unknown IDs are refused on append and on replay.
+        entry_id: EntryId,
+        /// Bounded, control-character-free label text; empty clears.
+        label: String,
+    },
 }
 
 /// Borrowed serialization view used by append/checkout. Keeping the entry
@@ -720,6 +802,10 @@ enum SessionRecordRef<'a> {
     },
     Usage {
         record: &'a UsageRecord,
+    },
+    EntryLabel {
+        entry_id: &'a EntryId,
+        label: &'a str,
     },
 }
 
@@ -936,6 +1022,9 @@ pub struct Session {
     /// store owns its own descriptor-bound append line so a durable change is
     /// one synced record.
     deferred_runs: Arc<DeferredRunStore>,
+    /// Replaceable durable entry labels. Keyed by an existing entry ID, so the
+    /// map can never grow past the session's entry count (one label per entry).
+    entry_labels: BTreeMap<EntryId, String>,
 }
 
 impl Drop for Session {
@@ -1016,6 +1105,7 @@ impl Session {
             checkpoints: Vec::new(),
             usage_records: Vec::new(),
             usage_uncertainty_records: Vec::new(),
+            entry_labels: BTreeMap::new(),
         })
     }
 
@@ -1153,6 +1243,7 @@ impl Session {
         let mut usage_uncertainty_records = Vec::new();
         let restored_invocations = DurableInvocationStore::new();
         let restored_deferred_runs = DeferredRunStore::new();
+        let mut entry_labels: BTreeMap<EntryId, String> = BTreeMap::new();
 
         // Byte offset of the end of the last accepted record, so a torn tail
         // can be truncated away below. Only one physical line is buffered at a
@@ -1233,13 +1324,36 @@ impl Session {
                             message: error.to_string(),
                         })?;
                 }
+                SessionRecord::EntryLabel { entry_id, label } => {
+                    if !index.contains_key(&entry_id) {
+                        return Err(SessionError::Corrupt {
+                            line: line_no,
+                            message: format!(
+                                "entry label references unknown entry {:?}",
+                                entry_id.0
+                            ),
+                        });
+                    }
+                    if !valid_entry_label(&label) {
+                        return Err(SessionError::Corrupt {
+                            line: line_no,
+                            message: "entry label exceeds its bound or contains control characters"
+                                .to_owned(),
+                        });
+                    }
+                    if label.is_empty() {
+                        entry_labels.remove(&entry_id);
+                    } else {
+                        entry_labels.insert(entry_id, label);
+                    }
+                }
                 SessionRecord::DeferredRun { record } => {
-                    restored_deferred_runs
-                        .restore(record)
-                        .map_err(|error| SessionError::Corrupt {
+                    restored_deferred_runs.restore(record).map_err(|error| {
+                        SessionError::Corrupt {
                             line: line_no,
                             message: error.to_string(),
-                        })?;
+                        }
+                    })?;
                 }
                 SessionRecord::Entry(entry) => {
                     if index.contains_key(&entry.id) {
@@ -1504,6 +1618,7 @@ impl Session {
             checkpoints,
             usage_records,
             usage_uncertainty_records,
+            entry_labels,
         })
     }
 
@@ -1797,6 +1912,69 @@ impl Session {
             | EntryValue::SkillDeactivated { .. } => *cache = None,
         }
         Ok(id)
+    }
+
+    /// Appends one durable, non-model-visible extension-owned entry.
+    ///
+    /// The payload is retained exactly like [`Session::append_run_outcome`]:
+    /// the entry uses the long-standing non-context configuration marker and
+    /// the typed data lives in entry metadata, so no provider projection can
+    /// observe it and older readers can still replay the record. The entry's
+    /// `extension_metadata` carries the host-attested provenance envelope for
+    /// `namespace`, mirroring the persistence-metadata hook path, and the
+    /// payload itself is stored in that namespace's bounded value slot.
+    ///
+    /// Returns the new entry ID, which resolves again after reopening the
+    /// session from disk (see [`Session::extension_entry`]). An invalid
+    /// namespace, entry type, or payload is refused with a typed error before
+    /// anything is written; nothing is truncated or silently dropped.
+    pub fn append_extension_entry(
+        &mut self,
+        namespace: &str,
+        process_generation: Option<u64>,
+        entry_type: &str,
+        data: serde_json::Value,
+    ) -> Result<EntryId, SessionError> {
+        if !is_valid_extension_metadata_namespace(namespace) {
+            return Err(SessionError::Limit(format!(
+                "invalid extension metadata namespace {namespace:?}"
+            )));
+        }
+        let payload = ExtensionEntry {
+            entry_type: entry_type.to_owned(),
+            data,
+        };
+        let Some(_data_bytes) = valid_extension_entry_payload(&payload) else {
+            return Err(SessionError::Limit(format!(
+                "extension entry type must be 1..={MAX_EXTENSION_ENTRY_TYPE_BYTES} non-control bytes and its data must be an inert JSON value within {MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES} encoded bytes"
+            )));
+        };
+        let mut extension_metadata = BTreeMap::new();
+        extension_metadata.insert(
+            namespace.to_owned(),
+            ExtensionEntryMetadata {
+                // The append protocol carries no public flag, so extension
+                // payloads stay private: exports and frontend projections must
+                // not surface extension-owned data implicitly.
+                public: false,
+                value: payload.to_value(),
+                provenance: ExtensionMetadataProvenance {
+                    extension: namespace.to_owned(),
+                    process_generation,
+                },
+            },
+        );
+        self.append_with_metadata(
+            EntryValue::Config {
+                model: None,
+                reasoning: None,
+                reasoning_mode: None,
+            },
+            Some(EntryMetadata {
+                extension_metadata,
+                ..EntryMetadata::default()
+            }),
+        )
     }
 
     /// Changes the head to an existing entry and appends a head record (same
@@ -2809,6 +2987,62 @@ impl Session {
         self.index.get(id).map(|&i| &self.entries[i])
     }
 
+    /// Durably sets or clears the label of an existing entry.
+    ///
+    /// Labels are a replaceable mutation of an immutable JSONL entry: a new
+    /// label record is appended and the last record for one entry wins on
+    /// replay. An empty `label` clears the entry's label. Unknown entry IDs,
+    /// labels longer than [`MAX_ENTRY_LABEL_BYTES`], and control characters are
+    /// refused with a typed error and leave the session state unchanged.
+    pub fn set_entry_label(&mut self, id: &EntryId, label: &str) -> Result<(), SessionError> {
+        if !self.index.contains_key(id) {
+            return Err(SessionError::UnknownEntry(id.clone()));
+        }
+        if !valid_entry_label(label) {
+            return Err(SessionError::Limit(format!(
+                "entry label must be at most {MAX_ENTRY_LABEL_BYTES} bytes without control characters"
+            )));
+        }
+        let mut buf = Vec::with_capacity(64 + label.len());
+        write_json_line(
+            &mut buf,
+            &SessionRecordRef::EntryLabel {
+                entry_id: id,
+                label,
+            },
+        )?;
+        self.persist(&buf)?;
+        if label.is_empty() {
+            self.entry_labels.remove(id);
+        } else {
+            self.entry_labels.insert(id.clone(), label.to_owned());
+        }
+        Ok(())
+    }
+
+    /// The durable label of `id`, if one is currently set.
+    pub fn entry_label(&self, id: &EntryId) -> Option<&str> {
+        self.entry_labels.get(id).map(String::as_str)
+    }
+
+    /// Every durable entry label, keyed by entry ID.
+    ///
+    /// At most one label exists per entry, so the map never outgrows the
+    /// session's entries.
+    pub fn entry_labels(&self) -> &BTreeMap<EntryId, String> {
+        &self.entry_labels
+    }
+
+    /// The durable extension-owned payload appended for `id` by `namespace`.
+    ///
+    /// Returns a detached decoded payload, or `None` when the entry has no
+    /// extension value in that namespace (or the value was written by another
+    /// host path that does not use the entry envelope).
+    pub fn extension_entry(&self, id: &EntryId, namespace: &str) -> Option<ExtensionEntry> {
+        let metadata = self.entry(id)?.metadata.as_ref()?;
+        ExtensionEntry::from_value(&metadata.extension_metadata.get(namespace)?.value)
+    }
+
     /// Reconstructs the model-visible context from the current head.
     ///
     /// Walks the parent chain from the head, stopping at the nearest
@@ -3113,8 +3347,8 @@ impl AssistantFrameJournal {
         if self.settled || self.bounded {
             return Ok(());
         }
-        let mut line = serde_json::to_vec(frame)
-            .map_err(|error| SessionError::Serde(error.to_string()))?;
+        let mut line =
+            serde_json::to_vec(frame).map_err(|error| SessionError::Serde(error.to_string()))?;
         line.push(b'\n');
         if self.frames >= MAX_PARTIAL_FRAME_JOURNAL_FRAMES
             || self.bytes.saturating_add(line.len()) > MAX_PARTIAL_FRAME_JOURNAL_BYTES
@@ -5877,5 +6111,207 @@ mod tests {
         assert!(
             std::fs::metadata(&path).unwrap().len() as usize <= MAX_PARTIAL_FRAME_JOURNAL_BYTES
         );
+    }
+
+    #[test]
+    fn extension_entries_are_durable_and_never_model_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        let id = session
+            .append_extension_entry(
+                "octet.todo",
+                Some(7),
+                "todo.created",
+                serde_json::json!({ "text": "ship wave 1" }),
+            )
+            .unwrap();
+        // The payload rides the same non-context marker envelope as
+        // `append_run_outcome`, so every provider projection skips it and
+        // older readers can still replay the record.
+        assert!(matches!(
+            &session.entry(&id).unwrap().value,
+            EntryValue::Config {
+                model: None,
+                reasoning: None,
+                reasoning_mode: None,
+            }
+        ));
+        assert!(session.context().unwrap().is_empty());
+        let prompt = session.append(user("hello")).unwrap();
+        let context = session.context().unwrap();
+        assert_eq!(context.len(), 1, "only the user message is model-visible");
+        assert!(
+            !format!("{context:?}").contains("ship wave 1"),
+            "extension payload text must never reach provider context"
+        );
+        // Nothing before the prompt is model-visible: the extension marker is
+        // skipped exactly like every other configuration marker.
+        assert!(session.context_before(&prompt).unwrap().is_empty());
+        // A marker that is itself the active head still adds no context, and
+        // the prior message remains the only model-visible contribution.
+        let second = session
+            .append_extension_entry(
+                "octet.todo",
+                None,
+                "todo.updated",
+                serde_json::json!({ "text": "ship wave 1" }),
+            )
+            .unwrap();
+        assert_eq!(session.head(), Some(second.clone()));
+        assert_eq!(session.context().unwrap().len(), 1);
+        assert_eq!(session.context_before(&second).unwrap().len(), 1);
+        assert!(!format!("{:?}", session.context().unwrap()).contains("ship wave 1"));
+    }
+
+    #[test]
+    fn extension_entry_round_trips_through_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let id = {
+            let mut session = Session::create(&path).unwrap();
+            session
+                .append_extension_entry(
+                    "octet.todo",
+                    Some(11),
+                    "todo.created",
+                    serde_json::json!({ "items": ["a", "b"] }),
+                )
+                .unwrap()
+        };
+        let session = Session::open(&path).unwrap();
+        let entry = session
+            .extension_entry(&id, "octet.todo")
+            .expect("payload resolves");
+        assert_eq!(entry.entry_type, "todo.created");
+        assert_eq!(entry.data, serde_json::json!({ "items": ["a", "b"] }));
+        let metadata = session.entry(&id).unwrap().metadata.as_ref().unwrap();
+        let stored = &metadata.extension_metadata["octet.todo"];
+        assert!(!stored.public);
+        assert_eq!(stored.provenance.extension, "octet.todo");
+        assert_eq!(stored.provenance.process_generation, Some(11));
+        assert_eq!(
+            stored.value,
+            serde_json::json!({
+                "entry_type": "todo.created",
+                "data": { "items": ["a", "b"] },
+            })
+        );
+        assert!(metadata.public_extension_metadata().is_empty());
+        assert!(session.extension_entry(&id, "other.namespace").is_none());
+        assert!(session.context().unwrap().is_empty());
+    }
+
+    #[test]
+    fn extension_entry_refuses_invalid_input_without_state_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        let anchor = session.append(user("anchor")).unwrap();
+        let durable_bytes = std::fs::metadata(&path).unwrap().len();
+        let long_type = "t".repeat(MAX_EXTENSION_ENTRY_TYPE_BYTES + 1);
+        let mut deep = serde_json::json!(1);
+        for _ in 0..=MAX_EXTENSION_ENTRY_METADATA_DEPTH {
+            deep = serde_json::json!({ "a": deep });
+        }
+        // 255 single-kilobyte strings plus their array is exactly the node
+        // bound, but whose encoded form exceeds the namespace value bound.
+        let oversize = serde_json::Value::Array(
+            (0..255)
+                .map(|_| serde_json::json!("x".repeat(1024)))
+                .collect(),
+        );
+        let cases = vec![
+            ("Bad.Namespace", "note", serde_json::json!(1)),
+            ("", "note", serde_json::json!(1)),
+            ("octet..todo", "note", serde_json::json!(1)),
+            ("octet.todo", "", serde_json::json!(1)),
+            ("octet.todo", long_type.as_str(), serde_json::json!(1)),
+            ("octet.todo", "no\nte", serde_json::json!(1)),
+            (
+                "octet.todo",
+                "note",
+                serde_json::json!("x".repeat(MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES)),
+            ),
+            ("octet.todo", "note", deep),
+            ("octet.todo", "note", oversize),
+        ];
+        for (namespace, entry_type, data) in cases {
+            let error = session
+                .append_extension_entry(namespace, None, entry_type, data)
+                .expect_err("invalid extension entry must be refused");
+            assert!(matches!(error, SessionError::Limit(_)), "{error}");
+        }
+        assert_eq!(session.head(), Some(anchor));
+        assert_eq!(session.entries().len(), 1);
+        assert_eq!(session.context().unwrap().len(), 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), durable_bytes);
+        // A payload that fits the namespace value bound is retained verbatim.
+        let accepted = serde_json::json!({ "note": "x".repeat(8 * 1024) });
+        let id = session
+            .append_extension_entry("octet.todo", None, "note", accepted.clone())
+            .unwrap();
+        assert_eq!(
+            session.extension_entry(&id, "octet.todo").unwrap().data,
+            accepted
+        );
+    }
+
+    #[test]
+    fn entry_labels_are_replaceable_durable_and_clearable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let first;
+        let second;
+        {
+            let mut session = Session::create(&path).unwrap();
+            first = session.append(user("one")).unwrap();
+            second = session.append(assistant("two")).unwrap();
+            session.set_entry_label(&first, "planning").unwrap();
+            session.set_entry_label(&second, "answer").unwrap();
+            session.set_entry_label(&first, "replanned").unwrap();
+            assert_eq!(session.entry_label(&first), Some("replanned"));
+            assert_eq!(session.entry_label(&second), Some("answer"));
+            assert_eq!(session.entry_labels().len(), 2);
+            assert!(session.entry_labels().len() <= session.entries().len());
+            // Labels never move the head or change model-visible context.
+            assert_eq!(session.head(), Some(second.clone()));
+            assert_eq!(session.context().unwrap().len(), 2);
+        }
+        let mut session = Session::open(&path).unwrap();
+        assert_eq!(session.entry_label(&first), Some("replanned"));
+        assert_eq!(session.entry_label(&second), Some("answer"));
+        session.set_entry_label(&first, "").unwrap();
+        assert_eq!(session.entry_label(&first), None);
+        assert!(session.entry_labels().contains_key(&second));
+        drop(session);
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(reopened.entry_label(&first), None);
+        assert_eq!(reopened.entry_label(&second), Some("answer"));
+    }
+
+    #[test]
+    fn entry_label_refuses_unknown_entry_and_invalid_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        let entry = session.append(user("one")).unwrap();
+        let durable_bytes = std::fs::metadata(&path).unwrap().len();
+        let unknown = EntryId("999".into());
+        let error = session.set_entry_label(&unknown, "ghost").unwrap_err();
+        assert!(matches!(error, SessionError::UnknownEntry(id) if id == unknown));
+        let error = session
+            .set_entry_label(&entry, &"x".repeat(MAX_ENTRY_LABEL_BYTES + 1))
+            .unwrap_err();
+        assert!(matches!(error, SessionError::Limit(_)), "{error}");
+        let error = session.set_entry_label(&entry, "two\nlines").unwrap_err();
+        assert!(matches!(error, SessionError::Limit(_)), "{error}");
+        assert_eq!(session.entry_label(&entry), None);
+        assert!(session.entry_labels().is_empty());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), durable_bytes);
+        // The exact byte bound is accepted without control characters.
+        let label = "y".repeat(MAX_ENTRY_LABEL_BYTES);
+        session.set_entry_label(&entry, &label).unwrap();
+        assert_eq!(session.entry_label(&entry), Some(label.as_str()));
     }
 }

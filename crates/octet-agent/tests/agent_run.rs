@@ -937,7 +937,9 @@ fn scripted_model_for_protocol(uri: &str, protocol: Protocol) -> Model {
         Protocol::OpenAiResponses => scripted_responses_model(uri),
         Protocol::OpenAiChat => openai_multimodal_model(uri),
         Protocol::AnthropicMessages => scripted_model(uri),
-        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi | Protocol::MistralConversations => {
+        Protocol::BedrockConverse
+        | Protocol::GoogleGenerativeAi
+        | Protocol::MistralConversations => {
             panic!("{protocol:?} requires a codec-specific provider fixture")
         }
         // `pi-messages` is the native host codec (the Pi gateway request
@@ -2375,7 +2377,10 @@ async fn local_server_request_size_rejection_compacts_once_and_retries() {
         Some(6),
     );
     let output = agent.complete("compact and retry").await.unwrap();
-    assert!(matches!(output.reason, FinishReason::Completed), "{output:?}");
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "{output:?}"
+    );
     assert!(
         agent
             .session()
@@ -4814,7 +4819,6 @@ async fn marked_tool_output_remains_rich_across_lowering_events_and_session_reop
         .any(|part| matches!(part, octet_ai::ToolResultPart::Media(Media::Image(_)))));
 }
 
-
 fn assert_bounded_invocation_batch(path: &Path, expected_calls: usize, prefix: &str) {
     let records = std::fs::read_to_string(path)
         .unwrap()
@@ -6992,6 +6996,7 @@ async fn observe_unfinished_tool_turn(run: &mut octet_agent::Run<'_>) -> Vec<Age
 }
 
 struct DurableBashProbe {
+    bash: octet_agent::BashTool,
     effect: ToolEffect,
     effect_calls: Arc<AtomicUsize>,
     executions: Arc<AtomicUsize>,
@@ -7001,7 +7006,7 @@ struct DurableBashProbe {
 #[async_trait::async_trait]
 impl Tool for DurableBashProbe {
     fn definition(&self) -> octet_ai::ToolDef {
-        octet_agent::BashTool.definition()
+        self.bash.definition()
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -7038,7 +7043,7 @@ impl Tool for DurableBashProbe {
             std::fs::write(ctx.workspace.join("mutation.txt"), "executed").unwrap();
             Ok(ToolOutput::new("mutation executed"))
         } else {
-            octet_agent::BashTool.execute(args, ctx).await
+            self.bash.execute(args, ctx).await
         }
     }
 }
@@ -7059,6 +7064,7 @@ fn bash_probe_harness(
     // Deliberately register an arbitrary sequential implementation named bash,
     // with no tool hooks that could suppress an unsafe streaming fast path.
     extensions.tool(DurableBashProbe {
+        bash: octet_agent::BashTool::default(),
         effect,
         effect_calls: Arc::clone(&effect_calls),
         executions: Arc::clone(&executions),
@@ -8110,7 +8116,10 @@ async fn qualified_codex_four_eofs_then_success_preserves_unknown_usage() {
     assert_eq!(wire_requests(&server).await.len(), 5);
     assert_eq!(agent.session().usage_uncertainty_records().len(), 4);
     let mut recovered_session = Session::open(&session_path).unwrap();
-    assert!(recovered_session.take_partial_assistant().unwrap().is_none());
+    assert!(recovered_session
+        .take_partial_assistant()
+        .unwrap()
+        .is_none());
     drop(recovered_session);
     drop(agent);
     let mut agent = build_responses_agent_from_session(
@@ -9489,11 +9498,14 @@ async fn native_compaction_calls_bound_reopening_but_not_healthy_reconnected_bod
                     )
                     .unwrap();
                 let output = drive_native_virtual(agent.complete("continue")).await;
-                output.and_then(|output| match output.reason {
-                    FinishReason::Completed => Ok(()),
-                    FinishReason::Failed(error) => Err(error),
-                    other => panic!("unexpected native outcome {other:?}"),
-                })
+                match output {
+                    Ok(output) => match output.reason {
+                        FinishReason::Completed => Ok(()),
+                        FinishReason::Failed(error) => Err(error),
+                        other => panic!("unexpected native outcome {other:?}"),
+                    },
+                    Err(error) => Err(error),
+                }
             } else {
                 drive_native_virtual(agent.compact_responses_native())
                     .await
@@ -9724,10 +9736,7 @@ fn recorded_span_names(
     spans.iter().map(|span| span.name.as_str()).collect()
 }
 
-fn span_index(
-    spans: &[octet_agent::telemetry::spans::RecordedTelemetrySpan],
-    name: &str,
-) -> usize {
+fn span_index(spans: &[octet_agent::telemetry::spans::RecordedTelemetrySpan], name: &str) -> usize {
     spans
         .iter()
         .position(|span| span.name == name)
@@ -9789,15 +9798,27 @@ async fn typed_spans_nest_run_turn_provider_and_tool_boundaries() {
     );
     assert_eq!(spans[0].parent_id, None, "the run span is the root");
     for index in [1usize, 5] {
-        assert_eq!(spans[index].parent_id, Some(spans[0].id), "turns nest under the run");
+        assert_eq!(
+            spans[index].parent_id,
+            Some(spans[0].id),
+            "turns nest under the run"
+        );
     }
     for index in [2usize, 6] {
         let turn = if index == 2 { 1 } else { 5 };
         assert_eq!(spans[index].parent_id, Some(spans[turn].id));
     }
-    assert_eq!(spans[3].parent_id, Some(spans[2].id), "the stream nests under its request");
+    assert_eq!(
+        spans[3].parent_id,
+        Some(spans[2].id),
+        "the stream nests under its request"
+    );
     assert_eq!(spans[7].parent_id, Some(spans[6].id));
-    assert_eq!(spans[4].parent_id, Some(spans[1].id), "the tool nests under its turn");
+    assert_eq!(
+        spans[4].parent_id,
+        Some(spans[1].id),
+        "the tool nests under its turn"
+    );
 
     assert!(
         spans.iter().all(|span| span.settled),
@@ -9813,8 +9834,14 @@ async fn typed_spans_nest_run_turn_provider_and_tool_boundaries() {
         "the tool span carries the registered name and never arguments"
     );
     let request = &spans[2].attributes;
-    assert_eq!(request.get("input_tokens"), Some(&AttributeValue::Number(5.0)));
-    assert_eq!(request.get("output_tokens"), Some(&AttributeValue::Number(3.0)));
+    assert_eq!(
+        request.get("input_tokens"),
+        Some(&AttributeValue::Number(5.0))
+    );
+    assert_eq!(
+        request.get("output_tokens"),
+        Some(&AttributeValue::Number(3.0))
+    );
     assert_eq!(
         request.get("has_uncertain_usage"),
         Some(&AttributeValue::Boolean(false)),
@@ -9884,8 +9911,16 @@ async fn typed_spans_label_failed_runs_without_changing_accounting() {
                     "octet.ai.stream",
                 ]
             );
-            assert_eq!(spans[0].status, SpanStatus::Error, "a failed run is an error span");
-            assert_eq!(spans[1].status, SpanStatus::Error, "a failed turn is an error span");
+            assert_eq!(
+                spans[0].status,
+                SpanStatus::Error,
+                "a failed run is an error span"
+            );
+            assert_eq!(
+                spans[1].status,
+                SpanStatus::Error,
+                "a failed turn is an error span"
+            );
             assert_eq!(
                 spans[2].status,
                 SpanStatus::Ok,
@@ -10099,7 +10134,9 @@ async fn typed_spans_cover_compaction_and_summary_boundaries() {
         180_000,
     );
     let mut agent = build_agent_from_session(&server.uri(), workspace.path(), session, Some(4));
-    agent.set_compaction_token_policy(true, 0.85, 10_000).unwrap();
+    agent
+        .set_compaction_token_policy(true, 0.85, 10_000)
+        .unwrap();
     let fixture = InMemoryTelemetryContext::default();
     agent.set_telemetry_context(fixture.context());
 
@@ -10128,9 +10165,15 @@ async fn typed_spans_cover_compaction_and_summary_boundaries() {
         Some(spans[summary].id),
         "the summary request nests under the summary span"
     );
-    assert_eq!(spans[compaction].parent_id, Some(spans[1].id), "compaction nests under the turn");
+    assert_eq!(
+        spans[compaction].parent_id,
+        Some(spans[1].id),
+        "compaction nests under the turn"
+    );
     assert!(
-        spans.iter().all(|span| span.settled && span.status == SpanStatus::Ok),
+        spans
+            .iter()
+            .all(|span| span.settled && span.status == SpanStatus::Ok),
         "a completed compaction settles every boundary: {spans:#?}"
     );
 }
@@ -10380,10 +10423,21 @@ async fn a_killed_stream_republishes_its_partial_assistant_prefix_once() {
             _ => None,
         })
         .collect();
-    assert!(
-        text.starts_with(&observed_prefix),
-        "the restart must republish the frame prefix first: {text:?}"
+    assert_eq!(
+        text, "SECOND-TURN",
+        "historical progress must not enter the next answer"
     );
+    let recovered: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::RecoveredOutput {
+                channel: OutputChannel::Text,
+                text,
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recovered, observed_prefix);
     assert!(
         !text.contains("KILLED-TAIL"),
         "a partial must never grow into the whole killed turn: {text:?}"
@@ -10717,10 +10771,7 @@ async fn live_panel_decorations_are_coalesced_and_settle_the_latest_state() {
         "the first state after idle is immediate"
     );
     assert_eq!(
-        decorations
-            .last()
-            .expect("at least one decoration")
-            .label(),
+        decorations.last().expect("at least one decoration").label(),
         "step 11",
         "the terminal boundary publishes the latest state, never a stale one"
     );
@@ -10867,7 +10918,8 @@ async fn live_run_path_publishes_bounded_partial_output_checkpoints() {
     );
     for snapshot in &snapshots {
         assert!(
-            !snapshot.contains("complete_stdout=true") && !snapshot.contains("complete_stderr=true"),
+            !snapshot.contains("complete_stdout=true")
+                && !snapshot.contains("complete_stderr=true"),
             "a checkpoint never claims the command finished: {snapshot}"
         );
     }
@@ -11071,7 +11123,7 @@ async fn durable_memos_are_injected_into_sequential_and_parallel_calls() {
         let ids = (0..width)
             .map(|index| format!("memo-{index}"))
             .collect::<Vec<_>>();
-        let script = vec![
+        let script = [
             tool_turn(
                 &(0..width)
                     .map(|index| {

@@ -118,7 +118,9 @@ pub enum MermaidError {
 impl std::fmt::Display for MermaidError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingHeader => write!(formatter, "dropped, expected a graph or flowchart header"),
+            Self::MissingHeader => {
+                write!(formatter, "dropped, expected a graph or flowchart header")
+            }
             Self::UnsupportedDiagram { header } => {
                 write!(formatter, "dropped, unsupported diagram type: \"{header}\"")
             }
@@ -186,7 +188,10 @@ struct Edge {
 pub fn render_mermaid(source: &str) -> Result<MermaidArt, MermaidError> {
     if source.len() > MAX_MERMAID_SOURCE_BYTES {
         return Err(MermaidError::TooLarge {
-            detail: format!("source is {} bytes, limit is {MAX_MERMAID_SOURCE_BYTES}", source.len()),
+            detail: format!(
+                "source is {} bytes, limit is {MAX_MERMAID_SOURCE_BYTES}",
+                source.len()
+            ),
         });
     }
     let (direction, nodes, edges) = parse(source)?;
@@ -207,7 +212,11 @@ pub fn render_mermaid(source: &str) -> Result<MermaidArt, MermaidError> {
         });
     }
     let lines: Vec<String> = canvas.rows.iter().map(|row| row_to_line(row)).collect();
-    let width = lines.iter().map(|line| display_width(line)).max().unwrap_or(0);
+    let width = lines
+        .iter()
+        .map(|line| display_width(line))
+        .max()
+        .unwrap_or(0);
     Ok(MermaidArt { lines, width })
 }
 
@@ -311,10 +320,9 @@ fn parse(source: &str) -> Result<(Direction, Vec<Node>, Vec<Edge>), MermaidError
             {
                 continue;
             }
-            if let Some(keyword) = STATEMENT_KEYWORDS_IN_UNSUPPORTED
-                .iter()
-                .find(|keyword| lowered.starts_with(**keyword) && boundary(&lowered[keyword.len()..]))
-            {
+            if let Some(keyword) = STATEMENT_KEYWORDS_IN_UNSUPPORTED.iter().find(|keyword| {
+                lowered.starts_with(**keyword) && boundary(&lowered[keyword.len()..])
+            }) {
                 return Err(syntax(
                     line_number,
                     format!("`{keyword}` statements are not supported"),
@@ -434,7 +442,10 @@ fn parse_statement(
             return Ok(());
         }
         if characters[position] == '&' {
-            return Err(syntax(line, "node lists with `&` are not supported".to_owned()));
+            return Err(syntax(
+                line,
+                "node lists with `&` are not supported".to_owned(),
+            ));
         }
         let (token, next) = read_link(&characters, position).ok_or_else(|| {
             syntax(
@@ -449,7 +460,10 @@ fn parse_statement(
         }
         position = skip_spaces(&characters, position);
         if position >= characters.len() {
-            return Err(syntax(line, "trailing link without a target node".to_owned()));
+            return Err(syntax(
+                line,
+                "trailing link without a target node".to_owned(),
+            ));
         }
         pending_from = Some(index);
         pending_label = Some(label);
@@ -458,7 +472,11 @@ fn parse_statement(
 }
 
 fn rest(characters: &[char], from: usize) -> String {
-    characters[from..].iter().collect::<String>().trim().to_owned()
+    characters[from..]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 fn skip_spaces(characters: &[char], mut position: usize) -> usize {
@@ -477,7 +495,9 @@ fn skip_class_annotation(characters: &[char], mut position: usize) -> usize {
                 cursor += 1;
             }
             while cursor < characters.len()
-                && (characters[cursor].is_alphanumeric() || characters[cursor] == '_' || characters[cursor] == '-')
+                && (characters[cursor].is_alphanumeric()
+                    || characters[cursor] == '_'
+                    || characters[cursor] == '-')
             {
                 cursor += 1;
             }
@@ -594,7 +614,10 @@ fn read_label(
         }
         cursor += 1;
     }
-    Err(syntax(line, format!("unbalanced node label opened with `{open}`")))
+    Err(syntax(
+        line,
+        format!("unbalanced node label opened with `{open}`"),
+    ))
 }
 
 fn unquote(value: &str) -> String {
@@ -635,7 +658,9 @@ fn layer(
         indegree[edge.to] += 1;
     }
 
-    let mut queue: Vec<usize> = (0..nodes.len()).filter(|index| indegree[*index] == 0).collect();
+    let mut queue: Vec<usize> = (0..nodes.len())
+        .filter(|index| indegree[*index] == 0)
+        .collect();
     let mut order: Vec<usize> = Vec::new();
     let mut processed = 0usize;
     while let Some(index) = queue.pop() {
@@ -684,10 +709,9 @@ fn layer(
 
     let last_layer = nodes.iter().map(|node| node.layer).max().unwrap_or(0);
     let mut used: Vec<usize> = vec![0; last_layer + 1];
-    for index in 0..nodes.len() {
-        let layer = nodes[index].layer;
-        nodes[index].slot = used[layer];
-        used[layer] += 1;
+    for node in &mut nodes {
+        node.slot = used[node.layer];
+        used[node.layer] += 1;
     }
     Ok((nodes, edges))
 }
@@ -828,19 +852,11 @@ fn layout_left_right(nodes: &mut [Node], edges: &[Edge]) -> Canvas {
             for x in start_x + 1..jog_x {
                 canvas.put(x, start_y, '─');
             }
-            canvas.put(
-                jog_x,
-                start_y,
-                if end_y > start_y { '┐' } else { '┘' },
-            );
+            canvas.put(jog_x, start_y, if end_y > start_y { '┐' } else { '┘' });
             for y in (start_y.min(end_y) + 1)..start_y.max(end_y) {
                 canvas.put(jog_x, y, '│');
             }
-            canvas.put(
-                jog_x,
-                end_y,
-                if end_y > start_y { '└' } else { '┌' },
-            );
+            canvas.put(jog_x, end_y, if end_y > start_y { '└' } else { '┌' });
             for x in jog_x + 1..end_x {
                 canvas.put(x, end_y, '─');
             }
@@ -886,7 +902,11 @@ fn layout_top_down(nodes: &mut [Node], edges: &[Edge]) -> Canvas {
             for y in start_y + 1..end_y.saturating_sub(1) {
                 canvas.put(start_x, y, '│');
             }
-            canvas.put(end_x, end_y.saturating_sub(1), if edge.directed { '▼' } else { '│' });
+            canvas.put(
+                end_x,
+                end_y.saturating_sub(1),
+                if edge.directed { '▼' } else { '│' },
+            );
         } else {
             let jog_y = end_y.saturating_sub(2);
             for y in start_y + 1..jog_y {
@@ -897,20 +917,16 @@ fn layout_top_down(nodes: &mut [Node], edges: &[Edge]) -> Canvas {
             } else {
                 (end_x, start_x)
             };
-            canvas.put(
-                start_x,
-                jog_y,
-                if start_x < end_x { '└' } else { '┘' },
-            );
+            canvas.put(start_x, jog_y, if start_x < end_x { '└' } else { '┘' });
             for x in left + 1..right {
                 canvas.put(x, jog_y, '─');
             }
+            canvas.put(end_x, jog_y, if start_x < end_x { '┐' } else { '┌' });
             canvas.put(
                 end_x,
-                jog_y,
-                if start_x < end_x { '┐' } else { '┌' },
+                end_y.saturating_sub(1),
+                if edge.directed { '▼' } else { '│' },
             );
-            canvas.put(end_x, end_y.saturating_sub(1), if edge.directed { '▼' } else { '│' });
         }
         if let Some(label) = &edge.label {
             canvas.text(start_x + 2, start_y + 1, label);

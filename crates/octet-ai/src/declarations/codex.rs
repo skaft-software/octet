@@ -191,7 +191,9 @@ pub fn normalize_codex_timeout_ms(value: Option<u64>) -> Result<Option<u64>, Dec
 }
 
 /// The connect deadline actually applied for one attempt.
-pub fn effective_codex_connect_timeout_ms(requested: Option<u64>) -> Result<Option<u64>, DeclarationError> {
+pub fn effective_codex_connect_timeout_ms(
+    requested: Option<u64>,
+) -> Result<Option<u64>, DeclarationError> {
     Ok(match normalize_codex_timeout_ms(requested)? {
         // Pi passes `undefined` and lets the WebSocket layer use its own
         // 15-second default; making that default explicit keeps one number.
@@ -362,9 +364,15 @@ mod tests {
     fn connect_deadlines_match_pis_normalization() {
         assert_eq!(normalize_codex_timeout_ms(None).unwrap(), None);
         assert_eq!(normalize_codex_timeout_ms(Some(0)).unwrap(), Some(0));
-        assert_eq!(effective_codex_connect_timeout_ms(None).unwrap(), Some(15_000));
+        assert_eq!(
+            effective_codex_connect_timeout_ms(None).unwrap(),
+            Some(15_000)
+        );
         assert_eq!(effective_codex_connect_timeout_ms(Some(0)).unwrap(), None);
-        assert_eq!(effective_codex_connect_timeout_ms(Some(250)).unwrap(), Some(250));
+        assert_eq!(
+            effective_codex_connect_timeout_ms(Some(250)).unwrap(),
+            Some(250)
+        );
         assert!(effective_codex_connect_timeout_ms(Some(u64::MAX)).is_err());
     }
 
@@ -379,7 +387,10 @@ mod tests {
         stats.record_request(true, true, true, 3, Some(("resp_prev", 3)));
         assert_eq!(stats.connections_reused, 1);
         assert_eq!(stats.delta_requests, 1);
-        assert_eq!(stats.last_previous_response_id.as_deref(), Some("resp_prev"));
+        assert_eq!(
+            stats.last_previous_response_id.as_deref(),
+            Some("resp_prev")
+        );
         assert_eq!(stats.store_true_requests, 1);
         stats.record_websocket_failure("socket\nreset\u{7}after timeout");
         assert_eq!(stats.websocket_failures, 1);
@@ -390,6 +401,8 @@ mod tests {
         );
         stats.record_sse_fallback();
         assert_eq!(stats.sse_fallbacks, 1);
-        assert!(serde_json::to_string(&stats).unwrap().contains("sse_fallbacks"));
+        assert!(serde_json::to_string(&stats)
+            .unwrap()
+            .contains("sse_fallbacks"));
     }
 }

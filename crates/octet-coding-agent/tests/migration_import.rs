@@ -5,23 +5,15 @@ use std::process::Command;
 
 #[test]
 fn pi_adapter_source_package_manifest_validates_without_model_tools() {
-    // The tracked adapter pins the last *published* host. This local candidate
-    // is a newer version than that pin, so validation runs against a private
-    // byte-identical copy whose only change is the required host version. The
-    // tracked manifest keeps its published-release pin, and no adapter source
-    // or distribution metadata is rewritten by this test.
-    let tracked = include_str!("../../../extensions/octet-import-pi/extension.toml");
-    assert!(
-        tracked.contains("requires_octet = \"=0.7.6\""),
-        "{tracked}"
-    );
-    let staged = tracked.replace(
-        "requires_octet = \"=0.7.6\"",
-        &format!("requires_octet = \"={}\"", env!("CARGO_PKG_VERSION")),
-    );
-    let manifest = octet_agent::ExtensionManifest::parse(&staged).unwrap();
+    // Validate the actual source adapter without rewriting its host/API contract.
+    let source = include_str!("../../../extensions/octet-import-pi/extension.toml");
+    let manifest = octet_agent::ExtensionManifest::parse(source).unwrap();
     assert_eq!(manifest.name, "octet-import-pi");
-    assert_eq!(manifest.api_version, "0.3");
+    assert_eq!(manifest.api_version, "0.4");
+    assert_eq!(
+        manifest.requires_octet.as_deref(),
+        Some(concat!("=", env!("CARGO_PKG_VERSION")))
+    );
     assert_eq!(manifest.entrypoint.command, "extension.sh");
     assert!(manifest.entrypoint.args.is_empty());
     assert!(manifest.contributes.tools.is_empty());
@@ -141,7 +133,10 @@ fn import_preserves_policy_and_source_while_disabling_imported_code() {
     assert!(frontmatter.contains("disable-model-invocation: true"));
     assert_eq!(fs::read(&config).unwrap(), policy);
     assert_eq!(fs::read(source.join("settings.json")).unwrap(), settings);
-    assert_eq!(fs::read(source.join("skills/review/SKILL.md")).unwrap(), skill);
+    assert_eq!(
+        fs::read(source.join("skills/review/SKILL.md")).unwrap(),
+        skill
+    );
     let repeated = run();
     assert!(repeated.status.success());
     let report: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();

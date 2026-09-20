@@ -163,6 +163,8 @@ struct AnthropicTool {
     eager_input_streaming: Option<bool>,
     input_schema: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
 }
 
@@ -218,7 +220,8 @@ const ANTHROPIC_FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-stre
 /// permitted fallback model.
 const ANTHROPIC_SERVER_SIDE_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// Mid-conversation effort and its thinking binding control.
-const ANTHROPIC_MID_CONVERSATION_OUTPUT_CONFIG_BETA: &str = "mid-conversation-output-config-2026-07-01";
+const ANTHROPIC_MID_CONVERSATION_OUTPUT_CONFIG_BETA: &str =
+    "mid-conversation-output-config-2026-07-01";
 const ANTHROPIC_THINKING_BINDING_CONTROLS_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 /// Resolved Anthropic compat for one model: Pi's route defaults with the
@@ -652,8 +655,7 @@ pub(crate) fn build_request(
                                     match &state.kind {
                                         ReasoningStateKind::AnthropicSignature { signature } => {
                                             if let Some(text) = &reasoning.text {
-                                                let has_signature =
-                                                    !signature.trim().is_empty();
+                                                let has_signature = !signature.trim().is_empty();
                                                 if !has_signature && text.trim().is_empty() {
                                                     // Nothing to replay; an empty
                                                     // thinking block is never sent.
@@ -664,10 +666,12 @@ pub(crate) fn build_request(
                                                     // that declares it accepts one;
                                                     // otherwise it becomes text.
                                                     if compat.allow_empty_signature {
-                                                        blocks.push(AnthropicContentBlock::Thinking {
-                                                            thinking: text.clone(),
-                                                            signature: String::new(),
-                                                        });
+                                                        blocks.push(
+                                                            AnthropicContentBlock::Thinking {
+                                                                thinking: text.clone(),
+                                                                signature: String::new(),
+                                                            },
+                                                        );
                                                     } else {
                                                         blocks.push(AnthropicContentBlock::Text {
                                                             text: text.clone(),
@@ -755,6 +759,7 @@ pub(crate) fn build_request(
                 description: t.description.clone(),
                 eager_input_streaming: compat.eager_tool_input_streaming.then_some(true),
                 input_schema,
+                strict: strict.then_some(true),
                 cache_control: (index + 1 == req.tools.len()
                     && model.spec.cache.supports_cache_control_on_tools)
                     .then_some(cache_marker)
@@ -953,7 +958,7 @@ pub(crate) fn build_request(
                 .map_err(|_| ConfigError::InvalidHeader("anthropic-beta".into()))?,
         );
     } else {
-        let inferred = inferred_anthropic_betas(&model, extended_thinking, tools_present);
+        let inferred = inferred_anthropic_betas(model, extended_thinking, tools_present);
         if !inferred.is_empty() {
             headers.insert(
                 http::HeaderName::from_static("anthropic-beta"),
@@ -1497,7 +1502,8 @@ mod tests {
     #[test]
     fn caller_anthropic_beta_list_is_authoritative_and_deduplicated() {
         let mut model = make_test_model(false);
-        {            let endpoint = Arc::make_mut(&mut model.endpoint);
+        {
+            let endpoint = Arc::make_mut(&mut model.endpoint);
             // Repeated headers and comma-joined values both occur in practice;
             // the caller's list replaces inferred defaults and is deduplicated.
             endpoint.default_headers.append(
@@ -1593,8 +1599,10 @@ mod tests {
         // An ordinary API-key route infers nothing: the beta header is absent
         // rather than carrying an empty value.
         let mut model = make_test_model(false);
-        Arc::make_mut(&mut model.endpoint).auth =
-            crate::auth::Auth::header_env(http::HeaderName::from_static("x-api-key"), "ANTHROPIC_API_KEY");
+        Arc::make_mut(&mut model.endpoint).auth = crate::auth::Auth::header_env(
+            http::HeaderName::from_static("x-api-key"),
+            "ANTHROPIC_API_KEY",
+        );
         let parts = build_request(&model, &beta_test_request(ReasoningConfig::Off)).unwrap();
         assert_eq!(beta_header(&parts), None);
     }
@@ -1989,10 +1997,7 @@ mod tests {
 
     fn compat_build(model: &Model, req: &Request) -> (serde_json::Value, http::HeaderMap) {
         let parts = build_request(model, req).unwrap();
-        (
-            serde_json::from_slice(&parts.body).unwrap(),
-            parts.headers,
-        )
+        (serde_json::from_slice(&parts.body).unwrap(), parts.headers)
     }
 
     fn compat_beta_header(headers: &http::HeaderMap) -> String {
@@ -2034,25 +2039,27 @@ mod tests {
         let mut fallback = make_test_model(false);
         Arc::make_mut(&mut fallback.spec).preset.anthropic_compat =
             Some(crate::declarations::AnthropicCompatPreset {
-                allowed_fallback_models: vec![
-                    crate::declarations::AnthropicFallbackModel {
-                        provider: "anthropic".to_string(),
-                        model: "claude-haiku-4-5".to_string(),
-                        cost: Some(crate::declarations::AnthropicFallbackCost {
-                            input: 1.0,
-                            output: 5.0,
-                            cache_read: 0.1,
-                            cache_write: 1.25,
-                        }),
-                    },
-                ],
+                allowed_fallback_models: vec![crate::declarations::AnthropicFallbackModel {
+                    provider: "anthropic".to_string(),
+                    model: "claude-haiku-4-5".to_string(),
+                    cost: Some(crate::declarations::AnthropicFallbackCost {
+                        input: 1.0,
+                        output: 5.0,
+                        cache_read: 0.1,
+                        cache_write: 1.25,
+                    }),
+                }],
                 ..Default::default()
             });
         let (body, headers) = compat_build(&fallback, &compat_request(ToolChoice::Auto));
-        assert_eq!(body["fallbacks"], serde_json::json!([{"model": "claude-haiku-4-5"}]));
+        assert_eq!(
+            body["fallbacks"],
+            serde_json::json!([{"model": "claude-haiku-4-5"}])
+        );
         assert!(compat_beta_header(&headers).contains("server-side-fallback-2026-07-01"));
         // Never an empty array: Anthropic rejects the field with no target.
-        let (body, _headers) = compat_build(&make_test_model(false), &compat_request(ToolChoice::Auto));
+        let (body, _headers) =
+            compat_build(&make_test_model(false), &compat_request(ToolChoice::Auto));
         assert!(body.get("fallbacks").is_none());
     }
 
@@ -2192,15 +2199,14 @@ mod tests {
         let (body, _headers) = compat_build(&model, &silent);
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
     }
-
 }
 
 /// Offline fixture matrix for the Anthropic Messages stream decoder
 /// (design §19; plan Task 10.2).
 #[cfg(test)]
 mod fixture_tests {
-    use super::{bounded_refusal_explanation, decode_stream_event};
     use super::MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES;
+    use super::{bounded_refusal_explanation, decode_stream_event};
     use crate::error::{AiError, StreamProtocolError};
     use crate::protocol::harness;
     use crate::stream::StreamEvent;

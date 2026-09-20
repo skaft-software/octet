@@ -19,12 +19,14 @@ output_lock = threading.Lock()
 state_lock = threading.Condition()
 pending = {}
 events = []
+wire_order = []
 next_id = 0
 stopping = threading.Event()
 commands = queue.Queue(maxsize=16)
 raw_binding = ""
 captured = None
 sdk_mode = False
+hold_subscribe_events = 0
 registry = TopicRegistry()
 # Explicit immutable subscriber schema; no publisher generation is inferred.
 if EXTENSION_NAME != "alpha":
@@ -41,27 +43,40 @@ def result(call_id, value):
         "content": [], "is_error": False, "metadata": None, "structured_content": value}})
 
 
-def request_host(method, params, cancelled):
+def observe_wire(kind):
+    # Reader-only, content-free ordering evidence, including rejected events.
+    if len(wire_order) >= 128:
+        raise RuntimeError("fixture wire trace bound")
+    wire_order.append(kind)
+
+
+def request_host(method, params, cancelled, accept_result=None):
     global next_id
+    deadline = time.monotonic() + 3
     with state_lock:
         if len(pending) >= 8:
             raise BusError(-32012, "fixture_pending_full")
         next_id += 1
         peer_id = "peer-" + str(next_id)
-        slot = [None]
+        slot = {"method": method, "accept_result": accept_result, "cancelled": cancelled,
+                "deadline": deadline, "done": False, "result": None, "error": None}
         pending[peer_id] = slot
-    send({"jsonrpc": "2.0", "id": peer_id, "method": method, "params": params})
-    deadline = time.monotonic() + 3
     try:
+        send({"jsonrpc": "2.0", "id": peer_id, "method": method, "params": params})
         with state_lock:
-            while slot[0] is None and not cancelled.is_set() and not stopping.is_set() and time.monotonic() < deadline:
+            while not slot["done"] and not cancelled.is_set() and not stopping.is_set() and time.monotonic() < deadline:
                 state_lock.wait(0.01)
-            if slot[0] is None:
+            if not slot["done"]:
                 raise BusError(-32011, "fixture_request_cancelled")
-            response = slot[0]
-            if "error" in response:
-                raise RpcError(response["error"]["code"], response["error"]["message"])
-            return response["result"]
+            if slot["error"] is not None:
+                raise slot["error"]
+            # Deterministic SDK regression: keep the requesting tool worker
+            # parked after its ACK while the serial reader consumes an event.
+            while method == "bus/subscribe" and len(events) < hold_subscribe_events:
+                if cancelled.is_set() or stopping.is_set() or time.monotonic() >= deadline:
+                    raise BusError(-32011, "fixture_event_wait_cancelled")
+                state_lock.wait(0.01)
+            return slot["result"]
     finally:
         with state_lock:
             pending.pop(peer_id, None)
@@ -71,7 +86,7 @@ bus = HostEventBus(request_host, registry, extension_id=EXTENSION_NAME)
 
 
 def tools():
-    global captured, sdk_mode
+    global captured, sdk_mode, hold_subscribe_events
     while not stopping.is_set():
         request = commands.get()
         if request is None:
@@ -97,7 +112,14 @@ def tools():
                 value = {"result": bus.snapshot()}
             elif method == "sdk/subscribe":
                 sdk_mode = True
-                bus.subscribe("bus.alpha.status")
+                hold_subscribe_events = params.get("wait_for_events", 0)
+                try:
+                    bus.subscribe("bus.alpha.status")
+                    value = {"result": bus.snapshot()}
+                finally:
+                    hold_subscribe_events = 0
+            elif method == "sdk/unsubscribe":
+                bus.unsubscribe("bus.alpha.status")
                 value = {"result": bus.snapshot()}
             elif method == "sdk/publish":
                 value = {"result": bus.publish("bus.alpha.status", params["payload"]).public()}
@@ -139,13 +161,21 @@ try:
                     "capabilities": sorted(capabilities), "methods": sorted(methods), "limits": offer["limits"]},
                 "tools": [{"name": "probe", "description": "Bus fixture", "parameters": {"type": "object"}}]}})
         elif method == "tool/call":
-            commands.put_nowait(request)
+            if request["params"]["arguments"]["method"] == "sdk/reader-state":
+                with state_lock:
+                    held = any(slot["method"] == "bus/subscribe" and slot["done"]
+                               and slot["error"] is None for slot in pending.values())
+                result(request["id"], {"state": bus.snapshot(), "subscribe_held": held,
+                                       "wire_order": list(wire_order)})
+            else:
+                commands.put_nowait(request)
         elif method == "bus/lifecycle":
             if request["params"]["kind"] == "binding":
                 raw_binding = request["params"]["binding_id"]
             bus.accept_lifecycle(request["params"])
         elif method == "bus/event":
             if sdk_mode:
+                observe_wire("event")
                 try:
                     event = bus.accept_event(request["params"]).public()
                 except BusError:
@@ -165,8 +195,19 @@ try:
         else:
             with state_lock:
                 slot = pending.get(request.get("id"))
-                if slot is not None:
-                    slot[0] = request
+                if (slot is not None and not slot["done"] and not slot["cancelled"].is_set()
+                        and not stopping.is_set() and time.monotonic() < slot["deadline"]):
+                    try:
+                        if "error" in request:
+                            raise RpcError(request["error"]["code"], request["error"]["message"])
+                        accept_result = slot["accept_result"]
+                        if accept_result is not None and slot["method"] == "bus/subscribe":
+                            observe_wire("subscribe_ack")
+                        slot["result"] = (request["result"] if accept_result is None
+                                          else accept_result(request["result"]))
+                    except Exception as error:
+                        slot["error"] = error
+                    slot["done"] = True
                     state_lock.notify_all()
 finally:
     stopping.set()

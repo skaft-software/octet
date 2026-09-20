@@ -1197,11 +1197,10 @@ impl AdaptivePreviewCoalescer {
     /// `encoded_bytes / target_bytes_per_second` in wall-clock time, so
     /// sustained encoded throughput converges to the target.
     pub fn delay_for(&self, encoded_bytes: usize) -> std::time::Duration {
-        let by_rate = if self.target_bytes_per_second == 0 {
-            0
-        } else {
-            (encoded_bytes as u64).saturating_mul(1000) / self.target_bytes_per_second
-        };
+        let by_rate = (encoded_bytes as u64)
+            .saturating_mul(1000)
+            .checked_div(self.target_bytes_per_second)
+            .unwrap_or(0);
         std::time::Duration::from_millis(by_rate).max(self.min_emit_interval)
     }
 
@@ -1667,7 +1666,7 @@ impl ToolOutput {
             terminate: self.terminate,
             // Provider usage is billing evidence for the completed call, not
             // presentation content: lowering media must never drop it.
-            usage: self.usage.clone(),
+            usage: self.usage,
         }
     }
 }

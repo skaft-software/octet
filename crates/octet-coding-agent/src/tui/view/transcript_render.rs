@@ -23,12 +23,6 @@ use super::{
 };
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
 
-fn extension_activity_state_label(state: octet_agent::ExtensionPresentationState) -> &'static str {
-    // One owner for the declared vocabulary: the grouped transcript rows print
-    // these exact words, so the fallback presentation path cannot drift from it.
-    super::subagent_activity_state_label(state)
-}
-
 fn nest_tool_output(rows: Vec<String>, theme: &OctetTheme, width: u16) -> Vec<String> {
     let mut first_content_row = true;
     rows.into_iter()

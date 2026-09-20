@@ -961,7 +961,11 @@ async fn responses_websocket_connection_limit_retires_socket_and_falls_back() {
     assert!(progress.first_body_seen);
     assert!(progress.last_event_ms.is_some());
     assert!(stream.next().await.is_none());
-    assert_eq!(server.requests().await.len(), 1, "no hidden inference replay");
+    assert_eq!(
+        server.requests().await.len(),
+        1,
+        "no hidden inference replay"
+    );
 
     // Retirement is authoritative before the provider error is published, so
     // an immediate next request deterministically takes HTTP/SSE.
@@ -1366,7 +1370,11 @@ async fn responses_websocket_heartbeat_failure_is_terminal_and_next_request_fall
     let requests = server.requests().await;
     // One initial WebSocket attempt plus this explicit host-requested HTTP
     // replacement; the heartbeat never adds transport-local inference retries.
-    assert_eq!(requests.len(), 2, "no hidden inference replay: {requests:?}");
+    assert_eq!(
+        requests.len(),
+        2,
+        "no hidden inference replay: {requests:?}"
+    );
     assert!(requests[0].get("transport").is_none());
     assert_eq!(requests[1]["transport"], "http");
 }
@@ -1453,14 +1461,21 @@ async fn responses_websocket_heartbeat_failure_never_replays_on_a_fresh_socket()
         )
         .await
         .unwrap();
-    assert!(matches!(stream.next().await, Some(Ok(StreamEvent::Started { .. }))));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(StreamEvent::Started { .. }))
+    ));
     let error = stream.next().await.unwrap().unwrap_err();
     assert!(matches!(error, AiError::StreamFailure { inner, .. }
-        if matches!(*inner, AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
-            attempts: 0, visible_output: false, ..
-        }))));
+    if matches!(*inner, AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+        attempts: 0, visible_output: false, ..
+    }))));
     assert!(stream.next().await.is_none());
-    assert_eq!(server.requests().await.len(), 1, "no unaccounted generation");
+    assert_eq!(
+        server.requests().await.len(),
+        1,
+        "no unaccounted generation"
+    );
 }
 
 #[tokio::test]

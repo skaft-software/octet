@@ -1219,7 +1219,7 @@ export default function App() {
     visibleActivityOpen ||
     visibleTerminalOpen ||
     (mobileLayout && sidebarOpen);
-  const canInterrupt = Boolean(
+  const canInterrupt = surface === "session" && Boolean(
     session?.activeRunId ||
       session?.status === "working" ||
       session?.status === "needs_attention",

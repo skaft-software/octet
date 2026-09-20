@@ -135,7 +135,8 @@ impl PayloadHook for InjectTopK {
     }
 }
 
-struct ObserveResponse(Arc<Mutex<Option<(u16, Option<String>)>>>);
+type ObservedResponse = Option<(u16, Option<String>)>;
+struct ObserveResponse(Arc<Mutex<ObservedResponse>>);
 
 impl ResponseHook for ObserveResponse {
     fn on_response(
@@ -331,8 +332,7 @@ async fn api_key_override_replaces_an_env_backed_credential_only() {
             },
         )
         .await
-        .err()
-        .expect("fixed credentials must refuse an override");
+        .expect_err("fixed credentials must refuse an override");
     assert!(matches!(error, AiError::Auth(octet_ai::AuthError::Resolve)));
 }
 

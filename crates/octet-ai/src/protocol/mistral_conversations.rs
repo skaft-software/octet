@@ -253,7 +253,6 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
     })
 }
 
-
 /// Map a portable selection onto the native Conversations `reasoning_effort`
 /// value. Pi's `mapReasoningEffort` maps the selected level through
 /// `thinkingLevelMap` and falls back to `"high"` for an absent or explicitly

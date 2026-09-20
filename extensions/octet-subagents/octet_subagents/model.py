@@ -9,7 +9,7 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
-VERSION = "0.7.6"
+VERSION = "0.8.0"
 MAX_ACTIVE_CHILDREN = 8
 MAX_DEPTH = 1
 MAX_WORKERS_PER_OWNER = 32
@@ -658,6 +658,17 @@ def _is_control(character: str) -> bool:
     return codepoint < 32 or 127 <= codepoint <= 159
 
 
+def _unsafe_presentation_character(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        _is_control(character)
+        or codepoint in {0x061C, 0x2060, 0xFEFF}
+        or 0x200B <= codepoint <= 0x200F
+        or 0x202A <= codepoint <= 0x202E
+        or 0x2066 <= codepoint <= 0x2069
+    )
+
+
 def validate_plain_text(value: str, name: str, *, allow_newline: bool) -> None:
     if "\x1b" in value or any(
         _is_control(character)
@@ -687,7 +698,7 @@ def sanitize_document(value: Any, limit: int) -> str:
     text = str(value)
     pieces = []
     for character in text:
-        if _is_control(character) and character not in {"\n", "\r", "\t"}:
+        if _unsafe_presentation_character(character) and character not in {"\n", "\r", "\t"}:
             pieces.append("\\u%04x" % ord(character))
         else:
             pieces.append(character)

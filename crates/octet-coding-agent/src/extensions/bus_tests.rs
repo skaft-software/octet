@@ -381,7 +381,7 @@ tools = ["probe_{name}"]
     // crash/restart leaves its stderr traceback and a health transition here,
     // not in the SDK ledger, so the failure message must carry both.
     let mut diagnostic_lines = extensions.drain_events();
-    diagnostic_lines.extend(extensions.diagnostics.iter().map(|line| line.clone()));
+    diagnostic_lines.extend(extensions.diagnostics.iter().cloned());
     let diagnostics = diagnostic_lines.join("\n");
     for (name, process, generation, instance) in [
         ("alpha", &alpha, alpha_generation, alpha_instance.as_str()),

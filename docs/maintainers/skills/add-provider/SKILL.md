@@ -54,7 +54,6 @@ user-facing provider contract; this skill is the change checklist.
 
 - Update `docs/providers.md` with the user-visible capability and any limits. Do
   not claim live-provider qualification from source-only checks.
-- If provider compatibility artifacts are generated
-  (`scripts/generate-pi-provider-compatibility.py`,
-  `scripts/refresh-models-dev-pricing.py`), regenerate and review the diff.
+- If model metadata changes, use `scripts/refresh-models-dev-pricing.py` and
+  review the generated diff.
 - Add a `## [Unreleased]` CHANGELOG entry when the change is user-visible.

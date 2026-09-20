@@ -271,6 +271,53 @@ fn structured_schema(value: &Value) -> bool {
         || object.contains_key("items")
 }
 
+pub(crate) fn normalize_tool_arguments(
+    name: &str,
+    arguments: &mut Value,
+    definitions: &[ToolDef],
+    strict_supported: bool,
+) -> Result<(), AiError> {
+    if !strict_supported {
+        return Ok(());
+    }
+    if let Some(tool) = definitions.iter().find(|tool| tool.name == name) {
+        if resolve_json_schema_strict(tool, true)? == Some(true) {
+            omit_optional_nulls(arguments, &tool.parameters)?;
+        }
+    }
+    Ok(())
+}
+
+fn omit_optional_nulls(value: &mut Value, schema: &Value) -> Result<(), AiError> {
+    // Strict schemas reject structured unions. Scalar anyOf branches contain
+    // no optional child properties, so only objects and arrays need traversal.
+    if let (Some(object), Some(properties)) = (
+        value.as_object_mut(),
+        schema.get("properties").and_then(Value::as_object),
+    ) {
+        for (key, property) in properties {
+            let required = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|keys| keys.iter().any(|item| item.as_str() == Some(key)));
+            if !required
+                && !schema_allows_null(property)
+                && object.get(key).is_some_and(Value::is_null)
+            {
+                object.remove(key);
+            } else if let Some(child) = object.get_mut(key) {
+                omit_optional_nulls(child, property)?;
+            }
+        }
+    }
+    if let (Some(items), Some(schema)) = (value.as_array_mut(), schema.get("items")) {
+        for item in items {
+            omit_optional_nulls(item, schema)?;
+        }
+    }
+    Ok(())
+}
+
 fn schema_allows_null(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;

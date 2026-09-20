@@ -30,33 +30,57 @@ struct Replacement {
 
 fn normalize(mut args: serde_json::Value) -> Result<EditArgs, ToolError> {
     use serde_json::{json, Value};
-    let object = args.as_object_mut().ok_or_else(|| ToolError::new("invalid arguments: expected object"))?;
+    let object = args
+        .as_object_mut()
+        .ok_or_else(|| ToolError::new("invalid arguments: expected object"))?;
     let edits = match object.remove("edits") {
-        Some(Value::String(s)) => serde_json::from_str(&s).map_err(|_| ToolError::new("invalid arguments: edits must contain JSON replacements"))?,
+        Some(Value::String(s)) => serde_json::from_str(&s).map_err(|_| {
+            ToolError::new("invalid arguments: edits must contain JSON replacements")
+        })?,
         value => value.unwrap_or_else(|| json!([])),
     };
     let mut edits = match edits {
         Value::Array(edits) => edits,
         Value::Object(edit) => vec![Value::Object(edit)],
-        _ => return Err(ToolError::new("invalid arguments: edits must be an array or a single replacement")),
+        _ => {
+            return Err(ToolError::new(
+                "invalid arguments: edits must be an array or a single replacement",
+            ))
+        }
     };
     for (old, new) in [("old", "new"), ("oldText", "newText")] {
         if object.contains_key(old) || object.contains_key(new) {
-            let old = object.remove(old).ok_or_else(|| ToolError::new("invalid arguments: missing old replacement text"))?;
-            let new = object.remove(new).ok_or_else(|| ToolError::new("invalid arguments: missing new replacement text"))?;
+            let old = object
+                .remove(old)
+                .ok_or_else(|| ToolError::new("invalid arguments: missing old replacement text"))?;
+            let new = object
+                .remove(new)
+                .ok_or_else(|| ToolError::new("invalid arguments: missing new replacement text"))?;
             edits.push(json!({"old":old,"new":new}));
         }
     }
-    if edits.is_empty() || edits.len() > 1000 { return Err(ToolError::new("invalid arguments: edits must contain 1 to 1000 replacements")); }
+    if edits.is_empty() || edits.len() > 1000 {
+        return Err(ToolError::new(
+            "invalid arguments: edits must contain 1 to 1000 replacements",
+        ));
+    }
     object.insert("edits".into(), Value::Array(edits));
     validate_expected_hash(object.get("expected_hash"))?;
     let args: EditArgs = parse_args(args)?;
     let mut bytes = 0usize;
     for edit in &args.edits {
-        if edit.old.is_empty() { return Err(ToolError::new("invalid arguments: `old` must be non-empty")); }
-        bytes = bytes.saturating_add(edit.old.len()).saturating_add(edit.new.len());
+        if edit.old.is_empty() {
+            return Err(ToolError::new("invalid arguments: `old` must be non-empty"));
+        }
+        bytes = bytes
+            .saturating_add(edit.old.len())
+            .saturating_add(edit.new.len());
     }
-    if bytes > MAX_FILE_BYTES { return Err(ToolError::new("invalid arguments: replacement text exceeds file byte limit")); }
+    if bytes > MAX_FILE_BYTES {
+        return Err(ToolError::new(
+            "invalid arguments: replacement text exceeds file byte limit",
+        ));
+    }
     Ok(args)
 }
 
@@ -216,41 +240,61 @@ fn replace(
     })?;
     let mut regions = Vec::with_capacity(edits.len());
     for edit in edits {
-        let start = text.find(&edit.old).ok_or_else(|| no_match_error(display_path, &edit.old, text))?;
-        let next = start + text[start..].chars().next().expect("nonempty match").len_utf8();
+        let start = text
+            .find(&edit.old)
+            .ok_or_else(|| no_match_error(display_path, &edit.old, text))?;
+        let next = start
+            + text[start..]
+                .chars()
+                .next()
+                .expect("nonempty match")
+                .len_utf8();
         if text[next..].contains(&edit.old) {
             let count = 1 + text[next..].matches(&edit.old).count();
             return Err(ToolError::new(format!("error ambiguous\n{display_path}\n\"{}\" matches {count} locations. Include more surrounding context to make it unique.", clip_line(&edit.old,80))));
         }
         regions.push((start, start + edit.old.len(), edit));
     }
-    regions.sort_unstable_by_key(|(start,_,_)| *start);
+    regions.sort_unstable_by_key(|(start, _, _)| *start);
     if regions.windows(2).any(|pair| pair[0].1 > pair[1].0) {
         return Err(ToolError::new("error overlapping_edits\nReplacements overlap in the original file; merge them into one edit."));
     }
     let mut size = text.len();
-    for (_,_,edit) in &regions { size = size - edit.old.len() + edit.new.len(); }
-    if size > MAX_FILE_BYTES { return Err(ToolError::new(format!("error too_large\n{display_path}: edited content is {size} bytes (limit {MAX_FILE_BYTES})"))); }
+    for (_, _, edit) in &regions {
+        size = size - edit.old.len() + edit.new.len();
+    }
+    if size > MAX_FILE_BYTES {
+        return Err(ToolError::new(format!("error too_large\n{display_path}: edited content is {size} bytes (limit {MAX_FILE_BYTES})")));
+    }
     let mut updated = String::with_capacity(size);
     let mut cursor = 0;
     let mut diff = String::new();
     let mut added = 0;
     let mut removed = 0;
-    for (start,end,edit) in regions {
+    for (start, end, edit) in regions {
         updated.push_str(&text[cursor..start]);
         updated.push_str(&edit.new);
         cursor = end;
         added += edit.new.lines().count();
         removed += edit.old.lines().count();
         if diff.len() < super::MAX_UNIFIED_DIFF_BYTES {
-            diff.push_str(&format_unified_diff(display_path,&edit.old,&edit.new,text));
-            super::truncate_utf8(&mut diff,super::MAX_UNIFIED_DIFF_BYTES);
+            diff.push_str(&format_unified_diff(
+                display_path,
+                &edit.old,
+                &edit.new,
+                text,
+            ));
+            super::truncate_utf8(&mut diff, super::MAX_UNIFIED_DIFF_BYTES);
         }
     }
     updated.push_str(&text[cursor..]);
-    prepared.commit_if(updated.as_bytes(), || cancellation.is_cancelled()).map_err(|error| file_error(display_path,error))?;
+    prepared
+        .commit_if(updated.as_bytes(), || cancellation.is_cancelled())
+        .map_err(|error| file_error(display_path, error))?;
     let hash = content_hash(updated.as_bytes());
-    Ok(ToolOutput::new(format!("ok modified=1\n{display_path}  +{added} -{removed} hash={hash}\n{diff}")))
+    Ok(ToolOutput::new(format!(
+        "ok modified=1\n{display_path}  +{added} -{removed} hash={hash}\n{diff}"
+    )))
 }
 
 /// Builds the `no_match` error, suggesting nearby lines that resemble the

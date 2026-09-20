@@ -1,12 +1,13 @@
 # octet-web-search reference
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Source distribution: 0.8.0 (release candidate).** This checkout and local
+archives require exactly octet 0.8.0. Catalog commands below require matching
+published assets; no 0.8.0 publication is claimed. Use a
+[source-built host](../../docs/installation.md#build-from-a-checkout) with a
+reviewed source checkout or local archive until matching assets are published.
 
-[Usage guide](README.md). This describes the bundled API `0.2` implementation,
-not current extension authoring. Bundle `0.7.6` requires exactly octet `0.7.6`.
+[Usage guide](README.md). This describes the bundled API `0.4` implementation,
+not a general extension-authoring tutorial. Bundle `0.8.0` requires exactly octet `0.8.0`.
 
 The opt-in executable supports [Brave Search API](https://brave.com/search/api/)
 (recommended) and an explicitly configured [SearXNG](https://docs.searxng.org/)
@@ -24,8 +25,8 @@ visible consent metadata, not a sandbox.
 
 ## Install and opt in
 
-With [octet 0.7.6 installed](../../docs/installation.md), install the matching
-signed public bundle:
+With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout) and verified
+matching published assets, the catalog path is:
 
 ```console
 octet extension install octet-web-search
@@ -59,8 +60,8 @@ safe and inert; load it explicitly with `/skills load octet-web-search` when web
 research is wanted. The runtime contains its dependency-free Python SDK, so
 installation performs no `pip install`, model call, service setup, or other
 arbitrary code. Python 3.9 or newer must be available as `python3`.
-Release compatibility is recorded in `extension.toml`: bundle `0.7.6`, extension
-API `0.2`, exact octet `0.7.6`.
+Release compatibility is recorded in `extension.toml`: bundle `0.8.0`, extension
+API `0.4`, exact octet `0.8.0`.
 
 ## Choose a provider
 
@@ -154,7 +155,7 @@ Defaults can be made smaller in configuration. Call arguments may select a
 smaller result, byte, redirect, or time limit but cannot exceed the hard limit.
 With the shipped/default configuration, an omitted `web_search` timeout uses
 8 seconds; an explicit 8-second or 20-second argument is passed unchanged
-through the API 0.2 tool boundary. SearXNG and Brave use the same absolute
+through the API 0.4 tool boundary. SearXNG and Brave use the same absolute
 provider deadline. It spans provider URL construction, DNS resolution,
 connect/TLS/header/body I/O, redirects, JSON/result normalization, bounded
 result construction, and cache return; it is not reset for a phase or retry.
@@ -162,7 +163,7 @@ The 100 ms socket poll is only a cancellation checkpoint and never a terminal
 success/failure timeout. A host cancellation remains cooperative and wins at
 each checkpoint.
 
-The generic API 0.2 host default is a separate 30-second request timeout with a
+The generic API 0.4 host default is a separate 30-second request timeout with a
 2-second cooperative-cancellation grace. It is the outer authority, not extra
 provider time; a host configured below the requested provider budget can still
 cancel first. The extension cannot enlarge that host budget, so installed-path
@@ -209,7 +210,7 @@ frame. Titles, URLs, snippets, excerpts, page text, and publication metadata are
 data only. They cannot change octet policy, enable tools, grant trust, authorize a
 command, or justify a side effect. The packaged skill repeats that rule.
 
-Each call returns one API `0.2` terminal result with:
+Each call returns one API `0.4` terminal result with:
 
 - compact model-visible text and validated `structured_content`;
 - normalized citation ID, title, sanitized URL/origin, snippet or content, and
@@ -233,7 +234,7 @@ network is offline; otherwise offline, timeout, rate-limit, provider failure,
 unsupported content, oversized content, and blocked destination are explicit
 terminal states. None prevents ordinary coding tools from continuing.
 
-API `0.2` cancellation is cooperative and request-scoped. The runtime checks the
+API `0.4` cancellation is cooperative and request-scoped. The runtime checks the
 ambient token before/after resolution, redirects, normalization, and every
 bounded read, and caps individual socket waits below the host's cancellation
 grace. System DNS runs through a fixed four-slot daemon worker boundary, so a
@@ -268,7 +269,7 @@ failure, offline, reconnect-without-refetch, and stale-generation cleanup. They
 contain semantic status/activity/list/detail data only—no ANSI, HTML,
 JavaScript, CSS, queries, snippets, or page content.
 
-The runtime publishes complete monotonic API `0.2` `presentation/update`
+The runtime publishes complete monotonic API `0.4` `presentation/update`
 snapshots in addition to status, progress, structured results, and retained
 metadata. Its activity summary carries operation/provider/progress/count/bytes,
 cache, latency, truncation, and outcome without copying a query or retrieved

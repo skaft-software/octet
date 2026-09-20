@@ -20,7 +20,7 @@ For each PR URL:
    [CONTRIBUTING.md](../../../CONTRIBUTING.md), maintainers add
    `CHANGELOG.md` entries; note the entry that will be needed.
 5. Check whether user-facing docs need updating: `docs/README.md` links, the
-   owning topic page, and `docs/parity/repo-tooling.md` when parity is affected.
+   owning topic page, and the relevant API reference.
 
 Report with these sections, in order:
 

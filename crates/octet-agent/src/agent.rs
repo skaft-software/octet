@@ -1,6 +1,6 @@
 //! The agent: configuration, the procedural run loop, and run control.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -28,21 +28,20 @@ use crate::compaction::{
 use crate::context::{ContextBreakdown, ContextSnapshot, ContextTracker};
 use crate::delegation::{
     enable_root_delegation, DelegationBinding, DelegationConfig, DelegationError,
-    SessionDelegationHandle,
-    DelegationRuntimeSettings, DelegationTemplate,
+    DelegationRuntimeSettings, DelegationTemplate, SessionDelegationHandle,
 };
 use crate::effect::{
     EffectBroker, EffectIntent, EffectReservation, ToolEffect, ToolPolicyDenialCode,
 };
 use crate::events::{
-    AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control,
-    DelegationTelemetrySnapshot, DeferredRunResumed, DeferredRunSuspended, FinishReason,
-    OutputChannel, QueueDeliveryMode, ToolPolicyDecision,
+    AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control, DeferredRunResumed,
+    DeferredRunSuspended, DelegationTelemetrySnapshot, FinishReason, OutputChannel,
+    QueueDeliveryMode, ToolPolicyDecision,
 };
 use crate::extension::{
     AssistantPersistenceContext, EventObserver, ExtensionHost, ProviderRetryAdvice,
     ProviderRetryContext, ProviderRetryHook, ProviderRetryKind, RegisteredPersistenceMetadataHook,
-    ToolCallHook, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+    ToolCallHook, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY, MAX_REFUSED_ACTIVE_TOOL_NAMES,
 };
 use crate::extension_process::{ExtensionProcess, EXTENSION_FEATURE_AGENT_SESSIONS};
 use crate::input::UserInput;
@@ -233,6 +232,16 @@ pub enum AgentError {
         /// Diagnostic starting with Pi's exact invalid-handle wording.
         diagnostic: String,
     },
+    /// An active-tool narrowing request named tools that are not in the
+    /// host-policed registered surface; the request changed nothing. The list
+    /// is sorted and bounded, and names the refused tools.
+    #[error("cannot activate unknown tool(s): {0:?}")]
+    UnknownActiveTools(Vec<String>),
+    /// The host refused an otherwise validated active-tool narrowing request,
+    /// for example because a concurrent extension catalog change removed a
+    /// requested name before publication. The request changed nothing.
+    #[error("active tool set refused: {0}")]
+    ActiveToolSetRefused(String),
     /// A control message was sent after the run finished.
     #[error("the run has already finished")]
     RunEnded,
@@ -525,9 +534,7 @@ fn redact_common_secret_patterns(value: &str) -> String {
 /// carriage is normalized, so the same registration always renders the same
 /// bytes (a provider prefix must not churn between turns). The result is
 /// bounded by [`MAX_TOOL_PROMPT_SECTION_BYTES`] on a character boundary.
-fn render_tool_prompt_section<'a>(
-    tools: impl IntoIterator<Item = &'a dyn Tool>,
-) -> Option<String> {
+fn render_tool_prompt_section<'a>(tools: impl IntoIterator<Item = &'a dyn Tool>) -> Option<String> {
     let contributions =
         collect_tool_prompt_contributions(tools.into_iter().take(MAX_TOOL_PROMPT_SECTION_TOOLS));
     if contributions.is_empty() {
@@ -617,6 +624,8 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
         | AgentError::UsageUncertain
         | AgentError::OutputLimitUnavailable
         | AgentError::NetworkWaitLimit { .. }
+        | AgentError::UnknownActiveTools(_)
+        | AgentError::ActiveToolSetRefused(_)
         | AgentError::RunEnded => None,
     }
 }
@@ -1452,8 +1461,8 @@ struct AdmittedParallelReadCall {
 }
 
 enum ParallelReadPreparation {
-    Admitted(AdmittedParallelReadCall),
-    Completed(ParallelReadWaveExecution),
+    Admitted(Box<AdmittedParallelReadCall>),
+    Completed(Box<ParallelReadWaveExecution>),
 }
 
 fn parallel_read_candidate(
@@ -1485,8 +1494,8 @@ fn completed_parallel_read_execution(
     progress_sink: ToolProgressSink,
     start: std::time::Instant,
     cancellation_won: bool,
-) -> ParallelReadWaveExecution {
-    ParallelReadWaveExecution {
+) -> Box<ParallelReadWaveExecution> {
+    Box::new(ParallelReadWaveExecution {
         execution: CompletedToolExecution {
             result,
             policy_decision,
@@ -1498,7 +1507,7 @@ fn completed_parallel_read_execution(
             cancellation_won,
         },
         after: None,
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1651,7 +1660,7 @@ async fn prepare_parallel_read_call(
         None,
     );
     let started_unix_ms = crate::session::now_unix_millis();
-    ParallelReadPreparation::Admitted(AdmittedParallelReadCall {
+    ParallelReadPreparation::Admitted(Box::new(AdmittedParallelReadCall {
         tool,
         name: name.to_owned(),
         arguments,
@@ -1661,7 +1670,7 @@ async fn prepare_parallel_read_call(
         policy_decision,
         start,
         started_unix_ms,
-    })
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1778,14 +1787,14 @@ async fn execute_parallel_read_wave(
         )
         .await;
         match prepared {
-            ParallelReadPreparation::Completed(execution) => results[index] = Some(execution),
+            ParallelReadPreparation::Completed(execution) => results[index] = Some(*execution),
             ParallelReadPreparation::Admitted(admitted) => {
                 let execution_cancellation = cancellation.clone();
                 executions.push(async move {
                     (
                         index,
                         execute_admitted_parallel_read(
-                            admitted,
+                            *admitted,
                             sandbox,
                             tool_scope,
                             resource_owner,
@@ -2050,8 +2059,10 @@ const REQUEST_OUTPUT_HEADROOM_MINIMUM: u64 = 256;
 const REQUEST_OUTPUT_HEADROOM_MAXIMUM: u64 = 4096;
 
 fn request_output_headroom(context_window: u64) -> u64 {
-    ((context_window / REQUEST_OUTPUT_HEADROOM_DIVISOR) * REQUEST_OUTPUT_HEADROOM_PERCENT)
-        .clamp(REQUEST_OUTPUT_HEADROOM_MINIMUM, REQUEST_OUTPUT_HEADROOM_MAXIMUM)
+    ((context_window / REQUEST_OUTPUT_HEADROOM_DIVISOR) * REQUEST_OUTPUT_HEADROOM_PERCENT).clamp(
+        REQUEST_OUTPUT_HEADROOM_MINIMUM,
+        REQUEST_OUTPUT_HEADROOM_MAXIMUM,
+    )
 }
 
 fn resolve_request_max_output_tokens(
@@ -4003,7 +4014,11 @@ fn resolve_service_tier(
         return Ok(None);
     };
     if model.spec.protocol != Protocol::OpenAiResponses
-        || !model.endpoint.runtime.responses_profile.accepts_service_tier()
+        || !model
+            .endpoint
+            .runtime
+            .responses_profile
+            .accepts_service_tier()
     {
         return Err(AiError::Unsupported(octet_ai::UnsupportedError::ServiceTier).into());
     }
@@ -4413,8 +4428,7 @@ impl LivePreviewPacer {
         decoration: ToolProgressDecoration,
         now: std::time::Instant,
     ) -> Option<ToolProgressDecoration> {
-        let encoded_bytes =
-            decoration.label().len() + decoration.detail().map_or(0, str::len);
+        let encoded_bytes = decoration.label().len() + decoration.detail().map_or(0, str::len);
         match self.coalescer.record(encoded_bytes, now) {
             PreviewPublication::Immediate => {
                 self.pending = None;
@@ -4473,9 +4487,9 @@ fn forward_tool_progress(
     now: std::time::Instant,
 ) -> Option<ToolProgress> {
     match progress {
-        ToolProgress::Decoration(decoration) => pacer
-            .observe(decoration, now)
-            .map(ToolProgress::Decoration),
+        ToolProgress::Decoration(decoration) => {
+            pacer.observe(decoration, now).map(ToolProgress::Decoration)
+        }
         verbatim => Some(verbatim),
     }
 }
@@ -4674,7 +4688,8 @@ impl LivePartialOutput {
             self.totals.paced.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        let snapshot = BashCheckpointPublisher::bound_snapshot(&render_partial_output(&self.streams));
+        let snapshot =
+            BashCheckpointPublisher::bound_snapshot(&render_partial_output(&self.streams));
         let Some(published) = self.publisher.observe(&snapshot, now) else {
             self.totals.paced.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -5311,12 +5326,15 @@ impl CompactionContext<'_> {
     ) -> Result<Option<String>, AgentError> {
         // Row 3.5: the summary boundary owns its own provider request, which
         // nests under it. Both settle explicitly on every returned outcome.
-        let summary_guard = self.telemetry.begin_typed::<SummarySpan>(EmptyAttributes {});
-        let summary_request_guard = summary_guard.context().begin_typed::<ProviderRequestSpan>(
-            RequestAttributes {
-                operation: SpanOperation::Summary,
-            },
-        );
+        let summary_guard = self
+            .telemetry
+            .begin_typed::<SummarySpan>(EmptyAttributes {});
+        let summary_request_guard =
+            summary_guard
+                .context()
+                .begin_typed::<ProviderRequestSpan>(RequestAttributes {
+                    operation: SpanOperation::Summary,
+                });
         // Compaction is a normal provider request: retaining the stable session
         // affinity lets compatible providers reuse any common prefix and keeps
         // its accounting visible alongside autonomous turns.
@@ -5361,9 +5379,11 @@ impl CompactionContext<'_> {
             });
         }
         let reserved_output_tokens = reservation_output_tokens(
-            self.session, self.compaction_model,
+            self.session,
+            self.compaction_model,
             request.max_output_tokens.unwrap_or(output_tokens),
-            self.max_session_tokens, self.max_session_cost_microdollars,
+            self.max_session_tokens,
+            self.max_session_cost_microdollars,
         )?;
         reserve_request_tokens(
             self.session,
@@ -5601,7 +5621,12 @@ impl CompactionContext<'_> {
                 Some(self.session_id),
             )?;
             let input_tokens = estimate_compact_request_tokens(&request, &replay);
-            require_enforceable_output_cap(self.session, None, self.max_session_tokens, self.max_session_cost_microdollars)?;
+            require_enforceable_output_cap(
+                self.session,
+                None,
+                self.max_session_tokens,
+                self.max_session_cost_microdollars,
+            )?;
             reserve_request_tokens(
                 self.session,
                 input_tokens,
@@ -5966,8 +5991,19 @@ impl TerminalGateContext<'_> {
                     budget,
                 });
             }
-            let reserved_output_tokens = reservation_output_tokens(self.session, self.model, 1, self.max_session_tokens, self.max_session_cost_microdollars)?;
-            reserve_request_tokens(self.session, input_tokens, reserved_output_tokens, self.max_session_tokens)?;
+            let reserved_output_tokens = reservation_output_tokens(
+                self.session,
+                self.model,
+                1,
+                self.max_session_tokens,
+                self.max_session_cost_microdollars,
+            )?;
+            reserve_request_tokens(
+                self.session,
+                input_tokens,
+                reserved_output_tokens,
+                self.max_session_tokens,
+            )?;
             reserve_request_cost(
                 self.session,
                 self.model,
@@ -6009,7 +6045,8 @@ impl TerminalGateContext<'_> {
                         self.model.spec.id.clone(),
                         response.usage,
                         response.cost,
-                        parse_terminal_gate(response).map(|decision| decision == TerminalGateDecision::Return),
+                        parse_terminal_gate(response)
+                            .map(|decision| decision == TerminalGateDecision::Return),
                     )?;
                     add_usage(self.usage, &response.usage);
                     self.run_cost.add(response.cost);
@@ -6391,7 +6428,12 @@ impl Agent {
                 self.service_tier,
             )?),
             AgentCompactionMode::Local | AgentCompactionMode::Disabled => {
-                durable_responses_options(&self.session, &self.model, &self.system, self.service_tier)?
+                durable_responses_options(
+                    &self.session,
+                    &self.model,
+                    &self.system,
+                    self.service_tier,
+                )?
             }
         };
         let request = Request {
@@ -6527,6 +6569,16 @@ impl Agent {
         let team_directory = binding.team_directory().to_path_buf();
         self.delegation = Some(binding);
         Ok(team_directory)
+    }
+
+    /// Returns the authoritative host count of active delegated workers.
+    ///
+    /// Returns zero when delegation is not enabled; frontend roster snapshots
+    /// are not consulted.
+    pub fn active_delegated_worker_count(&self) -> usize {
+        self.delegation
+            .as_ref()
+            .map_or(0, DelegationBinding::active_worker_count)
     }
 
     /// Returns the private team directory when V2 delegation is enabled.
@@ -6675,8 +6727,19 @@ impl Agent {
         input_tokens: u64,
         output_tokens: u64,
     ) -> Result<(), AgentError> {
-        let output_tokens = reservation_output_tokens(&self.session, model, output_tokens, self.max_session_tokens, self.max_session_cost_microdollars)?;
-        reserve_request_tokens(&self.session, input_tokens, output_tokens, self.max_session_tokens)?;
+        let output_tokens = reservation_output_tokens(
+            &self.session,
+            model,
+            output_tokens,
+            self.max_session_tokens,
+            self.max_session_cost_microdollars,
+        )?;
+        reserve_request_tokens(
+            &self.session,
+            input_tokens,
+            output_tokens,
+            self.max_session_tokens,
+        )?;
         reserve_request_cost(
             &self.session,
             model,
@@ -7125,7 +7188,12 @@ impl Agent {
             Some(&self.session_id),
         )?;
         let input_tokens = estimate_compact_request_tokens(&request, &replay);
-        require_enforceable_output_cap(&self.session, None, self.max_session_tokens, self.max_session_cost_microdollars)?;
+        require_enforceable_output_cap(
+            &self.session,
+            None,
+            self.max_session_tokens,
+            self.max_session_cost_microdollars,
+        )?;
         reserve_request_tokens(
             &self.session,
             input_tokens,
@@ -7189,9 +7257,10 @@ impl Agent {
                 )
             },
             |session, response| {
-                cost = self.model.spec.pricing.as_ref().and_then(|pricing| {
-                    octet_ai::pricing::cost_of(pricing, &response.usage).ok()
-                });
+                cost =
+                    self.model.spec.pricing.as_ref().and_then(|pricing| {
+                        octet_ai::pricing::cost_of(pricing, &response.usage).ok()
+                    });
                 session.record_compaction_usage(
                     self.model.endpoint.id.clone(),
                     self.model.spec.id.clone(),
@@ -7368,14 +7437,23 @@ impl Agent {
         let now_ms = i64::try_from(now_unix_millis()).unwrap_or(i64::MAX);
         let start = store.begin_pass(operation_id, pass_id.clone(), intent, now_ms)?;
         match start {
-            DeferredResumeStart::Unknown => Err(DeferredRunError::UnknownOperation(operation_id.to_owned()).into()),
+            DeferredResumeStart::Unknown => {
+                Err(DeferredRunError::UnknownOperation(operation_id.to_owned()).into())
+            }
             DeferredResumeStart::Finished(record) => Ok(DeferredRunOutcome::Finished {
                 operation_id: record.operation_id.clone(),
                 state: record.state_label(),
             }),
             DeferredResumeStart::Waiting(observation) => {
-                self.observe_deferred_boundary(operation_id, "deferred", "suspended", observation.poll, 0, false);
-                Ok(DeferredRunOutcome::Waiting(observation))
+                self.observe_deferred_boundary(
+                    operation_id,
+                    "deferred",
+                    "suspended",
+                    observation.poll,
+                    0,
+                    false,
+                );
+                Ok(DeferredRunOutcome::Waiting(*observation))
             }
             DeferredResumeStart::Refused(refusal) => {
                 let stop_reason = refusal_stop_reason(&refusal);
@@ -7383,7 +7461,8 @@ impl Agent {
                 Ok(DeferredRunOutcome::Refused(refusal))
             }
             DeferredResumeStart::Admitted(poll) => {
-                self.drive_admitted_deferred_poll(pass_id, *poll, source).await
+                self.drive_admitted_deferred_poll(pass_id, *poll, source)
+                    .await
             }
         }
     }
@@ -7413,7 +7492,14 @@ impl Agent {
         for observer in &self.extensions.observers {
             observer.on_run_resume(&resume);
         }
-        self.observe_deferred_boundary(&operation_id, "deferred", "effect_pending", poll_number, generation, recovery);
+        self.observe_deferred_boundary(
+            &operation_id,
+            "deferred",
+            "effect_pending",
+            poll_number,
+            generation,
+            recovery,
+        );
         // The transport permit is minted for the same unique pass and leaf
         // generation as the durable permit, and is consumed by the provider
         // call before any request is dispatched.
@@ -7444,13 +7530,25 @@ impl Agent {
                     generation,
                     recovery,
                 );
-                return Ok(DeferredRunOutcome::PollRefused(bounded_deferred_label(&message)));
+                return Ok(DeferredRunOutcome::PollRefused(bounded_deferred_label(
+                    &message,
+                )));
             }
         };
-        let completion = self.session.deferred_run_store().complete_pass(&poll, outcome)?;
+        let completion = self
+            .session
+            .deferred_run_store()
+            .complete_pass(&poll, outcome)?;
         match completion {
             DeferredPollCompletion::Suspended(observation) => {
-                self.observe_deferred_boundary(&operation_id, "deferred", "suspended", observation.poll, 0, recovery);
+                self.observe_deferred_boundary(
+                    &operation_id,
+                    "deferred",
+                    "suspended",
+                    observation.poll,
+                    0,
+                    recovery,
+                );
                 Ok(DeferredRunOutcome::Suspended(observation))
             }
             DeferredPollCompletion::Settled {
@@ -7463,7 +7561,14 @@ impl Agent {
                     )
                     .into());
                 };
-                self.observe_deferred_boundary(&operation_id, "settled", "settled", poll_number, generation, recovery);
+                self.observe_deferred_boundary(
+                    &operation_id,
+                    "settled",
+                    "settled",
+                    poll_number,
+                    generation,
+                    recovery,
+                );
                 Ok(DeferredRunOutcome::Settled {
                     response,
                     response_id,
@@ -7475,7 +7580,14 @@ impl Agent {
                 // usage is unknown, so record exposure rather than a fabricated
                 // cost or a second poll.
                 self.record_deferred_exposure();
-                self.observe_deferred_boundary(&operation_id, "failed", "failed", poll_number, generation, recovery);
+                self.observe_deferred_boundary(
+                    &operation_id,
+                    "failed",
+                    "failed",
+                    poll_number,
+                    generation,
+                    recovery,
+                );
                 Ok(DeferredRunOutcome::Failed(failure))
             }
         }
@@ -7518,15 +7630,17 @@ impl Agent {
         generation: u64,
         recovery: bool,
     ) {
-        let _guard = self.telemetry.begin_typed::<DeferredRunSpan>(DeferredRunAttributes {
-            operation_id: bounded_deferred_label(operation_id),
-            stop_reason: stop_reason.to_owned(),
-            phase: phase.to_owned(),
-            poll,
-            generation,
-            recovery,
-            diagnostics: 0,
-        });
+        let _guard = self
+            .telemetry
+            .begin_typed::<DeferredRunSpan>(DeferredRunAttributes {
+                operation_id: bounded_deferred_label(operation_id),
+                stop_reason: stop_reason.to_owned(),
+                phase: phase.to_owned(),
+                poll,
+                generation,
+                recovery,
+                diagnostics: 0,
+            });
     }
 
     /// Enables durable partial-output checkpoints for live calls of `tool`.
@@ -7715,19 +7829,53 @@ impl Agent {
         self.extensions.tool_definitions()
     }
 
-    /// Exact registered tool names after the frontend has applied all policy
-    /// filters and extension registration. The sorted result is suitable for
-    /// deterministic diagnostics and capability validation at idle boundaries.
+    /// Exact host-policed registered tool names, sorted.
+    ///
+    /// The result lists every name registered after the frontend has applied
+    /// all policy filters and extension registration. It still includes names
+    /// that [`set_active_tool_names`](Self::set_active_tool_names) has
+    /// deactivated, so it is the stable validation surface for active-tool
+    /// requests; use
+    /// [`registered_tool_definitions`](Self::registered_tool_definitions) for
+    /// the exact schemas the next provider request would advertise.
     pub fn registered_tool_names(&self) -> Vec<String> {
-        let mut names = self
-            .extensions
-            .tool_snapshot()
-            .1
-            .iter()
-            .map(|tool| tool.definition().name)
-            .collect::<Vec<_>>();
-        names.sort();
-        names
+        self.extensions.policed_tool_names()
+    }
+
+    /// Narrows the host-policed tool surface this agent advertises and
+    /// executes to exactly `names`.
+    ///
+    /// `Some(set)` activates only the requested registered names. Unknown or
+    /// already policy-excluded names fail with
+    /// [`AgentError::UnknownActiveTools`] and change nothing; `None` restores
+    /// the full host-policed surface; `Some(empty)` is valid and leaves the
+    /// agent with no callable tools.
+    ///
+    /// Activation strictly narrows: it can never add a tool, re-admit a name
+    /// the sandbox, effect broker, or frontend policy excluded, or widen what
+    /// an admitted tool may do. Every accepted call bumps the host
+    /// tool-snapshot revision, so an in-flight run drops deactivated schemas
+    /// and refuses calls to deactivated tools with the existing `unknown tool`
+    /// result at its next turn boundary.
+    pub fn set_active_tool_names(
+        &mut self,
+        names: Option<BTreeSet<String>>,
+    ) -> Result<(), AgentError> {
+        if let Some(names) = names.as_ref() {
+            let registered = self.registered_tool_names();
+            let mut refused = names
+                .iter()
+                .filter(|name| !registered.iter().any(|registered| registered == *name))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !refused.is_empty() {
+                refused.truncate(MAX_REFUSED_ACTIVE_TOOL_NAMES);
+                return Err(AgentError::UnknownActiveTools(refused));
+            }
+        }
+        self.extensions
+            .set_active_tools(names.as_ref())
+            .map_err(AgentError::ActiveToolSetRefused)
     }
 
     /// Reconciles unresolved calls from the latest persisted assistant turn.
@@ -8030,7 +8178,7 @@ impl Agent {
                         if text.is_empty() {
                             continue;
                         }
-                        let ev = AgentEvent::OutputDelta { channel, text };
+                        let ev = AgentEvent::RecoveredOutput { channel, text };
                         notify_observers(&observers, &ev);
                         yield ev;
                     }
@@ -10476,11 +10624,11 @@ impl Agent {
                 | AgentEvent::FollowUpDelivered { .. }
                 | AgentEvent::CompactionStarted { .. }
                 | AgentEvent::CompactionFinished { .. } => {}
-                AgentEvent::ToolFinished { result, .. } => {
-                    if let Ok(output) = result {
-                        if let Some(tool_usage) = output.usage() {
-                            add_usage(&mut trailing_tool_usage, tool_usage);
-                        }
+                AgentEvent::ToolFinished {
+                    result: Ok(output), ..
+                } => {
+                    if let Some(tool_usage) = output.usage() {
+                        add_usage(&mut trailing_tool_usage, tool_usage);
                     }
                 }
                 AgentEvent::TurnFinished {
@@ -10596,7 +10744,11 @@ mod tests {
             "the section must respect its byte budget: {}",
             section.len()
         );
-        assert!(section.ends_with('…'), "truncation is marked: {:?}", &section[section.len().saturating_sub(8)..]);
+        assert!(
+            section.ends_with('…'),
+            "truncation is marked: {:?}",
+            &section[section.len().saturating_sub(8)..]
+        );
         assert!(
             section.is_char_boundary(section.len()),
             "a truncated section stays valid UTF-8"
@@ -10727,7 +10879,11 @@ mod tests {
         let requested = resolve_request_max_output_tokens(window, estimated_input, window);
         assert_eq!(requested, 29_586);
         // Provider-side counting differences of this size are covered.
-        for provider_input in [estimated_input + 1, estimated_input + 512, estimated_input + 1_310] {
+        for provider_input in [
+            estimated_input + 1,
+            estimated_input + 512,
+            estimated_input + 1_310,
+        ] {
             assert!(
                 provider_input + requested <= window,
                 "provider input {provider_input} + requested {requested} exceeded {window}"
@@ -10736,7 +10892,10 @@ mod tests {
         // A prompt that already fills or exceeds the window reserves nothing and
         // cannot fabricate a negative cap.
         assert_eq!(resolve_request_max_output_tokens(window, window, window), 0);
-        assert_eq!(resolve_request_max_output_tokens(window, window + 5_000, window), 0);
+        assert_eq!(
+            resolve_request_max_output_tokens(window, window + 5_000, window),
+            0
+        );
         // Small windows keep a proportionate reserve rather than a fixed bite.
         assert_eq!(request_output_headroom(8_192), 256);
         assert_eq!(request_output_headroom(131_072), 1_310);
@@ -10965,7 +11124,9 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
                 request_id: None,
                 retry_after: None,
                 provider_code: None,
-                body_snippet: Some(format!(r#"{{"object":"error","message":"{VLLM}","type":"BadRequestError","code":400}}"#)),
+                body_snippet: Some(format!(
+                    r#"{{"object":"error","message":"{VLLM}","type":"BadRequestError","code":400}}"#
+                )),
                 retryable: false,
             }),
             // Body carried a numeric machine-readable code.
@@ -11964,9 +12125,10 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         // A requested tier still rides on the request when there is no replay
         // window: the codec then replays canonically exactly as it would with no
         // options, so `/fast` cannot be silently inert.
-        let options = durable_responses_options(&session, &model, "system", Some(ServiceTier::Flex))
-            .unwrap()
-            .expect("a requested tier always produces options");
+        let options =
+            durable_responses_options(&session, &model, "system", Some(ServiceTier::Flex))
+                .unwrap()
+                .expect("a requested tier always produces options");
         assert_eq!(options.service_tier, Some(ServiceTier::Flex));
         assert!(options.input.is_none());
         assert_eq!(options.previous_response_id, None);
@@ -12002,7 +12164,10 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
     #[cfg(any(unix, windows))]
     fn checkpoint_config(
         sink: Arc<RecordingCheckpointSink>,
-    ) -> (PartialOutputCheckpointConfig, Arc<PartialOutputCheckpointTotals>) {
+    ) -> (
+        PartialOutputCheckpointConfig,
+        Arc<PartialOutputCheckpointTotals>,
+    ) {
         let totals = Arc::new(PartialOutputCheckpointTotals::default());
         (
             PartialOutputCheckpointConfig {
@@ -12034,14 +12199,13 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         assert!(first.contains("alpha"), "{first}");
 
         // Before the interval: paced away, counted, never published.
-        assert!(
-            live.observe_output(
+        assert!(live
+            .observe_output(
                 OutputStream::Stdout,
                 b"beta\n",
                 start + Duration::from_millis(1)
             )
-            .is_none()
-        );
+            .is_none());
         assert_eq!(sink.snapshots().len(), 1, "one publication so far");
         assert_eq!(totals.stats().paced, 1);
 
@@ -12075,7 +12239,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         // its header, and stays a checkpoint: no publication may claim the
         // command finished.
         let burst_bytes = 4 * BASH_CHECKPOINT_MAX_BYTES;
-        let mut burst = std::iter::repeat(b'x').take(burst_bytes).collect::<Vec<u8>>();
+        let mut burst = vec![b'x'; burst_bytes];
         burst.extend_from_slice(b"NEWEST-MARKER");
         let bounded = live
             .observe_output(
@@ -12202,11 +12366,18 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             matches!(chunk, Some(ToolProgress::Output { bytes, .. }) if bytes.as_ref() == b"verbatim\n"),
             "a stdout chunk is never collapsed"
         );
-        assert_eq!(pacer.stats().0, 1, "verbatim forwarding is not a publication");
+        assert_eq!(
+            pacer.stats().0,
+            1,
+            "verbatim forwarding is not a publication"
+        );
 
         // Nothing is published before the deadline, and the deadline publishes
         // the *latest* state rather than one that was paced away.
-        assert!(pacer.take_due(start).is_none(), "the held state is not due yet");
+        assert!(
+            pacer.take_due(start).is_none(),
+            "the held state is not due yet"
+        );
         let deadline = pacer
             .flush_deadline(start)
             .expect("the held state has one trailing timer");
@@ -13184,6 +13355,243 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             .expect("level-triggered wait");
         assert!(flag.is_set());
     }
+
+    fn active_tool_test_agent(
+        directory: &std::path::Path,
+        session: Session,
+        extensions: ExtensionHost,
+    ) -> Agent {
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        Agent::new(AgentConfig {
+            client: AiClient::new(),
+            model,
+            session,
+            system: "system".into(),
+            sandbox: SandboxConfig::new(directory),
+            effect_broker: EffectBroker::default(),
+            extensions,
+            max_turns: Some(1),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: ReasoningMode::Standard,
+            cache_retention: CacheRetention::Short,
+            session_id: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn inactive_delegation_reports_no_active_workers() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("no-delegation.jsonl")).unwrap();
+        let agent = active_tool_test_agent(directory.path(), session, ExtensionHost::new());
+        assert_eq!(agent.active_delegated_worker_count(), 0);
+    }
+
+    fn active_tool_test_extensions(names: &[&'static str]) -> ExtensionHost {
+        let mut extensions = ExtensionHost::new();
+        for &name in names {
+            extensions.tool(PromptTool {
+                name,
+                snippet: None,
+                guidelines: &[],
+            });
+        }
+        extensions
+    }
+
+    fn advertised_tool_names(agent: &Agent) -> Vec<String> {
+        agent
+            .registered_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect()
+    }
+
+    fn persisted_tool_result_texts(session: &Session) -> Vec<String> {
+        session
+            .context()
+            .unwrap()
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.content.iter()),
+                Message::Assistant(_) => None,
+            })
+            .flatten()
+            .filter_map(|part| match part {
+                UserPart::ToolResult(result) => Some(result.content.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|part| match part {
+                ToolResultPart::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn set_active_tool_names_narrows_the_advertised_surface_and_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("active-tools.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![
+                    AssistantPart::ToolCall(ToolCall {
+                        id: octet_ai::ToolCallId("call-alpha".into()),
+                        name: "alpha".into(),
+                        arguments_json: "{}".into(),
+                        argument_error: None,
+                    }),
+                    AssistantPart::ToolCall(ToolCall {
+                        id: octet_ai::ToolCallId("call-beta".into()),
+                        name: "beta".into(),
+                        arguments_json: "{}".into(),
+                        argument_error: None,
+                    }),
+                ],
+                model: octet_ai::ModelId("test".into()),
+                protocol: Protocol::AnthropicMessages,
+            })))
+            .unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            session,
+            active_tool_test_extensions(&["alpha", "beta"]),
+        );
+        assert_eq!(advertised_tool_names(&agent), ["alpha", "beta"]);
+        let revision = agent.extensions.tool_snapshot().0;
+
+        agent
+            .set_active_tool_names(Some(BTreeSet::from(["alpha".to_owned()])))
+            .unwrap();
+
+        assert_eq!(advertised_tool_names(&agent), ["alpha"]);
+        assert!(agent.extensions.tool_snapshot().0 > revision);
+
+        // A persisted call issued before the change resolves against the
+        // narrowed dispatch map: the deactivated tool gets the existing
+        // unknown-tool result while the active tool still dispatches.
+        agent.recover_pending_tools(false).await.unwrap();
+        let texts = persisted_tool_result_texts(agent.session());
+        assert!(
+            texts.iter().any(|text| text.contains("unknown tool: beta")),
+            "a deactivated tool must be refused by the dispatch map: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("`alpha` was not replayed")),
+            "the still-active tool must remain dispatched: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn set_active_tool_names_refuses_unknown_names_without_state_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("active-unknown.jsonl")).unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            session,
+            active_tool_test_extensions(&["alpha", "beta"]),
+        );
+        let revision = agent.extensions.tool_snapshot().0;
+
+        let error = agent
+            .set_active_tool_names(Some(BTreeSet::from([
+                "alpha".to_owned(),
+                "ghost".to_owned(),
+            ])))
+            .unwrap_err();
+        match error {
+            AgentError::UnknownActiveTools(refused) => assert_eq!(refused, ["ghost"]),
+            other => panic!("expected UnknownActiveTools, got {other:?}"),
+        }
+        assert_eq!(advertised_tool_names(&agent), ["alpha", "beta"]);
+        assert_eq!(agent.extensions.tool_snapshot().0, revision);
+    }
+
+    #[test]
+    fn set_active_tool_names_cannot_readmit_policy_excluded_tools() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("active-policy.jsonl")).unwrap();
+        let mut extensions = active_tool_test_extensions(&["read", "write"]);
+        extensions.set_tool_policy(|name| name != "write");
+        let mut agent = active_tool_test_agent(directory.path(), session, extensions);
+
+        assert_eq!(advertised_tool_names(&agent), ["read"]);
+        assert_eq!(agent.registered_tool_names(), ["read"]);
+        let revision = agent.extensions.tool_snapshot().0;
+
+        for requested in [
+            BTreeSet::from(["write".to_owned()]),
+            BTreeSet::from(["read".to_owned(), "write".to_owned()]),
+        ] {
+            let error = agent.set_active_tool_names(Some(requested)).unwrap_err();
+            match error {
+                AgentError::UnknownActiveTools(refused) => assert_eq!(refused, ["write"]),
+                other => panic!("expected UnknownActiveTools, got {other:?}"),
+            }
+        }
+        assert_eq!(advertised_tool_names(&agent), ["read"]);
+        assert_eq!(agent.extensions.tool_snapshot().0, revision);
+
+        agent
+            .set_active_tool_names(Some(BTreeSet::from(["read".to_owned()])))
+            .unwrap();
+        assert_eq!(advertised_tool_names(&agent), ["read"]);
+    }
+
+    #[test]
+    fn set_active_tool_names_none_restores_the_host_policed_surface() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("active-restore.jsonl")).unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            session,
+            active_tool_test_extensions(&["alpha", "beta"]),
+        );
+
+        agent
+            .set_active_tool_names(Some(BTreeSet::from(["alpha".to_owned()])))
+            .unwrap();
+        assert_eq!(advertised_tool_names(&agent), ["alpha"]);
+        // Deactivated names stay registered, so they can be requested again.
+        assert_eq!(agent.registered_tool_names(), ["alpha", "beta"]);
+
+        agent.set_active_tool_names(None).unwrap();
+        assert_eq!(advertised_tool_names(&agent), ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn set_active_tool_names_bump_the_revision_the_run_host_observes() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("active-run-host.jsonl")).unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            session,
+            active_tool_test_extensions(&["alpha", "beta"]),
+        );
+        // `Agent::prompt` hands a clone of the host to the streaming loop.
+        let run_host = agent.extensions.clone();
+        let before = run_host.tool_snapshot().0;
+
+        agent
+            .set_active_tool_names(Some(BTreeSet::from(["beta".to_owned()])))
+            .unwrap();
+
+        let (revision, tools) = run_host.tool_snapshot();
+        assert!(revision > before);
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.definition().name.clone())
+                .collect::<Vec<_>>(),
+            ["beta"]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -13501,7 +13909,8 @@ mod inference_recovery_tests {
             if hard_token_limit {
                 // HTTP uncertainty coverage needs a genuinely capped route;
                 // uncapped Codex hard ceilings now refuse before dispatch.
-                Arc::make_mut(&mut model.endpoint).runtime.responses_profile = octet_ai::ResponsesRuntimeProfile::Default;
+                Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+                    octet_ai::ResponsesRuntimeProfile::Default;
             }
             Arc::make_mut(&mut model.endpoint).base_url =
                 url::Url::parse(&format!("{}/", server.uri())).unwrap();
@@ -13623,7 +14032,10 @@ mod sustained_network_recovery_tests {
         })
         .unwrap();
         agent.set_max_session_tokens(Some(u64::MAX));
-        assert!(matches!(agent.complete("bounded uncapped route").await, Err(AgentError::OutputLimitUnavailable)));
+        assert!(matches!(
+            agent.complete("bounded uncapped route").await,
+            Err(AgentError::OutputLimitUnavailable)
+        ));
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
         // The original long-outage behavior remains available only without a
         // hard ceiling on this cap-omitting Codex route.
@@ -13994,9 +14406,11 @@ mod sustained_network_recovery_tests {
                                         _ => {
                                             usage.input_tokens = input / 3;
                                             usage.cache_read_tokens = input / 3;
-                                            usage.cache_write_tokens =
-                                                input - usage.input_tokens - usage.cache_read_tokens;
-                                            usage.cache_write_1h_tokens = usage.cache_write_tokens / 2;
+                                            usage.cache_write_tokens = input
+                                                - usage.input_tokens
+                                                - usage.cache_read_tokens;
+                                            usage.cache_write_1h_tokens =
+                                                usage.cache_write_tokens / 2;
                                         }
                                     }
                                     for reasoning in [0, output / 2, output] {
@@ -14017,10 +14431,13 @@ mod sustained_network_recovery_tests {
                             }
                         }
                     }
-                    assert!(
-                        worst_case_request_cost(&model, 200_001, 8192, Some(ServiceTier::Auto))
-                            .is_none()
-                    );
+                    assert!(worst_case_request_cost(
+                        &model,
+                        200_001,
+                        8192,
+                        Some(ServiceTier::Auto)
+                    )
+                    .is_none());
                 }
             }
         }
@@ -14123,23 +14540,14 @@ mod sustained_network_recovery_tests {
         // The selected tier is load-bearing: the same budget admits the
         // untiered reservation used by auxiliary operations, which is exactly
         // why a priority main request must reserve the tier-aware amount.
-        assert!(reserve_request_cost(
-            &reopened,
-            &model,
-            input,
-            output,
-            Some(1_000 + priority - 1),
-        )
-        .is_ok());
+        assert!(
+            reserve_request_cost(&reopened, &model, input, output, Some(1_000 + priority - 1),)
+                .is_ok()
+        );
         // A cheap provider echo cannot reduce the reservation: the helper has
         // no echo input and always prices the requested tier.
-        let reserved_again = worst_case_request_cost(
-            &model,
-            input,
-            output,
-            Some(ServiceTier::Priority),
-        )
-        .unwrap();
+        let reserved_again =
+            worst_case_request_cost(&model, input, output, Some(ServiceTier::Priority)).unwrap();
         assert_eq!(reserved_again, priority);
         // Restart does not erase exposure either: an unpriced durable record
         // blocks the same hard budget on a reopened session.

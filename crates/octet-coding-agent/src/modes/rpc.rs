@@ -360,6 +360,7 @@ fn rpc_bash_result(text: String) -> RpcBashResult {
 }
 
 async fn run_sandboxed_bash(
+    tool: Arc<BashTool>,
     command: String,
     workspace: PathBuf,
     sandbox: SandboxConfig,
@@ -377,7 +378,7 @@ async fn run_sandboxed_bash(
         progress: ToolProgressSink::null(),
         cancellation: cancellation.clone(),
     };
-    let execution = BashTool.execute(json!({"command": command}), &context);
+    let execution = tool.execute(json!({"command": command}), &context);
     tokio::pin!(execution);
     tokio::select! {
         biased;
@@ -1550,7 +1551,7 @@ impl EventTranslator {
             AgentEvent::OutputDelta { channel, text } => self.emit_delta(output, channel, text)?,
             // The final TurnFinished message carries generated media in the
             // Pi-compatible content array; no provisional RPC event exists.
-            AgentEvent::OutputMedia { .. } => {}
+            AgentEvent::RecoveredOutput { .. } | AgentEvent::OutputMedia { .. } => {}
             AgentEvent::ProviderLifecycle { lifecycle } => {
                 // Deliberately outside assistant-message updates: readiness is
                 // transient endpoint telemetry, never model content.
@@ -2577,6 +2578,9 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
     };
     let mut queue = QueueState::default();
     let mut eof = false;
+    // Keep bounded spill files available between RPC commands and clean them
+    // up when this frontend owner exits.
+    let bash_tool = Arc::new(BashTool::default());
 
     while !eof {
         let inbound = if let Some(command) = deferred.pop_front() {
@@ -2624,6 +2628,7 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
             let sandbox = app.config.sandbox.to_sandbox_config(&workspace);
             let cancellation = CancellationToken::default();
             let task = tokio::spawn(run_sandboxed_bash(
+                Arc::clone(&bash_tool),
                 shell_command.clone(),
                 workspace,
                 sandbox,

@@ -33,7 +33,7 @@ explicitly installs it. It records operational facts and hashes, never prompts,
 tool arguments, tool output, credentials or provider payloads. Streaming deltas
 are aggregated in memory and are not written.
 
-## Observer spans (rows 3.1-3.4)
+## Observer spans
 
 `octet_agent::telemetry::spans` is a small, dependency-light substrate:
 
@@ -58,7 +58,7 @@ recorder used by tests.
 > `NOOP_TELEMETRY_CONTEXT` loses observations only. The `--telemetry` JSONL path
 > and `has_uncertain_usage()` are unchanged by the observer substrate.
 
-## Serializable schema (rows 3.3, 3.6)
+## Serializable schema
 
 `octet_agent::telemetry::schema` provides:
 
@@ -80,7 +80,7 @@ recorder used by tests.
 there is no reported prompt traffic: missing data is unavailable, not a
 fabricated zero.
 
-## Span assertion harness (row 3.4)
+## Span assertion harness
 
 `octet_agent::telemetry::testing` exports a runner-independent conformance suite
 (`conformance_cases()`), a `TelemetryAdapterFixture` trait, and
@@ -91,13 +91,11 @@ without dropping callbacks. `crates/octet-agent/tests/telemetry_conformance.rs`
 runs it against `InMemoryTelemetryContext` and additionally asserts the inert
 context and the untouched JSONL path.
 
-## Current boundary status (row 3.5)
+## Runtime instrumentation
 
-The substrate, schema and harness are complete and tested. Wiring the seven
-named boundaries (run, turn, provider request, provider stream, tool,
-compaction/summary, delegation) into the `octet-agent` run generator is the
-remaining work. `TelemetryContext::begin_typed` (crate-internal) and
-`SpanGuard::context` are the intended generator-driven hooks, and
-`crates/octet-agent/src/telemetry/schema.rs` unit tests exercise that path
-(nesting, completion-usage recording, and drop-settles-as-error). See
-`docs/parity/telemetry.md` for the precise gap.
+The agent installs explicit run, turn, provider-request, provider-stream, tool,
+compaction/summary, and delegation spans at their owning execution boundaries.
+`TelemetryContext::begin_typed` and `SpanGuard::context` carry parentage through
+the generator; a dropped guard settles as an error. An embedding host supplies
+its observer context explicitly. These measurements do not replace durable
+usage or uncertainty accounting, and an inert observer changes no run behavior.

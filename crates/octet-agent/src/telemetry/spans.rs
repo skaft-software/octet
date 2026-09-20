@@ -11,13 +11,13 @@
 //! `--telemetry` JSONL path in [`crate::telemetry`]. Dropping to
 //! [`NOOP_TELEMETRY_CONTEXT`] loses observations, never accounting.
 
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     future::Future,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{Arc, Mutex},
 };
-use serde::{Deserialize, Serialize};
 
 /// One scalar or homogeneous-array span attribute value.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -250,7 +250,8 @@ impl SpanGuard {
     }
 
     fn settle(&self, failed: bool) {
-        if let (Some(backend), Some(state)) = (&self.span.context.backend, &self.span.context.parent)
+        if let (Some(backend), Some(state)) =
+            (&self.span.context.backend, &self.span.context.parent)
         {
             let mut settled = state.settled.lock().unwrap_or_else(|e| e.into_inner());
             if !*settled {

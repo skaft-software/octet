@@ -9,8 +9,6 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-const PASSING_TEXT: &str = "hello from the eval fixture";
-
 struct Fixture {
     _root: tempfile::TempDir,
     home: PathBuf,
@@ -110,7 +108,7 @@ fn assert_success(output: &Output) {
     );
 }
 
-fn number<'a>(value: &'a serde_json::Value, key: &str) -> f64 {
+fn number(value: &serde_json::Value, key: &str) -> f64 {
     value
         .get(key)
         .and_then(serde_json::Value::as_f64)

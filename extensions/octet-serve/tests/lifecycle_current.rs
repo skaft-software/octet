@@ -1,8 +1,10 @@
+//! Session-core isolation and bounded replay integration tests.
+
 use octet_serve_backend::{
-    ActorConfig, ActorOwnerState, AuthorityProfile, ContextUsage, DriverCommandOutcome,
-    EventPayload, HostId, JournalConfig, ModelSelection, PromptInput, ReplayResponse, RunId,
-    SessionActorCore, SessionCommand, SessionCommandEnvelope, SessionCursor, SessionId,
-    SessionLiveState, SessionSeed, SessionSnapshot, SessionSummary, DeviceId, CommandId,
+    ActorConfig, ActorOwnerState, AuthorityProfile, CommandId, ContextUsage, DeviceId,
+    DriverCommandOutcome, EventPayload, HostId, JournalConfig, ModelSelection, PromptInput,
+    ReplayResponse, RunId, SessionActorCore, SessionCommand, SessionCommandEnvelope, SessionCursor,
+    SessionId, SessionLiveState, SessionSeed, SessionSnapshot, SessionSummary,
 };
 
 fn seed(index: usize) -> SessionSeed {
@@ -137,8 +139,10 @@ async fn ten_core_sessions_keep_effects_isolated_and_replay_bounded() {
         assert_eq!(repeated.ack, first.ack);
 
         let cancelled = core
-            .admit_command(abort_command(session_id.clone(), &format!("abort-{index}")), 20, |_| {
-                async {
+            .admit_command(
+                abort_command(session_id.clone(), &format!("abort-{index}")),
+                20,
+                |_| async {
                     Ok(DriverCommandOutcome::with_events(vec![
                         octet_serve_backend::TimestampedEvent::new(
                             2,
@@ -148,8 +152,8 @@ async fn ten_core_sessions_keep_effects_isolated_and_replay_bounded() {
                             },
                         ),
                     ]))
-                }
-            })
+                },
+            )
             .await
             .unwrap();
         assert!(!cancelled.cached);
@@ -170,8 +174,7 @@ async fn ten_core_sessions_keep_effects_isolated_and_replay_bounded() {
         .unwrap();
         assert_eq!(core.view().summary.title, format!("settled-{index}"));
 
-        let ReplayResponse::Gap { gap, snapshot } =
-            core.replay_after(SessionCursor::zero(1))
+        let ReplayResponse::Gap { gap, snapshot } = core.replay_after(SessionCursor::zero(1))
         else {
             panic!("old cursors must receive a bounded snapshot fallback");
         };
@@ -179,12 +182,13 @@ async fn ten_core_sessions_keep_effects_isolated_and_replay_bounded() {
         assert_eq!(gap.latest_available.sequence, 3);
         assert_eq!(snapshot.session_id, session_id);
 
-        let ReplayResponse::Events { events, through, .. } = core.replay_after(
-            SessionCursor {
-                actor_generation: 1,
-                sequence: 2,
-            },
-        ) else {
+        let ReplayResponse::Events {
+            events, through, ..
+        } = core.replay_after(SessionCursor {
+            actor_generation: 1,
+            sequence: 2,
+        })
+        else {
             panic!("the retained replay tail should be available");
         };
         assert_eq!(events.len(), 1);

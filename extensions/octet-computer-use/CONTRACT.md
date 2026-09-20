@@ -4,7 +4,7 @@ Status: tested synthetic source composition, **not installed/native/security
 qualification**. The manifest remains opt-in and unchanged. No live desktop,
 provider, permission request or model-code worker is exercised by these tests.
 See [README.md](README.md) for the exact implemented operation subset and
-[execution evidence](../../docs/swarm-audit/EXECUTION-automation.md) for results.
+deterministic test commands.
 
 ## Integration and remaining mismatches
 

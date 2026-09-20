@@ -1,4 +1,4 @@
-# octet TUI design
+# octet TUI architecture
 
 **Status:** Current implementation contract.
 
@@ -13,7 +13,7 @@ vocabulary that uses that hierarchy without adding a second TUI.
 ## Terminal guarantees
 
 - The interactive frontend renders on the primary screen. `auto`, `terminal`,
-  and `off` use Pi's complete logical-frame renderer: the first frame writes
+  and `off` use the complete logical-frame renderer: the first frame writes
   every materialized row, pure appends flow naturally into terminal scrollback,
   and a width/height change or mutation above the previous viewport clears the
   screen and saved lines before replaying the complete frame. PageUp transfers
@@ -21,12 +21,12 @@ vocabulary that uses that hierarchy without adding a second TUI.
   that shell. Explicit `--mouse app` selects that viewport from startup.
 - octet uses one compiled default theme with three built-in terminal appearance selectors: Auto adapts to a reliably detected background with a neutral fallback, while Light and Dark explicitly select contrast. Runtime theme-file loading and reload remain disabled; model-aware accents change atmosphere without changing layout or semantic status colours.
 - Raw mode, bracketed paste, keyboard enhancements, and mouse reporting are
-  enabled only when supported and restored idempotently. Matching Pi, every
+  enabled only when supported and restored idempotently. Every
   interactive frame is bracketed by CSI 2026 synchronized-output markers;
   terminals that do not implement the private mode ignore it, while octet's
   backend still uses the markers to batch each frame into one flush. octet's
-  composer uses the positioned hardware cursor rather than Pi's painted fake
-  cursor, so every renderer construction explicitly keeps that cursor visible.
+  composer uses a positioned hardware cursor; every renderer construction
+  explicitly keeps that cursor visible.
 - Mouse reporting is disabled by default, preserving native drag selection and
   wheel scrolling. `--mouse app` enables capture for semantic wheel navigation
   and selection, but keyboard viewport ownership does not depend on capture.
@@ -44,6 +44,14 @@ vocabulary that uses that hierarchy without adding a second TUI.
   directory; these traces are sensitive because they include displayed content.
 
 ## Startup identity
+
+Routine startup phases are silent, including session lookup, replay, and fork
+preparation on fresh, continued, resumed, and forked launches. Saved-session I/O
+uses the silent lifecycle input owner; a fresh launch resolves configuration
+inline without cloning the full config or dispatching a replay worker. The
+composer remains editable until the atomic ready frame installs history and
+identity. Setup/selection panels and actionable errors keep their normal owners;
+quiet startup does not suppress cancellation or shutdown diagnostics.
 
 The working directory appears only in the footer, not again in the splash.
 The splash keeps its byte-aligned spacing, model identity, permissions, and
@@ -79,7 +87,7 @@ to `sexy-tui-rs` on every interactive render. Removing a transient tail
 status truncates only that block's cached rows and metadata when rendered, or
 keeps the existing cache prefix when the status has not received a frame, so
 admitting the next tool does not reconstruct historical Markdown while holding
-the shared shell state. The terminal renderer follows Pi's
+the shared shell state. The terminal renderer retains
 `previousLines`, logical cursor, hardware cursor, maximum working height, and
 previous viewport-top state. It finds the first and last changed physical rows,
 repaints only that range when it remains addressable, and uses bottom-row CRLF
@@ -90,18 +98,23 @@ its intent and newest progress remain on the addressable screen, with an explici
 `result pending` omission marker when space permits. This projection does not
 truncate the semantic/source cache. On completion it is replaced by the canonical
 result under the normal disclosure policy, which can then enter saved history
-exactly once. Octet disables shrink-triggered clearing for its renderer; generic
-Pi behavior remains unchanged. Optional dot/shimmer/timer ticks do not invalidate
+exactly once. Octet disables shrink-triggered clearing for its renderer; the generic
+renderer retains its own shrink policy. Optional dot/shimmer/timer ticks do not invalidate
 headings already above the native live-screen seam.
 
-The current deterministic Shell → Pi → VT matrix also tests fragmented table
+An active roster never clips subsequent unrelated conversation: only an ordinary
+trailing pending tool may use the bounded preview, while genuine historical
+roster updates can still require full replay.
+
+The current deterministic shell/renderer/VT matrix also tests fragmented table
 rows through narrow/wide width and height changes, exactly one required replay
 per resize, and late-reference finalization with exactly one historical repair.
 Repeated no-change frames remain quiet; source/copy and exactly-once history
 sentinels remain authoritative. These tests model emitted VT and saved-line
 reset, not a physical emulator's reflow, paint, or native selection.
 
-This closes the tested pending → progress → result/error case, not all of #392.
+This covers the tested pending → progress → result/error case, not every
+historical update.
 Real updates to historical concurrent tools/rosters, retrospective Markdown
 changes, resize, and other structural transitions can still take the replay path
 below. Do not suppress that path without an emitted-history policy that preserves
@@ -110,14 +123,14 @@ real results. Maintainer-reported Terminal.app, Ghostty and Ghostty → SSH acce
 rows. Acceptance of one journey does not qualify every reader/selection path.
 
 A change above the old viewport cannot be repaired with cursor addressing.
-Matching Pi, that path emits `ED 2`, homes, clears saved lines with `ED 3`, and
+That path emits `ED 2`, homes, clears saved lines with `ED 3`, and
 replays the complete materialized frame. Width changes do the same because line
 wrapping changed; height changes do so outside Termux. Disclosure contraction,
 theme repaint, overlays, and dynamic composer chrome therefore cannot leave an
-unwritten semantic gap in terminal history: they either take Pi's visible-row
-differential path or its authoritative full replay path. Kitty image placements
+unwritten semantic gap in terminal history: they either take the visible-row
+differential path or the authoritative full replay path. Kitty image placements
 participate in the same changed-range expansion, targeted deletion, reserved-row
-painting, and full-replay fallback as upstream Pi.
+painting, and full-replay fallback.
 
 Default terminal-owned resume materializes the complete active branch before it
 is rendered, because terminal scrollback cannot prepend a deferred prefix later.
@@ -134,7 +147,7 @@ fixed while one Markdown block continues to grow, increments the new-output
 state, and exposes the PageDown return-to-live affordance.
 
 Terminal-owned modes preserve native selection and ordinary append scrollback,
-but octet cannot observe or freeze a reader's position. A Pi full replay replaces
+but octet cannot observe or freeze a reader's position. A full replay replaces
 the application's saved-line presentation and therefore returns the terminal to
 the live frame. Semantic copy retains stable coordinates in either renderer;
 application-owned drag selection is available only while mouse capture is
@@ -299,9 +312,8 @@ without an event-margin dot or a synthetic first-row bullet.
 
 ## Run outcomes
 
-A normal completion uses the success glyph and `completed`. A completion with
-warnings is a distinct terminal state: it keeps the warning glyph and the
-explicit `completed with warnings` label rather than collapsing into success.
+Both normal completion and completion with warnings use the success glyph
+and `completed`; per-call failures remain in their own tool blocks.
 An interruption remains warning-class; it is not painted as success or failure.
 
 A failed run keeps the compact `failed · <duration>` lifecycle row and follows it
@@ -379,8 +391,7 @@ provenance metadata before the ordinary idle-boundary session rebuild.
 The durable connector tree presents entry IDs and kinds deterministically (`sessions
 inspect` on the command line; the withdrawn `/tree` overlay used the same renderer).
 It marks every ancestor on the selected branch with `+`, the exact durable head
-with `*`, and keeps abandoned forks visible. The withdrawn `/checkout` command
-durable head and hydrates the selected branch. `/reload` recomposes AGENTS
+with `*`, and keeps abandoned forks visible. `/reload` recomposes AGENTS
 instructions, rescans skills and prompts, and rebuilds the Agent only at an idle
 boundary.
 
@@ -420,8 +431,8 @@ Focused frame tests render the durable prompt, terminal outcome, composer, and
 shared geometry at short (`46×8`), regular (`80×24`), and wide (`120×40`)
 sizes, asserting that every row remains within the terminal width. Separate
 regressions prove that an invisible approval action cannot be confirmed,
-approval detail remains retained and rendered, warning completion differs from
-normal success, and collapsed failures keep a bounded actionable reason.
+approval detail remains retained and rendered, and collapsed failures keep a
+bounded actionable reason.
 
 ## Active-run controls
 
@@ -447,10 +458,14 @@ normal success, and collapsed failures keep a bounded actionable reason.
   pickers, tool prompts, lifecycle waits, and local shell commands. Active work
   is aborted and settled before the process exits.
 - Safe presentation commands execute immediately.
-- Model, reasoning, session, compaction, reload, and checkout work is queued in
+- Model, reasoning, session, compaction, and reload work is queued in
   order and applied after the active `Run` releases its Agent borrow.
 
 ## Interrupted inference presentation
+
+`RecoveredOutput` is displayed as a separate notice labelled as partial text or
+reasoning from a previous interrupted attempt, not as this answer. It does not
+feed current output deltas, token-speed counters, provider replay, or accounting.
 
 `ProviderRetry` invalidates every model block owned by the unfinished attempt,
 including reasoning already closed when public text began. Ownership uses stable

@@ -482,11 +482,34 @@ def _read_optional_regular(root: Path, relative: str, limit: int) -> Optional[by
         raise _UnreadableSourcePath from error
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise _UnreadableSourcePath
+    # Pin each directory from the filesystem root. No ordinary path open may
+    # follow a replacement symlink after the lexical checks above.
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        raise _UnreadableSourcePath
+    directory_fd = None
+    file_fd = None
     try:
-        with path.open("rb") as handle:
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory_fd = os.open(root.anchor, directory_flags)
+        components = (*root.parts[1:], *relative.split("/"))
+        for component in components[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                          dir_fd=directory_fd)
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            raise _UnreadableSourcePath
+        with os.fdopen(file_fd, "rb") as handle:
+            file_fd = None
             data = handle.read(limit + 1)
     except OSError as error:
         raise _UnreadableSourcePath from error
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
     if len(data) > limit:
         raise _UnreadableSourcePath
     return data

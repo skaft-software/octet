@@ -367,10 +367,7 @@ fn inline_route_digest(
 }
 
 fn validate_inline_media_route(request: &RunRequest, protocol: Protocol) -> anyhow::Result<()> {
-    let requested_audio = request
-        .input_modalities
-        .iter()
-        .any(|modality| *modality == HostInputModality::Audio);
+    let requested_audio = request.input_modalities.contains(&HostInputModality::Audio);
     let has_audio_attachment = request
         .media
         .iter()

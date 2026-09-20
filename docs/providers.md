@@ -49,11 +49,9 @@ explicit endpoint reasoning metadata can narrow or disable that contract. The
 separate `deepseek-v4` family keeps its declared 1M/384K limits and
 Off/high/xhigh reasoning fallback. Direct DeepSeek's current peak/off-peak tariff
 is not modeled: pricing remains unknown unless explicitly configured, so hard
-price-dependent ceilings fail closed. See the
-[bounded metadata repair record](qualification/discovery-current-candidate.md)
-for source-review scope and unrun checks.
+price-dependent ceilings fail closed.
 
-> These are octet 0.7.6 source contracts, not live endpoint verification. Model
+> These are source contracts, not live endpoint verification. Model
 > availability remains account- and endpoint-specific; deterministic checks do
 > not qualify every live provider.
 
@@ -213,14 +211,14 @@ values. Gemini presets include tools, structured JSON output, and supported imag
 Other built-in presets include DeepSeek, Groq, Cerebras, xAI, Together AI,
 Fireworks AI, NVIDIA, Hugging Face, Moonshot AI, Xiaomi, MiniMax, and OpenCode Zen.
 The [provider declarations](../crates/octet-coding-agent/src/providers/declarations.json)
-and [compatibility reference](pi-provider-compatibility.md) describe route-specific
-coverage; a preset name is not a promise of every provider API.
+describe route-specific coverage; a preset name is not a promise of every
+provider API.
 
 ## Declarative preset metadata
 
 Presets are data, never provider-name branches. The typed preset surface in
 `octet_ai::declarations` (`ModelPreset`, `RequestOverrides`,
-`ProviderCredentialPreset`, `ChatTemplateValue`) describes the parity-relevant
+`ProviderCredentialPreset`, `ChatTemplateValue`) describes the declared
 per-model and per-provider fields — `samplingParams`, per-model `headers`,
 `vllmPriority`, `supportsMaxOutputTokens`, `thinkingTokenBudgetField`,
 `chatTemplateArgs`/`chatTemplateKwargs` with `{ "$var": "thinking.enabled" |
@@ -229,20 +227,18 @@ format, and credential environment aliases. Validation is fail-closed: unknown
 `$var` names, malformed headers, empty identifiers and unbounded retry/timeout
 values are rejected. This is declared plumbing; the OpenAI-compatible codecs and
 the streaming client that consume these fields are owned separately, so the
-preset data is described and validated here while codec emission and proxy
-resolution remain tracked gaps (see [providers parity](parity/providers.md)).
+preset validation alone does not establish codec emission or proxy behavior.
 
 Credential aliases recognize Anthropic's `ANTHROPIC_AUTH_TOKEN` and
 `ANTHROPIC_OAUTH_TOKEN` (which must be sent as `Authorization: Bearer`) ahead of
 `ANTHROPIC_API_KEY` (sent as `x-api-key`), and Vertex's `GOOGLE_CLOUD_API_KEY`.
 Route presentation currently follows the declaration's static auth presentation;
-selecting bearer-vs-API-key per matched variable is a named gap.
+selecting bearer-vs-API-key per matched variable is not implemented.
 
 `octet_ai::declarations::proxy` resolves `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/
 `NO_PROXY` for a request target with upstream root-and-subdomain `NO_PROXY`
 semantics (exact host, `.domain`, `*.domain`, optional `:port`, lone `*`), and
-rejects non-http(s) proxies. The streaming client does not yet call it; that
-`reqwest::Proxy` seam is the tracked gap.
+rejects non-http(s) proxies. The streaming client does not call this resolver.
 
 ## Codex subscription login
 
@@ -300,9 +296,8 @@ flags and restart existing catalog owners after account changes. NDJSON does not
 gain login/logout commands or OAuth payload fields. Rust embedders retain the
 [credential-safe SDK seam](sdk.md#host-owned-github-copilot).
 
-This is **source integration, not build/live/native qualification**. See the
-[adapter candidate and unrun fixture matrix](qualification/copilot-host-current-candidate.md)
-for remaining implementation and acceptance gates; #249 is not closed.
+This describes source integration, not live-provider or native-client
+qualification.
 
 ## Native Mistral Conversations (unreleased codec)
 
@@ -524,9 +519,12 @@ The Responses `service_tier` request field (`auto`, `default`, `flex`,
 codec sends it only when the caller selects one **and** the route's declared
 `runtime.responses_profile` accepts it (`Codex` today, the same gate `/fast`
 uses). Any other profile fails closed with a typed unsupported error instead of
-silently dropping a caller's billing-changing control. Octet does not yet apply
-the provider's tier cost multipliers to reported usage cost; see the
-[providers parity ledger](parity/providers.md#codex-service_tier).
+silently dropping a caller's billing-changing control. Cost settlement and
+conservative request reservations use the declared Codex
+tier tariff with the provider's echoed tier: flex is one-half, priority is twice
+the base rate (five-halves for exact API model `gpt-5.5`). Unknown tiers,
+unresolved `auto`, and unsupported tariffs remain unpriced. The priority
+uncertainty marker stays durable; tier settlement does not clear prior exposure.
 
 The OpenAI Responses **computer-use tool**
 (`{"type":"computer_use_preview","display_width":…,"display_height":…,
@@ -541,8 +539,7 @@ canonical tool call named `computer_use_preview` with a bounded action payload
 maps the caller's result back to a `computer_call_output` item carrying the one
 documented `computer_screenshot` object. **Nothing in octet executes a computer
 action**: there is no desktop or browser backend behind this codec, and whether
-any action may run is a separate host-policy decision. See the
-[codec ledger](parity/codecs.md).
+any action may run is a separate host-policy decision.
 
 `previous_response_id` is a best-effort process-local live-WebSocket optimization
 only when fixed parameters and the prior input/output prefix match. It is not
@@ -567,9 +564,8 @@ waiting. Unknown failed-attempt usage blocks replacement under hard cumulative
 cost/token ceilings. Unknown exposure is durably recorded independently of known
 usage: later success, resume, or checkout does not restore complete totals.
 Displayed numeric usage/cost is then a known subtotal; a fork starts independent
-accounting. See [historical v0.7.4 recovery qualification](qualification/v0.7.4-recovery.md)
-for the source comparison and outstanding live/endurance evidence; Codex parity
-is not established.
+accounting. See the [agent recovery contract](design/octet-agent.md#in-process-provider-recovery)
+for eligibility, budgets, and verification limits.
 
 ## Astra source limits
 

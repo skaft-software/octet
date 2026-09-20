@@ -755,7 +755,10 @@ pub struct ModelSpec {
     pub cache: CacheCompatibility,
     /// Validated model defaults and explicit provider wire compatibility.
     /// Header secrets are excluded from public model serialization.
-    #[serde(default, serialize_with = "crate::declarations::serialize_public_preset")]
+    #[serde(
+        default,
+        serialize_with = "crate::declarations::serialize_public_preset"
+    )]
     pub preset: crate::declarations::ModelPreset,
 }
 

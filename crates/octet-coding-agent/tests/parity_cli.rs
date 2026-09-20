@@ -50,7 +50,9 @@ impl LoopbackApi {
 
     fn with_base_path(base_path: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-        listener.set_nonblocking(true).expect("nonblocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let url = format!("http://{}{base_path}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
@@ -285,7 +287,8 @@ impl Fixture {
         if offline {
             command.arg("--offline");
         }
-        command.args(["--no-context-files", "--no-tools"])
+        command
+            .args(["--no-context-files", "--no-tools"])
             .arg("--workspace")
             .arg(&self.workspace)
             .arg("--session-dir")
@@ -334,7 +337,8 @@ fn session_transcript(fixture: &Fixture, id: &str) -> Option<PathBuf> {
                 if let Some(found) = walk(&path, id) {
                     return Some(found);
                 }
-            } else if path.file_name().and_then(|name| name.to_str()) == Some(&format!("{id}.jsonl"))
+            } else if path.file_name().and_then(|name| name.to_str())
+                == Some(&format!("{id}.jsonl"))
             {
                 return Some(path);
             }
@@ -388,8 +392,17 @@ fn json_mode_streams_a_session_header_first_delta_only_event_sequence() {
         .iter()
         .map(|event| event["type"].as_str().unwrap_or_default().to_owned())
         .collect::<Vec<_>>();
-    for expected in ["agent_start", "turn_start", "message_start", "message_end", "agent_end"] {
-        assert!(types.contains(&expected.to_owned()), "missing {expected} in {types:?}");
+    for expected in [
+        "agent_start",
+        "turn_start",
+        "message_start",
+        "message_end",
+        "agent_end",
+    ] {
+        assert!(
+            types.contains(&expected.to_owned()),
+            "missing {expected} in {types:?}"
+        );
     }
     for event in &events {
         if event["type"] == "message_update" {
@@ -403,7 +416,10 @@ fn json_mode_streams_a_session_header_first_delta_only_event_sequence() {
             );
         }
     }
-    assert!(stdout.contains(ASSISTANT_TEXT), "assistant text must be streamed");
+    assert!(
+        stdout.contains(ASSISTANT_TEXT),
+        "assistant text must be streamed"
+    );
     assert_eq!(
         api.chat_requests().len(),
         2,
@@ -438,10 +454,22 @@ fn piped_stdin_and_files_join_the_first_prompt_before_the_remaining_prompts() {
     let requests = api.chat_requests();
     assert_eq!(requests.len(), 2, "one request per sequential prompt");
     let first = last_user_text(&requests[0]);
-    assert!(first.contains("piped stdin body"), "piped stdin reached the model: {first}");
-    assert!(first.contains("file context body"), "@file content reached the model: {first}");
-    assert!(first.contains("<file name="), "@file is wrapped as an explicit file part: {first}");
-    assert!(first.ends_with("first prompt"), "the first positional prompt joins it: {first}");
+    assert!(
+        first.contains("piped stdin body"),
+        "piped stdin reached the model: {first}"
+    );
+    assert!(
+        first.contains("file context body"),
+        "@file content reached the model: {first}"
+    );
+    assert!(
+        first.contains("<file name="),
+        "@file is wrapped as an explicit file part: {first}"
+    );
+    assert!(
+        first.ends_with("first prompt"),
+        "the first positional prompt joins it: {first}"
+    );
     assert_eq!(last_user_text(&requests[1]), "second prompt");
 }
 
@@ -455,19 +483,32 @@ fn list_models_lists_the_credential_scoped_catalog_and_filters_by_search() {
     assert_success(&all);
     let listing = stdout_of(&all);
     assert!(
-        listing.lines().next().unwrap_or_default().contains("PROVIDER"),
+        listing
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .contains("PROVIDER"),
         "listing header: {listing}"
     );
-    assert!(listing.contains("probe") && listing.contains("alpha-model"), "listing: {listing}");
+    assert!(
+        listing.contains("probe") && listing.contains("alpha-model"),
+        "listing: {listing}"
+    );
     let probe_index = listing.find("custom/probe").unwrap();
     let alpha_index = listing.find("custom/alpha-model").unwrap();
-    assert!(alpha_index < probe_index, "listing must be sorted ascending: {listing}");
+    assert!(
+        alpha_index < probe_index,
+        "listing must be sorted ascending: {listing}"
+    );
 
     let filtered = fixture.run(&["--list-models", "alphamod"]);
     assert_success(&filtered);
     let filtered = stdout_of(&filtered);
     assert!(filtered.contains("alpha-model"), "fuzzy search: {filtered}");
-    assert!(!filtered.contains("custom/probe"), "search must filter: {filtered}");
+    assert!(
+        !filtered.contains("custom/probe"),
+        "search must filter: {filtered}"
+    );
 
     let empty = fixture.run(&["--list-models", "no-such-model"]);
     assert_success(&empty);
@@ -504,7 +545,14 @@ fn session_id_creates_the_exact_session_and_name_trims_or_rejects_empty() {
         stdout_of(&inspect)
     );
 
-    let empty = fixture.run(&["--model", "custom/probe", "--print", "--name", "   ", "hello"]);
+    let empty = fixture.run(&[
+        "--model",
+        "custom/probe",
+        "--print",
+        "--name",
+        "   ",
+        "hello",
+    ]);
     assert!(!empty.status.success(), "an empty name must fail");
     assert!(
         stderr_of(&empty).contains("--name requires a non-empty name"),
@@ -513,12 +561,39 @@ fn session_id_creates_the_exact_session_and_name_trims_or_rejects_empty() {
     );
 }
 
+#[test]
+fn standalone_name_uses_the_allocated_session_id_without_orphaning_a_transcript() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    let run = fixture.run(&[
+        "--model",
+        "custom/probe",
+        "--print",
+        "--name",
+        "Standalone name",
+        "hello",
+    ]);
+    assert_success(&run);
+    let list = fixture.run(&["sessions", "list"]);
+    assert_success(&list);
+    assert!(
+        stdout_of(&list).contains("Standalone name"),
+        "{}",
+        stdout_of(&list)
+    );
+    assert_eq!(session_transcripts(&fixture).len(), 1);
+}
+
 /// Every file named `name` under the isolated session root.
 fn files_named(fixture: &Fixture, name: &str) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![fixture.sessions.clone()];
     while let Some(directory) = stack.pop() {
-        for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
@@ -537,7 +612,11 @@ fn session_transcripts(fixture: &Fixture) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![fixture.sessions.clone()];
     while let Some(directory) = stack.pop() {
-        for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
@@ -559,7 +638,13 @@ fn session_transcripts(fixture: &Fixture) -> Vec<PathBuf> {
 fn no_session_discards_the_transcript_but_keeps_durable_accounting() {
     let api = LoopbackApi::start();
     let fixture = Fixture::new(Some(&api.url));
-    let run = fixture.run(&["--model", "custom/probe", "--no-session", "--print", "hello"]);
+    let run = fixture.run(&[
+        "--model",
+        "custom/probe",
+        "--no-session",
+        "--print",
+        "hello",
+    ]);
     assert_success(&run);
     assert!(
         stdout_of(&run).contains(ASSISTANT_TEXT),
@@ -576,7 +661,11 @@ fn no_session_discards_the_transcript_but_keeps_durable_accounting() {
 
     // ... but the accounting ledger kept the provider usage.
     let ledger = files_named(&fixture, "ephemeral-sessions.jsonl");
-    assert_eq!(ledger.len(), 1, "one workspace accounting ledger: {ledger:?}");
+    assert_eq!(
+        ledger.len(),
+        1,
+        "one workspace accounting ledger: {ledger:?}"
+    );
     let lines = std::fs::read_to_string(&ledger[0]).unwrap();
     assert_eq!(lines.lines().count(), 1, "{lines}");
     let record: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
@@ -611,7 +700,10 @@ fn no_session_discards_the_transcript_but_keeps_durable_accounting() {
 fn no_session_fails_closed_for_an_interactive_frontend_and_records_nothing() {
     let fixture = Fixture::new(None);
     let interactive = fixture.run(&["--no-session"]);
-    assert!(!interactive.status.success(), "a TUI run cannot be ephemeral");
+    assert!(
+        !interactive.status.success(),
+        "a TUI run cannot be ephemeral"
+    );
     let stderr = stderr_of(&interactive);
     assert!(
         stderr.contains("--no-session requires a headless frontend"),
@@ -619,7 +711,10 @@ fn no_session_fails_closed_for_an_interactive_frontend_and_records_nothing() {
     );
 
     let named = fixture.run(&["--no-session", "--print", "--name", "ephemeral", "hello"]);
-    assert!(!named.status.success(), "an ephemeral run cannot name a session");
+    assert!(
+        !named.status.success(),
+        "an ephemeral run cannot name a session"
+    );
     assert!(
         stderr_of(&named).contains("--no-session cannot name a session"),
         "diagnostic: {}",
@@ -679,8 +774,18 @@ fn codex_context_notes_are_not_emitted_for_a_non_codex_session_or_per_turn() {
 fn sessions_search_is_incremental_and_reports_the_index_change() {
     let api = LoopbackApi::start();
     let fixture = Fixture::new(Some(&api.url));
-    for (id, prompt) in [("search-a", "alpha needle one"), ("search-b", "beta needle two")] {
-        let run = fixture.run(&["--model", "custom/probe", "--print", "--session-id", id, prompt]);
+    for (id, prompt) in [
+        ("search-a", "alpha needle one"),
+        ("search-b", "beta needle two"),
+    ] {
+        let run = fixture.run(&[
+            "--model",
+            "custom/probe",
+            "--print",
+            "--session-id",
+            id,
+            prompt,
+        ]);
         assert_success(&run);
     }
 
@@ -739,17 +844,33 @@ fn codex_context_window_override_fails_closed_without_acknowledgement() {
     let fixture = Fixture::new(None);
 
     let unacknowledged = fixture.run(&["--codex-context-window", "500000", "--print", "hello"]);
-    assert!(!unacknowledged.status.success(), "an unacknowledged raise must fail closed");
+    assert!(
+        !unacknowledged.status.success(),
+        "an unacknowledged raise must fail closed"
+    );
     let stderr = stderr_of(&unacknowledged);
-    assert!(stderr.contains("double-priced"), "diagnostic names the cost cliff: {stderr}");
-    assert!(stderr.contains("acknowledge-cost-cliff"), "diagnostic names the flag: {stderr}");
+    assert!(
+        stderr.contains("double-priced"),
+        "diagnostic names the cost cliff: {stderr}"
+    );
+    assert!(
+        stderr.contains("acknowledge-cost-cliff"),
+        "diagnostic names the flag: {stderr}"
+    );
 
     let zero = fixture.run(&["--codex-context-window", "0", "--print", "hello"]);
     assert!(!zero.status.success(), "zero must fail closed");
-    assert!(stderr_of(&zero).contains("greater than zero"), "{}", stderr_of(&zero));
+    assert!(
+        stderr_of(&zero).contains("greater than zero"),
+        "{}",
+        stderr_of(&zero)
+    );
 
     let oversized = fixture.run(&["--codex-context-window", "2000000", "--print", "hello"]);
-    assert!(!oversized.status.success(), "above every entitlement must fail closed");
+    assert!(
+        !oversized.status.success(),
+        "above every entitlement must fail closed"
+    );
 }
 
 /// Row 1 — with the acknowledgement the opt-in is accepted and a non-Codex run
@@ -931,10 +1052,16 @@ fn catalog_publish_gates_are_fail_closed_and_the_path_is_immutable() {
     };
 
     let refused = publish(&wrong_checksum);
-    assert!(!refused.status.success(), "a bad checksum must refuse to publish");
+    assert!(
+        !refused.status.success(),
+        "a bad checksum must refuse to publish"
+    );
     let stderr = stderr_of(&refused);
     assert!(stderr.contains("checksum"), "diagnostic: {stderr}");
-    assert!(!std::path::Path::new(&destination).exists(), "a refusal leaves no catalog");
+    assert!(
+        !std::path::Path::new(&destination).exists(),
+        "a refusal leaves no catalog"
+    );
 
     // The refusal reports the computed digest; a matching checksum now publishes.
     let computed = stderr
@@ -950,8 +1077,15 @@ fn catalog_publish_gates_are_fail_closed_and_the_path_is_immutable() {
     assert_eq!(std::fs::read_to_string(&destination).unwrap(), document);
 
     let immutable = publish(&computed);
-    assert!(!immutable.status.success(), "an existing catalog must never be replaced");
-    assert!(stderr_of(&immutable).contains("immutable-path"), "{}", stderr_of(&immutable));
+    assert!(
+        !immutable.status.success(),
+        "an existing catalog must never be replaced"
+    );
+    assert!(
+        stderr_of(&immutable).contains("immutable-path"),
+        "{}",
+        stderr_of(&immutable)
+    );
     assert_eq!(std::fs::read_to_string(&destination).unwrap(), document);
 }
 
@@ -1160,7 +1294,10 @@ fn powershell_opt_in_is_additive_and_reports_an_inert_host() {
 fn rpc_mode_rejects_positional_prompts_instead_of_sharing_stdin() {
     let fixture = Fixture::new(None);
     let output = fixture.run(&["--mode", "rpc", "hello"]);
-    assert!(!output.status.success(), "positional RPC prompts must fail closed");
+    assert!(
+        !output.status.success(),
+        "positional RPC prompts must fail closed"
+    );
     assert!(
         stderr_of(&output).contains("RPC input must be sent as JSONL prompt commands on stdin"),
         "diagnostic: {}",
@@ -1207,9 +1344,16 @@ fn file_media_is_admitted_only_for_recognized_images_and_vision_models() {
         stderr_of(&unsupported)
     );
 
-    std::fs::write(fixture.workspace.join("binary.dat"), b"\xff\xfe\x00\x01\x02").unwrap();
+    std::fs::write(
+        fixture.workspace.join("binary.dat"),
+        b"\xff\xfe\x00\x01\x02",
+    )
+    .unwrap();
     let rejected = fixture.run(&["--model", "custom/probe", "--print", "@binary.dat", "hello"]);
-    assert!(!rejected.status.success(), "unknown binary input must fail closed");
+    assert!(
+        !rejected.status.success(),
+        "unknown binary input must fail closed"
+    );
     assert!(
         stderr_of(&rejected).contains("neither UTF-8 text nor a supported image"),
         "diagnostic: {}",
@@ -1244,10 +1388,19 @@ fn sessions_export_html_is_a_single_script_free_self_contained_file() {
     ]);
     assert_success(&export);
     let html = std::fs::read_to_string(&output_path).expect("HTML export");
-    assert!(html.starts_with("<!doctype html>"), "single self-contained document");
-    assert!(html.contains("default-src 'none'; img-src data:"), "inert CSP: {html}");
+    assert!(
+        html.starts_with("<!doctype html>"),
+        "single self-contained document"
+    );
+    assert!(
+        html.contains("default-src 'none'; img-src data:"),
+        "inert CSP: {html}"
+    );
     assert!(!html.contains("<script"), "no scripts may be emitted");
-    assert!(!html.contains("onerror"), "no inline handlers may be emitted");
+    assert!(
+        !html.contains("onerror"),
+        "no inline handlers may be emitted"
+    );
     assert_eq!(
         std::fs::read_dir(&fixture.workspace)
             .unwrap()
@@ -1466,10 +1619,16 @@ fn serve_name_fails_closed_without_the_embedded_serve_runtime() {
     let parsed = fixture.run(&["serve", "--help"]);
     assert_success(&parsed);
     let help = stdout_of(&parsed);
-    assert!(help.contains("--name"), "serve must accept a startup name: {help}");
+    assert!(
+        help.contains("--name"),
+        "serve must accept a startup name: {help}"
+    );
 
     let output = fixture.run(&["serve", "--name", "release review"]);
-    assert!(!output.status.success(), "the name must not be silently ignored");
+    assert!(
+        !output.status.success(),
+        "the name must not be silently ignored"
+    );
     assert!(
         stderr_of(&output).contains("serve --name requires"),
         "diagnostic: {}",

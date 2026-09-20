@@ -5,12 +5,14 @@ coding-product binding. Its binding-scoped lifecycle contract is implemented in
 the host, the generated contract and the Python SDK: every request and event
 carries the host-issued `binding_id`, the host pushes `bus/lifecycle` control
 notices, and the SDK owns a cancellable rebinding worker. Host bus unit tests,
-two real Python process fixtures and product discovery/bus tests execute in the
-current receipts. **A real active-session switch A→B→A with both surviving
+two real Python process fixtures and product discovery/bus tests cover the
+bounded transport. **A real active-session switch A→B→A with both surviving
 processes, and fenced incoming requests across that switch, are still not
 captured as product evidence**, so surviving-peer recovery is not claimed as
-qualified behavior. See the [generated contract](API-0.3-REFERENCE.md) for exact
-wire models and [extension parity](../parity/extensions.md) for remaining gates.
+qualified behavior. See the [generated contract](API-0.4-REFERENCE.md) for exact
+wire models.
+Current API `0.4` uses a different feature-negotiated wire: the canonical bus
+contract below does not become available by changing a manifest version.
 
 The coding product binds one bus to its active session's isolated API `0.3`
 processes, after ordinary enablement, trust, source and process-policy checks.
@@ -107,14 +109,20 @@ closed as unbound. `declare` sends `bus/declare` before local registration,
 `subscribe` requires a typed acknowledgement, publish timestamps and sequences
 come from the host, and inbound events are validated against generated types,
 topic ownership, binding and sequence fences. The request adapter is
-`(method, params, cancelled)`: the serial reader never waits for an RPC response,
-and one separate cancellable worker performs rebinding, so a replacement binding
+`request(method, params, cancelled, accept_result)`. It must be thread-safe
+and cancellation-aware. For each successful, non-expired response, the serial
+protocol reader invokes `accept_result(result)` **before reading the next
+frame**, then returns its transformed value or propagates its exception to the
+waiting caller. RPC errors and late cancelled/expired responses never invoke
+the callback. This ordering installs subscription acknowledgement fences before
+a following event can be delivered. The serial reader never waits for an RPC
+response; a separate cancellable worker performs rebinding, so a replacement binding
 clears the declaration/subscription/sequence ledger and re-establishes only the
 bounded desired set. Missing or invalid lifecycle control fails the participant
 closed instead of continuing on an apparently current stale ledger.
 
 The SDK's legacy `Extension` runtime does **not** become an API `0.3` runtime;
-wire these helpers to an ordinary current-API process loop. Recreating a helper
+wire these helpers to an ordinary canonical API `0.3` process loop. Recreating a helper
 still is not a substitute for consuming `bus/lifecycle`, and no publication is
 replayed: a peer that misses a notice is retired, not silently resynchronized.
 
@@ -127,7 +135,7 @@ PYTHONPATH=sdk/python python3 -m unittest discover -s sdk/python/tests
 node sdk/typescript/tests/api_v03_conformance.mjs
 ```
 
-Behavioral fixtures (Rust execution is parent-owned):
+Behavioral fixtures:
 
 - `crates/octet-agent/src/extension_process/event_bus.rs`: atomic queue pressure,
   message/byte held-frame credit across reset/reload, generation/subscription/
@@ -143,5 +151,4 @@ Behavioral fixtures (Rust execution is parent-owned):
 
 No payload persistence, model/provider-stream delivery, telemetry, remote bus,
 authority delegation, session steering, capability transfer, credential service,
-or project-trust mutation. No Pi bridge compatibility is implied by an API `0.3`
-service: a legacy bridge would need its own reviewed adapter and negotiation.
+or project-trust mutation.

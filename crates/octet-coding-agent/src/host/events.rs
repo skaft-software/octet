@@ -293,7 +293,7 @@ pub(crate) async fn translate(
                 .await?;
         }
         // Attempt boundaries are not part of the host protocol surface.
-        AgentEvent::TurnStarted => {}
+        AgentEvent::TurnStarted | AgentEvent::RecoveredOutput { .. } => {}
         AgentEvent::RunFinished { head, reason } => {
             state.terminal_head = Some(head.0);
             return Ok(Some(HostRunOutcome::from_finish_reason(

@@ -34,6 +34,5 @@ uncertain colour/keyboard capability detection, and no release-support channel.
 
 ## Reporting
 
-Portability findings should be reported against the platform scope rather than
-treated as a regression. The parity ledger records Termux documentation under
-item `6.1` in [docs/parity/README.md](parity/README.md).
+Portability findings should include the build and terminal versions. An
+unqualified platform observation is not evidence of a supported-platform regression.

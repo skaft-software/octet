@@ -26,7 +26,7 @@ diagnostics go to stderr in plain/print mode.
 RPC is a separate automation frontend, not a terminal UI. Its command and response
 messages use `type` fields, not the native-host `hello` envelope. `--mode rpc`
 conflicts with `--print`. It is independent of both [native-host protocol 1](sdk.md)
-and [extension API 0.3](extensions/API-0.3-REFERENCE.md). Pi-compatible framing does
+and [extension API 0.4](extensions/API-0.4-REFERENCE.md). Pi-compatible framing does
 not establish blanket command/feature parity or live qualification against a
 pinned Pi release.
 
@@ -34,6 +34,12 @@ The startup card labels `permissions: full access` in bold red by default.
 `--safe-mode` changes it to bold-accent `safe mode` (blue in the default theme)
 and enables approval gates for bash calls and workspace mutation. Neither is
 OS containment.
+
+Startup keeps routine session lookup, replay, and extension-loading progress off
+screen. The composer accepts typing while startup work finishes; the resolved
+welcome card and saved conversation appear at readiness. Setup prompts, errors,
+and cancellation/shutdown diagnostics remain visible. Fresh sessions skip the
+replay worker entirely; resumed sessions still restore their history.
 
 ## Input and active work
 
@@ -80,7 +86,7 @@ output. `--mouse app` selects that viewport from startup, additionally captures
 wheel/drag selection, and permits tail-first lazy resume hydration. Uncaptured
 wheel history stays terminal-owned: portable protocols cannot report its offset.
 
-The renderer uses Pi's complete retained frame, synchronized frames, and exact
+The renderer uses a complete retained frame, synchronized frames, and exact
 first-to-last changed-range repainting. Completions, panels, reports, and streamed
 Markdown participate in the same algorithm. Resize reflows the retained semantic
 transcript, clears saved lines, and replays once; changes above the old viewport

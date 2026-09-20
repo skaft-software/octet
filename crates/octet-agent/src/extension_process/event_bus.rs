@@ -490,8 +490,43 @@ impl ExtensionEventBus {
         }
     }
 
+    /// Admit the reply on the same writer before releasing the mutation lock.
+    /// A concurrent publisher or lifecycle transition cannot overtake a fresh
+    /// subscription ACK. `respond` must synchronously attempt bounded admission,
+    /// never await the physical write or re-enter the bus.
+    pub(super) fn dispatch_with_response(
+        &self,
+        reader: &ProtocolReadState,
+        method: &str,
+        params: serde_json::Value,
+        respond: impl FnOnce(Result<serde_json::Value, api_v03::ContractError>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut state = lock_std_mutex(&self.inner);
+        let result = Self::dispatch_locked(&mut state, reader, method, params);
+        let queued = respond(result);
+        if queued.is_err() {
+            // An unacknowledged mutation must not leave a seemingly live peer
+            // that can receive events after its response writer was exhausted.
+            let key = (reader.instance_id.clone(), reader.generation);
+            if let Some(peer) = state.peers.get(&key) {
+                peer.fail_closed();
+            }
+        }
+        queued
+    }
+
+    #[cfg(test)]
     pub(super) fn dispatch(
         &self,
+        reader: &ProtocolReadState,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, api_v03::ContractError> {
+        Self::dispatch_locked(&mut lock_std_mutex(&self.inner), reader, method, params)
+    }
+
+    fn dispatch_locked(
+        state: &mut BusState,
         reader: &ProtocolReadState,
         method: &str,
         params: serde_json::Value,
@@ -499,7 +534,6 @@ impl ExtensionEventBus {
         if reader.closed.load(Ordering::Acquire) || reader.draining.load(Ordering::Acquire) {
             return Err(denied());
         }
-        let mut state = lock_std_mutex(&self.inner);
         let key = (reader.instance_id.clone(), reader.generation);
         // Validate the child-captured incarnation under the mutation lock. Even
         // bytes buffered before reset but read after a new declaration refuse.
@@ -850,6 +884,93 @@ mod tests {
     }
 
     #[test]
+    fn subscription_ack_precedes_concurrent_publisher_on_the_physical_writer() {
+        let bus = Arc::new(ExtensionEventBus::default());
+        let alpha = attached(&bus, "alpha", 8);
+        let mut beta = attached(&bus, "beta", 8);
+        declare(&bus, &alpha.reader);
+        let incarnation = binding(&bus);
+        let publication = json!({"binding_id":incarnation,"topic":"bus.alpha.status","payload":{"summary":"safe"}});
+        let (start, started) = std::sync::mpsc::channel();
+        let (attempted, attempt) = std::sync::mpsc::channel();
+        let publisher_bus = bus.clone();
+        let publisher = std::thread::spawn(move || {
+            started.recv_timeout(Duration::from_secs(2)).unwrap();
+            // The subscriber is already active, but its reply has not yet been
+            // admitted. A publisher on another protocol reader must be fenced.
+            assert!(matches!(
+                publisher_bus.inner.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            attempted.send(()).unwrap();
+            publisher_bus.dispatch(&alpha.reader, "bus/publish", publication)
+        });
+        let id = ExtensionRequestId::String("subscribe".into());
+        insert_child_request(&beta.reader, id.clone(), None, None).unwrap();
+        bus.dispatch_with_response(
+            &beta.reader,
+            "bus/subscribe",
+            json!({"binding_id":incarnation,"topic":"bus.alpha.status"}),
+            |result| {
+                assert_eq!(result.as_ref().unwrap()["state"], "active");
+                start.send(()).unwrap();
+                attempt.recv_timeout(Duration::from_secs(2)).unwrap();
+                queue_provider_host_response(&beta.reader, &id, Ok(result.unwrap()))
+            },
+        )
+        .unwrap();
+        assert_eq!(publisher.join().unwrap().unwrap()["sequence"], 1);
+        let ack = beta.frames.try_recv().unwrap();
+        assert!(ack.bus_delivery.is_none());
+        let ack: serde_json::Value = serde_json::from_slice(&ack.line).unwrap();
+        assert_eq!(ack["id"], "subscribe");
+        assert_eq!(ack["result"]["state"], "active");
+        let event = beta.expect_data();
+        assert!(event.bus_delivery.as_ref().unwrap().is_current());
+        let event: serde_json::Value = serde_json::from_slice(&event.line).unwrap();
+        assert_eq!(event["method"], "bus/event");
+        assert_eq!(event["params"]["sequence"], 1);
+        assert!(lock_std_mutex(&beta.reader.child_requests).is_empty());
+    }
+
+    #[test]
+    fn subscription_ack_writer_pressure_retires_the_unacknowledged_peer() {
+        let bus = ExtensionEventBus::default();
+        let alpha = attached(&bus, "alpha", 8);
+        let mut beta = attached(&bus, "beta", 1);
+        declare(&bus, &alpha.reader);
+        let id = ExtensionRequestId::String("subscribe".into());
+        insert_child_request(&beta.reader, id.clone(), None, None).unwrap();
+        queue_writer_value(
+            &beta.reader.writer,
+            &beta.reader.frame_limit,
+            json!({"jsonrpc":"2.0","id":"occupied","result":{}}),
+        )
+        .unwrap();
+        assert!(bus
+            .dispatch_with_response(
+                &beta.reader,
+                "bus/subscribe",
+                json!({"binding_id":binding(&bus),"topic":"bus.alpha.status"}),
+                |result| queue_provider_host_response(&beta.reader, &id, Ok(result.unwrap())),
+            )
+            .is_err());
+        assert!(beta.reader.closed.load(Ordering::Acquire));
+        assert!(lock_std_mutex(&beta.reader.child_requests).is_empty());
+        assert_eq!(publish(&bus, &alpha.reader).unwrap()["sequence"], 1);
+        drop(beta.frames.try_recv().unwrap());
+        assert!(beta.no_data());
+        let state = lock_std_mutex(&bus.inner);
+        let peer = &state.peers[&(beta.reader.instance_id.clone(), beta.reader.generation)];
+        assert!(peer
+            .subscriptions
+            .values()
+            .all(CancellationToken::is_cancelled));
+        assert_eq!(peer.budget.messages.load(Ordering::Acquire), 0);
+        assert_eq!(peer.budget.bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn stale_captured_binding_is_refused_and_new_incarnation_is_required() {
         let bus = ExtensionEventBus::default();
         let alpha = attached(&bus, "alpha", 8);
@@ -1086,9 +1207,7 @@ mod tests {
                 "publisher_reload" => {
                     bus.remove(&alpha.reader.instance_id, alpha.reader.generation)
                 }
-                "subscriber_reload" => {
-                    bus.remove(&beta.reader.instance_id, beta.reader.generation)
-                }
+                "subscriber_reload" => bus.remove(&beta.reader.instance_id, beta.reader.generation),
                 "unsubscribe" => unsubscribe(&bus, &beta.reader),
                 "expiry" => {
                     tokio::time::advance(Duration::from_millis(
@@ -1176,16 +1295,12 @@ mod tests {
             }
         }
         assert!(!held.is_empty());
-        assert!(
-            beta.no_data(),
-            "byte pressure cannot partially fan out"
-        );
+        assert!(beta.no_data(), "byte pressure cannot partially fan out");
         assert!(gamma.no_data());
         let next = held.len() + 1;
         held.clear();
         assert_eq!(
-            bus.dispatch(&alpha.reader, "bus/publish", request)
-                .unwrap()["sequence"],
+            bus.dispatch(&alpha.reader, "bus/publish", request).unwrap()["sequence"],
             next
         );
         drop(beta.expect_data());

@@ -284,9 +284,7 @@ async fn unavailable_discovery_and_unsupported_protocol_fixtures_fail_closed() {
         CopilotAvailabilityError::LoginRequired
     );
     assert_eq!(catalog.models().count(), 0);
-    assert!(!catalog.has_endpoint(&octet_ai::EndpointId(
-        "github-copilot-chat".to_owned()
-    )));
+    assert!(!catalog.has_endpoint(&octet_ai::EndpointId("github-copilot-chat".to_owned())));
 
     let discovery_error = provider_for(
         fixture_host(
@@ -310,9 +308,7 @@ async fn unavailable_discovery_and_unsupported_protocol_fixtures_fail_closed() {
         CopilotAvailabilityError::ModelDiscoveryUnavailable
     );
     assert_eq!(catalog.models().count(), 0);
-    assert!(!catalog.has_endpoint(&octet_ai::EndpointId(
-        "github-copilot-chat".to_owned()
-    )));
+    assert!(!catalog.has_endpoint(&octet_ai::EndpointId("github-copilot-chat".to_owned())));
 
     let unsupported = provider_for(
         fixture_host(
@@ -336,9 +332,7 @@ async fn unavailable_discovery_and_unsupported_protocol_fixtures_fail_closed() {
         CopilotAvailabilityError::UnsupportedModelProtocol
     );
     assert_eq!(catalog.models().count(), 0);
-    assert!(!catalog.has_endpoint(&octet_ai::EndpointId(
-        "github-copilot-chat".to_owned()
-    )));
+    assert!(!catalog.has_endpoint(&octet_ai::EndpointId("github-copilot-chat".to_owned())));
 }
 
 #[tokio::test]
@@ -428,14 +422,12 @@ async fn chat_and_responses_stream_fixtures_preserve_route_and_usage() {
     provider.register_models(&mut catalog).await.unwrap();
 
     let chat = catalog
-        .resolve(&octet_ai::ModelId(
-            "github-copilot/chat-fixture".to_owned(),
-        ))
+        .resolve(&octet_ai::ModelId("github-copilot/chat-fixture".to_owned()))
         .unwrap();
     let chat_events = collect_events(&chat).await;
-    assert!(chat_events.iter().any(
-        |event| matches!(event, StreamEvent::TextDelta { delta, .. } if delta == "hello")
-    ));
+    assert!(chat_events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::TextDelta { delta, .. } if delta == "hello")));
     assert_eq!(usage_total(&chat_events), 10);
     assert!(matches!(chat_events.last(), Some(StreamEvent::Finished(_))));
 

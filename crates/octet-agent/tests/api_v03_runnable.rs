@@ -40,10 +40,10 @@ async fn runnable_api_v03_example_negotiates_calls_cancels_and_shutdowns() {
         .expect("published API 0.3 example manifest");
     let mut fixture_manifest: toml::Value =
         toml::from_str(&published_manifest).expect("published manifest TOML");
-    assert_eq!(fixture_manifest["requires_octet"].as_str(), Some("=0.7.6"));
+    assert_eq!(fixture_manifest["requires_octet"].as_str(), Some("=0.8.0"));
     assert_eq!(fixture_manifest["api_version"].as_str(), Some("0.3"));
     assert_eq!(fixture_manifest["version"].as_str(), Some("0.1.0"));
-    let released_requirement = semver::VersionReq::parse("=0.7.6").unwrap();
+    let released_requirement = semver::VersionReq::parse("=0.8.0").unwrap();
     let current_host = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
     if released_requirement.matches(&current_host) {
         ExtensionManifest::load(&published_manifest_path).expect("matching released runtime pin");
@@ -246,4 +246,67 @@ for line in sys.stdin:
     octet_agent::extension_api_v03::parse_json_rpc_envelope(evidence["response"].clone()).unwrap();
     assert!(process.is_running());
     assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn bundled_canonical_extensions_negotiate_with_the_real_host() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
+    for name in [
+        "octet-computer-use",
+        "octet-import-aider",
+        "octet-import-cline",
+    ] {
+        let manifest_path = repository
+            .join(name)
+            .join(EXTENSION_MANIFEST_FILENAME)
+            .canonicalize()
+            .unwrap();
+        let manifest = ExtensionManifest::load(&manifest_path).unwrap();
+        assert_eq!(manifest.api_version, "0.3", "{name}");
+        let workspace = TempDir::new().unwrap();
+        let process = ExtensionProcess::start(
+            trusted_descriptor(manifest_path, manifest),
+            ExtensionRuntimeConfig::new(workspace.path()),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(process.is_running(), "{name}");
+        assert_eq!(process.api_version(), "0.3");
+        assert!(process.shutdown().await, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn official_feature_negotiated_bundles_initialize_and_shutdown_with_the_host() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
+    for name in [
+        "octet-browse",
+        "octet-mcp",
+        "octet-subagents",
+        "octet-web-search",
+    ] {
+        let manifest_path = repository
+            .join(name)
+            .join(EXTENSION_MANIFEST_FILENAME)
+            .canonicalize()
+            .unwrap();
+        let mut manifest = ExtensionManifest::load(&manifest_path).unwrap();
+        let workspace = TempDir::new().unwrap();
+        // No real user config, provider secret, browser profile or MCP server
+        // is involved in this host/bundle protocol qualification.
+        for variable in ["HOME", "OCTET_HOME", "XDG_CONFIG_HOME", "APPDATA"] {
+            manifest.entrypoint.env.insert(
+                variable.into(),
+                workspace.path().to_string_lossy().into_owned(),
+            );
+        }
+        let mut config = ExtensionRuntimeConfig::new(workspace.path());
+        config.agent_sessions = true;
+        let process = ExtensionProcess::start(trusted_descriptor(manifest_path, manifest), config)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(process.api_version(), "0.4", "{name}");
+        assert!(process.is_running(), "{name}");
+        assert!(process.shutdown().await, "{name}");
+    }
 }

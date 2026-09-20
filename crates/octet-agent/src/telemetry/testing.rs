@@ -237,9 +237,10 @@ pub fn conformance_cases() -> Vec<ConformanceCase> {
                     span.add_event("late", SpanAttributes::new());
                     span.set_status(SpanStatus::Error);
                     let child: Result<(), ()> = span
-                        .start_span(super::spans::SpanOptions::new("late-child"), |_child| async {
-                            Ok(())
-                        })
+                        .start_span(
+                            super::spans::SpanOptions::new("late-child"),
+                            |_child| async { Ok(()) },
+                        )
                         .await;
                     assert_eq!(child, Ok(()));
                     let spans = fixture.get_spans();
@@ -258,20 +259,24 @@ pub fn conformance_cases() -> Vec<ConformanceCase> {
                 Box::pin(async move {
                     let _: Result<(), ()> = fixture
                         .context()
-                        .start_span(super::spans::SpanOptions::new("parent"), |parent| async move {
-                            let first = parent
-                                .start_span(super::spans::SpanOptions::new("first-child"), |_c| async {
-                                    Ok::<_, ()>(())
-                                });
-                            let second: Result<(), ()> = parent
-                                .start_span(super::spans::SpanOptions::new("second-child"), |_c| async {
-                                    Ok::<_, ()>(())
-                                })
-                                .await;
-                            second?;
-                            first.await?;
-                            Ok(())
-                        })
+                        .start_span(
+                            super::spans::SpanOptions::new("parent"),
+                            |parent| async move {
+                                let first = parent.start_span(
+                                    super::spans::SpanOptions::new("first-child"),
+                                    |_c| async { Ok::<_, ()>(()) },
+                                );
+                                let second: Result<(), ()> = parent
+                                    .start_span(
+                                        super::spans::SpanOptions::new("second-child"),
+                                        |_c| async { Ok::<_, ()>(()) },
+                                    )
+                                    .await;
+                                second?;
+                                first.await?;
+                                Ok(())
+                            },
+                        )
                         .await;
                     let spans = fixture.get_spans();
                     let assertions = SpanAssertions::new(&spans);

@@ -26,7 +26,6 @@ For each issue:
    default).
 
 5. Report: affected files with paths, the proposed change, the regression test
-   that would prove it, and any parity/work-queue row it belongs to
-   (`docs/parity/README.md`, `docs/swarm-audit/WORK-QUEUE.md`).
+   that would prove it, and the relevant user-facing documentation.
 
 Do **not** implement unless explicitly asked. Analyze and propose only.

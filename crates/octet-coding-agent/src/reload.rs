@@ -15,7 +15,8 @@
 //! if plan.contains(ReloadLayer::Extensions) { /* caller restarts children */ }
 //! plan.record(ReloadLayer::Resources, LayerOutcome::Reloaded);
 //! let report = supervisor.finish(plan)?;                // one pass, one report
-//! for notice in report.notices() { /* transcript */ }
+//! for notice in report.diagnostics() { /* transcript */ }
+//! // Show report.summary() for explicit commands, not automatic passes.
 //! ```
 //!
 //! The decision functions are pure: [`ReloadSupervisor::observe`] consumes a
@@ -57,16 +58,16 @@
 //!
 //! * A **model call in flight** dies when the run is stopped for a reload; the
 //!   records already appended to the session survive, the unrecorded turn does
-//!   not ([`ReloadLoss::ModelCallInFlight`]).
+//!   not ([`ReloadLoss::ModelCall`]).
 //! * A **tool call in flight** is abandoned mid-effect
-//!   ([`ReloadLoss::ToolCallInFlight`]); a half-applied edit or a killed shell
+//!   ([`ReloadLoss::ToolCall`]); a half-applied edit or a killed shell
 //!   child is possible.
 //! * An extension restart drops that extension's **in-flight host request**
-//!   ([`ReloadLoss::ExtensionHostRequestInFlight`]); the child is replaced and
+//!   ([`ReloadLoss::ExtensionHostRequest`]); the child is replaced and
 //!   the previous generation's session binding is fenced, so the replacement
 //!   must re-establish it.
 //! * A delegated **worker mid-call** loses the in-flight call
-//!   ([`ReloadLoss::WorkerCallInFlight`]); its durable record survives and stays
+//!   ([`ReloadLoss::WorkerCall`]); its durable record survives and stays
 //!   reattachable.
 //!
 //! Because sampling is metadata-only, two further limits are real and
@@ -100,7 +101,21 @@ use crate::config::Config;
 /// Boundary type shared with the existing theme reload engine. A reload is
 /// admitted only at [`ReloadBoundary::Idle`]; [`ReloadBoundary::Busy`] keeps the
 /// evidence queued exactly like the `PendingIdleAction` path.
-pub use crate::tui::theme_reload::ReloadBoundary;
+/// The only boundary at which a loaded resource may be applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReloadBoundary {
+    /// The prompt is idle and no active run or modal owns the shell.
+    Idle,
+    /// Input, a model run, or a modal currently owns the shell.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Busy remains part of the supervisor safety contract; production callers currently enter only at idle boundaries."
+        )
+    )]
+    Busy,
+}
 
 /// Default interval between filesystem samples.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(1000);
@@ -220,7 +235,7 @@ pub enum ReloadUserAction {
 impl ReloadUserAction {
     /// Recognize `/reload --dry-run` and `/reload --force` exactly.
     pub fn parse(input: &str) -> Option<Self> {
-        let mut parts = input.trim().split_whitespace();
+        let mut parts = input.split_whitespace();
         if parts.next()? != "/reload" {
             return None;
         }
@@ -233,6 +248,7 @@ impl ReloadUserAction {
     }
 
     /// The exact text that selects this action.
+    #[cfg(test)]
     pub fn label(self) -> &'static str {
         match self {
             Self::DryRun => "/reload --dry-run",
@@ -245,38 +261,38 @@ impl ReloadUserAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReloadLoss {
     /// The in-flight provider call dies; already-persisted records survive.
-    ModelCallInFlight,
+    ModelCall,
     /// The in-flight tool call is abandoned mid-effect.
-    ToolCallInFlight,
+    ToolCall,
     /// An extension restart drops that extension's in-flight host request.
-    ExtensionHostRequestInFlight,
+    ExtensionHostRequest,
     /// A delegated worker's in-flight call is lost; its durable record survives
     /// and stays reattachable.
-    WorkerCallInFlight,
+    WorkerCall,
 }
 
 impl ReloadLoss {
     /// Every named loss, in reporting order.
     pub const ALL: [ReloadLoss; 4] = [
-        Self::ModelCallInFlight,
-        Self::ToolCallInFlight,
-        Self::ExtensionHostRequestInFlight,
-        Self::WorkerCallInFlight,
+        Self::ModelCall,
+        Self::ToolCall,
+        Self::ExtensionHostRequest,
+        Self::WorkerCall,
     ];
 
     /// Bounded, secret-free description.
     pub fn description(self) -> &'static str {
         match self {
-            Self::ModelCallInFlight => {
+            Self::ModelCall => {
                 "the in-flight model call is abandoned; persisted records survive"
             }
-            Self::ToolCallInFlight => {
+            Self::ToolCall => {
                 "the in-flight tool call is abandoned; a partial effect may remain"
             }
-            Self::ExtensionHostRequestInFlight => {
+            Self::ExtensionHostRequest => {
                 "an extension restart drops that extension's in-flight host request"
             }
-            Self::WorkerCallInFlight => {
+            Self::WorkerCall => {
                 "a worker's in-flight call is lost; its durable record survives and stays reattachable"
             }
         }
@@ -285,10 +301,10 @@ impl ReloadLoss {
     /// Short transcript label.
     pub fn label(self) -> &'static str {
         match self {
-            Self::ModelCallInFlight => "in-flight model call",
-            Self::ToolCallInFlight => "in-flight tool call",
-            Self::ExtensionHostRequestInFlight => "extension host request in flight",
-            Self::WorkerCallInFlight => "worker mid-call",
+            Self::ModelCall => "in-flight model call",
+            Self::ToolCall => "in-flight tool call",
+            Self::ExtensionHostRequest => "extension host request in flight",
+            Self::WorkerCall => "worker mid-call",
         }
     }
 }
@@ -717,18 +733,25 @@ impl ReloadWatchSet {
     }
 
     /// Number of targets that could not be added.
+    #[cfg(test)]
     pub fn dropped(&self) -> usize {
         self.dropped
     }
 
-    /// One bounded line naming what is armed.
-    ///
-    /// Counts and durations only: the wording is secret-free, bounded, and is
-    /// what makes the live-reload default visible without opening a config
-    /// file. `dropped` is named rather than hidden, because a watch set over
-    /// the target cap is watching less than it was asked to. The host layer is
-    /// named explicitly, because "live reload armed" must never imply that a
-    /// replaced binary will be executed on its own.
+    /// Report incomplete watch coverage, without a routine startup banner.
+    pub fn limit_notice(&self) -> Option<String> {
+        (self.dropped > 0).then(|| {
+            format!(
+                "live reload: watch limit reached; {} path{} not watched",
+                self.dropped,
+                plural(self.dropped)
+            )
+        })
+    }
+
+    /// On-demand settings detail for `/reload --dry-run`, not startup output.
+    /// Counts and durations are bounded and secret-free. Name the host opt-in
+    /// explicitly so a resource watcher never implies automatic re-exec.
     pub fn arming_notice(&self, settings: ReloadSettings) -> String {
         if !settings.enabled {
             return "live reload: disabled (set reload = true to arm it)".to_owned();
@@ -1147,12 +1170,7 @@ pub struct LayerReport {
     pub notes: Vec<String>,
 }
 
-impl LayerReport {
-    /// Whether the layer was applied.
-    fn was_applied(&self) -> bool {
-        matches!(self.outcome, LayerOutcome::Reloaded)
-    }
-}
+impl LayerReport {}
 
 /// One pass, one report.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1181,22 +1199,15 @@ pub struct ReloadReport {
 
 impl ReloadReport {
     /// One layer's line.
+    #[cfg(test)]
     pub fn layer(&self, layer: ReloadLayer) -> Option<&LayerReport> {
         self.layers.iter().find(|line| line.layer == layer)
-    }
-
-    /// Layers that were actually reloaded.
-    pub fn reloaded_layers(&self) -> Vec<ReloadLayer> {
-        self.layers
-            .iter()
-            .filter(|line| line.was_applied())
-            .map(|line| line.layer)
-            .collect()
     }
 
     /// Whether this report describes no work at all: nothing was reloaded and
     /// nothing would reload. A dry run with stale layers is therefore not a
     /// no-op, while a dry run with none is.
+    #[cfg(test)]
     pub fn is_noop(&self) -> bool {
         self.layers.iter().all(|line| {
             !matches!(
@@ -1257,8 +1268,18 @@ impl ReloadReport {
         sanitize_note(&format!("{label} #{}: {summary}", self.sequence))
     }
 
-    /// Bounded transcript notices for the pass. Never contains file contents.
+    /// Detailed on-demand notices for the pass. Never contains file contents.
     pub fn notices(&self) -> Vec<String> {
+        self.collect_notices(true)
+    }
+
+    /// Keep failures, limits, losses and caller diagnostics visible, without
+    /// successful layer/path and detach/reattach bookkeeping.
+    pub fn diagnostics(&self) -> Vec<String> {
+        self.collect_notices(false)
+    }
+
+    fn collect_notices(&self, detailed: bool) -> Vec<String> {
         let mut notices = Vec::new();
         if self.forced {
             notices.push(
@@ -1267,16 +1288,17 @@ impl ReloadReport {
                     .to_owned(),
             );
         }
-        // An explicit request is worth naming: it is the difference between the
-        // watcher noticing a save and an owner or extension asking for a pass.
+        // Detailed output distinguishes the watcher noticing a save from an
+        // owner or extension asking for a pass.
         if let Some(reason) = self
             .requesters
             .iter()
             .find(|requester| {
-                !matches!(
-                    requester,
-                    ReloadRequester::Watcher | ReloadRequester::Forced
-                )
+                detailed
+                    && !matches!(
+                        requester,
+                        ReloadRequester::Watcher | ReloadRequester::Forced
+                    )
             })
             .map(ReloadRequester::describe)
         {
@@ -1284,7 +1306,7 @@ impl ReloadReport {
         }
         for line in &self.layers {
             match line.outcome {
-                LayerOutcome::Reloaded => notices.push(format!(
+                LayerOutcome::Reloaded if detailed => notices.push(format!(
                     "reload: {} reloaded{}",
                     line.layer.label(),
                     changed_clause(line)
@@ -1298,16 +1320,16 @@ impl ReloadReport {
                     "reload: {} reload failed; the previous state is kept",
                     line.layer.label()
                 )),
-                LayerOutcome::Skipped(_) => {}
+                LayerOutcome::Reloaded | LayerOutcome::Skipped(_) => {}
             }
-            if !line.detached.is_empty() {
+            if detailed && !line.detached.is_empty() {
                 notices.push(format!(
                     "reload: {} detached {}",
                     line.layer.label(),
                     join_labels(&line.detached)
                 ));
             }
-            if !line.reattached.is_empty() {
+            if detailed && !line.reattached.is_empty() {
                 notices.push(format!(
                     "reload: {} will reattach {}",
                     line.layer.label(),
@@ -1374,6 +1396,7 @@ struct PlannedLayer {
 
 impl ReloadPlan {
     /// Layers included in this pass, in fixed order.
+    #[cfg(test)]
     pub fn layers(&self) -> Vec<ReloadLayer> {
         self.layers.iter().map(|line| line.layer).collect()
     }
@@ -1493,9 +1516,9 @@ impl ReloadPlan {
                 }
             } else if matches!(outcome, LayerOutcome::Reloaded | LayerOutcome::WouldReload)
                 && planned.layer == ReloadLayer::Extensions
-                && !losses.contains(&ReloadLoss::ExtensionHostRequestInFlight)
+                && !losses.contains(&ReloadLoss::ExtensionHostRequest)
             {
-                losses.push(ReloadLoss::ExtensionHostRequestInFlight);
+                losses.push(ReloadLoss::ExtensionHostRequest);
             }
             layers.push(LayerReport {
                 layer: planned.layer,
@@ -1520,10 +1543,6 @@ impl ReloadPlan {
             requesters,
             layers,
         }
-    }
-
-    fn line(&self, layer: ReloadLayer) -> Option<&PlannedLayer> {
-        self.layers.iter().find(|line| line.layer == layer)
     }
 
     fn line_mut(&mut self, layer: ReloadLayer) -> Option<&mut PlannedLayer> {
@@ -1852,7 +1871,7 @@ impl ReloadSupervisor {
                 Some(change) => {
                     let mut losses = Vec::new();
                     if layer == ReloadLayer::Extensions {
-                        losses.push(ReloadLoss::ExtensionHostRequestInFlight);
+                        losses.push(ReloadLoss::ExtensionHostRequest);
                     }
                     layers.push(LayerReport {
                         layer,
@@ -2270,6 +2289,21 @@ mod tests {
     }
 
     #[test]
+    fn startup_notice_only_reports_incomplete_watch_coverage() {
+        let mut watches = ReloadWatchSet::new();
+        assert_eq!(watches.limit_notice(), None);
+        for index in 0..MAX_WATCH_TARGETS {
+            assert!(watches.watch_path(ReloadLayer::Resources, format!("/skills/{index}")));
+        }
+        assert_eq!(watches.limit_notice(), None);
+        assert!(!watches.watch_path(ReloadLayer::Resources, "/overflow"));
+        assert_eq!(
+            watches.limit_notice().as_deref(),
+            Some("live reload: watch limit reached; 1 path not watched")
+        );
+    }
+
+    #[test]
     fn default_settings_never_plan_the_host_layer() {
         let start = base();
         let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
@@ -2411,9 +2445,8 @@ mod tests {
         base_files(&mut source);
         baseline(&mut supervisor, &watcher, &source, start);
 
-        let mut last = start;
         for step in 0..8u64 {
-            last = start + Duration::from_millis(step * 300);
+            let last = start + Duration::from_millis(step * 300);
             source.file(&format!("/skills/{step}.md"), 1);
             let scan = watcher.scan(&source);
             supervisor.observe(last, &scan);
@@ -2897,8 +2930,13 @@ mod tests {
         };
         plan.record_reload(ReloadLayer::Extensions);
         let report = supervisor.finish(plan).expect("current");
-        assert!(losses_of(&report, ReloadLayer::Extensions)
-            .contains(&ReloadLoss::ExtensionHostRequestInFlight));
+        assert!(
+            losses_of(&report, ReloadLayer::Extensions).contains(&ReloadLoss::ExtensionHostRequest)
+        );
+        assert!(report
+            .diagnostics()
+            .iter()
+            .any(|notice| { notice.contains(ReloadLoss::ExtensionHostRequest.label()) }));
 
         // A host pass justified by a real executable change carries no
         // extension-restart loss: the replacement image rebuilds them.
@@ -2964,6 +3002,63 @@ mod tests {
             outcome_of(&report, ReloadLayer::Extensions),
             Some(LayerOutcome::Skipped(SkipReason::NoChange))
         );
+    }
+
+    #[test]
+    fn compact_reload_diagnostics_omit_routine_bookkeeping() {
+        let start = base();
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        supervisor.request(start, ReloadRequester::ExtensionSessionReload);
+        let mut plan = supervisor.begin(start, ReloadBoundary::Idle).unwrap();
+        plan.record_reload(ReloadLayer::Resources);
+        plan.detached(ReloadLayer::Resources, vec!["theme binding".into()]);
+        plan.reattached(ReloadLayer::Resources, vec!["theme binding".into()]);
+        let report = supervisor.finish(plan).unwrap();
+
+        assert!(report.diagnostics().is_empty());
+        assert!(report.summary().contains("resources reloaded"));
+        let detailed = report.notices().join("\n");
+        for detail in [
+            "requested by",
+            "resources reloaded",
+            "detached",
+            "will reattach",
+        ] {
+            assert!(detailed.contains(detail), "{detailed}");
+        }
+    }
+
+    #[test]
+    fn compact_reload_diagnostics_preserve_failures_limits_losses_and_caller_notes() {
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        let mut plan = supervisor.force();
+        plan.record(ReloadLayer::Resources, LayerOutcome::Failed);
+        plan.note(
+            ReloadLayer::Extensions,
+            "fixture warning\u{7}: previous child retained",
+        );
+        let mut report = supervisor.finish(plan).unwrap();
+        report.watcher_cap_reached = true;
+        report.inspected_paths = 3;
+        report.skipped_paths = 2;
+        let notices = report.diagnostics();
+        let text = notices.join("\n");
+        for detail in [
+            "reload (forced)",
+            "resources reload failed",
+            "fixture warning",
+            "skipped 2",
+            "lost work",
+        ] {
+            assert!(text.contains(detail), "{text}");
+        }
+        for loss in ReloadLoss::ALL {
+            assert!(text.contains(loss.label()), "{text}");
+        }
+        for notice in notices {
+            assert!(!notice.chars().any(char::is_control), "{notice:?}");
+            assert!(notice.len() <= MAX_NOTE_BYTES);
+        }
     }
 
     #[test]

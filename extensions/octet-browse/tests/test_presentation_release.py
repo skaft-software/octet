@@ -215,9 +215,9 @@ class PackageTests(unittest.TestCase):
     def test_manifest_surface_metadata_and_executable(self) -> None:
         manifest = tomllib.loads((PACKAGE / "extension.toml").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "octet-browse")
-        self.assertEqual(manifest["version"], "0.7.6")
-        self.assertEqual(manifest["api_version"], "0.2")
-        self.assertEqual(manifest["requires_octet"], "=0.7.6")
+        self.assertEqual(manifest["version"], "0.8.0")
+        self.assertEqual(manifest["api_version"], "0.4")
+        self.assertEqual(manifest["requires_octet"], "=0.8.0")
         self.assertEqual(set(manifest["contributes"]["tools"]), TOOLS)
         self.assertEqual(manifest["contributes"]["commands"], ["browse"])
         self.assertTrue(manifest["contributes"]["confirmations"])
@@ -296,7 +296,7 @@ class PackageTests(unittest.TestCase):
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "api_version": "0.2",
+                    "api_version": "0.4",
                     "octet_version": "0.7.0",
                     "extension": {
                         "name": "octet-browse",
@@ -319,7 +319,7 @@ class PackageTests(unittest.TestCase):
                     },
                     "host": {},
                     "protocol": {
-                        "version": "0.2",
+                        "version": "0.4",
                         "required_features": ["request_cancellation", "content_parts"],
                         "optional_features": ["artifacts"],
                         "limits": {"max_concurrent_requests": 8},
@@ -363,7 +363,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, process.stderr)
             messages = [json.loads(line) for line in process.stdout.splitlines() if line]
             by_id = {message.get("id"): message for message in messages if "id" in message}
-            self.assertEqual(by_id[1]["result"]["api_version"], "0.2")
+            self.assertEqual(by_id[1]["result"]["api_version"], "0.4")
             tools = {tool["name"]: tool for tool in by_id[1]["result"]["tools"]}
             self.assertEqual(set(tools), TOOLS)
             identity_properties = {
@@ -414,7 +414,7 @@ class PackageTests(unittest.TestCase):
             self.skipTest("generic extension release packager is not present")
         with tempfile.TemporaryDirectory() as output:
             process = subprocess.run(
-                [str(script), "octet-browse", output, "v0.7.6", str(PACKAGE)],
+                [str(script), "octet-browse", output, "v0.8.0", str(PACKAGE)],
                 cwd=REPOSITORY,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -422,7 +422,7 @@ class PackageTests(unittest.TestCase):
                 timeout=30,
             )
             self.assertEqual(process.returncode, 0, process.stderr)
-            archive = Path(output) / "octet-browse-0.7.6.tar.gz"
+            archive = Path(output) / "octet-browse-0.8.0.tar.gz"
             self.assertTrue(archive.is_file())
             with tarfile.open(archive, "r:gz") as bundle:
                 names = set(bundle.getnames())

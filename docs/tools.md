@@ -86,6 +86,34 @@ The documented configuration example uses `bash_timeout_secs = 120` and
 these alongside capability controls. Capture limits differ from the TUI's
 collapsible preview: expanding a panel cannot restore discarded bytes.
 
+## Bash output and temporary spills
+
+Bash drains stdout and stderr with bounded head/tail previews. A truncated result
+may include `full_output_path` when its entire stream was retained, or
+`partial_output_path` when only a prefix could be saved. `spill_truncated=true`
+reports storage limits; `spill_error=true` reports capture/storage failure.
+Neither a partial path nor an omitted path promises recoverable full output.
+
+Spill storage is private and temporary: at most **16 MiB per stream**, and
+**64 MiB / 32 files per tool instance**, counting active captures. Storage pressure
+evicts the oldest retained files first. Active captures are not evicted; if they
+consume the allowance, further spill bytes are discarded while pipe draining
+continues. Dropping the tool removes its retained files. Paths in old results
+therefore are not durable session artifacts and may already have expired.
+
+Rust embedders construct the stateful tool with `Default`, not a unit value:
+
+```rust
+use octet_agent::{BashTool, ExtensionHost};
+
+let mut host = ExtensionHost::new();
+host.tool(BashTool::default()); // The host retains the tool and its spill store.
+```
+
+Keep the owning tool alive for the intended frontend lifetime rather than
+constructing one per call. The RPC frontend retains an `Arc<BashTool>` across
+commands; its spill limits are shared across those commands, not reset per result.
+
 ## Recovery and security
 
 - Descriptor-relative no-follow file operations prevent parent-symlink replacement from redirecting built-in reads or mutations. Shell commands and extension processes are not contained by a file-path guard.
@@ -93,7 +121,7 @@ collapsible preview: expanding a panel cannot restore discarded bytes.
 - Complete session records survive; torn final appends are narrowly repairable. Unresolved mutating calls are indeterminate and never silently replayed.
 - Cancellation covers provider streams, retry waits, compaction, tools, delegated agents, and descendant process/agent groups.
 - Delegation directories/files are owner-private and descriptor-bound. Spawns, status, and interrupts sync before visibility; journal failure cancels the team and rejects new work. [Delegation provenance](design/octet-agent.md#v2-task-delegation).
-- A positively classified pre-send connection failure (including a connect timeout) is different from an ambiguous accepted request. Sending a POST, awaiting headers, or losing its body can leave execution indeterminate. No visible text does **not** make replay safe. Unqualified requests retain the conservative no-body-replay default. Only host-qualified Codex local-function inference may be replaced before assistant commit, with separate finite streamed-inference and HTTP-admission retry budgets and unknown usage guarded under hard cumulative cost/token limits. HTTP 5xx, including gateway 504, is not evidence of zero usage; ambiguous status failures require durable uncertainty before replacement. Unknown exposure is durably recorded separately from known usage and survives success, resume, and checkout; numeric usage/cost then represents known subtotals, not complete totals. Completed local tool effects/results are not replayed. Provisional TUI removal is not replay permission or proof of remote cancellation. See [historical v0.7.4 recovery qualification](qualification/v0.7.4-recovery.md); deterministic regressions do not qualify live recovery, Codex parity, or weeks-scale endurance.
+- A positively classified pre-send connection failure (including a connect timeout) is different from an ambiguous accepted request. Sending a POST, awaiting headers, or losing its body can leave execution indeterminate. No visible text does **not** make replay safe. Unqualified requests retain the conservative no-body-replay default. Only host-qualified Codex local-function inference may be replaced before assistant commit, with separate finite streamed-inference and HTTP-admission retry budgets and unknown usage guarded under hard cumulative cost/token limits. HTTP 5xx, including gateway 504, is not evidence of zero usage; ambiguous status failures require durable uncertainty before replacement. Unknown exposure is durably recorded separately from known usage and survives success, resume, and checkout; numeric usage/cost then represents known subtotals, not complete totals. Completed local tool effects/results are not replayed. Provisional TUI removal is not replay permission or proof of remote cancellation. See the [agent recovery contract](design/octet-agent.md#in-process-provider-recovery); deterministic regressions do not qualify live recovery or weeks-scale endurance.
 - Credential files are owner-private; headers, debug output, provider diagnostics, and bounded session export redact secrets. Redirects are disabled and terminal controls are neutralized.
 
 Release checks include protocol/adversarial-stream fixtures, filesystem races,

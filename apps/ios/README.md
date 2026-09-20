@@ -1,6 +1,8 @@
 # Octet Companion for iOS
 
-Native SwiftUI controller for an authoritative Serve host. The app is a
+Source-only native SwiftUI controller for an authoritative Serve host.
+The default composition cannot pair or connect to a live host.
+ The app is a
 companion, not an agent runtime: it renders host-reported state and sends
 host-validated commands, and it is offline when the host is offline.
 
@@ -51,8 +53,7 @@ xcrun --sdk iphonesimulator swiftc -typecheck -target arm64-apple-ios16.0-simula
   Sources/OctetCompanionApp.swift Sources/OctetCompanion/*.swift Sources/OctetCompanion/Views/*.swift
 ```
 
-The Xcode application build needs the sibling `../apple-shared` package, which now
-compiles. Build a copy outside the repository so the shared worktree stays clean:
+The Xcode application build needs the sibling `../apple-shared` package, used by the application target. Build a copy outside the repository so the shared worktree stays clean:
 
 ```sh
 rm -rf /tmp/octet-ios-verify && mkdir -p /tmp/octet-ios-verify
@@ -83,7 +84,8 @@ for the `@main` entry point and the views.
 
 Source, unit tests, the SwiftPM host-side build and the Xcode application build
 (`build` and `build-for-testing`, unsigned, simulator destination) are delivered
-and were observed to succeed. Code signing, notarization, installation, a
+and were observed to succeed during earlier source checks. These observations
+are not 0.8.0 candidate verification. Code signing, notarization, installation, a
 simulator test *run* and any device run have not been performed and are not
 claimed. The SwiftPM dependency on `../apple-shared` stays absent from
 `Package.swift` because this library imports nothing from it; the Xcode app target

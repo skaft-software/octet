@@ -62,7 +62,9 @@ struct LoopbackApi {
 impl LoopbackApi {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-        listener.set_nonblocking(true).expect("nonblocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let url = format!("http://{}/v1/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
@@ -123,7 +125,10 @@ impl LoopbackApi {
                 }
                 let (content_type, body): (&str, String) = if headers.starts_with("GET /v1/models ")
                 {
-                    ("application/json", r#"{"data":[{"id":"probe"}]}"#.to_owned())
+                    (
+                        "application/json",
+                        r#"{"data":[{"id":"probe"}]}"#.to_owned(),
+                    )
                 } else {
                     ("text/event-stream", SSE_BODY.to_owned())
                 };
@@ -239,12 +244,7 @@ impl Fixture {
             .expect("session root")
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
-            .filter(|entry| {
-                !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with('.')
-            })
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
             .map(|entry| entry.path())
             .collect::<Vec<_>>();
         directories.sort();
@@ -608,11 +608,13 @@ fn every_unlaunchable_worker_handle_refuses_with_its_own_bounded_reason() {
     let delegation = fixture.delegation_directory();
     let mut reasons = Vec::new();
 
-    for (state, expected) in [
-        ("running", "live worker"),
-        ("pending", "live worker"),
-    ] {
-        write_roster(&delegation, &child, serde_json::json!({"state": state}), false);
+    for (state, expected) in [("running", "live worker"), ("pending", "live worker")] {
+        write_roster(
+            &delegation,
+            &child,
+            serde_json::json!({"state": state}),
+            false,
+        );
         let inspect = fixture.run(&["sessions", "inspect", &handle]);
         assert_refused(&inspect, expected);
         assert_no_secret(&inspect);
@@ -674,7 +676,9 @@ fn every_unlaunchable_worker_handle_refuses_with_its_own_bounded_reason() {
         "no refusal may relay roster free text"
     );
     assert!(
-        !reasons.join("").contains(&delegation.to_string_lossy().into_owned()),
+        !reasons
+            .join("")
+            .contains(&delegation.to_string_lossy().into_owned()),
         "no refusal may relay the delegation path"
     );
 }
@@ -749,7 +753,10 @@ fn a_malformed_handle_is_rejected_before_path_work_and_a_forged_entry_cannot_esc
     private_directory(&fixture.delegation_directory());
     write_roster(&fixture.delegation_directory(), &escaped, detached(), true);
     let forged = fixture.run(&["sessions", "inspect", &escaped_handle]);
-    assert_refused(&forged, "outside this session store's private delegation directory");
+    assert_refused(
+        &forged,
+        "outside this session store's private delegation directory",
+    );
     assert_no_secret(&forged);
     assert!(
         !combined(&forged).contains(&store_directory.to_string_lossy().into_owned()),
@@ -838,7 +845,10 @@ fn ordinary_resume_and_the_session_picker_are_unchanged() {
     assert_success(&listed);
     assert_no_secret(&listed);
     let listing = stdout_of(&listed);
-    assert!(listing.contains("parent"), "the picker lists ordinary sessions: {listing}");
+    assert!(
+        listing.contains("parent"),
+        "the picker lists ordinary sessions: {listing}"
+    );
     assert!(
         !listing.contains("0001-worker"),
         "the picker must not list a delegated child: {listing}"

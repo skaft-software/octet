@@ -2,7 +2,10 @@
 
 Native SwiftUI companion for an authoritative Serve host. This target is deliberately source-only: it expects the sibling `../apple-shared` shared client for discovery, TLS/HostId validation, pairing, Keychain storage, bootstrap, replay, reconnect, and idempotent commands.
 
-## Current build status (observed, not inferred)
+## Source build limitations
+
+The observations below are historical source checks, not 0.8.0 candidate
+verification or native-app release qualification.
 
 - The sibling package now compiles: `swift build` in `apps/apple-shared` -> `Build complete!`.
 - This target still does **not** build. `apps/macos/Package.swift` names the shared package's only
@@ -27,9 +30,9 @@ Native SwiftUI companion for an authoritative Serve host. This target is deliber
 
 ## Dependency contract
 
-`Package.swift` expects the sibling package at `apps/apple-shared` (the app path is `apps/macos`, so the relative package path is `../apple-shared`) and its `OctetServe` product. The required public API is recorded in the private macOS handoff artifact and must be kept compatible by the shared package; no HTTP, WebSocket, QR, TLS, or credential implementation belongs in this target.
+`Package.swift` expects the sibling package at `apps/apple-shared` (the app path is `apps/macos`, so the relative package path is `../apple-shared`) and its `OctetServe` product. The source-required client types listed above are absent; no HTTP, WebSocket, QR, TLS, or credential implementation belongs in this target.
 
-## Scope
+## Source UI scope (not live support)
 
 - LAN discovery and manual host inspection, fingerprint-word confirmation, one-time ticket pairing, approval polling, cancellation, revocation, and host-identity-change handling.
 - Inventory bootstrap followed by session snapshots and live host events; streamed assistant/tool output, progress, source/output references, approvals, user-input requests, interrupt, steer, and follow-up controls.
@@ -52,4 +55,5 @@ The scripts under `scripts/` are authored but intentionally not run in this sour
 
 Replacement operations stage beside the installed app and retain a rollback copy until the new app has been moved into place. No script removes quarantine metadata.
 
-No artifact is signed, notarized, installed, updated, removed, built, or live-tested by this change.
+This source-only target has no signed, notarized, installed, or live-tested
+release artifact.

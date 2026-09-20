@@ -39,7 +39,9 @@ struct SearchArgs {
     hidden: bool,
 }
 
-fn default_hidden() -> bool { true }
+fn default_hidden() -> bool {
+    true
+}
 
 #[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -142,7 +144,15 @@ impl Tool for SearchTool {
             || arguments.keys().any(|key| {
                 !matches!(
                     key.as_str(),
-                    "query" | "path" | "glob" | "mode" | "max_results" | "limit" | "ignoreCase" | "context" | "hidden"
+                    "query"
+                        | "path"
+                        | "glob"
+                        | "mode"
+                        | "max_results"
+                        | "limit"
+                        | "ignoreCase"
+                        | "context"
+                        | "hidden"
                 )
             })
         {
@@ -199,11 +209,34 @@ impl Tool for SearchTool {
             ));
         }
         for name in ["ignoreCase", "hidden"] {
-            if arguments.get(name).is_some_and(|v| !v.is_boolean()) { return Err(ToolError::new(format!("invalid arguments: {name} must be boolean"))); }
+            if arguments.get(name).is_some_and(|v| !v.is_boolean()) {
+                return Err(ToolError::new(format!(
+                    "invalid arguments: {name} must be boolean"
+                )));
+            }
         }
-        if arguments.get("context").is_some_and(|v| v.as_u64().is_none_or(|n| n > 1000)) { return Err(ToolError::new("invalid arguments: context must be an integer from 0 to 1000")); }
-        if arguments.contains_key("limit") && arguments.contains_key("max_results") { return Err(ToolError::new("invalid arguments: use limit or max_results, not both")); }
-        if arguments.get("limit").is_some_and(|v| v.as_u64().and_then(|n| usize::try_from(n).ok()).is_none_or(|n| n == 0)) { return Err(ToolError::new("invalid arguments: limit must be a positive integer")); }
+        if arguments
+            .get("context")
+            .is_some_and(|v| v.as_u64().is_none_or(|n| n > 1000))
+        {
+            return Err(ToolError::new(
+                "invalid arguments: context must be an integer from 0 to 1000",
+            ));
+        }
+        if arguments.contains_key("limit") && arguments.contains_key("max_results") {
+            return Err(ToolError::new(
+                "invalid arguments: use limit or max_results, not both",
+            ));
+        }
+        if arguments.get("limit").is_some_and(|v| {
+            v.as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .is_none_or(|n| n == 0)
+        }) {
+            return Err(ToolError::new(
+                "invalid arguments: limit must be a positive integer",
+            ));
+        }
         // Search currently executes `rg` from PATH as a native child. Treat it
         // as process authority even though its argument construction is fixed.
         Ok(ToolEffect::HostProcess)
@@ -275,9 +308,15 @@ async fn execute_search(
     if args.mode == SearchMode::Literal {
         command.arg("--fixed-strings");
     }
-    if args.ignore_case { command.arg("--ignore-case"); }
-    if args.hidden { command.arg("--hidden"); }
-    if args.context > 0 { command.arg("--context").arg(args.context.to_string()); }
+    if args.ignore_case {
+        command.arg("--ignore-case");
+    }
+    if args.hidden {
+        command.arg("--hidden");
+    }
+    if args.context > 0 {
+        command.arg("--context").arg(args.context.to_string());
+    }
     if let Some(glob) = &args.glob {
         command.args(["--glob", glob]);
     }
@@ -326,7 +365,8 @@ async fn execute_search(
     let byte_budget = ctx.sandbox.max_output_bytes.saturating_sub(128).max(1024);
     let deadline = tokio::time::Instant::now() + ctx.sandbox.bash_timeout;
     let collect = async {
-        let (results, truncated, match_count) = collect_rg_stdout(stdout, max_results, byte_budget).await?;
+        let (results, truncated, match_count) =
+            collect_rg_stdout(stdout, max_results, byte_budget).await?;
 
         let status =
             if truncated {
@@ -468,12 +508,19 @@ fn record_rg_event(
     let Some(rendered) = render_match(event) else {
         return false;
     };
-    let is_match = serde_json::from_str::<serde_json::Value>(event).ok().is_some_and(|v| v["type"] == "match");
-    if (is_match && *match_count == max_results) || body_bytes.saturating_add(rendered.len() + usize::from(!results.is_empty())) > byte_budget {
+    let is_match = serde_json::from_str::<serde_json::Value>(event)
+        .ok()
+        .is_some_and(|v| v["type"] == "match");
+    if (is_match && *match_count == max_results)
+        || body_bytes.saturating_add(rendered.len() + usize::from(!results.is_empty()))
+            > byte_budget
+    {
         return true;
     }
     *body_bytes += rendered.len() + usize::from(!results.is_empty());
-    if is_match { *match_count += 1; }
+    if is_match {
+        *match_count += 1;
+    }
     results.push(rendered);
     false
 }

@@ -1,3 +1,5 @@
+//! Session resource ownership and public protocol security integration tests.
+
 use bytes::Bytes;
 use octet_serve_backend::{
     CommandId, DeviceId, DurableEntryId, ErrorCode, HostId, PromptInput, ProtocolValidation,
@@ -99,7 +101,12 @@ fn resources_are_opaque_session_scoped_and_reopenable() {
     // The commit sidecar is the sole restart visibility boundary: a staged
     // binding stays transient until the adapter commits the tool record.
     store
-        .persist_record(&owner, &entry, "tool-call-full", br#"{"kind":"tool-result"}"#)
+        .persist_record(
+            &owner,
+            &entry,
+            "tool-call-full",
+            br#"{"kind":"tool-result"}"#,
+        )
         .unwrap();
     drop(store);
     let reopened = ResourceStore::open(directory.path()).unwrap();

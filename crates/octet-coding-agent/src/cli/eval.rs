@@ -537,10 +537,12 @@ fn run_suite(
             )
         } else {
             match run_case(
-                &executable,
-                &home,
-                &session_root,
-                &workspace,
+                CasePaths {
+                    executable: &executable,
+                    home: &home,
+                    session_root: &session_root,
+                    workspace: &workspace,
+                },
                 case,
                 &model,
                 limits,
@@ -671,16 +673,26 @@ struct CaseUsage {
     usage_records: u64,
 }
 
+struct CasePaths<'a> {
+    executable: &'a Path,
+    home: &'a Path,
+    session_root: &'a Path,
+    workspace: &'a Path,
+}
+
 fn run_case(
-    executable: &Path,
-    home: &Path,
-    session_root: &Path,
-    workspace: &Path,
+    paths: CasePaths<'_>,
     case: &EvalCase,
     model: &str,
     limits: CaseLimits,
     pricing_known: bool,
 ) -> anyhow::Result<(CaseUsage, Option<String>)> {
+    let CasePaths {
+        executable,
+        home,
+        session_root,
+        workspace,
+    } = paths;
     // Stdin carries literal prompt text, so @file/--flag syntax in a suite
     // cannot become CLI options or cause local file expansion.
     let mut input = tempfile::tempfile()?;

@@ -14,6 +14,10 @@ import threading
 import time
 from typing import Any, BinaryIO, Callable, Dict, Mapping, Optional
 
+# The host stages the executable privately; sibling modules remain in the
+# host-provided extension root rather than beside the staged __file__.
+sys.path.insert(0, os.environ.get("OCTET_EXTENSION_DIR", os.path.dirname(os.path.abspath(__file__))))
+
 from octet_computer_use.policy import (
     ActionRequest,
     Decision,

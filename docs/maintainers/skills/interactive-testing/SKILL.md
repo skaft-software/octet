@@ -58,6 +58,5 @@ Rules:
 
 ## Reporting
 
-Record the exact command and the observed output. Capture issues as parity or
-work-queue rows (`docs/parity/README.md`, `docs/swarm-audit/WORK-QUEUE.md`) rather
-than treating every TUI observation as a regression.
+Record the exact command, build identity, and observed output. Distinguish a
+reproduced regression from an unverified observation when reporting an issue.

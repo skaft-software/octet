@@ -1,4 +1,4 @@
-# octet agent design
+# octet agent architecture
 
 ## Responsibilities
 
@@ -180,7 +180,16 @@ headers, and healthy response bodies. HTTP 520 sequences/exhaustion and unknown
 failed/incomplete terminal partial generations retain the same finite envelopes.
 Four terminal EOFs followed by success also retain durable unknown usage. This is not a live-provider
 interruption, real-terminal qualification, weeks-long wall-clock soak, or a claim
-of complete unattended-runtime parity.
+of complete unattended-runtime qualification.
+
+## Interrupted-attempt progress
+
+`AgentEvent::RecoveredOutput { channel, text }` carries a durable partial text
+or reasoning prefix from a previous interrupted attempt. It is historical
+progress, not a current `OutputDelta`, completed assistant response, provider
+replay input, or usage/accounting contribution. Consumers may display it in a
+separate recovery view; they must not append it to the current answer. Partial
+tool calls, media, and provider metadata are not recovered as output events.
 
 ## Effect admission boundary
 
@@ -222,7 +231,7 @@ neither a path nor a digest.
 
 ## Sessions
 
-Sessions are append-only JSONL records containing entries, head updates, provider usage, and checkpoints. Entries form a parent-linked tree and the latest durable head selects the active branch. Compaction adds a Pi-structured summary, `first_kept` boundary, active-skill snapshot, and cumulative `readFiles`/`modifiedFiles` details without deleting ancestry. Both product-triggered and autonomous compaction use the same serialized handoff contract.
+Sessions are append-only JSONL records containing entries, head updates, provider usage, and checkpoints. Entries form a parent-linked tree and the latest durable head selects the active branch. Compaction adds a structured summary, `first_kept` boundary, active-skill snapshot, and cumulative `readFiles`/`modifiedFiles` details without deleting ancestry. Both product-triggered and autonomous compaction use the same serialized handoff contract.
 
 Before every provider turn, the agent estimates the complete request and retains a fixed 16K output reserve (or a larger explicit reasoning floor). The provider-advertised maximum completion size remains the model ceiling; the individual request is clamped only to the context space remaining after input. The default compaction threshold is the full context window, so the fixed reserve is not combined with an additional percentage buffer. If a provider nevertheless ends at the output limit while emitting tools, the assistant envelope is persisted, every call is paired with a synthetic error without execution, and a corrective continuation asks the model to reissue complete arguments.
 

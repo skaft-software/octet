@@ -1409,7 +1409,7 @@ fn render_subagent_column_header(state: &ShellState, width: u16) -> String {
 /// State-group heading with its displayed count, e.g. `Running · 8`.
 fn render_subagent_heading(state: &ShellState, label: &str, count: usize, width: u16) -> String {
     let plan = PresentationLayout::new(&state.theme, width);
-    let prefix = format!("{}", " ".repeat(usize::from(plan.inset)));
+    let prefix = " ".repeat(usize::from(plan.inset));
     let text = panel_cell(&format!("{label} · {count}"), state.theme.unicode());
     fit_line(
         &format!(

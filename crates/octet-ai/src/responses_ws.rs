@@ -77,13 +77,13 @@ fn not_resumable(attempts: u32, visible_output: bool, detail: &str) -> AiError {
 
 /// Dials one socket. Production re-runs the same handshake as the initial
 /// connection; tests substitute a dialer that counts and steers attempts.
-type DialFuture<S> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<S, AiError>> + Send>>;
+type DialFuture<S> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<S, AiError>> + Send>>;
 pub(crate) type SocketDialer<S> = Arc<dyn Fn(Url, http::HeaderMap) -> DialFuture<S> + Send + Sync>;
 
 /// Production socket type for a Responses WebSocket endpoint.
-pub(crate) type ResponsesSocket = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+pub(crate) type ResponsesSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// One in-flight generation's consumer-visible cursor: the provider response id
 /// and the highest event `sequence_number` already forwarded downstream.
@@ -547,6 +547,10 @@ impl ResponsesWsPool {
     /// Sends one full request to a cached or one-shot connection and returns
     /// the raw JSON event stream. The caller owns protocol decoding and stream
     /// deadlines.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Transport entry point keeps endpoint, request, and independent startup/resume policies explicit"
+    )]
     pub(crate) async fn request(
         &self,
         key: Option<&str>,
@@ -662,7 +666,15 @@ impl ResponsesWsPool {
         object.insert("generate".to_owned(), Value::Bool(false));
         let deadline = tokio::time::Instant::now() + startup_timeout;
         let mut events = self
-            .request(Some(key), url, headers, body, liveness, startup_timeout, None)
+            .request(
+                Some(key),
+                url,
+                headers,
+                body,
+                liveness,
+                startup_timeout,
+                None,
+            )
             .await?;
         tokio::time::timeout_at(deadline, async {
             while let Some(event) = events.recv().await {
@@ -916,7 +928,10 @@ async fn handle_provider_event(
     if is_terminal {
         update_continuation(&command.body, &value, continuation);
     }
-    if connection_refresh_error(&value) || stale_continuation_error(&value) || failed_terminal(&value) {
+    if connection_refresh_error(&value)
+        || stale_continuation_error(&value)
+        || failed_terminal(&value)
+    {
         // The provider failed this generation or rejected the socket. Hand the
         // event back unpublished: the actor retires and fences the pool key
         // before it reaches the consumer, so an immediate retry observes the
@@ -1168,7 +1183,7 @@ where
 {
     let resumer = command.resumer.as_ref();
     let mut attempts = 0_u32;
-    let reconnect_started = tokio::time::Instant::now();
+    let mut reconnect_started: Option<tokio::time::Instant> = None;
     let mut cursor = GenerationProgress::default();
     // Preserve the generation's lifecycle prelude, including on failure.
     let mut prelude: Vec<Value> = Vec::new();
@@ -1188,7 +1203,17 @@ where
                     error: not_resumable(attempts, true, "no resumable cursor"),
                 };
             };
-            match resumer(response_id, last_sequence).await {
+            let deadline =
+                reconnect_started.expect("resume follows interruption") + RECONNECT_TOTAL_BUDGET;
+            let opened = tokio::select! {
+                biased;
+                _ = command.reply.closed() => return GenerationEnd::Abandoned,
+                _ = tokio::time::sleep_until(deadline) => return GenerationEnd::Fatal {
+                    error: not_resumable(attempts, true, "resume request deadline exceeded"),
+                },
+                opened = resumer(response_id, last_sequence) => opened,
+            };
+            match opened {
                 Ok(mut resumed) => pump_resumed(&mut resumed, command, last_sequence).await,
                 // The attempt budget, not the resume error, bounds this loop:
                 // an unresumable route still terminates with the typed
@@ -1237,7 +1262,9 @@ where
                     };
                 }
                 resuming = true;
-                let elapsed = reconnect_started.elapsed();
+                let elapsed = reconnect_started
+                    .get_or_insert_with(tokio::time::Instant::now)
+                    .elapsed();
                 if attempts >= MAX_SOCKET_RECONNECT_ATTEMPTS || elapsed >= RECONNECT_TOTAL_BUDGET {
                     if !flush_pending_prelude(&command.reply, &mut prelude).await {
                         return GenerationEnd::Abandoned;
@@ -1405,8 +1432,9 @@ async fn run_connection<S>(
         let started = command.started.take();
         let (wire_body, _) = incremental_body(&command.body, continuation.as_ref());
         let Value::Object(mut payload) = wire_body else {
-            let _ = started
-                .map(|started| started.send(Err("Responses WebSocket body is not an object".to_owned())));
+            let _ = started.map(|started| {
+                started.send(Err("Responses WebSocket body is not an object".to_owned()))
+            });
             let _ = command
                 .reply
                 .send(Err(transport_error(
@@ -1459,13 +1487,7 @@ async fn run_connection<S>(
         }
         let _ = started.map(|started| started.send(Ok(())));
 
-        match run_generation(
-            &mut socket,
-            &command,
-            &mut continuation,
-        )
-        .await
-        {
+        match run_generation(&mut socket, &command, &mut continuation).await {
             GenerationEnd::Completed => {}
             GenerationEnd::Abandoned => {
                 alive.store(false, Ordering::Release);
@@ -1545,17 +1567,21 @@ mod tests {
     /// A dialer that connects to one test listener and counts attempts.
     fn counting_dialer(
         address: std::net::SocketAddr,
-    ) -> (SocketDialer<ClientSocket>, Arc<std::sync::atomic::AtomicUsize>) {
+    ) -> (
+        SocketDialer<ClientSocket>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
         let dialer: SocketDialer<ClientSocket> = Arc::new(move |_url, headers| {
             counter.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
-                let request = format!("ws://{address}/")
-                    .into_client_request()
-                    .map_err(|error| {
-                        transport_error(TransportPhase::Connect, format!("test dial: {error}"))
-                    })?;
+                let request =
+                    format!("ws://{address}/")
+                        .into_client_request()
+                        .map_err(|error| {
+                            transport_error(TransportPhase::Connect, format!("test dial: {error}"))
+                        })?;
                 let mut request = request;
                 for (name, value) in headers {
                     if let Some(name) = name {
@@ -1825,8 +1851,7 @@ mod tests {
     async fn idle_actor_detects_peer_close_and_evicts_itself() {
         let (client, mut server) = websocket_pair().await;
         let state = Arc::new(Mutex::new(PoolState::default()));
-        let (connection, actor) =
-            spawn_test_actor(
+        let (connection, actor) = spawn_test_actor(
             client,
             &state,
             "closed",
@@ -1851,8 +1876,7 @@ mod tests {
     async fn idle_actor_times_out_and_evicts_itself() {
         let (client, mut server) = websocket_pair().await;
         let state = Arc::new(Mutex::new(PoolState::default()));
-        let (connection, actor) =
-            spawn_test_actor(
+        let (connection, actor) = spawn_test_actor(
             client,
             &state,
             "idle",
@@ -1878,8 +1902,7 @@ mod tests {
     async fn idle_actor_does_not_retain_pool_state() {
         let (client, _server) = websocket_pair().await;
         let state = Arc::new(Mutex::new(PoolState::default()));
-        let (connection, actor) =
-            spawn_test_actor(
+        let (connection, actor) = spawn_test_actor(
             client,
             &state,
             "cycle",
@@ -1902,8 +1925,7 @@ mod tests {
     async fn dropping_an_active_response_retires_the_socket_and_provider_work() {
         let (client, mut server) = websocket_pair().await;
         let state = Arc::new(Mutex::new(PoolState::default()));
-        let (connection, actor) =
-            spawn_test_actor(
+        let (connection, actor) = spawn_test_actor(
             client,
             &state,
             "cancel",
@@ -1958,8 +1980,7 @@ mod tests {
             })
         });
         let state = Arc::new(Mutex::new(PoolState::default()));
-        let (connection, actor) =
-            spawn_test_actor(
+        let (connection, actor) = spawn_test_actor(
             client,
             &state,
             "send-failure",
@@ -2033,8 +2054,7 @@ mod tests {
                 )
             });
             let state = Arc::new(Mutex::new(PoolState::default()));
-            let (connection, actor) =
-                spawn_test_actor(
+            let (connection, actor) = spawn_test_actor(
                 client,
                 &state,
                 "poisoned",
@@ -2136,15 +2156,14 @@ mod tests {
                 };
                 let (client, mut server) = websocket_pair().await;
                 let state = Arc::new(Mutex::new(PoolState::default()));
-                let (connection, actor) =
-                    spawn_test_actor(
-                client,
-                &state,
-                "poisoned",
-                Duration::from_secs(60),
-                unreachable_dialer(),
-            )
-            .await;
+                let (connection, actor) = spawn_test_actor(
+                    client,
+                    &state,
+                    "poisoned",
+                    Duration::from_secs(60),
+                    unreachable_dialer(),
+                )
+                .await;
                 let (reply, mut events) = mpsc::channel(1);
                 let (started, started_rx) = oneshot::channel();
                 connection
@@ -2411,10 +2430,7 @@ mod tests {
     }
 
     fn count_of(events: &[Value], kind: &str) -> usize {
-        events
-            .iter()
-            .filter(|event| event["type"] == kind)
-            .count()
+        events.iter().filter(|event| event["type"] == kind).count()
     }
 
     fn liveness() -> ResponsesWsLiveness {
@@ -2430,7 +2446,9 @@ mod tests {
         for attempt in 5..64 {
             assert_eq!(reconnect_delay(attempt), RECONNECT_MAX_DELAY);
         }
-        let spent: Duration = (1..=MAX_SOCKET_RECONNECT_ATTEMPTS).map(reconnect_delay).sum();
+        let spent: Duration = (1..=MAX_SOCKET_RECONNECT_ATTEMPTS)
+            .map(reconnect_delay)
+            .sum();
         assert!(
             spent <= RECONNECT_TOTAL_BUDGET,
             "the whole attempt budget must fit the reconnect deadline: {spent:?}"
@@ -2464,14 +2482,8 @@ mod tests {
         let (dialer, attempts) = counting_dialer(address);
         let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
         let state = Arc::new(Mutex::new(PoolState::default()));
-        let (connection, actor) = spawn_test_actor(
-            initial,
-            &state,
-            "resume",
-            Duration::from_secs(60),
-            dialer,
-        )
-        .await;
+        let (connection, actor) =
+            spawn_test_actor(initial, &state, "resume", Duration::from_secs(60), dialer).await;
 
         let (events, error) = drive_command(
             &connection,
@@ -2482,11 +2494,19 @@ mod tests {
 
         assert!(matches!(
             error,
-            Some(AiError::StreamProtocol(crate::error::StreamProtocolError::ResponseNotResumable {
-                attempts: 0, visible_output: false, ..
-            }))
+            Some(AiError::StreamProtocol(
+                crate::error::StreamProtocolError::ResponseNotResumable {
+                    attempts: 0,
+                    visible_output: false,
+                    ..
+                }
+            ))
         ));
-        assert_eq!(attempts.load(Ordering::SeqCst), 0, "no hidden inference replay");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "no hidden inference replay"
+        );
         assert_eq!(count_of(&events, "response.created"), 1);
         assert_eq!(count_of(&events, "response.in_progress"), 1);
         assert!(deltas(&events).is_empty());
@@ -2522,14 +2542,8 @@ mod tests {
         let (dialer, attempts) = counting_dialer(address);
         let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
         let state = Arc::new(Mutex::new(PoolState::default()));
-        let (connection, actor) = spawn_test_actor(
-            initial,
-            &state,
-            "visible",
-            Duration::from_secs(60),
-            dialer,
-        )
-        .await;
+        let (connection, actor) =
+            spawn_test_actor(initial, &state, "visible", Duration::from_secs(60), dialer).await;
 
         let (events, error) = drive_command(
             &connection,
@@ -2565,12 +2579,12 @@ mod tests {
         finish_scripted_server(server).await;
     }
 
+    type ResumeCalls = Arc<Mutex<Vec<(String, u64)>>>;
+
     /// A resumer that records every `(response_id, starting_after)` and serves
     /// one scripted result per call. A missing entry fails like an unreachable
     /// retrieve endpoint.
-    fn scripted_resumer(
-        script: Vec<Option<Vec<Value>>>,
-    ) -> (ResponseResumer, Arc<Mutex<Vec<(String, u64)>>>) {
+    fn scripted_resumer(script: Vec<Option<Vec<Value>>>) -> (ResponseResumer, ResumeCalls) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&calls);
         let script = Arc::new(script);
@@ -2637,6 +2651,93 @@ mod tests {
         assert!(body_requests_storage(&json!({"store": true})));
         assert!(!body_requests_storage(&json!({"store": false})));
         assert!(!body_requests_storage(&json!({"model": "gpt"})));
+    }
+
+    #[tokio::test]
+    async fn a_pending_resume_opener_obeys_receiver_cancellation_and_absolute_budget() {
+        struct DropSignal(Arc<AtomicBool>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        for cancel in [true, false] {
+            let (address, server) =
+                scripted_server(vec![scripted_stream_that_drops_after("partial")]).await;
+            let (dialer, _) = counting_dialer(address);
+            let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
+            let state = Arc::new(Mutex::new(PoolState::default()));
+            let (connection, actor) = spawn_test_actor(
+                initial,
+                &state,
+                "pending-resume",
+                Duration::from_secs(60),
+                dialer,
+            )
+            .await;
+            let opened = Arc::new(tokio::sync::Notify::new());
+            let dropped = Arc::new(AtomicBool::new(false));
+            let resumer: ResponseResumer = {
+                let opened = Arc::clone(&opened);
+                let dropped = Arc::clone(&dropped);
+                Arc::new(move |_, _| {
+                    let opened = Arc::clone(&opened);
+                    let dropped = Arc::clone(&dropped);
+                    Box::pin(async move {
+                        let _guard = DropSignal(dropped);
+                        opened.notify_one();
+                        std::future::pending().await
+                    })
+                })
+            };
+            let (reply, mut events) = mpsc::channel(16);
+            connection
+                .sender
+                .send(RequestCommand {
+                    body: test_generation_request(),
+                    reply,
+                    started: None,
+                    liveness: liveness(),
+                    resumer: Some(resumer),
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), opened.notified())
+                .await
+                .unwrap();
+            if cancel {
+                drop(events);
+            } else {
+                let error =
+                    tokio::time::timeout(RECONNECT_TOTAL_BUDGET + Duration::from_secs(1), async {
+                        loop {
+                            match events.recv().await {
+                                Some(Err(error)) => break error,
+                                Some(Ok(_)) => {}
+                                None => panic!("resume must publish a terminal error"),
+                            }
+                        }
+                    })
+                    .await
+                    .expect("absolute resume deadline");
+                assert!(matches!(
+                    error,
+                    AiError::StreamProtocol(
+                        crate::error::StreamProtocolError::ResponseNotResumable { .. }
+                    )
+                ));
+            }
+            tokio::time::timeout(Duration::from_secs(2), actor)
+                .await
+                .expect("actor must settle")
+                .unwrap();
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "pending HTTP opener was dropped"
+            );
+            assert!(!connection.alive.load(Ordering::Acquire));
+            finish_scripted_server(server).await;
+        }
     }
 
     #[tokio::test]
@@ -2887,26 +2988,21 @@ mod tests {
     async fn an_accepted_request_without_events_is_not_replayed() {
         // Every connection drops the generation frame immediately.
         let script = || {
-            let script: ServerScript = Arc::new(|mut socket: ServerSocket| -> BoxFuture<'static, ()> {
-                Box::pin(async move {
-                    let _ = socket.next().await;
-                    drop(socket);
-                })
-            });
+            let script: ServerScript =
+                Arc::new(|mut socket: ServerSocket| -> BoxFuture<'static, ()> {
+                    Box::pin(async move {
+                        let _ = socket.next().await;
+                        drop(socket);
+                    })
+                });
             script
         };
         let (address, server) = scripted_server(vec![script()]).await;
         let (dialer, attempts) = counting_dialer(address);
         let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
         let state = Arc::new(Mutex::new(PoolState::default()));
-        let (connection, actor) = spawn_test_actor(
-            initial,
-            &state,
-            "bounded",
-            Duration::from_secs(60),
-            dialer,
-        )
-        .await;
+        let (connection, actor) =
+            spawn_test_actor(initial, &state, "bounded", Duration::from_secs(60), dialer).await;
 
         let (_events, error) = drive_command(
             &connection,
@@ -2981,14 +3077,8 @@ mod tests {
         let (dialer, attempts) = counting_dialer(address);
         let initial = connect_async(format!("ws://{address}/")).await.unwrap().0;
         let state = Arc::new(Mutex::new(PoolState::default()));
-        let (connection, actor) = spawn_test_actor(
-            initial,
-            &state,
-            "stale",
-            Duration::from_secs(60),
-            dialer,
-        )
-        .await;
+        let (connection, actor) =
+            spawn_test_actor(initial, &state, "stale", Duration::from_secs(60), dialer).await;
         let url = Url::parse(&format!("ws://{address}/")).unwrap();
 
         let (first_events, first_error) = drive_command(&connection, url.clone(), liveness()).await;
@@ -2996,7 +3086,10 @@ mod tests {
         assert_eq!(count_of(&first_events, "response.completed"), 1);
 
         let (second_events, second_error) = drive_command(&connection, url, liveness()).await;
-        assert!(second_error.is_none(), "raw provider rejection, not a local error");
+        assert!(
+            second_error.is_none(),
+            "raw provider rejection, not a local error"
+        );
         assert_eq!(second_events.len(), 1);
         assert_eq!(second_events[0]["code"], "previous_response_not_found");
         assert_eq!(attempts.load(Ordering::SeqCst), 0, "no hidden retry");

@@ -1,10 +1,10 @@
 # octet-subagents
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. This source checkout targets local octet 0.8.0 via its exact runtime pin;
-published 0.7.6 assets retain their historical compatibility.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Source distribution: 0.8.0 (release candidate).** This checkout and local
+archives require exactly octet 0.8.0. Catalog commands below require matching
+published assets; no 0.8.0 publication is claimed. Use a
+[source-built host](../../docs/installation.md#build-from-a-checkout) with a
+reviewed source checkout or local archive until matching assets are published.
 
 Delegate a bounded task to a background worker while the parent continues other
 work. octet owns the child conversations, permissions, persistence, limits, and
@@ -57,8 +57,8 @@ selections are both visible in the panel and inspector.
 
 ## Install and enable
 
-With [octet 0.7.6 installed](../../docs/installation.md), install the matching
-signed public bundle, then explicitly enable it:
+With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout) and verified
+matching published assets, install the bundle, then explicitly enable it:
 
 ```console
 octet extension install octet-subagents
@@ -66,7 +66,7 @@ octet --enable-extension octet-subagents
 ```
 
 For source testing with a locally built octet 0.8.0 and reviewed local
-archive, use `octet extension install --path ./octet-subagents-0.7.6.tar.gz`.
+archive, use `octet extension install --path ./octet-subagents-0.8.0.tar.gz`.
 Python 3.9+ is required. Installation has no hook or third-party dependency and
 starts nothing; the bundle stays disabled until explicitly enabled. Default full
 access (`unsafe_host`) implicitly trusts it without saving a grant. Optional
@@ -125,19 +125,19 @@ See [`/subagents open-all`](REFERENCE.md#subagents-open-all-tmuxherdr).
 
 ## Session-scoped delegation
 
-A worker is not a detached OS process: the owning run retires its record when the
-run ends. The extension treats that as **detached, not dead** — the worker is
-still owned by the parent session, keeps its summaries, errors, usage, and the
-complete sibling roster, and is reattached automatically when the session
-republishes the live record. `/subagents wait [name-or-id]` forces an owner-bound
-reattach pass, and a worker the host parks at the approval boundary is rendered
-as `awaiting approval` and cannot be given unattended work.
+A worker is owned by the parent session, not just the turn that spawned it.
+Ending the parent turn does not stop its workers. After owner reconstruction,
+the extension treats retained records as **detached, not dead**: summaries,
+errors, usage, and the sibling roster remain recoverable. An owner-bound
+reattach pass restores available workers as idle until an explicit follow-up;
+it never invents a new task. A worker parked at the approval boundary is
+rendered as `awaiting approval` and cannot be given unattended work.
 
 ## Reference
 
-This source bundle retains distribution `0.7.6` and API `0.2`, with an exact
-local runtime requirement of octet `0.8.0`. The detailed
-contract is a bundled-runtime reference, not a current extension SDK tutorial.
+This source bundle has distribution version `0.8.0` and uses API `0.4`, with an
+exact runtime requirement of octet `0.8.0`. The detailed
+contract is a bundled-runtime reference, not a general extension SDK tutorial.
 
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact grants, ceilings, ownership, and accounting.
 - <a id="kernel-boundary"></a>[Kernel boundary](REFERENCE.md#kernel-boundary): host service ownership.

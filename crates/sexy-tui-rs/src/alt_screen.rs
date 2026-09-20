@@ -166,7 +166,7 @@ impl AlternateScreen {
                 buffer.push_str(&format!(
                     "\x1b[{};{}H",
                     row + 1,
-                    usize::from(column).min(usize::from(width)) + 1
+                    column.min(usize::from(width)) + 1
                 ));
                 buffer.push_str(if show_hardware_cursor {
                     "\x1b[?25h"
@@ -397,11 +397,7 @@ mod tests {
         let mut session = AlternateScreen::new(options(false));
         assert!(session.enter(&mut terminal));
         clear.set(true);
-        let document = vec![
-            "older".to_owned(),
-            "middle".to_owned(),
-            "newest".to_owned(),
-        ];
+        let document = vec!["older".to_owned(), "middle".to_owned(), "newest".to_owned()];
         session.paint(&mut terminal, &document, 10, 2, Some((1, 3)), true);
         let output = writes.borrow().clone();
         assert!(output.contains("\x1b[1;1H\x1b[2Kmiddle"), "{output:?}");

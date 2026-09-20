@@ -16,10 +16,7 @@ Describe the sound in the audio. Compare the screenshot with this repository's
 player UI, then propose a change. Do not edit yet.
 ```
 
-This is an input recipe, not a recorded/live-provider demonstration. The
-[current candidate record](qualification/core-journeys-df5a7e80.md) separately
-reports deterministic process-to-provider media transport checks and their limits.
-Ordinary
+This is an input recipe, not a recorded/live-provider demonstration. Ordinary
 typed paths—including raw-key terminal drops—remain text, not upload consent.
 A failed attachment leaves the path visible and reports a diagnostic rather
 than creating a chip. An enabled `read` tool can still read a named file under

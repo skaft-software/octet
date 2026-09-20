@@ -1,4 +1,4 @@
-# `octet-coding-agent` design
+# `octet-coding-agent` architecture
 
 **Status:** Current implementation contract.
 
@@ -24,7 +24,7 @@ parses extension source with a real TypeScript syntax tree, and emits a
 versioned dry-run report. It never constructs an `Agent`, discovers a provider,
 executes package code, writes either setup, or invokes a model. A malformed
 package becomes a local diagnostic rather than preventing independent packages
-from being inventoried. The user contract and future compatibility boundary are
+from being inventoried. The user contract and compatibility limits are
 documented in [`../pi-migration.md`](../pi-migration.md).
 
 ## Startup and resume
@@ -60,7 +60,7 @@ Startup resolves the persistent session before final model selection:
 
 Runtime `/resume` and branch checkout use the same restoration behavior.
 Interactive resume follows renderer ownership. Default terminal-owned mode
-hydrates the complete active branch so Pi's complete logical frame can populate
+hydrates the complete active branch so the complete logical frame can populate
 native scrollback without an impossible later prepend. Explicit application-owned
 mode hydrates only a bounded active-branch tail for first paint; the complete
 branch is materialized when semantic navigation or selection reaches beyond that
@@ -185,12 +185,11 @@ reconfiguration, and RPC toggles, and `/context` reports that same effective
 capacity.
 
 The product pre-request gate and `octet-agent` overflow recovery share one
-Pi-compatible summarization implementation. Conversation messages are first
+structured summarization implementation. Conversation messages are first
 serialized inside `<conversation>` tags so the model cannot mistake them for a
-live turn. Initial and iterative summaries use Pi's exact structured Markdown
-contracts; iterative calls provide the prior checkpoint in
-`<previous-summary>` tags. Branch-handoff helpers use Pi's corresponding branch
-prompt and preamble.
+live turn. Initial and iterative summaries use structured Markdown contracts;
+iterative calls provide the prior checkpoint in `<previous-summary>` tags.
+Branch-handoff helpers use a separate branch prompt and preamble.
 
 File tracking is deterministic host behavior, not model output. Successful or
 failed assistant calls to `read`, `write`, and `edit` contribute paths;
@@ -469,8 +468,8 @@ there is no new native-host auth command, OAuth payload field, or extension API
 rechecks the host's selected login; explicit replacement is serialized with
 invalidation, and rejected/changed origins fence every resolver sharing a host.
 No local operation promises remote revocation of an already-resolved request or
-pending device code. All new Rust fixtures, full provider parity and native/live
-acceptance remain unqualified; see the [candidate record](../qualification/copilot-host-current-candidate.md).
+pending device code. This source contract does not establish native/live
+acceptance.
 
 ## Authentication
 

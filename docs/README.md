@@ -1,5 +1,9 @@
 # octet documentation
 
+octet is a fast, small coding host across cloud and local models. Extensions add
+tools and bounded host-shaped integrations. These source docs include the
+local 0.8.0 RC; [published installation](installation.md) remains separate.
+
 ## Getting started
 
 - [Installation](installation.md)
@@ -40,21 +44,18 @@
 - [Web search](../extensions/octet-web-search/README.md)
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
-- [Pi session/transcript import status and missing artifact](pi-session-import.md)
 - [Serve](experimental/octet-serve/README.md)
 
 ## Development
 
 - [Extension authoring](extensions.md)
 - [Extension event bus (bounded, host-mediated)](extensions/event-bus.md)
-- [Extension API 0.3 reference](extensions/API-0.3-REFERENCE.md)
-- [Additive Pi parity ledger](parity/README.md) and its
-  [extension-surface detail page](parity/extensions.md)
+- [Extension API 0.4 and retained wire reference](extensions/API-0.4-REFERENCE.md)
 - [Native embedding — host protocol 1](sdk.md)
 - [Examples and their compatibility status](../examples/README.md)
 - Architecture: [model clients](design/octet-ai.md), [agent runtime](design/octet-agent.md),
   [application](design/octet-coding-agent.md), [terminal renderer](design/octet-tui.md)
-- [Performance philosophy and execution contract](design/performance.md)
+- [Performance and measurement contract](design/performance.md)
 - [Build profiles](build-profiles.md)
 - [Distribution](distribution.md)
 - [Maintainer prompts, skills and playbooks](maintainers/README.md)
@@ -69,7 +70,6 @@
 - [0.7.4 release notes and documentation correction](releases/v0.7.4.md)
 - [0.7.3 release notes](releases/v0.7.3.md)
 - [0.7.1 release notes](releases/v0.7.1.md)
-- [Roadmap](https://github.com/skaft-software/octet/blob/main/ROADMAP.md)
 - [Benchmarks and performance](benchmarks/README.md)
 - [Download benchmark results](assets/evidence/README.md)
 - [Brand Kit](assets/octet/README.md)
