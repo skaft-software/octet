@@ -643,6 +643,35 @@ fn frame_ranges(bytes: &[u8]) -> Vec<Range<usize>> {
     ranges
 }
 
+fn resize_frame_end(bytes: &[u8]) -> Option<usize> {
+    // A previous frame may finish before the resize repaint has fully arrived.
+    // Require the clear and its following frame end, not independent markers.
+    frame_ranges(bytes)
+        .into_iter()
+        .find(|range| {
+            bytes[range.clone()]
+                .windows(4)
+                .any(|window| window == b"\x1b[2J")
+        })
+        .map(|range| range.end)
+}
+
+#[test]
+fn resize_wait_rejects_a_previous_frame_end() {
+    let bytes =
+        b"\x1b[?2026hprevious frame\x1b[?2026l\x1b[?2026h\x1b[2Jdraft remains local\x1b[?2026l";
+    for end in 0..bytes.len() {
+        assert!(
+            resize_frame_end(&bytes[..end]).is_none(),
+            "accepted incomplete resize frame at byte {end}"
+        );
+    }
+    assert_eq!(resize_frame_end(bytes), Some(bytes.len()));
+    let mut with_partial_frame = bytes.to_vec();
+    with_partial_frame.extend_from_slice(b"\x1b[?2026h\x1b[2J");
+    assert_eq!(resize_frame_end(&with_partial_frame), Some(bytes.len()));
+}
+
 fn status_colors(parser: &vt100::Parser, label: &str, columns: u16) -> Option<Vec<vt100::Color>> {
     parser
         .screen()
@@ -737,16 +766,13 @@ fn run_activity_case(theme: &str, compact: bool, color: &str) {
     let resize_start = candidate.pty.output.len();
     candidate.resize(RESIZED_COLUMNS, RESIZED_ROWS);
     candidate.wait_for_output(WAIT_TIMEOUT, |bytes| {
-        bytes[resize_start..]
-            .windows(FRAME_END.len())
-            .any(|window| window == FRAME_END)
-            && bytes[resize_start..]
-                .windows(4)
-                .any(|window| window == b"\x1b[2J")
+        resize_frame_end(&bytes[resize_start..]).is_some()
     });
+    let resize_end =
+        resize_start + resize_frame_end(&candidate.pty.output[resize_start..]).unwrap();
     parser.set_size(RESIZED_ROWS, RESIZED_COLUMNS);
-    parser.process(&candidate.pty.output[consumed..]);
-    consumed = candidate.pty.output.len();
+    parser.process(&candidate.pty.output[consumed..resize_end]);
+    consumed = resize_end;
     assert!(
         parser.screen().contents().contains("draft remains local"),
         "resize lost local input: {}",

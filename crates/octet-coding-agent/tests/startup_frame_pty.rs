@@ -2778,6 +2778,18 @@ fn changelog_session_bytes(octet: &PtyOctet) -> Vec<u8> {
     fs::read(&sessions[0]).unwrap()
 }
 
+fn current_changelog_first_section() -> &'static str {
+    // Match the actual release body, not a heading from a previous version.
+    include_str!(concat!(
+        "../src/tui/view/releases/v",
+        env!("CARGO_PKG_VERSION"),
+        ".md"
+    ))
+    .lines()
+    .find_map(|line| line.strip_prefix("## "))
+    .expect("bundled release notes have a section heading")
+}
+
 #[test]
 fn real_octet_changelog_initial_and_idle_never_submit_to_provider() {
     let _guard = pty_test_lock()
@@ -2819,7 +2831,7 @@ fn real_octet_changelog_initial_and_idle_never_submit_to_provider() {
             &mut octet,
             &mut parser,
             &mut consumed,
-            "Fixed",
+            current_changelog_first_section(),
             STARTUP_TIMEOUT,
         );
         assert!(parser.screen().contents().contains("Changelog"));
@@ -2875,7 +2887,7 @@ fn real_octet_initial_changelog_without_model_preserves_setup_choice() {
         &mut octet,
         &mut parser,
         &mut consumed,
-        "Fixed",
+        current_changelog_first_section(),
         STARTUP_TIMEOUT,
     );
     assert!(parser.screen().contents().contains("Changelog"));
