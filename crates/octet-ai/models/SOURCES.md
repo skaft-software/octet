@@ -80,13 +80,15 @@ Cerebras contracts. Their fixture provenance is recorded in
 ## Reviewed metadata refresh (v0.8.0)
 
 The release-candidate refresh pins public `https://models.dev/api.json` source
-SHA-256 `81539e12794c8df968fe2c6631a3e046e6548bdbd10b4ee65ca33758ac68ad92`.
-After an earlier receipt-only refresh, the final CI follow-up changed two
-OpenRouter price records and two capability records; names stayed identical.
+SHA-256 `aa4e49b8018efda0259f390c5374fada51102d0fbe322b9069faeb923895263b`.
+After an earlier receipt-only refresh, CI follow-ups changed two OpenRouter
+price records and three capability records; names stayed identical.
 Muse Glimmer input/output quotes fell to $0.30/$1.20 per million and its output
-limit fell to 16,384. The `~deepseek/deepseek-pro-latest` OpenRouter quote changed
-slightly; this is not direct DeepSeek pricing. Mistral Small 3.1 now asserts tools
-in the saved source; snapshot tool flags do not grant runtime tool capability.
+limit fell to 16,384. The `~deepseek/deepseek-pro-latest` OpenRouter quote now
+records $0.57288/$1.71864/$0.018228 per million input/output/cache-read tokens
+and a 393,216 output limit; this is not direct DeepSeek pricing. Mistral Small 3.1
+now asserts tools in the saved source; snapshot tool flags do not grant runtime
+tool capability.
 The four checked-in outputs include this source record and the following
 reviewed changes relative to the v0.7.6 snapshots:
 

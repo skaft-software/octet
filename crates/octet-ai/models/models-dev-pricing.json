@@ -5439,10 +5439,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 19140,
+    "cache_read": 18228,
     "cache_write_5m": 0,
-    "input": 574200,
-    "output": 1722600,
+    "input": 572880,
+    "output": 1718640,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {

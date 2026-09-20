@@ -854,11 +854,12 @@ fn find_bytes(bytes: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn visible(bytes: &[u8]) -> String {
-    const MAX_BYTES: usize = 4096;
-    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BYTES)]);
+    const MAX_BYTES: usize = 16 * 1024;
+    let start = bytes.len().saturating_sub(MAX_BYTES);
+    let text = String::from_utf8_lossy(&bytes[start..]);
     let escaped = text.escape_default().to_string();
-    if bytes.len() > MAX_BYTES {
-        format!("{escaped}… ({} bytes total)", bytes.len())
+    if start > 0 {
+        format!("…{escaped} ({} bytes total)", bytes.len())
     } else {
         escaped
     }

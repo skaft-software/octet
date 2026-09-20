@@ -35,6 +35,13 @@ const SSE_BODY: &[u8] = concat!(
 )
 .as_bytes();
 
+fn trace_fixture(stage: &str) {
+    // Bypass libtest's per-test capture so a stuck syscall leaves a CI breadcrumb.
+    if std::env::var_os("OCTET_PTY_TRACE").is_some() {
+        let _ = writeln!(io::stderr(), "activity-wait-pty: {stage}");
+    }
+}
+
 fn pty_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -249,7 +256,9 @@ impl Candidate {
                 Ok(())
             });
         }
+        trace_fixture("spawning PTY child");
         let child = command.spawn().expect("spawn octet under PTY");
+        trace_fixture("PTY child spawned");
         Self {
             child,
             pty,
@@ -288,6 +297,7 @@ impl Candidate {
     }
 
     fn shutdown(mut self) {
+        trace_fixture("shutting down PTY child");
         self.pty.write_input(&[4]);
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         let status = loop {
@@ -302,6 +312,7 @@ impl Candidate {
         // A controlling-terminal session exit can revoke the parent-held slave
         // on macOS. The retained master exposes the same terminal mode state
         // after the child exits on both macOS and Linux.
+        trace_fixture("PTY child exited; checking restored terminal");
         let restored = terminal_attributes(self.pty.master.as_raw_fd());
         assert_eq!(
             restored.c_lflag & (libc::ICANON | libc::ECHO),
@@ -314,10 +325,12 @@ impl Candidate {
 impl Drop for Candidate {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
+            trace_fixture("killing and reaping PTY child");
             unsafe {
                 let _ = libc::kill(self.child.id() as libc::pid_t, libc::SIGKILL);
             }
             let _ = self.child.wait();
+            trace_fixture("PTY child reaped");
         }
     }
 }
@@ -359,7 +372,7 @@ impl HeldApi {
                 socket
                     .set_write_timeout(Some(Duration::from_secs(2)))
                     .expect("fixture write timeout");
-                let Some((headers, body)) = read_request(&mut socket) else {
+                let Some((headers, body)) = read_request(&mut socket, &worker_stop) else {
                     continue;
                 };
                 assert!(
@@ -440,18 +453,24 @@ impl Drop for HeldApi {
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.release.send(());
         if let Some(worker) = self.worker.take() {
+            trace_fixture("joining loopback fixture");
             if let Err(panic) = worker.join() {
                 if !thread::panicking() {
                     std::panic::resume_unwind(panic);
                 }
             }
+            trace_fixture("loopback fixture joined");
         }
     }
 }
 
-fn read_request(socket: &mut std::net::TcpStream) -> Option<(String, Vec<u8>)> {
+fn read_request(socket: &mut std::net::TcpStream, stop: &AtomicBool) -> Option<(String, Vec<u8>)> {
+    let deadline = Instant::now() + WAIT_TIMEOUT;
     let mut request = Vec::new();
     let header_end = loop {
+        if stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+            return None;
+        }
         let mut bytes = [0u8; 1024];
         let read = match socket.read(&mut bytes) {
             Ok(0) => return None,
@@ -482,13 +501,66 @@ fn read_request(socket: &mut std::net::TcpStream) -> Option<(String, Vec<u8>)> {
         })
         .unwrap_or(0);
     while request.len() < header_end + length {
+        if stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+            return None;
+        }
         let mut bytes = [0u8; 1024];
-        let read = socket.read(&mut bytes).expect("read loopback body");
-        assert!(read > 0, "request ended before body");
+        let read = match socket.read(&mut bytes) {
+            Ok(0) => return None,
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue
+            }
+            Err(error) => panic!("read loopback body: {error}"),
+        };
         request.extend_from_slice(&bytes[..read]);
         assert!(request.len() <= 128 * 1024, "unbounded fixture body");
     }
     Some((headers, request[header_end..header_end + length].to_vec()))
+}
+
+#[test]
+fn fixture_shutdown_cancels_partial_requests() {
+    use std::net::{TcpListener, TcpStream};
+
+    for partial in [
+        b"POST /v1/chat/completions HTTP/1.1\r\n".as_slice(),
+        b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 100\r\n\r\n{",
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        client.write_all(partial).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (started_tx, started) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let request = read_request(&mut socket, &worker_stop);
+            let _ = done_tx.send(request.is_none());
+        });
+        started.recv_timeout(WAIT_TIMEOUT).unwrap();
+        stop.store(true, Ordering::SeqCst);
+        let result = done.recv_timeout(Duration::from_secs(1));
+        // Always release the connection and join, including on the red path.
+        drop(client);
+        let joined = worker.join();
+        assert_eq!(
+            result.ok(),
+            Some(true),
+            "partial request ignored fixture shutdown"
+        );
+        joined.unwrap();
+    }
 }
 
 fn await_screen(

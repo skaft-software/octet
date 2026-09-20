@@ -61,7 +61,10 @@
 //! inode/ctime change counts as a changed generation. An update that is still in
 //! flight (the path no longer resolves, the file is missing or unreadable, the
 //! file is not executable) is a distinct, clean `Blocked` notice, never a
-//! half-executed image.
+//! half-executed image. On Linux an atomic replacement makes the kernel report
+//! the captured startup path with ` (deleted)` appended. Only that exact marker
+//! is mapped back to the captured path; its replacement still passes every
+//! generation, confirmation, probe, and pre-exec check.
 //!
 //! # Descriptor hygiene
 //!
@@ -1264,6 +1267,20 @@ fn process_executable() -> std::io::Result<PathBuf> {
     std::env::current_exe()
 }
 
+/// Linux appends this marker to `/proc/self/exe` after an atomic replacement.
+/// Recover only the already captured launch path, not arbitrary suffixed paths.
+/// Its new generation still goes through the ordinary replacement trust gate.
+#[cfg(any(target_os = "linux", test))]
+fn linux_reload_path(startup: &Path, reported: PathBuf) -> PathBuf {
+    let mut deleted = startup.as_os_str().to_owned();
+    deleted.push(" (deleted)");
+    if reported.as_os_str() == deleted.as_os_str() {
+        startup.to_path_buf()
+    } else {
+        reported
+    }
+}
+
 impl ReexecController {
     /// Capture the running image, the original invocation, and its generation.
     ///
@@ -1305,7 +1322,10 @@ impl ReexecController {
     /// own notice. The observation is the only source of the candidate path: it
     /// is the path the probe, the exec, and the notice use.
     pub(crate) fn observe_generation(&self) -> ExecutableObservation {
-        classify_executable((self.resolver)())
+        let reported = (self.resolver)();
+        #[cfg(target_os = "linux")]
+        let reported = reported.map(|path| linux_reload_path(&self.startup_exe, path));
+        classify_executable(reported)
     }
 
     /// Decide whether `/reload` stays in this process or prepares a re-exec.
@@ -2149,6 +2169,60 @@ mod tests {
             .collect();
         entries.sort();
         entries
+    }
+
+    #[test]
+    fn linux_deleted_image_marker_only_recovers_the_captured_path() {
+        let startup = Path::new("/bin/octet");
+        assert_eq!(
+            linux_reload_path(startup, PathBuf::from("/bin/octet (deleted)")),
+            startup
+        );
+        for reported in [
+            "/bin/other (deleted)",
+            "/bin/octet",
+            "/bin/octet (deleted) extra",
+        ] {
+            assert_eq!(
+                linux_reload_path(startup, PathBuf::from(reported)),
+                Path::new(reported)
+            );
+        }
+        // A literal filename ending in the marker remains a literal filename.
+        let literal = Path::new("/bin/octet (deleted)");
+        assert_eq!(linux_reload_path(literal, literal.to_path_buf()), literal);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_deleted_image_replacement_still_requires_confirmation_before_probe() {
+        let directory = tempfile::tempdir().unwrap();
+        let (probe, seen) = recording_probe(valid_output());
+        let (mut controller, _) = changed_controller(directory.path(), probe);
+        let exe = controller.executable().to_path_buf();
+        let replacement = directory.path().join("replacement");
+        write_binary(&replacement, b"atomically installed replacement");
+        std::fs::rename(replacement, &exe).unwrap();
+        let mut deleted = exe.as_os_str().to_owned();
+        deleted.push(" (deleted)");
+        controller.resolver = resolving(Path::new(&deleted));
+        let observed = controller.observe_generation();
+        assert_eq!(observed, classify_executable(Ok(exe.clone())));
+        let mut hooks = TestHooks::default();
+        let decision = controller
+            .reexec_if_changed(
+                &observed,
+                &LiveSafetyInputs::default(),
+                ReexecOptions::default(),
+                &mut hooks,
+            )
+            .await;
+        assert!(matches!(decision,
+            ReexecDecision::ConfirmationRequired {
+                redirect: ExecutableRedirect::Replaced { path }, ..
+            } if path == exe
+        ));
+        assert!(seen.lock().unwrap().is_empty(), "no probe before consent");
     }
 
     #[test]
