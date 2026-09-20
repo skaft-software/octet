@@ -9,7 +9,8 @@ fn pi_adapter_source_package_manifest_validates_without_model_tools() {
     let source = include_str!("../../../extensions/octet-import-pi/extension.toml");
     let manifest = octet_agent::ExtensionManifest::parse(source).unwrap();
     assert_eq!(manifest.name, "octet-import-pi");
-    assert_eq!(manifest.api_version, "0.4");
+    // Source-only adapters use the canonical 0.3 wire, not the official bundles' 0.4 wire.
+    assert_eq!(manifest.api_version, "0.3");
     assert_eq!(
         manifest.requires_octet.as_deref(),
         Some(concat!("=", env!("CARGO_PKG_VERSION")))
