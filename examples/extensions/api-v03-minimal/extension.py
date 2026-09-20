@@ -56,6 +56,7 @@ REQUIRED_CAPABILITIES = [
     "tool_call",
 ]
 OPTIONAL_CAPABILITIES = [
+    "event_bus",
     "lifecycle_events",
     "migration.adapter.v1",
     "provider_auth",
@@ -69,6 +70,12 @@ ALL_CAPABILITIES = set(REQUIRED_CAPABILITIES + OPTIONAL_CAPABILITIES + ["dynamic
 
 REQUIRED_METHODS = ["$/cancelRequest", "initialize", "shutdown", "tool/call"]
 ALLOWED_OPTIONAL_METHODS = [
+    "bus/declare",
+    "bus/event",
+    "bus/lifecycle",
+    "bus/publish",
+    "bus/subscribe",
+    "bus/unsubscribe",
     "hook/run",
     "migration/detect",
     "migration/import",
@@ -92,6 +99,12 @@ ALL_METHODS = set(
     + ["context/collect", "tools/register", "tools/unregister"]
 )
 METHOD_CAPABILITY = {
+    "bus/declare": "event_bus",
+    "bus/event": "event_bus",
+    "bus/lifecycle": "event_bus",
+    "bus/publish": "event_bus",
+    "bus/subscribe": "event_bus",
+    "bus/unsubscribe": "event_bus",
     "$/cancelRequest": "request_cancellation",
     "context/collect": "lifecycle_events",
     "hook/run": "lifecycle_events",
@@ -120,7 +133,7 @@ SUPPORTED_METHODS = set(REQUIRED_METHODS)
 # Generated API 0.3 marks these methods as notifications.  The remaining
 # generated methods are requests and therefore require an ID at the envelope
 # boundary, even when this example will reject them as unnegotiated.
-NOTIFICATION_METHODS = {"$/cancelRequest", "provider/cancel", "provider/event", "providers/complete"}
+NOTIFICATION_METHODS = {"bus/event", "bus/lifecycle", "$/cancelRequest", "provider/cancel", "provider/event", "providers/complete"}
 REQUEST_METHODS = ALL_METHODS - NOTIFICATION_METHODS
 
 TOOL_DEFINITION = {

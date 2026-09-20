@@ -20,6 +20,7 @@ REQUIRED_CAPABILITIES = [
     "tool_call",
 ]
 OPTIONAL_CAPABILITIES = [
+    "event_bus",
     "lifecycle_events",
     "migration.adapter.v1",
     "provider_auth",
@@ -29,6 +30,12 @@ OPTIONAL_CAPABILITIES = [
 ]
 REQUIRED_METHODS = ["$/cancelRequest", "initialize", "shutdown", "tool/call"]
 OPTIONAL_METHODS = [
+    "bus/declare",
+    "bus/event",
+    "bus/lifecycle",
+    "bus/publish",
+    "bus/subscribe",
+    "bus/unsubscribe",
     "hook/run",
     "migration/detect",
     "migration/import",

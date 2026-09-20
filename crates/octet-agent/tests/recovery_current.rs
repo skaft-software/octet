@@ -312,7 +312,7 @@ impl Drop for WsFallbackFixture {
     }
 }
 
-async fn start_ws_fallback_fixture(http_failures: usize) -> WsFallbackFixture {
+async fn start_ws_fallback_fixture(http_failures: usize, drop_first: bool) -> WsFallbackFixture {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let websocket_requests = Arc::new(AtomicUsize::new(0));
@@ -332,6 +332,7 @@ async fn start_ws_fallback_fixture(http_failures: usize) -> WsFallbackFixture {
                     websocket_count,
                     http_count,
                     http_failures,
+                    drop_first,
                 )
                 .await;
             });
@@ -350,6 +351,7 @@ async fn serve_ws_fallback_connection(
     websocket_requests: Arc<AtomicUsize>,
     http_requests: Arc<AtomicUsize>,
     http_failures: usize,
+    drop_first: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut peek = [0_u8; 4096];
     let count = stream.peek(&mut peek).await?;
@@ -359,7 +361,28 @@ async fn serve_ws_fallback_connection(
         if !matches!(socket.next().await, Some(Ok(WebSocketMessage::Text(_)))) {
             return Ok(());
         }
-        websocket_requests.fetch_add(1, Ordering::SeqCst);
+        let attempt = websocket_requests.fetch_add(1, Ordering::SeqCst);
+        if drop_first {
+            let body = responses_text_turn(
+                "replacement",
+                if attempt == 0 {
+                    "provisional"
+                } else {
+                    "recovered"
+                },
+            );
+            for frame in body.split("\n\n").filter(|frame| !frame.is_empty()) {
+                if attempt == 0 && frame.contains("response.completed") {
+                    break;
+                }
+                socket
+                    .send(WebSocketMessage::Text(
+                        frame.strip_prefix("data: ").unwrap().to_owned().into(),
+                    ))
+                    .await?;
+            }
+            return Ok(());
+        }
         for event in [
             serde_json::json!({
                 "type": "response.created",
@@ -438,8 +461,45 @@ async fn serve_ws_fallback_connection(
 }
 
 #[tokio::test]
+async fn nonstored_websocket_drop_replaces_only_the_host_qualified_attempt() {
+    let fixture = start_ws_fallback_fixture(0, true).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("nonstored.jsonl");
+    let mut agent = build_agent(
+        codex_model(&fixture.base_url, EndpointTransport::WebSocketPreferred),
+        &path,
+        workspace.path(),
+    );
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        agent.complete("recover a nonstored response"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "{:?}",
+        output.reason
+    );
+    let context = serde_json::to_string(&agent.session().context().unwrap()).unwrap();
+    assert!(
+        context.contains("recovered") && !context.contains("provisional"),
+        "{context}"
+    );
+    assert_eq!(
+        fixture.websocket_requests.load(Ordering::SeqCst)
+            + fixture.http_requests.load(Ordering::SeqCst),
+        2
+    );
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    drop(agent);
+    assert!(Session::open(&path).unwrap().has_uncertain_usage());
+}
+
+#[tokio::test]
 async fn current_candidate_retired_websocket_uses_http_fallback_without_stale_reuse() {
-    let fixture = start_ws_fallback_fixture(1).await;
+    let fixture = start_ws_fallback_fixture(1, false).await;
     let workspace = tempfile::tempdir().unwrap();
     let session_path = workspace.path().join("session.jsonl");
     let mut agent = build_agent(

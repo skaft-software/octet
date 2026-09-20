@@ -10530,6 +10530,63 @@ impl Tool for TerminateProbe {
     }
 }
 
+#[tokio::test]
+async fn tool_termination_drains_controls_accepted_at_tool_finished() {
+    for kind in 0..3 {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(Script {
+                bodies: vec![
+                    tool_turn(&[(
+                        "call_done",
+                        "terminate_probe",
+                        serde_json::json!({"stop":true}),
+                    )]),
+                    text_turn("accepted control delivered"),
+                ],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let mut agent = build_agent_with_extra_tool(
+            &server.uri(),
+            workspace.path(),
+            &workspace.path().join("termination.jsonl"),
+            Some(4),
+            TerminateProbe,
+        );
+        let mut run = agent.prompt("finish").await.unwrap();
+        let control = run.control();
+        let mut submitted = false;
+        let mut events = Vec::new();
+        while let Some(event) = run.next().await {
+            if matches!(event, AgentEvent::ToolFinished { .. }) && !submitted {
+                submit_gate_boundary_control(&control, kind).await;
+                submitted = true;
+            }
+            events.push(event);
+        }
+        assert!(submitted);
+        assert!(
+            matches!(assert_single_run_finished(&events), FinishReason::Completed),
+            "{events:?}"
+        );
+        assert!(matches!(
+            control.steer("too late").await,
+            Err(octet_agent::AgentError::RunEnded)
+        ));
+        drop(run);
+        let requests = wire_requests(&server).await;
+        assert_eq!(requests.len(), 2, "control kind {kind}");
+        assert!(requests[1].to_string().contains("final-boundary-sentinel"));
+        assert!(serde_json::to_string(&agent.session().context().unwrap())
+            .unwrap()
+            .contains("final-boundary-sentinel"));
+    }
+}
+
 /// A unanimous batch ends the run with the results already durable; one
 /// sibling that did not ask to stop keeps the batch going.
 #[tokio::test]
@@ -11113,6 +11170,91 @@ impl Tool for DurableMemoProbe {
             handle.replay_step("step/read", || "recorded observation".to_owned())?;
         self.handles.lock().unwrap().push(handle.clone());
         Ok(ToolOutput::new(value))
+    }
+}
+
+#[tokio::test]
+async fn immutable_tool_results_recover_torn_heads_and_branch_checkout_without_reexecution() {
+    for torn_head in [false, true] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(text_turn("recovered"))
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("orphan.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("original request".into())],
+            })))
+            .unwrap();
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::ToolCall(ToolCall {
+                    id: octet_ai::ToolCallId("same-id".into()),
+                    name: "unavailable_side_effect".into(),
+                    arguments_json: "{}".into(),
+                    argument_error: None,
+                })],
+                model: scripted_model(&server.uri()).spec.id.clone(),
+                protocol: Protocol::AnthropicMessages,
+            })))
+            .unwrap();
+        let handle = session.tool_invocation(0).unwrap();
+        handle
+            .set_memo("step", serde_json::json!("already executed"))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(octet_ai::ToolResult {
+                    tool_call_id: octet_ai::ToolCallId("same-id".into()),
+                    content: vec![octet_ai::ToolResultPart::Text(
+                        "immutable original result".into(),
+                    )],
+                    is_error: false,
+                    added_tool_names: None,
+                })],
+            })))
+            .unwrap();
+        if !torn_head {
+            session.checkout(assistant).unwrap();
+        }
+        drop(session);
+        if torn_head {
+            let bytes = std::fs::read_to_string(&path).unwrap();
+            let last_record = bytes.trim_end_matches('\n').rfind('\n').unwrap() + 1;
+            std::fs::write(&path, &bytes[..last_record]).unwrap();
+        }
+        let mut agent = build_agent_from_session(
+            &server.uri(),
+            workspace.path(),
+            Session::open(&path).unwrap(),
+            Some(2),
+        );
+        assert_eq!(
+            agent.complete("new prompt").await.unwrap().text,
+            "recovered"
+        );
+        let requests = wire_requests(&server).await;
+        assert_eq!(requests.len(), 1);
+        let wire = requests[0].to_string();
+        assert!(
+            wire.contains("immutable original result") && wire.contains("new prompt"),
+            "{wire}"
+        );
+        assert!(!wire.contains("unavailable tool"), "{wire}");
+        drop(agent);
+        let reopened = Session::open(&path).unwrap();
+        assert!(serde_json::to_string(&reopened.context().unwrap())
+            .unwrap()
+            .contains("immutable original result"));
+        assert!(handle.get_memo("step").is_err());
     }
 }
 

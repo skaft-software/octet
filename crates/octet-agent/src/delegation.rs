@@ -709,16 +709,50 @@ impl DelegationBinding {
         }
         let root_resource_owner = root_resource_owner.into();
         ExtensionDelegationService::validate_resource_owner(&root_resource_owner)?;
-        self.manager
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .root_resource_owner = Some(root_resource_owner);
+        let mut service_state = ExtensionDelegationState::default();
+        {
+            let mut state = self
+                .manager
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.root_resource_owner = Some(root_resource_owner.clone());
+            // Durable records, not a replay of spawn requests, reconstruct the
+            // inspection/control index. Both the extension principal and the
+            // parent resource-owner fence must match the restored tree.
+            for record in state.records.values() {
+                if record.extension_principal.as_deref() != Some(principal.as_str()) {
+                    continue;
+                }
+                let Some(owner) = record.extension_resource_owner.as_deref() else {
+                    continue;
+                };
+                if ExtensionDelegationService::validate_resource_owner(owner).is_err() {
+                    continue;
+                }
+                let parent_matches = if owner == root_resource_owner {
+                    record.parent_id == ROOT_AGENT_ID
+                } else {
+                    state
+                        .records
+                        .get(&record.parent_id)
+                        .is_some_and(|parent| parent.resource_owner.as_deref() == Some(owner))
+                };
+                if parent_matches {
+                    service_state
+                        .owners
+                        .entry(owner.to_owned())
+                        .or_default()
+                        .owned_agents
+                        .insert(record.identity.id.clone());
+                }
+            }
+        }
         Ok(ExtensionDelegationService {
             manager: Arc::downgrade(&self.manager),
             principal: Arc::from(principal),
             parent_session_id: Arc::from(parent_session_id),
-            state: Arc::new(Mutex::new(ExtensionDelegationState::default())),
+            state: Arc::new(Mutex::new(service_state)),
         })
     }
 }
@@ -1479,9 +1513,12 @@ struct DurableFleet {
     records: Vec<DurableFleetRecord>,
 }
 
-/// Bounded roster file limit. A larger or malformed file fails closed instead
-/// of being partially trusted.
-const MAX_FLEET_ROSTER_BYTES: usize = 256 * 1024;
+/// Fits every admitted fleet (at most 256 agents), including JSON's worst-case
+/// six-byte escaping of both bounded text fields (status and diagnostic), plus
+/// bounded identities, paths and policy metadata. Writers and readers share
+/// this aggregate bound; admitted terminal summaries must not poison a fleet.
+const MAX_FLEET_ROSTER_BYTES: usize =
+    256 * (12 * MAX_PROVENANCE_TEXT_BYTES + 64 * 1024) + 64 * 1024;
 const FLEET_ROSTER_VERSION: u32 = 1;
 const FLEET_ROSTER_FILE: &str = "fleet.json";
 /// Versioned durable claim that fences execution of one session's fleet to a
@@ -1567,6 +1604,13 @@ fn fleet_lease_paths(session_directory: &Path, root_session: &Path) -> (PathBuf,
         session_directory.join(format!("{stem}.lock")),
         session_directory.join(format!("{stem}.lease")),
     )
+}
+
+fn fleet_roster_path(session_directory: &Path, root_session: &Path) -> PathBuf {
+    // Use exactly the lease's owner identity, not the shared workspace directory.
+    fleet_lease_paths(session_directory, root_session)
+        .0
+        .with_extension("json")
 }
 
 fn read_fleet_lease(claim_path: &Path) -> Option<DurableFleetLease> {
@@ -2124,7 +2168,7 @@ impl DelegationManager {
         template: DelegationTemplate,
         root_session: PathBuf,
     ) -> Arc<Self> {
-        let roster_path = Some(config.session_directory.join(FLEET_ROSTER_FILE));
+        let roster_path = Some(fleet_roster_path(&config.session_directory, &root_session));
         let child_slots = config.limits.max_concurrent_agents.saturating_sub(1);
         Arc::new(Self {
             config,
@@ -2533,8 +2577,20 @@ impl DelegationManager {
         let Some(path) = self.roster_path.as_ref() else {
             return;
         };
-        let Ok(bytes) = secure_fs::read_private_file_bounded(path, MAX_FLEET_ROSTER_BYTES) else {
-            return;
+        let bytes = match secure_fs::read_private_file_bounded(path, MAX_FLEET_ROSTER_BYTES) {
+            Ok(bytes) => bytes,
+            // Existing rosters are read-only migration sources. Their root
+            // fence below must match; all future writes use the scoped path.
+            Err(SecureFileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                let legacy = self.config.session_directory.join(FLEET_ROSTER_FILE);
+                let Ok(bytes) =
+                    secure_fs::read_private_file_bounded(&legacy, MAX_FLEET_ROSTER_BYTES)
+                else {
+                    return;
+                };
+                bytes
+            }
+            Err(_) => return,
         };
         let Ok(fleet) = serde_json::from_slice::<DurableFleet>(&bytes) else {
             return;
@@ -4515,7 +4571,22 @@ impl DelegationManager {
             .journal_order
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let status = DelegatedAgentStatus::Detached;
+        let status = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(record) = state.records.get(id) else {
+                return false;
+            };
+            if record.status.is_running() || matches!(record.status, DelegatedAgentStatus::Idle) {
+                DelegatedAgentStatus::Detached
+            } else {
+                // Attachment is independent of the settled task outcome.
+                // Retain its output/error and completion time after teardown.
+                record.status.clone()
+            }
+        };
         let encoded = serde_json::to_vec(&ProvenanceEvent::AgentStatus {
             timestamp_ms: timestamp_ms(),
             agent_id: id,
@@ -4555,8 +4626,10 @@ impl DelegationManager {
                 record.status = status;
                 record.detached = true;
                 record.live_task = false;
-                record.completed_at_ms = Some(u64::try_from(timestamp_ms()).unwrap_or(u64::MAX));
-                record.durable_diagnostic = Some(diagnostic);
+                record
+                    .completed_at_ms
+                    .get_or_insert_with(|| u64::try_from(timestamp_ms()).unwrap_or(u64::MAX));
+                record.durable_diagnostic.get_or_insert(diagnostic);
                 if let Some(commands) = commands {
                     record.detached_commands = Some(commands);
                 }
@@ -6697,7 +6770,7 @@ fn validate_launch_reference(reference: &str) -> Result<(), DelegationError> {
 }
 
 /// Resolves the session-owned launchable handle for one worker from the
-/// session's durable roster (`<session directory>/fleet.json`).
+/// root-scoped durable roster (`<session directory>/fleet-<owner hash>.json`).
 ///
 /// This is the host-side primitive a *separate* process needs in order to open
 /// a session-owned worker as its own interactive session: it needs no live
@@ -6711,28 +6784,75 @@ pub fn resolve_launchable_child_session(
     reference: &str,
 ) -> Result<LaunchableChildSession, DelegationError> {
     validate_launch_reference(reference)?;
-    let path = session_directory.join(FLEET_ROSTER_FILE);
-    let bytes =
-        secure_fs::read_private_file_bounded(&path, MAX_FLEET_ROSTER_BYTES).map_err(|error| {
-            DelegationError::Unlaunchable(format!(
-                "no session-owned delegation roster in this session: {error}"
-            ))
-        })?;
-    let fleet: DurableFleet = serde_json::from_slice(&bytes).map_err(|error| {
-        DelegationError::Unlaunchable(format!("unreadable delegation roster: {error}"))
+    let unavailable = |message: String| DelegationError::Unlaunchable(message);
+    let directory = std::fs::read_dir(session_directory).map_err(|error| {
+        unavailable(format!(
+            "no session-owned delegation roster in this session: {error}"
+        ))
     })?;
-    if fleet.version != FLEET_ROSTER_VERSION {
-        return Err(DelegationError::Unlaunchable(
-            "unsupported delegation roster version".into(),
+    let mut paths = Vec::new();
+    // A workspace contains private team directories as well as per-root files.
+    // Bound inventory work without loading other roots' transcript bodies.
+    for (count, entry) in directory.enumerate() {
+        if count >= 100_000 {
+            return Err(unavailable(
+                "delegation directory inventory limit exceeded".into(),
+            ));
+        }
+        let entry = entry.map_err(|error| unavailable(error.to_string()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let scoped = name
+            .strip_prefix("fleet-")
+            .and_then(|name| name.strip_suffix(".json"))
+            .is_some_and(|digest| {
+                digest.len() == 16 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+            });
+        if scoped || name == FLEET_ROSTER_FILE {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    if paths.is_empty() {
+        return Err(unavailable(
+            "no session-owned delegation roster in this session".into(),
         ));
     }
-    let record = fleet
-        .records
-        .into_iter()
-        .find(|record| {
+    let mut found = None;
+    for path in paths {
+        // Other roots' damaged or obsolete snapshots cannot make a valid
+        // worker unavailable. Invalid files confer no launch authority.
+        let Ok(bytes) = secure_fs::read_private_file_bounded(&path, MAX_FLEET_ROSTER_BYTES) else {
+            continue;
+        };
+        let Ok(fleet) = serde_json::from_slice::<DurableFleet>(&bytes) else {
+            continue;
+        };
+        if fleet.version != FLEET_ROSTER_VERSION {
+            continue;
+        }
+        let scoped_path = fleet_roster_path(session_directory, &fleet.root_session);
+        if path
+            .file_name()
+            .is_some_and(|name| name == FLEET_ROSTER_FILE)
+        {
+            // Never let an old shared snapshot shadow a migrated owner's state.
+            if scoped_path.exists() {
+                continue;
+            }
+        } else if path != scoped_path {
+            continue;
+        }
+        if let Some(record) = fleet.records.into_iter().find(|record| {
             delegated_session_reference(&record.session_path).as_deref() == Some(reference)
-        })
-        .ok_or_else(|| DelegationError::Unlaunchable("unknown worker handle".into()))?;
+        }) {
+            found = Some(record);
+            break;
+        }
+    }
+    let record = found.ok_or_else(|| unavailable("unknown worker handle".into()))?;
     if let DelegatedAgentStatus::AwaitingApproval { .. } = record.status {
         return Err(DelegationError::Unlaunchable(
             "worker is parked at the approval boundary; supplying new authority is required before it can be opened"
@@ -9105,10 +9225,198 @@ mod tests {
             assert!(record.detached_commands.is_some());
         }
         // The parked record is durable: a later owner reads it back.
-        let roster =
-            std::fs::read_to_string(manager.team_directory.join(FLEET_ROSTER_FILE)).unwrap();
+        let roster = std::fs::read_to_string(manager.roster_path.as_ref().unwrap()).unwrap();
         assert!(roster.contains("\"agent_id\":\"agent-1\""));
         assert!(roster.contains("\"state\":\"detached\""));
+    }
+
+    #[test]
+    fn releasing_a_settled_worker_retains_terminal_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let status = DelegatedAgentStatus::Completed {
+            output: "verified result".into(),
+        };
+        let (identity, commands) = insert_test_record(&manager, status.clone());
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .records
+            .get_mut(&identity.id)
+            .unwrap()
+            .completed_at_ms = Some(7);
+        manager.request_shutdown_descendants(ROOT_AGENT_ID);
+        assert!(manager.park_released_worker(&identity.id, Some(commands)));
+        let state = manager.state.lock().unwrap();
+        let record = &state.records[&identity.id];
+        assert_eq!(record.status, status);
+        assert_eq!(record.completed_at_ms, Some(7));
+        assert!(record.detached);
+        assert_eq!(durable_fleet_record(record).status, status);
+    }
+
+    #[tokio::test]
+    async fn different_roots_share_a_directory_without_overwriting_fleets() {
+        let directory = tempfile::tempdir().unwrap();
+        let shared = directory.path().join(".delegation");
+        let first_root = directory.path().join("first.jsonl");
+        let second_root = directory.path().join("second.jsonl");
+        let create = |root: &Path| {
+            DelegationManager::create(
+                DelegationConfig::new(&shared),
+                test_template(directory.path()),
+                root,
+                false,
+            )
+            .unwrap()
+        };
+        let first = create(&first_root);
+        let second = create(&second_root);
+        assert!(first.lease_held() && second.lease_held());
+        assert_ne!(first.roster_path, second.roster_path);
+        for (manager, output) in [(&first, "first"), (&second, "second")] {
+            Session::create(manager.team_directory.join("child.jsonl")).unwrap();
+            insert_test_record(
+                manager,
+                DelegatedAgentStatus::Completed {
+                    output: output.into(),
+                },
+            );
+            manager.persist_durable_fleet_locked(&mut manager.state.lock().unwrap());
+        }
+        std::fs::write(
+            shared.join("fleet-0000000000000000.json"),
+            b"invalid unrelated roster",
+        )
+        .unwrap();
+        for manager in [&first, &second] {
+            let path = manager.state.lock().unwrap().records["agent-1"]
+                .session_path
+                .clone();
+            let reference = delegated_session_reference(&path).unwrap();
+            assert_eq!(
+                resolve_launchable_child_session(&shared, &reference)
+                    .unwrap()
+                    .session_path,
+                path
+            );
+        }
+        drop(first);
+        drop(second);
+        for (root, expected) in [(&first_root, "first"), (&second_root, "second")] {
+            let restored = create(root);
+            assert_eq!(
+                restored.state.lock().unwrap().records["agent-1"].status,
+                DelegatedAgentStatus::Completed {
+                    output: expected.into()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_roster_migrates_only_its_owner_and_never_shadows_new_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let shared = directory.path().join(".delegation");
+        let root = directory.path().join("root.jsonl");
+        let create = |root: &Path| {
+            DelegationManager::create(
+                DelegationConfig::new(&shared),
+                test_template(directory.path()),
+                root,
+                false,
+            )
+            .unwrap()
+        };
+        let first = create(&root);
+        insert_test_record(
+            &first,
+            DelegatedAgentStatus::Completed {
+                output: "legacy".into(),
+            },
+        );
+        first.persist_durable_fleet_locked(&mut first.state.lock().unwrap());
+        let scoped = first.roster_path.clone().unwrap();
+        drop(first);
+        let legacy = shared.join(FLEET_ROSTER_FILE);
+        std::fs::rename(&scoped, &legacy).unwrap();
+        let original = std::fs::read(&legacy).unwrap();
+        let other = create(&directory.path().join("other.jsonl"));
+        assert!(other.state.lock().unwrap().records.is_empty());
+        let migrated = create(&root);
+        {
+            let mut state = migrated.state.lock().unwrap();
+            assert_eq!(
+                state.records["agent-1"].status,
+                DelegatedAgentStatus::Completed {
+                    output: "legacy".into()
+                }
+            );
+            state.records.get_mut("agent-1").unwrap().status = DelegatedAgentStatus::Completed {
+                output: "current".into(),
+            };
+            migrated.persist_durable_fleet_locked(&mut state);
+        }
+        drop(migrated);
+        let reopened = create(&root);
+        assert_eq!(
+            reopened.state.lock().unwrap().records["agent-1"].status,
+            DelegatedAgentStatus::Completed {
+                output: "current".into()
+            }
+        );
+        assert_eq!(std::fs::read(legacy).unwrap(), original);
+    }
+
+    #[test]
+    fn roster_bound_fits_admitted_outputs_and_json_escaping() {
+        let record = DurableFleetRecord {
+            status: DelegatedAgentStatus::Completed {
+                output: "\u{0001}".repeat(MAX_PROVENANCE_TEXT_BYTES),
+            },
+            durable_diagnostic: Some("\u{0001}".repeat(MAX_PROVENANCE_TEXT_BYTES)),
+            ..DurableFleetRecord::default()
+        };
+        let bytes = serde_json::to_vec(&record).unwrap().len();
+        assert!(bytes * 255 + 64 * 1024 <= MAX_FLEET_ROSTER_BYTES);
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        {
+            let mut state = manager.state.lock().unwrap();
+            for i in 1..32 {
+                let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+                let durable = DurableFleetRecord {
+                    agent_id: format!("agent-{i}"),
+                    agent_path: format!("/root/{i}"),
+                    status: DelegatedAgentStatus::Completed {
+                        output: "x".repeat(16 * 1024),
+                    },
+                    ..DurableFleetRecord::default()
+                };
+                state.records.insert(
+                    durable.agent_id.clone(),
+                    DelegationManager::agent_record_from_durable(
+                        durable,
+                        test_effective_tool_policy(),
+                        None,
+                        tx,
+                        Some(rx),
+                    ),
+                );
+            }
+            manager.persist_durable_fleet_locked(&mut state);
+            assert!(state.persistence_error.is_none());
+        }
+        let bytes = std::fs::read(manager.roster_path.as_ref().unwrap()).unwrap();
+        assert!(bytes.len() > 256 * 1024);
+        assert_eq!(
+            serde_json::from_slice::<DurableFleet>(&bytes)
+                .unwrap()
+                .records
+                .len(),
+            31
+        );
     }
 
     #[tokio::test]
@@ -9219,13 +9527,13 @@ mod tests {
 
         // A parked record in the roster is refused before any launch happens.
         {
-            let bytes = std::fs::read(session_directory.join(FLEET_ROSTER_FILE)).unwrap();
+            let bytes = std::fs::read(manager.roster_path.as_ref().unwrap()).unwrap();
             let parked = String::from_utf8(bytes).unwrap().replace(
                 "\"state\":\"detached\"",
                 "\"state\":\"awaiting_approval\",\"reason\":\"approval is unavailable\"",
             );
             secure_fs::write_private_atomic(
-                &session_directory.join(FLEET_ROSTER_FILE),
+                manager.roster_path.as_ref().unwrap(),
                 parked.as_bytes(),
                 MAX_FLEET_ROSTER_BYTES,
             )
@@ -9236,7 +9544,7 @@ mod tests {
 
         // A vanished transcript fails closed rather than fabricating a launch.
         let missing = tempfile::tempdir().unwrap();
-        let bytes = std::fs::read(session_directory.join(FLEET_ROSTER_FILE)).unwrap();
+        let bytes = std::fs::read(manager.roster_path.as_ref().unwrap()).unwrap();
         let body = String::from_utf8(bytes)
             .unwrap()
             .replace("\"state\":\"awaiting_approval\"", "\"state\":\"detached\"");
@@ -10858,6 +11166,25 @@ mod tests {
             .root_binding()
             .extension_service("extension-a", "parent-session", "root-owner")
             .unwrap();
+        assert_eq!(
+            service.list("root-owner").unwrap()["agents"][0]["agent_id"],
+            identity.id
+        );
+        assert_eq!(
+            service
+                .resolve_owned_target(&manager, "root-owner", &identity.id)
+                .unwrap(),
+            identity.id
+        );
+        let foreign = manager
+            .root_binding()
+            .extension_service("extension-b", "parent-session", "root-owner")
+            .unwrap();
+        assert!(foreign.list("root-owner").unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(service.list("foreign-owner").is_err());
         let request = |message: &str| {
             let mut request = test_extension_spawn("research", None, None, message, "spawn-1");
             request.policy = requested_policy.clone();

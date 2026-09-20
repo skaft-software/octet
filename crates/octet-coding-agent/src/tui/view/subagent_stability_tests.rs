@@ -695,7 +695,7 @@ fn live_roster_rows_update_in_place_while_the_reader_reads_history() {
 }
 
 #[test]
-fn uniform_rosters_fold_the_group_into_the_heading_and_drop_the_state_column() {
+fn expanded_rosters_keep_quiet_headings_and_explicit_state_columns() {
     let theme = crate::tui::theme::test_theme();
     let uniform = SubagentActivityView {
         telemetry: vec![
@@ -710,18 +710,15 @@ fn uniform_rosters_fold_the_group_into_the_heading_and_drop_the_state_column() {
         .map(|row| row.to_owned())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        rows[0].contains("running") && rows[0].contains("2"),
-        "{plain}"
-    );
+    assert!(rows[0] == "• Subagents", "{plain}");
     assert!(
         rows.iter()
             .all(|row| !row.trim_start().starts_with("running")),
         "the per-group sub-heading is folded away: {plain}"
     );
     assert!(
-        !plain.contains("state"),
-        "the repeated state column is dropped: {plain}"
+        plain.contains("state"),
+        "expanded rows keep the state column: {plain}"
     );
 
     let mixed = SubagentActivityView {
@@ -734,8 +731,8 @@ fn uniform_rosters_fold_the_group_into_the_heading_and_drop_the_state_column() {
     let rows = roster_rows(&mixed, &theme, 120, false);
     let plain = rows.join("\n");
     assert!(
-        plain.contains("running · 1"),
-        "group lines survive a mixed roster: {plain}"
+        rows.iter().any(|row| row.trim() == "running"),
+        "expanded group headings omit counts: {plain}"
     );
     assert!(plain.contains("completed · 1"), "{plain}");
     assert!(

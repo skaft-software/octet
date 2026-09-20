@@ -15,6 +15,10 @@ const CATALOG_DIRECTORY: &str = ".catalog";
 const CATALOG_FILE: &str = "sessions-v1.sqlite3";
 const CATALOG_SCHEMA_VERSION: i64 = 4;
 const MAX_CATALOG_BYTES: u64 = 64 * 1024 * 1024;
+#[derive(Debug, thiserror::Error)]
+#[error("session catalog is {0} bytes (limit {MAX_CATALOG_BYTES})")]
+struct CatalogSizeLimit(u64);
+
 const STATUS_SUMMARY: i64 = 0;
 const STATUS_UNREADABLE: i64 = 1;
 
@@ -142,7 +146,7 @@ impl SessionCatalog {
         // directory only after the secure path walk has created and validated
         // it, then keep symlink following disabled for the database open.
         let path = directory.canonicalize()?.join(CATALOG_FILE);
-        prepare_private_database_file(&path)?;
+        let file_size = prepare_private_database_file(&path)?;
 
         let connection = Connection::open_with_flags(
             &path,
@@ -163,6 +167,22 @@ impl SessionCatalog {
             );
         }
 
+        if file_size > MAX_CATALOG_BYTES {
+            return Err(CatalogSizeLimit(file_size).into());
+        }
+        // SQLite must refuse an over-capacity transaction before committing
+        // rows/fingerprints that this same catalog would reject on reopening.
+        let page_size: i64 = connection.pragma_query_value(None, "page_size", |row| row.get(0))?;
+        let page_count: i64 =
+            connection.pragma_query_value(None, "page_count", |row| row.get(0))?;
+        let logical_size = (page_count * page_size) as u64;
+        // An old writer's uncheckpointed WAL may exceed the bound while the
+        // main file still fits. SQLite cannot lower max_page_count below that
+        // existing logical size, so rebuild rather than silently raising it.
+        if logical_size > MAX_CATALOG_BYTES {
+            return Err(CatalogSizeLimit(logical_size).into());
+        }
+        connection.pragma_update(None, "max_page_count", MAX_CATALOG_BYTES as i64 / page_size)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
@@ -528,6 +548,9 @@ fn escape_like(query: &str) -> String {
 }
 
 fn catalog_error_is_rebuildable(error: &anyhow::Error) -> bool {
+    if error.is::<CatalogSizeLimit>() {
+        return true;
+    }
     error.chain().any(|cause| {
         let Some(rusqlite::Error::SqliteFailure(error, _)) =
             cause.downcast_ref::<rusqlite::Error>()
@@ -558,7 +581,7 @@ fn reset_catalog_files(workspace_store: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn prepare_private_database_file(path: &Path) -> anyhow::Result<()> {
+fn prepare_private_database_file(path: &Path) -> anyhow::Result<u64> {
     let file = match octet_agent::secure_fs::open_regular_file_for_append(path) {
         Ok(file) => file,
         Err(octet_agent::secure_fs::SecureFileError::Io(error))
@@ -569,16 +592,99 @@ fn prepare_private_database_file(path: &Path) -> anyhow::Result<()> {
         Err(error) => return Err(error.into()),
     };
     let file_size = file.metadata()?.len();
-    if file_size > MAX_CATALOG_BYTES {
-        anyhow::bail!("session catalog is {file_size} bytes (limit {MAX_CATALOG_BYTES})");
-    }
     drop(file);
-    Ok(())
+    Ok(file_size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_index_capacity_failure_is_atomic_and_reopenable() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut catalog = SessionCatalog::open(temp.path()).unwrap();
+        // Exercise SQLite's real page admission with a small test budget.
+        catalog
+            .connection
+            .pragma_update(None, "max_page_count", 64)
+            .unwrap();
+        let revision = catalog.entry_revision().unwrap();
+        let update = IndexedEntryUpdate {
+            session_id: "large".into(),
+            fingerprint: CatalogFingerprint {
+                file_size: 1,
+                modified_ns: 1,
+            },
+            entries: (0..4096)
+                .map(|i| IndexedEntry {
+                    entry_id: i.to_string(),
+                    kind: IndexedEntryKind::User,
+                    text: "x".repeat(512),
+                })
+                .collect(),
+        };
+        assert!(catalog.apply_entries(&[update], &HashSet::new()).is_err());
+        assert_eq!(catalog.entry_revision().unwrap(), revision);
+        assert!(catalog.search_entries("x", 10).unwrap().is_empty());
+        drop(catalog);
+        let catalog = SessionCatalog::open(temp.path()).unwrap();
+        assert_eq!(catalog.entry_revision().unwrap(), revision);
+        assert!(catalog.search_entries("x", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn oversized_uncheckpointed_catalog_is_rebuildable() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = SessionCatalog::open(temp.path()).unwrap();
+        catalog
+            .connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        // Model a supported catalog written before page admission was bounded.
+        catalog
+            .connection
+            .pragma_update(None, "max_page_count", 1_000_000)
+            .unwrap();
+        catalog
+            .connection
+            .execute_batch("CREATE TABLE legacy_padding (value BLOB)")
+            .unwrap();
+        catalog
+            .connection
+            .execute(
+                "INSERT INTO legacy_padding VALUES (zeroblob(?1))",
+                [MAX_CATALOG_BYTES as i64],
+            )
+            .unwrap();
+        assert!(
+            std::fs::metadata(SessionCatalog::path(temp.path()))
+                .unwrap()
+                .len()
+                < MAX_CATALOG_BYTES
+        );
+        let error = match SessionCatalog::open(temp.path()) {
+            Ok(_) => panic!("oversized WAL must not raise the admission ceiling"),
+            Err(error) => error,
+        };
+        assert!(error.is::<CatalogSizeLimit>(), "{error}");
+        assert!(catalog_error_is_rebuildable(&error));
+    }
+
+    #[test]
+    fn oversized_supported_catalog_is_rebuilt() {
+        let temp = tempfile::tempdir().unwrap();
+        drop(SessionCatalog::open(temp.path()).unwrap());
+        let path = SessionCatalog::path(temp.path());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_CATALOG_BYTES + 1)
+            .unwrap();
+        drop(SessionCatalog::open_loaded(temp.path()).unwrap());
+        assert!(std::fs::metadata(path).unwrap().len() <= MAX_CATALOG_BYTES);
+    }
 
     #[test]
     fn non_text_reasoning_rows_are_ignored_for_transcript_rebuild() {

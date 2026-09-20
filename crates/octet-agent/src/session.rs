@@ -264,11 +264,12 @@ fn valid_extension_entry_payload(entry: &ExtensionEntry) -> Option<usize> {
     if !valid_extension_entry_type(&entry.entry_type) {
         return None;
     }
+    let value = entry.to_value();
     let mut nodes = 0usize;
-    if !valid_extension_metadata_value(&entry.data, 0, &mut nodes) {
+    if !valid_extension_metadata_value(&value, 0, &mut nodes) {
         return None;
     }
-    let encoded = serde_json::to_vec(&entry.to_value()).ok()?;
+    let encoded = serde_json::to_vec(&value).ok()?;
     (encoded.len() <= MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES).then_some(encoded.len())
 }
 
@@ -818,32 +819,63 @@ fn write_json_line<T: Serialize>(buf: &mut Vec<u8>, record: &T) -> Result<(), Se
 pub(crate) const MAX_SESSION_FILE_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_SESSION_RECORDS: usize = 1_000_000;
 
-fn result_invocation_scopes<'a>(
-    value: &EntryValue,
-    mut cursor: Option<&'a EntryId>,
-    entries: &'a [Entry],
-    index: &HashMap<EntryId, usize>,
-) -> Vec<InvocationScope> {
-    let EntryValue::Message(Message::User(user)) = value else {
-        return Vec::new();
-    };
-    let results = user
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            UserPart::ToolResult(result) => Some(&result.tool_call_id),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if results.is_empty() {
-        return Vec::new();
-    }
-    while let Some(id) = cursor {
-        let Some(entry) = index.get(id).and_then(|position| entries.get(*position)) else {
-            break;
+/// Immutable-entry index shared by replay and live appends. Parent links and
+/// call IDs are indexed once, rather than rewalking a batch for every result.
+#[derive(Default)]
+struct InvocationEntryIndex {
+    nearest_assistant: Vec<Option<usize>>,
+    calls: HashMap<usize, HashMap<octet_ai::ToolCallId, Vec<usize>>>,
+    results: HashMap<InvocationScope, (usize, usize)>,
+}
+
+impl InvocationEntryIndex {
+    fn result_scopes(
+        &self,
+        entry: &Entry,
+        entries: &[Entry],
+        index: &HashMap<EntryId, usize>,
+    ) -> Vec<(InvocationScope, usize)> {
+        let EntryValue::Message(Message::User(user)) = &entry.value else {
+            return Vec::new();
         };
-        if let EntryValue::Message(Message::Assistant(assistant)) = &entry.value {
-            return assistant
+        let Some(assistant) = entry
+            .parent
+            .as_ref()
+            .and_then(|parent| self.nearest_assistant[index[parent]])
+        else {
+            return Vec::new();
+        };
+        let Some(calls) = self.calls.get(&assistant) else {
+            return Vec::new();
+        };
+        let mut scopes = Vec::new();
+        for (part_index, part) in user.content.iter().enumerate() {
+            if let UserPart::ToolResult(result) = part {
+                if let Some(positions) = calls.get(&result.tool_call_id) {
+                    for position in positions {
+                        if let Ok(scope) = InvocationScope::new(
+                            entries[assistant].id.0.clone(),
+                            position.to_string(),
+                        ) {
+                            scopes.push((scope, part_index));
+                        }
+                    }
+                }
+            }
+        }
+        scopes
+    }
+
+    fn record(
+        &mut self,
+        entry: &Entry,
+        index: &HashMap<EntryId, usize>,
+        results: &[(InvocationScope, usize)],
+    ) {
+        let position = self.nearest_assistant.len();
+        let nearest = if let EntryValue::Message(Message::Assistant(assistant)) = &entry.value {
+            let mut calls: HashMap<_, Vec<usize>> = HashMap::new();
+            for (call_index, call) in assistant
                 .content
                 .iter()
                 .filter_map(|part| match part {
@@ -851,15 +883,28 @@ fn result_invocation_scopes<'a>(
                     _ => None,
                 })
                 .enumerate()
-                .filter(|(_, call)| results.contains(&&call.id))
-                .filter_map(|(position, _)| {
-                    InvocationScope::new(entry.id.0.clone(), position.to_string()).ok()
-                })
-                .collect();
+            {
+                calls.entry(call.id.clone()).or_default().push(call_index);
+            }
+            if !calls.is_empty() {
+                self.calls.insert(position, calls);
+            }
+            Some(position)
+        } else {
+            entry
+                .parent
+                .as_ref()
+                .and_then(|parent| self.nearest_assistant[index[parent]])
+        };
+        self.nearest_assistant.push(nearest);
+        for (scope, part) in results {
+            // Reconciliation may copy an existing immutable result onto a new
+            // branch; the first durable result remains the source of truth.
+            self.results
+                .entry(scope.clone())
+                .or_insert((position, *part));
         }
-        cursor = entry.parent.as_ref();
     }
-    Vec::new()
 }
 
 /// Build DFS entry/exit times for the parent-linked entry forest in linear
@@ -993,6 +1038,7 @@ pub struct Session {
     // same descriptor-bound mutation line and stale-length fence.
     writer: Arc<SessionWriter>,
     invocations: Arc<DurableInvocationStore>,
+    invocation_entries: InvocationEntryIndex,
     entries: Vec<Entry>,
     index: HashMap<EntryId, usize>,
     head: Option<EntryId>,
@@ -1094,6 +1140,7 @@ impl Session {
             file,
             writer,
             invocations,
+            invocation_entries: InvocationEntryIndex::default(),
             deferred_runs,
             entries: Vec::new(),
             index: HashMap::new(),
@@ -1242,6 +1289,7 @@ impl Session {
         let mut usage_records: Vec<UsageRecord> = Vec::new();
         let mut usage_uncertainty_records = Vec::new();
         let restored_invocations = DurableInvocationStore::new();
+        let mut invocation_entries = InvocationEntryIndex::default();
         let restored_deferred_runs = DeferredRunStore::new();
         let mut entry_labels: BTreeMap<EntryId, String> = BTreeMap::new();
 
@@ -1439,14 +1487,11 @@ impl Session {
                         }
                         _ => {}
                     }
-                    for scope in result_invocation_scopes(
-                        &entry.value,
-                        entry.parent.as_ref(),
-                        &entries,
-                        &index,
-                    ) {
-                        restored_invocations.restore_result(&scope);
+                    let settled = invocation_entries.result_scopes(&entry, &entries, &index);
+                    for (scope, _) in &settled {
+                        restored_invocations.restore_result(scope);
                     }
+                    invocation_entries.record(&entry, &index, &settled);
                     index.insert(entry.id.clone(), entries.len());
                     entries.push(*entry);
                 }
@@ -1607,6 +1652,7 @@ impl Session {
             file,
             writer,
             invocations,
+            invocation_entries,
             deferred_runs,
             entries,
             next_id,
@@ -1722,6 +1768,29 @@ impl Session {
         self.invocations
             .partial_output_for_scope(&self.invocation_scope(call_index)?)
             .map_err(|e| SessionError::Limit(e.to_string()))
+    }
+
+    /// Reuse an immutable outcome from any branch without issuing a capability
+    /// to execute the tool again. This also repairs a result whose head write
+    /// was torn after the result entry itself became durable.
+    pub(crate) fn persisted_invocation_result(
+        &self,
+        call_index: usize,
+    ) -> Result<Option<(UserMessage, Option<EntryMetadata>)>, SessionError> {
+        let scope = self.invocation_scope(call_index)?;
+        let Some(&(entry, part)) = self.invocation_entries.results.get(&scope) else {
+            return Ok(None);
+        };
+        let entry = &self.entries[entry];
+        let EntryValue::Message(Message::User(user)) = &entry.value else {
+            unreachable!("result index contains only user tool results");
+        };
+        Ok(Some((
+            UserMessage {
+                content: vec![user.content[part].clone()],
+            },
+            entry.metadata.clone(),
+        )))
     }
 
     fn invocation_scope(&self, call_index: usize) -> Result<InvocationScope, SessionError> {
@@ -1881,14 +1950,17 @@ impl Session {
         // The immutable paired result doubles as the invocation tombstone.
         // Hold the store fence across its synced append so late memos cannot
         // revive state; replay performs the same cleanup from this entry.
-        let settled = result_invocation_scopes(
-            &entry.value,
-            entry.parent.as_ref(),
-            &self.entries,
-            &self.index,
-        );
+        let settled = self
+            .invocation_entries
+            .result_scopes(&entry, &self.entries, &self.index);
+        let scopes = settled
+            .iter()
+            .map(|(scope, _)| scope.clone())
+            .collect::<Vec<_>>();
         self.invocations
-            .commit_results(&settled, || self.writer.persist(&buf))?;
+            .commit_results(&scopes, || self.writer.persist(&buf))?;
+        self.invocation_entries
+            .record(&entry, &self.index, &settled);
 
         self.index.insert(id.clone(), self.entries.len());
         self.entries.push(entry);
@@ -2728,10 +2800,14 @@ impl Session {
 
         self.persist(&buffer)?;
 
+        self.invocation_entries
+            .record(&assistant_entry, &self.index, &[]);
         self.entries.push(assistant_entry);
         self.index
             .insert(assistant_id.clone(), self.entries.len().saturating_sub(1));
         if let Some(sidecar_entry) = sidecar_entry {
+            self.invocation_entries
+                .record(&sidecar_entry, &self.index, &[]);
             let id = sidecar_entry.id.clone();
             self.index.insert(id, self.entries.len());
             self.entries.push(sidecar_entry);
@@ -6251,6 +6327,37 @@ mod tests {
         let id = session
             .append_extension_entry("octet.todo", None, "note", accepted.clone())
             .unwrap();
+        assert_eq!(
+            session.extension_entry(&id, "octet.todo").unwrap().data,
+            accepted
+        );
+    }
+
+    #[test]
+    fn extension_entry_node_budget_includes_the_durable_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path(&dir);
+        let mut session = Session::create(&path).unwrap();
+        let accepted = serde_json::json!(vec![false; 253]);
+        let id = session
+            .append_extension_entry("octet.todo", None, "note", accepted.clone())
+            .unwrap();
+        for count in [254, 255, 256] {
+            assert!(session
+                .append_extension_entry(
+                    "octet.todo",
+                    None,
+                    "note",
+                    serde_json::json!(vec![false; count])
+                )
+                .is_err());
+        }
+        assert_eq!(
+            session.extension_entry(&id, "octet.todo").unwrap().data,
+            accepted
+        );
+        drop(session);
+        let session = Session::open(&path).unwrap();
         assert_eq!(
             session.extension_entry(&id, "octet.todo").unwrap().data,
             accepted

@@ -6232,7 +6232,6 @@ impl Bootstrap {
     /// Idempotent: a launch that already took the fleet plan (or one that has
     /// already been enriched) returns immediately, so a second call can never
     /// duplicate a provider registration or re-run credential refresh.
-    #[cfg(test)]
     pub fn enrich_catalog(&mut self) -> anyhow::Result<()> {
         if self.readiness.is_fleet() {
             return Ok(());

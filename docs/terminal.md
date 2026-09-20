@@ -39,7 +39,8 @@ Startup keeps routine session lookup, replay, and extension-loading progress off
 screen. The composer accepts typing while startup work finishes; the resolved
 welcome card and saved conversation appear at readiness. Setup prompts, errors,
 and cancellation/shutdown diagnostics remain visible. Fresh sessions skip the
-replay worker entirely; resumed sessions still restore their history.
+replay worker entirely; resumed sessions still restore their history. `--models`
+inventory discovery also runs after the shell owns input, not before first paint.
 
 ## Input and active work
 
@@ -57,12 +58,15 @@ dispatch one at a time in FIFO order after normal completion. Ctrl+S instead
 admits live steering at the next model boundary; both kinds of pending input
 share the bounded hint above the composer. Option+Up (Alt+Up) recalls the newest
 local follow-up into an empty composer, preserving attachment/paste chips. It
-never submits or retracts already-admitted steering.
+never submits or retracts already-admitted steering. Local follow-ups remain
+with their session across `/new` and `/resume`; returning restores them for
+editing, not automatic dispatch.
 
 Escape first closes the current panel/slash popup; with the composer focused,
 it interrupts active work and dispatches the oldest queued follow-up **after**
 the run settles. It never submits an unqueued draft. Ctrl+C clears a nonempty
 draft, otherwise aborts active work without dispatch and does nothing while idle.
+A Ctrl+C abort also revokes dispatch previously armed by Escape.
 Failures and close also leave follow-ups unsubmitted. Ctrl+D coordinates close
 from any input surface, settling active work and child-process cleanup first.
 Shift+Enter inserts a newline when the terminal reports enhanced keys.
@@ -107,7 +111,7 @@ run begins a bold, model-adaptive shimmering `Working` row. One trailing
 `Working (<elapsed> • esc to interrupt)` remains even after assistant text until
 the run settles; tool admission replaces it with the tool lifecycle.
 
-While reasoning is active, the fixed two-row status has a shimmering `Thinking`
+While reasoning is active, the fixed two-row status has a quiet, static `Thinking`
 header and the latest explicit ATX or standalone-bold Markdown heading, followed
 by a subdued expansion hint. Ordinary reasoning body text is never promoted to
 a label; without a heading, only the hint appears on the second row.
@@ -119,14 +123,13 @@ a label; without a heading, only the hint appears on the second row.
 
 Expanded reasoning retains its inset without an event-margin dot or synthetic
 first-line bullet. Completed reasoning disappears again when collapsed.
-Reasoning/activity dots keep a solid, fixed-size glyph while their foreground
-pulses with the label sweep: brighter on dark profiles, darker on light ones.
-Assistant-response dots remain steady; active tool/shell dots pulse
-foreground/muted tones without changing size. Completed success is green and
-failed tools red. Activity shimmer is foreground-only: dark profiles use a light
-text baseline with a narrow darker sweep, while light profiles invert it. The
-sweep crosses the dot and the complete label before returning to rest.
-Reduced-motion and no-color paths keep both static.
+Reasoning/activity and assistant-response dots remain steady. Active tool/shell
+dots pulse foreground/muted tones without changing size. Completed success is
+green and failed tools red. Only the word `Working` shimmers; its marker,
+subdued timer, and interrupt hint remain steady. `Thinking`, retry, and
+`Compacting context` labels do not shimmer; elapsed/countdown timers still update.
+The foreground-only sweep crosses the complete word before returning to rest.
+Reduced-motion and no-color paths remain static.
 [Selecting reasoning](providers.md#reasoning).
 
 ## Tool evidence and worker activity
@@ -137,8 +140,10 @@ and collapses it again; this does not alter the executed command or the separate
 output preview.
 
 The transcript's **Subagents** event indents the complete worker roster beneath
-its heading. Rows retain state, input/output tokens, and cost, but omit call
-counts; the underlying telemetry and inspector remain unchanged.
+its quiet **Subagents** heading. Expanded rows retain aligned, subdued column
+headings and explicit worker state, input/output tokens, and cost, but omit call
+counts. Counts appear only for collapsed groups or hidden rows, not expanded
+headings; the underlying telemetry and inspector remain unchanged.
 
 `octet --show-images` (or `show_images = true` in user configuration) opts in to
 bounded inline **tool-result display**, off by default. Validated inline image

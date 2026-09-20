@@ -268,8 +268,9 @@ pub enum StreamProtocolError {
     /// The provider stream died and the route offers no primitive to resume
     /// that exact generation, or the bounded reconnect budget was spent. The
     /// assistant turn is incomplete: the partial output must not be treated as
-    /// a finished response, and octet never replays the request because doing
-    /// so could duplicate already-emitted output or provider work.
+    /// a finished response. The transport never replays the request: a host
+    /// may separately admit a qualified fresh inference under its replacement
+    /// budget and unknown-usage accounting policy.
     #[error(
         "Provider stream was interrupted and could not be resumed (reconnect attempts: {attempts}, visible output: {visible_output}): {detail}; the turn is incomplete"
     )]

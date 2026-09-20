@@ -113,9 +113,9 @@ impl ParityOptions {
     pub fn install_codex_context_env(&self) {
         // One publication path for every frontend: the TUI effort menu calls
         // `CodexContextOverride::publish` with the same values.
-        self.codex_context_override()
-            .unwrap_or(CodexContextOverride::NONE)
-            .publish();
+        if let Some(override_) = self.codex_context_override() {
+            override_.publish();
+        }
     }
 
     /// Apply the `--models` scope: resolve every pattern against the
@@ -125,18 +125,40 @@ impl ParityOptions {
     /// The ordered scope is returned for frontends that cycle models; it is not
     /// persisted, because the shared session ledger has no scope record.
     pub fn resolve_models(&self, config: &mut Config) -> anyhow::Result<Vec<ModelId>> {
+        if self.models.is_none() {
+            return Ok(Vec::new());
+        }
+        let catalog = crate::app::bootstrap::model_catalog_with_offline(config.offline)?;
+        self.resolve_models_in_catalog(config, &catalog)
+    }
+
+    pub(crate) fn resolve_models_in_catalog(
+        &self,
+        config: &mut Config,
+        catalog: &octet_ai::ModelCatalog,
+    ) -> anyhow::Result<Vec<ModelId>> {
         let Some(patterns) = self.models.as_deref() else {
             return Ok(Vec::new());
         };
         let parsed = model_patterns(patterns)?;
-        let catalog = crate::app::bootstrap::model_catalog_with_offline(config.offline)?;
         let available = catalog
             .models()
             .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
             .collect::<Vec<_>>();
         let scope = select_scoped_models(&parsed, &available)?;
+        let resumes_explicit_session = self
+            .session_id
+            .as_deref()
+            .map(|id| {
+                SessionStore::new(&config.session_dir, &config.workspace).session_file_exists(id)
+            })
+            .transpose()?
+            .unwrap_or(false);
         if let Some(selected) = scope.first() {
-            if config.model.is_none() && matches!(config.resume, ResumeSelector::New) {
+            if config.model.is_none()
+                && matches!(config.resume, ResumeSelector::New)
+                && !resumes_explicit_session
+            {
                 config.model = Some(selected.id.clone());
                 config.model_explicit = true;
                 if config.reasoning.is_none() {
@@ -599,6 +621,37 @@ fn fuzzy_match(query: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn codex_context_preserves_inherited_environment_unless_explicitly_overridden() {
+        use crate::codex_context::{CODEX_CONTEXT_ACKNOWLEDGE_ENV, CODEX_CONTEXT_OVERRIDE_ENV};
+        const CHILD: &str = "OCTET_TEST_CODEX_CONTEXT_INHERITANCE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cli::parity::tests::codex_context_preserves_inherited_environment_unless_explicitly_overridden"])
+                .env(CHILD, "1")
+                .env(CODEX_CONTEXT_OVERRIDE_ENV, "872000")
+                .env(CODEX_CONTEXT_ACKNOWLEDGE_ENV, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        ParityOptions::default().install_codex_context_env();
+        assert_eq!(std::env::var(CODEX_CONTEXT_OVERRIDE_ENV).unwrap(), "872000");
+        assert_eq!(std::env::var(CODEX_CONTEXT_ACKNOWLEDGE_ENV).unwrap(), "1");
+        ParityOptions {
+            codex_context_window: Some(200_000),
+            ..Default::default()
+        }
+        .install_codex_context_env();
+        assert_eq!(std::env::var(CODEX_CONTEXT_OVERRIDE_ENV).unwrap(), "200000");
+        assert_eq!(std::env::var(CODEX_CONTEXT_ACKNOWLEDGE_ENV).unwrap(), "0");
+    }
+
     #[test]
     fn expansion_combines_stdin_files_and_first_prompt_then_preserves_sequence() {
         let dir = tempfile::tempdir().unwrap();

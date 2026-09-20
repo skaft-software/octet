@@ -731,8 +731,11 @@ fn run_activity_case(theme: &str, compact: bool, color: &str) {
         "{theme}/{label} redraw is not bounded to the 80ms schedule: {} frames",
         frames.len()
     );
-    if color == "never" {
-        assert!(frames.len() <= 2, "no-color activity should be static");
+    if color == "never" || compact {
+        assert!(
+            frames.len() <= 2,
+            "non-shimmering activity only refreshes its timer"
+        );
     } else {
         assert!(
             frames.len() >= 3,

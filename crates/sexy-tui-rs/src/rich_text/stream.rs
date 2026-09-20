@@ -658,7 +658,13 @@ impl StreamingMarkdown {
                 );
             let candidate_start = if structural_prefix { start } else { 0 };
             let candidate = &self.tail[candidate_start..end];
-            if ordinary_preview_start(candidate, &mut self.stats.preview_classified_bytes)
+            // A rich paragraph cannot become a plain-prose preview. Do not
+            // repeatedly classify its growing source before discovering that.
+            let promotable = self.preview.is_empty()
+                || matches!(self.preview.blocks.as_slice(), [Block::Plain(_)])
+                || structural_prefix;
+            if promotable
+                && ordinary_preview_start(candidate, &mut self.stats.preview_classified_bytes)
                 && !prose_requires_literal_preview(
                     candidate,
                     &mut self.stats.preview_classified_bytes,
@@ -2136,6 +2142,9 @@ mod tests {
                 frame,
                 renderer.render_unstable(stream.preview(), 40).plain_lines()
             );
+            // Layout counters alone miss a full-source classification on
+            // every append. Rich continuations must stay append-local too.
+            assert!(stream.stats().preview_classified_bytes <= stream.raw_bytes().len() as u64 * 4);
             let stats = cache.stats();
             assert_eq!(stats.rich_prefix_layouts, 1);
             assert_eq!(stats.full_tail_layouts, 1);

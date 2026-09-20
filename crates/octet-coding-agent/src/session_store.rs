@@ -660,6 +660,16 @@ enum SummaryRecord {
     DeferredRun {
         record: DeferredRunRecord,
     },
+    EntryLabel {
+        entry_id: EntryId,
+        label: String,
+    },
+    ToolInvocation {
+        #[serde(rename = "scope")]
+        _scope: octet_agent::tools::durability::InvocationScope,
+        #[serde(rename = "record")]
+        _record: octet_agent::tools::durability::InvocationRecord,
+    },
 }
 
 /// Derive the oldest user title on the active branch, if one exists.
@@ -1380,6 +1390,17 @@ fn summarize_session_with_usage(
                     usage_uncertainty_records.push(record);
                 }
             }
+            SummaryRecord::EntryLabel { entry_id, label } => {
+                if !entries.contains_key(&entry_id)
+                    || label.len() > octet_agent::session::MAX_ENTRY_LABEL_BYTES
+                    || label.chars().any(char::is_control)
+                {
+                    return Err(corrupt_summary(line_no, "invalid entry label"));
+                }
+            }
+            // Invocation memos/checkpoints are auxiliary, not transcript,
+            // model selection, or usage. Their wire shape is still decoded.
+            SummaryRecord::ToolInvocation { .. } => {}
             SummaryRecord::DeferredRun { record } => {
                 // Replaceable state, not model-visible context: the record still
                 // has to be valid and monotonic, and the last one per operation
@@ -3940,6 +3961,45 @@ mod tests {
         });
         assert_eq!(scans.get(), 0);
         assert_eq!(listed[0].title, "second branch");
+    }
+
+    #[test]
+    fn cold_catalog_accepts_labels_and_tool_invocation_records() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("with-metadata.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let prompt = session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("retained title".into())],
+            })))
+            .unwrap();
+        session.set_entry_label(&prompt, "checkpoint").unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(
+                octet_ai::AssistantMessage {
+                    model: ModelId("model".into()),
+                    protocol: Protocol::OpenAiResponses,
+                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        id: octet_ai::ToolCallId("call".into()),
+                        name: "test".into(),
+                        arguments_json: "{}".into(),
+                        argument_error: None,
+                    })],
+                },
+            )))
+            .unwrap();
+        session
+            .tool_invocation(0)
+            .unwrap()
+            .set_memo("progress", serde_json::json!(true))
+            .unwrap();
+        drop(session);
+        assert!(Session::open_read_only(&path).is_ok());
+        assert!(summarize_catalog_session(&path).is_ok());
+        assert_eq!(store.list()[0].title, "retained title");
     }
 
     #[test]

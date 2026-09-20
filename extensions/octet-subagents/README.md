@@ -100,7 +100,8 @@ scrollable read-only transcript, and Escape or Left to return. The transcript's
 complete worker roster is indented beneath **Subagents** and shows state, token
 usage, and cost without per-worker call counts. Tool-call telemetry remains in
 the inspector; prompts, tool arguments/results, and running model prose stay
-out of the roster.
+out of the roster. Expanded headings omit counts; counts describe only collapsed
+groups or hidden rows.
 Serve inspection is also owner-bound and read-only; inspection cannot send a
 prompt. `/subagents inspect <name-or-id>` provides cached detail and
 `/extensions inspect agent-session:<digest>` is the explicit-reference fallback.
@@ -131,7 +132,11 @@ the extension treats retained records as **detached, not dead**: summaries,
 errors, usage, and the sibling roster remain recoverable. An owner-bound
 reattach pass restores available workers as idle until an explicit follow-up;
 it never invents a new task. A worker parked at the approval boundary is
-rendered as `awaiting approval` and cannot be given unattended work.
+rendered as `awaiting approval` and cannot be given unattended work. Host rebuilds
+restore extension ownership from the persisted principal and resource-owner
+fences. Each root session has a separate roster alongside its lease, even when
+sessions share a delegation directory. Releasing an owner retains settled
+output/error, terminal status, and completion time independently of attachment.
 
 ## Reference
 

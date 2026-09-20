@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 || "$1" != "--confirm REMOVE-OCTET" ]]; then
+if [[ $# -ne 2 || "${1-}" != "--confirm" || "${2-}" != "REMOVE-OCTET" ]]; then
   echo "usage: $0 --confirm REMOVE-OCTET" >&2
   echo "This removes only the installed Octet Serve app; shared credentials remain managed by Octet Serve Client." >&2
   exit 77

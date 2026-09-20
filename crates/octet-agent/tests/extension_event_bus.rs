@@ -25,6 +25,7 @@ command = "python3"
 args = ["peer.py"]
 [contributes]
 tools = ["probe"]
+hooks = ["session_start", "session_end"]
 "#
         ),
     )
@@ -33,6 +34,7 @@ tools = ["probe"]
         directory.path().join("peer.py"),
         include_str!("support/extension_bus_peer.py")
             .replace("__EXTENSION_NAME__", name)
+            .replace("LIFECYCLE_HOOKS = False", "LIFECYCLE_HOOKS = True")
             .replace(
                 "__SDK_PATH__",
                 &format!("{}/../../sdk/python", env!("CARGO_MANIFEST_DIR")),
@@ -82,6 +84,35 @@ async fn events(process: &ExtensionProcess, count: usize) -> Value {
         .unwrap()
         .structured_content
         .unwrap()
+}
+
+#[tokio::test]
+async fn replacement_start_hook_can_redeclare_before_old_process_shutdown() {
+    let bus = Arc::new(ExtensionEventBus::default());
+    let (_directory, alpha) = start("alpha", Some(bus)).await;
+    alpha
+        .start_session_hook_binding("reload-owner")
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&alpha, "sdk/state", json!({})).await["declared"],
+        json!(["bus.alpha.status"])
+    );
+    alpha.reload().await.unwrap();
+    // reload awaits the replacement start hook before shutting the old process
+    // down. The declaration must already have succeeded at that boundary.
+    assert_eq!(
+        call(&alpha, "sdk/state", json!({})).await["declared"],
+        json!(["bus.alpha.status"])
+    );
+    let published = call(
+        &alpha,
+        "sdk/publish",
+        json!({"payload":{"summary":"reloaded"}}),
+    )
+    .await;
+    assert!(published.get("error").is_none(), "{published}");
+    assert!(alpha.shutdown().await);
 }
 
 #[tokio::test]

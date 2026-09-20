@@ -839,7 +839,11 @@ fn activity_status_line(
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> String {
-    let label = activity_shimmer_label(theme, reasoning, label, shimmer_frame, rainbow_strength);
+    let label = if label == "Working" {
+        activity_shimmer_label(theme, reasoning, label, shimmer_frame, rainbow_strength)
+    } else {
+        theme.model_fg(reasoning.model_lab, label)
+    };
     let Some(started_at) = reasoning.activity_started_at else {
         return label;
     };
@@ -1122,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_reasoning_uses_shimmering_thinking_and_moves_heading_to_detail() {
+    fn collapsed_reasoning_uses_static_thinking_and_moves_heading_to_detail() {
         let theme = theme::test_theme();
         let reasoning = AssistantBlock::streaming_reasoning("## Verifying `implementation`")
             .with_model_lab(Some(ModelLab::Alibaba));
@@ -1134,9 +1138,9 @@ mod tests {
             strip_terminal_sequences(&first[1]),
             "└ Verifying implementation (ctrl+o to expand)"
         );
-        assert!(first[0].contains("\x1b[1m"), "{first:?}");
+        assert!(!first[0].contains("\x1b[1m"), "{first:?}");
         assert!(!first[1].contains("\x1b[3m"), "{first:?}");
-        assert_ne!(first[0], next[0], "the Thinking shimmer must move");
+        assert_eq!(first[0], next[0], "Thinking must remain static");
         assert!(first[0].contains("38;2;"), "{first:?}");
         assert!(
             !first[0].contains(";48;2;"),
@@ -1448,7 +1452,7 @@ mod tests {
                     Some(ModelLab::Google),
                     None,
                 ] {
-                    for label in ["Working", "Thinking", "Compacting context"] {
+                    for label in ["Working"] {
                         let reasoning = activity_reasoning(lab, label);
                         let rest = collapsed_reasoning_lines_at(&theme, &reasoning, 0, 0);
                         let resting = rendered_foregrounds(&rest[0])[0];
@@ -2640,7 +2644,7 @@ mod tests {
         assert_eq!(live.len(), 2, "{live:?}");
         assert_eq!(strip_terminal_sequences(&live[0]), "Thinking");
         assert_eq!(strip_terminal_sequences(&live[1]), "└ (ctrl+o to expand)");
-        assert!(live[0].contains("\x1b[1m"), "{live:?}");
+        assert!(!live[0].contains("\x1b[1m"), "{live:?}");
         assert!(!live[1].contains("\x1b[3m"), "{live:?}");
 
         reasoning.reasoning_elapsed = Some(Duration::from_millis(13_700));

@@ -1589,11 +1589,8 @@ pub(super) fn subagent_activity_render_rows(
         rows.retain(|row| row.group == filter);
     }
     sort_subagent_rows(&mut rows, view.sort);
-    // One group that covers every rendered row already names its state in the
-    // group line, and every row then repeats that same word in its state cell.
-    // Fold the count into the event heading, drop the group line, and drop the
-    // state column. A collapsed terminal group is excluded because it renders
-    // one summary row that carries both the state and the count itself.
+    // A uniform roster needs no group heading; each visible worker still
+    // carries its own state. Counts belong only to collapsed/hidden summaries.
     let uniform_group = (!rows.is_empty())
         .then(|| {
             SubagentStateGroup::ORDER
@@ -1606,17 +1603,7 @@ pub(super) fn subagent_activity_render_rows(
     if let Some(scope) = subagent_activity_scope(view) {
         heading.push_str(&format!("{separator}{scope}"));
     }
-    if let Some(group) = uniform_group {
-        heading.push_str(&format!(
-            "{separator}{}{separator}{}",
-            group.declared(),
-            rows.len()
-        ));
-    }
-    let mut lines = vec![fit_line(
-        &theme.bold(&theme.fg("foreground", &heading)),
-        width,
-    )];
+    let mut lines = vec![fit_line(&theme.fg("foreground", &heading), width)];
     if rows.is_empty() {
         if let Some(reason) = view.failure_reason.as_deref() {
             // A spawn that failed before it produced any worker is the whole
@@ -1636,8 +1623,7 @@ pub(super) fn subagent_activity_render_rows(
     }
 
     let compact = width < 46;
-    let include_state = uniform_group.is_none();
-    let (columns, widths) = subagent_columns(&rows, width, unicode, include_state);
+    let (columns, widths) = subagent_columns(&rows, width, unicode, true);
     // The grid is only usable while every mandatory column fits. Otherwise the
     // compact per-worker line keeps the model readable instead of cutting the
     // identifier at the terminal edge.
@@ -1684,15 +1670,11 @@ pub(super) fn subagent_activity_render_rows(
             continue;
         }
 
-        // A uniform roster already carries its state (and count) in the event
-        // heading, so the per-group line and its indentation level are skipped.
+        // Group headings are quiet labels, not redundant counts of visible rows.
         if uniform_group != Some(group) {
-            let heading = format!("{}{separator}{}", group.declared(), members.len());
+            let heading = group.declared();
             lines.push(fit_line(
-                &theme.bold(&subdued_text(
-                    theme,
-                    &format!("{ACTIVITY_DETAIL_INDENT}{heading}"),
-                )),
+                &subdued_text(theme, &format!("{ACTIVITY_DETAIL_INDENT}{heading}")),
                 width,
             ));
             remaining = remaining.saturating_sub(1);
@@ -1735,13 +1717,7 @@ pub(super) fn subagent_activity_render_rows(
                     theme, elbow, &columns, &widths, &cells, width,
                 ));
             } else {
-                lines.extend(subagent_compact_line(
-                    theme,
-                    row,
-                    elbow,
-                    width,
-                    include_state,
-                ));
+                lines.extend(subagent_compact_line(theme, row, elbow, width, true));
             }
             remaining = remaining.saturating_sub(1);
             if let Some(reason) = row.reason.as_deref() {
@@ -1925,7 +1901,7 @@ pub(crate) struct ShellState {
     event_dot_visible: bool,
     /// Current frame in the optional theme-owned animated spinner.
     event_spinner_frame: usize,
-    /// Independent frame for the model-adaptive `Working`/`Thinking` text
+    /// Independent frame for the model-adaptive `Working` text
     /// shimmer. Keeping it separate cannot change tool-dot cadence.
     status_shimmer_frame: usize,
     /// Small set of transcript indices that can currently own the shared
@@ -1951,6 +1927,10 @@ pub(crate) struct ShellState {
     /// Enter-submitted follow-ups remain local and editable until run settlement.
     follow_up_queue: std::collections::VecDeque<ComposedInput>,
     follow_up_ready: bool,
+    /// Local drafts stay with their session across /new, /resume and extension switches.
+    follow_up_session: Option<PathBuf>,
+    parked_follow_ups:
+        std::collections::HashMap<PathBuf, std::collections::VecDeque<ComposedInput>>,
     /// Successful prompts retained only by this interactive shell for recall.
     prompt_history: Vec<PromptHistoryEntry>,
     /// Active sent-prompt traversal and the draft captured before it began.
@@ -2903,7 +2883,11 @@ impl ShellState {
         }
         let index = self.transcript.len();
         let model_lab = self.executing_model_lab();
-        let activity_started_at = self.run.current().map(|run| run.started_at());
+        let activity_started_at = self
+            .run
+            .current()
+            .map(|run| run.started_at())
+            .or_else(|| (label == Some("Compacting context")).then(Instant::now));
         self.event_dot_visible = true;
         self.event_spinner_frame = 0;
         self.status_shimmer_frame = 0;
@@ -3198,14 +3182,7 @@ impl ShellState {
     }
 
     fn status_shimmer_active(&self, reasoning: &AssistantBlock) -> bool {
-        reasoning.is_working_activity()
-            || (!reasoning.finished
-                && reasoning.text.is_empty()
-                && reasoning.reasoning_heading.as_deref() == Some("Compacting context"))
-            || (!reasoning.text.is_empty()
-                && !self.verbose_tools
-                && !reasoning.finished
-                && !reasoning.reasoning_expanded)
+        reasoning.is_working_activity() && reasoning.retry_activity.is_none()
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {
@@ -7182,6 +7159,20 @@ impl InteractiveShell {
             .map(|model| model.0.clone());
         let session_cost = session.total_cost_microdollars();
         let mut state = self.state.borrow_mut();
+        if state.follow_up_session.as_deref() != Some(session.path()) {
+            let queued = std::mem::take(&mut state.follow_up_queue);
+            if let Some(previous) = state.follow_up_session.replace(session.path().to_owned()) {
+                if !queued.is_empty() {
+                    state.parked_follow_ups.insert(previous, queued);
+                }
+            }
+            state.follow_up_queue = state
+                .parked_follow_ups
+                .remove(session.path())
+                .unwrap_or_default();
+            // Settlement in the old session cannot authorize a send in the new one.
+            state.follow_up_ready = false;
+        }
         state.deferred_session_history = None;
         state.latest_compaction_summary =
             session

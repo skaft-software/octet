@@ -2782,9 +2782,9 @@ where
                         }
                     }
                     InputAction::Abort | InputAction::DispatchQueued => {
-                        // A second Escape during settlement must not turn a
-                        // plain Ctrl+C cancellation into an implicit send.
-                        if !aborting {
+                        // Ctrl+C always revokes an earlier Escape dispatch;
+                        // Escape cannot arm a cancellation already requested by Ctrl+C.
+                        if matches!(action, InputAction::Abort) || !aborting {
                             dispatch_queued = matches!(action, InputAction::DispatchQueued);
                         }
                         control.abort();
@@ -4989,6 +4989,26 @@ where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let _diagnostics = crate::output::defer_tui_diagnostics();
+    if let Reconfig::Model(id) = &reconfig {
+        if app.catalog.resolve(id).is_err() {
+            app = run_blocking_lifecycle(shell, input, "loading models…", move || {
+                let notice = app.enrich_catalog_for_surface();
+                Ok((app, notice))
+            })
+            .await
+            .map(|(app, notice)| {
+                if let Some(notice) = notice {
+                    shell.notice(notice);
+                }
+                app
+            })?;
+            shell.set_model_cycle(app.model_cycle());
+        }
+        if let Err(error) = app.catalog.resolve(id) {
+            shell.error(error.to_string());
+            return Ok(app);
+        }
+    }
     app.executable_extensions
         .revoke_terminal_grant_for_shell(shell, "the model or foreground session is changing");
     let had_fast = app.agent.service_tier().is_some();
@@ -8298,13 +8318,13 @@ fn startup_update_task(
 /// re-execs into it. `exec` returns only on failure, so this wrapper rebuilds
 /// the TUI and extension children from the durable session head and keeps the
 /// current process usable.
-pub async fn run_interactive_with_model_scope(
+pub(crate) async fn run_interactive_with_options(
     config: Config,
-    model_scope_patterns: Option<String>,
+    mut options: crate::cli::parity::ParityOptions,
 ) -> anyhow::Result<()> {
     let mut config = config;
     loop {
-        match run_interactive_once(config.clone(), model_scope_patterns.clone()).await? {
+        match run_interactive_once(config.clone(), options.clone()).await? {
             InteractiveExit::Finished => return Ok(()),
             InteractiveExit::Reexec(plan) => {
                 let session_id = plan.session_id().to_owned();
@@ -8325,6 +8345,8 @@ pub async fn run_interactive_with_model_scope(
                 crate::output::stderr_line(notice);
                 config.initial_prompt = None;
                 config.resume = crate::config::ResumeSelector::Resume(Some(session_id));
+                options.session_id = None;
+                options.name = None;
             }
         }
     }
@@ -8333,8 +8355,9 @@ pub async fn run_interactive_with_model_scope(
 /// One interactive process lifetime. Returns after the terminal was left.
 async fn run_interactive_once(
     config: Config,
-    model_scope_patterns: Option<String>,
+    options: crate::cli::parity::ParityOptions,
 ) -> anyhow::Result<InteractiveExit> {
+    let model_scope_patterns = options.models.clone();
     let mut config = config;
     let initial_prompt = config.initial_prompt.clone();
     let theme = load_theme(&config);
@@ -8371,7 +8394,15 @@ async fn run_interactive_once(
         &mut shell,
         &mut input,
         STARTUP_MODELS_OPERATION,
-        move || crate::app::bootstrap::bootstrap(config),
+        move || {
+            let mut boot = crate::app::bootstrap::bootstrap(config)?;
+            if options.models.is_some() {
+                boot.enrich_catalog()?;
+                options.resolve_models_in_catalog(&mut boot.config, &boot.catalog)?;
+            }
+            options.select_session(&mut boot.config)?;
+            Ok(boot)
+        },
     )
     .await?;
     if shell.close_requested() {
@@ -11097,6 +11128,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn model_scope_does_not_override_an_existing_explicit_session() {
+        for existing in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut config = terminal_theme_test_config(directory.path().to_owned());
+            config.session_dir = directory.path().join("sessions");
+            let store =
+                crate::session_store::SessionStore::new(&config.session_dir, &config.workspace);
+            store.write_workspace_marker().unwrap();
+            if existing {
+                let mut session = Session::create(store.dir().join("chosen.jsonl")).unwrap();
+                session
+                    .append(EntryValue::Config {
+                        model: Some("saved-model".into()),
+                        reasoning: None,
+                        reasoning_mode: None,
+                    })
+                    .unwrap();
+            }
+            let options = crate::cli::parity::ParityOptions {
+                session_id: Some("chosen".into()),
+                models: Some("gpt-5.4-mini-responses:high".into()),
+                ..Default::default()
+            };
+            options
+                .resolve_models_in_catalog(&mut config, &octet_ai::ModelCatalog::builtin().unwrap())
+                .unwrap();
+            assert_eq!(config.model.is_none(), existing);
+            assert_eq!(config.model_explicit, !existing);
+            options.select_session(&mut config).unwrap();
+            assert!(
+                matches!(config.resume, crate::config::ResumeSelector::Resume(Some(ref id)) if id == "chosen")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_model_selection_enriches_and_unknown_models_preserve_the_app() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let target = ModelId("gpt-5.4-mini-responses".into());
+        let target_model = app.catalog.resolve(&target).unwrap();
+        app.catalog
+            .remove_model_if_endpoint(&target, &target_model.endpoint.id);
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending();
+        let mut app = transition(app, &mut shell, &mut input, Reconfig::Model(target.clone()))
+            .await
+            .unwrap();
+        assert!(app.readiness.is_fleet());
+        assert_eq!(app.model.spec.id, target);
+        let path = app.agent.session().path().to_owned();
+        app = transition(
+            app,
+            &mut shell,
+            &mut input,
+            Reconfig::Model(ModelId("nonexistent/route".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.model.spec.id, target);
+        assert_eq!(app.agent.session().path(), path);
+        assert!(shell.debug_error().unwrap().contains("Unknown model"));
+    }
+
     fn fast_test_app(model: Model) -> (tempfile::TempDir, App) {
         let (directory, mut app) = crate::compaction::tests::app_for_estimate();
         app.catalog
@@ -11637,20 +11733,26 @@ mod tests {
         update_status(&mut shell, &app);
         let identity = shell.selected_identity();
         let mut input = futures_util::stream::pending();
-        let error = transition(
+        let app = transition(
             app,
             &mut shell,
             &mut input,
             Reconfig::Model(ModelId("missing-release-test-model".into())),
         )
         .await
-        .err()
-        .expect("an unresolved model must remain an error");
+        .expect("an unresolved model must preserve the usable app");
+        let error = shell
+            .debug_error()
+            .expect("a diagnostic must remain visible");
         assert!(
             error.to_string().contains("missing-release-test-model"),
             "{error}"
         );
         assert_eq!(shell.selected_identity(), identity);
+        assert_eq!(
+            app.config.model.as_ref().map(|id| id.0.as_str()),
+            Some(identity.0.as_str())
+        );
         assert!(shell.debug_snapshot().is_empty());
     }
 
@@ -12603,14 +12705,16 @@ mod tests {
     #[tokio::test]
     async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement() {
         use crossterm::event::KeyEvent;
-        for (cancel, dispatch, quit_expected) in [
+        for (cancel, dispatch, quit_expected, escape_first) in [
             (
                 Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
                 true,
                 false,
+                false,
             ),
             (
                 Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                false,
                 false,
                 false,
             ),
@@ -12618,8 +12722,15 @@ mod tests {
                 Some(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
                 false,
                 true,
+                false,
             ),
-            (None, true, false),
+            (
+                Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                false,
+                false,
+                true,
+            ),
+            (None, true, false, false),
         ] {
             let (_server, _workspace, mut agent) =
                 scripted_agent_with_delay(Duration::from_millis(10)).await;
@@ -12633,6 +12744,9 @@ mod tests {
                 Event::Paste(" edited".into()),
                 Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             ];
+            if escape_first {
+                events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            }
             if let Some(cancel) = cancel {
                 events.push(Event::Key(cancel));
                 // Neither repeated Escape nor a second fresh Escape can arm a

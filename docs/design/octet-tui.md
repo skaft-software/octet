@@ -51,7 +51,10 @@ uses the silent lifecycle input owner; a fresh launch resolves configuration
 inline without cloning the full config or dispatching a replay worker. The
 composer remains editable until the atomic ready frame installs history and
 identity. Setup/selection panels and actionable errors keep their normal owners;
-quiet startup does not suppress cancellation or shutdown diagnostics.
+quiet startup does not suppress cancellation or shutdown diagnostics. Scoped
+`--models` discovery and explicit session selection also use that input owner.
+An existing `--session-id` keeps its saved model unless a model is explicitly
+selected; scope order alone does not overwrite it.
 
 The working directory appears only in the footer, not again in the splash.
 The splash keeps its byte-aligned spacing, model identity, permissions, and
@@ -189,7 +192,10 @@ Escape or Left returns to the composer.
 Generic presentation snapshots do not create persistent chrome. The first-party
 `octet-subagents` observation surface is the bounded exception: while an owning
 run has workers, the host renders its complete owner-fenced `subagent` roster in
-a persistent transcript event. Compact worker rows retain task name, lifecycle,
+a persistent transcript event. Its quiet expanded title is `Subagents`, with
+aligned subdued column headings and explicit state on every worker row. Counts
+are reserved for collapsed groups and hidden rows. Compact worker rows retain
+task name, lifecycle,
 tokens, and cost; transient child-tool names stay in the inspector
 rather than shifting those columns on each tool start/finish. The roster's active
 dot is steady. Full host telemetry remains current, but hidden phase/elapsed
@@ -279,8 +285,8 @@ arbitrary text cannot alter the decision set.
 ## Reasoning presentation
 
 Every accepted run opens a `Working` row immediately. After the provider emits
-an actual reasoning delta, collapsed reasoning uses a fixed bold `Thinking`
-header with the same model-adaptive shimmer as `Working`. The aligned detail row
+an actual reasoning delta, collapsed reasoning uses a fixed, quiet `Thinking`
+header without shimmer. The aligned detail row
 contains the latest semantic ATX or standalone-bold heading followed by a plain,
 subdued `Ctrl+O` hint; when no heading exists it contains only the hint. Ordinary
 body prose is never inferred as a label, and provider text is sanitized before
@@ -289,9 +295,10 @@ independent of semantic-event frequency. Late frames select the current phase
 without replaying missed frames; coalescing has a fixed deadline so incoming
 notifications cannot postpone painting indefinitely. Animation changes style
 rather than text or geometry and invalidates only the active status block.
-Each sweep spans the label's terminal-cell width plus its marker and trailing
-highlight clearance, at one cell per 80 ms of active time. Long labels such as
-`Compacting context` therefore receive a complete sweep; grapheme clusters stay
+Only the word `Working` shimmers, at one cell per 80 ms of active time; its
+marker, elapsed time, and interrupt hint retain steady styling. `Thinking`,
+retry, provider readiness, and `Compacting context` labels stay static while
+independent elapsed/countdown timers still update. Grapheme clusters stay
 intact and reduced-motion/no-color rendering remains static.
 Before any model delta, an opted-in endpoint readiness update may temporarily
 replace `Working` with `Provider queued`, `Loading Provider`, or `Provider
@@ -328,9 +335,9 @@ raw provider envelopes or headers.
 Tool calls expose deterministic intent and lifecycle rows. Event-margin dots
 identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning
-and activity dots keep a solid, fixed-size glyph but pulse in foreground contrast
-when the label sweep crosses them: brighter on dark profiles, darker on light
-ones, then back to rest. Reduced-motion and no-color paths keep them static.
+and activity dots keep a solid, fixed-size, steady glyph. Only the `Working`
+label carries the foreground shimmer; reduced-motion and no-color paths keep
+that label static too.
 Assistant-response dots remain steady; active tool and shell dots may pulse
 through foreground and muted tones rather than changing size.
 Successful completed event dots use green,
@@ -438,6 +445,8 @@ bounded actionable reason.
 
 - Enter queues a local, typed follow-up. Normal completion arms exactly one FIFO
   dispatch through the idle prompt owner after the old Run and children settle.
+  Session switches park local follow-ups by session path. Returning restores the
+  drafts without carrying over dispatch authorization.
 - Ctrl+S admits live steering to RunControl at the next model boundary. Its
   pending display is removed only by the durable delivery acknowledgement;
   undelivered steering is restored on settlement.
@@ -449,7 +458,8 @@ bounded actionable reason.
   aborted settlement; it never sends the unqueued draft. Repeated Escape while
   settling cannot arm dispatch after a plain cancellation.
 - Ctrl+C first clears a nonempty draft; with an empty draft it interrupts without
-  dispatch and is ignored while idle. Failure, max-turn limits, stream loss, and
+  dispatch and is ignored while idle. An abort revokes any earlier Escape dispatch.
+  Failure, max-turn limits, stream loss, and
   close do not automatically retry queued prompts; local entries remain editable.
 - Auto-dispatched prompts use normal composition and persistence, but are never
   reinterpreted as delayed `!` shell commands. A failed submission restores its

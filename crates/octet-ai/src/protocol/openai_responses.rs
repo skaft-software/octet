@@ -368,38 +368,40 @@ fn map_responses_tools(
 fn map_responses_lite_tools(
     model: &crate::catalog::Model,
     tools: &[ToolDef],
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, AiError> {
     if tools.is_empty() || !model.spec.capabilities.tools {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let tools = tools
         .iter()
         .map(|tool| {
-            serde_json::json!({
+            let (parameters, strict) =
+                crate::constrained_sampling::function_tool_parameters(tool, false)?;
+            Ok(serde_json::json!({
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
-                "strict": false,
-                "parameters": tool.parameters,
-            })
+                "strict": strict,
+                "parameters": parameters,
+            }))
         })
-        .collect::<Vec<_>>();
-    vec![serde_json::json!({
+        .collect::<Result<Vec<_>, AiError>>()?;
+    Ok(vec![serde_json::json!({
         "type": "namespace",
         "name": "functions",
         "description": "",
         "tools": tools,
-    })]
+    })])
 }
 
 fn responses_lite_prefix(
     model: &crate::catalog::Model,
     instructions: Option<&str>,
     tools: &[ToolDef],
-) -> Vec<crate::responses::ResponsesItem> {
+) -> Result<Vec<crate::responses::ResponsesItem>, AiError> {
     let mut prefix = vec![opaque_input_item(ResponsesInputItem::AdditionalTools {
         role: "developer".to_owned(),
-        tools: map_responses_lite_tools(model, tools),
+        tools: map_responses_lite_tools(model, tools)?,
     })];
     if let Some(instructions) = instructions.filter(|instructions| !instructions.is_empty()) {
         prefix.push(opaque_input_item(ResponsesInputItem::Message {
@@ -409,7 +411,7 @@ fn responses_lite_prefix(
             }],
         }));
     }
-    prefix
+    Ok(prefix)
 }
 
 fn responses_reasoning_effort(effort: crate::types::ReasoningEffort) -> &'static str {
@@ -535,7 +537,7 @@ pub(crate) fn build_compact_request(
     };
     let (input, instructions) = if responses_lite {
         input.strip_image_details_for_responses_lite();
-        let mut items = responses_lite_prefix(model, instructions.as_deref(), tools);
+        let mut items = responses_lite_prefix(model, instructions.as_deref(), tools)?;
         items.extend(input.into_items());
         (crate::responses::ResponsesInput::new(items), None)
     } else {
@@ -1177,7 +1179,7 @@ pub(crate) fn build_request(
     let mut input = raw_input.cloned().unwrap_or(canonical_input);
     let instructions = if responses_lite {
         input.strip_image_details_for_responses_lite();
-        let mut items = responses_lite_prefix(model, refresh_instructions.as_deref(), &req.tools);
+        let mut items = responses_lite_prefix(model, refresh_instructions.as_deref(), &req.tools)?;
         items.extend(input.into_items());
         input = crate::responses::ResponsesInput::new(items);
         None
@@ -2686,6 +2688,34 @@ mod tests {
         assert_eq!(body["reasoning"]["effort"], "max");
         assert_eq!(body["reasoning"]["context"], "all_turns");
         assert!(body["reasoning"].get("mode").is_none());
+    }
+
+    #[test]
+    fn responses_lite_refuses_required_strict_tool_constraints() {
+        let mut model = make_test_model(true);
+        Arc::make_mut(&mut model.spec).capabilities.responses_lite = true;
+        let mut req = user_req(
+            vec![UserPart::Text("hello".into())],
+            CompatibilityMode::Strict,
+        );
+        req.tools.push(ToolDef {
+            name: "strict".into(),
+            description: "required strict schema".into(),
+            parameters: serde_json::json!({"type":"object", "properties":{}}),
+            constrained_sampling: Some(crate::ConstrainedSampling::JsonSchema {
+                strict: crate::ConstrainedSamplingStrict::Require,
+            }),
+        });
+        assert!(matches!(
+            build_request(&model, &req),
+            Err(AiError::Unsupported(
+                crate::UnsupportedError::ConstrainedSampling(_)
+            ))
+        ));
+        req.tools[0].constrained_sampling = Some(crate::ConstrainedSampling::JsonSchema {
+            strict: crate::ConstrainedSamplingStrict::Prefer,
+        });
+        assert!(build_request(&model, &req).is_ok());
     }
 
     #[test]

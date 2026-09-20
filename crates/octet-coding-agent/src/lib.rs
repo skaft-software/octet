@@ -200,15 +200,18 @@ async fn run() -> anyhow::Result<()> {
         return extensions::serve::run_with_session_name(config, port, no_open, web_root, name)
             .await;
     }
-    parity.resolve_models(&mut config)?;
-    parity.select_session(&mut config)?;
+    let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
+    let interactive = matches!(config.mode, config::Mode::Interactive) && capabilities.interactive;
+    // Interactive inventory and session selection run only after the shell owns input.
+    if !interactive {
+        parity.resolve_models(&mut config)?;
+        parity.select_session(&mut config)?;
+    }
     let mode = config.mode.clone();
     let initial_prompt = config.initial_prompt.clone();
-    let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
     let result = match mode {
         config::Mode::Interactive if capabilities.interactive => {
-            modes::interactive::run_interactive_with_model_scope(config, parity.models.clone())
-                .await
+            modes::interactive::run_interactive_with_options(config, parity.clone()).await
         }
         config::Mode::Interactive => {
             modes::plain::run_plain(app::bootstrap::bootstrap(config)?, initial_prompt).await

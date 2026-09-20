@@ -181,7 +181,7 @@ pub(super) fn event_margin_marker_with_frame(
     theme: &OctetTheme,
     spinner_frame: usize,
     status_shimmer_frame: Option<usize>,
-    rainbow_strength: u16,
+    _rainbow_strength: u16,
     collapsed_reasoning: bool,
 ) -> Option<String> {
     let markers_enabled = theme.resolve::<bool>("margin_markers").unwrap_or(true);
@@ -212,8 +212,13 @@ pub(super) fn event_margin_marker_with_frame(
         TranscriptBlock::Reasoning(reasoning) if collapsed_reasoning && markers_enabled => {
             Some(status_shimmer_frame.map_or_else(
                 || theme.model_fg(reasoning.model_lab, event_dot),
-                |frame| {
-                    activity_shimmer_marker(theme, reasoning, frame, rainbow_strength, event_dot)
+                |_| {
+                    if reasoning.is_working_activity() && reasoning.retry_activity.is_none() {
+                        // Only the word Working shimmers; its marker stays at rest.
+                        activity_shimmer_marker(theme, reasoning, 0, 0, event_dot)
+                    } else {
+                        theme.model_fg(reasoning.model_lab, event_dot)
+                    }
                 },
             ))
         }

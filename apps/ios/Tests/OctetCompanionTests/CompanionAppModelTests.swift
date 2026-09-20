@@ -72,8 +72,8 @@ final class CompanionAppModelTests: XCTestCase {
         XCTAssertEqual(transport.commandEnvelopes.count, 1)
         let envelope = try XCTUnwrap(transport.commandEnvelopes.first)
         XCTAssertEqual(try Fixture.commandType(envelope), "session.submitPrompt")
-        XCTAssertEqual(try Fixture.decode(envelope)["hostID"] as? String, "host-1")
-        XCTAssertEqual(try Fixture.decode(envelope)["sessionID"] as? String, "session-1")
+        XCTAssertEqual(try Fixture.decode(envelope)["hostId"] as? String, "host-1")
+        XCTAssertEqual(try Fixture.decode(envelope)["sessionId"] as? String, "session-1")
         XCTAssertEqual(try Fixture.decode(envelope)["expectedActorGeneration"] as? UInt64, 1)
         let input = try Fixture.commandData(envelope)["input"] as? [String: Any]
         XCTAssertEqual(input?["text"] as? String, "please continue")
@@ -135,7 +135,7 @@ final class CompanionAppModelTests: XCTestCase {
         let envelope = try XCTUnwrap(transport.commandEnvelopes.first)
         XCTAssertEqual(try Fixture.commandType(envelope), "session.answerRequest")
         let data = try Fixture.commandData(envelope)
-        XCTAssertEqual(data["requestID"] as? String, "request-1")
+        XCTAssertEqual(data["requestId"] as? String, "request-1")
         let answer = data["answer"] as? [String: Any]
         XCTAssertEqual(answer?["type"] as? String, "approval")
         XCTAssertEqual((answer?["data"] as? [String: Any])?["allowed"] as? Bool, false)
@@ -179,7 +179,7 @@ final class CompanionAppModelTests: XCTestCase {
         XCTAssertNil(running.failure)
         let envelope = try XCTUnwrap(runningTransport.commandEnvelopes.first)
         XCTAssertEqual(try Fixture.commandType(envelope), "session.abort")
-        XCTAssertEqual(try Fixture.commandData(envelope)["runID"] as? String, "run-1")
+        XCTAssertEqual(try Fixture.commandData(envelope)["runId"] as? String, "run-1")
         await running.disconnect()
         running.stopObserving()
     }

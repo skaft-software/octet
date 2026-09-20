@@ -614,6 +614,43 @@ impl DeferredPollSource for ScriptedPollSource {
 }
 
 #[tokio::test]
+async fn replacement_poll_stops_when_exposure_cannot_be_persisted() {
+    // Usage-journal identifiers have a tighter boundary than model IDs. This
+    // deterministically rejects the uncertainty record after admission, before
+    // the replacement's provider source can be polled.
+    let mut model = test_model();
+    Arc::make_mut(&mut model.spec).id = ModelId("x".repeat(129));
+    let transport = Arc::new(ParkedTransport::new(&model, "exposure-failure"));
+    let (mut agent, _, _workspace) = parked_agent(model.clone(), transport);
+    let store = agent.session().deferred_run_store();
+    suspend_in_store(
+        &store,
+        &identity_for(&model),
+        &model,
+        "exposure-failure",
+        "entry-1",
+    );
+    assert!(matches!(
+        store
+            .begin_pass("exposure-failure", "first", DeferredResumeIntent::Poll, 0)
+            .unwrap(),
+        DeferredResumeStart::Admitted(_)
+    ));
+    let source = ScriptedPollSource::new(Vec::new());
+    let outcome = agent
+        .resume_deferred_run(
+            "exposure-failure",
+            "replacement",
+            DeferredResumeIntent::ReplaceUnknownPoll,
+            &source,
+        )
+        .await;
+    assert!(outcome.is_err());
+    assert_eq!(source.polls.load(Ordering::SeqCst), 0);
+    assert!(!agent.session().has_uncertain_usage());
+}
+
+#[tokio::test]
 async fn cancelling_an_effect_pending_leaf_records_exposure_once_without_repolling() {
     let model = test_model();
     let transport = Arc::new(ParkedTransport::new(&model, "parked-cancel"));

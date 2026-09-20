@@ -7382,7 +7382,7 @@ fn activity_shimmer_clock_can_cross_long_labels() {
 }
 
 #[test]
-fn collapsed_activity_shimmer_repaints_only_the_status_style() {
+fn collapsed_thinking_keeps_a_static_label_and_marker() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "high");
     let run_id = shell.begin_run("codex");
@@ -7415,7 +7415,7 @@ fn collapsed_activity_shimmer_repaints_only_the_status_style() {
     {
         let mut state = shell.state.borrow_mut();
         assert!(!event_dot_animating(&state));
-        assert!(state.has_active_status_shimmer());
+        assert!(!state.has_active_status_shimmer());
         assert_eq!(state.active_event_blocks, vec![0]);
         state.advance_status_shimmer();
     }
@@ -7424,11 +7424,11 @@ fn collapsed_activity_shimmer_repaints_only_the_status_style() {
         strip_terminal_sequences(&after).starts_with("• Thinking ("),
         "{after:?}"
     );
-    assert_ne!(after, before, "the shimmer style must advance");
-    assert_ne!(
+    assert_eq!(after, before, "Thinking must not shimmer");
+    assert_eq!(
         marker_prefix(&after),
         marker_prefix(&before),
-        "the margin dot must share the status shimmer"
+        "the Thinking marker must remain steady"
     );
     assert!(
         !after.contains("\x1b[48;"),
@@ -7437,7 +7437,7 @@ fn collapsed_activity_shimmer_repaints_only_the_status_style() {
 }
 
 #[test]
-fn compaction_activity_remains_scheduled_without_provider_events() {
+fn compaction_uses_a_timer_without_shimmer() {
     for width in [46, 80] {
         let mut shell = InteractiveShell::test_shell();
         shell.set_size(width, 24);
@@ -7445,8 +7445,9 @@ fn compaction_activity_remains_scheduled_without_provider_events() {
         let before = shell.state.borrow().rendered_transcript(width).join("\n");
         {
             let mut state = shell.state.borrow_mut();
-            assert!(renderer_runtime::status_shimmer_animating(&state));
-            assert!(state.has_active_status_shimmer());
+            assert!(!renderer_runtime::status_shimmer_animating(&state));
+            assert!(renderer_runtime::status_timer_active(&state));
+            assert!(!state.has_active_status_shimmer());
             state.advance_status_shimmer();
         }
         let after = shell.state.borrow().rendered_transcript(width).join("\n");
@@ -7454,17 +7455,14 @@ fn compaction_activity_remains_scheduled_without_provider_events() {
             strip_terminal_sequences(&before),
             strip_terminal_sequences(&after)
         );
-        assert_ne!(
-            before, after,
-            "compaction style must advance independently of provider events"
-        );
+        assert_eq!(before, after, "compaction labels must not shimmer");
         shell.set_run_label("idle");
         assert!(!shell.state.borrow().has_active_status_shimmer());
     }
 }
 
 #[test]
-fn working_activity_shimmer_repaints_its_margin_dot() {
+fn working_activity_shimmers_only_the_label_not_its_margin_dot() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "high");
     shell.begin_run("codex");
@@ -7487,11 +7485,12 @@ fn working_activity_shimmer_repaints_its_margin_dot() {
     {
         let mut state = shell.state.borrow_mut();
         assert!(state.has_active_status_shimmer());
-        state.advance_status_shimmer();
+        state.advance_status_shimmer_by(8);
     }
     let after = raw(&shell);
 
-    assert_ne!(marker_prefix(&after), marker_prefix(&before));
+    assert_eq!(marker_prefix(&after), marker_prefix(&before));
+    assert_ne!(after, before, "the Working label still shimmers");
     assert!(
         !after.contains("\x1b[48;"),
         "status shimmer must stay foreground-only"
@@ -11916,7 +11915,7 @@ fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
         );
     }
     // ...and each terminal group reports its own displayed count.
-    for summary in ["running · 8", "completed · 2", "failed · 8", "stopped · 14"] {
+    for summary in ["completed · 2", "failed · 8", "stopped · 14"] {
         assert!(
             collapsed.contains(summary),
             "missing {summary}: {collapsed}"
@@ -14625,7 +14624,10 @@ struct StatusRenderLoop {
 fn status_render_loop_shell(theme: OctetTheme) -> StatusRenderLoop {
     let mut shell = InteractiveShell::test_shell_with_theme(theme);
     shell.set_size(80, 24);
-    shell.set_run_label("compacting");
+    shell
+        .state
+        .borrow_mut()
+        .open_activity_status(Some("Working"), false);
     shell.tui.take().unwrap().stop();
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let delay = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -14731,7 +14733,7 @@ fn status_render_loop_skips_missed_phases_after_expensive_frames() {
 }
 
 #[test]
-fn status_render_loop_long_compaction_is_animated_without_terminal_floods() {
+fn status_render_loop_working_is_animated_without_terminal_floods() {
     let StatusRenderLoop {
         mut shell,
         frames,
@@ -14741,7 +14743,7 @@ fn status_render_loop_long_compaction_is_animated_without_terminal_floods() {
     let first = frames.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(first.1, 0);
     // Missed 80 ms deadlines skip frames, so a shared runner need not paint
-    // 20 frames in 2050 ms. Await the sweep and the same ANSI palette coverage,
+    // every frame in 2050 ms. Await the sweep and the seven-letter label's ANSI palette coverage,
     // with one finite liveness deadline, rather than asserting OS throughput.
     let deadline = first.0 + Duration::from_secs(10);
     let mut sample = first;
@@ -14765,8 +14767,8 @@ fn status_render_loop_long_compaction_is_animated_without_terminal_floods() {
         parser.process(&frame);
         consumed = end;
         for (row, line) in parser.screen().rows(0, 80).enumerate() {
-            if let Some(column) = line.find("Compacting context") {
-                let palette = (column..column + "Compacting context".len())
+            if let Some(column) = line.find("Working") {
+                let palette = (column..column + "Working".len())
                     .map(|column| {
                         parser
                             .screen()
@@ -14780,7 +14782,7 @@ fn status_render_loop_long_compaction_is_animated_without_terminal_floods() {
                 }
             }
         }
-        if phase >= 24 && palettes.len() >= 20 {
+        if phase >= 24 && palettes.len() >= 12 {
             break;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -14798,12 +14800,12 @@ fn status_render_loop_long_compaction_is_animated_without_terminal_floods() {
         samples += 1;
     }
     eprintln!(
-        "status-loop idle compaction: {samples} frames, {} palettes, phase {} in {:?}",
+        "status-loop working: {samples} frames, {} palettes, phase {} in {:?}",
         palettes.len(),
         sample.1,
         sample.0.duration_since(first.0)
     );
-    shell.set_run_label("idle");
+    shell.state.borrow_mut().close_activity_status("Working");
     shell.render();
     frames.recv_timeout(Duration::from_secs(2)).unwrap();
     // Any already-published frame may be in the observation queue at settlement.
@@ -14928,14 +14930,14 @@ fn status_render_loop_retry_compaction_and_cancellation_transitions() {
             }
         }
     };
-    await_label("Compacting context");
-    shell.set_run_label("idle");
+    await_label("Working");
+    shell.state.borrow_mut().close_activity_status("Working");
     let id = shell.begin_run("openai");
     shell.on_run_event(id, &retry_event(1));
     shell.render();
     let first = await_label("Retrying 1/3");
     let second = await_label("Retrying 1/3");
-    assert!(second.1 > first.1);
+    assert_eq!(second.1, first.1, "retry/compaction timers do not shimmer");
     shell.on_run_event(
         id,
         &AgentEvent::CompactionStarted {
@@ -14945,7 +14947,7 @@ fn status_render_loop_retry_compaction_and_cancellation_transitions() {
     shell.render();
     let first = await_label("Compacting context");
     let second = await_label("Compacting context");
-    assert!(second.1 > first.1);
+    assert_eq!(second.1, first.1, "retry/compaction timers do not shimmer");
     shell.on_run_event(
         id,
         &AgentEvent::CompactionFinished {
@@ -14970,6 +14972,39 @@ fn status_render_loop_retry_compaction_and_cancellation_transitions() {
     assert!(!parser.screen().contents().contains("Compacting context"));
     assert!(!parser.screen().contents().contains("Retrying"));
     shell.stop_renderer();
+}
+
+#[test]
+fn queued_follow_ups_stay_with_their_session_across_hydration() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = Session::create(directory.path().join("first.jsonl")).unwrap();
+    let second = Session::create(directory.path().join("second.jsonl")).unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    shell.hydrate(&first).unwrap();
+    shell.queue_follow_up(ComposedInput::from_text("first session only".into()));
+    shell.settle_queued_follow_ups(true);
+    shell.hydrate(&second).unwrap();
+    assert_eq!(shell.queued_follow_up_len(), 0);
+    assert!(shell.take_ready_follow_up().is_none());
+    shell.queue_follow_up(ComposedInput::from_text("second session only".into()));
+    shell.settle_queued_follow_ups(true);
+    shell.hydrate(&first).unwrap();
+    assert_eq!(shell.queued_follow_up_len(), 1);
+    assert!(
+        shell.take_ready_follow_up().is_none(),
+        "another session's settlement cannot authorize dispatch"
+    );
+    shell.settle_queued_follow_ups(true);
+    assert_eq!(
+        shell.take_ready_follow_up().unwrap().transcript_text,
+        "first session only"
+    );
+    shell.hydrate(&second).unwrap();
+    shell.edit_queued_follow_up();
+    assert_eq!(
+        shell.drain_composed().transcript_text,
+        "second session only"
+    );
 }
 
 #[test]

@@ -3,6 +3,27 @@ import XCTest
 @testable import OctetCompanion
 
 final class CompanionWireTests: XCTestCase {
+    func testServeCamelCaseIdentifiers() throws {
+        let host = try CommandEnvelopeEncoder.hostCreateSession(
+            hostID: "h", deviceID: "d", commandID: "c", projectID: "p", issuedAtMs: 1
+        )
+        XCTAssertEqual(Set(try Fixture.decode(host).keys),
+                       Set(["protocol", "hostId", "deviceId", "commandId", "issuedAtMs", "command"]))
+        XCTAssertEqual(try Fixture.commandData(host)["projectId"] as? String, "p")
+        let answer = try CommandEnvelopeEncoder.answerRequest(
+            hostID: "h", deviceID: "d", sessionID: "s", commandID: "c",
+            actorGeneration: 1, requestID: "r", allowed: true, issuedAtMs: 1
+        )
+        XCTAssertEqual(Set(try Fixture.decode(answer).keys),
+                       Set(["protocol", "hostId", "deviceId", "sessionId", "commandId",
+                            "issuedAtMs", "expectedActorGeneration", "command"]))
+        XCTAssertEqual(try Fixture.commandData(answer)["requestId"] as? String, "r")
+        // This is a Serve-shaped literal, independent of the app's encoder.
+        let ack = Data(#"{"protocol":1,"sessionId":"s","commandId":"c","acknowledgedAtMs":1,"cursor":{"actorGeneration":1,"sequence":1},"disposition":{"status":"accepted"}}"#.utf8)
+        XCTAssertEqual(try CommandEnvelopeEncoder.inspectSessionAck(
+            ack, hostID: "h", sessionID: "s", commandID: "c"), .accepted)
+    }
+
     func testPromptEncodingRequiresBoundedTextAndCarriesTheGeneration() throws {
         XCTAssertThrowsError(try CommandEnvelopeEncoder.sessionPrompt(
             hostID: "host-1",

@@ -2854,7 +2854,8 @@ fn interrupted_inference_error(error: &AiError) -> bool {
         // UTF-8, schema-validation, resource-limit or state-machine violations.
         AiError::StreamProtocol(
             octet_ai::StreamProtocolError::MissingFinish
-            | octet_ai::StreamProtocolError::PrematureEof,
+            | octet_ai::StreamProtocolError::PrematureEof
+            | octet_ai::StreamProtocolError::ResponseNotResumable { .. },
         ) => true,
         AiError::ResponsesFailed(error) => !error.is_permanent(),
         AiError::Provider(error) => {
@@ -7408,7 +7409,7 @@ impl Agent {
             false,
         );
         if cancellation.abandoned_unknown_poll() {
-            self.record_deferred_exposure();
+            self.record_deferred_exposure()?;
         }
         Ok(cancellation)
     }
@@ -7482,7 +7483,7 @@ impl Agent {
         // An abandoned unknown-outcome poll may already be accepted and billed;
         // its exposure is sticky and is never cleared by a later success.
         if recovery {
-            self.record_deferred_exposure();
+            self.record_deferred_exposure()?;
         }
         let resume = DeferredRunResumed {
             operation_id: operation_id.clone(),
@@ -7581,7 +7582,7 @@ impl Agent {
                 // The admitted poll may have been accepted and billed; its
                 // usage is unknown, so record exposure rather than a fabricated
                 // cost or a second poll.
-                self.record_deferred_exposure();
+                self.record_deferred_exposure()?;
                 self.observe_deferred_boundary(
                     &operation_id,
                     "failed",
@@ -7612,15 +7613,16 @@ impl Agent {
     /// One sticky exposure record for an accepted deferred attempt whose usage
     /// cannot be known. Never invents usage or cost, and never clears earlier
     /// exposure.
-    fn record_deferred_exposure(&mut self) {
+    fn record_deferred_exposure(&mut self) -> Result<(), AgentError> {
         if self.session.has_uncertain_usage() {
-            return;
+            return Ok(());
         }
-        let _ = self.session.record_usage_uncertainty(
+        self.session.record_usage_uncertainty(
             self.model.endpoint.id.clone(),
             self.model.spec.id.clone(),
             "deferred_poll",
-        );
+        )?;
+        Ok(())
     }
 
     fn observe_deferred_boundary(
@@ -7925,6 +7927,13 @@ impl Agent {
         let effect_broker = self.effect_broker.clone();
         let tool_call_hooks = self.extensions.tool_call_hooks.clone();
         for (call_index, call) in unresolved {
+            if let Some((message, metadata)) =
+                self.session.persisted_invocation_result(call_index)?
+            {
+                self.session
+                    .append_with_metadata(EntryValue::Message(Message::User(message)), metadata)?;
+                continue;
+            }
             let result = if let Some(argument_error) = call.argument_error {
                 // A schema-rejected call was never admitted for execution in
                 // the live path; retain that fact across a restart as well.
@@ -10447,7 +10456,61 @@ impl Agent {
                 // entering another model turn; any sibling that did not ask to
                 // stop keeps the batch going, and its result is never discarded.
                 if batch_requests_termination(termination_requests.iter().copied()) {
-                    break 'run FinishReason::Completed;
+                    // ToolFinished yields to the caller while admission is open.
+                    // Drain and close under the same lock used by send(), just
+                    // as for a natural terminal answer. Accepted user controls
+                    // take precedence over a tool's request to stop.
+                    let terminal = {
+                        let mut admission = control_admission.lock().unwrap_or_else(|error| error.into_inner());
+                        while control_open {
+                            match control_rx.try_recv() {
+                                Ok(Control::Steer(input)) => pending_steer.push(input),
+                                Ok(Control::FollowUp(input)) => followups.push_back(input),
+                                Ok(Control::FinishNow(input)) => {
+                                    pending_steer.push(input);
+                                    answer_only = true;
+                                    finish_pending = true;
+                                    context_capacity.invalidate();
+                                }
+                                Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                Ok(Control::Abort) => { abort.set(); break; }
+                                Err(mpsc::error::TryRecvError::Empty) => break,
+                                Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
+                            }
+                        }
+                        let terminal = pending_steer.is_empty() && followups.is_empty();
+                        if terminal { *admission = false; }
+                        terminal
+                    };
+                    if abort.is_set() {
+                        break 'run FinishReason::Aborted;
+                    }
+                    if terminal {
+                        break 'run FinishReason::Completed;
+                    }
+                    if pending_steer.is_empty() && !followups.is_empty() {
+                        let queued = match follow_up_mode {
+                            QueueDeliveryMode::All => followups.drain(..).collect::<Vec<_>>(),
+                            QueueDeliveryMode::OneAtATime => vec![followups.pop_front().expect("follow-up queue is non-empty")],
+                        };
+                        let observation = ContextObservation {
+                            tracker: &stream_context,
+                            model: &model,
+                            system: &system,
+                            tools: if answer_only { &[][..] } else { tool_defs.as_slice() },
+                        };
+                        match deliver_control_inputs(queued, ControlDeliveryKind::FollowUp, session,
+                            &control_prompt_metadata, &mut terminal_gate_requests, &observation) {
+                            ControlDelivery::Completed { event } => {
+                                if let Some(ev) = event { notify_observers(&observers, &ev); yield ev; }
+                            }
+                            ControlDelivery::Interrupted { event, finish } => {
+                                if let Some(ev) = event { notify_observers(&observers, &ev); yield ev; }
+                                break 'run finish;
+                            }
+                        }
+                    }
                 }
 
                 if needs_continuation {
@@ -13674,6 +13737,33 @@ mod inference_recovery_tests {
             ..Default::default()
         });
         assert!(!qualified_inference_replacement(&model, &request));
+    }
+
+    #[test]
+    fn nonresumable_websocket_keeps_host_qualified_replacement_budget() {
+        for qualified in [false, true] {
+            let recovery = PendingProviderRecovery {
+                error: AiError::StreamProtocol(
+                    octet_ai::StreamProtocolError::ResponseNotResumable {
+                        attempts: 0,
+                        visible_output: true,
+                        detail: "connection reset".into(),
+                    },
+                ),
+                qualified,
+                saw_generation: true,
+                opened: true,
+            };
+            assert_eq!(
+                recovery.replacement_limit(),
+                if qualified {
+                    MAX_INFERENCE_REPLACEMENTS
+                } else {
+                    0
+                }
+            );
+            assert!(recovery.usage_unknown());
+        }
     }
 
     #[test]

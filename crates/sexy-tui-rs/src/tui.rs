@@ -756,9 +756,27 @@ impl<'a> TUI<'a> {
         let width_u16 = self.terminal.columns().max(1);
         let height_u16 = self.terminal.rows().max(1);
         let height = usize::from(height_u16);
-        let mut rendered = self.root_render(width_u16);
-        let logical_cursor_position = extract_logical_cursor_position_from(&mut rendered, 0);
-        for line in &mut rendered {
+        let update = (!self.first_render && self.previous_size == Some((width_u16, height_u16)))
+            .then(|| self.root_render_update_without_cursor(width_u16))
+            .flatten()
+            .filter(|update| {
+                update.stable_prefix <= self.previous_frame.len()
+                    && !update.reanchor_viewport
+                    && !update.rebuild_scrollback
+                    && update.resize_replay.is_none()
+            });
+        // Retain the complete document for exit/debug, but prepare only the
+        // changed tail. Animation must not clone or normalize settled history.
+        let (stable_prefix, mut replacement) = update.map_or_else(
+            || (0, self.root_render(width_u16)),
+            |update| (update.stable_prefix, update.replacement),
+        );
+        let logical_cursor_position =
+            extract_logical_cursor_position_from(&mut replacement, stable_prefix).or_else(|| {
+                self.logical_cursor_position
+                    .filter(|cursor| cursor.row < stable_prefix)
+            });
+        for line in &mut replacement {
             if !is_image_line(line) {
                 *line = format!(
                     "{}{}",
@@ -767,6 +785,9 @@ impl<'a> TUI<'a> {
                 );
             }
         }
+        let mut rendered = std::mem::take(&mut self.previous_frame);
+        rendered.truncate(stable_prefix);
+        rendered.extend(replacement);
         let window_top = rendered.len().saturating_sub(height);
         let window = rendered[window_top..].to_vec();
         let cursor = logical_cursor_position
@@ -4907,6 +4928,41 @@ mod tests {
             "autowrap returns to the terminal: {output:?}"
         );
         assert!(output.contains("\x1b[?25h"), "{output:?}");
+    }
+
+    #[test]
+    fn alternate_screen_reuses_history_on_tail_updates() {
+        let size = Rc::new(Cell::new((24, 4)));
+        let capabilities = crate::capabilities::TerminalCapabilities::interactive(
+            crate::capabilities::ColorDepth::Ansi16,
+            false,
+        );
+        let (terminal, _, _, _, _, writes) = recording_terminal(size, capabilities);
+        let mut tui = TUI::new(Box::new(terminal));
+        tui.set_alternate_screen(true);
+        let history = 10_000;
+        let rows = Rc::new(RefCell::new(vec!["history".to_owned(); history]));
+        tui.add_child(Box::new(MutableLines(rows)));
+        tui.start();
+        let retained = tui.previous_frame[0].as_ptr();
+        let full_renders = Rc::new(Cell::new(0));
+        let tail = Rc::new(RefCell::new("Working".to_owned()));
+        tui.children[0] = Box::new(LazyTail {
+            stable_prefix: history,
+            tail: tail.clone(),
+            full_renders: full_renders.clone(),
+            replacement_rows: Rc::new(Cell::new(0)),
+        });
+        for tick in 0..10 {
+            *tail.borrow_mut() = format!("Working {tick}");
+            writes.borrow_mut().clear();
+            tui.request_render();
+            assert_eq!(tui.previous_frame.len(), history + 1);
+            assert_eq!(tui.previous_frame[0].as_ptr(), retained);
+            assert!(tui.previous_frame[history].contains(&format!("Working {tick}")));
+            assert!(writes.borrow().join("").len() < 512);
+        }
+        assert_eq!(full_renders.get(), 0);
     }
 
     #[test]

@@ -992,6 +992,88 @@ async fn responses_websocket_connection_limit_retires_socket_and_falls_back() {
 }
 
 #[tokio::test]
+async fn request_local_codex_transport_controls_sse_and_cached_context() {
+    use octet_ai::declarations::codex::CodexTransport;
+    for selection in [
+        CodexTransport::Sse,
+        CodexTransport::WebSocket,
+        CodexTransport::WebSocketCached,
+    ] {
+        let server =
+            TestResponsesServer::start(WebSocketBehavior::Complete, fallback_responses_body())
+                .await;
+        let model = websocket_test_model(&server.base_url);
+        let client = AiClient::new();
+        client
+            .prewarm_responses(
+                &model,
+                responses_request(vec![user_message("first")], Some("local")),
+            )
+            .await
+            .unwrap();
+        let response = client
+            .complete_with_overrides(
+                &model,
+                responses_request(
+                    vec![user_message("first"), user_message("second")],
+                    Some("local"),
+                ),
+                octet_ai::RequestOverrides {
+                    codex_transport: Some(selection),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 2);
+        match selection {
+            CodexTransport::Sse => {
+                assert_eq!(response.response_id.as_deref(), Some("resp-http"));
+                assert_eq!(requests[1], serde_json::json!({"transport":"http"}));
+            }
+            CodexTransport::WebSocket => {
+                assert!(requests[1].get("previous_response_id").is_none());
+                assert_eq!(requests[1]["input"].as_array().unwrap().len(), 2);
+            }
+            CodexTransport::WebSocketCached => {
+                assert_eq!(requests[1]["previous_response_id"], "resp-prewarm");
+                assert_eq!(requests[1]["input"].as_array().unwrap().len(), 1);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn request_local_codex_connect_timeout_bounds_handshake_not_generation() {
+    let server =
+        TestResponsesServer::start(WebSocketBehavior::StallHandshake, fallback_responses_body())
+            .await;
+    let mut model = websocket_test_model(&server.base_url);
+    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_secs(5);
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        AiClient::new().complete_with_overrides(
+            &model,
+            responses_request(vec![user_message("slow upgrade")], Some("local-timeout")),
+            octet_ai::RequestOverrides {
+                codex_connect_timeout_ms: Some(20),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("request-local connect budget must beat the endpoint timeout")
+    .unwrap();
+    assert_eq!(response.response_id.as_deref(), Some("resp-http"));
+    assert_eq!(
+        server.requests().await,
+        vec![serde_json::json!({"transport":"http"})]
+    );
+}
+
+#[tokio::test]
 async fn responses_websocket_handshake_failure_falls_back_to_http_sse() {
     let server = TestResponsesServer::start(
         WebSocketBehavior::RejectHandshake,

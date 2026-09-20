@@ -194,7 +194,7 @@ impl Pty {
 enum StartupFixture<'a> {
     Model(&'a str),
     /// Online catalog discovery against a gated, credential-free loopback API.
-    DiscoveringModel(&'a str),
+    DiscoveringModel(&'a str, bool),
     /// Fresh/resumed/forked startup against one synthetic saved conversation.
     Session(&'a [&'a str]),
     /// A persisted selection, resolved through the real registry with no auth.
@@ -249,7 +249,7 @@ impl PtyOctet {
             .expect("canonical PTY fixture root");
         let home = canonical_root.join("home");
         let workspace = match fixture {
-            StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_) => {
+            StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_, _) => {
                 canonical_root.join("workspace")
             }
             _ => home.join("workspace"),
@@ -258,14 +258,14 @@ impl PtyOctet {
         create_inert_environment(&home, &workspace, &sessions);
         let credential = home.join(".octet/credentials/custom.json");
         match fixture {
-            StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model)
+            StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model, _)
                 if api.is_some() || model != "probe" =>
             {
                 let base_url = api.unwrap_or("http://127.0.0.1:9/v1/");
                 let record = serde_json::json!({
                     "base_url": base_url, "api_key": "", "api_name": model,
                     "headers": [],
-                    "auto_discover": matches!(fixture, StartupFixture::DiscoveringModel(_)),
+                    "auto_discover": matches!(fixture, StartupFixture::DiscoveringModel(_, _)),
                     // The composed-redraw fixture needs genuinely distinct status
                     // values now that successful changes do not append notices.
                     "models": if model == "qwen-3.8-27b" {
@@ -329,7 +329,7 @@ impl PtyOctet {
                     )))
                     .unwrap();
             }
-            StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_) => {}
+            StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_, _) => {}
         }
 
         let mut pty = Pty::open(dimensions.0, dimensions.1);
@@ -351,7 +351,7 @@ impl PtyOctet {
         let stderr = duplicate_stdio(pty.slave.as_raw_fd());
         let tty_fd = pty.slave.as_raw_fd();
         let mut command = Command::new(binary);
-        if !matches!(fixture, StartupFixture::DiscoveringModel(_)) {
+        if !matches!(fixture, StartupFixture::DiscoveringModel(_, _)) {
             command.arg("--offline");
         }
         command
@@ -387,8 +387,11 @@ impl PtyOctet {
             .stderr(stderr);
 
         match fixture {
-            StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model) => {
+            StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model, _) => {
                 command.args(["--model", &format!("custom/{model}")]);
+                if matches!(fixture, StartupFixture::DiscoveringModel(_, true)) {
+                    command.args(["--models", &format!("custom/{model}")]);
+                }
             }
             StartupFixture::Session(args) => {
                 command
@@ -1509,7 +1512,12 @@ fn real_octet_model_discovery_keeps_startup_editable() {
     let _guard = pty_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for mode in [MouseMode::Auto, MouseMode::App] {
+    for (mode, scoped) in [
+        (MouseMode::Auto, false),
+        (MouseMode::App, false),
+        (MouseMode::Auto, true),
+        (MouseMode::App, true),
+    ] {
         let api = HeldChatApi::start_for_models(true);
         let mut octet = PtyOctet::spawn_at(
             Path::new(env!("CARGO_BIN_EXE_octet")),
@@ -1518,7 +1526,7 @@ fn real_octet_model_discovery_keeps_startup_editable() {
             false,
             (INITIAL_COLUMNS, INITIAL_ROWS),
             (2, false, false),
-            StartupFixture::DiscoveringModel("probe"),
+            StartupFixture::DiscoveringModel("probe", scoped),
         );
         api.wait_for_request(&mut octet, 1);
         octet.wait_until(STARTUP_TIMEOUT, |bytes| nth_frame_end(bytes, 1).is_some());
@@ -1592,7 +1600,7 @@ fn real_octet_model_discovery_ctrl_c_restores_terminal_while_response_is_held() 
             false,
             (INITIAL_COLUMNS, INITIAL_ROWS),
             (2, false, false),
-            StartupFixture::DiscoveringModel("probe"),
+            StartupFixture::DiscoveringModel("probe", false),
         );
         api.wait_for_request(&mut octet, 1);
         octet.wait_until(STARTUP_TIMEOUT, |bytes| nth_frame_end(bytes, 1).is_some());
@@ -1905,13 +1913,13 @@ fn assert_held_activity_pty(compact: bool, color: bool) {
         "bounded 80 ms animation cadence, not busy redraw: {}",
         frames.len()
     );
-    if color {
+    if color && !compact {
         assert!(palettes.len() >= 3, "held {label} must change ANSI cell styles without provider events: {} palettes / {} frames", palettes.len(), frames.len());
     } else {
         assert_eq!(
             palettes.len(),
             1,
-            "no-color status style intentionally static"
+            "compaction and no-color status styles remain static"
         );
         assert!(
             frames.len() <= 2,

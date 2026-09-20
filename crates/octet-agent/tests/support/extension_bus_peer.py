@@ -11,6 +11,7 @@ import time
 
 SDK_PATH = "__SDK_PATH__"
 EXTENSION_NAME = "__EXTENSION_NAME__"
+LIFECYCLE_HOOKS = False
 sys.path.insert(0, SDK_PATH)
 from octet_extension.event_bus import BusError, FieldSpec, HostEventBus, TopicRegistry, TopicSpec
 from octet_extension.protocol import RpcError
@@ -91,6 +92,14 @@ def tools():
         request = commands.get()
         if request is None:
             return
+        if request["method"] == "hook/run":
+            try:
+                if request["params"]["hook"] == "session_start":
+                    bus.declare(name="status", fields=(FieldSpec.string("summary", max_bytes=128),))
+                send({"jsonrpc": "2.0", "id": request["id"], "result": {"disposition": {"kind": "continue"}}})
+            except (RpcError, BusError) as error:
+                send({"jsonrpc": "2.0", "id": request["id"], "error": {"code": error.code, "message": "invalid params"}})
+            continue
         args = request["params"]["arguments"]
         method = args["method"]
         params = args.get("params", {})
@@ -152,6 +161,9 @@ try:
             offer = request["params"]["contract"]
             capabilities = offer["required_capabilities"][:]
             methods = offer["required_methods"][:]
+            if LIFECYCLE_HOOKS and "hook/run" in offer["optional_methods"]:
+                capabilities.append("lifecycle_events")
+                methods.append("hook/run")
             if "event_bus" in offer["optional_capabilities"]:
                 capabilities.append("event_bus")
                 methods.extend(name for name in offer["optional_methods"] if name.startswith("bus/"))
@@ -160,6 +172,8 @@ try:
                     "schema": offer["schema"], "encoding": offer["encoding"],
                     "capabilities": sorted(capabilities), "methods": sorted(methods), "limits": offer["limits"]},
                 "tools": [{"name": "probe", "description": "Bus fixture", "parameters": {"type": "object"}}]}})
+        elif method == "hook/run":
+            commands.put_nowait(request)
         elif method == "tool/call":
             if request["params"]["arguments"]["method"] == "sdk/reader-state":
                 with state_lock:

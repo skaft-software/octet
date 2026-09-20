@@ -70,6 +70,7 @@ REQUIRED_CAPABILITIES = [
     "tool_call",
 ]
 OPTIONAL_CAPABILITIES = [
+    "event_bus",
     "lifecycle_events",
     "migration.adapter.v1",
     "provider_auth",
@@ -80,6 +81,12 @@ OPTIONAL_CAPABILITIES = [
 ALL_CAPABILITIES = set(REQUIRED_CAPABILITIES + OPTIONAL_CAPABILITIES + ["dynamic_tools"])
 REQUIRED_METHODS = ["$/cancelRequest", "initialize", "shutdown", "tool/call"]
 OPTIONAL_METHODS = [
+    "bus/declare",
+    "bus/event",
+    "bus/lifecycle",
+    "bus/publish",
+    "bus/subscribe",
+    "bus/unsubscribe",
     "hook/run",
     "migration/detect",
     "migration/import",
@@ -99,6 +106,12 @@ OPTIONAL_METHODS = [
 ]
 ALL_METHODS = set(REQUIRED_METHODS + OPTIONAL_METHODS + ["context/collect", "tools/register", "tools/unregister"])
 METHOD_CAPABILITY = {
+    "bus/declare": "event_bus",
+    "bus/event": "event_bus",
+    "bus/lifecycle": "event_bus",
+    "bus/publish": "event_bus",
+    "bus/subscribe": "event_bus",
+    "bus/unsubscribe": "event_bus",
     "$/cancelRequest": "request_cancellation",
     "context/collect": "lifecycle_events",
     "hook/run": "lifecycle_events",
@@ -123,7 +136,7 @@ METHOD_CAPABILITY = {
     "tools/register": "dynamic_tools",
     "tools/unregister": "dynamic_tools",
 }
-NOTIFICATION_METHODS = {"$/cancelRequest", "provider/cancel", "provider/event", "providers/complete"}
+NOTIFICATION_METHODS = {"bus/event", "bus/lifecycle", "$/cancelRequest", "provider/cancel", "provider/event", "providers/complete"}
 REQUEST_METHODS = ALL_METHODS - NOTIFICATION_METHODS
 
 

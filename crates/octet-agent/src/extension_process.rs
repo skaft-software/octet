@@ -8286,6 +8286,15 @@ impl ExtensionProcess {
                 );
             }
 
+            // Cutover is committed. Withdraw the old topic owner before the
+            // replacement reader can bind and run its start hooks; speculative
+            // initialization and failed reloads leave the old owner intact.
+            if let Some(bus) = &previous.event_bus {
+                bus.remove(
+                    &previous.provider_owner.extension_instance_id,
+                    previous.generation,
+                );
+            }
             *active = Arc::clone(&replacement);
             replacement.activate_post_initialize();
             self.inner.generation.store(generation, Ordering::Release);

@@ -537,10 +537,13 @@ mod scheduler_tests {
     }
 
     #[test]
-    fn sparse_compaction_frames_keep_elapsed_phase_without_replay() {
+    fn sparse_working_frames_keep_elapsed_phase_without_replay() {
         use super::super::InteractiveShell;
-        let mut shell = InteractiveShell::test_shell();
-        shell.set_run_label("compacting");
+        let shell = InteractiveShell::test_shell();
+        shell
+            .state
+            .borrow_mut()
+            .open_activity_status(Some("Working"), false);
         let start = Instant::now();
         let mut schedule = AnimationSchedule::new();
         let mut state = shell.state.borrow_mut();
@@ -579,27 +582,30 @@ mod scheduler_tests {
         schedule.observe(&state, start);
         let revisions = state.block_revisions.clone();
         schedule.advance(&mut state, start + Duration::from_secs(300));
-        assert_eq!(state.status_shimmer_frame, 3750);
+        assert_eq!(state.status_shimmer_frame, 0);
         assert_eq!(state.block_revisions[0], revisions[0]);
         assert_eq!(state.block_revisions[1], revisions[1] + 1);
         schedule.advance(&mut state, start + Duration::from_secs(300));
         assert_eq!(state.block_revisions[1], revisions[1] + 1);
         assert_eq!(
             schedule.poll_interval(false, start + Duration::from_secs(300)),
-            STATUS_ANIMATION_INTERVAL
+            RESIZE_POLL_INTERVAL
         );
     }
 
     #[test]
     fn animation_schedule_rechecks_transitions_after_coalescing() {
         use super::super::InteractiveShell;
-        let mut shell = InteractiveShell::test_shell();
+        let shell = InteractiveShell::test_shell();
         let start = Instant::now();
         let mut schedule = AnimationSchedule::new();
         schedule.observe(&shell.state.borrow(), start);
         assert_eq!(schedule.poll_interval(false, start), RESIZE_POLL_INTERVAL);
         // The status appears after the receiver wakes, before the frame lock.
-        shell.set_run_label("compacting");
+        shell
+            .state
+            .borrow_mut()
+            .open_activity_status(Some("Working"), false);
         schedule.advance(
             &mut shell.state.borrow_mut(),
             start + Duration::from_millis(10),
@@ -619,13 +625,16 @@ mod scheduler_tests {
             schedule.poll_interval(false, start + Duration::from_millis(95)),
             Duration::from_millis(75)
         );
-        shell.set_run_label("idle");
+        shell.state.borrow_mut().close_activity_status("Working");
         schedule.advance(
             &mut shell.state.borrow_mut(),
             start + Duration::from_secs(1),
         );
         assert!(schedule.status.last_tick.is_none());
-        shell.set_run_label("compacting");
+        shell
+            .state
+            .borrow_mut()
+            .open_activity_status(Some("Working"), false);
         schedule.advance(
             &mut shell.state.borrow_mut(),
             start + Duration::from_secs(10),
@@ -642,8 +651,11 @@ mod scheduler_tests {
         use super::super::{
             summarize_tool, InteractiveShell, ToolCallId, ToolPanel, TranscriptBlock,
         };
-        let mut shell = InteractiveShell::test_shell();
-        shell.set_run_label("compacting");
+        let shell = InteractiveShell::test_shell();
+        shell
+            .state
+            .borrow_mut()
+            .open_activity_status(Some("Working"), false);
         let args = serde_json::json!({"path":"src/lib.rs"});
         let start = Instant::now();
         let mut schedule = AnimationSchedule::new();
@@ -714,7 +726,7 @@ mod scheduler_tests {
         schedule.advance(&mut state, start + Duration::from_millis(1040));
         assert_eq!(state.event_spinner_frame, 3);
         assert!(state.event_dot_visible);
-        assert_eq!(state.status_shimmer_frame, 13);
+        assert_eq!(state.status_shimmer_frame, 0);
     }
 
     use sexy_tui_rs::{Terminal, TerminalInput as TerminalInputEvent};

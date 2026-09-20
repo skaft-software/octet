@@ -2314,7 +2314,9 @@ impl AiClient {
             && (!overrides.headers.is_empty()
                 || !overrides.env.is_empty()
                 || !overrides.sampling_params.is_empty()
-                || overrides.azure.is_some())
+                || overrides.azure.is_some()
+                || overrides.codex_transport.is_some()
+                || overrides.codex_connect_timeout_ms.is_some())
         {
             return Err(crate::ConfigError::Parse(
                 "wire overrides are unsupported by a host stream transport".into(),
@@ -2368,7 +2370,7 @@ impl AiClient {
         } else {
             None
         };
-        let open = client.stream_once(&model, req, &overrides.env, &host_options);
+        let open = client.stream_once(&model, req, &overrides, &host_options);
         let Some(deadline) = deadline else {
             return open.await;
         };
@@ -2484,9 +2486,10 @@ impl AiClient {
         &self,
         model: &Model,
         req: Request,
-        environment: &std::collections::BTreeMap<String, String>,
+        overrides: &crate::RequestOverrides,
         host_options: &HostRequestOptions,
     ) -> Result<ResponseStream, AiError> {
+        let environment = &overrides.env;
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         if model.spec.endpoint != model.endpoint.id {
@@ -2648,15 +2651,25 @@ impl AiClient {
         // ordinary HTTP/SSE request below. Once the generation frame may have
         // been sent, every timeout or disconnect is terminal: silently replaying
         // the POST could duplicate provider work and billing.
-        if matches!(
+        let session_key = req.session_id.as_deref().filter(|id| !id.is_empty());
+        let transport = crate::declarations::codex::resolve_codex_transport(
+            overrides.codex_transport.unwrap_or_default(),
             model.endpoint.transport,
-            crate::types::EndpointTransport::WebSocketPreferred
-        ) && model.spec.protocol == Protocol::OpenAiResponses
+            false, // The pool owns its per-key fallback latch.
+            session_key.is_some(),
+        );
+        if transport.uses_websocket()
+            && model.spec.protocol == Protocol::OpenAiResponses
             && !request_aware_signer
             && proxy.is_none()
             && fallback_request.parts.streaming
         {
-            let session_key = req.session_id.as_deref().filter(|id| !id.is_empty());
+            let session_key = session_key.filter(|_| transport.cached_context);
+            let connect_timeout = crate::declarations::codex::effective_codex_connect_timeout_ms(
+                overrides.codex_connect_timeout_ms,
+            )
+            .map_err(|error| crate::ConfigError::Parse(error.to_string()))?
+            .map(Duration::from_millis);
             let mut ws_headers = fallback_request.headers.clone();
             if model
                 .endpoint
@@ -2696,6 +2709,7 @@ impl AiClient {
                         body,
                         ResponsesWsLiveness::for_response_idle(self.stream_idle_timeout),
                         model.endpoint.timeout,
+                        connect_timeout,
                         resumer,
                     )
                     .await;
@@ -3261,6 +3275,7 @@ mod tests {
                     serde_json::json!({}),
                     ResponsesWsLiveness::for_response_idle(Duration::from_secs(5)),
                     Duration::from_secs(5),
+                    Some(DEFAULT_CONNECT_TIMEOUT),
                     None,
                 )
                 .await

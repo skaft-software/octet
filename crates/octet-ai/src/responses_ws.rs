@@ -559,13 +559,14 @@ impl ResponsesWsPool {
         body: Value,
         liveness: ResponsesWsLiveness,
         startup_timeout: Duration,
+        connect_timeout: Option<Duration>,
         resumer: Option<ResponseResumer>,
     ) -> Result<mpsc::Receiver<Result<Value, AiError>>, AiError> {
         let deadline = tokio::time::Instant::now() + startup_timeout;
         // Only this future owns connection establishment; no generation command
         // exists yet. A timeout here is proven safe for HTTP fallback.
         let connection = tokio::time::timeout(
-            startup_timeout.min(crate::client::DEFAULT_CONNECT_TIMEOUT),
+            connect_timeout.map_or(startup_timeout, |timeout| startup_timeout.min(timeout)),
             self.connect(key, url.clone(), headers.clone()),
         )
         .await
@@ -673,6 +674,7 @@ impl ResponsesWsPool {
                 body,
                 liveness,
                 startup_timeout,
+                Some(crate::client::DEFAULT_CONNECT_TIMEOUT),
                 None,
             )
             .await?;
@@ -1772,6 +1774,7 @@ mod tests {
                     serde_json::json!({"model": "gpt", "input": []}),
                     ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
                     Duration::from_secs(2),
+                    Some(crate::client::DEFAULT_CONNECT_TIMEOUT),
                     None,
                 )
                 .await
@@ -1820,6 +1823,7 @@ mod tests {
                 serde_json::json!({"model": "gpt", "input": []}),
                 ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
                 Duration::from_millis(20),
+                Some(crate::client::DEFAULT_CONNECT_TIMEOUT),
                 None,
             )
             .await
@@ -2848,6 +2852,7 @@ mod tests {
                 test_generation_request(),
                 liveness(),
                 Duration::from_secs(5),
+                Some(crate::client::DEFAULT_CONNECT_TIMEOUT),
                 None,
             )
             .await

@@ -290,6 +290,12 @@ public struct WirePendingRequest: Codable, Equatable, Sendable {
 }
 
 public struct WireSessionSnapshot: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "sessionId"
+        case actorGeneration, cursor, liveState, model, items, pendingRequests
+        case activeRunID = "activeRunId"
+    }
+
     public let sessionID: String
     public let actorGeneration: UInt64
     public let cursor: WireCursor
@@ -342,7 +348,7 @@ public struct WireEventEnvelope: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case protocolVersion = "protocol"
-        case sessionID
+        case sessionID = "sessionId"
         case cursor
         case event
     }
@@ -390,7 +396,7 @@ public struct WireHostBootstrap: Codable, Equatable, Sendable {
         case host
         case catalogCursor
         case sessions
-        case selectedSessionID
+        case selectedSessionID = "selectedSessionId"
         case selectedSession
     }
 }

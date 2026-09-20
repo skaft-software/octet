@@ -63,6 +63,14 @@ public actor CompanionSessionService {
     }
 
     public func connect(hostID: String? = nil) async throws {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        try await connectHost(hostID: hostID)
+    }
+
+    // Automatic retries share establishment, not the user action that cancels
+    // the retry owner. A failed attempt must leave the backoff task alive.
+    private func connectHost(hostID: String?) async throws {
         let hosts = try await pairing.pairedHosts()
         guard let selected = hosts.first(where: { hostID == nil || $0.hostID == hostID }) else {
             connection = .needsPairing
@@ -70,9 +78,9 @@ public actor CompanionSessionService {
             publish()
             throw CompanionError.hostNotFound
         }
-        reconnectTask?.cancel()
-        reconnectTask = nil
+        try Task.checkCancellation()
         await closeTransport()
+        try Task.checkCancellation()
         host = selected
         connection = .connecting
         lastError = nil
@@ -80,12 +88,16 @@ public actor CompanionSessionService {
         do {
             try await establish(selected)
         } catch let error as CompanionError {
+            // A manual disconnect/reconnect now owns state. A cancelled retry
+            // must not close its successor or replace offline with failed.
+            if Task.isCancelled { throw CancellationError() }
             await closeTransport()
             connection = .failed
             lastError = error
             publish()
             throw error
         } catch {
+            if Task.isCancelled { throw error }
             await closeTransport()
             connection = .failed
             lastError = .transportUnavailable
@@ -282,10 +294,12 @@ public actor CompanionSessionService {
         let configuration = try await pairing.configuration(for: pairedHost)
         let newTransport = try await factory.makeClient(configuration: configuration)
         do {
+            try Task.checkCancellation()
             try await newTransport.verifyPeerIdentity(hostID: pairedHost.hostID, fingerprint: pairedHost.fingerprint)
             let data = try await newTransport.request(.bootstrap(selectedSessionID: selectedSessionID))
             let bootstrap = try WireDecoder.bootstrap(data, expectedHostID: pairedHost.hostID)
             guard bootstrap.host.id == pairedHost.hostID else { throw CompanionError.hostIdentityChanged }
+            try Task.checkCancellation()
             transport = newTransport
             host = pairedHost
             connectionToken = UUID()
@@ -569,7 +583,8 @@ public actor CompanionSessionService {
                 try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
                 guard !Task.isCancelled, let self else { return }
                 do {
-                    try await self.connect(hostID: hostID)
+                    try await self.connectHost(hostID: hostID)
+                    guard !Task.isCancelled else { return }
                     await self.clearReconnectTask()
                     return
                 } catch {

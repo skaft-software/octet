@@ -84,6 +84,10 @@ final class ScriptedTransport: ServeClientTransport, @unchecked Sendable {
         self.bootstrap = bootstrap
     }
 
+    var isClosed: Bool {
+        lock.withCriticalSection { closed }
+    }
+
     var commandEnvelopes: [Data] {
         recorded.compactMap { request in
             if case .command(let data, _) = request { return data }
@@ -224,11 +228,11 @@ enum Fixture {
                 "attention": "none",
                 "model": model
             ]],
-            "selectedSessionID": sessionID
+            "selectedSessionId": sessionID
         ]
         if includeSelectedSession {
             var snapshot: [String: Any] = [
-                "sessionID": sessionID,
+                "sessionId": sessionID,
                 "actorGeneration": actorGeneration,
                 "cursor": ["actorGeneration": actorGeneration, "sequence": cursorSequence],
                 "liveState": liveState,
@@ -236,7 +240,7 @@ enum Fixture {
                 "items": items,
                 "pendingRequests": pending
             ]
-            if let activeRunID { snapshot["activeRunID"] = activeRunID }
+            if let activeRunID { snapshot["activeRunId"] = activeRunID }
             document["selectedSession"] = snapshot
         }
         return try! JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
@@ -254,7 +258,7 @@ enum Fixture {
             "hostSequence": hostSequence,
             "event": [
                 "protocol": 1,
-                "sessionID": sessionID,
+                "sessionId": sessionID,
                 "cursor": ["actorGeneration": actorGeneration, "sequence": cursorSequence],
                 "event": ["type": "session.stateChanged", "data": ["state": state]]
             ]
@@ -267,11 +271,11 @@ enum Fixture {
         let object = (try? JSONSerialization.jsonObject(with: envelope)) as? [String: Any] ?? [:]
         var ack: [String: Any] = [
             "protocol": 1,
-            "commandID": commandID,
+            "commandId": commandID,
             "disposition": ["status": status]
         ]
-        if let hostID = object["hostID"] as? String { ack["hostID"] = hostID }
-        if let sessionID = object["sessionID"] as? String { ack["sessionID"] = sessionID }
+        if let hostID = object["hostId"] as? String { ack["hostId"] = hostID }
+        if let sessionID = object["sessionId"] as? String { ack["sessionId"] = sessionID }
         return try JSONSerialization.data(withJSONObject: ack, options: [.sortedKeys])
     }
 

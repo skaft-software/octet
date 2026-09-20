@@ -87,6 +87,9 @@ async fn runnable_api_v03_example_negotiates_calls_cancels_and_shutdowns() {
     let mut config = ExtensionRuntimeConfig::new(workspace.path());
     // Shutdown must cancel this delayed request before the request deadline;
     // otherwise the two independent timers can report a timeout instead.
+    config.event_bus = Some(std::sync::Arc::new(
+        octet_agent::extension_process::ExtensionEventBus::default(),
+    ));
     config.request_timeout = Duration::from_secs(3);
     config.shutdown_timeout = Duration::from_secs(1);
     let process = ExtensionProcess::start(trusted_descriptor(manifest_path, manifest), config)
@@ -264,12 +267,13 @@ async fn bundled_canonical_extensions_negotiate_with_the_real_host() {
         let manifest = ExtensionManifest::load(&manifest_path).unwrap();
         assert_eq!(manifest.api_version, "0.3", "{name}");
         let workspace = TempDir::new().unwrap();
-        let process = ExtensionProcess::start(
-            trusted_descriptor(manifest_path, manifest),
-            ExtensionRuntimeConfig::new(workspace.path()),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let mut config = ExtensionRuntimeConfig::new(workspace.path());
+        config.event_bus = Some(std::sync::Arc::new(
+            octet_agent::extension_process::ExtensionEventBus::default(),
+        ));
+        let process = ExtensionProcess::start(trusted_descriptor(manifest_path, manifest), config)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert!(process.is_running(), "{name}");
         assert_eq!(process.api_version(), "0.3");
         assert!(process.shutdown().await, "{name}");

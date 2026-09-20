@@ -119,7 +119,7 @@ private enum WireCommand: Encodable {
     }
 
     private enum CreateKeys: String, CodingKey {
-        case projectID
+        case projectID = "projectId"
         case authority
         case model
     }
@@ -129,12 +129,12 @@ private enum WireCommand: Encodable {
     }
 
     private enum AnswerRequestKeys: String, CodingKey {
-        case requestID
+        case requestID = "requestId"
         case answer
     }
 
     private enum AbortKeys: String, CodingKey {
-        case runID
+        case runID = "runId"
     }
 }
 
@@ -177,9 +177,9 @@ private struct HostEnvelope: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case protocolVersion = "protocol"
-        case hostID
-        case deviceID
-        case commandID
+        case hostID = "hostId"
+        case deviceID = "deviceId"
+        case commandID = "commandId"
         case issuedAtMs
         case command
     }
@@ -197,10 +197,10 @@ private struct SessionEnvelope: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case protocolVersion = "protocol"
-        case hostID
-        case deviceID
-        case sessionID
-        case commandID
+        case hostID = "hostId"
+        case deviceID = "deviceId"
+        case sessionID = "sessionId"
+        case commandID = "commandId"
         case issuedAtMs
         case expectedActorGeneration
         case command
@@ -427,13 +427,13 @@ public enum CommandEnvelopeEncoder {
         sessionID: String?
     ) throws {
         guard value[protocolKey]?.uint64Value == UInt64(octetProtocolMajor),
-              value["commandID"]?.stringValue == expectedCommandID else {
+              value["commandId"]?.stringValue == expectedCommandID else {
             throw CompanionError.protocolViolation("acknowledgement identity mismatch")
         }
-        if let sessionID, value["sessionID"]?.stringValue != sessionID {
+        if let sessionID, value["sessionId"]?.stringValue != sessionID {
             throw CompanionError.protocolViolation("acknowledgement session mismatch")
         }
-        if let ackHostID = value["hostID"]?.stringValue, ackHostID != expectedHostID {
+        if let ackHostID = value["hostId"]?.stringValue, ackHostID != expectedHostID {
             throw CompanionError.hostIdentityChanged
         }
     }
