@@ -10527,7 +10527,10 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
     let heading_column = visible_width(&heading[..heading_byte]);
     let elbow_column = visible_width(&child[..elbow_byte]);
     let task_column = visible_width(&child[..task_byte]);
-    assert_eq!(elbow_column, heading_column + 2, "{block}");
+    // The roster table nests like any other tool's output: the connector sits
+    // one level under the event heading's text, and every cell after it aligns
+    // with the connector's column.
+    assert_eq!(elbow_column, heading_column, "{block}");
     assert_eq!(task_column, elbow_column + 2, "{block}");
     assert!(block.contains("failed"), "{block}");
     // Hide call counts only in the row; keep live token/cost and failure detail.
@@ -10805,11 +10808,12 @@ fn subagent_transcript_aligns_columns_by_visible_width() {
             activity.summary = name.into();
         }
         let rows = subagent_transcript_test_rows(&view, &theme, 120, false);
-        // heading, running group heading, column header, the live row, then one
-        // counted summary line for each collapsed terminal group.
-        assert_eq!(rows.len(), 6, "{rows:?}");
-        let header = &rows[2];
-        let live = &rows[3];
+        // heading, column header, the live row, then one counted summary line
+        // for each collapsed terminal group. There is no per-group heading: the
+        // state column names the state on every row.
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        let header = &rows[1];
+        let live = &rows[2];
         let cells = |row: &str| {
             row.split("  ")
                 .map(str::trim)
@@ -10912,12 +10916,12 @@ fn subagent_transcript_does_not_invent_missing_activity_metrics() {
     assert!(measured.contains('$'), "{measured}");
 }
 
+/// A spawn that failed before it produced any worker: the reason is the whole
+/// event, so it wraps under the event heading without a truncating cut.
 #[test]
-fn subagent_transcript_failure_wraps_at_the_group_indent() {
+fn subagent_transcript_failure_wraps_completely() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 
-    // A spawn that failed before it produced any worker: the reason is the
-    // whole event, so it wraps at the group indent instead of being cut off.
     let view = SubagentActivityView {
         failure_reason: Some("spawn rejected: \x1b[31mworker limit reached\x1b[0m".into()),
         ..SubagentActivityView::default()
@@ -10938,14 +10942,14 @@ fn subagent_transcript_failure_wraps_at_the_group_indent() {
                     "* Subagents"
                 }
             );
-            // Every continuation row keeps the group indent, and the sanitized
-            // reason is complete - no escape sequence and no truncation.
+            // Every continuation row keeps the event's own margin width, and the
+            // sanitized reason is complete - no escape sequence and no truncation.
             let detail = rows[1..]
                 .iter()
                 .map(|row| {
                     let text = row
-                        .strip_prefix("    ")
-                        .unwrap_or_else(|| panic!("group indent lost: {rows:?}"));
+                        .strip_prefix("  ")
+                        .unwrap_or_else(|| panic!("event margin lost: {rows:?}"));
                     assert!(!text.contains('\x1b'), "{rows:?}");
                     text
                 })
@@ -11894,16 +11898,21 @@ fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
             "live worker {index} is not visible: {collapsed}"
         );
     }
-    // ...and each terminal group reports its own displayed count.
-    for summary in ["running · 8", "completed · 2", "failed · 8", "stopped · 14"] {
+    // ...and each terminal group reports its own displayed count. The live
+    // workers' state is named on every row instead of in a group heading.
+    for summary in ["completed · 2", "failed · 8", "stopped · 14"] {
         assert!(
             collapsed.contains(summary),
             "missing {summary}: {collapsed}"
         );
     }
+    assert!(
+        collapsed.contains("running"),
+        "the live rows name their state: {collapsed}"
+    );
     // The 22 dead workers are three summary rows, not 22 rows of their own: 32
-    // workers render as heading + running group + column header + 8 live rows +
-    // 3 collapsed summaries.
+    // workers render as heading + column header + 8 live rows + 3 collapsed
+    // summaries.
     let lines = collapsed.lines().collect::<Vec<_>>();
     let heading = lines
         .iter()
@@ -11915,7 +11924,7 @@ fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
         .expect("the stopped summary row");
     assert_eq!(
         summary_end - heading + 1,
-        14,
+        13,
         "the settled event must stay bounded: {collapsed}"
     );
     for summary in ["completed · 2", "failed · 8", "stopped · 14"] {
@@ -11958,7 +11967,7 @@ fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
     shell.toggle_disclosure();
     let expanded = render(&shell, 120);
     assert!(
-        expanded.len() <= 28,
+        expanded.len() <= 29,
         "{} rows: {expanded:?}",
         expanded.len()
     );

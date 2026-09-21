@@ -66,7 +66,7 @@ runtime defaults.
 | `reload` | Default `true`: the interactive prompt silently arms the live-reload supervisor and applies reloads only at the idle prompt. `/reload --dry-run` shows watch counts, timing, and host re-exec policy; incomplete watch coverage still warns. `false` disables sampling for good. User level only; a trusted project layer may not arm it. |
 | `reload_poll_ms` | Default `1000`; interval between filesystem samples, clamped to `50..=300000`. Sampling covers the skill/prompt/theme/context/extension roots in use plus the resolved executable. |
 | `reload_debounce_ms` | Default `200`; save-burst debounce, clamped to `2000` maximum so a burst always flushes. |
-| `reload_max_files` | Default `512`; metadata inspections one poll may perform, clamped to `4096`. Directory reads and inspections stop at the bound, and the layer that was not fully inspected is reported as capped rather than as a change. |
+| `reload_max_files` | Default `512`; metadata inspections per poll, clamped to `1..=4096`. Directory enumeration shares a separate allowance of the same size, plus at most one overflow entry; entries are bounded before collection/sorting. Partially scanned layers are reported as capped, never as changes or removals. |
 | `session_dir` | Session-storage root; equivalent CLI option `--session-dir PATH`. [Storage and recovery](sessions.md). |
 | `max_turns` | Bound model turns; equivalent CLI option `--max-turns N`. |
 | `max_cost_microdollars` | Optional session cost guardrail; example `500000`, integer microdollars. |
@@ -75,6 +75,13 @@ runtime defaults.
 | `[compaction]` | `mode = "local"`, `threshold_fraction = 1.0`, optional `max_active_tokens` (zero/unset uses model limit), `keep_recent_tokens = 20000`, optional `compact_model = "provider/model"`. [Exact budgeting and caveats](context.md#settings). |
 | `enabled_extensions` | Default `[]`: installed executable extensions stay disabled until explicitly enabled. Full access does not change activation. |
 | `trusted_extensions` | Default `[]`: optional persistent source-bound grants. Full access implicitly trusts selected extensions without adding grants; safe mode removes implicit trust and blocks executable startup even with explicit grants. [Resource rules](resources.md#locations-and-precedence). |
+
+Reload cap reports show **at least** the known skipped paths, not an exact total:
+unread directory contents are unknown. Failed directory entries also consume the
+enumeration allowance. Fully scanned directories retain deterministic ordering;
+capped layers neither replace their baseline nor infer changes from an arbitrary
+filesystem-order prefix. The first complete scan establishes that layer's
+baseline. Executable sampling remains independent of these resource-tree limits.
 
 ## Environment variables
 

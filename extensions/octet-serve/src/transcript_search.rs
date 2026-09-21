@@ -8,7 +8,29 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SearchWork {
+    pub(crate) posting_candidates: usize,
+    pub(crate) membership_checks: usize,
+    pub(crate) scored_documents: usize,
+    pub(crate) peak_retained_candidates: usize,
+    pub(crate) snippets_built: usize,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static SEARCH_WORK: std::cell::RefCell<SearchWork> = Default::default();
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn take_search_work() -> SearchWork {
+    SEARCH_WORK.with(|work| std::mem::take(&mut *work.borrow_mut()))
+}
 
 use serde::{Deserialize, Serialize};
 
@@ -485,52 +507,68 @@ impl TranscriptSearchIndex {
         if let Some(session_id) = &request.filter.session_id {
             validate_identity(session_id)?;
         }
-        if terms.iter().any(|term| !self.postings.contains_key(term)) {
-            return Ok(TranscriptSearchResult {
-                hits: Vec::new(),
-                truncated: false,
+        let mut postings = Vec::with_capacity(terms.len());
+        for term in &terms {
+            let Some(keys) = self.postings.get(term) else {
+                return Ok(TranscriptSearchResult {
+                    hits: Vec::new(),
+                    truncated: false,
+                });
+            };
+            postings.push(keys);
+        }
+        postings.sort_unstable_by_key(|keys| keys.len());
+        // Queries are nonempty. Borrow the rarest posting set and check the
+        // other sets in place instead of cloning keys or materializing an AND.
+        let mut winners = BinaryHeap::with_capacity(request.limit);
+        let mut matching_documents = 0usize;
+        let mut token = String::new();
+        for key in postings[0] {
+            #[cfg(test)]
+            SEARCH_WORK.with(|work| work.borrow_mut().posting_candidates += 1);
+            if request
+                .filter
+                .session_id
+                .as_ref()
+                .is_some_and(|session_id| &key.session_id != session_id)
+                || !postings[1..].iter().all(|keys| {
+                    #[cfg(test)]
+                    SEARCH_WORK.with(|work| work.borrow_mut().membership_checks += 1);
+                    keys.contains(key)
+                })
+            {
+                continue;
+            }
+            let document = &self.documents[key].public;
+            if !request.filter.kinds.is_empty() && !request.filter.kinds.contains(&document.kind) {
+                continue;
+            }
+            matching_documents += 1;
+            let candidate = RankedDocument {
+                document,
+                score: score_for(document, &terms, &mut token),
+            };
+            if winners.len() < request.limit {
+                winners.push(candidate);
+            } else if candidate < *winners.peek().expect("full result heap") {
+                *winners.peek_mut().expect("full result heap") = candidate;
+            }
+            #[cfg(test)]
+            SEARCH_WORK.with(|work| {
+                let mut work = work.borrow_mut();
+                work.peak_retained_candidates = work.peak_retained_candidates.max(winners.len());
             });
         }
 
-        let Some(mut candidates) = terms
-            .iter()
-            .filter_map(|term| self.postings.get(term).cloned())
-            .reduce(|left, right| left.intersection(&right).cloned().collect())
-        else {
-            return Ok(TranscriptSearchResult {
-                hits: Vec::new(),
-                truncated: false,
-            });
-        };
-
-        if let Some(session_id) = &request.filter.session_id {
-            candidates.retain(|key| &key.session_id == session_id);
-        }
-        if !request.filter.kinds.is_empty() {
-            candidates.retain(|key| {
-                self.documents
-                    .get(key)
-                    .is_some_and(|document| request.filter.kinds.contains(&document.public.kind))
-            });
-        }
-
-        let mut hits = candidates
+        let hits = winners
+            .into_sorted_vec()
             .into_iter()
-            .filter_map(|key| self.documents.get(&key))
-            .map(|document| hit_for(&document.public, &terms))
-            .collect::<Vec<_>>();
-        hits.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| right.timestamp_ms.cmp(&left.timestamp_ms))
-                .then_with(|| left.session_id.cmp(&right.session_id))
-                .then_with(|| left.item_id.cmp(&right.item_id))
-                .then_with(|| left.kind.cmp(&right.kind))
-        });
-        let truncated = hits.len() > request.limit;
-        hits.truncate(request.limit);
-        Ok(TranscriptSearchResult { hits, truncated })
+            .map(|winner| hit_for(winner.document, &terms, winner.score))
+            .collect();
+        Ok(TranscriptSearchResult {
+            hits,
+            truncated: matching_documents > request.limit,
+        })
     }
 
     fn ensure_capacity<'a>(
@@ -848,7 +886,68 @@ fn token_occurrences(value: &str) -> (Vec<TokenOccurrence>, bool) {
     (occurrences, overlong)
 }
 
-fn hit_for(document: &SearchDocument, terms: &[String]) -> SearchHit {
+// Smaller ranks are better, leaving the worst retained candidate at the top
+// of the max-heap. This is the same ordering as the public hit sort.
+struct RankedDocument<'a> {
+    document: &'a SearchDocument,
+    score: u32,
+}
+
+impl Ord for RankedDocument<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .score
+            .cmp(&self.score)
+            .then_with(|| other.document.timestamp_ms.cmp(&self.document.timestamp_ms))
+            .then_with(|| self.document.session_id.cmp(&other.document.session_id))
+            .then_with(|| self.document.item_id.cmp(&other.document.item_id))
+            .then_with(|| self.document.kind.cmp(&other.document.kind))
+    }
+}
+
+impl PartialOrd for RankedDocument<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for RankedDocument<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for RankedDocument<'_> {}
+
+fn score_for(document: &SearchDocument, terms: &[String], token: &mut String) -> u32 {
+    #[cfg(test)]
+    SEARCH_WORK.with(|work| work.borrow_mut().scored_documents += 1);
+    matching_token_count(&document.text, terms, token)
+        .saturating_mul(10)
+        .saturating_add(matching_token_count(&document.session_title, terms, token))
+}
+
+fn matching_token_count(value: &str, terms: &[String], token: &mut String) -> u32 {
+    let mut count = 0u32;
+    for source in value.split(|character: char| !character.is_alphanumeric() && character != '_') {
+        if source.is_empty() {
+            continue;
+        }
+        // Match token_occurrences' per-scalar folding, including expansions.
+        // Indexed text has already passed the term-length bound. Reuse one
+        // scratch buffer for all candidates without allocating match ranges.
+        token.clear();
+        token.extend(source.chars().flat_map(char::to_lowercase));
+        if terms.binary_search(token).is_ok() {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+fn hit_for(document: &SearchDocument, terms: &[String], score: u32) -> SearchHit {
+    #[cfg(test)]
+    SEARCH_WORK.with(|work| work.borrow_mut().snippets_built += 1);
     let query_terms = terms.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let text_occurrences = token_occurrences(&document.text)
         .0
@@ -898,10 +997,6 @@ fn hit_for(document: &SearchDocument, terms: &[String]) -> SearchHit {
     title_match_ranges.sort_by_key(|range| (range.start_char, range.end_char));
     title_match_ranges.dedup();
 
-    let score = u32::try_from(text_occurrences.len())
-        .unwrap_or(u32::MAX)
-        .saturating_mul(10)
-        .saturating_add(u32::try_from(title_occurrences.len()).unwrap_or(u32::MAX));
     SearchHit {
         session_id: document.session_id.clone(),
         item_id: document.item_id.clone(),

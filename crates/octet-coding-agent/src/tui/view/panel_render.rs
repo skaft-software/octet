@@ -17,8 +17,131 @@ use crate::tui::fuzzy::{fuzzy_match, parse_search_query, SearchMode, TokenKind};
 use crate::tui::layout::{PickerLayout, PresentationLayout, MAX_APPROVAL_DETAIL_ROWS};
 use crate::tui::theme::OctetTheme;
 
+const PANEL_SEARCH_CACHE_MAX_ITEMS: usize = 4096;
+const PANEL_SEARCH_CACHE_MAX_BYTES: usize = 2 * 1024 * 1024;
+const PANEL_SEARCH_CACHE_MAX_SOURCE_BYTES: usize = PANEL_SEARCH_CACHE_MAX_BYTES / 4;
+
+struct CachedPanelSearchItem {
+    label: String,
+    description: Option<String>,
+    group: Option<String>,
+    normalized: String,
+}
+
+struct PanelSearchCache {
+    items: Vec<CachedPanelSearchItem>,
+}
+
+impl PanelSearchCache {
+    fn matches(
+        &self,
+        items: &[String],
+        descriptions: &[Option<String>],
+        groups: Option<&[String]>,
+    ) -> bool {
+        self.items.len() == items.len()
+            && self.items.iter().enumerate().all(|(index, cached)| {
+                cached.label == items[index]
+                    && cached.description.as_deref()
+                        == descriptions.get(index).and_then(Option::as_deref)
+                    && cached.group.as_deref()
+                        == groups
+                            .and_then(|groups| groups.get(index))
+                            .map(String::as_str)
+            })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.items.capacity() * std::mem::size_of::<CachedPanelSearchItem>()
+            + self
+                .items
+                .iter()
+                .map(|item| {
+                    item.label.capacity()
+                        + item.description.as_ref().map_or(0, String::capacity)
+                        + item.group.as_ref().map_or(0, String::capacity)
+                        + item.normalized.capacity()
+                })
+                .sum::<usize>()
+    }
+
+    fn build(
+        items: &[String],
+        descriptions: &[Option<String>],
+        groups: Option<&[String]>,
+    ) -> Option<Self> {
+        if items.len() > PANEL_SEARCH_CACHE_MAX_ITEMS {
+            return None;
+        }
+        // Check borrowed source sizes before cloning or normalizing. Oversized
+        // panels still search every item through the uncached path below.
+        let mut source_bytes = 0usize;
+        for (index, item) in items.iter().enumerate() {
+            source_bytes = source_bytes
+                .checked_add(item.len())?
+                .checked_add(
+                    descriptions
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .map_or(0, String::len),
+                )?
+                .checked_add(
+                    groups
+                        .and_then(|groups| groups.get(index))
+                        .map_or(0, String::len),
+                )?;
+            if source_bytes > PANEL_SEARCH_CACHE_MAX_SOURCE_BYTES {
+                return None;
+            }
+        }
+        let cached = Self {
+            items: items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let description = descriptions.get(index).and_then(Option::as_deref);
+                    let group = groups
+                        .and_then(|groups| groups.get(index))
+                        .map(String::as_str);
+                    CachedPanelSearchItem {
+                        label: item.clone(),
+                        description: description.map(str::to_owned),
+                        group: group.map(str::to_owned),
+                        normalized: normalized_panel_search_text(item, description, group),
+                    }
+                })
+                .collect(),
+        };
+        (cached.retained_bytes() <= PANEL_SEARCH_CACHE_MAX_BYTES).then_some(cached)
+    }
+}
+
+thread_local! {
+    // Input and rendering can run on different threads. Each retains at most one
+    // bounded snapshot. Exact source equality, not addresses or a hash, is the
+    // cache identity, so in-place updates and replacement panels cannot go stale.
+    static PANEL_SEARCH_CACHE: std::cell::RefCell<Option<PanelSearchCache>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+fn normalized_panel_search_text(
+    label: &str,
+    description: Option<&str>,
+    group: Option<&str>,
+) -> String {
+    #[cfg(test)]
+    panel_render_test_hook::record_search_normalization();
+    let mut searchable = label.to_lowercase();
+    for field in [description, group].into_iter().flatten() {
+        searchable.push(' ');
+        searchable.push_str(&field.to_lowercase());
+    }
+    searchable
+}
+
 /// Indices of the items matching the current filter. Every whitespace-delimited
-/// term must appear in either the label or description, case-insensitively.
+/// term must appear in the label, description, or provider, case-insensitively.
 fn filtered_indices_with_groups(
     items: &[String],
     descriptions: &[Option<String>],
@@ -29,29 +152,41 @@ fn filtered_indices_with_groups(
         .split_whitespace()
         .map(str::to_lowercase)
         .collect::<Vec<_>>();
-    items
-        .iter()
-        .enumerate()
-        .filter(|(index, item)| {
-            if needles.is_empty() {
-                return true;
-            }
-            let mut searchable = item.to_lowercase();
-            if let Some(description) = descriptions
-                .get(*index)
-                .and_then(|description| description.as_deref())
-            {
-                searchable.push(' ');
-                searchable.push_str(&description.to_lowercase());
-            }
-            if let Some(group) = groups.and_then(|groups| groups.get(*index)) {
-                searchable.push(' ');
-                searchable.push_str(&group.to_lowercase());
-            }
-            needles.iter().all(|needle| searchable.contains(needle))
-        })
-        .map(|(index, _)| index)
-        .collect()
+    if needles.is_empty() {
+        return (0..items.len()).collect();
+    }
+    PANEL_SEARCH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache
+            .as_ref()
+            .is_some_and(|cache| cache.matches(items, descriptions, groups))
+        {
+            *cache = PanelSearchCache::build(items, descriptions, groups);
+        }
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let uncached;
+                let searchable = if let Some(cache) = cache.as_ref() {
+                    &cache.items[index].normalized
+                } else {
+                    uncached = normalized_panel_search_text(
+                        item,
+                        descriptions.get(index).and_then(Option::as_deref),
+                        groups
+                            .and_then(|groups| groups.get(index))
+                            .map(String::as_str),
+                    );
+                    &uncached
+                };
+                needles
+                    .iter()
+                    .all(|needle| searchable.contains(needle))
+                    .then_some(index)
+            })
+            .collect()
+    })
 }
 
 /// Indices the typed filter matched, before any presentation grouping hides
@@ -2163,6 +2298,142 @@ pub(super) fn confirmation_metadata_for_rendered_panel(
 }
 
 #[cfg(test)]
+mod panel_search_cache_tests {
+    use super::*;
+
+    fn reset() {
+        PANEL_SEARCH_CACHE.with(|cache| *cache.borrow_mut() = None);
+        panel_render_test_hook::reset_search_normalizations();
+    }
+
+    #[test]
+    fn unchanged_and_equal_reallocated_snapshots_normalize_only_once() {
+        reset();
+        let items = vec!["Alpha".into(), "Beta".into()];
+        let descriptions = vec![Some("Warm".into()), Some("Cold".into())];
+        let groups = vec!["OpenAI".into(), "Other".into()];
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "alpha warm openai"),
+            vec![0]
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 2);
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "beta cold"),
+            vec![1]
+        );
+        assert_eq!(
+            filtered_indices_with_groups(
+                &items.clone(),
+                &descriptions.clone(),
+                Some(&groups.clone()),
+                "openai"
+            ),
+            vec![0]
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 2);
+        PANEL_SEARCH_CACHE.with(|cache| {
+            assert!(
+                cache.borrow().as_ref().unwrap().retained_bytes() <= PANEL_SEARCH_CACHE_MAX_BYTES
+            );
+        });
+    }
+
+    #[test]
+    fn in_place_text_updates_and_item_reordering_invalidate_exactly() {
+        reset();
+        let mut items = vec!["Alpha".into(), "Bravo".into()];
+        let mut descriptions = vec![Some("Warm".into()), None];
+        let mut groups = vec!["OpenAI".into(), "Other!".into()];
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "alpha warm openai"),
+            vec![0]
+        );
+        descriptions[0].as_mut().unwrap().replace_range(.., "Cold");
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "warm").is_empty()
+        );
+        groups[0].replace_range(.., "Closed");
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "openai").is_empty()
+        );
+        items[0].replace_range(.., "Delta");
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "alpha").is_empty()
+        );
+        items.swap(0, 1);
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "delta"),
+            vec![1]
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 10);
+        // Removing metadata must also invalidate a previously matching snapshot.
+        assert!(filtered_indices_with_groups(&items, &[], None, "cold closed").is_empty());
+    }
+
+    #[test]
+    fn unicode_and_filter_terms_keep_the_original_lowercase_semantics() {
+        reset();
+        let items = vec!["İSTANBUL".into(), "ΟΣ".into(), "CAFÉ".into()];
+        let descriptions = vec![Some("ÜBER".into()), None, Some("ACCÈS".into())];
+        let groups = vec!["GRÜPPE".into()];
+        assert_eq!(
+            filtered_indices_with_groups(
+                &items,
+                &descriptions,
+                Some(&groups),
+                "i\u{307}stanbul ÜBER grüppe"
+            ),
+            vec![0]
+        );
+        // Whole-string lowercasing preserves Greek final sigma; per-char
+        // lowercasing would not be equivalent to the original implementation.
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "ος"),
+            vec![1]
+        );
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "οσ").is_empty()
+        );
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "café accès"),
+            vec![2]
+        );
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "café über")
+                .is_empty()
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 3);
+    }
+
+    #[test]
+    fn empty_filter_skips_normalization_and_oversized_panels_remain_complete() {
+        reset();
+        let mut items = vec!["other".into(); PANEL_SEARCH_CACHE_MAX_ITEMS + 1];
+        let last = items.len() - 1;
+        items[last] = "Needle".into();
+        assert_eq!(
+            filtered_indices_with_groups(&items, &[], None, " \t"),
+            (0..items.len()).collect::<Vec<_>>()
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 0);
+        assert_eq!(
+            filtered_indices_with_groups(&items, &[], None, "needle"),
+            vec![last]
+        );
+        PANEL_SEARCH_CACHE.with(|cache| assert!(cache.borrow().is_none()));
+        let items = vec![
+            "x".repeat(PANEL_SEARCH_CACHE_MAX_SOURCE_BYTES + 1),
+            "Needle".into(),
+        ];
+        assert_eq!(
+            filtered_indices_with_groups(&items, &[], None, "needle"),
+            vec![1]
+        );
+        PANEL_SEARCH_CACHE.with(|cache| assert!(cache.borrow().is_none()));
+    }
+}
+
+#[cfg(test)]
 mod grouped_model_tests {
     use super::*;
 
@@ -2260,7 +2531,19 @@ mod grouped_model_tests {
 
 #[cfg(test)]
 pub mod panel_render_test_hook {
-    thread_local! { static DOCUMENT_LAYOUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+    thread_local! {
+        static DOCUMENT_LAYOUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static SEARCH_NORMALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub(super) fn record_search_normalization() {
+        SEARCH_NORMALIZATIONS.with(|count| count.set(count.get() + 1));
+    }
+    pub(super) fn reset_search_normalizations() {
+        SEARCH_NORMALIZATIONS.with(|count| count.set(0));
+    }
+    pub(super) fn search_normalizations() -> usize {
+        SEARCH_NORMALIZATIONS.with(std::cell::Cell::get)
+    }
     pub(super) fn record_document_layout() {
         DOCUMENT_LAYOUTS.with(|calls| calls.set(calls.get() + 1));
     }

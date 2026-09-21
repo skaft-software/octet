@@ -23,6 +23,9 @@ use crate::validate::{
 #[derive(Serialize)]
 struct ResponsesRequest {
     model: String,
+    // Already-owned opaque trees are inserted by into_json, not serialized
+    // through the typed metadata DTO into a second tree.
+    #[serde(skip_serializing)]
     input: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
@@ -59,6 +62,27 @@ struct ResponsesRequest {
     // This codec is always-streamed (there is no non-streaming Responses decode
     // path — see `decode_stream_event`), so it is unconditionally true.
     stream: bool,
+}
+
+impl ResponsesRequest {
+    fn into_json(self) -> Result<serde_json::Value, AiError> {
+        let mut body = serde_json::to_value(&self)
+            .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+        body.as_object_mut()
+            .expect("the Responses request DTO serializes to an object")
+            .insert("input".to_owned(), self.input);
+        Ok(body)
+    }
+}
+
+fn into_wire_input(input: crate::responses::ResponsesInput) -> serde_json::Value {
+    serde_json::Value::Array(
+        input
+            .into_items()
+            .into_iter()
+            .map(crate::responses::ResponsesItem::into_json)
+            .collect(),
+    )
 }
 
 #[derive(Serialize)]
@@ -1178,7 +1202,7 @@ pub(crate) fn build_request(
     } else {
         refresh_instructions
     };
-    let mut wire_input = serde_json::to_value(input).expect("Responses input serializes");
+    let mut wire_input = into_wire_input(input);
     if !responses_lite {
         map_grammar_replay(
             &mut wire_input,
@@ -1229,8 +1253,7 @@ pub(crate) fn build_request(
         stream: true,
     };
 
-    let mut body = serde_json::to_value(&responses_req)
-        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let mut body = responses_req.into_json()?;
     super::preset::sampling(model, &req, &mut body)?;
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
@@ -2833,6 +2856,235 @@ mod tests {
         assert_eq!(body["input"][1], compacted);
         assert_eq!(body["instructions"], "current instructions");
         assert!(!body["input"].to_string().contains("current instructions"));
+    }
+
+    #[test]
+    fn owned_responses_input_moves_through_both_tree_boundaries() {
+        use crate::responses::{ResponsesInput, ResponsesItem};
+        fn allocations(value: &serde_json::Value) -> (*const u8, *const serde_json::Value) {
+            (
+                value["encrypted_content"].as_str().unwrap().as_ptr(),
+                value["future_field"].as_array().unwrap().as_ptr(),
+            )
+        }
+        for count in [1, 128] {
+            let input = ResponsesInput::new(
+                (0..count)
+                    .map(|index| {
+                        ResponsesItem::new(serde_json::json!({
+                            "type": "reasoning", "id": format!("opaque-{index}"),
+                            "encrypted_content": "opaque-🙂".repeat(1024),
+                            "future_field": [{"nested": [null, true, 42, "exact"]}]
+                        }))
+                        .unwrap()
+                    })
+                    .collect(),
+            );
+            let original_allocations: Vec<_> = input
+                .items()
+                .iter()
+                .map(|item| allocations(item.as_json()))
+                .collect();
+            let input = into_wire_input(input);
+            let array_allocation = input.as_array().unwrap().as_ptr();
+            assert_eq!(
+                input
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(allocations)
+                    .collect::<Vec<_>>(),
+                original_allocations
+            );
+            let dto = ResponsesRequest {
+                model: "model".to_owned(),
+                input,
+                instructions: None,
+                previous_response_id: None,
+                context_management: None,
+                tools: None,
+                tool_choice: None,
+                parallel_tool_calls: None,
+                max_output_tokens: None,
+                temperature: None,
+                service_tier: None,
+                reasoning: None,
+                text: None,
+                prompt_cache_key: None,
+                prompt_cache_retention: None,
+                include: vec![],
+                store: false,
+                stream: true,
+            };
+            // The metadata serialization must never traverse the owned input,
+            // even if the original input would subsequently overwrite a clone.
+            assert_eq!(
+                serde_json::to_value(&dto).unwrap(),
+                serde_json::json!({
+                    "model": "model", "store": false, "stream": true
+                })
+            );
+            let body = dto.into_json().unwrap();
+            assert_eq!(body.as_object().unwrap().len(), 4);
+            let items = body["input"].as_array().unwrap();
+            assert_eq!(items.as_ptr(), array_allocation);
+            assert_eq!(
+                items.iter().map(allocations).collect::<Vec<_>>(),
+                original_allocations
+            );
+        }
+    }
+
+    #[test]
+    fn raw_replay_and_lite_rebuild_without_mutating_opaque_input() {
+        use crate::responses::{ResponsesInput, ResponsesItem, ResponsesOptions};
+        let raw = vec![
+            serde_json::json!({"type":"compaction", "encrypted_content":"opaque-🙂".repeat(4096), "future":{"null":null, "array":[true, 3]}}),
+            serde_json::json!({"type":"message", "role":"user", "content":[
+                {"type":"input_image", "image_url":"https://example.com/image.png", "detail":"high", "future":[1,2]},
+                {"type":"input_text", "text":"original", "detail":"keep"}
+            ], "detail":"keep-root"}),
+            serde_json::json!({"type":"function_call_output", "call_id":"call|verbatim", "output":[
+                {"type":"input_image", "image_url":"https://example.com/result.png", "detail":"low", "future":{"keep":true}}
+            ], "future":"retain"}),
+            serde_json::json!({"type":"custom_tool_call_output", "call_id":"custom|verbatim", "output":[
+                {"type":"input_image", "image_url":"https://example.com/custom.png", "detail":"auto"}
+            ]}),
+        ];
+        for lite in [false, true] {
+            let mut model = make_test_model(true);
+            Arc::make_mut(&mut model.spec).capabilities.responses_lite = lite;
+            let mut req = user_req(
+                vec![UserPart::Text("unused canonical input".to_owned())],
+                CompatibilityMode::Strict,
+            );
+            req.system = Some("fresh instructions".to_owned());
+            req.tools.push(ToolDef {
+                name: "read".to_owned(),
+                description: "read".to_owned(),
+                parameters: serde_json::json!({"type":"object"}),
+                constrained_sampling: None,
+            });
+            req.responses = Some(ResponsesOptions::full_replay(ResponsesInput::new(
+                raw.iter()
+                    .cloned()
+                    .map(|item| ResponsesItem::new(item).unwrap())
+                    .collect(),
+            )));
+            let original_request = serde_json::to_value(&req).unwrap();
+            let first = build_request(&model, &req).unwrap();
+            let second = build_request(&model, &req).unwrap();
+            assert_eq!(first.body, second.body);
+            assert_eq!(serde_json::to_value(&req).unwrap(), original_request);
+            let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+            let mut expected = raw.clone();
+            if lite {
+                expected[1]["content"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("detail");
+                expected[2]["output"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("detail");
+                expected[3]["output"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("detail");
+                assert_eq!(&body["input"].as_array().unwrap()[2..], expected.as_slice());
+                assert_eq!(body["input"][0]["type"], "additional_tools");
+                assert_eq!(body["input"][1]["content"][0]["text"], "fresh instructions");
+                assert_eq!(body["reasoning"]["context"], "all_turns");
+                assert_eq!(body["parallel_tool_calls"], false);
+                assert!(body.get("instructions").is_none());
+                assert!(body.get("tools").is_none());
+            } else {
+                assert_eq!(body["input"], serde_json::Value::Array(expected));
+                assert_eq!(body["instructions"], "fresh instructions");
+                assert_eq!(body["tools"][0]["name"], "read");
+                assert_eq!(body["parallel_tool_calls"], true);
+            }
+            assert_eq!(body["store"], false);
+            assert_eq!(body["stream"], true);
+            for omitted in [
+                "previous_response_id",
+                "max_output_tokens",
+                "temperature",
+                "text",
+                "service_tier",
+            ] {
+                assert!(body.get(omitted).is_none(), "{omitted}");
+            }
+        }
+    }
+
+    #[test]
+    fn moved_input_keeps_canonical_and_opaque_grammar_replay_distinct() {
+        use crate::responses::{ResponsesInput, ResponsesItem, ResponsesOptions};
+        let mut model = make_test_model(false);
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .supports_openai_grammar_tools = Some(true);
+        let mut req = user_req(
+            vec![UserPart::Text("go".to_owned())],
+            CompatibilityMode::Strict,
+        );
+        req.tools.push(ToolDef {
+            name: "language".to_owned(), description: "grammar".to_owned(),
+            parameters: serde_json::json!({"type":"object", "properties":{"source":{"type":"string"}}, "required":["source"], "additionalProperties":false}),
+            constrained_sampling: Some(crate::types::ConstrainedSampling::Grammar {
+                variants: crate::types::GrammarVariants { openai_lark: Some("start: /.+/".to_owned()), openai_regex: None },
+            }),
+        });
+        let source = "println(\"🙂\")\n";
+        req.messages
+            .push(Message::Assistant(crate::types::AssistantMessage {
+                content: vec![AssistantPart::ToolCall(crate::types::ToolCall {
+                    id: ToolCallId("call_canonical".to_owned()),
+                    name: "language".to_owned(),
+                    arguments_json: serde_json::json!({"source":source}).to_string(),
+                    argument_error: None,
+                })],
+                model: model.spec.id.clone(),
+                protocol: Protocol::OpenAiResponses,
+            }));
+        req.messages.push(Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(crate::types::ToolResult {
+                tool_call_id: ToolCallId("call_canonical".to_owned()),
+                content: vec![ToolResultPart::Text("ok".to_owned())],
+                is_error: false,
+                added_tool_names: None,
+            })],
+        }));
+        let original = serde_json::to_value(&req).unwrap();
+        let first = build_request(&model, &req).unwrap();
+        assert_eq!(first.body, build_request(&model, &req).unwrap().body);
+        assert_eq!(serde_json::to_value(&req).unwrap(), original);
+        let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(body["input"][1]["type"], "custom_tool_call");
+        assert_eq!(body["input"][1]["input"], source);
+        assert!(body["input"][1].get("arguments").is_none());
+        assert_eq!(body["input"][2]["type"], "custom_tool_call_output");
+
+        let mut raw = vec![
+            serde_json::json!({"type":"function_call", "name":"language", "call_id":"function|exact", "arguments":"{\"source\":\"unchanged\"}", "future":true}),
+            serde_json::json!({"type":"custom_tool_call", "name":"language", "call_id":"custom|exact", "input":source, "future":[null, true]}),
+            serde_json::json!({"type":"function_call_output", "call_id":"custom|exact", "output":"ok", "future":{"keep":true}}),
+            serde_json::json!({"type":"function_call_output", "call_id":"function|exact", "output":"unconverted"}),
+        ];
+        req.responses = Some(ResponsesOptions::full_replay(ResponsesInput::new(
+            raw.iter()
+                .cloned()
+                .map(|item| ResponsesItem::new(item).unwrap())
+                .collect(),
+        )));
+        let original = serde_json::to_value(&req).unwrap();
+        let first = build_request(&model, &req).unwrap();
+        assert_eq!(first.body, build_request(&model, &req).unwrap().body);
+        assert_eq!(serde_json::to_value(&req).unwrap(), original);
+        let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+        raw[2]["type"] = "custom_tool_call_output".into();
+        assert_eq!(body["input"], serde_json::Value::Array(raw));
     }
 
     #[test]

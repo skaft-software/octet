@@ -28,7 +28,7 @@ use crate::project_registry::{
 };
 use crate::repository_context::{
     refresh_git_file_status, GitFileStatus, GitFileStatusEntry, GitFileStatusKind,
-    GitFileStatusSnapshot, DEFAULT_GIT_TIMEOUT,
+    DEFAULT_GIT_TIMEOUT,
 };
 
 /// Maximum UTF-8 bytes accepted in a project-relative path.
@@ -60,6 +60,26 @@ pub const MAX_PROJECT_FILE_SEARCH_DIRECTORY_ENTRIES: usize = 20_000;
 
 const TEMP_FILE_PREFIX: &str = ".octet-write.tmp-";
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FileSystemWork {
+    pub(crate) git_status_entries: usize,
+    pub(crate) search_directories: usize,
+    pub(crate) search_file_reads: usize,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FILE_SYSTEM_WORK: std::cell::RefCell<FileSystemWork> = Default::default();
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn take_file_system_work() -> FileSystemWork {
+    FILE_SYSTEM_WORK.with(|work| std::mem::take(&mut *work.borrow_mut()))
+}
+
 #[cfg(test)]
 static TEST_ATOMIC_WRITE_TARGET: Mutex<Option<String>> = Mutex::new(None);
 #[cfg(test)]
@@ -302,24 +322,22 @@ impl ProjectFileSystem {
         let relative = parse_relative_path(path, true)?;
         let root = trusted_root(registry, project_id)?;
         let git_status = refresh_git_file_status(&root.path, DEFAULT_GIT_TIMEOUT);
+        let mut child_statuses = git_status_by_child(&git_status.entries, &relative.display);
         let directory = match resolve_directory(&root, &relative.path) {
             Ok(directory) => Some(directory),
-            Err(ProjectFileSystemError::NotFound)
-                if has_git_statuses_under(&git_status, &relative.display) =>
-            {
-                None
-            }
+            Err(ProjectFileSystemError::NotFound) if !child_statuses.is_empty() => None,
             Err(error) => return Err(error),
         };
         let mut public_entries = Vec::new();
-        let mut present_names = BTreeSet::new();
         let mut truncated = false;
 
         if let Some(directory) = directory {
             let (names, directory_truncated) = tree_directory_names(&directory)?;
             truncated |= directory_truncated;
             for name in names {
-                present_names.insert(name.clone());
+                // Even a suppressed symlink or hard link must not reappear as
+                // a virtual Git entry under the same physical name.
+                let statuses = child_statuses.remove(name.as_str());
                 let Some((kind, metadata)) = open_entry_metadata(&directory, &name)? else {
                     continue;
                 };
@@ -327,7 +345,6 @@ impl ProjectFileSystem {
                     truncated = true;
                     continue;
                 }
-                let entry_path = join_project_path(&relative.display, &name);
                 public_entries.push(ProjectFileEntry {
                     name,
                     kind,
@@ -337,22 +354,14 @@ impl ProjectFileSystem {
                         0
                     },
                     modified_at_ms: modified_at_ms(&metadata),
-                    git_status: git_status_for_path(
-                        &git_status.entries,
-                        &entry_path,
-                        matches!(kind, ProjectFileEntryKind::Directory),
-                    ),
+                    git_status: statuses
+                        .map(|statuses| statuses.into_statuses(kind))
+                        .unwrap_or_default(),
                 });
             }
         }
 
-        append_virtual_git_entries(
-            &git_status,
-            &relative.display,
-            &present_names,
-            &mut public_entries,
-            &mut truncated,
-        );
+        append_virtual_git_entries(child_statuses, &mut public_entries, &mut truncated);
         public_entries.sort_by(|left, right| {
             entry_kind_order(left.kind)
                 .cmp(&entry_kind_order(right.kind))
@@ -436,7 +445,9 @@ impl ProjectFileSystem {
         let mut scanned_directory_entries = 0usize;
         let mut truncated = false;
 
-        while let Some((relative_directory, depth)) = stack.pop() {
+        'directories: while let Some((relative_directory, depth)) = stack.pop() {
+            #[cfg(test)]
+            FILE_SYSTEM_WORK.with(|work| work.borrow_mut().search_directories += 1);
             let directory = resolve_directory(&root, &relative_directory)?;
             let (entries, directory_truncated) =
                 bounded_directory_entries(&directory, &mut scanned_directory_entries)?;
@@ -467,9 +478,10 @@ impl ProjectFileSystem {
                         .is_none_or(|total| total > MAX_PROJECT_FILE_SEARCH_BYTES)
                 {
                     truncated = true;
-                    if find_match(&display_path, query).is_some()
-                        && hits.len() < MAX_PROJECT_FILE_SEARCH_RESULTS
-                    {
+                    if find_match(&display_path, query).is_some() {
+                        if hits.len() >= MAX_PROJECT_FILE_SEARCH_RESULTS {
+                            break 'directories;
+                        }
                         hits.push(ProjectFileSearchHit {
                             path: display_path,
                             line: None,
@@ -495,7 +507,7 @@ impl ProjectFileSystem {
                 if find_match(&display_path, query).is_some() || content_match.is_some() {
                     if hits.len() >= MAX_PROJECT_FILE_SEARCH_RESULTS {
                         truncated = true;
-                        continue;
+                        break 'directories;
                     }
                     let (line, snippet) = match content_match {
                         Some(position) => (
@@ -561,116 +573,95 @@ impl ProjectFileSystem {
     }
 }
 
-fn join_project_path(parent: &str, name: &str) -> String {
-    if parent.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{parent}/{name}")
-    }
+#[derive(Default)]
+struct ChildGitStatus<'a> {
+    file: BTreeMap<GitFileStatusKind, Option<&'a str>>,
+    directory: BTreeSet<GitFileStatusKind>,
+    has_descendants: bool,
 }
 
-fn has_git_statuses_under(snapshot: &GitFileStatusSnapshot, path: &str) -> bool {
-    if path.is_empty() {
-        return !snapshot.entries.is_empty();
-    }
-    let prefix = format!("{path}/");
-    snapshot
-        .entries
-        .iter()
-        .any(|entry| entry.path.starts_with(&prefix))
-}
-
-fn git_status_for_path(
-    entries: &[GitFileStatusEntry],
-    path: &str,
-    directory: bool,
-) -> Vec<GitFileStatus> {
-    let prefix = format!("{path}/");
-    let mut statuses = BTreeMap::<GitFileStatusKind, Option<String>>::new();
-    for entry in entries {
-        let matches = if directory {
-            entry.path == path || entry.path.starts_with(&prefix)
-        } else {
-            entry.path == path
-        };
-        if !matches {
-            continue;
+impl ChildGitStatus<'_> {
+    fn into_statuses(self, kind: ProjectFileEntryKind) -> Vec<GitFileStatus> {
+        match kind {
+            ProjectFileEntryKind::File => self
+                .file
+                .into_iter()
+                .map(|(kind, old_path)| GitFileStatus {
+                    kind,
+                    old_path: old_path.map(str::to_owned),
+                })
+                .collect(),
+            ProjectFileEntryKind::Directory => self
+                .directory
+                .into_iter()
+                .map(|kind| GitFileStatus {
+                    kind,
+                    old_path: None,
+                })
+                .collect(),
         }
-        let old_path = (!directory && entry.path == path)
-            .then(|| entry.status.old_path.clone())
-            .flatten();
-        statuses
-            .entry(entry.status.kind)
-            .and_modify(|current| {
-                if current.is_none() {
-                    *current = old_path.clone();
-                }
-            })
-            .or_insert(old_path);
     }
-    statuses
-        .into_iter()
-        .map(|(kind, old_path)| GitFileStatus { kind, old_path })
-        .collect()
 }
 
-fn append_virtual_git_entries(
-    snapshot: &GitFileStatusSnapshot,
+fn git_status_by_child<'a>(
+    entries: &'a [GitFileStatusEntry],
     path: &str,
-    present_names: &BTreeSet<String>,
-    entries: &mut Vec<ProjectFileEntry>,
-    truncated: &mut bool,
-) {
+) -> BTreeMap<&'a str, ChildGitStatus<'a>> {
     let prefix = if path.is_empty() {
         String::new()
     } else {
         format!("{path}/")
     };
-    let mut virtual_names = BTreeMap::<String, ProjectFileEntryKind>::new();
-    for status in &snapshot.entries {
-        let Some(remainder) = status.path.strip_prefix(&prefix) else {
+    let mut children = BTreeMap::<&str, ChildGitStatus<'_>>::new();
+    // Aggregate once for this listing, with a component boundary in the
+    // prefix. Physical files use exact statuses; folders also use descendants.
+    for entry in entries {
+        #[cfg(test)]
+        FILE_SYSTEM_WORK.with(|work| work.borrow_mut().git_status_entries += 1);
+        let Some(remainder) = entry.path.strip_prefix(&prefix) else {
             continue;
         };
         if remainder.is_empty() {
             continue;
         }
-        let Some(name) = remainder.split('/').next() else {
-            continue;
+        let (name, descendant) = match remainder.split_once('/') {
+            Some((name, _)) => (name, true),
+            None => (remainder, false),
         };
-        if present_names.contains(name) {
-            continue;
+        let child = children.entry(name).or_default();
+        child.directory.insert(entry.status.kind);
+        child.has_descendants |= descendant;
+        if !descendant {
+            let old_path = child.file.entry(entry.status.kind).or_default();
+            if old_path.is_none() {
+                *old_path = entry.status.old_path.as_deref();
+            }
         }
-        let kind = if remainder.contains('/') {
-            ProjectFileEntryKind::Directory
-        } else {
-            ProjectFileEntryKind::File
-        };
-        virtual_names
-            .entry(name.to_owned())
-            .and_modify(|current| {
-                if kind == ProjectFileEntryKind::Directory {
-                    *current = kind;
-                }
-            })
-            .or_insert(kind);
     }
+    children
+}
 
-    for (name, kind) in virtual_names {
+fn append_virtual_git_entries(
+    children: BTreeMap<&str, ChildGitStatus<'_>>,
+    entries: &mut Vec<ProjectFileEntry>,
+    truncated: &mut bool,
+) {
+    for (name, statuses) in children {
         if entries.len() >= MAX_PROJECT_FILE_TREE_ENTRIES {
             *truncated = true;
             break;
         }
-        let entry_path = join_project_path(path, &name);
+        let kind = if statuses.has_descendants {
+            ProjectFileEntryKind::Directory
+        } else {
+            ProjectFileEntryKind::File
+        };
         entries.push(ProjectFileEntry {
-            name,
+            name: name.to_owned(),
             kind,
             size: 0,
             modified_at_ms: None,
-            git_status: git_status_for_path(
-                &snapshot.entries,
-                &entry_path,
-                matches!(kind, ProjectFileEntryKind::Directory),
-            ),
+            git_status: statuses.into_statuses(kind),
         });
     }
 }
@@ -1038,6 +1029,8 @@ fn read_complete_text(
     root: &OpenedRoot,
     relative: &Path,
 ) -> Result<(String, u64), ProjectFileSystemError> {
+    #[cfg(test)]
+    FILE_SYSTEM_WORK.with(|work| work.borrow_mut().search_file_reads += 1);
     let mut opened = open_regular_file(root, relative)?;
     let text = read_opened_complete_text(&mut opened)?;
     Ok((text, opened.identity.size))
@@ -1555,4 +1548,189 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod git_status_tests {
+    use super::*;
+
+    fn status(path: &str, kind: GitFileStatusKind, old_path: Option<&str>) -> GitFileStatusEntry {
+        GitFileStatusEntry {
+            path: path.into(),
+            status: GitFileStatus {
+                kind,
+                old_path: old_path.map(str::to_owned),
+            },
+        }
+    }
+
+    // The former per-path scan, kept as an independent semantics oracle.
+    fn reference_statuses(
+        entries: &[GitFileStatusEntry],
+        path: &str,
+        directory: bool,
+    ) -> Vec<GitFileStatus> {
+        let mut statuses = BTreeMap::new();
+        for entry in entries {
+            if entry.path != path && !(directory && entry.path.starts_with(&format!("{path}/"))) {
+                continue;
+            }
+            let old_path = if directory {
+                None
+            } else {
+                entry.status.old_path.clone()
+            };
+            let current = statuses.entry(entry.status.kind).or_insert(None);
+            if current.is_none() {
+                *current = old_path;
+            }
+        }
+        statuses
+            .into_iter()
+            .map(|(kind, old_path)| GitFileStatus { kind, old_path })
+            .collect()
+    }
+
+    #[test]
+    fn aggregated_statuses_match_exact_and_descendant_scans() {
+        use GitFileStatusKind::*;
+        let entries = vec![
+            status("src/child/one", Modified, None),
+            status("src/child/two", Added, None),
+            status("src/child/three", Modified, None),
+            status("src/child", Renamed, Some("old-child")),
+            status("src/file", Renamed, None),
+            status("src/file", Renamed, Some("first-origin")),
+            status("src/file", Renamed, Some("later-origin")),
+            status("src/file/deleted", Deleted, None),
+            status("src/childish/nested", Untracked, None),
+            status("srcish/child", Untracked, None),
+            status("src", Deleted, None),
+        ];
+        for parent in [
+            "",
+            "src",
+            "src/child",
+            "src/file",
+            "srcish",
+            "sr",
+            "missing",
+        ] {
+            for kind in [ProjectFileEntryKind::File, ProjectFileEntryKind::Directory] {
+                for (name, child) in git_status_by_child(&entries, parent) {
+                    let path = if parent.is_empty() {
+                        name.into()
+                    } else {
+                        format!("{parent}/{name}")
+                    };
+                    assert_eq!(
+                        child.into_statuses(kind),
+                        reference_statuses(
+                            &entries,
+                            &path,
+                            kind == ProjectFileEntryKind::Directory
+                        ),
+                        "{path}: {kind:?}",
+                    );
+                }
+            }
+        }
+        assert!(git_status_by_child(&entries, "sr").is_empty());
+        assert_eq!(
+            git_status_by_child(&entries, "src")
+                .remove("file")
+                .unwrap()
+                .into_statuses(ProjectFileEntryKind::File),
+            vec![GitFileStatus {
+                kind: Renamed,
+                old_path: Some("first-origin".into())
+            }],
+        );
+        let mut virtual_entries = Vec::new();
+        let mut truncated = false;
+        append_virtual_git_entries(
+            git_status_by_child(&entries, "src"),
+            &mut virtual_entries,
+            &mut truncated,
+        );
+        assert!(!truncated);
+        let child = virtual_entries
+            .iter()
+            .find(|entry| entry.name == "child")
+            .unwrap();
+        assert_eq!(child.kind, ProjectFileEntryKind::Directory);
+        assert_eq!(
+            child.git_status,
+            reference_statuses(&entries, "src/child", true)
+        );
+        assert!(child
+            .git_status
+            .iter()
+            .all(|status| status.old_path.is_none()));
+    }
+
+    #[test]
+    fn status_aggregation_visits_each_record_once_and_shares_the_physical_entry_cap() {
+        let statuses = (0..2_000)
+            .flat_map(|number| {
+                [
+                    status(
+                        &format!("src/child-{number:04}/one"),
+                        GitFileStatusKind::Deleted,
+                        None,
+                    ),
+                    status(
+                        &format!("src/child-{number:04}/two"),
+                        GitFileStatusKind::Deleted,
+                        None,
+                    ),
+                ]
+            })
+            .collect::<Vec<_>>();
+        for physical_count in [
+            0,
+            MAX_PROJECT_FILE_TREE_ENTRIES - 2,
+            MAX_PROJECT_FILE_TREE_ENTRIES,
+        ] {
+            let mut entries = (0..physical_count)
+                .map(|number| ProjectFileEntry {
+                    name: format!("physical-{number:04}"),
+                    kind: ProjectFileEntryKind::File,
+                    size: 1,
+                    modified_at_ms: Some(1),
+                    git_status: Vec::new(),
+                })
+                .collect::<Vec<_>>();
+            let mut truncated = false;
+            take_file_system_work();
+            append_virtual_git_entries(
+                git_status_by_child(&statuses, "src"),
+                &mut entries,
+                &mut truncated,
+            );
+            assert_eq!(take_file_system_work().git_status_entries, statuses.len());
+            assert!(truncated);
+            assert_eq!(entries.len(), MAX_PROJECT_FILE_TREE_ENTRIES);
+            for (number, entry) in entries[physical_count..].iter().enumerate() {
+                assert_eq!(entry.name, format!("child-{number:04}"));
+                assert_eq!(entry.kind, ProjectFileEntryKind::Directory);
+                assert_eq!(
+                    entry.git_status,
+                    vec![GitFileStatus {
+                        kind: GitFileStatusKind::Deleted,
+                        old_path: None
+                    }]
+                );
+            }
+        }
+        let mut entries = Vec::new();
+        let mut truncated = false;
+        append_virtual_git_entries(
+            git_status_by_child(&statuses[..2_000], "src"),
+            &mut entries,
+            &mut truncated,
+        );
+        assert_eq!(entries.len(), MAX_PROJECT_FILE_TREE_ENTRIES);
+        assert!(!truncated, "exactly the shared cap is not an overflow");
+    }
 }

@@ -1,4 +1,4 @@
-//! Native-reader producer probes use actual ShellComponent -> Pi -> VT bytes.
+//! Native-reader probes retain actual isolated ShellComponent -> Pi -> VT frames.
 use super::*;
 
 struct NativeReplay {
@@ -15,22 +15,32 @@ impl NativeReplay {
     }
 
     fn with_size(width: u16, height: u16) -> Self {
-        let (mut shell, bytes) =
-            emulated_shell_with_mode(crate::tui::theme::test_theme(), width, height, true, false);
+        Self::with_theme(crate::tui::theme::test_theme(), width, height)
+    }
+
+    fn with_theme(theme: OctetTheme, width: u16, height: u16) -> Self {
+        let mut replay = Self::unrendered(theme, width, height);
+        replay.render(false);
+        replay
+    }
+
+    fn unrendered(theme: OctetTheme, width: u16, height: u16) -> Self {
+        let (mut shell, bytes) = emulated_shell_with_mode(theme, width, height, true, false);
+        // Exercise production publication/materialization, not the inline test
+        // component. Its first private layout starts at generation 1.
+        shell.isolate_native_test_renderer();
         // Match the product's policy; the generic Pi default stays unchanged.
         shell.tui.as_mut().unwrap().set_clear_on_shrink(false);
         for index in 0..30 {
             shell.notice(format!("NATIVE-HISTORY-{index:02}"));
         }
-        let mut replay = Self {
+        Self {
             shell,
             bytes,
             terminal: vt100::Parser::new(height, width, 2048),
             width,
             height,
-        };
-        replay.render(false);
-        replay
+        }
     }
 
     fn render(&mut self, stable: bool) -> String {
@@ -57,15 +67,130 @@ impl NativeReplay {
         output
     }
 
+    fn frame(&self) -> String {
+        strip_terminal_sequences(&self.shell.tui.as_ref().unwrap().rendered_frame().join("\n"))
+    }
+
+    fn assert_canonical_transcript(&self) {
+        let state = self.shell.state.borrow();
+        let transcript = state.rendered_transcript(self.width);
+        let expected = transcript
+            .iter()
+            .map(|row| strip_terminal_sequences(row))
+            .collect::<Vec<_>>();
+        let frame = self.shell.tui.as_ref().unwrap().rendered_frame();
+        assert!(
+            frame.len() >= expected.len(),
+            "canonical transcript was clipped"
+        );
+        let actual = frame[..expected.len()]
+            .iter()
+            .map(|row| strip_terminal_sequences(row))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "Pi retained stale transcript rows");
+    }
+
     fn history(&mut self) -> String {
-        self.terminal.set_size(2048, self.width);
+        // Read saved rows without resizing the emulated terminal: callers can
+        // keep replaying after this snapshot with the same cursor/viewport.
         self.terminal.set_scrollback(usize::MAX);
-        let physical = self.terminal.screen().contents();
+        let saved_rows = self.terminal.screen().scrollback();
+        let mut rows = Vec::new();
+        for offset in (1..=saved_rows).rev() {
+            self.terminal.set_scrollback(offset);
+            rows.push(self.terminal.screen().rows(0, self.width).next().unwrap());
+        }
+        self.terminal.set_scrollback(0);
+        rows.extend(self.terminal.screen().rows(0, self.width));
+        let physical = rows.join("\n");
         for index in 0..30 {
             let marker = format!("NATIVE-HISTORY-{index:02}");
             assert_eq!(physical.matches(&marker).count(), 1, "{marker}: {physical}");
         }
         physical
+    }
+}
+
+fn native_profile_matrix() -> impl Iterator<Item = (OctetTheme, u16, u16)> {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    use crate::tui::theme::TerminalBackground;
+
+    [(80, 8), (96, 18), (120, 40)]
+        .into_iter()
+        .flat_map(|(width, height)| {
+            [ColorDepth::TrueColor, ColorDepth::None].map(move |depth| {
+                let theme = crate::tui::theme::test_theme_for(
+                    TerminalBackground::Light,
+                    TerminalCapabilities::test(true, true, depth),
+                );
+                (theme, width, height)
+            })
+        })
+}
+
+#[test]
+fn native_isolated_non_tail_insertion_and_removal_repair_generation_one_history() {
+    for (theme, width, height) in native_profile_matrix() {
+        for insert in [false, true] {
+            let mut replay = NativeReplay::unrendered(theme.clone(), width, height);
+            // Keep the edit above the old viewport even at 120x40. All of this
+            // is accepted before the isolated component's first layout.
+            for index in 0..48 {
+                replay.shell.notice(format!("STRUCTURAL-TAIL-{index:02}"));
+            }
+            if !insert {
+                replay
+                    .shell
+                    .state
+                    .borrow_mut()
+                    .insert_block(2, TranscriptBlock::Notice("REMOVABLE-HISTORY".into()));
+            }
+            replay.render(false);
+            replay.assert_canonical_transcript();
+            let baseline = replay.shell.tui.as_ref().unwrap().full_redraws();
+            let epoch = replay.shell.state.borrow().transcript_epoch;
+            if insert {
+                replay
+                    .shell
+                    .state
+                    .borrow_mut()
+                    .insert_block(2, TranscriptBlock::Notice("INSERTED-HISTORY".into()));
+            } else {
+                replay
+                    .shell
+                    .state
+                    .borrow_mut()
+                    .remove_transient_activity_block(2);
+            }
+            // This is a publication reset within the same session, not a new
+            // transcript epoch that could accidentally mask the collision.
+            assert_eq!(replay.shell.state.borrow().transcript_epoch, epoch);
+            let output = replay.render(false);
+            assert_eq!(output.matches("\x1b[3J").count(), 1, "{output:?}");
+            assert_eq!(
+                replay.shell.tui.as_ref().unwrap().full_redraws(),
+                baseline + 1
+            );
+            replay.assert_canonical_transcript();
+            for _ in 0..3 {
+                replay.render(true);
+            }
+            let physical = replay.history();
+            assert_eq!(
+                physical.matches("INSERTED-HISTORY").count(),
+                usize::from(insert)
+            );
+            assert!(!physical.contains("REMOVABLE-HISTORY"), "{physical}");
+            for index in 0..48 {
+                assert_eq!(
+                    physical
+                        .matches(&format!("STRUCTURAL-TAIL-{index:02}"))
+                        .count(),
+                    1,
+                    "{physical}"
+                );
+            }
+        }
     }
 }
 
@@ -287,6 +412,353 @@ fn publish_workers(
             failure_class: None,
         },
     });
+}
+
+fn assert_parent_history_is_not_worker_preview(replay: &mut NativeReplay, expanded: bool) {
+    for text in [replay.frame(), replay.history()] {
+        assert_eq!(text.matches("Subagents").count(), 1, "{text}");
+        assert_eq!(text.matches("LIVE-WORKER").count(), 1, "{text}");
+        assert!(!text.contains("result pending"), "{text}");
+        for index in 0..48 {
+            assert_eq!(
+                text.matches(&format!("PARENT-{index:02}")).count(),
+                1,
+                "{text}"
+            );
+        }
+        for tool in 0..2 {
+            assert_eq!(
+                text.matches(&format!("parent-command-{tool}")).count(),
+                1,
+                "{text}"
+            );
+            assert_eq!(
+                text.matches(&format!("FINAL-{tool}-11")).count(),
+                1,
+                "{text}"
+            );
+            if expanded {
+                for row in 0..12 {
+                    assert_eq!(
+                        text.matches(&format!("FINAL-{tool}-{row:02}")).count(),
+                        1,
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_active_roster_preserves_parent_answers_results_and_authoritative_updates() {
+    for (theme, width, height) in native_profile_matrix() {
+        let mut replay = NativeReplay::with_theme(theme, width, height);
+        let run = replay.shell.begin_run("openai");
+        replay.shell.on_prompt_submitted("parent owns this answer");
+        let mut live = worker("LIVE-WORKER");
+        publish_workers(&mut replay, vec![live.clone()]);
+        replay.render(false);
+        assert!(!replay.frame().contains("result pending"));
+        let roster_id = {
+            let state = replay.shell.state.borrow();
+            state.transcript_commit_ids[state.subagent_activity_block.unwrap()]
+        };
+
+        let mut source = String::new();
+        for index in 0..48 {
+            let chunk = format!("PARENT-{index:02} unrelated **assistant** text β.\n\n");
+            source.push_str(&chunk);
+            replay.shell.on_run_event(
+                run,
+                &AgentEvent::OutputDelta {
+                    channel: OutputChannel::Text,
+                    text: chunk,
+                },
+            );
+            if index % 16 == 15 {
+                replay.render(false);
+                let frame = replay.frame();
+                assert_eq!(frame.matches("LIVE-WORKER").count(), 1, "{frame}");
+                assert!(!frame.contains("result pending"), "{frame}");
+                for accepted in 0..=index {
+                    assert_eq!(
+                        frame.matches(&format!("PARENT-{accepted:02}")).count(),
+                        1,
+                        "{frame}"
+                    );
+                }
+            }
+        }
+        let mut results = Vec::new();
+        for tool in 0..2 {
+            let id = ToolCallId(format!("parent-tool-{tool}"));
+            replay.shell.on_run_event(
+                run,
+                &AgentEvent::ToolStarted {
+                    id: id.clone(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": format!("parent-command-{tool}")}),
+                },
+            );
+            replay.shell.on_run_event(
+                run,
+                &AgentEvent::ToolProgress {
+                    id: id.clone(),
+                    progress: ToolProgress::Output {
+                        stream: octet_agent::OutputStream::Stdout,
+                        bytes: bytes::Bytes::from("pending output\n".repeat(12)),
+                    },
+                },
+            );
+            replay.render(false);
+            // The ordinary trailing tool may have a preview, never the roster
+            // or the already accepted answer before that tool.
+            assert_eq!(replay.frame().matches("PARENT-00").count(), 1);
+            assert_eq!(replay.frame().matches("LIVE-WORKER").count(), 1);
+            let output = (0..12)
+                .map(|row| format!("FINAL-{tool}-{row:02}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            replay.shell.on_run_event(
+                run,
+                &AgentEvent::ToolFinished {
+                    id: id.clone(),
+                    result: Ok(octet_agent::ToolOutput::new(output.clone())),
+                    duration: Duration::from_millis(10),
+                },
+            );
+            results.push((id, output));
+            replay.render(false);
+            assert!(!replay.frame().contains("result pending"));
+            assert!(!replay.history().contains("pending output"));
+        }
+        assert_parent_history_is_not_worker_preview(&mut replay, false);
+        replay.shell.on_run_event(
+            run,
+            &AgentEvent::RunFinished {
+                head: octet_agent::EntryId("parent-head".into()),
+                reason: octet_agent::FinishReason::Completed,
+            },
+        );
+        replay.render(false);
+        replay.assert_canonical_transcript();
+
+        // Real offscreen metric, growth, shrink and completion changes must
+        // repair history, not keep a stale running roster to avoid ED3.
+        live.output_tokens = 987;
+        live.total_tokens = live.input_tokens + live.output_tokens;
+        for children in [
+            vec![live.clone()],
+            vec![live.clone(), worker("SECOND-WORKER")],
+            vec![live.clone()],
+            vec![octet_agent::DelegationTelemetryChild {
+                state: "completed".into(),
+                ..live.clone()
+            }],
+        ] {
+            let second = children.len() == 2;
+            let completed = children[0].state == "completed";
+            let baseline = replay.shell.tui.as_ref().unwrap().full_redraws();
+            publish_workers(&mut replay, children);
+            let output = replay.render(false);
+            assert_eq!(output.matches("\x1b[3J").count(), 1, "{output:?}");
+            assert_eq!(
+                replay.shell.tui.as_ref().unwrap().full_redraws(),
+                baseline + 1
+            );
+            replay.assert_canonical_transcript();
+            assert_parent_history_is_not_worker_preview(&mut replay, false);
+            let physical = replay.history();
+            assert_eq!(
+                physical.matches("SECOND-WORKER").count(),
+                usize::from(second)
+            );
+            let row = physical
+                .lines()
+                .find(|row| row.contains("LIVE-WORKER"))
+                .unwrap();
+            if !completed {
+                assert!(row.contains("987"), "{row}");
+            }
+            // Uniform rosters may put their state in the heading rather than
+            // repeat a state column. Check only this roster's projection, not
+            // unrelated historical lifecycle text.
+            let roster = physical
+                .split_once("Subagents")
+                .unwrap()
+                .1
+                .split_once("PARENT-00")
+                .unwrap()
+                .0;
+            assert!(
+                roster.contains(if completed { "completed" } else { "running" }),
+                "{roster}"
+            );
+            let state = replay.shell.state.borrow();
+            assert_eq!(
+                state.transcript_commit_ids[state.subagent_activity_block.unwrap()],
+                roster_id
+            );
+            drop(state);
+            replay.render(true);
+        }
+
+        for expanded in [true, false, true] {
+            replay.shell.set_verbose_tools(expanded);
+            replay.render(false);
+            replay.assert_canonical_transcript();
+            assert_parent_history_is_not_worker_preview(&mut replay, expanded);
+            replay.render(true);
+        }
+        for (columns, rows) in [(120, 40), (80, 8), (96, 18), (width, height)] {
+            if (columns, rows) == (replay.width, replay.height) {
+                continue;
+            }
+            replay.terminal.set_size(rows, columns);
+            replay.width = columns;
+            replay.height = rows;
+            replay.shell.set_size(columns, rows);
+            let baseline = replay.shell.tui.as_ref().unwrap().full_redraws();
+            let output = replay.render(false);
+            assert_eq!(output.matches("\x1b[3J").count(), 1, "{output:?}");
+            assert_eq!(
+                replay.shell.tui.as_ref().unwrap().full_redraws(),
+                baseline + 1
+            );
+            replay.assert_canonical_transcript();
+            assert_parent_history_is_not_worker_preview(&mut replay, true);
+            replay.render(true);
+        }
+        let state = replay.shell.state.borrow();
+        let assistant = state
+            .transcript
+            .iter()
+            .find(|block| matches!(block, TranscriptBlock::Assistant(_)))
+            .unwrap();
+        let TranscriptBlock::Assistant(block) = assistant else {
+            unreachable!()
+        };
+        assert_eq!(block.text, source);
+        assert!(block.finished);
+        assert_eq!(
+            block_copy_text(assistant),
+            sexy_tui_rs::parse_markdown(&source).plain_text()
+        );
+        for (tool, (id, output)) in results.iter().enumerate() {
+            let index = state.tool_panels[id];
+            let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
+                unreachable!()
+            };
+            assert_eq!(&panel.output, output);
+            assert_eq!(
+                block_copy_text(&state.transcript[index]),
+                format!("$ parent-command-{tool}")
+            );
+        }
+    }
+}
+
+#[test]
+fn native_two_runs_keep_roster_identity_through_late_worker_completion() {
+    for (theme, width, height) in native_profile_matrix() {
+        let mut replay = NativeReplay::with_theme(theme, width, height);
+        let first_run = replay.shell.begin_run("fixture");
+        replay.shell.on_prompt_submitted("FIRST-ROOT-PROMPT");
+        let mut first = worker("FIRST-ROOT-WORKER");
+        publish_workers(&mut replay, vec![first.clone()]);
+        replay.render(false);
+        first.state = "completed".into();
+        publish_workers(&mut replay, vec![first.clone()]);
+        replay.shell.on_run_event(
+            first_run,
+            &AgentEvent::RunFinished {
+                head: octet_agent::EntryId("first-root-head".into()),
+                reason: octet_agent::FinishReason::Completed,
+            },
+        );
+        replay.render(false);
+        let (first_id, first_copy) = {
+            let state = replay.shell.state.borrow();
+            let index = state.subagent_activity_block.unwrap();
+            (
+                state.transcript_commit_ids[index],
+                block_copy_text(&state.transcript[index]),
+            )
+        };
+
+        let second_run = replay.shell.begin_run("fixture");
+        replay.shell.on_prompt_submitted("SECOND-ROOT-PROMPT");
+        publish_workers(&mut replay, vec![first.clone()]);
+        assert!(replay
+            .shell
+            .state
+            .borrow()
+            .subagent_activity_block
+            .is_none());
+        let mut second = worker("SECOND-ROOT-WORKER");
+        publish_workers(&mut replay, vec![first.clone(), second.clone()]);
+        replay.render(false);
+        let second_id = {
+            let state = replay.shell.state.borrow();
+            state.transcript_commit_ids[state.subagent_activity_block.unwrap()]
+        };
+        assert_ne!(first_id, second_id);
+        for index in 0..48 {
+            replay.shell.notice(format!("SECOND-ROOT-TAIL-{index:02}"));
+        }
+        // The parent settles before this run's worker. A later authoritative
+        // completion still repairs that worker, never the preceding run's event.
+        replay.shell.on_run_event(
+            second_run,
+            &AgentEvent::RunFinished {
+                head: octet_agent::EntryId("second-root-head".into()),
+                reason: octet_agent::FinishReason::Completed,
+            },
+        );
+        replay.render(false);
+        second.state = "failed".into();
+        second.failure_reason = Some("late worker failure".into());
+        publish_workers(&mut replay, vec![first, second]);
+        let output = replay.render(false);
+        assert_eq!(output.matches("\x1b[3J").count(), 1, "{output:?}");
+        replay.assert_canonical_transcript();
+        let state = replay.shell.state.borrow();
+        let first_index = state
+            .transcript_commit_ids
+            .iter()
+            .position(|id| *id == first_id)
+            .unwrap();
+        let second_index = state.subagent_activity_block.unwrap();
+        assert_eq!(state.transcript_commit_ids[second_index], second_id);
+        assert_eq!(block_copy_text(&state.transcript[first_index]), first_copy);
+        let second_copy = block_copy_text(&state.transcript[second_index]);
+        assert!(second_copy.contains("SECOND-ROOT-WORKER"), "{second_copy}");
+        assert!(second_copy.contains("failed"), "{second_copy}");
+        assert!(!second_copy.contains("FIRST-ROOT-WORKER"), "{second_copy}");
+        drop(state);
+        for _ in 0..3 {
+            replay.render(true);
+        }
+        for text in [replay.frame(), replay.history()] {
+            assert_eq!(text.matches("Subagents").count(), 2, "{text}");
+            assert_eq!(text.matches("FIRST-ROOT-WORKER").count(), 1, "{text}");
+            assert_eq!(text.matches("SECOND-ROOT-WORKER").count(), 1, "{text}");
+            let (old, current) = text.split_once("SECOND-ROOT-PROMPT").unwrap();
+            assert!(old.contains("FIRST-ROOT-WORKER"), "{text}");
+            assert!(!current.contains("FIRST-ROOT-WORKER"), "{text}");
+            assert!(current.contains("SECOND-ROOT-WORKER"), "{text}");
+            assert!(current.contains("failed"), "{text}");
+            for index in 0..48 {
+                assert_eq!(
+                    text.matches(&format!("SECOND-ROOT-TAIL-{index:02}"))
+                        .count(),
+                    1,
+                    "{text}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

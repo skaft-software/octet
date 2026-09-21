@@ -84,7 +84,7 @@ fn compact_subagent_rows_retain_metrics_during_short_tools_and_keep_latest_telem
 }
 
 #[test]
-fn live_subagent_marker_pulses_without_invalidating_historical_rows() {
+fn live_subagent_marker_pulses_and_settles_without_shifting_rows() {
     let mut shell = InteractiveShell::test_shell();
     publish(&mut shell, &child());
     let index = shell.state.borrow().subagent_activity_block.unwrap();
@@ -93,11 +93,47 @@ fn live_subagent_marker_pulses_without_invalidating_historical_rows() {
     }
     let baseline = shell.state.borrow().rendered_transcript(80).clone();
     let revision = shell.state.borrow().block_revisions[index];
-    for _ in 0..6 {
-        shell.state.borrow_mut().advance_event_dot_animation();
-        assert_eq!(shell.state.borrow().block_revisions[index], revision);
-        assert_eq!(*shell.state.borrow().rendered_transcript(80), baseline);
-    }
+    shell.state.borrow_mut().advance_event_dot_animation();
+    let pulsed = shell.state.borrow().rendered_transcript(80).clone();
+    assert!(
+        shell.state.borrow().block_revisions[index] > revision,
+        "a live roster is invalidated by the shared event-dot clock"
+    );
+    assert_ne!(
+        pulsed, baseline,
+        "a live roster pulses on the shared spinner clock"
+    );
+    // The pulse is a colour-only flip on the roster's own margin dot: the
+    // historical rows above it and every roster row keep their shape.
+    assert_eq!(pulsed.len(), baseline.len(), "{pulsed:?}");
+    let changed: Vec<usize> = baseline
+        .iter()
+        .zip(pulsed.iter())
+        .enumerate()
+        .filter(|(_, (before, after))| before != after)
+        .map(|(row, _)| row)
+        .collect();
+    assert_eq!(
+        changed.len(),
+        1,
+        "only the roster's marker row may change: {pulsed:?}"
+    );
+    assert!(
+        baseline[changed[0]].contains("Subagents"),
+        "the changing row is the event heading: {pulsed:?}"
+    );
+    assert_eq!(
+        pulsed
+            .iter()
+            .filter(|line| line.contains("HISTORY-"))
+            .count(),
+        baseline
+            .iter()
+            .filter(|line| line.contains("HISTORY-"))
+            .count(),
+        "history above the event is untouched"
+    );
+
     let state = shell.state.borrow();
     let block = &state.transcript[index];
     let marker = super::surface_frame::event_margin_marker_with_frame;
@@ -115,19 +151,27 @@ fn live_subagent_marker_pulses_without_invalidating_historical_rows() {
     );
     drop(state);
 
-    // A settled roster resolves from the declared child states: green when
-    // every worker finished successfully, red when one failed, neutral when
-    // work was stopped.
+    // A settled roster resolves from the declared child states: green only
+    // when every worker finished successfully, red when anything else
+    // happened - a failure, a cancellation, or a stopped worker.
     let mut settled = child();
     settled.state = "completed".into();
     publish(&mut shell, &settled);
-    let state = shell.state.borrow();
-    let block = &state.transcript[index];
+    let settled_rows = shell.state.borrow().rendered_transcript(80).clone();
+    {
+        let state = shell.state.borrow();
+        let block = &state.transcript[index];
+        assert_eq!(
+            marker(block, &state.theme, 0, None, 0, false),
+            Some(state.theme.settled_event_dot("success", pulse))
+        );
+    }
+    shell.state.borrow_mut().advance_event_dot_animation();
     assert_eq!(
-        marker(block, &state.theme, 0, None, 0, false),
-        Some(state.theme.settled_event_dot("success", pulse))
+        *shell.state.borrow().rendered_transcript(80),
+        settled_rows,
+        "a settled roster stops animating"
     );
-    drop(state);
 
     let mut stopped = settled.clone();
     stopped.state = "stopped".into();
@@ -136,7 +180,7 @@ fn live_subagent_marker_pulses_without_invalidating_historical_rows() {
     let block = &state.transcript[index];
     assert_eq!(
         marker(block, &state.theme, 0, None, 0, false),
-        Some(state.theme.settled_event_dot("neutral", pulse))
+        Some(state.theme.settled_event_dot("error", pulse))
     );
     drop(state);
 
@@ -680,7 +724,11 @@ fn live_roster_rows_update_in_place_while_the_reader_reads_history() {
 }
 
 #[test]
-fn uniform_rosters_fold_the_group_into_the_heading_and_drop_the_state_column() {
+/// A roster made of one state still prints the state column on every row, and
+/// its heading stays a plain tool-call name: the state lives on the rows and
+/// the margin dot, and the count lives on nothing at all.
+#[test]
+fn a_uniform_roster_keeps_the_state_column_and_a_plain_heading() {
     let theme = crate::tui::theme::test_theme();
     let uniform = SubagentActivityView {
         telemetry: vec![
@@ -690,23 +738,22 @@ fn uniform_rosters_fold_the_group_into_the_heading_and_drop_the_state_column() {
         ..SubagentActivityView::default()
     };
     let rows = roster_rows(&uniform, &theme, 120, false);
-    let plain = rows
-        .iter()
-        .map(|row| row.to_owned())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let plain = rows.join("\n");
     assert!(
-        rows[0].contains("running") && rows[0].contains("2"),
-        "{plain}"
+        rows[0].trim_end().ends_with("Subagents"),
+        "the heading is a plain tool-call name: {plain}"
     );
     assert!(
-        rows.iter()
-            .all(|row| !row.trim_start().starts_with("running")),
-        "the per-group sub-heading is folded away: {plain}"
+        plain.contains("state"),
+        "the state column survives a uniform roster: {plain}"
     );
     assert!(
-        !plain.contains("state"),
-        "the repeated state column is dropped: {plain}"
+        plain.contains("running"),
+        "every row names its own state: {plain}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("running · ")),
+        "no per-group sub-heading is printed: {plain}"
     );
 
     let mixed = SubagentActivityView {
@@ -719,13 +766,14 @@ fn uniform_rosters_fold_the_group_into_the_heading_and_drop_the_state_column() {
     let rows = roster_rows(&mixed, &theme, 120, false);
     let plain = rows.join("\n");
     assert!(
-        plain.contains("running · 1"),
-        "group lines survive a mixed roster: {plain}"
+        plain.contains("running"),
+        "mixed rosters keep every state word: {plain}"
     );
-    assert!(plain.contains("completed · 1"), "{plain}");
+    assert!(plain.contains("completed"), "{plain}");
+    assert!(plain.contains("state"), "{plain}");
     assert!(
-        plain.contains("state"),
-        "the state column survives a mixed roster: {plain}"
+        rows.iter().all(|row| !row.contains("running · ")),
+        "mixed rosters print no per-group sub-heading either: {plain}"
     );
 }
 

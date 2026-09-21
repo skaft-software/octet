@@ -10,6 +10,7 @@ use crate::secure_fs::{create_bound_private_directory, PrivateDirectory};
 
 const OWNER_BYTES: usize = 64 * 1024 * 1024;
 const OWNER_FILES: usize = 32;
+const CHUNK_BYTES: usize = 8192;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 type Owner = Arc<OwnerState>;
 
@@ -18,6 +19,17 @@ pub(super) struct OwnerState {
     // recheck this fence after obtaining that mutex and before storing bytes.
     retired: AtomicBool,
     retention: Mutex<Retention>,
+    #[cfg(test)]
+    work: Work,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct Work {
+    workers: std::sync::atomic::AtomicUsize,
+    files: std::sync::atomic::AtomicUsize,
+    chunks: std::sync::atomic::AtomicUsize,
+    copied_bytes: std::sync::atomic::AtomicUsize,
 }
 
 impl OwnerState {
@@ -25,6 +37,8 @@ impl OwnerState {
         Self {
             retired: AtomicBool::new(false),
             retention: Mutex::new(Retention::new(max_bytes, max_files)),
+            #[cfg(test)]
+            work: Work::default(),
         }
     }
 }
@@ -269,19 +283,28 @@ pub(super) struct Outcome {
 }
 
 enum Message {
-    Chunk(Vec<u8>),
+    Chunk { bytes: Vec<u8>, truncated: bool },
     Finish,
 }
 
 pub(super) struct Writer {
     sender: tokio::sync::mpsc::Sender<Message>,
     result: tokio::sync::oneshot::Receiver<Outcome>,
+    remaining: usize,
+    truncated: bool,
+    #[cfg(test)]
+    owner: Owner,
 }
 
 impl Writer {
     pub(super) fn start(owner: Owner, scope: String, limit: usize) -> Self {
-        // Four 8-KiB pipe chunks: backpressure bounds queued disk work. The
-        // worker drains this queue when a cancelled reader drops its sender.
+        // Four 8-KiB chunks, including promotion of a larger provisional
+        // capture: backpressure bounds queued disk work. The worker drains this
+        // queue when a cancelled reader drops its sender.
+        #[cfg(test)]
+        owner.work.workers.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        let work_owner = owner.clone();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
         let (result_sender, result) = tokio::sync::oneshot::channel();
         tokio::task::spawn_blocking(move || {
@@ -292,7 +315,7 @@ impl Writer {
                 error: false,
             };
             while let Some(message) = receiver.blocking_recv() {
-                let Message::Chunk(chunk) = message else {
+                let Message::Chunk { bytes, truncated } = message else {
                     let _ = result_sender.send(outcome);
                     return;
                 };
@@ -302,9 +325,8 @@ impl Writer {
                 {
                     continue;
                 }
-                let take = chunk.len().min(limit.saturating_sub(outcome.bytes));
-                outcome.truncated = take < chunk.len();
-                if take == 0 {
+                outcome.truncated = truncated;
+                if bytes.is_empty() {
                     continue;
                 }
                 let mut retention = owner.retention.lock().unwrap();
@@ -315,6 +337,8 @@ impl Writer {
                 if outcome.spill.is_none() {
                     match retention.create(scope.clone()) {
                         Ok((id, path, expired)) => {
+                            #[cfg(test)]
+                            owner.work.files.fetch_add(1, Ordering::Relaxed);
                             outcome.spill = Some(Spill {
                                 owner: owner.clone(),
                                 id,
@@ -334,7 +358,7 @@ impl Writer {
                     outcome.error = true;
                     continue;
                 }
-                match retention.append(id, &chunk[..take]) {
+                match retention.append(id, &bytes) {
                     Ok(n) => outcome.bytes += n,
                     Err(()) => outcome.error = true,
                 }
@@ -342,11 +366,53 @@ impl Writer {
             // No Finish means cancellation. Dropping the uncommitted lease
             // schedules safe cleanup, including a cancelled result receiver.
         });
-        Self { sender, result }
+        Self {
+            sender,
+            result,
+            remaining: limit,
+            truncated: false,
+            #[cfg(test)]
+            owner: work_owner,
+        }
     }
 
-    pub(super) async fn chunk(&self, bytes: &[u8]) {
-        let _ = self.sender.send(Message::Chunk(bytes.to_vec())).await;
+    pub(super) async fn chunk(&mut self, bytes: &[u8]) {
+        // Stop copying/queueing as soon as the exact prefix limit is reached,
+        // not just writing. The pipe reader must still drain and publish output.
+        let take = bytes.len().min(self.remaining);
+        let truncated = !self.truncated && take < bytes.len();
+        self.truncated |= truncated;
+        self.remaining -= take;
+        let mut chunks = bytes[..take].chunks(CHUNK_BYTES).peekable();
+        while let Some(chunk) = chunks.next() {
+            #[cfg(test)]
+            {
+                self.owner.work.chunks.fetch_add(1, Ordering::Relaxed);
+                self.owner
+                    .work
+                    .copied_bytes
+                    .fetch_add(chunk.len(), Ordering::Relaxed);
+            }
+            let _ = self
+                .sender
+                .send(Message::Chunk {
+                    bytes: chunk.to_vec(),
+                    truncated: truncated && chunks.peek().is_none(),
+                })
+                .await;
+        }
+        if take == 0 && truncated {
+            // Exactly filling the cap is not truncation until the next byte.
+            // Report that boundary once, ordered after all prefix writes, so
+            // earlier storage errors/expiry retain their original diagnostics.
+            let _ = self
+                .sender
+                .send(Message::Chunk {
+                    bytes: Vec::new(),
+                    truncated: true,
+                })
+                .await;
+        }
     }
 
     pub(super) async fn finish(self) -> Outcome {
@@ -362,7 +428,390 @@ impl Writer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{
+        read_bounded_with_spill_limit, rebalance_captures, Capture, OutputStream, ToolProgressSink,
+    };
     use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    struct TestOwner {
+        key: String,
+        store: Owner,
+    }
+
+    impl TestOwner {
+        fn new() -> Self {
+            let key = format!(
+                "lazy-spill-test-{}",
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            let store = owner(&key);
+            Self { key, store }
+        }
+
+        fn work(&self) -> [usize; 4] {
+            let work = &self.store.work;
+            [&work.workers, &work.files, &work.chunks, &work.copied_bytes]
+                .map(|counter| counter.load(Ordering::Relaxed))
+        }
+    }
+
+    impl Drop for TestOwner {
+        fn drop(&mut self) {
+            release_owner(&self.key);
+        }
+    }
+
+    struct Chunked<'a> {
+        bytes: &'a [u8],
+        chunk_size: usize,
+    }
+
+    impl AsyncRead for Chunked<'_> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let take = self.bytes.len().min(self.chunk_size).min(buf.remaining());
+            buf.put_slice(&self.bytes[..take]);
+            self.bytes = &self.bytes[take..];
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn capture(
+        owner: &TestOwner,
+        bytes: &[u8],
+        chunk_size: usize,
+        budget: usize,
+        limit: usize,
+    ) -> Capture {
+        read_bounded_with_spill_limit(
+            &mut Some(Chunked { bytes, chunk_size }),
+            budget,
+            &ToolProgressSink::null(),
+            OutputStream::Stdout,
+            None,
+            limit,
+            (&owner.key, "capture"),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn empty_and_fitting_streams_do_no_spill_work() {
+        let owner = TestOwner::new();
+        for budget in [0, 1, 7, 32, CHUNK_BYTES * 3 + 1] {
+            let bytes: Vec<_> = (0..budget).map(|n| n as u8).collect();
+            for length in [0, budget / 2, budget] {
+                // Fitting output does no spill work even above the spill cap.
+                let mut out = capture(&owner, &bytes[..length], 3, budget, 2).await;
+                let mut err = capture(&owner, &bytes[..budget - length], 3, budget, 2).await;
+                rebalance_captures(&mut out, &mut err, budget).await;
+                assert_eq!(out.head, bytes[..length]);
+                assert_eq!(err.head, bytes[..budget - length]);
+                assert!(!err.truncated);
+                assert!(err.spill.is_none());
+                assert!(out.tail.is_empty());
+                assert!(!out.truncated);
+                assert!(out.spill.is_none());
+                assert_eq!(owner.work(), [0, 0, 0, 0]);
+            }
+        }
+        let mut absent: Option<std::io::Cursor<&[u8]>> = None;
+        let out = read_bounded_with_spill_limit(
+            &mut absent,
+            0,
+            &ToolProgressSink::null(),
+            OutputStream::Stdout,
+            None,
+            8,
+            (&owner.key, "absent"),
+        )
+        .await;
+        assert_eq!(out.total_bytes, 0);
+        assert_eq!(owner.work(), [0, 0, 0, 0]);
+        assert!(owner.store.retention.lock().unwrap().directory.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fitting_output_progress_and_checkpoints_are_live_before_eof() {
+        use crate::tool::{PartialOutputCheckpointSink, ToolError, ToolProgress};
+        use tokio::io::AsyncWriteExt;
+
+        #[derive(Default)]
+        struct Checkpoints(Mutex<Vec<String>>);
+        impl PartialOutputCheckpointSink for Checkpoints {
+            fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError> {
+                self.0.lock().unwrap().push(snapshot.to_owned());
+                Ok(())
+            }
+        }
+        let owner = TestOwner::new();
+        let sink = Arc::new(Checkpoints::default());
+        let checkpoints = super::super::BashCheckpoints::new(
+            sink.clone(),
+            super::super::BASH_CHECKPOINT_INTERVAL,
+        );
+        let (mut input, reader) = tokio::io::duplex(64);
+        let mut reader = Some(reader);
+        let (progress, mut updates) = ToolProgressSink::bounded_channel();
+        let mut drain = Box::pin(read_bounded_with_spill_limit(
+            &mut reader,
+            64,
+            &progress,
+            OutputStream::Stdout,
+            Some(&checkpoints),
+            8,
+            (&owner.key, "live-fitting"),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                _ = &mut drain => panic!("pipe has not reached EOF"),
+                update = async {
+                    input.write_all(b"first\n").await.unwrap();
+                    updates.recv().await.unwrap()
+                } => {
+                    let ToolProgress::Output { stream, bytes } = update else {
+                        panic!("unexpected progress");
+                    };
+                    assert_eq!(stream, OutputStream::Stdout);
+                    assert_eq!(bytes.as_ref(), b"first\n");
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sink.0.lock().unwrap().as_slice(),
+            ["stdout: 6 bytes seen\nfirst\nstderr: 0 bytes seen"]
+        );
+        assert_eq!(checkpoints.stats().requested, 1);
+        drop(drain);
+        assert_eq!(owner.work(), [0, 0, 0, 0]);
+        assert!(owner.store.retention.lock().unwrap().directory.is_none());
+    }
+
+    #[tokio::test]
+    async fn promotion_preserves_binary_prefix_at_raw_byte_boundaries() {
+        let owner = TestOwner::new();
+        for budget in [0_usize, 1, 7, 16, CHUNK_BYTES + 1] {
+            // Includes NUL, invalid UTF-8 and multibyte sequences split across
+            // the provisional head/tail, pipe chunks and the spill limit.
+            let pattern = b"\0\xff\xe2\x82\xac\xf0\x9f\x98\x80\n";
+            let bytes: Vec<_> = pattern.iter().copied().cycle().take(budget + 19).collect();
+            for chunk_size in [1, 3, CHUNK_BYTES] {
+                for limit in [budget.saturating_sub(1), budget + 1, bytes.len()] {
+                    let before = owner.work();
+                    let mut out = capture(&owner, &bytes, chunk_size, budget, limit).await;
+                    assert_eq!(out.total_bytes, bytes.len());
+                    assert_eq!(out.head, bytes[..budget / 2]);
+                    let tail_cap = budget - budget / 2;
+                    assert_eq!(
+                        out.tail.iter().copied().collect::<Vec<_>>(),
+                        bytes[bytes.len() - tail_cap..]
+                    );
+                    assert_eq!(out.spill_bytes, limit);
+                    assert_eq!(out.spill_truncated, limit < bytes.len());
+                    assert!(!out.spill_error);
+                    if limit == 0 {
+                        assert!(out.spill.is_none());
+                    } else {
+                        assert_eq!(
+                            std::fs::read(&out.spill.as_ref().unwrap().path).unwrap(),
+                            bytes[..limit]
+                        );
+                    }
+                    let after = owner.work();
+                    assert_eq!(after[0] - before[0], 1);
+                    assert_eq!(after[1] - before[1], usize::from(limit > 0));
+                    assert_eq!(
+                        after[3] - before[3],
+                        limit,
+                        "prefix must be copied only once"
+                    );
+                    out.fit_to_budget(budget);
+                    let rendered = out.render("stdout");
+                    assert_eq!(
+                        rendered.contains("spill_truncated=true"),
+                        limit < bytes.len()
+                    );
+                    assert_eq!(rendered.contains("full_output_path="), limit == bytes.len());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_budget_only_spills_materialize_before_shrinking() {
+        let owner = TestOwner::new();
+        let budget = 4096;
+        let large = b"large\0\xff\n".repeat(512);
+        let small = b"small\n";
+        let mut out = capture(&owner, small, 1, budget, budget).await;
+        let mut err = capture(&owner, &large, 3, budget, budget).await;
+        assert_eq!(owner.work(), [0, 0, 0, 0]);
+        rebalance_captures(&mut out, &mut err, budget).await;
+        assert_eq!(out.head, small);
+        assert!(out.spill.is_none());
+        assert!(!out.truncated);
+        assert!(err.truncated);
+        assert_eq!(
+            std::fs::read(&err.spill.as_ref().unwrap().path).unwrap(),
+            large
+        );
+        assert_eq!(owner.work()[0..2], [1, 1]);
+        assert_eq!(owner.work()[3], large.len());
+
+        // Only stderr initially needs a spill. Its path overhead then truncates
+        // stdout too, entirely within stdout's provisional head. Neither stream
+        // may be shrunk until both exact prefixes have been materialized.
+        let bytes: Vec<_> = (0..budget / 2 - 64).map(|n| n as u8).collect();
+        let mut out = capture(&owner, &bytes, 3, budget, budget).await;
+        let mut err = capture(&owner, &large, 3, budget, budget).await;
+        assert_eq!(owner.work()[0..2], [1, 1]);
+        rebalance_captures(&mut out, &mut err, budget).await;
+        assert!(out.truncated && err.truncated);
+        for (stream, original) in [(&out, bytes.as_slice()), (&err, large.as_slice())] {
+            assert_eq!(
+                std::fs::read(&stream.spill.as_ref().unwrap().path).unwrap(),
+                original
+            );
+            assert_eq!(stream.head, original[..stream.head.len()]);
+            let tail: Vec<_> = stream.tail.iter().copied().collect();
+            assert_eq!(tail, original[original.len() - tail.len()..]);
+            assert!(stream.tail.len().abs_diff(stream.head.len()) <= 1);
+            assert!(stream.render("stdout").contains("full_output_path="));
+        }
+        assert_eq!(owner.work()[0..2], [3, 3]);
+        assert_eq!(owner.work()[3], 2 * large.len() + bytes.len());
+    }
+
+    #[tokio::test]
+    async fn late_promotion_bounds_queue_chunks_and_copies_only_the_spill_prefix() {
+        let owner = TestOwner::new();
+        let bytes: Vec<_> = (0..CHUNK_BYTES * 10).map(|n| n as u8).collect();
+        let limit = CHUNK_BYTES * 3 + 7;
+        let mut out = capture(&owner, &bytes, CHUNK_BYTES, bytes.len(), limit).await;
+        assert_eq!(owner.work(), [0, 0, 0, 0]);
+        assert!(out.spill_if_truncated(0).await);
+        assert_eq!(owner.work(), [1, 1, 4, limit]);
+        assert_eq!(
+            std::fs::read(&out.spill.as_ref().unwrap().path).unwrap(),
+            bytes[..limit]
+        );
+        assert!(out.spill_truncated);
+        // A failed or successful promotion is never repeated during budgeting.
+        assert!(!out.spill_if_truncated(0).await);
+        assert_eq!(owner.work(), [1, 1, 4, limit]);
+    }
+
+    #[tokio::test]
+    async fn lazy_spills_preserve_retirement_and_storage_errors() {
+        let owner = TestOwner::new();
+        let bytes = b"complete provisional bytes";
+        let mut out = capture(&owner, bytes, 3, bytes.len(), bytes.len()).await;
+        release_owner(&owner.key);
+        assert!(owner.store.retired.load(Ordering::Acquire));
+        assert!(out.spill_if_truncated(0).await);
+        assert!(out.spill_error);
+        assert!(out.spill.is_none());
+        assert_eq!(owner.work()[0..2], [1, 0]);
+
+        let owner = TestOwner::new();
+        owner.store.retention.lock().unwrap().max_files = 0;
+        let mut out = capture(&owner, bytes, 3, 4, 4).await;
+        out.fit_to_budget(4);
+        assert_eq!(out.total_bytes, bytes.len());
+        assert!(out.spill_error);
+        assert!(
+            !out.spill_truncated,
+            "storage failed before the quota boundary"
+        );
+        assert!(out.spill.is_none());
+        assert_eq!(owner.work()[0..2], [1, 0]);
+        let rendered = out.render("stdout");
+        assert!(rendered.contains("spill_error=true"));
+        assert!(!rendered.contains("output_path="));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn beyond_cap_drains_and_cancels_even_with_the_disk_worker_blocked() {
+        use crate::tool::ToolProgress;
+        use tokio::io::AsyncWriteExt;
+
+        let owner = TestOwner::new();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gated_store = owner.store.clone();
+        let gate = tokio::task::spawn_blocking(move || {
+            let _guard = gated_store.retention.lock().unwrap();
+            let _ = ready_tx.send(());
+            // Dropping the sender on panic also releases the worker.
+            let _ = release_rx.recv();
+        });
+        ready_rx.await.unwrap();
+        let (mut input, reader) = tokio::io::duplex(64);
+        let mut reader = Some(reader);
+        let (progress, mut updates) = ToolProgressSink::bounded_channel();
+        let mut drain = Box::pin(read_bounded_with_spill_limit(
+            &mut reader,
+            12,
+            &progress,
+            OutputStream::Stdout,
+            None,
+            9,
+            (&owner.key, "cancel-beyond-cap"),
+        ));
+        let bytes: Vec<_> = (0..4096).map(|n| n as u8).collect();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                _ = &mut drain => panic!("pipe has not reached EOF"),
+                () = async {
+                    let (written, seen) = tokio::join!(input.write_all(&bytes), async {
+                        let mut seen = Vec::new();
+                        while seen.len() < bytes.len() {
+                            let ToolProgress::Output { stream, bytes } = updates.recv().await.unwrap() else {
+                                panic!("unexpected progress");
+                            };
+                            assert_eq!(stream, OutputStream::Stdout);
+                            seen.extend_from_slice(&bytes);
+                        }
+                        seen
+                    });
+                    written.unwrap();
+                    assert_eq!(seen, bytes);
+                } => {}
+            }
+        })
+        .await
+        .expect("a full spill must not backpressure later pipe output");
+        assert_eq!(owner.work(), [1, 0, 1, 9]);
+        drop(drain);
+        release_tx.send(()).unwrap();
+        gate.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let store = owner.store.clone();
+                let cleaned = tokio::task::spawn_blocking(move || {
+                    let retention = store.retention.lock().unwrap();
+                    retention.directory.is_some() && retention.entries.is_empty()
+                })
+                .await
+                .unwrap();
+                if cleaned {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled promotion must remove its uncommitted spill");
+        assert_eq!(owner.work(), [1, 1, 1, 9]);
+    }
 
     #[test]
     fn aggregate_count_and_bytes_evict_oldest_even_when_active() {
@@ -450,7 +899,7 @@ mod tests {
             let _ = release_rx.recv();
         });
         ready_rx.await.unwrap();
-        let writer = Writer::start(owner.clone(), "cancelled-call".into(), 32);
+        let mut writer = Writer::start(owner.clone(), "cancelled-call".into(), 32);
         writer.chunk(b"first").await;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         drop(writer);
@@ -491,7 +940,7 @@ mod tests {
             let _ = release_rx.recv();
         });
         ready_rx.await.unwrap();
-        let writer = Writer::start(store.clone(), "queued-before-retirement".into(), 8);
+        let mut writer = Writer::start(store.clone(), "queued-before-retirement".into(), 8);
         writer.chunk(b"queued").await;
         release_owner("spill-retirement-gate-test");
         assert!(store.retired.load(Ordering::Acquire));
@@ -508,7 +957,7 @@ mod tests {
     #[tokio::test]
     async fn host_owner_teardown_removes_retained_paths_and_closes_active_store() {
         let store = owner("spill-teardown-test");
-        let writer = Writer::start(store.clone(), "host-call-scope".into(), 8);
+        let mut writer = Writer::start(store.clone(), "host-call-scope".into(), 8);
         writer.chunk(b"retained").await;
         let mut outcome = writer.finish().await;
         outcome.spill.as_mut().unwrap().retain();
@@ -531,7 +980,7 @@ mod tests {
         .unwrap();
         assert!(!path.exists());
         assert!(outcome.spill.as_ref().unwrap().expired());
-        let writer = Writer::start(store, "late-call".into(), 8);
+        let mut writer = Writer::start(store, "late-call".into(), 8);
         writer.chunk(b"late").await;
         assert!(writer.finish().await.error);
     }
@@ -540,7 +989,7 @@ mod tests {
     async fn owners_are_isolated_and_expired_capture_never_advertises_a_path() {
         let first = Arc::new(OwnerState::new(8, 1));
         let other = Arc::new(OwnerState::new(8, 1));
-        let writer = Writer::start(first.clone(), "first-scope".into(), 8);
+        let mut writer = Writer::start(first.clone(), "first-scope".into(), 8);
         writer.chunk(b"abcdef").await;
         let outcome = writer.finish().await;
         let mut capture = super::super::Capture::empty();
@@ -548,12 +997,12 @@ mod tests {
         capture.spill = outcome.spill;
         capture.fit_to_budget(0);
         let first_path = capture.spill.as_ref().unwrap().path.clone();
-        let writer = Writer::start(other.clone(), "other-scope".into(), 8);
+        let mut writer = Writer::start(other.clone(), "other-scope".into(), 8);
         writer.chunk(b"other").await;
         let mut other_outcome = writer.finish().await;
         other_outcome.spill.as_mut().unwrap().retain();
         let other_path = other_outcome.spill.as_ref().unwrap().path.clone();
-        let writer = Writer::start(first.clone(), "new-scope".into(), 8);
+        let mut writer = Writer::start(first.clone(), "new-scope".into(), 8);
         writer.chunk(b"new").await;
         let _outcome = writer.finish().await;
         assert!(!first_path.exists());

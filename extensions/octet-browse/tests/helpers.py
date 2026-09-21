@@ -20,9 +20,16 @@ OWNER_CONTEXT = {
 
 
 class FakeLocator:
-    def __init__(self, elements: Optional[List[Any]] = None, *, body_text: Optional[str] = None):
+    def __init__(
+        self,
+        elements: Optional[List[Any]] = None,
+        *,
+        body_text: Optional[str] = None,
+        evaluations: Optional[List[Any]] = None,
+    ):
         self.elements = list(elements or [])
         self.body_text = body_text
+        self.evaluations = evaluations
 
     def count(self) -> int:
         return len(self.elements)
@@ -33,10 +40,29 @@ class FakeLocator:
     def inner_text(self, timeout: Optional[int] = None) -> str:
         _ = timeout
         if self.body_text is not None:
-            return self.body_text
+            raise AssertionError("body snapshots must use bounded DOM evaluation")
         if len(self.elements) == 1:
             return self.elements[0].inner_text()
         return ""
+
+    def evaluate(self, expression: str, argument: Mapping[str, Any], *, timeout: int) -> Mapping[str, Any]:
+        # Only emulate the wire shape for a single text node. Actual extraction
+        # and work budgets are exercised by the Node DOM and Playwright tests.
+        assert self.body_text is not None
+        assert set(argument) == {"max_source", "max_output", "max_nodes"}
+        assert "substringData" in expression
+        if self.evaluations is not None:
+            self.evaluations.append((expression, dict(argument), timeout))
+        limit = min(argument["max_source"], argument["max_output"])
+        prefix = self.body_text[: limit + 1].encode("utf-16-le", errors="surrogatepass")
+        truncated = len(prefix) > limit * 2
+        return {
+            "text": prefix[: limit * 2].decode("utf-16-le", errors="ignore"),
+            "source_truncated": truncated and argument["max_source"] <= argument["max_output"],
+            "output_truncated": truncated and argument["max_output"] <= argument["max_source"],
+            "traversal_truncated": False,
+            "editable_present": False,
+        }
 
 
 class FakeElement:
@@ -108,10 +134,11 @@ class FakePage:
         self.role_elements: Dict[str, List[FakeElement]] = {}
         self.text_elements: Dict[str, List[FakeElement]] = {}
         self._closed = False
+        self.body_evaluations: List[Any] = []
 
     def locator(self, selector: str) -> FakeLocator:
         if selector == "body":
-            return FakeLocator(body_text=self.body)
+            return FakeLocator(body_text=self.body, evaluations=self.body_evaluations)
         return FakeLocator(self.selector_elements.get(selector, []))
 
     def get_by_role(self, role: str, name: Optional[str] = None, exact: bool = False) -> FakeLocator:

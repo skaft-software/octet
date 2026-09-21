@@ -1330,6 +1330,18 @@ const TERMINAL_GATE_CORRECTION: &str = "The candidate response was not returnabl
 const TERMINAL_GATE_ATTEMPTS: usize = 2;
 const TERMINAL_GATE_TEXT_LIMIT: usize = 3_000;
 const TERMINAL_GATE_RECEIPT_LIMIT: usize = 24;
+const TERMINAL_GATE_ARGUMENT_LIMIT: usize = 400;
+const TERMINAL_GATE_RESULT_LIMIT: usize = 600;
+// Registered names fit unchanged; also bound unknown names emitted by a provider.
+const TERMINAL_GATE_TOOL_NAME_LIMIT: usize = 256;
+// Keep the initial request and a rolling suffix. Both count and UTF-8 bytes
+// matter: empty controls must not grow the list, nor may multibyte text evade it.
+// This byte budget always fits the initial and latest 3,000-character summaries.
+const TERMINAL_GATE_REQUEST_LIMIT: usize = 8;
+const TERMINAL_GATE_REQUEST_BYTES: usize = 32 * 1024;
+// The field/count limits below fit even JSON's worst-case six bytes per char,
+// plus keys, delimiters and omission counters. This is not a context-limit bypass.
+const TERMINAL_GATE_CAPSULE_BYTES: usize = 384 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerminalGateDecision {
@@ -1337,12 +1349,74 @@ enum TerminalGateDecision {
     Continue,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct TerminalActionReceipt {
     tool: String,
     arguments: String,
     status: &'static str,
     result: String,
+}
+
+/// Lossy gate-only evidence, never the authoritative input or tool result.
+/// Natural runs have no instance and perform none of these projections.
+#[derive(Default)]
+struct TerminalGateEvidence {
+    prior_context: String,
+    requests: VecDeque<String>,
+    request_bytes: usize,
+    requests_omitted: usize,
+    receipts: VecDeque<TerminalActionReceipt>,
+    actions_omitted: usize,
+}
+
+impl TerminalGateEvidence {
+    fn for_run(
+        policy: CompletionPolicy,
+        session: &Session,
+        input: &UserInput,
+    ) -> Result<Option<Self>, SessionError> {
+        if policy != CompletionPolicy::TerminalGate {
+            return Ok(None);
+        }
+        let mut evidence = Self {
+            prior_context: recent_conversational_context(&session.context()?),
+            ..Self::default()
+        };
+        #[cfg(test)]
+        TERMINAL_GATE_INITIAL_SUMMARIES.with(|count| count.set(count.get() + 1));
+        evidence.record_request(&input.text_summary());
+        Ok(Some(evidence))
+    }
+
+    fn record_request(&mut self, summary: &str) {
+        let summary = bounded_gate_text(summary, TERMINAL_GATE_TEXT_LIMIT);
+        while self.requests.len() >= TERMINAL_GATE_REQUEST_LIMIT
+            || self.request_bytes + summary.len() > TERMINAL_GATE_REQUEST_BYTES
+        {
+            // The initial request is never evicted; the budget fits it plus
+            // the incoming latest request even at four UTF-8 bytes per char.
+            let removed = self.requests.remove(1).expect("initial and latest fit");
+            self.request_bytes -= removed.len();
+            self.requests_omitted += 1;
+        }
+        self.request_bytes += summary.len();
+        self.requests.push_back(summary);
+    }
+
+    fn record_action(&mut self, tool: &str, arguments: &str, is_error: bool, result: &str) {
+        if self.receipts.len() == TERMINAL_GATE_RECEIPT_LIMIT {
+            // Exactly the original capsule's first 12 plus rolling last 12,
+            // in delivery order, without retaining the intervening payloads.
+            let _ = self.receipts.remove(TERMINAL_GATE_RECEIPT_LIMIT / 2);
+            self.actions_omitted += 1;
+        }
+        self.receipts.push_back(TerminalActionReceipt {
+            tool: bounded_gate_text(tool, TERMINAL_GATE_TOOL_NAME_LIMIT),
+            arguments: bounded_gate_text(arguments, TERMINAL_GATE_ARGUMENT_LIMIT),
+            status: if is_error { "error" } else { "ok" },
+            result: bounded_gate_text(result, TERMINAL_GATE_RESULT_LIMIT),
+        });
+    }
 }
 
 struct CompletedToolExecution {
@@ -2023,7 +2097,15 @@ async fn run_parallel_after_tool_hooks(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TERMINAL_GATE_TEXT_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TERMINAL_GATE_INITIAL_SUMMARIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn bounded_gate_text(text: &str, max_chars: usize) -> String {
+    #[cfg(test)]
+    TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.set(count.get() + 1));
     let count = text.chars().count();
     if count <= max_chars {
         return text.to_owned();
@@ -2090,37 +2172,20 @@ fn recent_conversational_context(messages: &[Message]) -> String {
     bounded_gate_text(&selected.join("\n---\n"), TERMINAL_GATE_TEXT_LIMIT)
 }
 
-fn terminal_gate_capsule(
-    prior_context: &str,
-    requests: &[String],
-    candidate: &AssistantMessage,
-    receipts: &[TerminalActionReceipt],
-) -> String {
+fn terminal_gate_capsule(evidence: &TerminalGateEvidence, candidate: &AssistantMessage) -> String {
     let candidate =
         message_visible_text(&Message::Assistant(candidate.clone())).unwrap_or_default();
-    let omitted = receipts.len().saturating_sub(TERMINAL_GATE_RECEIPT_LIMIT);
-    let receipts = if receipts.len() <= TERMINAL_GATE_RECEIPT_LIMIT {
-        receipts.iter().collect::<Vec<_>>()
-    } else {
-        let half = TERMINAL_GATE_RECEIPT_LIMIT / 2;
-        receipts[..half]
-            .iter()
-            .chain(receipts[receipts.len() - half..].iter())
-            .collect::<Vec<_>>()
-    };
-    serde_json::json!({
-        "prior_context": bounded_gate_text(prior_context, TERMINAL_GATE_TEXT_LIMIT),
-        "requests": requests.iter().map(|text| bounded_gate_text(text, TERMINAL_GATE_TEXT_LIMIT)).collect::<Vec<_>>(),
+    let capsule = serde_json::json!({
+        "prior_context": evidence.prior_context,
+        "requests": evidence.requests,
+        "requests_omitted": evidence.requests_omitted,
         "candidate": bounded_gate_text(&candidate, TERMINAL_GATE_TEXT_LIMIT),
-        "actions_omitted": omitted,
-        "actions": receipts.iter().map(|receipt| serde_json::json!({
-            "tool": receipt.tool,
-            "arguments": bounded_gate_text(&receipt.arguments, 400),
-            "status": receipt.status,
-            "result": bounded_gate_text(&receipt.result, 600),
-        })).collect::<Vec<_>>(),
+        "actions_omitted": evidence.actions_omitted,
+        "actions": evidence.receipts,
     })
-    .to_string()
+    .to_string();
+    debug_assert!(capsule.len() <= TERMINAL_GATE_CAPSULE_BYTES);
+    capsule
 }
 
 fn parse_terminal_gate(response: &octet_ai::Response) -> Option<TerminalGateDecision> {
@@ -2413,6 +2478,50 @@ fn assistant_has_terminal_content(assistant: &AssistantMessage) -> bool {
         AssistantPart::ToolCall(_) | AssistantPart::Media(_) => true,
         AssistantPart::Reasoning(_) | AssistantPart::ProviderMetadata(_) => false,
     })
+}
+
+/// Content-free evidence for a normally ended turn with no terminal content.
+/// Only allowlisted diagnostic codes are read, never their messages or IDs.
+fn incomplete_terminal_response_reason(
+    assistant: &AssistantMessage,
+    stop_reason: &StopReason,
+    usage: &Usage,
+    diagnostics: &[octet_ai::Diagnostic],
+    request_max_output_tokens: u64,
+) -> String {
+    let base = if assistant
+        .content
+        .iter()
+        .any(|part| matches!(part, AssistantPart::Reasoning(_)))
+    {
+        "provider returned reasoning but no answer text"
+    } else {
+        "provider returned no user-visible content"
+    };
+    let mut chat_stop_defaulted = false;
+    let mut usage_missing = false;
+    for diagnostic in diagnostics {
+        match diagnostic.code.as_str() {
+            "chat_defaulted_stop_reason" => chat_stop_defaulted = true,
+            "chat_usage_missing" => usage_missing = true,
+            _ => {}
+        }
+    }
+    let stop = match stop_reason {
+        StopReason::Other(_) => "other",
+        reason => reason.as_canonical(),
+    };
+    let usage = if usage_missing {
+        "usage=not_reported".to_owned()
+    } else {
+        format!(
+            "usage=canonical; output_tokens={}; reasoning_tokens={}",
+            usage.output_tokens, usage.reasoning_tokens
+        )
+    };
+    format!(
+        "{base} (stop={stop}; chat_stop_defaulted={chat_stop_defaulted}; {usage}; request_max_output_tokens={request_max_output_tokens}; not automatically retried)"
+    )
 }
 
 fn truncate_tool_text(text: &str, limit: usize) -> String {
@@ -4933,16 +5042,16 @@ fn settle_tool_progress(
 /// Append a batch of already-queued control inputs as durable user messages
 /// and report what was delivered.
 ///
-/// Each summary is recorded for the terminal gate before its append is
-/// attempted, mirroring the original inline blocks. On append failure the
-/// context tracker is still observed (its error ignored) so observers see the
-/// partial delivery before the run ends.
+/// When enabled, bounded evidence is recorded for the terminal gate before
+/// its append is attempted. Frontend delivery summaries remain complete.
+/// On append failure the context tracker is still observed (its error ignored)
+/// so observers see the partial delivery before the run ends.
 fn deliver_control_inputs(
     queued: Vec<ReservedInput>,
     kind: ControlDeliveryKind,
     session: &mut Session,
     metadata: &EntryMetadata,
-    terminal_gate_requests: &mut Vec<String>,
+    terminal_gate_evidence: &mut Option<TerminalGateEvidence>,
     observation: &ContextObservation<'_>,
 ) -> ControlDelivery {
     let mut delivered = Vec::with_capacity(queued.len());
@@ -4953,7 +5062,9 @@ fn deliver_control_inputs(
     } in queued
     {
         let summary = input.text_summary();
-        terminal_gate_requests.push(summary.clone());
+        if let Some(evidence) = terminal_gate_evidence {
+            evidence.record_request(&summary);
+        }
         if let Err(e) = session.append_with_metadata(user_message(input), Some(metadata.clone())) {
             let event = (!delivered.is_empty())
                 .then(|| kind.delivered_event(std::mem::take(&mut delivered)));
@@ -8167,13 +8278,9 @@ impl Agent {
             .take()
             .is_some_and(|lifecycle| lifecycle.dropped.load(Ordering::Acquire));
         self.recover_pending_tools(previous_run_was_dropped).await?;
-        let terminal_gate_prior_context =
-            if self.completion_policy == CompletionPolicy::TerminalGate {
-                recent_conversational_context(&self.session.context()?)
-            } else {
-                String::new()
-            };
-        let initial_request = input.text_summary();
+        let completion_policy = self.completion_policy;
+        let mut terminal_gate_evidence =
+            TerminalGateEvidence::for_run(completion_policy, &self.session, &input)?;
         let prompt_metadata = self.prompt_entry_metadata();
         // `display_text` belongs only to the draft that started this run.
         // Steering and follow-up inputs are independent user submissions and
@@ -8256,7 +8363,6 @@ impl Agent {
         let tool_scope = self.tool_scope.clone();
         let effect_broker = self.effect_broker.clone();
         let effect_run_id = format!("run:{}", first_entry.0);
-        let completion_policy = self.completion_policy;
         let output_modalities = self.output_modalities.clone();
         let provider_output_ceiling = self.max_output_tokens;
         let compaction_reserve_tokens = self.compaction_reserve_tokens();
@@ -8365,8 +8471,6 @@ impl Agent {
             let mut answer_only = !tools_enabled;
             let mut finish_pending = false;
             let mut completed_turns: u64 = 0;
-            let mut terminal_gate_requests = vec![initial_request];
-            let mut terminal_action_receipts = Vec::<TerminalActionReceipt>::new();
             let mut context_retries = 0usize;
             // Shared by open/body retries, re-preparation and transport fallback.
             // Reset only on a complete successful assistant response.
@@ -8588,7 +8692,7 @@ impl Agent {
                         ControlDeliveryKind::Steering,
                         session,
                         &control_prompt_metadata,
-                        &mut terminal_gate_requests,
+                        &mut terminal_gate_evidence,
                         &observation,
                     ) {
                         ControlDelivery::Completed { event } => {
@@ -9393,20 +9497,17 @@ impl Agent {
                     || matches!(stop_reason, StopReason::PauseTurn)
                     || matches!(&stop_reason, StopReason::Other(reason) if reason == "tool_output_locked");
                 if normal_end && calls.is_empty() && !assistant_has_terminal_content(&assistant) {
-                    // A reasoning-only completion is its own diagnosis: the model
-                    // finished normally having emitted thinking but no answer, which
-                    // is exactly what a local thinking model does when its whole
-                    // budget goes into reasoning and no final text follows.
-                    let reasoned_only = assistant
-                        .content
-                        .iter()
-                        .any(|part| matches!(part, AssistantPart::Reasoning(_)));
+                    // A normal stop without terminal content is not a completed
+                    // turn. Persist its message and usage above, then fail without
+                    // retrying; the stop alone does not establish the cause.
                     break 'run FinishReason::Failed(AgentError::IncompleteResponse {
-                        stop_reason: if reasoned_only {
-                            "provider returned reasoning but no answer text".to_owned()
-                        } else {
-                            "provider returned no user-visible content".to_owned()
-                        },
+                        stop_reason: incomplete_terminal_response_reason(
+                            &assistant,
+                            &stop_reason,
+                            &turn_usage,
+                            &response.diagnostics,
+                            request_max_output_tokens,
+                        ),
                     });
                 }
                 let gated_candidate = completion_policy == CompletionPolicy::TerminalGate
@@ -9554,7 +9655,7 @@ impl Agent {
                             ControlDeliveryKind::FollowUp,
                             session,
                             &control_prompt_metadata,
-                            &mut terminal_gate_requests,
+                            &mut terminal_gate_evidence,
                             &observation,
                         ) {
                             ControlDelivery::Completed { event } => {
@@ -9573,13 +9674,8 @@ impl Agent {
                         }
                         continue;
                     }
-                    if completion_policy == CompletionPolicy::TerminalGate {
-                        let capsule = terminal_gate_capsule(
-                            &terminal_gate_prior_context,
-                            &terminal_gate_requests,
-                            &assistant,
-                            &terminal_action_receipts,
-                        );
+                    if let Some(evidence) = terminal_gate_evidence.as_ref() {
+                        let capsule = terminal_gate_capsule(evidence, &assistant);
                         let decision = {
                             let mut gate = TerminalGateContext {
                                 run_id: &effect_run_id,
@@ -9731,7 +9827,7 @@ impl Agent {
                                     ControlDeliveryKind::FollowUp,
                                     session,
                                     &control_prompt_metadata,
-                                    &mut terminal_gate_requests,
+                                    &mut terminal_gate_evidence,
                                     &observation,
                                 ) {
                                     ControlDelivery::Completed { event } => {
@@ -10459,12 +10555,9 @@ impl Agent {
                     } else {
                         None
                     };
-                    terminal_action_receipts.push(TerminalActionReceipt {
-                        tool: call.name.clone(),
-                        arguments: call.arguments_json.clone(),
-                        status: if is_error { "error" } else { "ok" },
-                        result: text.clone(),
-                    });
+                    if let Some(evidence) = terminal_gate_evidence.as_mut() {
+                        evidence.record_action(&call.name, &call.arguments_json, is_error, &text);
+                    }
                     if let Err(e) = session.append_with_metadata(
                         EntryValue::Message(Message::User(message)),
                         details.map(|tool_output| EntryMetadata {
@@ -10832,6 +10925,453 @@ mod tests {
         )
     }
 
+    fn gate_candidate(text: &str) -> AssistantMessage {
+        AssistantMessage {
+            content: vec![AssistantPart::Text(text.to_owned())],
+            model: octet_ai::ModelId("test".into()),
+            protocol: Protocol::OpenAiChat,
+        }
+    }
+
+    #[test]
+    fn incomplete_terminal_response_diagnostic_is_content_free_and_bounded() {
+        let hostile = "private-payload-\u{1b}[31m\n".repeat(512);
+        let assistant = AssistantMessage {
+            content: vec![
+                AssistantPart::Text(hostile.clone()),
+                AssistantPart::Reasoning(octet_ai::ReasoningPart {
+                    text: Some(hostile.clone()),
+                    state: None,
+                }),
+                AssistantPart::ToolCall(ToolCall {
+                    id: octet_ai::ToolCallId(hostile.clone()),
+                    name: hostile.clone(),
+                    arguments_json: hostile.clone(),
+                    argument_error: None,
+                }),
+            ],
+            model: octet_ai::ModelId(hostile.clone()),
+            protocol: Protocol::OpenAiChat,
+        };
+        let usage = Usage {
+            output_tokens: u64::MAX,
+            reasoning_tokens: u64::MAX,
+            ..Usage::default()
+        };
+        let mut diagnostics = vec![
+            octet_ai::Diagnostic {
+                code: "chat_defaulted_stop_reason".to_owned(),
+                message: hostile.clone(),
+            },
+            octet_ai::Diagnostic {
+                code: "chat_usage_missing-untrusted-code".to_owned(),
+                message: hostile.clone(),
+            },
+        ];
+        for usage_missing in [false, true] {
+            if usage_missing {
+                diagnostics.push(octet_ai::Diagnostic {
+                    code: "chat_usage_missing".to_owned(),
+                    message: hostile.clone(),
+                });
+            }
+            let reason = incomplete_terminal_response_reason(
+                &assistant,
+                &StopReason::Other(hostile.clone()),
+                &usage,
+                &diagnostics,
+                u64::MAX,
+            );
+            assert!(reason.starts_with("provider returned reasoning but no answer text"));
+            assert!(reason.contains("stop=other; chat_stop_defaulted=true"));
+            assert_eq!(reason.contains("usage=not_reported"), usage_missing);
+            assert_eq!(reason.contains("usage=canonical"), !usage_missing);
+            assert_eq!(
+                reason.contains("; output_tokens=18446744073709551615;"),
+                !usage_missing
+            );
+            assert_eq!(
+                reason.contains("reasoning_tokens=18446744073709551615;"),
+                !usage_missing
+            );
+            assert!(reason.contains("request_max_output_tokens=18446744073709551615"));
+            assert!(reason.len() < 320);
+            let public = public_error_diagnostic(
+                &AgentError::IncompleteResponse {
+                    stop_reason: reason,
+                },
+                "test",
+                "test",
+            );
+            assert!(public.contains("not automatically retried"));
+            for forbidden in ["private-payload", "untrusted-code", "\u{1b}", "\n"] {
+                assert!(!public.contains(forbidden));
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_gate_receipts_retain_first_and_last_twelve_online() {
+        for total in [0usize, 24, 25, 10_000] {
+            let mut evidence = TerminalGateEvidence::default();
+            TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.set(0));
+            for index in 0..total {
+                evidence.record_action(
+                    &format!("tool-{index}"),
+                    &format!("args-{index}"),
+                    index % 2 == 0,
+                    &format!("result-{index}"),
+                );
+                assert_eq!(evidence.receipts.len(), (index + 1).min(24));
+                assert_eq!(evidence.actions_omitted, (index + 1).saturating_sub(24));
+            }
+            assert_eq!(
+                TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.get()),
+                3 * total
+            );
+            let expected = if total <= 24 {
+                (0..total).collect::<Vec<_>>()
+            } else {
+                (0..12).chain(total - 12..total).collect::<Vec<_>>()
+            };
+            let capsule = terminal_gate_capsule(&evidence, &gate_candidate("done"));
+            let capsule: serde_json::Value = serde_json::from_str(&capsule).unwrap();
+            assert_eq!(capsule["actions_omitted"], total.saturating_sub(24));
+            let actions = capsule["actions"].as_array().unwrap();
+            assert_eq!(actions.len(), expected.len());
+            for (action, index) in actions.iter().zip(expected) {
+                assert_eq!(action["tool"], format!("tool-{index}"));
+                assert_eq!(action["arguments"], format!("args-{index}"));
+                assert_eq!(action["result"], format!("result-{index}"));
+                assert_eq!(
+                    action["status"],
+                    if index % 2 == 0 { "error" } else { "ok" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_gate_projects_unicode_receipts_at_insertion_not_at_each_attempt() {
+        let text = "界🙂e\u{301}".repeat(2_000);
+        let mut evidence = TerminalGateEvidence::default();
+        evidence.record_action("read", &text, false, &text);
+        let receipt = &evidence.receipts[0];
+        for (projected, limit) in [
+            (&receipt.arguments, TERMINAL_GATE_ARGUMENT_LIMIT),
+            (&receipt.result, TERMINAL_GATE_RESULT_LIMIT),
+        ] {
+            let chars = text.chars().collect::<Vec<_>>();
+            let half = (limit - 32) / 2;
+            let head = chars[..half].iter().collect::<String>();
+            let tail = chars[chars.len() - half..].iter().collect::<String>();
+            assert_eq!(
+                projected,
+                &format!("{head}\n[… 8000 chars total …]\n{tail}")
+            );
+            assert!(projected.chars().count() <= limit);
+            assert!(projected.len() <= limit * 4);
+        }
+        let candidate = gate_candidate("done");
+        TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.set(0));
+        let first = terminal_gate_capsule(&evidence, &candidate);
+        for _ in 0..10 {
+            assert_eq!(terminal_gate_capsule(&evidence, &candidate), first);
+        }
+        // Repeated gate attempts project only the new candidate, never all
+        // already-projected action arguments/results or retained requests.
+        assert_eq!(TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.get()), 11);
+        let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(parsed["actions"][0]["arguments"], receipt.arguments);
+        assert_eq!(parsed["actions"][0]["result"], receipt.result);
+        assert_eq!(text.chars().count(), 8_000);
+    }
+
+    #[test]
+    fn terminal_gate_requests_bound_count_bytes_and_preserve_initial_and_latest() {
+        for unit in ["x", "🙂"] {
+            let body = unit.repeat(4_000);
+            let request = |index| format!("request-{index}: {body}");
+            let mut evidence = TerminalGateEvidence::default();
+            for index in 0..1_000 {
+                evidence.record_request(&request(index));
+                assert!(evidence.requests.len() <= TERMINAL_GATE_REQUEST_LIMIT);
+                assert!(evidence.request_bytes <= TERMINAL_GATE_REQUEST_BYTES);
+                assert_eq!(
+                    evidence.request_bytes,
+                    evidence.requests.iter().map(String::len).sum::<usize>()
+                );
+                assert_eq!(
+                    evidence.requests_omitted + evidence.requests.len(),
+                    index + 1
+                );
+            }
+            assert_eq!(evidence.requests[0], bounded_gate_text(&request(0), 3_000));
+            let retained_suffix = evidence.requests.len() - 1;
+            for (summary, index) in evidence
+                .requests
+                .iter()
+                .skip(1)
+                .zip(1_000 - retained_suffix..1_000)
+            {
+                assert_eq!(summary, &bounded_gate_text(&request(index), 3_000));
+            }
+            if unit == "🙂" {
+                assert!(evidence.requests.len() < TERMINAL_GATE_REQUEST_LIMIT);
+            } else {
+                assert_eq!(evidence.requests.len(), TERMINAL_GATE_REQUEST_LIMIT);
+            }
+        }
+        let mut empty = TerminalGateEvidence::default();
+        for _ in 0..10_000 {
+            empty.record_request("");
+        }
+        assert_eq!(empty.requests.len(), TERMINAL_GATE_REQUEST_LIMIT);
+        assert_eq!(empty.requests_omitted, 10_000 - TERMINAL_GATE_REQUEST_LIMIT);
+        assert_eq!(empty.request_bytes, 0);
+    }
+
+    #[test]
+    fn terminal_gate_capsule_stays_bounded_across_repeated_requests_and_decisions() {
+        // NUL takes six JSON bytes per character, worse than UTF-8 or quotes.
+        let text = "\0".repeat(TERMINAL_GATE_TEXT_LIMIT);
+        let candidate = gate_candidate(&text);
+        let mut evidence = TerminalGateEvidence {
+            prior_context: text.clone(),
+            ..TerminalGateEvidence::default()
+        };
+        for index in 0..512usize {
+            evidence.record_request(&text);
+            evidence.record_action(&text, &text, index % 2 == 0, &text);
+            if [23, 24, 255, 511].contains(&index) {
+                let capsule = terminal_gate_capsule(&evidence, &candidate);
+                assert!(capsule.len() <= TERMINAL_GATE_CAPSULE_BYTES);
+                let parsed: serde_json::Value = serde_json::from_str(&capsule).unwrap();
+                assert_eq!(
+                    parsed["requests_omitted"],
+                    index + 1 - evidence.requests.len()
+                );
+                assert_eq!(parsed["actions_omitted"], (index + 1).saturating_sub(24));
+                assert_eq!(
+                    parsed["requests"].as_array().unwrap().len(),
+                    evidence.requests.len()
+                );
+                assert_eq!(terminal_gate_capsule(&evidence, &candidate), capsule);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn natural_run_has_no_terminal_gate_summary_projection_or_evidence_collection() {
+        struct Script(Mutex<VecDeque<Vec<AssistantPart>>>);
+        #[async_trait::async_trait]
+        impl octet_ai::HostStreamTransport for Script {
+            async fn stream(
+                &self,
+                model: octet_ai::HostStreamModel,
+                _: Request,
+                _: Vec<octet_ai::Diagnostic>,
+            ) -> Result<octet_ai::ResponseStream, AiError> {
+                let content = self.0.lock().unwrap().pop_front().expect("scripted turn");
+                let stop_reason = if content
+                    .iter()
+                    .any(|part| matches!(part, AssistantPart::ToolCall(_)))
+                {
+                    StopReason::ToolUse
+                } else {
+                    StopReason::EndTurn
+                };
+                Ok(Box::pin(futures_util::stream::iter([
+                    Ok(StreamEvent::Started { response_id: None }),
+                    Ok(StreamEvent::Finished(octet_ai::Response {
+                        message: AssistantMessage {
+                            content,
+                            model: model.id,
+                            protocol: model.protocol,
+                        },
+                        stop_reason,
+                        usage: Usage::default(),
+                        cost: None,
+                        response_id: None,
+                        responses_output: None,
+                        deferred: None,
+                        diagnostics: Vec::new(),
+                    })),
+                ])))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            Session::create(directory.path().join("natural-evidence.jsonl")).unwrap(),
+            ExtensionHost::new(),
+        );
+        agent.max_turns = Some(3);
+        let arguments = serde_json::json!({"payload": "x".repeat(16_000)}).to_string();
+        let script = Arc::new(Script(Mutex::new(VecDeque::from([
+            vec![AssistantPart::ToolCall(ToolCall {
+                id: octet_ai::ToolCallId("unknown-call".into()),
+                name: "unregistered".into(),
+                arguments_json: arguments.clone(),
+                argument_error: None,
+            })],
+            vec![AssistantPart::Text("done".into())],
+        ]))));
+        agent
+            .client
+            .register_host_stream_transport(agent.model.endpoint.id.clone(), script.clone());
+        let initial = UserInput::from("initial 🙂".repeat(2_000));
+        TERMINAL_GATE_INITIAL_SUMMARIES.with(|count| count.set(0));
+        TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.set(0));
+        assert!(TerminalGateEvidence::for_run(
+            CompletionPolicy::Natural,
+            agent.session(),
+            &initial
+        )
+        .unwrap()
+        .is_none());
+        let mut run = agent.prompt(initial).await.unwrap();
+        run.control().steer("steer 🙂".repeat(2_000)).await.unwrap();
+        let mut delivered = false;
+        let mut tool_finished = false;
+        let mut completed = false;
+        while let Some(event) = run.next().await {
+            match event {
+                AgentEvent::SteeringDelivered { messages } => {
+                    assert_eq!(messages, vec!["steer 🙂".repeat(2_000)]);
+                    delivered = true;
+                }
+                AgentEvent::ToolFinished { .. } => tool_finished = true,
+                AgentEvent::RunFinished { reason, .. } => {
+                    assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+                    completed = true;
+                }
+                _ => {}
+            }
+        }
+        drop(run);
+        assert!(delivered && tool_finished && completed);
+        assert!(script.0.lock().unwrap().is_empty());
+        let context = agent.session().context().unwrap();
+        assert_eq!(
+            message_visible_text(&context[0]).unwrap(),
+            "initial 🙂".repeat(2_000)
+        );
+        assert!(context.iter().any(|message| matches!(message,
+            Message::Assistant(assistant) if assistant.content.iter().any(|part| matches!(part,
+                AssistantPart::ToolCall(call) if call.arguments_json == arguments
+            ))
+        )));
+        assert_eq!(TERMINAL_GATE_INITIAL_SUMMARIES.with(|count| count.get()), 0);
+        assert_eq!(TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.get()), 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_gate_control_evidence_preserves_delivery_and_reservations() {
+        for policy in [CompletionPolicy::Natural, CompletionPolicy::TerminalGate] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut session =
+                Session::create(directory.path().join("control-evidence.jsonl")).unwrap();
+            let model = octet_ai::ModelCatalog::builtin()
+                .unwrap()
+                .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+                .unwrap();
+            let tracker = ContextTracker::default();
+            let observation = ContextObservation {
+                tracker: &tracker,
+                model: &model,
+                system: "",
+                tools: &[],
+            };
+            let initial = UserInput::from("initial request");
+            let mut evidence = TerminalGateEvidence::for_run(policy, &session, &initial).unwrap();
+            session.append(user_message(initial)).unwrap();
+            let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+            let mut expected = vec!["initial request".to_owned()];
+            for index in 0..24 {
+                let text = format!("control-{index}: {}", "🙂".repeat(4_000));
+                let input = UserInput::from(text.clone());
+                let bytes = control_input_bytes(&input);
+                let kind = match index % 3 {
+                    0 => {
+                        control.steer(input).await.unwrap();
+                        ControlDeliveryKind::Steering
+                    }
+                    1 => {
+                        control.follow_up(input).await.unwrap();
+                        ControlDeliveryKind::FollowUp
+                    }
+                    _ => {
+                        control.finish_now(input).await.unwrap();
+                        ControlDeliveryKind::Steering
+                    }
+                };
+                let reserved = match rx.recv().await.unwrap() {
+                    Control::Steer(input)
+                    | Control::FollowUp(input)
+                    | Control::FinishNow(input) => input,
+                    _ => panic!("semantic control"),
+                };
+                assert_eq!(
+                    control.pending_count.available_permits(),
+                    MAX_PENDING_CONTROL_INPUTS - 1
+                );
+                assert_eq!(
+                    control.pending_bytes.available_permits(),
+                    MAX_PENDING_CONTROL_BYTES - bytes
+                );
+                let delivered = deliver_control_inputs(
+                    vec![reserved],
+                    kind,
+                    &mut session,
+                    &EntryMetadata::default(),
+                    &mut evidence,
+                    &observation,
+                );
+                let ControlDelivery::Completed { event: Some(event) } = delivered else {
+                    panic!("durable delivery must succeed")
+                };
+                let messages = match event {
+                    AgentEvent::SteeringDelivered { messages }
+                    | AgentEvent::FollowUpDelivered { messages } => messages,
+                    _ => panic!("delivery acknowledgement"),
+                };
+                assert_eq!(messages, vec![text.clone()]);
+                expected.push(text);
+                assert_eq!(
+                    control.pending_count.available_permits(),
+                    MAX_PENDING_CONTROL_INPUTS
+                );
+                assert_eq!(
+                    control.pending_bytes.available_permits(),
+                    MAX_PENDING_CONTROL_BYTES
+                );
+            }
+            let persisted = session
+                .context()
+                .unwrap()
+                .iter()
+                .map(|message| message_visible_text(message).expect("complete delivered input"))
+                .collect::<Vec<_>>();
+            assert_eq!(persisted, expected);
+            if let Some(evidence) = evidence {
+                assert_eq!(evidence.requests.front().unwrap(), "initial request");
+                assert_eq!(
+                    evidence.requests.back().unwrap(),
+                    &bounded_gate_text(expected.last().unwrap(), 3_000)
+                );
+                assert_eq!(
+                    evidence.requests_omitted,
+                    expected.len() - evidence.requests.len()
+                );
+                assert!(evidence.request_bytes <= TERMINAL_GATE_REQUEST_BYTES);
+                assert!(evidence.requests_omitted > 0);
+            } else {
+                assert_eq!(policy, CompletionPolicy::Natural);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn pending_controls_stay_reserved_after_ingress_drain_until_durable_delivery() {
         let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
@@ -10872,7 +11412,7 @@ mod tests {
             system: "",
             tools: &[],
         };
-        let mut gate = Vec::new();
+        let mut gate = None;
         let delivered = deliver_control_inputs(
             pending,
             ControlDeliveryKind::FollowUp,
@@ -10988,7 +11528,7 @@ mod tests {
             ControlDeliveryKind::Steering,
             &mut session,
             &EntryMetadata::default(),
-            &mut Vec::new(),
+            &mut None,
             &observation,
         );
         assert!(matches!(

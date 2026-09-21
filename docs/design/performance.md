@@ -55,19 +55,72 @@ and independent abort. Those bytes measure retained logical payload, not RSS.
 Prospective extension catalogs share a 4-MiB input/output-schema budget and
 feature checks no longer clone negotiated catalogs.
 
-Session catalog maintenance uses targeted lookups and 32-summary batches;
-ordered substring postings avoid a full text scan for selective search. The old
-64-MiB catalog cliff is removed, SQLite residency is bounded, and the on-disk
-index grows with searchable content. The existing bounded session-search
-projection is unchanged. Optional JSONL telemetry uses an ordered off-path
-writer with 256-record / 1-MiB admission and observable loss/failure; it is not
-an accounting authority. See [telemetry](../telemetry.md) for drain boundaries.
+Session catalog maintenance uses targeted lookups and 32-summary batches.
+Entry reconciliation streams directory entries without sorting and batches up to
+32 changed sessions with an 8-MiB projection target. It still enumerates/stats
+workspace transcripts on each search: directory mtime alone cannot safely detect
+in-place edits, and no cross-process change feed is claimed. Maintained gram
+cardinalities select rare postings without query-time posting counts. Each
+session has a 524,288-posting quota; overflow sessions retain the complete existing
+bounded text projection and use substring-scan fallback. The quota bounds logical
+posting rows, not SQLite file bytes or free pages; overflow searches can be slower.
+SQLite residency remains bounded.
+
+Search projection consumes JSONL without constructing complete lines or JSON
+values. A 64-KiB input buffer and 12-byte scalar staging validate string suffixes
+even when discarded; non-ID strings forward at most 512 Unicode scalars to the
+projection deserializer. Existing file/record limits and malformed-line recovery
+are retained, without new record-size or ID restrictions. Exact entry IDs still
+require output-sized memory; this is not a total process-memory bound.
+
+Optional JSONL telemetry uses an ordered off-path writer with 256-record / 1-MiB
+admission and observable loss/failure; it is not an accounting authority. See
+[telemetry](../telemetry.md) for drain boundaries.
+
+Ephemeral accounting retains its locked, fsynced ledger as authority. A disposable
+private SQLite ID/offset index avoids warm whole-ledger parsing on Unix; ledger
+identity/size/mtime/ctime changes cause a streaming rebuild. Other platforms use
+the conservative streaming path. The cache is published after ledger durability,
+and duplicate receipts are checked against the authoritative record. This is
+not protection against external mutations with indistinguishable metadata.
 
 Active model/thinking/subagent panels and tool consent are states of the main
 run loop, not nested loops that stop caller-driven inference. The renderer uses
 shared semantic transcript roots and private layout caches, releasing semantic
 ownership before layout and terminal writes. Post-write geometry and approval
 receipts are revision-fenced; accepted text is retained even when paints coalesce.
+
+The follow-up cost audit adds narrower bounds, not measured latency claims:
+
+- Ordinary Chat SSE frames decode directly into the typed DTO once; error-bearing
+  and malformed frames retain a permissive error fallback. Locked-marker removal
+  advances a cursor and compacts once. Responses request construction moves
+  already-owned input trees instead of serializing them into extra JSON trees;
+  final wire encoding still visits the complete request.
+- Small Bash output starts no spill writer or file. Promotion occurs before the
+  first lost raw byte, including truncation caused only by the final shared
+  stdout/stderr budget; pipe draining and cancellation coverage remain intact.
+- Natural runs collect no terminal-gate evidence. TerminalGate retains the first
+  12 and latest 12 bounded action receipts, plus the initial/latest request
+  evidence within 8 entries / 32 KiB. Omission counts are explicit; authoritative
+  inputs, tool results, and accounting are unchanged.
+- Reload enumeration stops at its work budget and reports skipped counts as lower
+  bounds. Partial layers cannot infer deletions or advance their baseline. Skill
+  descriptors share count/payload limits and a separate rendered-catalog bound;
+  this is not a total discovery-work or RSS bound. See [resources](../resources.md).
+- Serve borrows posting sets, retains only top-K scored candidates, and creates
+  snippets only for winners; it still scores every eligible document. Git status
+  is aggregated once per listing. Filesystem search stops on the proven 101st
+  match, not merely on reaching 100 results.
+- Browse bounds DOM body traversal and substring reads before host-side redaction
+  and clipping, with explicit truncation notices. Interactive metadata extraction
+  retains its separate existing behavior; these are not whole-page work bounds.
+- Select-list filtering retains one exact-content-keyed normalization snapshot
+  per calling thread, bounded to 4,096 items / 2 MiB. It still compares source
+  content and scans candidates; oversized panels use complete uncached filtering.
+
+These changes and their regression fixtures require qualification on the final
+candidate. They do not establish real-terminal stability or provider-side speed.
 
 CR/CRLF normalization, general semantic previews, fenced diffs, and some
 content-fitting code geometry still use general tail layout. A bounded rich

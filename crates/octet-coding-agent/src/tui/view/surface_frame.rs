@@ -228,22 +228,22 @@ pub(super) fn event_margin_marker_with_frame(
         TranscriptBlock::Tool(panel) if markers_enabled => {
             Some(match panel.subagent_activity.as_ref() {
                 // A settled roster resolves from the declared child states the rows
-                // print: red when any worker failed or was cancelled, neutral when
-                // work was stopped, green when every worker finished successfully.
+                // print: red when anything other than every worker succeeded, green
+                // when all of them did.
                 Some(view) => {
-                    // The marker resolves from the declared child states, not
-                    // from the broader failure summary the panel uses for its
-                    // styling: a worker the reader *stopped* is neutral, while
-                    // only a failed/cancelled worker (or an explicit
-                    // roster-level failure that produced none) turns the event
-                    // red.
+                    // The marker resolves from the declared child states: green
+                    // only when every worker finished successfully, red when
+                    // anything else happened - a failed or cancelled worker, a
+                    // stopped one, or an explicit roster-level failure that
+                    // produced none.
                     let aggregate = super::subagent_activity_aggregate(view);
-                    if aggregate == Some(SubagentStateGroup::Failed)
-                        || view.failure_reason.is_some()
-                    {
+                    let failed = view.failure_reason.is_some()
+                        || matches!(
+                            aggregate,
+                            Some(SubagentStateGroup::Failed) | Some(SubagentStateGroup::Stopped)
+                        );
+                    if failed {
                         theme.settled_event_dot("error", event_dot)
-                    } else if aggregate == Some(SubagentStateGroup::Stopped) {
-                        theme.settled_event_dot("neutral", event_dot)
                     } else {
                         theme.settled_event_dot("success", event_dot)
                     }

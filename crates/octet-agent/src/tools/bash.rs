@@ -312,7 +312,7 @@ impl BashTool {
         let stderr_progress = ctx.progress.clone();
 
         let work = async {
-            let (out, err, status) = tokio::join!(
+            let (mut out, mut err, status) = tokio::join!(
                 read_bounded_with_progress(
                     &mut stdout_pipe,
                     capture_budget,
@@ -331,6 +331,8 @@ impl BashTool {
                 ),
                 wait_for_bash_process(&mut child, handoff),
             );
+            // EOF-only spills share the readers' deadline and drop cancellation.
+            rebalance_captures(&mut out, &mut err, capture_budget).await;
             (out, err, status)
         };
         tokio::pin!(work);
@@ -349,8 +351,7 @@ impl BashTool {
                     effective_timeout.as_secs_f64()
                 );
                 match drained {
-                    Ok((mut out, mut err, status)) => {
-                        rebalance_captures(&mut out, &mut err, capture_budget);
+                    Ok((out, err, status)) => {
                         guard.disarm();
                         if out.total_bytes > 0 {
                             message.push('\n');
@@ -376,8 +377,7 @@ impl BashTool {
                 }
                 Err(ToolError::new(message))
             }
-            Ok((mut out, mut err, status)) => {
-                rebalance_captures(&mut out, &mut err, capture_budget);
+            Ok((out, err, status)) => {
                 let status = status.map_err(|e| {
                     ToolError::new(format!("error io\nfailed to wait for command: {e}"))
                 })?;
@@ -910,7 +910,7 @@ impl BashTool {
         let stderr_progress = ctx.progress.clone();
 
         let work = async {
-            let (out, err, status) = tokio::join!(
+            let (mut out, mut err, status) = tokio::join!(
                 read_bounded_with_progress(
                     &mut stdout_pipe,
                     capture_budget,
@@ -929,6 +929,8 @@ impl BashTool {
                 ),
                 child.wait(),
             );
+            // EOF-only spills share the readers' deadline and drop cancellation.
+            rebalance_captures(&mut out, &mut err, capture_budget).await;
             (out, err, status)
         };
         tokio::pin!(work);
@@ -942,8 +944,7 @@ impl BashTool {
                     effective_timeout.as_secs_f64()
                 );
                 match drained {
-                    Ok((mut out, mut err, status)) => {
-                        rebalance_captures(&mut out, &mut err, capture_budget);
+                    Ok((out, err, status)) => {
                         guard.disarm();
                         if out.total_bytes > 0 {
                             message.push('\n');
@@ -966,8 +967,7 @@ impl BashTool {
                 }
                 Err(ToolError::new(message))
             }
-            Ok((mut out, mut err, status)) => {
-                rebalance_captures(&mut out, &mut err, capture_budget);
+            Ok((out, err, status)) => {
                 let status = status.map_err(|error| {
                     ToolError::new(format!("error io\nfailed to wait for command: {error}"))
                 })?;
@@ -1002,6 +1002,15 @@ impl BashTool {
     }
 }
 
+/// Pin the owner's retirement fence from capture admission, even if the writer
+/// is only needed after both streams reach EOF.
+#[cfg(any(unix, windows))]
+struct PendingSpill {
+    owner: Arc<spill::OwnerState>,
+    scope: String,
+    limit: usize,
+}
+
 /// Byte-bounded stream capture keeping the head and tail halves of the budget.
 #[cfg(any(unix, windows))]
 struct Capture {
@@ -1009,6 +1018,9 @@ struct Capture {
     tail: VecDeque<u8>,
     total_bytes: usize,
     truncated: bool,
+    // Head + tail are the exact provisional stream until the first eviction.
+    // No separate prefix buffer or spill worker is needed while output fits.
+    pending_spill: Option<PendingSpill>,
     spill: Option<spill::Spill>,
     spill_bytes: usize,
     spill_truncated: bool,
@@ -1023,11 +1035,44 @@ impl Capture {
             tail: VecDeque::new(),
             total_bytes: 0,
             truncated: false,
+            pending_spill: None,
             spill: None,
             spill_bytes: 0,
             spill_truncated: false,
             spill_error: false,
         }
+    }
+
+    /// Flush the exact provisional bytes before any head/tail bytes are lost.
+    /// The writer splits these borrowed slices into bounded queue messages.
+    async fn promote_spill(&mut self) -> Option<spill::Writer> {
+        let pending = self.pending_spill.take()?;
+        let mut writer = spill::Writer::start(pending.owner, pending.scope, pending.limit);
+        writer.chunk(&self.head).await;
+        let (first, second) = self.tail.as_slices();
+        writer.chunk(first).await;
+        writer.chunk(second).await;
+        Some(writer)
+    }
+
+    fn record_spill(&mut self, outcome: spill::Outcome) {
+        self.spill = outcome.spill;
+        self.spill_bytes = outcome.bytes;
+        self.spill_truncated = outcome.truncated;
+        self.spill_error |= outcome.error;
+    }
+
+    /// A stream may fit its provisional allowance but not the final shared one.
+    /// Materialize it before shrinking, and report whether budgeting must be
+    /// repeated to account for the newly known private path length.
+    async fn spill_if_truncated(&mut self, budget: usize) -> bool {
+        if self.total_bytes > budget {
+            if let Some(writer) = self.promote_spill().await {
+                self.record_spill(writer.finish().await);
+                return true;
+            }
+        }
+        false
     }
 
     /// Finalize a capture recorded with an equal-or-larger provisional
@@ -1043,6 +1088,14 @@ impl Capture {
 
         let head_cap = budget / 2;
         let tail_cap = budget.saturating_sub(head_cap);
+        if self.tail.len() < tail_cap {
+            // Shared-budget/path overhead can cut inside the provisional head.
+            // Its suffix still belongs in the final tail, not in omitted bytes.
+            let needed = tail_cap - self.tail.len();
+            for &byte in self.head[self.head.len() - needed..].iter().rev() {
+                self.tail.push_front(byte);
+            }
+        }
         self.head.truncate(head_cap);
         if self.tail.len() > tail_cap {
             self.tail.drain(..self.tail.len() - tail_cap);
@@ -1178,7 +1231,12 @@ async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
     let tail_cap = budget.saturating_sub(head_cap);
 
     let mut capture = Capture::empty();
-    let writer = spill::Writer::start(spill::owner(ownership.0), ownership.1.to_owned(), spill_limit);
+    capture.pending_spill = Some(PendingSpill {
+        owner: spill::owner(ownership.0),
+        scope: ownership.1.to_owned(),
+        limit: spill_limit,
+    });
+    let mut writer = None;
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf).await {
@@ -1188,7 +1246,13 @@ async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
                 break;
             }
             Ok(n) => {
-                writer.chunk(&buf[..n]).await;
+                if writer.is_none() && capture.total_bytes.saturating_add(n) > budget {
+                    // Promote before this chunk can evict the first raw byte.
+                    writer = capture.promote_spill().await;
+                }
+                if let Some(writer) = writer.as_mut() {
+                    writer.chunk(&buf[..n]).await;
+                }
                 progress.output(stream, Bytes::copy_from_slice(&buf[..n]));
                 capture.total_bytes += n;
                 let mut chunk = &buf[..n];
@@ -1214,11 +1278,9 @@ async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
             }
         }
     }
-    let outcome = writer.finish().await;
-    capture.spill = outcome.spill;
-    capture.spill_bytes = outcome.bytes;
-    capture.spill_truncated = outcome.truncated;
-    capture.spill_error |= outcome.error;
+    if let Some(writer) = writer {
+        capture.record_spill(writer.finish().await);
+    }
     capture
 }
 
@@ -1244,29 +1306,40 @@ fn shared_capture_budgets(
 }
 
 #[cfg(any(unix, windows))]
-fn rebalance_captures(stdout: &mut Capture, stderr: &mut Capture, budget: usize) {
-    // Complete inline output needs no spill-path envelope. When truncating,
-    // reserve the actual private path lengths rather than assuming /tmp is
-    // short (macOS and host-selected temporary roots need not be).
-    let budget = if stdout.total_bytes.saturating_add(stderr.total_bytes) > budget {
-        let paths = [stdout.spill.as_ref(), stderr.spill.as_ref()]
-            .into_iter()
-            .flatten()
-            .map(|spill| spill.path.as_os_str().len())
-            .sum::<usize>();
-        let second_section = if stdout.total_bytes > 0 && stderr.total_bytes > 0 {
-            128
+async fn rebalance_captures(stdout: &mut Capture, stderr: &mut Capture, budget: usize) {
+    loop {
+        // Complete inline output needs no spill-path envelope. When truncating,
+        // reserve actual private path lengths rather than assuming /tmp is short.
+        let inline_budget = if stdout.total_bytes.saturating_add(stderr.total_bytes) > budget {
+            let paths = [stdout.spill.as_ref(), stderr.spill.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(|spill| spill.path.as_os_str().len())
+                .sum::<usize>();
+            let second_section = if stdout.total_bytes > 0 && stderr.total_bytes > 0 {
+                128
+            } else {
+                0
+            };
+            budget.saturating_sub(paths + second_section)
         } else {
-            0
+            budget
         };
-        budget.saturating_sub(paths + second_section)
-    } else {
-        budget
-    };
-    let (stdout_budget, stderr_budget) =
-        shared_capture_budgets(stdout.total_bytes, stderr.total_bytes, budget);
-    stdout.fit_to_budget(stdout_budget);
-    stderr.fit_to_budget(stderr_budget);
+        let (stdout_budget, stderr_budget) =
+            shared_capture_budgets(stdout.total_bytes, stderr.total_bytes, inline_budget);
+        let (out_promoted, err_promoted) = tokio::join!(
+            stdout.spill_if_truncated(stdout_budget),
+            stderr.spill_if_truncated(stderr_budget),
+        );
+        if !out_promoted && !err_promoted {
+            stdout.fit_to_budget(stdout_budget);
+            stderr.fit_to_budget(stderr_budget);
+            return;
+        }
+        // A new spill path may itself truncate the peer. Each stream promotes
+        // at most once, so at most two more budget passes are needed. Neither
+        // capture may discard provisional bytes until this settles.
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -9,11 +9,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::types::Type;
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 const CATALOG_DIRECTORY: &str = ".catalog";
 const CATALOG_FILE: &str = "sessions-v1.sqlite3";
-const CATALOG_SCHEMA_VERSION: i64 = 5;
+const CATALOG_SCHEMA_VERSION: i64 = 6;
 // Bound SQLite resident pages, not the complete disposable on-disk index.
 const CATALOG_CACHE_KIB: i64 = 4 * 1024;
 const STATUS_SUMMARY: i64 = 0;
@@ -108,6 +108,9 @@ const ENTRY_KIND_ASSISTANT: i64 = 1;
 pub(crate) const MAX_INDEXED_ENTRY_CHARS: usize = 512;
 /// Hard bound for indexed entries per session.
 pub(crate) const MAX_INDEXED_ENTRIES_PER_SESSION: usize = 4_096;
+/// Bound the amplification of the bounded text projection into B-tree postings.
+/// Overflow sessions keep *all* projected text, but are searched by LIKE instead.
+const MAX_POSTINGS_PER_SESSION: usize = 512 * 1024;
 
 pub(crate) struct SessionCatalog {
     connection: Connection,
@@ -169,7 +172,8 @@ impl SessionCatalog {
 
         if schema_version < CATALOG_SCHEMA_VERSION {
             connection.execute_batch(
-                "DROP TABLE IF EXISTS indexed_entry_grams;
+                "DROP TABLE IF EXISTS indexed_entry_gram_counts;
+                 DROP TABLE IF EXISTS indexed_entry_grams;
                  DROP TABLE IF EXISTS indexed_entries;
                  DROP TABLE IF EXISTS indexed_entry_sessions;
                  DROP TABLE IF EXISTS sessions;
@@ -223,14 +227,28 @@ impl SessionCatalog {
              CREATE TABLE IF NOT EXISTS indexed_entry_sessions (
                  session_id TEXT PRIMARY KEY NOT NULL,
                  file_size INTEGER NOT NULL CHECK (file_size >= 0),
-                 modified_ns INTEGER NOT NULL CHECK (modified_ns >= 0)
+                 modified_ns INTEGER NOT NULL CHECK (modified_ns >= 0),
+                 postings_complete INTEGER NOT NULL CHECK (postings_complete IN (0, 1))
              ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS indexed_entry_fallback ON indexed_entry_sessions(postings_complete, session_id);
+             CREATE TABLE IF NOT EXISTS indexed_entry_gram_counts (
+                 gram TEXT PRIMARY KEY NOT NULL,
+                 postings INTEGER NOT NULL CHECK (postings > 0)
+             ) WITHOUT ROWID;
+             CREATE TRIGGER IF NOT EXISTS indexed_entry_gram_insert AFTER INSERT ON indexed_entry_grams BEGIN
+                 INSERT INTO indexed_entry_gram_counts (gram, postings) VALUES (NEW.gram, 1)
+                 ON CONFLICT(gram) DO UPDATE SET postings = postings + 1;
+             END;
+             CREATE TRIGGER IF NOT EXISTS indexed_entry_gram_delete AFTER DELETE ON indexed_entry_grams BEGIN
+                 DELETE FROM indexed_entry_gram_counts WHERE gram = OLD.gram AND postings = 1;
+                 UPDATE indexed_entry_gram_counts SET postings = postings - 1 WHERE gram = OLD.gram;
+             END;
              CREATE TABLE IF NOT EXISTS catalog_meta (
                  key TEXT PRIMARY KEY NOT NULL,
                  value INTEGER NOT NULL
              ) WITHOUT ROWID;
              INSERT OR IGNORE INTO catalog_meta (key, value) VALUES ('entry_revision', 1);
-             PRAGMA user_version = 5;",
+             PRAGMA user_version = 6;",
         )?;
 
         Ok(Self {
@@ -435,6 +453,15 @@ impl SessionCatalog {
         updates: &[IndexedEntryUpdate],
         stale_ids: &HashSet<String>,
     ) -> anyhow::Result<bool> {
+        self.apply_entries_with_quota(updates, stale_ids, MAX_POSTINGS_PER_SESSION)
+    }
+
+    fn apply_entries_with_quota(
+        &mut self,
+        updates: &[IndexedEntryUpdate],
+        stale_ids: &HashSet<String>,
+        posting_quota: usize,
+    ) -> anyhow::Result<bool> {
         if updates.is_empty() && stale_ids.is_empty() {
             return Ok(false);
         }
@@ -453,7 +480,7 @@ impl SessionCatalog {
                 "INSERT INTO indexed_entries (session_id, entry_id, ordinal, kind, text) VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             let mut insert_session = transaction.prepare(
-                "INSERT INTO indexed_entry_sessions (session_id, file_size, modified_ns) VALUES (?1, ?2, ?3)",
+                "INSERT INTO indexed_entry_sessions (session_id, file_size, modified_ns, postings_complete) VALUES (?1, ?2, ?3, 1)",
             )?;
             for update in updates {
                 delete_entries.execute([&update.session_id])?;
@@ -466,14 +493,32 @@ impl SessionCatalog {
                     })?,
                     update.fingerprint.modified_ns,
                 ])?;
+                let mut postings = 0;
+                let mut postings_complete = true;
                 for (ordinal, entry) in update.entries.iter().enumerate() {
-                    for gram in entry_grams(&entry.text) {
-                        insert_gram.execute(params![
-                            gram,
-                            update.session_id,
-                            ordinal as i64,
-                            entry.entry_id
-                        ])?;
+                    if postings_complete {
+                        let grams = entry_grams(&entry.text);
+                        if grams.len() > posting_quota.saturating_sub(postings) {
+                            // Never evict searchable text. Remove this session's
+                            // partial postings and explicitly use the complete
+                            // bounded text projection as its search fallback.
+                            delete_grams.execute([&update.session_id])?;
+                            transaction.execute(
+                                "UPDATE indexed_entry_sessions SET postings_complete = 0 WHERE session_id = ?1",
+                                [&update.session_id],
+                            )?;
+                            postings_complete = false;
+                        } else {
+                            postings += grams.len();
+                            for gram in grams {
+                                insert_gram.execute(params![
+                                    gram,
+                                    update.session_id,
+                                    ordinal as i64,
+                                    entry.entry_id
+                                ])?;
+                            }
+                        }
                     }
                     insert_entry.execute(params![
                         update.session_id,
@@ -522,29 +567,56 @@ impl SessionCatalog {
         // SQLite LIKE folds ASCII only. Keep its exact substring semantics,
         // including escaped metacharacters and NUL termination, while selecting
         // candidates through postings even for one/two-character queries.
-        let gram: String = query
-            .split('\0')
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(3)
-            .map(|ch| ch.to_ascii_lowercase())
-            .collect();
+        let grams = query_grams(query);
+        // Counts are maintained with the postings transaction, not computed by
+        // scanning COUNT(*) for each query gram. A common prefix is not an
+        // adequate candidate filter for a rare suffix (especially a miss).
+        let mut counts = self
+            .connection
+            .prepare_cached("SELECT postings FROM indexed_entry_gram_counts WHERE gram = ?1")?;
+        let mut selected = "";
+        let mut smallest = i64::MAX;
+        #[cfg(test)]
+        let mut probe_steps = 0;
+        for gram in &grams {
+            let count: i64 = counts
+                .query_row([gram], |row| row.get(0))
+                .optional()?
+                .unwrap_or(0);
+            #[cfg(test)]
+            {
+                probe_steps += counts.reset_status(rusqlite::StatementStatus::VmStep);
+            }
+            if count < smallest {
+                selected = gram;
+                smallest = count;
+            }
+            if count == 0 {
+                break;
+            }
+        }
         let pattern = format!("%{}%", escape_like(query));
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let sql = if gram.is_empty() {
+        let sql = if selected.is_empty() {
             "SELECT session_id, entry_id, ordinal, kind, text FROM indexed_entries
              WHERE text LIKE ?1 ESCAPE '\\' AND ?3 = ''
              ORDER BY session_id, ordinal LIMIT ?2"
         } else {
-            "SELECT e.session_id, e.entry_id, e.ordinal, e.kind, e.text
-             FROM indexed_entry_grams g JOIN indexed_entries e
+            // Disjoint sources: indexed sessions have postings, overflow
+            // sessions have none. SQLite can merge these ordered sources while
+            // retaining the same deterministic global order and limit.
+            "SELECT g.session_id, e.entry_id, g.ordinal, e.kind, e.text
+             FROM indexed_entry_grams g CROSS JOIN indexed_entries e
              ON e.session_id = g.session_id AND e.entry_id = g.entry_id
              WHERE g.gram = ?3 AND e.text LIKE ?1 ESCAPE '\\'
-             ORDER BY g.session_id, g.ordinal LIMIT ?2"
+             UNION ALL
+             SELECT s.session_id, e.entry_id, e.ordinal, e.kind, e.text
+             FROM indexed_entry_sessions s INDEXED BY indexed_entry_fallback CROSS JOIN indexed_entries e INDEXED BY indexed_entries_order ON e.session_id = s.session_id
+             WHERE s.postings_complete = 0 AND e.text LIKE ?1 ESCAPE '\\'
+             ORDER BY 1, 3 LIMIT ?2"
         };
         let mut statement = self.connection.prepare(sql)?;
-        let rows = statement.query_map(params![pattern, limit, gram], |row| {
+        let rows = statement.query_map(params![pattern, limit, selected], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -572,7 +644,7 @@ impl SessionCatalog {
         }
         #[cfg(test)]
         self.search_steps
-            .set(statement.get_status(rusqlite::StatementStatus::VmStep));
+            .set(probe_steps + statement.get_status(rusqlite::StatementStatus::VmStep));
         Ok(hits)
     }
 
@@ -588,7 +660,7 @@ impl SessionCatalog {
 }
 
 /// Unique short n-grams bound temporary retention to one projected entry.
-/// Disk postings grow with searchable data; no eviction can hide old sessions.
+/// Posting overflow falls back to the complete bounded text projection.
 fn entry_grams(text: &str) -> HashSet<String> {
     let chars: Vec<_> = text.chars().map(|ch| ch.to_ascii_lowercase()).collect();
     let mut grams = HashSet::new();
@@ -597,6 +669,29 @@ fn entry_grams(text: &str) -> HashSet<String> {
             grams.insert(window.iter().collect());
         }
     }
+    grams
+}
+
+/// All necessary grams of the longest supported size. LIKE terminates at NUL
+/// and folds only ASCII; using Unicode lowercase would lose valid matches.
+fn query_grams(query: &str) -> Vec<String> {
+    let chars: Vec<_> = query
+        .split('\0')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    let size = chars.len().min(3);
+    if size == 0 {
+        return Vec::new();
+    }
+    let mut grams: Vec<String> = chars
+        .windows(size)
+        .map(|window| window.iter().collect())
+        .collect();
+    grams.sort_unstable();
+    grams.dedup();
     grams
 }
 
@@ -779,6 +874,132 @@ mod tests {
                 catalog.search_steps.get()
             );
         }
+    }
+
+    #[test]
+    fn common_prefix_misses_choose_a_selective_gram_without_scanning_postings() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut catalog = SessionCatalog::open(temp.path()).unwrap();
+        catalog
+            .apply_entries(&[update("a", &["common prefix ordinary"])], &HashSet::new())
+            .unwrap();
+        assert!(catalog
+            .search_entries("common prefix missing ∆", 10)
+            .unwrap()
+            .is_empty());
+        let baseline = catalog.search_steps.get();
+        let mut background = update("b", &[]);
+        background.entries = (0..4096)
+            .map(|i| IndexedEntry {
+                entry_id: format!("{i:05}"),
+                kind: IndexedEntryKind::User,
+                text: "common prefix ordinary".into(),
+            })
+            .collect();
+        catalog
+            .apply_entries(&[background], &HashSet::new())
+            .unwrap();
+        assert!(catalog
+            .search_entries("common prefix missing ∆", 10)
+            .unwrap()
+            .is_empty());
+        assert!(
+            catalog.search_steps.get() <= baseline + 10,
+            "{} vs {baseline}",
+            catalog.search_steps.get()
+        );
+        assert_eq!(catalog.search_entries("common", 1).unwrap().len(), 1);
+        assert!(
+            catalog.search_steps.get() < 150,
+            "ordered postings must stop at the limit: {}",
+            catalog.search_steps.get()
+        );
+    }
+
+    #[test]
+    fn posting_quota_falls_back_without_losing_text_order_or_like_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut catalog = SessionCatalog::open(temp.path()).unwrap();
+        let texts = [
+            "Hello WORLD",
+            "helLo_%\\tail",
+            "éÉ🦀",
+            "x\0abc",
+            "last needle",
+        ];
+        catalog
+            .apply_entries_with_quota(
+                &[update("a", &texts), update("c", &texts)],
+                &HashSet::new(),
+                32,
+            )
+            .unwrap();
+        catalog
+            .apply_entries(
+                &[update("b", &["Hello world", "last needle"])],
+                &HashSet::new(),
+            )
+            .unwrap();
+        let overflow: i64 = catalog
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM indexed_entry_sessions WHERE postings_complete = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(overflow, 2);
+        let postings: i64 = catalog
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM indexed_entry_grams WHERE session_id IN ('a', 'c')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(postings, 0, "overflow uses only bounded projected text");
+        for query in [
+            "", "h", "HE", "HELLO", "world", "%", "_", "\\", "_%\\", "é", "É", "🦀", "a", "ab",
+            "abc", "\0", "x\0abc", "needle", "absent",
+        ] {
+            for limit in [0, 1, 2, 100] {
+                let mut baseline = catalog.connection.prepare("SELECT session_id, entry_id FROM indexed_entries WHERE text LIKE ?1 ESCAPE '\\' ORDER BY session_id, ordinal LIMIT ?2").unwrap();
+                let expected = baseline
+                    .query_map(
+                        params![format!("%{}%", escape_like(query)), limit as i64],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let actual: Vec<_> = catalog
+                    .search_entries(query, limit)
+                    .unwrap()
+                    .into_iter()
+                    .map(|hit| (hit.session_id, hit.entry_id))
+                    .collect();
+                assert_eq!(actual, expected, "query={query:?}, limit={limit}");
+            }
+        }
+        // Overflow is replaceable, not permanent eviction or a stale marker.
+        catalog
+            .apply_entries_with_quota(&[update("a", &["small"])], &HashSet::from(["c".into()]), 32)
+            .unwrap();
+        let overflow: i64 = catalog
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM indexed_entry_sessions WHERE postings_complete = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(overflow, 0);
+        let inaccurate: i64 = catalog.connection.query_row("SELECT COUNT(*) FROM indexed_entry_gram_counts c WHERE c.postings != (SELECT COUNT(*) FROM indexed_entry_grams g WHERE g.gram = c.gram)", [], |row| row.get(0)).unwrap();
+        assert_eq!(inaccurate, 0);
+        assert_eq!(
+            catalog.search_entries("small", 10).unwrap()[0].session_id,
+            "a"
+        );
     }
 
     #[test]

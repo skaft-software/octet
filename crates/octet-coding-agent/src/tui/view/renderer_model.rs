@@ -330,7 +330,10 @@ impl RenderOwner {
             state.transcript.clear();
             state.transcript_commit_ids.clear();
             state.block_revisions.clear();
-            *state.transcript_cache.get_mut() = Default::default();
+            // The retained ShellFrameState outlives this semantic root. Rebuild
+            // rows without resetting the cache generation: reusing generation
+            // 1 could falsely certify the previous frame's prefix as unchanged.
+            state.invalidate_transcript_layout();
             self.root = SharedSequence::default();
         }
         for count in (model.root.len() + 1..=state.transcript.len()).rev() {

@@ -800,3 +800,280 @@ fn stats_track_incremental_replacement_without_leaking_content() {
         .unwrap()
         .contains("\"indexedDocuments\":1"));
 }
+
+#[test]
+fn common_queries_score_every_candidate_but_retain_and_render_only_the_limit() {
+    let mut index = TranscriptSearchIndex::new();
+    index
+        .replace_session(
+            "session",
+            (0..1_024).map(|number| {
+                document(
+                    "session",
+                    &format!("item-{number:04}"),
+                    SearchDocumentKind::Assistant,
+                    if number % 64 == 0 { "Rare" } else { "Title" },
+                    "common common common",
+                    number,
+                )
+            }),
+        )
+        .unwrap();
+
+    take_search_work();
+    let common = index
+        .search_request(&TranscriptSearchRequest {
+            query: "common".into(),
+            filter: SearchFilter::default(),
+            limit: 7,
+        })
+        .unwrap();
+    assert!(common.truncated);
+    assert_eq!(common.hits[0].item_id, "item-1023");
+    assert_eq!(
+        take_search_work(),
+        SearchWork {
+            posting_candidates: 1_024,
+            membership_checks: 0,
+            scored_documents: 1_024,
+            peak_retained_candidates: 7,
+            snippets_built: 7,
+        }
+    );
+
+    let rare = index
+        .search("common rare", &SearchFilter::default(), 3)
+        .unwrap();
+    assert_eq!(rare[0].item_id, "item-0960");
+    assert!(rare.iter().all(|hit| hit.score == 31));
+    assert_eq!(
+        take_search_work(),
+        SearchWork {
+            posting_candidates: 16,
+            membership_checks: 16,
+            scored_documents: 16,
+            peak_retained_candidates: 3,
+            snippets_built: 3,
+        }
+    );
+
+    assert!(index
+        .search("common missing", &SearchFilter::default(), 3)
+        .unwrap()
+        .is_empty());
+    assert_eq!(take_search_work(), SearchWork::default());
+    assert!(index
+        .search(
+            "common",
+            &SearchFilter {
+                session_id: None,
+                kinds: BTreeSet::from([SearchDocumentKind::Error]),
+            },
+            3,
+        )
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        take_search_work(),
+        SearchWork {
+            posting_candidates: 1_024,
+            ..SearchWork::default()
+        }
+    );
+}
+
+// Deliberately allocation-heavy exhaustive oracle: find all token positions,
+// build every matching hit, then sort and truncate as before bounded selection.
+fn reference_occurrences(value: &str) -> Vec<(String, SearchMatchRange)> {
+    let source = value.chars().collect::<Vec<_>>();
+    let mut occurrences = Vec::new();
+    let mut offset = 0;
+    while offset < source.len() {
+        let start = offset;
+        while offset < source.len() && (source[offset].is_alphanumeric() || source[offset] == '_') {
+            offset += 1;
+        }
+        if offset > start {
+            occurrences.push((
+                source[start..offset]
+                    .iter()
+                    .flat_map(|character| character.to_lowercase())
+                    .collect(),
+                SearchMatchRange {
+                    start_char: start,
+                    end_char: offset,
+                },
+            ));
+        } else {
+            offset += 1;
+        }
+    }
+    occurrences
+}
+
+fn exhaustive_search(
+    documents: &[SearchDocument],
+    request: &TranscriptSearchRequest,
+) -> TranscriptSearchResult {
+    let terms = reference_occurrences(&request.query)
+        .into_iter()
+        .map(|(term, _)| term)
+        .collect::<BTreeSet<_>>();
+    let mut hits = Vec::new();
+    for document in documents {
+        if request
+            .filter
+            .session_id
+            .as_ref()
+            .is_some_and(|id| id != &document.session_id)
+            || (!request.filter.kinds.is_empty() && !request.filter.kinds.contains(&document.kind))
+        {
+            continue;
+        }
+        let body = reference_occurrences(&document.text);
+        let title = reference_occurrences(&document.session_title);
+        if !terms
+            .iter()
+            .all(|term| body.iter().chain(&title).any(|(word, _)| word == term))
+        {
+            continue;
+        }
+        let body = body
+            .into_iter()
+            .filter(|(term, _)| terms.contains(term))
+            .collect::<Vec<_>>();
+        let title = title
+            .into_iter()
+            .filter(|(term, _)| terms.contains(term))
+            .collect::<Vec<_>>();
+        let source = document.text.chars().collect::<Vec<_>>();
+        let first = body.first().map_or(0, |(_, range)| range.start_char);
+        let desired_start = first.saturating_sub(MAX_SEARCH_SNIPPET_CHARS / 2);
+        let end = source.len().min(desired_start + MAX_SEARCH_SNIPPET_CHARS);
+        let start = end
+            .saturating_sub(MAX_SEARCH_SNIPPET_CHARS)
+            .min(desired_start);
+        hits.push(SearchHit {
+            session_id: document.session_id.clone(),
+            item_id: document.item_id.clone(),
+            kind: document.kind,
+            session_title: document.session_title.clone(),
+            snippet: source[start..end].iter().collect(),
+            match_ranges: body
+                .iter()
+                .filter(|(_, range)| range.start_char >= start && range.end_char <= end)
+                .map(|(_, range)| SearchMatchRange {
+                    start_char: range.start_char - start,
+                    end_char: range.end_char - start,
+                })
+                .collect(),
+            title_match_ranges: title.iter().map(|(_, range)| *range).collect(),
+            timestamp_ms: document.timestamp_ms,
+            score: body.len() as u32 * 10 + title.len() as u32,
+        });
+    }
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| right.timestamp_ms.cmp(&left.timestamp_ms))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+            .then_with(|| left.item_id.cmp(&right.item_id))
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    let truncated = hits.len() > request.limit;
+    hits.truncate(request.limit);
+    TranscriptSearchResult { hits, truncated }
+}
+
+#[test]
+fn bounded_ranking_matches_exhaustive_scores_snippets_filters_and_ties() {
+    let kinds = [
+        SearchDocumentKind::User,
+        SearchDocumentKind::Assistant,
+        SearchDocumentKind::Tool,
+        SearchDocumentKind::Error,
+        SearchDocumentKind::Attachment,
+    ];
+    let titles = [
+        "Common RARE",
+        "İstanbul",
+        "heading_only",
+        "東京",
+        "ΣΟΣ café_2",
+    ];
+    let bodies = ["rare résumé", "İSTANBUL café_2", "ΣΟΣ", "東京", "bodyonly"];
+    let mut documents = (0..384)
+        .map(|number| {
+            document(
+                &format!("session-{}", number % 4),
+                &format!("item-{:03}", number / 4),
+                kinds[number % kinds.len()],
+                titles[number % titles.len()],
+                &format!(
+                    "{} {} {} {}",
+                    "🙂".repeat(if number % 9 == 0 { 260 } else { 0 }),
+                    "COMMON ".repeat(number % 7 + 1),
+                    bodies[number % bodies.len()],
+                    "padding ".repeat(number % 13),
+                ),
+                (number % 11) as u64,
+            )
+        })
+        .collect::<Vec<_>>();
+    documents.push(document(
+        "z-last",
+        "winner",
+        SearchDocumentKind::Tool,
+        "Late best score",
+        &"common ".repeat(100),
+        0,
+    ));
+    let mut index = TranscriptSearchIndex::new();
+    for document in documents.iter().rev() {
+        index.upsert_document(document.clone()).unwrap();
+    }
+    for query in [
+        "common common",
+        "common rare",
+        "common heading_only",
+        "İstanbul common",
+        "ΣΟΣ café_2",
+        "東京 rare",
+        "missing",
+        "bodyonly",
+    ] {
+        for filter in [
+            SearchFilter::default(),
+            SearchFilter {
+                session_id: Some("session-1".into()),
+                kinds: BTreeSet::new(),
+            },
+            SearchFilter {
+                session_id: None,
+                kinds: BTreeSet::from([SearchDocumentKind::Tool, SearchDocumentKind::User]),
+            },
+            SearchFilter {
+                session_id: Some("session-2".into()),
+                kinds: BTreeSet::from([SearchDocumentKind::Error]),
+            },
+            SearchFilter {
+                session_id: Some("absent".into()),
+                kinds: BTreeSet::new(),
+            },
+        ] {
+            for limit in [1, 7, MAX_SEARCH_RESULTS] {
+                let request = TranscriptSearchRequest {
+                    query: query.into(),
+                    filter: filter.clone(),
+                    limit,
+                };
+                assert_eq!(
+                    index.search_request(&request).unwrap(),
+                    exhaustive_search(&documents, &request),
+                    "{request:?}"
+                );
+            }
+        }
+    }
+}

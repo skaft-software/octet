@@ -21,6 +21,7 @@ mod repository_context;
 
 use project_fs::{
     ProjectFileEntryKind, ProjectFileSystem, ProjectFileSystemError, MAX_PROJECT_FILE_READ_BYTES,
+    MAX_PROJECT_FILE_SEARCH_RESULTS,
 };
 use project_registry::{ProjectId, ProjectRegistry};
 use repository_context::GitFileStatusKind;
@@ -726,4 +727,194 @@ fn trust_revocation_is_effective_for_existing_project_file_requests() {
         ProjectFileSystem::tree(&fixture.registry, &fixture.project_id, ""),
         Err(ProjectFileSystemError::TrustRequired)
     );
+}
+
+#[test]
+fn tree_aggregates_git_records_once_across_all_direct_children() {
+    let fixture = Fixture::new(|root| {
+        for child in 0..64 {
+            let directory = root.join(format!("dir-{child:02}"));
+            fs::create_dir(&directory).unwrap();
+            for file in 0..4 {
+                fs::write(directory.join(format!("file-{file}")), "untracked\n").unwrap();
+            }
+        }
+    });
+    initialize_git(&fixture.root);
+    project_fs::take_file_system_work();
+    let tree = ProjectFileSystem::tree(&fixture.registry, &fixture.project_id, "").unwrap();
+    assert_eq!(
+        project_fs::take_file_system_work().git_status_entries,
+        64 * 4
+    );
+    assert!(!tree.truncated);
+    assert!(!tree.git_status_truncated);
+    let directories = tree
+        .entries
+        .iter()
+        .filter(|entry| entry.name.starts_with("dir-"))
+        .collect::<Vec<_>>();
+    assert_eq!(directories.len(), 64);
+    assert!(directories
+        .iter()
+        .all(|entry| status_kinds(entry) == [GitFileStatusKind::Untracked]));
+}
+
+#[cfg(unix)]
+#[test]
+fn git_virtual_entries_do_not_resurrect_unsafe_physical_names() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new(|root| {
+        fs::create_dir(root.join("folder")).unwrap();
+        for name in ["safe", "symbolic", "hard-linked", "folder/child"] {
+            fs::write(root.join(name), "base\n").unwrap();
+        }
+    });
+    initialize_git(&fixture.root);
+    commit_all(&fixture.root, "base");
+    let outside = fixture._temporary.path().join("outside");
+    fs::write(&outside, "outside\n").unwrap();
+    fs::remove_file(fixture.root.join("symbolic")).unwrap();
+    symlink(&outside, fixture.root.join("symbolic")).unwrap();
+    fs::remove_file(fixture.root.join("hard-linked")).unwrap();
+    fs::hard_link(&outside, fixture.root.join("hard-linked")).unwrap();
+    fs::remove_dir_all(fixture.root.join("folder")).unwrap();
+    symlink(fixture._temporary.path(), fixture.root.join("folder")).unwrap();
+
+    let tree = ProjectFileSystem::tree(&fixture.registry, &fixture.project_id, "").unwrap();
+    assert!(!tree.git_status_truncated);
+    assert!(tree.entries.iter().any(|entry| entry.name == "safe"));
+    for name in ["symbolic", "hard-linked", "folder"] {
+        assert!(
+            tree.entries.iter().all(|entry| entry.name != name),
+            "resurrected {name}"
+        );
+    }
+}
+
+fn write_search_matches(root: &Path, count: usize) {
+    for number in 0..count {
+        fs::write(root.join(format!("a-{number:03}.txt")), "needle\n").unwrap();
+    }
+}
+
+#[test]
+fn search_requires_a_proven_overflow_and_does_not_count_binary_path_matches() {
+    let fixture = Fixture::new(|root| {
+        write_search_matches(root, MAX_PROJECT_FILE_SEARCH_RESULTS);
+        fs::write(root.join("b-needle.bin"), b"needle\0").unwrap();
+        fs::write(root.join("z-tail.txt"), "nonmatching tail\n").unwrap();
+    });
+    project_fs::take_file_system_work();
+    let exact =
+        ProjectFileSystem::search(&fixture.registry, &fixture.project_id, "needle").unwrap();
+    assert_eq!(exact.hits.len(), MAX_PROJECT_FILE_SEARCH_RESULTS);
+    assert!(!exact.truncated);
+    assert_eq!(
+        exact.scanned_bytes,
+        100 * 7 + "nonmatching tail\n".len() as u64
+    );
+    let work = project_fs::take_file_system_work();
+    assert_eq!(
+        work.search_file_reads, 102,
+        "100 hits must not skip later nonmatches or binary files"
+    );
+    assert_eq!(work.search_directories, 1);
+
+    fs::write(fixture.root.join("c-overflow.txt"), "needle\n").unwrap();
+    let overflow =
+        ProjectFileSystem::search(&fixture.registry, &fixture.project_id, "needle").unwrap();
+    assert_eq!(overflow.hits, exact.hits);
+    assert!(overflow.truncated);
+    assert_eq!(
+        overflow.scanned_bytes,
+        101 * 7,
+        "the tail is not read after a proven 101st hit"
+    );
+    assert_eq!(project_fs::take_file_system_work().search_file_reads, 102);
+}
+
+#[test]
+fn search_overflow_stops_the_outer_directory_traversal_without_resorting_selection() {
+    let fixture = Fixture::new(|root| {
+        for directory in ["a-later", "z-first/a-later", "z-first/z-deep"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        fs::write(root.join("z-root.txt"), "needle\n").unwrap();
+        write_search_matches(
+            &root.join("z-first/z-deep"),
+            MAX_PROJECT_FILE_SEARCH_RESULTS,
+        );
+        for path in [
+            "a-later/tail.txt",
+            "z-first/a-later/tail.txt",
+            "z-first/z-deep/z-tail.txt",
+        ] {
+            fs::write(root.join(path), "needle ".repeat(1_000)).unwrap();
+        }
+    });
+    project_fs::take_file_system_work();
+    let result =
+        ProjectFileSystem::search(&fixture.registry, &fixture.project_id, "needle").unwrap();
+    let mut expected = (0..99)
+        .map(|number| format!("z-first/z-deep/a-{number:03}.txt"))
+        .collect::<Vec<_>>();
+    expected.push("z-root.txt".into());
+    assert_eq!(
+        result
+            .hits
+            .iter()
+            .map(|hit| hit.path.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(result.truncated);
+    assert_eq!(result.scanned_bytes, 101 * 7);
+    let work = project_fs::take_file_system_work();
+    assert_eq!(work.search_file_reads, 101);
+    assert_eq!(
+        work.search_directories, 3,
+        "pending sibling directories are never opened"
+    );
+}
+
+#[test]
+fn oversized_path_overflow_stops_search_but_unrelated_truncation_and_exact_cap_do_not() {
+    let fixture = Fixture::new(|root| {
+        write_search_matches(root, MAX_PROJECT_FILE_SEARCH_RESULTS - 1);
+        for name in ["00-oversized.txt", "z-needle-large.txt"] {
+            fs::File::create(root.join(name))
+                .unwrap()
+                .set_len(MAX_PROJECT_FILE_READ_BYTES + 1)
+                .unwrap();
+        }
+        fs::write(root.join("zz-tail.txt"), "nonmatching tail\n").unwrap();
+    });
+    project_fs::take_file_system_work();
+    let exact =
+        ProjectFileSystem::search(&fixture.registry, &fixture.project_id, "needle").unwrap();
+    assert_eq!(exact.hits.len(), MAX_PROJECT_FILE_SEARCH_RESULTS);
+    assert!(
+        exact.truncated,
+        "oversized content is independently truncated"
+    );
+    let path_only = exact.hits.last().unwrap();
+    assert_eq!(path_only.path, "z-needle-large.txt");
+    assert_eq!(path_only.line, None);
+    assert!(path_only.snippet.is_empty());
+    assert_eq!(
+        exact.scanned_bytes,
+        99 * 7 + "nonmatching tail\n".len() as u64
+    );
+    assert_eq!(project_fs::take_file_system_work().search_file_reads, 100);
+
+    fs::write(fixture.root.join("a-099.txt"), "needle\n").unwrap();
+    let overflow =
+        ProjectFileSystem::search(&fixture.registry, &fixture.project_id, "needle").unwrap();
+    assert_eq!(overflow.hits.len(), MAX_PROJECT_FILE_SEARCH_RESULTS);
+    assert!(overflow.truncated);
+    assert!(overflow.hits.iter().all(|hit| hit.line == Some(1)));
+    assert_eq!(overflow.scanned_bytes, 100 * 7);
+    assert_eq!(project_fs::take_file_system_work().search_file_reads, 100);
 }

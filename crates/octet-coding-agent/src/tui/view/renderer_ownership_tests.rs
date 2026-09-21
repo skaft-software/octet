@@ -5,6 +5,53 @@ use super::*;
 use crate::tui::keymap::{EditAction, InputAction, SlashMenuAction};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
+// NativeReplay uses the same immutable-publication boundary as the renderer
+// thread, while retaining its deterministic in-process Pi/VT terminal.
+impl InteractiveShell {
+    pub(in crate::tui::view) fn isolate_native_test_renderer(&mut self) {
+        self.state.borrow_mut().render_threaded = true;
+        let tui = self.tui.as_mut().unwrap();
+        tui.remove_child(0);
+        tui.add_child(Box::new(ShellComponent::isolated(self.state.clone(), false)));
+    }
+}
+
+#[test]
+fn isolated_structural_rebuild_cannot_reuse_the_retained_frame_generation() {
+    for insert in [false, true] {
+        let state = SharedState::new(ShellState {
+            theme: crate::tui::theme::test_theme(),
+            size: (80, 8),
+            follow_tail: true,
+            ..Default::default()
+        });
+        for index in 0..60 {
+            state
+                .borrow_mut()
+                .push_block(TranscriptBlock::Notice(format!("RETAINED-{index:02}")));
+        }
+        let component = ShellComponent::isolated(state.clone(), false);
+        let mut retained = component.render(80);
+        assert_eq!(component.frame.borrow().transcript_generation, 1);
+        let epoch = state.borrow().transcript_epoch;
+        if insert {
+            state
+                .borrow_mut()
+                .insert_block(2, TranscriptBlock::Notice("INSERTED".into()));
+        } else {
+            state.borrow_mut().remove_transient_activity_block(2);
+        }
+        assert_eq!(state.borrow().transcript_epoch, epoch);
+        let update = component.render_update(80).unwrap();
+        assert!(component.frame.borrow().transcript_generation > 1);
+        assert_eq!(update.stable_prefix, 0, "a new root cannot certify old rows");
+        retained.truncate(update.stable_prefix);
+        retained.extend(update.replacement);
+        let owner = component.owner.as_ref().unwrap().borrow();
+        assert_eq!(retained, render_shell(&owner.state, 80));
+    }
+}
+
 struct ReleaseGate(Arc<RenderGate>);
 impl Drop for ReleaseGate {
     fn drop(&mut self) {

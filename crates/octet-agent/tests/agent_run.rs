@@ -1318,9 +1318,8 @@ fn request_has_no_tools(request: &serde_json::Value) -> bool {
 
 #[tokio::test]
 async fn normal_terminal_turn_without_user_visible_content_fails_loudly() {
-    // Each shape names its own cause: an empty reply, and a model that spent the
-    // whole turn on reasoning without ever emitting answer text (what a local
-    // thinking model does when its budget or template produces no final answer).
+    // Distinguish the observed response shapes without inferring why the
+    // provider ended the turn without an answer.
     for (body, expected) in [
         (empty_turn(), "no user-visible content"),
         (
@@ -1362,6 +1361,176 @@ async fn normal_terminal_turn_without_user_visible_content_fails_loudly() {
             "an empty turn must not be presented as a completed model turn"
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn chat_reasoning_only_diagnostic_retains_usage_without_retry() {
+    for (report_stop, report_usage) in [(true, true), (false, true), (true, false), (false, false)]
+    {
+        let response_id = "private-response-id\u{1b}[31m\n";
+        let reasoning = "private-reasoning\u{1b}[31m\n";
+        let mut chunks = vec![serde_json::json!({
+            "id": response_id,
+            "choices": [{"delta": {"reasoning": reasoning}}],
+        })];
+        if report_stop {
+            chunks.push(serde_json::json!({
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+            }));
+        }
+        if report_usage {
+            chunks.push(serde_json::json!({
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 12,
+                    "completion_tokens_details": {"reasoning_tokens": 12},
+                },
+            }));
+        }
+        let body = chunks
+            .into_iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(Script {
+                bodies: vec![body],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let session_path = sessions.path().join("session.jsonl");
+        let mut model = openai_multimodal_model(&server.uri());
+        Arc::make_mut(&mut model.spec).limits = ModelLimits {
+            context_window: 32_768,
+            max_output_tokens: 32_768,
+        };
+        let mut agent = build_agent_with_reasoning(
+            model,
+            &session_path,
+            workspace.path(),
+            ReasoningConfig::Off,
+            Some(4),
+        );
+        let mut run = agent.prompt("return an answer").await.unwrap();
+        let events = collect(&mut run).await;
+        drop(run);
+        let requests = wire_requests(&server).await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "completed reasoning-only turns must not be replayed"
+        );
+        let error = match assert_single_run_finished(&events) {
+            FinishReason::Failed(error @ octet_agent::AgentError::IncompleteResponse { .. }) => {
+                error
+            }
+            other => panic!("reasoning-only completion must fail, got {other:?}"),
+        };
+        let diagnostic = octet_agent::public_error_diagnostic(error, "test", "scripted");
+        assert!(diagnostic.contains("provider returned reasoning but no answer text"));
+        assert!(diagnostic.contains("stop=end_turn"));
+        assert!(diagnostic.contains(&format!("chat_stop_defaulted={}", !report_stop)));
+        let requested_cap = requests[0]["max_completion_tokens"].as_u64().unwrap();
+        assert!(requested_cap > 0 && requested_cap < 32_768);
+        assert!(diagnostic.contains(&format!("request_max_output_tokens={requested_cap}")));
+        assert!(diagnostic.contains("not automatically retried"));
+        if report_usage {
+            assert!(diagnostic.contains("output_tokens=12; reasoning_tokens=12"));
+            assert!(!diagnostic.contains("usage=not_reported"));
+        } else {
+            assert!(diagnostic.contains("usage=not_reported"));
+            assert!(!diagnostic.contains("reasoning_tokens="));
+            assert!(!diagnostic.contains("; output_tokens="));
+        }
+        for forbidden in ["private-response-id", "private-reasoning", "\u{1b}", "\n"] {
+            assert!(!diagnostic.contains(forbidden));
+        }
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TurnFinished { .. } | AgentEvent::ProviderRetry { .. }
+        )));
+        let reopened = Session::open_read_only(&session_path).unwrap();
+        assert!(reopened.context().unwrap().iter().any(|message| matches!(
+            message,
+            Message::Assistant(assistant) if assistant.content.iter().any(|part| matches!(
+                part,
+                AssistantPart::Reasoning(part) if part.text.as_deref() == Some(reasoning)
+            ))
+        )));
+        let records = reopened.usage_records();
+        assert_eq!(records.len(), 1);
+        assert!(matches!(
+            records[0].kind,
+            UsageRecordKind::AssistantTurn { .. }
+        ));
+        assert_eq!(records[0].stop_reason, Some(octet_ai::StopReason::EndTurn));
+        let expected_usage = if report_usage {
+            Usage {
+                input_tokens: 5,
+                output_tokens: 12,
+                reasoning_tokens: 12,
+                total_tokens: 17,
+                ..Usage::default()
+            }
+        } else {
+            // Preserve the existing accounting representation, not a billing claim.
+            Usage::default()
+        };
+        assert_eq!(records[0].usage, expected_usage);
+    }
+}
+
+#[tokio::test]
+async fn chat_reasoning_answer_and_length_continuation_remain_successful() {
+    for finish_reason in ["stop", "length"] {
+        let chunk = serde_json::json!({
+            "id": "chat-reasoning-answer",
+            "choices": [{
+                "delta": {"reasoning": "private reasoning", "content": "answer"},
+                "finish_reason": finish_reason,
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 12},
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(Script {
+                bodies: vec![
+                    format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+                    openai_text_turn("continued"),
+                ],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let mut agent = build_agent_with_reasoning(
+            openai_multimodal_model(&server.uri()),
+            &sessions.path().join("session.jsonl"),
+            workspace.path(),
+            ReasoningConfig::Off,
+            Some(4),
+        );
+        let output = agent.complete("return an answer").await.unwrap();
+        assert!(matches!(output.reason, FinishReason::Completed));
+        let requests = wire_requests(&server).await;
+        if finish_reason == "length" {
+            assert_eq!(output.text, "answercontinued");
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]
+                .to_string()
+                .contains("truncated at the token limit"));
+        } else {
+            assert_eq!(output.text, "answer");
+            assert_eq!(requests.len(), 1);
+        }
     }
 }
 

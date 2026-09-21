@@ -1000,20 +1000,11 @@ fn subagent_activity_failure_reason(view: &SubagentActivityView) -> Option<Strin
 /// Plain semantic text used by copy/width calculations for the presentation
 /// block. The renderer owns styling and compact row selection.
 pub(super) fn subagent_activity_copy_text(view: &SubagentActivityView) -> String {
-    // The copy text mirrors the rendered event shape: the aggregate state word
-    // and the total in the heading, then one row per worker with the declared
-    // state word and the full model identifier.
+    // The copy text mirrors the rendered event shape: a plain tool-call name
+    // for the heading, then one row per worker with the declared state word and
+    // the full model identifier.
     let mut lines = Vec::new();
-    let total = if view.telemetry.is_empty() {
-        view.activities.len()
-    } else {
-        view.telemetry.len()
-    };
-    let mut heading = "Subagents".to_owned();
-    if let Some(group) = subagent_activity_aggregate(view) {
-        heading.push_str(&format!(" · {} · {total}", group.declared()));
-    }
-    lines.push(heading);
+    lines.push("Subagents".to_owned());
     if !view.telemetry.is_empty() {
         lines.extend(view.telemetry.iter().map(|child| {
             let state = if child.state.is_empty() {
@@ -1301,7 +1292,7 @@ fn subagent_cell_role(column: SubagentColumn, group: SubagentStateGroup) -> &'st
 /// same prefix width - in the ASCII profile the connector is two cells wide -
 /// or a header cell stops lining up with the worker column it labels.
 fn subagent_grid_prefix_width(theme: &OctetTheme) -> usize {
-    visible_width(ACTIVITY_DETAIL_INDENT) + visible_width(activity_elbow(theme)) + 1
+    visible_width(activity_elbow(theme)) + 1
 }
 
 /// The grid header row. It pays the exact prefix width of a worker row, with
@@ -1322,20 +1313,23 @@ fn subagent_grid_header_line(
     subagent_grid_line(theme, &connector, columns, widths, &cells, width)
 }
 
-/// Enabled columns, in reading order, that fit `width` once the indent, the
-/// row connector, and the two-cell gutters are paid for.
+/// Enabled columns, in reading order, that fit `width` once the row connector
+/// and the two-cell gutters are paid for.
 ///
-/// `include_state` is `false` when one group covers every rendered row: the
-/// state word is then already in the event heading and repeating it in every
-/// row would spend a whole column on the same word.
+/// `include_state` is always `true` today: every row names its own state, so
+/// the roster needs no per-group heading that could fold it away. The flag is
+/// kept because the compact fallback and the column budget share this shape.
 fn subagent_columns(
     rows: &[SubagentRow],
     width: u16,
     unicode: bool,
     include_state: bool,
 ) -> (Vec<SubagentColumn>, Vec<usize>) {
-    let connector = if unicode { 1 } else { 2 };
-    let indent = visible_width(ACTIVITY_DETAIL_INDENT) + connector + 1;
+    let connector: usize = if unicode { 1 } else { 2 };
+    // The roster table pays the same prefix width as any other tool's nested
+    // output: the connector cell plus the gutter that separates it from the
+    // first column.
+    let indent = connector + 1;
     let width = usize::from(width);
     let mut columns = vec![SubagentColumn::Worker];
     let mut widths = vec![rows
@@ -1453,13 +1447,7 @@ fn subagent_grid_line(
             body.push_str(&" ".repeat(padding));
         }
     }
-    fit_line(
-        &format!(
-            "{ACTIVITY_DETAIL_INDENT}{} {body}",
-            theme.fg("muted", elbow)
-        ),
-        width,
-    )
+    fit_line(&format!("{} {body}", theme.fg("muted", elbow)), width)
 }
 
 /// Style one cell. The theme resolves roles against the active profile, and
@@ -1477,7 +1465,7 @@ fn subagent_compact_line(
 ) -> Vec<String> {
     let unicode = theme.unicode();
     let separator = if unicode { " · " } else { " | " };
-    let prefix = format!("{ACTIVITY_DETAIL_INDENT}{} ", theme.fg("muted", elbow));
+    let prefix = format!("{} ", theme.fg("muted", elbow));
     let continuation = " ".repeat(visible_width(&prefix));
     let usage = row
         .tokens
@@ -1602,29 +1590,12 @@ pub(super) fn subagent_activity_render_rows(
         rows.retain(|row| row.group == filter);
     }
     sort_subagent_rows(&mut rows, view.sort);
-    // One group that covers every rendered row already names its state in the
-    // group line, and every row then repeats that same word in its state cell.
-    // Fold the count into the event heading, drop the group line, and drop the
-    // state column. A collapsed terminal group is excluded because it renders
-    // one summary row that carries both the state and the count itself.
-    let uniform_group = (!rows.is_empty())
-        .then(|| {
-            SubagentStateGroup::ORDER
-                .into_iter()
-                .find(|group| rows.iter().all(|row| row.group == *group))
-        })
-        .flatten()
-        .filter(|group| !group.is_terminal() || expanded || view.state_filter.is_some());
+    // The event heading is a plain tool-call name. The live margin dot carries
+    // the aggregate state, and every row prints its own, so the heading adds
+    // neither a state word nor a count.
     let mut heading = "Subagents".to_owned();
     if let Some(scope) = subagent_activity_scope(view) {
         heading.push_str(&format!("{separator}{scope}"));
-    }
-    if let Some(group) = uniform_group {
-        heading.push_str(&format!(
-            "{separator}{}{separator}{}",
-            group.declared(),
-            rows.len()
-        ));
     }
     let mut lines = vec![fit_line(
         &theme.bold(&theme.fg("foreground", &heading)),
@@ -1640,8 +1611,8 @@ pub(super) fn subagent_activity_render_rows(
                     "error",
                     &format!("Failed: {}", sanitize_for_terminal(reason)),
                 ),
-                ACTIVITY_DETAIL_INDENT,
-                ACTIVITY_DETAIL_INDENT,
+                "",
+                "",
                 width,
             ));
         }
@@ -1649,7 +1620,9 @@ pub(super) fn subagent_activity_render_rows(
     }
 
     let compact = width < 46;
-    let include_state = uniform_group.is_none();
+    // Every row names its own state in the state column, so the column is
+    // never folded away - not even when one group covers the whole roster.
+    let include_state = true;
     let (columns, widths) = subagent_columns(&rows, width, unicode, include_state);
     // The grid is only usable while every mandatory column fits. Otherwise the
     // compact per-worker line keeps the model readable instead of cutting the
@@ -1686,7 +1659,7 @@ pub(super) fn subagent_activity_render_rows(
                 collapsed_subagent_groups_row(theme, group, members.len(), &names, reason, width);
             lines.push(fit_line(
                 &format!(
-                    "{ACTIVITY_DETAIL_INDENT}{} {}",
+                    "{} {}",
                     theme.fg("muted", activity_elbow(theme)),
                     subdued_text(theme, &text)
                 ),
@@ -1697,19 +1670,9 @@ pub(super) fn subagent_activity_render_rows(
             continue;
         }
 
-        // A uniform roster already carries its state (and count) in the event
-        // heading, so the per-group line and its indentation level are skipped.
-        if uniform_group != Some(group) {
-            let heading = format!("{}{separator}{}", group.declared(), members.len());
-            lines.push(fit_line(
-                &theme.bold(&subdued_text(
-                    theme,
-                    &format!("{ACTIVITY_DETAIL_INDENT}{heading}"),
-                )),
-                width,
-            ));
-            remaining = remaining.saturating_sub(1);
-        }
+        // Every row names its own state in the state cell, so a per-group
+        // sub-heading would only repeat it. The collapsed summary above already
+        // accounts for the workers a terminal group hides.
         if grid_fits && remaining > 0 {
             lines.push(subagent_grid_header_line(
                 theme, &columns, &widths, group, width,
@@ -1723,7 +1686,7 @@ pub(super) fn subagent_activity_render_rows(
                     &subdued_text(
                         theme,
                         &format!(
-                            "{ACTIVITY_DETAIL_INDENT}{}{} {omitted} more{separator}ctrl+o shows all",
+                            "{}{} {omitted} more{separator}ctrl+o shows all",
                             if unicode { "└" } else { "`-" },
                             theme.glyph("ellipsis"),
                         ),
@@ -1763,12 +1726,10 @@ pub(super) fn subagent_activity_render_rows(
                     &theme.fg(
                         "error",
                         &format!(
-                            "{ACTIVITY_DETAIL_INDENT}  {}",
+                            "  {}",
                             truncate_subagent_cell(
                                 &text,
-                                usize::from(width)
-                                    .saturating_sub(visible_width(ACTIVITY_DETAIL_INDENT) + 2)
-                                    .max(8),
+                                usize::from(width).saturating_sub(2).max(8),
                                 Some(theme.glyph("ellipsis")),
                             )
                         ),
@@ -1799,12 +1760,7 @@ pub(super) fn subagent_activity_render_rows(
         } else {
             summary
         };
-        lines.extend(wrap_hanging(
-            &subdued_text(theme, &text),
-            ACTIVITY_DETAIL_INDENT,
-            ACTIVITY_DETAIL_INDENT,
-            width,
-        ));
+        lines.extend(wrap_hanging(&subdued_text(theme, &text), "", "", width));
     }
     if let Some(reason) = view.failure_reason.as_deref() {
         // A failure that produced no workers at all is still the whole point of
@@ -1815,8 +1771,8 @@ pub(super) fn subagent_activity_render_rows(
                 "error",
                 &format!("Failed: {}", sanitize_for_terminal(reason)),
             ),
-            ACTIVITY_DETAIL_INDENT,
-            ACTIVITY_DETAIL_INDENT,
+            "",
+            "",
             width,
         ));
     }
@@ -3223,9 +3179,7 @@ impl ShellState {
             .filter(|index| self.animation_block_is_addressable(**index))
             .any(|index| match self.transcript.get(*index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
-                Some(TranscriptBlock::Tool(panel)) => {
-                    markers_enabled && !panel.finished && panel.subagent_activity.is_none()
-                }
+                Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
                 Some(TranscriptBlock::Shell(shell)) => markers_enabled && shell.running,
                 _ => false,
             })
@@ -3396,9 +3350,7 @@ impl ShellState {
             let markers_enabled = self.theme.resolve::<bool>("margin_markers").unwrap_or(true);
             let visible = match self.transcript.get(index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
-                Some(TranscriptBlock::Tool(panel)) => {
-                    markers_enabled && !panel.finished && panel.subagent_activity.is_none()
-                }
+                Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
                 Some(TranscriptBlock::Shell(shell)) => markers_enabled && shell.running,
                 _ => false,
             };
