@@ -2141,9 +2141,9 @@ pub struct StreamingLayoutStats {
     pub fallback_source_bytes: u64,
 }
 
-/// An append-only literal preview retains source offsets, not a second copy of
-/// the growing text. Only complete logical rows and proven visual wraps become
-/// stable. These are NOT parser commits: semantic promotion may replace them.
+/// An append-only literal preview retains source offsets (transformed offsets
+/// for code). Only complete logical rows and proven visual wraps become stable.
+/// These are NOT parser commits: semantic promotion may replace them.
 #[derive(Clone, Debug, Default)]
 pub(super) struct AppendOnlyTail {
     checked: usize,
@@ -2160,10 +2160,106 @@ pub(super) struct AppendOnlyTail {
     // in the document. Offsets address flattened prefix + borrowed Raw bytes.
     paragraph_prefix: Option<Vec<RichRun>>,
     paragraph_prefix_bytes: usize,
+    code_text: AppendCodeText,
+}
+
+/// Sanitized code with tab stops carried across deltas. Only the final EGC is
+/// replayed: an appended combining mark or ZWJ may change its display width.
+#[derive(Clone, Debug, Default)]
+struct AppendCodeText {
+    text: String,
+    raw_checked: usize,
+    pending: String,
+    pending_start: usize,
+    column: usize,
+}
+
+impl AppendCodeText {
+    fn append(
+        &mut self,
+        source: &str,
+        renderer: &RichRenderer,
+        stats: &mut StreamingLayoutStats,
+    ) -> bool {
+        let delta = &source[self.raw_checked..];
+        stats.checked_bytes += delta.len() as u64;
+        // Static code layout handles CR per original source line, including a
+        // special terminal CRLF. Keep that authoritative path for now.
+        if delta.contains('\r') {
+            return false;
+        }
+        // Sanitization is character-local except CRLF (excluded above): even a
+        // fragmented ESC/OSC/CSI becomes visible text, never terminal commands.
+        let safe = renderer.sanitize(delta);
+        stats.copied_bytes += safe.len() as u64;
+        self.pending.push_str(&safe);
+        self.text.truncate(self.pending_start);
+        let mut column = self.column;
+        let mut last = 0;
+        stats.checked_bytes += self.pending.len() as u64;
+        for (offset, grapheme) in self.pending.grapheme_indices(true) {
+            last = offset;
+            self.pending_start = self.text.len();
+            self.column = column;
+            let cells = renderer.options.width.grapheme_width(grapheme, column);
+            if grapheme == "\t" {
+                self.text.extend(std::iter::repeat(' ').take(cells));
+                stats.copied_bytes += cells as u64;
+            } else {
+                self.text.push_str(grapheme);
+                stats.copied_bytes += grapheme.len() as u64;
+            }
+            column = if grapheme == "\n" {
+                0
+            } else {
+                column.saturating_add(cells)
+            };
+        }
+        self.pending.drain(..last);
+        self.raw_checked = source.len();
+        true
+    }
 }
 
 impl AppendOnlyTail {
     pub(super) fn update(
+        &mut self,
+        block: &Block,
+        renderer: &RichRenderer,
+        width: u16,
+        output: &mut Vec<RenderedLine>,
+        stats: &mut StreamingLayoutStats,
+    ) -> Option<(usize, usize)> {
+        if self.disabled {
+            return None;
+        }
+        if let Block::CodeBlock(code) = block {
+            if code.language.as_deref().is_some_and(|language| {
+                language.eq_ignore_ascii_case("diff") || language.eq_ignore_ascii_case("patch")
+            }) {
+                return None;
+            }
+            if !self.code_text.append(&code.code, renderer, stats) {
+                stats.literal_transform_fallbacks += 1;
+                self.disabled = true;
+                return None;
+            }
+            // Move, never clone, the growing transformed source across layout.
+            let normalized = Block::CodeBlock(CodeBlock {
+                language: code.language.clone(),
+                code: std::mem::take(&mut self.code_text.text),
+            });
+            let result = self.update_inner(&normalized, renderer, width, output, stats);
+            let Block::CodeBlock(code) = normalized else {
+                unreachable!()
+            };
+            self.code_text.text = code.code;
+            return result;
+        }
+        self.update_inner(block, renderer, width, output, stats)
+    }
+
+    fn update_inner(
         &mut self,
         block: &Block,
         renderer: &RichRenderer,
@@ -2935,6 +3031,48 @@ mod tests {
                             assert_eq!(prior[..stable], output[..stable]);
                             prior = expected;
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn append_only_code_transforms_match_every_scalar_boundary() {
+        for (color, unicode) in [(ColorDepth::TrueColor, true), (ColorDepth::None, false)] {
+            for overflow in [CodeOverflow::Clip, CodeOverflow::Wrap] {
+                for width in [1, 7, 16] {
+                    let mut renderer = renderer(color, unicode);
+                    let mut options = renderer.options();
+                    options.code_overflow = overflow;
+                    renderer.set_options(options);
+                    for source in [
+                        "12345♥\u{fe0f}\t👩\u{200d}💻\t🇦🇧e\u{301}\tend\nnext\trow",
+                        "abc\t\x1b[31mred\x1b[0m\n\x1b]52;c;Y2xpcA==\x07\u{009b}\u{202e}\tend",
+                    ] {
+                        let mut cache = AppendOnlyTail::default();
+                        let mut stats = StreamingLayoutStats::default();
+                        let mut output = Vec::new();
+                        let mut prior: Vec<RenderedLine> = Vec::new();
+                        for end in source.char_indices().map(|(i, c)| i + c.len_utf8()) {
+                            let block =
+                                Block::CodeBlock(CodeBlock::with_language("rust", &source[..end]));
+                            let (stable, visible) = cache
+                                .update(&block, &renderer, width, &mut output, &mut stats)
+                                .unwrap();
+                            let expected = renderer
+                                .render_unstable(&Document::new(vec![block]), width)
+                                .lines;
+                            assert_eq!(
+                                output[..visible],
+                                expected,
+                                "end={end} width={width} overflow={overflow:?}"
+                            );
+                            let stable = stable.min(prior.len());
+                            assert_eq!(prior[..stable], output[..stable]);
+                            prior = expected;
+                        }
+                        assert_eq!(stats.literal_transform_fallbacks, 0);
                     }
                 }
             }

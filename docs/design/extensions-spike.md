@@ -1,5 +1,13 @@
 # Executable Extensions Spike: Daily-Driver Capabilities
 
+> **Historical research and superseded platform plan — not a release gate.**
+> The “everything interesting is an extension” decision and phased breadth below
+> are retained as history, not current product scope. [The roadmap](https://github.com/skaft-software/octet/blob/main/ROADMAP.md)
+> selects a fast, small, model-flexible coding host; extensions add tools and
+> bounded host-shaped integrations. Existing runtime services, safety contracts,
+> generated SDK/schema artifacts, and conformance tests remain live. This record
+> neither removes them nor obligates delivery of every researched capability.
+
 > **Status:** research evidence retained; architecture superseded by the
 > tiny-kernel decision below
 > **Observed:** 2026-08-16

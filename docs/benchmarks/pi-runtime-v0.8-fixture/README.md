@@ -1,12 +1,16 @@
 # Pi runtime fixture evidence — 00e3ca3e561fc807491931712b93e534c952cf59
 
-Bounded, offline, credential-free capture from
-[`scripts/bench-pi-runtime.py`](../../../scripts/bench-pi-runtime.py). It runs the checked-in
-Pi compatibility fixture only: no model or provider request, no network call, no inherited
+> **Historical evidence:** the bridge-exclusive `scripts/bench-pi-runtime.py`
+> harness has been removed with Pi extension execution. Measurements remain
+> unchanged; commands and gates below apply only to the recorded snapshot.
+
+Bounded, offline, credential-free capture from `scripts/bench-pi-runtime.py`.
+It ran the Pi compatibility fixture checked in at that revision only:
+no model or provider request, no network call, no inherited
 credentials, and a temporary HOME. These are fixture representations of the lifecycle
 profiles, not a production runtime-manager measurement.
 
-## Reproduction
+## Historical reproduction
 
 ```console
 python3 scripts/bench-pi-runtime.py --candidate 00e3ca3e561fc807491931712b93e534c952cf59 --repetitions 5 --sample-interval-ms 25 --max-resource-samples 16 --publish --output docs/benchmarks/pi-runtime-v0.8-fixture
@@ -30,7 +34,7 @@ wall-clock timings still vary per run and host, so the recorded numbers are one 
 (minimum 5); release approval
 `blocked`.
 
-## Release gates
+## Historical release gates
 
 - `runtime_manager_adapter` (unmet): observed 'hermetic_fixture'; requires a checked-in adapter backed by the real aggregate plan/evidence seam.
 - `inference_attribution` (unmet): observed 'no inference process was launched or sampled'; requires separately retained inference server identity and resources.

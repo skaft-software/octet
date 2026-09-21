@@ -263,6 +263,8 @@ pub const MAX_POST_MUTATION_AFFECTED_RESOURCES: usize = 32;
 pub const MAX_POST_MUTATION_ID_BYTES: usize = 128;
 /// Maximum opaque resource identity bytes in a post-mutation notification.
 pub const MAX_POST_MUTATION_RESOURCE_ID_BYTES: usize = 128;
+/// Maximum refused tool names echoed back by one active-tool narrowing error.
+pub(crate) const MAX_REFUSED_ACTIVE_TOOL_NAMES: usize = 8;
 
 /// Host-owned category of a completed mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -447,6 +449,9 @@ struct DynamicToolRegistry {
     ready_changed: Arc<Notify>,
     policy: Option<ToolPolicy>,
     revision: u64,
+    /// `None` publishes the full host-policed surface; `Some` publishes only
+    /// the intersection of these names with that surface.
+    active_names: Option<BTreeSet<String>>,
 }
 
 struct DynamicToolGroup {
@@ -683,6 +688,21 @@ fn validate_dynamic_catalog(
     owner: &str,
     tools: &[Arc<dyn Tool>],
 ) -> Result<(), String> {
+    // Tool::definition returns an owned schema. Extract existing names once,
+    // not once per candidate (which repeatedly cloned every nested schema).
+    let registered_names = registry
+        .groups
+        .iter()
+        .filter(|group| group.owner != owner)
+        .flat_map(|group| &group.tools)
+        .map(|tool| tool.definition().name)
+        .collect::<BTreeSet<_>>();
+    let reserved_names = registry
+        .reservations
+        .iter()
+        .filter(|reservation| reservation.owner != owner)
+        .flat_map(|reservation| reservation.names.iter())
+        .collect::<BTreeSet<_>>();
     let mut names = BTreeSet::new();
     for tool in tools {
         let name = tool.definition().name;
@@ -692,23 +712,12 @@ fn validate_dynamic_catalog(
         if registry.static_names.contains(&name) {
             return Err(format!("dynamic tool `{name}` conflicts with a host tool"));
         }
-        if registry
-            .groups
-            .iter()
-            .filter(|group| group.owner != owner)
-            .flat_map(|group| &group.tools)
-            .any(|registered| registered.definition().name == name)
-        {
+        if registered_names.contains(&name) {
             return Err(format!(
                 "dynamic tool `{name}` conflicts with another extension"
             ));
         }
-        if registry
-            .reservations
-            .iter()
-            .filter(|reservation| reservation.owner != owner)
-            .any(|reservation| reservation.names.contains(&name))
-        {
+        if reserved_names.contains(&name) {
             return Err(format!(
                 "dynamic tool `{name}` is reserved by another extension update"
             ));
@@ -963,20 +972,92 @@ impl ExtensionHost {
         Ok((scoped, effective))
     }
 
+    /// Narrows the published provider and execution surface to `names`.
+    ///
+    /// This is strictly a narrowing operation. Requested names are
+    /// intersected with the tools this host already publishes after every
+    /// product policy filter, so a call can never add a tool, re-admit a name
+    /// the sandbox, effect broker, or product policy excluded, or widen what
+    /// an admitted tool may do. A name outside that surface refuses the whole
+    /// request (at most `MAX_REFUSED_ACTIVE_TOOL_NAMES` names are echoed in
+    /// the error) and leaves host state untouched.
+    ///
+    /// `None` restores the full host-policed surface. `Some(empty)` is valid
+    /// and publishes no tools. Every accepted call bumps the tool-snapshot
+    /// revision, so a run holding a clone of this host observes the new
+    /// surface at its next turn boundary.
+    pub fn set_active_tools(&self, names: Option<&BTreeSet<String>>) -> Result<(), String> {
+        let mut dynamic = self
+            .dynamic_tools
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(names) = names {
+            let policed = self.policed_tool_names_locked(&dynamic);
+            let refused = names.difference(&policed).cloned().collect::<Vec<_>>();
+            if !refused.is_empty() {
+                let total = refused.len();
+                let listed = refused
+                    .iter()
+                    .take(MAX_REFUSED_ACTIVE_TOOL_NAMES)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return Err(format!(
+                    "active tool set names {total} tool(s) that are not registered after host policy: {}{}",
+                    listed.join(", "),
+                    if total > listed.len() { ", …" } else { "" },
+                ));
+            }
+        }
+        dynamic.active_names = names.cloned();
+        dynamic.revision = dynamic.revision.saturating_add(1);
+        Ok(())
+    }
+
+    /// Every published tool in wire order, ignoring any active-set narrowing.
+    fn policed_tools<'a>(
+        &'a self,
+        dynamic: &'a DynamicToolRegistry,
+    ) -> impl Iterator<Item = &'a Arc<dyn Tool>> {
+        self.tools
+            .iter()
+            .chain(dynamic.groups.iter().flat_map(|group| group.tools.iter()))
+    }
+
+    /// Every published tool name after product policy, ignoring any active-set
+    /// narrowing. Sorted and deduplicated.
+    fn policed_tool_names_locked(&self, dynamic: &DynamicToolRegistry) -> BTreeSet<String> {
+        self.policed_tools(dynamic)
+            .map(|tool| tool.definition().name)
+            .collect()
+    }
+
+    /// Every host-policed registered tool name, sorted, including names that
+    /// are currently deactivated by [`Self::set_active_tools`].
+    ///
+    /// This is the validation surface for active-tool requests: a name absent
+    /// here was removed by product policy or never registered, and no
+    /// activation request can reintroduce it.
+    pub(crate) fn policed_tool_names(&self) -> Vec<String> {
+        let dynamic = self
+            .dynamic_tools
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.policed_tool_names_locked(&dynamic)
+            .into_iter()
+            .collect()
+    }
+
     pub(crate) fn tool_snapshot(&self) -> (u64, Vec<Arc<dyn Tool>>) {
         let dynamic = self
             .dynamic_tools
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dynamic_len: usize = dynamic.groups.iter().map(|group| group.tools.len()).sum();
-        let mut tools = Vec::with_capacity(self.tools.len() + dynamic_len);
-        tools.extend(self.tools.iter().cloned());
-        tools.extend(
-            dynamic
-                .groups
-                .iter()
-                .flat_map(|group| group.tools.iter().cloned()),
-        );
+        let active = dynamic.active_names.as_ref();
+        let tools = self
+            .policed_tools(&dynamic)
+            .filter(|tool| active.is_none_or(|active| active.contains(&tool.definition().name)))
+            .cloned()
+            .collect::<Vec<_>>();
         (dynamic.revision, tools)
     }
 
@@ -1125,6 +1206,59 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_catalog_clones_each_definition_once_per_validation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountedTool {
+            name: String,
+            definitions: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl Tool for CountedTool {
+            fn definition(&self) -> ToolDef {
+                self.definitions.fetch_add(1, Ordering::Relaxed);
+                ToolDef {
+                    name: self.name.clone(),
+                    description: String::new(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    constrained_sampling: None,
+                }
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &ToolContext<'_>,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!("validation never executes tools")
+            }
+        }
+        for count in [8, 32, 128] {
+            let definitions = Arc::new(AtomicUsize::new(0));
+            let tools = |prefix: &str| {
+                (0..count)
+                    .map(|index| {
+                        Arc::new(CountedTool {
+                            name: format!("{prefix}_{index}"),
+                            definitions: Arc::clone(&definitions),
+                        }) as Arc<dyn Tool>
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let registry = DynamicToolRegistry {
+                groups: vec![DynamicToolGroup {
+                    owner: "other".into(),
+                    tools: tools("old"),
+                }],
+                ..DynamicToolRegistry::default()
+            };
+            validate_dynamic_catalog(&registry, "new", &tools("new")).unwrap();
+            assert_eq!(definitions.load(Ordering::Relaxed), 2 * count);
+            assert!(validate_dynamic_catalog(&registry, "new", &tools("old")).is_err());
+            // Replacing one's own group never conflicts with its previous names.
+            validate_dynamic_catalog(&registry, "other", &tools("old")).unwrap();
+        }
+    }
+
+    #[test]
     fn dynamic_catalog_conflict_preserves_the_published_group() {
         let mut host = ExtensionHost::new();
         host.tool(NamedTool("core"));
@@ -1207,6 +1341,102 @@ mod tests {
         assert_eq!(
             alpha.published_names(),
             BTreeSet::from(["alpha_new".to_owned()])
+        );
+    }
+
+    fn host_tool_names(host: &ExtensionHost) -> Vec<String> {
+        host.tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect()
+    }
+
+    #[test]
+    fn active_tool_narrowing_filters_the_snapshot_and_restores() {
+        let mut host = ExtensionHost::new();
+        host.tool(NamedTool("read"));
+        host.tool(NamedTool("write"));
+        let initial_revision = host.tool_snapshot().0;
+
+        host.set_active_tools(Some(&BTreeSet::from(["read".to_owned()])))
+            .unwrap();
+        assert_eq!(host_tool_names(&host), ["read"]);
+        // Deactivation is not deregistration.
+        assert_eq!(host.policed_tool_names(), ["read", "write"]);
+        let narrowed_revision = host.tool_snapshot().0;
+        assert!(narrowed_revision > initial_revision);
+
+        // An empty set is valid and publishes no tools.
+        host.set_active_tools(Some(&BTreeSet::new())).unwrap();
+        assert!(host.tool_definitions().is_empty());
+
+        host.set_active_tools(None).unwrap();
+        assert_eq!(host_tool_names(&host), ["read", "write"]);
+        assert!(host.tool_snapshot().0 > narrowed_revision);
+    }
+
+    #[test]
+    fn active_tool_narrowing_refuses_unknown_names_without_state_change() {
+        let mut host = ExtensionHost::new();
+        host.tool(NamedTool("read"));
+        let revision = host.tool_snapshot().0;
+
+        let error = host
+            .set_active_tools(Some(&BTreeSet::from([
+                "read".to_owned(),
+                "ghost".to_owned(),
+            ])))
+            .unwrap_err();
+        assert!(
+            error.contains("ghost") && !error.contains("read"),
+            "the refused name is reported: {error}"
+        );
+        assert_eq!(host_tool_names(&host), ["read"]);
+        assert_eq!(host.tool_snapshot().0, revision);
+    }
+
+    #[test]
+    fn active_tool_narrowing_cannot_readmit_policy_denied_names() {
+        let mut host = ExtensionHost::new();
+        host.set_tool_policy(|name| name != "denied");
+        host.dynamic_tools("owner", vec![named_tool("allowed"), named_tool("denied")])
+            .unwrap();
+        assert_eq!(host.policed_tool_names(), ["allowed"]);
+        let revision = host.tool_snapshot().0;
+
+        let error = host
+            .set_active_tools(Some(&BTreeSet::from(["denied".to_owned()])))
+            .unwrap_err();
+        assert!(error.contains("denied"), "{error}");
+        // A refused request changes nothing: the policed surface stays active.
+        assert_eq!(host_tool_names(&host), ["allowed"]);
+        assert_eq!(host.tool_snapshot().0, revision);
+
+        host.set_active_tools(Some(&BTreeSet::from(["allowed".to_owned()])))
+            .unwrap();
+        assert_eq!(host_tool_names(&host), ["allowed"]);
+    }
+
+    #[test]
+    fn active_tool_narrowing_bumps_the_revision_a_cloned_run_host_observes() {
+        let mut host = ExtensionHost::new();
+        host.tool(NamedTool("read"));
+        host.tool(NamedTool("write"));
+        // `Agent::prompt` hands a clone of the host to the streaming loop.
+        let run_host = host.clone();
+        let before = run_host.tool_snapshot().0;
+
+        host.set_active_tools(Some(&BTreeSet::from(["write".to_owned()])))
+            .unwrap();
+
+        let (revision, tools) = run_host.tool_snapshot();
+        assert!(revision > before);
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.definition().name.clone())
+                .collect::<Vec<_>>(),
+            ["write"]
         );
     }
 }

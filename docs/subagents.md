@@ -167,6 +167,12 @@ turn and a restarted process can reconstruct it as `detached` instead of losing
 it silently. Execution caps do not drift up across that boundary: reattachment
 takes a slot per record and leaves the excess visibly detached.
 
+The restart roster remains bounded to 256 KiB. When completed/limit-reached
+output would exceed that budget, the roster retains explicitly marked output
+prefixes; complete committed responses remain in the referenced child sessions.
+Approval reasons and failure diagnostics are not shortened by this output budget,
+and oversized metadata still fails closed.
+
 The extension models the gap as **detached, not dead**:
 
 - A worker whose host record is no longer reported becomes `detached` (the wire

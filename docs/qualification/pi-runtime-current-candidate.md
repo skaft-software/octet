@@ -1,5 +1,10 @@
 # Pi 0.84.4 current-candidate qualification
 
+> **Historical bridge qualification — not a release gate.** The Pi execution
+> bridge is removed. These commands and receipts remain evidence for their
+> recorded snapshot, not current installation instructions or RC qualification.
+> Portable Pi inventory/import and native providers remain separate.
+
 - **Issues:** #397, #258, #257, #259, #260, #272, #262, #156, #157, #279
 - **Claim:** `dogfood_conformance` / local source-candidate fixtures only
 - **Candidate:** `df5a7e80` plus the shared working-tree diff

@@ -51,6 +51,9 @@ backslash-escaped. Without a visible completion menu, arrows retain normal
 editor navigation. Multiline editing, bracketed paste, and large-paste chips are
 supported. Explicitly pasted/dropped
 media needs an attachment chip before submission; [typed paths alone are text](media.md#attach-explicitly).
+Undo and redo each retain at most 64 snapshots / 4 MiB, evicting oldest history
+first. An edit too large for that budget starts a new undo boundary rather than
+retaining an unbounded copy.
 
 Enter submits, or queues a local follow-up while work is active. Follow-ups
 dispatch one at a time in FIFO order after normal completion. Ctrl+S instead
@@ -105,7 +108,9 @@ uses `#![forbid(unsafe_code)]`. [Compiled model-aware theme](themes.md).
 Reasoning is collapsed by default; Ctrl+O expands retained content. Each accepted
 run begins a bold, model-adaptive shimmering `Working` row. One trailing
 `Working (<elapsed> • esc to interrupt)` remains even after assistant text until
-the run settles; tool admission replaces it with the tool lifecycle.
+the run settles; tool admission replaces it with the tool lifecycle. Retry status
+keeps the interrupt hint but omits the run-elapsed counter, including after its
+backoff countdown reaches zero, so two clocks do not compete on the same row.
 
 While reasoning is active, the fixed two-row status has a shimmering `Thinking`
 header and the latest explicit ATX or standalone-bold Markdown heading, followed

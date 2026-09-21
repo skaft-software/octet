@@ -45,7 +45,7 @@ class ProtocolReadyExtension(Extension):
         super()._send_result(request_id, result)
         if (
             isinstance(result, Mapping)
-            and result.get("api_version") == "0.2"
+            and result.get("api_version") == "0.4"
             and isinstance(result.get("protocol"), Mapping)
         ):
             self.protocol_ready.set()
@@ -105,7 +105,7 @@ def build_runtime(
             }
 
     extension = ProtocolReadyExtension(
-        api_version="0.2",
+        api_version="0.4",
         max_concurrent_requests=8,
         max_pending_requests=64,
         writer_queue_size=64,

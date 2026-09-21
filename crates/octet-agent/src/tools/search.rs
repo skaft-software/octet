@@ -15,7 +15,8 @@ use crate::tools::{clip_line, parse_args, validate_effect_path};
 const MAX_LINE_CHARS: usize = 300;
 /// Default result cap when `max_results` is omitted.
 const DEFAULT_MAX_RESULTS: usize = 50;
-/// Hard cap for one structured `rg --json` record before parsing.
+/// Hard cap for retained fields of one structured `rg --json` record.
+/// Unused per-occurrence submatch arrays are discarded while framing.
 const MAX_RG_EVENT_BYTES: usize = 256 * 1024;
 const RG_MAX_COLUMNS: &str = "1024";
 const RG_MAX_FILESIZE: &str = "32M";
@@ -399,7 +400,7 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
     let mut results = Vec::new();
     let mut match_count = 0usize;
     let mut body_bytes = 0usize;
-    let mut event = Vec::with_capacity(8 * 1024);
+    let mut event = RgEventBuffer::default();
     let mut chunk = [0u8; 8 * 1024];
 
     loop {
@@ -408,9 +409,9 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
             .await
             .map_err(|error| ToolError::new(format!("failed to read ripgrep output: {error}")))?;
         if read == 0 {
-            if !event.is_empty()
+            if !event.bytes.is_empty()
                 && record_rg_event(
-                    &event,
+                    &event.bytes,
                     &mut results,
                     &mut body_bytes,
                     &mut match_count,
@@ -429,17 +430,14 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
             let newline = remainder.iter().position(|byte| *byte == b'\n');
             let end = newline.map_or(read, |offset| cursor + offset);
             let segment = &chunk[cursor..end];
-            if event.len().saturating_add(segment.len()) > MAX_RG_EVENT_BYTES {
-                return Err(ToolError::new(format!(
-                    "search output record exceeded the {MAX_RG_EVENT_BYTES}-byte limit"
-                )));
+            for &byte in segment {
+                event.push(byte)?;
             }
-            event.extend_from_slice(segment);
             let Some(_) = newline else {
                 break;
             };
             if record_rg_event(
-                &event,
+                &event.bytes,
                 &mut results,
                 &mut body_bytes,
                 &mut match_count,
@@ -448,9 +446,65 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
             ) {
                 return Ok((results, true, match_count));
             }
-            event.clear();
+            event = RgEventBuffer::default();
             cursor = end + 1;
         }
+    }
+}
+
+/// Ripgrep emits compact JSON, with an array of offsets and matched text
+/// for *every occurrence*, even with --max-columns-preview. Our result is
+/// line-oriented and never consumes that array. Replace it with [] while
+/// draining the record, keeping memory bounded independently of match density.
+/// String/escape/depth tracking prevents file contents from impersonating keys.
+#[derive(Default)]
+struct RgEventBuffer {
+    bytes: Vec<u8>,
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+    skip_depth: Option<usize>,
+}
+
+impl RgEventBuffer {
+    fn push(&mut self, byte: u8) -> Result<(), ToolError> {
+        let starts_submatches = !self.in_string
+            && self.depth == 2
+            && byte == b'['
+            && self.bytes.ends_with(b"\"submatches\":");
+        if starts_submatches {
+            self.bytes.extend_from_slice(b"[]");
+            self.skip_depth = Some(self.depth);
+        } else if self.skip_depth.is_none() {
+            self.bytes.push(byte);
+        }
+        if self.bytes.len() > MAX_RG_EVENT_BYTES {
+            return Err(ToolError::new(format!(
+                "search output record exceeded the {MAX_RG_EVENT_BYTES}-byte limit"
+            )));
+        }
+        if self.in_string {
+            if self.escaped {
+                self.escaped = false;
+            } else if byte == b'\\' {
+                self.escaped = true;
+            } else if byte == b'"' {
+                self.in_string = false;
+            }
+        } else {
+            match byte {
+                b'"' => self.in_string = true,
+                b'{' | b'[' => self.depth = self.depth.saturating_add(1),
+                b'}' | b']' => {
+                    self.depth = self.depth.saturating_sub(1);
+                    if self.skip_depth == Some(self.depth) {
+                        self.skip_depth = None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -465,22 +519,26 @@ fn record_rg_event(
     let Ok(event) = std::str::from_utf8(event) else {
         return false;
     };
-    let Some(rendered) = render_match(event) else {
+    let Some((rendered, is_match)) = render_match(event) else {
         return false;
     };
-    let is_match = serde_json::from_str::<serde_json::Value>(event).ok().is_some_and(|v| v["type"] == "match");
-    if (is_match && *match_count == max_results) || body_bytes.saturating_add(rendered.len() + usize::from(!results.is_empty())) > byte_budget {
+    if (is_match && *match_count == max_results)
+        || body_bytes.saturating_add(rendered.len() + usize::from(!results.is_empty()))
+            > byte_budget
+    {
         return true;
     }
     *body_bytes += rendered.len() + usize::from(!results.is_empty());
-    if is_match { *match_count += 1; }
+    if is_match {
+        *match_count += 1;
+    }
     results.push(rendered);
     false
 }
 
 /// Converts one `rg --json` event line into a `path:line  text` result, or
 /// `None` for non-match events (begin/end/summary).
-fn render_match(json_line: &str) -> Option<String> {
+fn render_match(json_line: &str) -> Option<(String, bool)> {
     let event: serde_json::Value = serde_json::from_str(json_line).ok()?;
     let kind = event.get("type")?.as_str()?;
     if kind != "match" && kind != "context" {
@@ -496,9 +554,12 @@ fn render_match(json_line: &str) -> Option<String> {
         .unwrap_or("")
         .trim_end();
     let separator = if kind == "match" { ":" } else { "-" };
-    Some(format!(
-        "{path}{separator}{line_number}  {}",
-        clip_line(text, MAX_LINE_CHARS)
+    Some((
+        format!(
+            "{path}{separator}{line_number}  {}",
+            clip_line(text, MAX_LINE_CHARS)
+        ),
+        kind == "match",
     ))
 }
 
@@ -804,6 +865,41 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.message.contains("record exceeded"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn dense_submatches_do_not_consume_the_line_record_budget() {
+        if !rg_available() {
+            eprintln!("skipping: rg not on PATH");
+            return;
+        }
+        let f = fixture();
+        // Before framing elision, this small line expands into several MiB of
+        // unused JSON offsets/matched-text objects and fails the event cap.
+        let dense = "a".repeat(64 * 1024);
+        std::fs::write(f.workspace.join("dense.txt"), format!("{dense}\ncontext\n")).unwrap();
+        for (query, mode) in [("a", "literal"), ("a|$", "regex")] {
+            let out = SearchTool
+                .execute(
+                    json!({
+                        "query": query, "mode": mode, "path": "dense.txt", "context": 1
+                    }),
+                    &f.ctx(),
+                )
+                .await
+                .unwrap();
+            assert!(out.text.contains("dense.txt:1  aaa"), "{}", out.text);
+            assert!(out.text.ends_with("truncated=false"), "{}", out.text);
+            assert!(out.text.len() < 1024);
+        }
+        // File text may contain JSON-looking keys and escaped delimiters.
+        let text = r#"\"submatches\":[{\"match\":\"]\"}]"#;
+        let raw = match_event("quoted\npath", 1, text);
+        let mut event = RgEventBuffer::default();
+        for byte in raw.bytes() {
+            event.push(byte).unwrap();
+        }
+        assert_eq!(event.bytes, raw.as_bytes());
     }
 
     #[tokio::test]

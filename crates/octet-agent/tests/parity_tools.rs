@@ -1302,7 +1302,10 @@ fn deferred_polls_need_one_permit_per_pass_and_fail_closed_on_stale_duplicate_or
     }
 
     // An unknown-outcome poll is replaced under fresh ids at the SAME poll
-    // number, and its abandoned frame list is deleted.
+    // number, and its abandoned frame list is deleted. Since 71c85e9f a plain
+    // permit refuses this (spending a second billable poll on an effect that
+    // may already have been accepted needs an explicit replacement decision),
+    // so recovery is admitted only under `one_replacing_unknown`.
     let mut unknown = valid_suspension();
     unknown.poll = 3;
     unknown.generation = 1;
@@ -1310,7 +1313,16 @@ fn deferred_polls_need_one_permit_per_pass_and_fail_closed_on_stale_duplicate_or
         response_id: "resp-unknown".to_string(),
         usage_id: "usage-unknown".to_string(),
     };
-    let mut permit = DeferredPollPermit::one("pass-recovery", unknown.generation);
+    let mut plain = DeferredPollPermit::one("pass-plain", unknown.generation);
+    match prepare_deferred_poll(&unknown, &mut plain, 0, &mut fresh_ids) {
+        DeferredPollPreparation::Refused(refusal) => assert_eq!(
+            refusal.kind,
+            DeferredPollRefusalKind::UnknownPollOutcome { poll: 3 },
+            "a plain permit must fail closed on an unknown outcome"
+        ),
+        other => panic!("a plain permit must fail closed, got {other:?}"),
+    }
+    let mut permit = DeferredPollPermit::one_replacing_unknown("pass-recovery", unknown.generation);
     let admitted = match prepare_deferred_poll(&unknown, &mut permit, 0, &mut fresh_ids) {
         DeferredPollPreparation::Admitted(intent) => *intent,
         other => panic!("recovery must admit one poll, got {other:?}"),

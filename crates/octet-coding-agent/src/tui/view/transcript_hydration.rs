@@ -1,6 +1,6 @@
 //! Durable transcript-item projection into the interactive shell model.
 
-use std::collections::hash_map::Entry;
+use std::collections::{hash_map::Entry, HashMap};
 use std::time::Duration;
 
 use super::{
@@ -34,6 +34,21 @@ pub(super) fn append_hydrated_items(
     state: &mut ShellState,
     items: impl IntoIterator<Item = TranscriptItem>,
 ) {
+    state.render_publication.reset();
+    // Index open duplicates once per hydration batch, not once per result.
+    // The ordinary tool_panels index continues to identify the newest card for
+    // repeated results; this temporary index also retains older open duplicates.
+    let mut pending_by_id: HashMap<octet_ai::ToolCallId, Vec<usize>> = HashMap::new();
+    for (index, block) in state.transcript.iter().enumerate() {
+        if let TranscriptBlock::Tool(panel) = block {
+            if !panel.finished {
+                pending_by_id
+                    .entry(panel.id.clone())
+                    .or_default()
+                    .push(index);
+            }
+        }
+    }
     for item in items {
         match item {
             TranscriptItem::User {
@@ -70,6 +85,7 @@ pub(super) fn append_hydrated_items(
                     None,
                     model_lab,
                 ))));
+                pending_by_id.entry(id.clone()).or_default().push(index);
                 state.tool_panels.insert(id, index);
             }
             TranscriptItem::ToolResult {
@@ -85,18 +101,7 @@ pub(super) fn append_hydrated_items(
                 // every still-open matching card. Leaving an older duplicate
                 // active would revive a spinner for work that cannot still be
                 // running after process restart.
-                let pending = state
-                    .transcript
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, block)| match block {
-                        TranscriptBlock::Tool(panel) if panel.id == id && !panel.finished => {
-                            Some(index)
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                if !pending.is_empty() {
+                if let Some(pending) = pending_by_id.remove(&id) {
                     for index in pending {
                         let registered_images = state.register_tool_images(images.clone());
                         if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get_mut(index)
@@ -157,5 +162,53 @@ pub(super) fn append_hydrated_items(
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use octet_ai::ToolCallId;
+
+    #[test]
+    fn hydrated_result_index_preserves_duplicates_across_batches_and_repeated_results() {
+        let mut state = ShellState::default();
+        let id = ToolCallId("duplicate".into());
+        append_hydrated_items(
+            &mut state,
+            ["first", "second"].map(|path| TranscriptItem::ToolCall {
+                id: id.clone(),
+                name: "read".into(),
+                args: serde_json::json!({"path": path}),
+            }),
+        );
+        let result = |text: &str| TranscriptItem::ToolResult {
+            id: id.clone(),
+            text: text.into(),
+            is_error: false,
+            duration_ms: Some(7),
+            images: Vec::new(),
+        };
+        append_hydrated_items(
+            &mut state,
+            [result("first result"), result("repeated result")],
+        );
+        assert_eq!(state.transcript.len(), 2);
+        for (index, block) in state.transcript.iter().enumerate() {
+            let TranscriptBlock::Tool(panel) = block else {
+                unreachable!()
+            };
+            assert!(panel.finished);
+            assert_eq!(panel.duration, Some(Duration::from_millis(7)));
+            assert_eq!(
+                panel.output,
+                if index == 0 {
+                    "first result"
+                } else {
+                    "repeated result"
+                }
+            );
+        }
+        assert_eq!(state.tool_panels[&id], 1);
     }
 }

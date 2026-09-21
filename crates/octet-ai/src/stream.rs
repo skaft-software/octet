@@ -250,6 +250,8 @@ pub(crate) struct ResponseBuilder {
     pub(crate) provider_event_count: usize,
     pub(crate) provider_to_canonical_indices: HashMap<String, usize>,
     pub(crate) temp_buffers: HashMap<String, String>,
+    /// Parsed cumulative Google arguments and their reserved serialized size.
+    pub(crate) google_function_args: HashMap<usize, (serde_json::Value, usize)>,
     /// Content buffered by a compatibility parser until it is known whether it
     /// is ordinary assistant text or a Qwen XML tool call. This is only used by
     /// the OpenAI Chat codec; keeping it in the shared builder avoids losing a
@@ -321,6 +323,7 @@ impl ResponseBuilder {
             provider_event_count: 0,
             provider_to_canonical_indices: HashMap::with_capacity(4),
             temp_buffers: HashMap::with_capacity(2),
+            google_function_args: HashMap::new(),
             qwen_xml_pending: String::new(),
             qwen_xml_state: OpenAiChatCompatibilityState::default(),
             buffer_ambiguous_compatibility_content: false,
@@ -390,7 +393,11 @@ impl ResponseBuilder {
         self.buffered_content_bytes = self.buffered_content_bytes.saturating_sub(bytes);
     }
 
-    fn resize_buffered_content(&mut self, old: usize, new: usize) -> Result<(), AiError> {
+    pub(crate) fn resize_buffered_content(
+        &mut self,
+        old: usize,
+        new: usize,
+    ) -> Result<(), AiError> {
         let without_old = self
             .buffered_content_bytes
             .checked_sub(old)

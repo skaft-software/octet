@@ -62,13 +62,9 @@
       "id": "events:session_info_changed",
       "area": "events",
       "surface": "session_info_changed",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:session_info_changed",
-      "behavior": "Event registration is diagnosed explicitly because session_info_changed is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because session_info_changed is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `session/info_changed` notification as the Pi `session_info_changed` event when `lifecycle_events_v2` is negotiated."
     },
     {
       "id": "events:session_before_switch",
@@ -98,37 +94,25 @@
       "id": "events:session_before_compact",
       "area": "events",
       "surface": "session_before_compact",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:session_before_compact",
-      "behavior": "Event registration is diagnosed explicitly because session_before_compact is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because session_before_compact is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `compaction/started` notification as the Pi `session_before_compact` event when `lifecycle_events_v2` is negotiated."
     },
     {
       "id": "events:session_compact",
       "area": "events",
       "surface": "session_compact",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:session_compact",
-      "behavior": "Event registration is diagnosed explicitly because session_compact is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because session_compact is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `compaction/settled` notification as the Pi `session_compact` event when `lifecycle_events_v2` is negotiated."
     },
     {
       "id": "events:session_compact_failed",
       "area": "events",
       "surface": "session_compact_failed",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:session_compact_failed",
-      "behavior": "Event registration is diagnosed explicitly because session_compact_failed is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because session_compact_failed is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `compaction/failed` notification as the Pi `session_compact_failed` event when `lifecycle_events_v2` is negotiated."
     },
     {
       "id": "events:session_shutdown",
@@ -266,25 +250,17 @@
       "id": "events:ui_prompt_start",
       "area": "events",
       "surface": "ui_prompt_start",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:ui_prompt_start",
-      "behavior": "Event registration is diagnosed explicitly because ui_prompt_start is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because ui_prompt_start is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `dialog/started` notification as the Pi `ui_prompt_start` event when `lifecycle_events_v2` is negotiated. The octet coding agent brackets its host confirm/input dialogs with it."
     },
     {
       "id": "events:ui_prompt_end",
       "area": "events",
       "surface": "ui_prompt_end",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:ui_prompt_end",
-      "behavior": "Event registration is diagnosed explicitly because ui_prompt_end is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because ui_prompt_end is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `dialog/settled` notification as the Pi `ui_prompt_end` event when `lifecycle_events_v2` is negotiated; the bracket settles exactly once on answer, dismissal, cancellation, or error."
     },
     {
       "id": "events:turn_start",
@@ -314,37 +290,25 @@
       "id": "events:message_start",
       "area": "events",
       "surface": "message_start",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:message_start",
-      "behavior": "Event registration is diagnosed explicitly because message_start is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because message_start is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `message/started` notification as the Pi `message_start` event when `lifecycle_events_v2` is negotiated. The octet coding agent emits it at the assistant stream's first text boundary."
     },
     {
       "id": "events:message_update",
       "area": "events",
       "surface": "message_update",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:message_update",
-      "behavior": "Event registration is diagnosed explicitly because message_update is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because message_update is not emitted by the bounded bridge."
-      }
+      "behavior": "Forwards one coalesced `message/updated` batch once, in host order, as the Pi `message_update` event; the host coalesces per-token deltas and the bridge opens no per-delta round trip."
     },
     {
       "id": "events:message_end",
       "area": "events",
       "surface": "message_end",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:message_end",
-      "behavior": "Event registration is diagnosed explicitly because message_end is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because message_end is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `message/settled` notification as the Pi `message_end` event when `lifecycle_events_v2` is negotiated. The octet coding agent settles the boundary exactly once per assistant message."
     },
     {
       "id": "events:tool_execution_start",
@@ -386,37 +350,25 @@
       "id": "events:model_select",
       "area": "events",
       "surface": "model_select",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:model_select",
-      "behavior": "Event registration is diagnosed explicitly because model_select is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because model_select is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `model/selected` notification as the Pi `model_select` event when `lifecycle_events_v2` is negotiated."
     },
     {
       "id": "events:thinking_level_select",
       "area": "events",
       "surface": "thinking_level_select",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:thinking_level_select",
-      "behavior": "Event registration is diagnosed explicitly because thinking_level_select is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because thinking_level_select is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `reasoning/selected` notification as the Pi `thinking_level_select` event when `lifecycle_events_v2` is negotiated."
     },
     {
       "id": "events:user_bash",
       "area": "events",
       "surface": "user_bash",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "events:user_bash",
-      "behavior": "Event registration is diagnosed explicitly because user_bash is not emitted by the bounded bridge.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Event registration is diagnosed explicitly because user_bash is not emitted by the bounded bridge."
-      }
+      "behavior": "Emits the host `bash/user` notification as the Pi `user_bash` event when `lifecycle_events_v2` is negotiated. The octet coding agent emits it for approved `!`/`!!` executions on both the active and idle shell paths."
     },
     {
       "id": "events:input",
@@ -494,13 +446,9 @@
       "id": "extension_api:registerShortcut",
       "area": "extension_api",
       "surface": "registerShortcut",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "extension_api:registerShortcut",
-      "behavior": "Shortcut registration is diagnosed at startup; host key dispatch remains deferred.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Shortcut registration is diagnosed at startup; host key dispatch remains deferred."
-      }
+      "behavior": "Registers one runtime shortcut through `shortcut/register` when `shortcuts` is negotiated; `shortcut/trigger` dispatches only an admitted registration."
     },
     {
       "id": "extension_api:registerFlag",
@@ -568,47 +516,35 @@
       "surface": "sendMessage",
       "status": "safe_divergence",
       "behavioral_fixture": "extension_api:sendMessage",
-      "behavior": "Root-session delivery is rejected explicitly; host message projection is deferred.",
+      "behavior": "Sends one bounded message through `session/send_message` when `message_injection` is negotiated. The installed corpus calls the custom-message form `pi.sendMessage({customType, content, display, details}, {triggerTurn})`, which octet records as a durable extension entry through `session/append_entry` (requiring `session_entries`) and, when a turn is requested, drives a real turn through `session/send_user_message`. An explicit `assistant` or `system` role is refused with a typed `unsupported_feature`: fabricating a provider turn would falsify transcript provenance and usage accounting. Rendering the custom message in the transcript is deferred to the entry-renderer tier, so `display` is recorded rather than honored.",
       "safe_divergence": {
         "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Root-session delivery is rejected explicitly; host message projection is deferred."
+        "reason": "The custom-message form is recorded and can drive a real turn, and an explicit assistant/system role is refused with a typed `unsupported_feature` (fabricating a provider turn would falsify provenance and usage). The custom message is not yet rendered in the transcript: that is the entry-renderer tier."
       }
     },
     {
       "id": "extension_api:sendUserMessage",
       "area": "extension_api",
       "surface": "sendUserMessage",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "extension_api:sendUserMessage",
-      "behavior": "Root-session delivery is rejected explicitly; host message projection is deferred.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Root-session delivery is rejected explicitly; host message projection is deferred."
-      }
+      "behavior": "Injects one bounded user message through `session/send_user_message` when `message_injection` is negotiated."
     },
     {
       "id": "extension_api:appendEntry",
       "area": "extension_api",
       "surface": "appendEntry",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "extension_api:appendEntry",
-      "behavior": "Durable custom entries are rejected explicitly; session-state projection is deferred.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Durable custom entries are rejected explicitly; session-state projection is deferred."
-      }
+      "behavior": "Appends one bounded durable entry through `session/append_entry` when `session_entries` is negotiated and returns the host entry id. The entry is durable, typed, extension-scoped, and never model-visible."
     },
     {
       "id": "extension_api:setSessionName",
       "area": "extension_api",
       "surface": "setSessionName",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "extension_api:setSessionName",
-      "behavior": "Session-name mutation is rejected explicitly; session-state projection is deferred.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Session-name mutation is rejected explicitly; session-state projection is deferred."
-      }
+      "behavior": "Sets the bounded session name through `session/set_name` when `session_entries` is negotiated."
     },
     {
       "id": "extension_api:getSessionName",
@@ -626,13 +562,9 @@
       "id": "extension_api:setLabel",
       "area": "extension_api",
       "surface": "setLabel",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "extension_api:setLabel",
-      "behavior": "Entry-label mutation is rejected explicitly.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Entry-label mutation is rejected explicitly."
-      }
+      "behavior": "Labels one durable entry through `session/set_label` when `session_entries` is negotiated. The label is durable and replaceable; an unknown entry id is refused with no state change."
     },
     {
       "id": "extension_api:exec",
@@ -674,13 +606,9 @@
       "id": "extension_api:setActiveTools",
       "area": "extension_api",
       "surface": "setActiveTools",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "extension_api:setActiveTools",
-      "behavior": "Active-tool policy mutation is rejected explicitly; host policy projection is deferred.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Active-tool policy mutation is rejected explicitly; host policy projection is deferred."
-      }
+      "behavior": "Replaces the active tool set through `tools/set_active` when `active_tools` is negotiated; the name list stays bounded and the change can only narrow the host-policed surface (unknown or policy-excluded names are refused with no state change)."
     },
     {
       "id": "extension_api:getCommands",
@@ -828,10 +756,10 @@
       "surface": "onTerminalInput",
       "status": "safe_divergence",
       "behavioral_fixture": "ui_context:onTerminalInput",
-      "behavior": "Raw terminal ownership stays in octet and errors explicitly.",
+      "behavior": "Raw terminal ownership stays with octet and this observer API still errors explicitly. While an extension holds a `terminal_handoff` grant it reads the tty through its own stream, so raw input reaches it without this surface.",
       "safe_divergence": {
         "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Raw terminal ownership stays in octet and errors explicitly."
+        "reason": "Raw terminal ownership stays host-side; a ceded extension reads its own tty stream instead of this observer API."
       }
     },
     {
@@ -936,59 +864,43 @@
       "surface": "setTitle",
       "status": "safe_divergence",
       "behavioral_fixture": "ui_context:setTitle",
-      "behavior": "Terminal title ownership stays in octet and errors explicitly.",
+      "behavior": "Terminal title ownership stays with octet and this surface still errors explicitly. A ceded extension can set the title itself through its own terminal writes while it holds a `terminal_handoff` grant.",
       "safe_divergence": {
         "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Terminal title ownership stays in octet and errors explicitly."
+        "reason": "Terminal title ownership stays host-side; a ceded extension can set it through its own writes."
       }
     },
     {
       "id": "ui_context:custom",
       "area": "ui_context",
       "surface": "custom",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "ui_context:custom",
-      "behavior": "Focused remote components are rejected explicitly.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Focused remote components are rejected explicitly."
-      }
+      "behavior": "Runs one full-screen Pi component through the negotiated `terminal_handoff` feature: the bridge acquires an exclusive, revocable terminal grant, builds the pinned Pi TUI over the extension's own `/dev/tty` handle, and restores the host terminal and its input loop on `done()`, on a factory throw, on a signal, or when the host revokes the grant."
     },
     {
       "id": "ui_context:pasteToEditor",
       "area": "ui_context",
       "surface": "pasteToEditor",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "ui_context:pasteToEditor",
-      "behavior": "Composer mutation is rejected explicitly.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Composer mutation is rejected explicitly."
-      }
+      "behavior": "Inserts text at the host composer cursor through `composer/insert` when `composer` is negotiated; the text is bounded and owner-scoped."
     },
     {
       "id": "ui_context:setEditorText",
       "area": "ui_context",
       "surface": "setEditorText",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "ui_context:setEditorText",
-      "behavior": "Composer mutation is rejected explicitly.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Composer mutation is rejected explicitly."
-      }
+      "behavior": "Replaces the host composer text through `composer/set` when `composer` is negotiated; the text is bounded and owner-scoped."
     },
     {
       "id": "ui_context:getEditorText",
       "area": "ui_context",
       "surface": "getEditorText",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "ui_context:getEditorText",
-      "behavior": "Composer state is rejected explicitly.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Composer state is rejected explicitly."
-      }
+      "behavior": "Returns the host composer text through `composer/get` when `composer` is negotiated; the snapshot stays bounded and owner-scoped."
     },
     {
       "id": "ui_context:editor",
@@ -996,10 +908,10 @@
       "surface": "editor",
       "status": "safe_divergence",
       "behavioral_fixture": "ui_context:editor",
-      "behavior": "Editor dialog transport is rejected explicitly; the host-owned editor handoff is not a Pi bridge surface.",
+      "behavior": "Acknowledges the host editor handoff by seeding the requested prefill and focusing the host editor through the negotiated `editor_handoff` surface, and stays explicitly refused without it; the edited text stays host-owned and is never returned.",
       "safe_divergence": {
         "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Editor dialog transport is rejected explicitly; the host-owned editor handoff is not a Pi bridge surface."
+        "reason": "Acknowledges the host editor handoff by seeding the requested prefill and focusing the host editor through the negotiated `editor_handoff` surface, and stays explicitly refused without it; the edited text stays host-owned and is never returned."
       }
     },
     {
@@ -1162,13 +1074,9 @@
       "id": "context:sessionManager",
       "area": "context",
       "surface": "sessionManager",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "context:sessionManager",
-      "behavior": "Session snapshots and mutation are host-owned and rejected explicitly.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Session snapshots and mutation are host-owned and rejected explicitly."
-      }
+      "behavior": "Supplies a read-only foreground session snapshot (session id, host-assigned name, model, reasoning, bounded active skills, cwd) through `context/session_manager` when `session_context` is negotiated. A missing session or workspace is refused with a typed error rather than answered with a fabricated placeholder."
     },
     {
       "id": "context:modelRegistry",
@@ -1270,13 +1178,9 @@
       "id": "context:hasPendingMessages",
       "area": "context",
       "surface": "hasPendingMessages",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "context:hasPendingMessages",
-      "behavior": "Queue inspection is rejected explicitly.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Queue inspection is rejected explicitly."
-      }
+      "behavior": "Reports the number of queued follow-up messages the foreground shell has not yet admitted, observed from the exact queue `session/send_user_message` feeds, through `context/pending_messages` when `session_context` is negotiated."
     },
     {
       "id": "context:shutdown",
@@ -1318,13 +1222,9 @@
       "id": "context:getSystemPrompt",
       "area": "context",
       "surface": "getSystemPrompt",
-      "status": "safe_divergence",
+      "status": "passing",
       "behavioral_fixture": "context:getSystemPrompt",
-      "behavior": "Exact effective prompt disclosure is rejected explicitly.",
-      "safe_divergence": {
-        "decision": "pi-0.84.4-dogfood-explicit-safe-divergence",
-        "reason": "Exact effective prompt disclosure is rejected explicitly."
-      }
+      "behavior": "Discloses the exact composed system prompt through `context/system_prompt` when `system_prompt_read` is negotiated AND the extension manifest declares `capabilities.system_prompt = true`; the feature is not offered to any other extension and an undeclared echo fails negotiation. An over-bound prompt is refused as `bounds_exceeded` rather than truncated."
     },
     {
       "id": "context:getSystemPromptOptions",

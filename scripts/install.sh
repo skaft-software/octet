@@ -492,16 +492,11 @@ extensions/octet-mcp/fixtures/tls/README.md
 extensions/octet-import-aider/README.md
 extensions/octet-import-cline/README.md
 extensions/octet-import-pi/README.md
-extensions/octet-pi-compat/COMPATIBILITY.md
-extensions/octet-pi-compat/README.md
-extensions/octet-pi-compat/profiles/0.84.4.json
-extensions/octet-pi-compat/profiles/0.84.4.ledger.json
 extensions/octet-serve/README.md
 extensions/octet-subagents/README.md
 extensions/octet-subagents/REFERENCE.md
 extensions/octet-web-search/README.md
 extensions/octet-web-search/REFERENCE.md
-scripts/bench-pi-runtime.py
 scripts/bench-systems.py
 third_party/licenses/PI-MIT.txt
 third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt

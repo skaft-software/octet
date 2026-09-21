@@ -29,16 +29,58 @@ renderer path, distinguish answer/reasoning telemetry, provide repeated
 credential-free renderer replay, and remove premature Bash effects. These are
 specific improvements, not completion of the latency targets below.
 
-Tabs, CR/control normalization, general semantic previews, fenced diffs, and some
+Eligible open-code previews now expand tabs and sanitize character-local controls
+incrementally, retaining column state and the last grapheme. Expanded reasoning
+uses the assistant suffix-update path; tool-result hydration indexes pending calls
+once per batch instead of scanning the transcript for each result. These are
+work-reduction changes, not measured end-to-end latency claims.
+
+The same pass polls RPC control admission alongside the run, constructs JSON-mode
+deltas without discarded cumulative snapshots, and bounds retained RPC tool
+progress to 64 KiB (authoritative results remain unchanged). Provider work removes
+repeated argument decoding/prefix copying and adds a 64 MiB serialized-event
+queue budget to Responses WebSockets; this is not an exact parsed-JSON heap cap.
+Bash spills stop storing after 16 MiB per stream while still draining pipes.
+Active and completed spills share a 64 MiB / 32-file owner budget with oldest-first
+expiry and lifecycle cleanup; bounded blocking capture workers keep disk work
+off the async path. Undo and redo each retain at most 64 snapshots / 4 MiB.
+Fleet restart summaries share the existing 256 KiB roster budget, preserving full
+committed answers in child sessions.
+
+Responses replay projections and opaque-item capacity estimates advance over
+new suffixes and invalidate on route/branch changes; final request encoding still
+materializes full input. Accepted run controls hold their 64-input / 64-MiB
+reservations through delivery or termination, with explicit admission failure
+and independent abort. Those bytes measure retained logical payload, not RSS.
+Prospective extension catalogs share a 4-MiB input/output-schema budget and
+feature checks no longer clone negotiated catalogs.
+
+Session catalog maintenance uses targeted lookups and 32-summary batches;
+ordered substring postings avoid a full text scan for selective search. The old
+64-MiB catalog cliff is removed, SQLite residency is bounded, and the on-disk
+index grows with searchable content. The existing bounded session-search
+projection is unchanged. Optional JSONL telemetry uses an ordered off-path
+writer with 256-record / 1-MiB admission and observable loss/failure; it is not
+an accounting authority. See [telemetry](../telemetry.md) for drain boundaries.
+
+Active model/thinking/subagent panels and tool consent are states of the main
+run loop, not nested loops that stop caller-driven inference. The renderer uses
+shared semantic transcript roots and private layout caches, releasing semantic
+ownership before layout and terminal writes. Post-write geometry and approval
+receipts are revision-fenced; accepted text is retained even when paints coalesce.
+
+CR/CRLF normalization, general semantic previews, fenced diffs, and some
 content-fitting code geometry still use general tail layout. A bounded rich
 paragraph prefix followed by append-only literal text retains styled rows and
 replays only its wrapping frontier; prefix flattening and copied layout bytes
 have separate work counters. Unbounded individual graphemes can also require
 unbounded frontier work. Full-document and
-full-lines APIs necessarily materialize their requested output. The input/layout
-shared lock and complete five-client interactive replay remain outstanding.
-Report these boundaries alongside improvements; no end-to-end constant-time or
-all-open-code linearity claim is supported.
+full-lines APIs necessarily materialize their requested output. On-demand
+session/export/debug helpers and local shell escapes are not all background jobs;
+this pass does not claim every command is latency-independent. Complete
+five-client interactive replay remains outstanding. Report these boundaries
+alongside improvements; no end-to-end constant-time or all-open-code linearity
+claim is supported.
 
 ## Visual stability is separate from throughput
 

@@ -151,14 +151,13 @@ fn model_id_candidates(raw: &str) -> Vec<ModelId> {
     candidates
 }
 
-fn resolve_batch_model(
-    catalog: &mut ModelCatalog,
-    config: &Config,
-    model_arg: Option<&str>,
-    input_model: Option<&str>,
-) -> anyhow::Result<Model> {
+fn requested_batch_model<'a>(
+    configured_model: Option<&'a ModelId>,
+    model_arg: Option<&'a str>,
+    input_model: Option<&'a str>,
+) -> anyhow::Result<&'a str> {
     let requested = model_arg
-        .or_else(|| config.model.as_ref().map(|model| model.0.as_str()))
+        .or_else(|| configured_model.map(|model| model.0.as_str()))
         .or(input_model)
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -169,6 +168,30 @@ fn resolve_batch_model(
         anyhow::bail!("OpenRouter model must not be empty");
     }
 
+    Ok(requested)
+}
+
+fn load_batch_model(
+    config: &Config,
+    model_arg: Option<&str>,
+    input_model: Option<&str>,
+) -> anyhow::Result<Model> {
+    // Batch is OpenRouter-only: no Codex/Copilot, unrelated cloud inventories,
+    // custom-provider discovery or credential probes can serve this command.
+    // Reject missing/empty selection before even initializing that one route.
+    let requested = requested_batch_model(config.model.as_ref(), model_arg, input_model)?;
+    let (mut catalog, _) = bootstrap::model_catalog_for_readiness(
+        config.offline,
+        &bootstrap::CatalogReadiness::Routes(vec!["openrouter"]),
+    )?;
+    resolve_batch_model(&mut catalog, config, requested)
+}
+
+fn resolve_batch_model(
+    catalog: &mut ModelCatalog,
+    config: &Config,
+    requested: &str,
+) -> anyhow::Result<Model> {
     let candidates = model_id_candidates(requested);
     let mut model = candidates.iter().find_map(|id| catalog.resolve(id).ok());
     if model.is_none() && config.offline {
@@ -242,14 +265,13 @@ async fn submit(
     endpoint_arg: Option<&str>,
 ) -> anyhow::Result<()> {
     let input = read_batch_input(input_path, config)?;
-    let mut catalog = bootstrap::model_catalog_with_offline(config.offline)?;
-    let model = resolve_batch_model(&mut catalog, config, model_arg, input.model.as_deref())?;
+    validate_input_endpoint_match(input.endpoint.as_deref(), endpoint_arg)?;
+    let model = load_batch_model(config, model_arg, input.model.as_deref())?;
 
     if let Some(input_model) = input.model.as_deref() {
         validate_input_model_match(&model, input_model)?;
     }
 
-    validate_input_endpoint_match(input.endpoint.as_deref(), endpoint_arg)?;
     let endpoint = if let Some(endpoint) = endpoint_arg.or(input.endpoint.as_deref()) {
         endpoint
     } else {
@@ -278,8 +300,7 @@ async fn get(
     if wait && !(1..=MAX_POLL_SECONDS).contains(&poll_seconds) {
         anyhow::bail!("--poll-seconds must be between 1 and {MAX_POLL_SECONDS}");
     }
-    let mut catalog = bootstrap::model_catalog_with_offline(config.offline)?;
-    let model = resolve_batch_model(&mut catalog, config, model_arg, None)?;
+    let model = load_batch_model(config, model_arg, None)?;
     let client = AiClient::try_new()?;
 
     loop {
@@ -300,8 +321,8 @@ async fn list(
     model_arg: Option<&str>,
     options: OpenRouterBatchListOptions,
 ) -> anyhow::Result<()> {
-    let mut catalog = bootstrap::model_catalog_with_offline(config.offline)?;
-    let model = resolve_batch_model(&mut catalog, config, model_arg, None)?;
+    options.validate()?;
+    let model = load_batch_model(config, model_arg, None)?;
     let client = AiClient::try_new()?;
     let batches = client
         .list_openrouter_batches(&model.endpoint, &options)
@@ -353,6 +374,25 @@ mod tests {
     use clap::Parser;
 
     use crate::cli::Cli;
+
+    #[test]
+    fn batch_model_selection_validates_before_discovery_and_preserves_precedence() {
+        let configured = ModelId("configured".into());
+        assert!(requested_batch_model(None, None, None).is_err());
+        assert!(requested_batch_model(Some(&configured), Some("  "), None).is_err());
+        assert_eq!(
+            requested_batch_model(Some(&configured), Some("explicit"), Some("input")).unwrap(),
+            "explicit"
+        );
+        assert_eq!(
+            requested_batch_model(Some(&configured), None, Some("input")).unwrap(),
+            "configured"
+        );
+        assert_eq!(
+            requested_batch_model(None, None, Some("input")).unwrap(),
+            "input"
+        );
+    }
 
     #[test]
     fn parses_batch_commands_without_entering_agent_mode() {

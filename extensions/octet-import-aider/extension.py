@@ -15,7 +15,7 @@ import stat
 import sys
 from typing import Any, BinaryIO, Optional
 
-API_VERSION = "0.3"
+API_VERSION = "0.4"
 SCHEMA_ID = "octet.extension.api/0.3"
 CANONICAL_ENCODING = "octet-canonical-json-v1"
 

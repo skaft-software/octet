@@ -1,5 +1,14 @@
 # Local delivery and verification handoff
 
+> **Historical parity record — not a release gate.** This plan and its linked
+> detail/verification records are archived in place. “Required”, “current”, and
+> “remaining gates” below refer to that effort, not current product obligations.
+> [The roadmap](https://github.com/skaft-software/octet/blob/main/ROADMAP.md) now selects a fast, small, model-flexible coding
+> host with bounded integrations, not Pi execution/parity or a general extension
+> platform. Evidence and safety findings remain useful; existing runtime
+> capabilities, generated contracts, SDKs, and conformance tests remain live.
+> No historical receipt qualifies the local 0.8.0 RC or implies publication.
+
 ## Current 0.8.0 candidate — in progress
 
 **Not completed Pi parity, release approval or an all-green candidate.** The

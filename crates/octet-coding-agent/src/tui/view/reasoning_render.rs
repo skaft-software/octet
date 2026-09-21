@@ -1153,6 +1153,9 @@ fn activity_status_line(
     rainbow_strength: u16,
 ) -> String {
     let label = activity_shimmer_label(theme, reasoning, label, shimmer_frame, rainbow_strength);
+    if reasoning.retry_activity.is_some() {
+        return format!("{label} {}", subdued_text(theme, "(esc to interrupt)"));
+    }
     let Some(started_at) = reasoning.activity_started_at else {
         return label;
     };
@@ -1255,6 +1258,9 @@ pub(super) fn render_reasoning_on_surface_with_rainbow(
 ) -> Vec<String> {
     let non_expandable_activity = reasoning.text.is_empty() && !reasoning.show_reasoning_hint;
     if non_expandable_activity || (!reasoning.reasoning_expanded && !show_reasoning) {
+        // The transcript now holds status rows, not this Markdown prefix.
+        // Re-expansion must establish a full body before applying tail updates.
+        reasoning.invalidate_layout();
         return collapsed_reasoning_lines_at(theme, reasoning, shimmer_frame, rainbow_strength)
             .into_iter()
             .map(|line| {
@@ -3052,6 +3058,44 @@ mod tests {
 
         let rendered = collapsed_reasoning_lines_at(&theme, &working, 0, 0);
         assert_eq!(rendered, vec!["Working (28s • esc to interrupt)"]);
+    }
+
+    #[test]
+    fn retry_status_keeps_interrupt_hint_without_run_elapsed() {
+        use super::super::assistant_block::RetryActivity;
+
+        let theme =
+            theme::test_theme_with(TerminalCapabilities::test(false, true, ColorDepth::None));
+        let now = Instant::now();
+        let mut working = AssistantBlock::streaming_reasoning("");
+        working.reasoning_heading = Some("Working".into());
+        working.show_reasoning_hint = false;
+        working.retry_activity = Some(RetryActivity {
+            operation: None,
+            attempt: 2,
+            max_attempts: Some(3),
+            delay: Duration::from_secs(5),
+            observed_at: now,
+        });
+        for started_at in [None, Some(now - Duration::from_secs(28))] {
+            working.activity_started_at = started_at;
+            for elapsed in [0, 6] {
+                let label = working
+                    .retry_activity
+                    .as_ref()
+                    .unwrap()
+                    .label_at(now + Duration::from_secs(elapsed));
+                let expected = if elapsed == 0 {
+                    "Retrying 2/3 in 5s (esc to interrupt)"
+                } else {
+                    "Retrying 2/3 (esc to interrupt)"
+                };
+                assert_eq!(
+                    activity_status_line(&theme, &working, &label, 0, 0),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]

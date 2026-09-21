@@ -1060,15 +1060,6 @@ pub(crate) fn build_request(
         .into());
     }
 
-    // 2–3. Encode the request prompt and canonical history through the same
-    // mapper used by durable opaque replay.
-    let canonical_input = crate::responses::encode_canonical_responses_input(
-        model,
-        req.system.as_deref(),
-        &req.messages,
-        req.compatibility,
-    );
-
     // 4. Map tools & tool_choice
     let grammar_tools = super::grammar_tools_for(model);
     let responses_lite = model.spec.capabilities.responses_lite;
@@ -1168,7 +1159,16 @@ pub(crate) fn build_request(
         .is_some_and(crate::responses::ResponsesInput::contains_compaction)
         .then(|| req.system.clone())
         .flatten();
-    let mut input = raw_input.cloned().unwrap_or(canonical_input);
+    // Opaque replay is authoritative: do not encode canonical history only to
+    // discard it when a raw input is present.
+    let mut input = raw_input.cloned().unwrap_or_else(|| {
+        crate::responses::encode_canonical_responses_input(
+            model,
+            req.system.as_deref(),
+            &req.messages,
+            req.compatibility,
+        )
+    });
     let instructions = if responses_lite {
         input.strip_image_details_for_responses_lite();
         let mut items = responses_lite_prefix(model, refresh_instructions.as_deref(), &req.tools);

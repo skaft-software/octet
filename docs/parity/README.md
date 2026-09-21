@@ -1,5 +1,14 @@
 # Additive Pi parity delivery ledger
 
+> **Historical parity record — not a release gate.** This plan and its linked
+> detail/verification records are archived in place. “Required”, “current”, and
+> “remaining gates” below refer to that effort, not current product obligations.
+> [The roadmap](https://github.com/skaft-software/octet/blob/main/ROADMAP.md) now selects a fast, small, model-flexible coding
+> host with bounded integrations, not Pi execution/parity or a general extension
+> platform. Evidence and safety findings remain useful; existing runtime
+> capabilities, generated contracts, SDKs, and conformance tests remain live.
+> No historical receipt qualifies the local 0.8.0 RC or implies publication.
+
 Reference (read-only): `earendil-works/pi` at
 `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391` (v0.85.1+72). Verified locally.
 This user-selected scope is additive to `BACKLOG.md`, not a replacement for its

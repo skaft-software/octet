@@ -15,7 +15,8 @@
 //! if plan.contains(ReloadLayer::Extensions) { /* caller restarts children */ }
 //! plan.record(ReloadLayer::Resources, LayerOutcome::Reloaded);
 //! let report = supervisor.finish(plan)?;                // one pass, one report
-//! for notice in report.notices() { /* transcript */ }
+//! // Typed component results own automatic problem/event feedback.
+//! // Show report.notices() and report.summary() only for explicit commands.
 //! ```
 //!
 //! The decision functions are pure: [`ReloadSupervisor::observe`] consumes a
@@ -38,8 +39,9 @@
 //! 1000 ms interval, and custom theme files); everything else reloads on
 //! demand. This module deliberately goes further: it *samples* all three
 //! layers on the same bounded schedule, but it applies nothing outside the
-//! same boundary discipline `/reload` already uses (queued to idle, debounced,
-//! fixed order `resources → extensions → host`). A watched theme file is one
+//! same boundary discipline `/reload` already uses (queued to idle, debounced).
+//! Host consent precedes any teardown; an admitted re-exec supersedes in-process
+//! rebuilds, otherwise resources precede extensions. A watched theme file is one
 //! resource path, so theme auto-reload falls out of the resources layer
 //! without wiring a second watcher.
 //!
@@ -53,7 +55,9 @@
 //!
 //! # What a reload loses (honest limits)
 //!
-//! Nothing here is lossless. At an idle boundary:
+//! These are possible interruption classes, not unconditional claims of loss.
+//! The interactive idle boundary has no foreground model/tool call in flight;
+//! previews use current queued requests/workers and actual discards are events:
 //!
 //! * A **model call in flight** dies when the run is stopped for a reload; the
 //!   records already appended to the session survive, the unrecorded turn does
@@ -88,8 +92,8 @@
 //!   and the layer whose enumeration stopped is recorded as capped per layer
 //!   (`ScanMeta::capped`), with every entry already read but not inspected
 //!   counted (`ScanMeta::skipped`) — never silently ignored.
-//! * Worker-level reload. Delegated workers keep running across a resources or
-//!   extensions reload; only a forced/host reload can interrupt one.
+//! * Worker-level reload. The interactive caller defers automatic teardown while
+//!   workers are active; host replacement retains explicit detach consent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -213,7 +217,7 @@ impl ReloadRequester {
 pub enum ReloadUserAction {
     /// Report what a pass would do now and change nothing.
     DryRun,
-    /// Take a pass now, at any boundary, naming every loss.
+    /// Take a pass now, with the caller previewing current interruption risks.
     Force,
 }
 
@@ -721,14 +725,20 @@ impl ReloadWatchSet {
         self.dropped
     }
 
-    /// One bounded line naming what is armed.
-    ///
-    /// Counts and durations only: the wording is secret-free, bounded, and is
-    /// what makes the live-reload default visible without opening a config
-    /// file. `dropped` is named rather than hidden, because a watch set over
-    /// the target cap is watching less than it was asked to. The host layer is
-    /// named explicitly, because "live reload armed" must never imply that a
-    /// replaced binary will be executed on its own.
+    /// Report incomplete watch coverage, without a routine startup banner.
+    pub fn limit_notice(&self) -> Option<String> {
+        (self.dropped > 0).then(|| {
+            format!(
+                "live reload: watch limit reached; {} path{} not watched",
+                self.dropped,
+                plural(self.dropped)
+            )
+        })
+    }
+
+    /// On-demand settings detail for `/reload --dry-run`, not startup output.
+    /// Counts and durations are bounded and secret-free. Name the host opt-in
+    /// explicitly so a resource watcher never implies automatic re-exec.
     pub fn arming_notice(&self, settings: ReloadSettings) -> String {
         if !settings.enabled {
             return "live reload: disabled (set reload = true to arm it)".to_owned();
@@ -1257,26 +1267,36 @@ impl ReloadReport {
         sanitize_note(&format!("{label} #{}: {summary}", self.sequence))
     }
 
-    /// Bounded transcript notices for the pass. Never contains file contents.
+    /// Detailed on-demand notices for the pass. Never contains file contents.
     pub fn notices(&self) -> Vec<String> {
+        self.collect_notices(true)
+    }
+
+    /// Keep failures, limits, losses and caller diagnostics visible, without
+    /// successful layer/path and detach/reattach bookkeeping.
+    pub fn diagnostics(&self) -> Vec<String> {
+        self.collect_notices(false)
+    }
+
+    fn collect_notices(&self, detailed: bool) -> Vec<String> {
         let mut notices = Vec::new();
         if self.forced {
             notices.push(
-                "reload (forced): in-flight work is abandoned; persisted records survive and \
-                 workers stay reattachable"
+                "reload (forced): applying an explicit pass; interruption risks are previewed from current state"
                     .to_owned(),
             );
         }
-        // An explicit request is worth naming: it is the difference between the
-        // watcher noticing a save and an owner or extension asking for a pass.
+        // Detailed output distinguishes the watcher noticing a save from an
+        // owner or extension asking for a pass.
         if let Some(reason) = self
             .requesters
             .iter()
             .find(|requester| {
-                !matches!(
-                    requester,
-                    ReloadRequester::Watcher | ReloadRequester::Forced
-                )
+                detailed
+                    && !matches!(
+                        requester,
+                        ReloadRequester::Watcher | ReloadRequester::Forced
+                    )
             })
             .map(ReloadRequester::describe)
         {
@@ -1284,7 +1304,7 @@ impl ReloadReport {
         }
         for line in &self.layers {
             match line.outcome {
-                LayerOutcome::Reloaded => notices.push(format!(
+                LayerOutcome::Reloaded if detailed => notices.push(format!(
                     "reload: {} reloaded{}",
                     line.layer.label(),
                     changed_clause(line)
@@ -1298,16 +1318,16 @@ impl ReloadReport {
                     "reload: {} reload failed; the previous state is kept",
                     line.layer.label()
                 )),
-                LayerOutcome::Skipped(_) => {}
+                LayerOutcome::Reloaded | LayerOutcome::Skipped(_) => {}
             }
-            if !line.detached.is_empty() {
+            if detailed && !line.detached.is_empty() {
                 notices.push(format!(
                     "reload: {} detached {}",
                     line.layer.label(),
                     join_labels(&line.detached)
                 ));
             }
-            if !line.reattached.is_empty() {
+            if detailed && !line.reattached.is_empty() {
                 notices.push(format!(
                     "reload: {} will reattach {}",
                     line.layer.label(),
@@ -1459,9 +1479,8 @@ impl ReloadPlan {
         }
     }
 
-    /// Finish the pass. Missing outcomes become skipped lines; a forced pass
-    /// names every loss, and an extensions reload always names the in-flight
-    /// host request it drops.
+    /// Finish the pass. Missing outcomes become skipped lines. Only producers
+    /// that actually discarded work may record losses; force is not evidence of loss.
     ///
     /// Private on purpose: a plan must be completed through
     /// [`ReloadSupervisor::finish`], which validates the admission token and
@@ -1484,19 +1503,7 @@ impl ReloadPlan {
                     LayerOutcome::Skipped(SkipReason::NoChange)
                 }
             });
-            let mut losses = planned.losses;
-            if forced {
-                for loss in ReloadLoss::ALL {
-                    if !losses.contains(&loss) {
-                        losses.push(loss);
-                    }
-                }
-            } else if matches!(outcome, LayerOutcome::Reloaded | LayerOutcome::WouldReload)
-                && planned.layer == ReloadLayer::Extensions
-                && !losses.contains(&ReloadLoss::ExtensionHostRequestInFlight)
-            {
-                losses.push(ReloadLoss::ExtensionHostRequestInFlight);
-            }
+            let losses = planned.losses;
             layers.push(LayerReport {
                 layer: planned.layer,
                 outcome,
@@ -1531,6 +1538,18 @@ impl ReloadPlan {
     }
 }
 
+/// Components are checked independently: a skipped component cannot clear its problem.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ReloadComponent {
+    WatchCoverage,
+    Host,
+    Extension(String),
+    ExtensionShortcuts,
+    ExtensionRescan(String),
+    Workers,
+    ProviderCatalog,
+}
+
 /// The supervisor: a pure `(now, observed) → decision` state machine.
 ///
 /// Rules, in one place:
@@ -1551,8 +1570,8 @@ impl ReloadPlan {
 ///    requires a real executable change, because a re-exec is only ever
 ///    justified by evidence. `/reload --force` is the one path that takes every
 ///    layer now.
-/// 6. `force` supersedes queued and in-flight passes (generation bump) and
-///    names every loss, because it may be taken while a run owns the session.
+/// 6. `force` supersedes queued and in-flight passes (generation bump). The
+///    caller previews current interruption risks; only actual discards are losses.
 /// 7. `dry_run` reports what a pass would do and changes nothing.
 #[derive(Debug)]
 pub struct ReloadSupervisor {
@@ -1569,6 +1588,7 @@ pub struct ReloadSupervisor {
     generation: u64,
     next_sequence: u64,
     in_flight: Option<ReloadToken>,
+    problems: BTreeMap<ReloadComponent, Vec<String>>,
 }
 
 impl ReloadSupervisor {
@@ -1588,6 +1608,28 @@ impl ReloadSupervisor {
             generation: 0,
             next_sequence: 0,
             in_flight: None,
+            problems: BTreeMap::new(),
+        }
+    }
+
+    /// Report current problems on appearance/change, or every explicit request.
+    /// Call only after actually checking this component. Events never enter here.
+    pub(crate) fn checked_problems(
+        &mut self,
+        component: ReloadComponent,
+        problems: Vec<String>,
+        explicit: bool,
+    ) -> Vec<String> {
+        if problems.is_empty() {
+            self.problems.remove(&component);
+            return Vec::new();
+        }
+        let changed = self.problems.get(&component) != Some(&problems);
+        self.problems.insert(component, problems.clone());
+        if explicit || changed {
+            problems
+        } else {
+            Vec::new()
         }
     }
 
@@ -1782,9 +1824,9 @@ impl ReloadSupervisor {
     /// The explicit force path: take a pass over **every** layer now, at any
     /// boundary.
     ///
-    /// A forced pass supersedes anything queued or in flight (generation bump)
-    /// and names every loss, because it may be taken while a run owns the
-    /// session. Records already persisted survive; in-flight work does not.
+    /// A forced pass supersedes anything queued or in flight (generation bump).
+    /// The caller must preview current risks and report actual discarded work.
+    /// Force alone is not evidence of loss.
     pub fn force(&mut self) -> ReloadPlan {
         self.generation = self.generation.wrapping_add(1);
         if !self.requesters.contains(&ReloadRequester::Forced) {
@@ -1850,10 +1892,6 @@ impl ReloadSupervisor {
         for layer in ReloadLayer::ORDER {
             match self.stale.get(&layer) {
                 Some(change) => {
-                    let mut losses = Vec::new();
-                    if layer == ReloadLayer::Extensions {
-                        losses.push(ReloadLoss::ExtensionHostRequestInFlight);
-                    }
                     layers.push(LayerReport {
                         layer,
                         outcome: LayerOutcome::WouldReload,
@@ -1861,7 +1899,7 @@ impl ReloadSupervisor {
                         changed_overflow: change.overflow,
                         detached: Vec::new(),
                         reattached: Vec::new(),
-                        losses,
+                        losses: Vec::new(),
                         notes: Vec::new(),
                     });
                 }
@@ -2270,6 +2308,21 @@ mod tests {
     }
 
     #[test]
+    fn startup_notice_only_reports_incomplete_watch_coverage() {
+        let mut watches = ReloadWatchSet::new();
+        assert_eq!(watches.limit_notice(), None);
+        for index in 0..MAX_WATCH_TARGETS {
+            assert!(watches.watch_path(ReloadLayer::Resources, format!("/skills/{index}")));
+        }
+        assert_eq!(watches.limit_notice(), None);
+        assert!(!watches.watch_path(ReloadLayer::Resources, "/overflow"));
+        assert_eq!(
+            watches.limit_notice().as_deref(),
+            Some("live reload: watch limit reached; 1 path not watched")
+        );
+    }
+
+    #[test]
     fn default_settings_never_plan_the_host_layer() {
         let start = base();
         let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
@@ -2579,7 +2632,7 @@ mod tests {
     }
 
     #[test]
-    fn force_names_every_loss_and_supersedes_a_queued_pass() {
+    fn force_supersedes_a_queued_pass_without_inventing_losses() {
         let start = base();
         let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
         let watcher = resources_watcher();
@@ -2598,13 +2651,13 @@ mod tests {
         assert!(!supervisor.is_queued());
         plan.record_reload(ReloadLayer::Resources);
         let report = supervisor.finish(plan).expect("current plan");
-        // A forced pass names every loss on every layer it selects.
+        // Force authorizes a pass; it does not prove any work was lost.
         for layer in ReloadLayer::ORDER {
-            assert_eq!(losses_of(&report, layer), ReloadLoss::ALL.to_vec());
+            assert!(losses_of(&report, layer).is_empty());
         }
         assert_eq!(report.layers[0].outcome, LayerOutcome::Reloaded);
         assert!(report.notices()[0].contains("reload (forced)"));
-        assert!(summary_mentions(&report, "4 named losses"));
+        assert!(!summary_mentions(&report, "named loss"));
     }
 
     #[test]
@@ -2883,7 +2936,7 @@ mod tests {
     }
 
     #[test]
-    fn an_extension_reload_names_the_host_request_it_drops_and_a_host_pass_does_not() {
+    fn extension_and_host_reloads_do_not_invent_host_request_losses() {
         let start = base();
 
         // An explicit request (or an extension's `session/reload`) selects the
@@ -2897,8 +2950,11 @@ mod tests {
         };
         plan.record_reload(ReloadLayer::Extensions);
         let report = supervisor.finish(plan).expect("current");
-        assert!(losses_of(&report, ReloadLayer::Extensions)
-            .contains(&ReloadLoss::ExtensionHostRequestInFlight));
+        assert!(losses_of(&report, ReloadLayer::Extensions).is_empty());
+        assert!(!report
+            .diagnostics()
+            .iter()
+            .any(|notice| notice.contains("lost work")));
 
         // A host pass justified by a real executable change carries no
         // extension-restart loss: the replacement image rebuilds them.
@@ -2964,6 +3020,94 @@ mod tests {
             outcome_of(&report, ReloadLayer::Extensions),
             Some(LayerOutcome::Skipped(SkipReason::NoChange))
         );
+    }
+
+    #[test]
+    fn compact_reload_diagnostics_omit_routine_bookkeeping() {
+        let start = base();
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        supervisor.request(start, ReloadRequester::ExtensionSessionReload);
+        let mut plan = supervisor.begin(start, ReloadBoundary::Idle).unwrap();
+        plan.record_reload(ReloadLayer::Resources);
+        plan.detached(ReloadLayer::Resources, vec!["theme binding".into()]);
+        plan.reattached(ReloadLayer::Resources, vec!["theme binding".into()]);
+        let report = supervisor.finish(plan).unwrap();
+
+        assert!(report.diagnostics().is_empty());
+        assert!(report.summary().contains("resources reloaded"));
+        let detailed = report.notices().join("\n");
+        for detail in [
+            "requested by",
+            "resources reloaded",
+            "detached",
+            "will reattach",
+        ] {
+            assert!(detailed.contains(detail), "{detailed}");
+        }
+    }
+
+    #[test]
+    fn reload_problems_suppress_repeats_but_recur_after_checked_clear() {
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        let host = ReloadComponent::Host;
+        let extension = ReloadComponent::Extension("fixture".into());
+        let problem = vec!["unavailable".to_owned()];
+        assert_eq!(
+            supervisor.checked_problems(host.clone(), problem.clone(), false),
+            problem
+        );
+        assert!(supervisor
+            .checked_problems(host.clone(), problem.clone(), false)
+            .is_empty());
+        // A successful, unrelated component does not clear the skipped host.
+        supervisor.checked_problems(extension, Vec::new(), false);
+        assert!(supervisor
+            .checked_problems(host.clone(), problem.clone(), false)
+            .is_empty());
+        assert_eq!(
+            supervisor.checked_problems(host.clone(), problem.clone(), true),
+            problem
+        );
+        let changed = vec!["consent required".to_owned()];
+        assert_eq!(
+            supervisor.checked_problems(host.clone(), changed.clone(), false),
+            changed
+        );
+        supervisor.checked_problems(host.clone(), Vec::new(), false);
+        assert_eq!(
+            supervisor.checked_problems(host, changed.clone(), false),
+            changed
+        );
+    }
+
+    #[test]
+    fn compact_reload_diagnostics_preserve_failures_limits_losses_and_caller_notes() {
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        let mut plan = supervisor.force();
+        plan.record(ReloadLayer::Resources, LayerOutcome::Failed);
+        plan.note(
+            ReloadLayer::Extensions,
+            "fixture warning\u{7}: previous child retained",
+        );
+        let mut report = supervisor.finish(plan).unwrap();
+        report.watcher_cap_reached = true;
+        report.inspected_paths = 3;
+        report.skipped_paths = 2;
+        let notices = report.diagnostics();
+        let text = notices.join("\n");
+        for detail in [
+            "reload (forced)",
+            "resources reload failed",
+            "fixture warning",
+            "skipped 2",
+        ] {
+            assert!(text.contains(detail), "{text}");
+        }
+        assert!(!text.contains("lost work"), "{text}");
+        for notice in notices {
+            assert!(!notice.chars().any(char::is_control), "{notice:?}");
+            assert!(notice.len() <= MAX_NOTE_BYTES);
+        }
     }
 
     #[test]

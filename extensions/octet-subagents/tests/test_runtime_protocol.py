@@ -135,7 +135,7 @@ class RuntimeProtocolTests(unittest.TestCase):
     def test_negotiates_only_bounded_features_and_exact_manifest_surface(self):
         initialized = self.running.start()
         result = initialized["result"]
-        self.assertEqual(result["api_version"], "0.2")
+        self.assertEqual(result["api_version"], "0.4")
         self.assertEqual(
             [tool["name"] for tool in result["tools"]],
             [

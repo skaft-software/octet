@@ -105,21 +105,30 @@ pub(super) struct RenderedTranscriptBlockUpdate {
     pub(super) geometry: SurfaceGeometry,
 }
 
-/// Incrementally decorate a streaming assistant tail. Stable Markdown rows and
-/// their outer surface frame remain in `TranscriptCache`; only the mutable
-/// content suffix plus trailing frame rows are rebuilt.
+/// Incrementally decorate a streaming assistant or expanded reasoning tail.
+/// Stable Markdown rows and their outer surface frame remain in
+/// `TranscriptCache`; only the mutable suffix plus trailing frame rows are rebuilt.
 pub(super) fn render_assistant_update_planned(
     previous: Option<&TranscriptBlock>,
     block: &TranscriptBlock,
     theme: &OctetTheme,
     rich_renderer: &RichRenderer,
+    reasoning_renderer: &RichRenderer,
     outer_width: u16,
+    show_reasoning: bool,
 ) -> Option<RenderedTranscriptBlockUpdate> {
-    let TranscriptBlock::Assistant(assistant) = block else {
-        return None;
+    let (assistant, renderer) = match block {
+        TranscriptBlock::Assistant(assistant) => (assistant, rich_renderer),
+        TranscriptBlock::Reasoning(reasoning)
+            if (reasoning.reasoning_expanded || show_reasoning)
+                && !(reasoning.text.is_empty() && !reasoning.show_reasoning_hint) =>
+        {
+            (reasoning, reasoning_renderer)
+        }
+        _ => return None,
     };
     let plan = compile_surface_plan(previous, block, theme, outer_width);
-    let update = assistant.render_update(rich_renderer, theme, plan.geometry.content_width)?;
+    let update = assistant.render_update(renderer, theme, plan.geometry.content_width)?;
     if update.stable_prefix == 0 {
         return None;
     }

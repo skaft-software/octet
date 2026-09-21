@@ -220,18 +220,23 @@ sample into a superiority claim. Follow the [diagnostic sharing rules](#voluntar
 
 ## Pi runtime fixture evidence
 
-[`scripts/bench-pi-runtime.py`](../../scripts/bench-pi-runtime.py) is the
-checked-in, stdlib-only driver for Pi aggregate lifecycle evidence. It runs no
-network/provider/model request, inherits no credentials, uses a temporary home,
-and writes bounded raw resource samples plus a checksum. It measures fixture
-representations of no-extension, legacy-eager, lazy activation, shared-workspace,
-and ordered-Pi-aggregate paths, scores the capture against documented
-fixture-regression thresholds, and writes a self-describing published artifact
+> **Historical evidence:** the bridge-exclusive `scripts/bench-pi-runtime.py`
+> harness has been removed with Pi extension execution. The method and receipts
+> below describe the recorded snapshot only, not current instructions or gates.
+
+`scripts/bench-pi-runtime.py` was the stdlib-only driver for Pi aggregate lifecycle
+evidence. It ran no network/provider/model request, inherited no credentials,
+used a temporary home, and wrote bounded raw resource samples plus a checksum.
+It measured fixture representations of no-extension, legacy-eager, lazy
+activation, shared-workspace, and ordered-Pi-aggregate paths, scored the capture
+against documented fixture-regression thresholds, and wrote a self-describing
+published artifact
 with `--publish` (see the [v0.8 fixture capture](pi-runtime-v0.8-fixture/README.md)).
 The threshold-derived `status` is a measurement verdict; release approval is a
 separate set of unmet gates, so a hermetic fixture capture can never approve a
-release. A real API 0.3 runtime-manager adapter is still required. See [Pi runtime
-evidence harness](pi-runtime-evidence.md) for invocation, exact
+release. A real API 0.3 runtime-manager adapter was an unmet gate of that effort,
+not current release work. See [Pi runtime evidence harness](pi-runtime-evidence.md)
+for the historical invocation, exact
 candidate/fixture identity, thresholds, Linux/macOS limits, separate
 inference/GPU attribution, and publication rules.
 

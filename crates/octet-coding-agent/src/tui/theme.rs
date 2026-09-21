@@ -2413,7 +2413,7 @@ mod tests {
         let names = available_themes(&config);
         assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
         assert!(load_named_theme(DEFAULT_THEME_NAME, &config).is_ok());
-        for name in ["legacy-theme", "custom"] {
+        for name in ["legacy-theme", "custom", "compact"] {
             assert!(
                 load_named_theme(name, &config).is_err(),
                 "unexpected theme availability for {name}"
@@ -2432,11 +2432,19 @@ mod tests {
                 .is_compiled_default()
         );
 
-        configured.theme = Some("legacy-theme".to_owned());
-        assert!(
-            load_theme_for_background(&configured, TerminalBackground::Unknown)
-                .is_compiled_default()
-        );
+        for name in ["legacy-theme", "compact"] {
+            configured.theme = Some(name.to_owned());
+            for background in [
+                TerminalBackground::Unknown,
+                TerminalBackground::Dark,
+                TerminalBackground::Light,
+            ] {
+                let theme = load_theme_for_background(&configured, background);
+                assert!(theme.is_compiled_default());
+                assert_eq!(theme.background(), background);
+                assert!(theme.layout_for_width(80).show_footer);
+            }
+        }
     }
 
     #[test]
@@ -3003,6 +3011,7 @@ mod tests {
             Some(TerminalThemeChoice::Light)
         );
         assert_eq!(TerminalThemeChoice::parse("custom"), None);
+        assert_eq!(TerminalThemeChoice::parse("compact"), None);
 
         let directory = tempfile::tempdir().unwrap();
         let mut config = config(directory.path().to_owned());

@@ -1,13 +1,18 @@
 # Pi UI handoff candidate qualification
 
+> **Historical bridge qualification — not a release gate.** The Pi execution
+> bridge is removed. These commands and receipts remain evidence for their
+> recorded snapshot, not current installation instructions or RC qualification.
+> Portable Pi inventory/import and native providers remain separate.
+
 ## Scope
 
 This is a bounded **API 0.2** bridge implementation and fixture record, not
 completion of #257, #397, #258 or the full Pi roadmap. Pi remains pinned to
 `0.84.4`, revision `b79e4cc834970cca69daebffab7df1da7d1e52c4`.
 The profile, canonical ledger and canonical API 0.3 tables are unchanged.
-See the [bridge contract](../../extensions/octet-pi-compat/README.md#optional-api-02-ui-handoff)
-and [baseline ledger](../../extensions/octet-pi-compat/COMPATIBILITY.md).
+See the [bridge contract](../reference/pi-compat/README.md#optional-api-02-ui-handoff)
+and [baseline ledger](../reference/pi-compat/COMPATIBILITY.md).
 
 ## Implemented boundary
 

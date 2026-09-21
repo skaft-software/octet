@@ -4,6 +4,10 @@ use std::collections::{HashMap, HashSet};
 
 use octet_agent::{Entry, EntryValue, Session};
 
+// Keep deep histories linear in output size and bounded in per-frame storage.
+// Beyond this level, explicit depth and parent IDs preserve every fork edge.
+const MAX_VISIBLE_ANCESTORS: usize = 16;
+
 /// Render the durable entry forest in append order while making forks and the
 /// selected branch visible. Session replay has already validated parent links,
 /// so this formatter can stay presentation-only and never alter persistence.
@@ -40,13 +44,16 @@ pub(crate) fn render_session_tree(session: &Session) -> String {
         .rev()
         .map(|(position, index)| TreeFrame {
             index: *index,
-            ancestor_has_next_sibling: Vec::new(),
+            depth: 0,
+            ancestor_has_next_sibling: [false; MAX_VISIBLE_ANCESTORS],
             is_last: position + 1 == roots.len(),
         })
         .collect::<Vec<_>>();
 
     while let Some(frame) = stack.pop() {
-        for has_next_sibling in &frame.ancestor_has_next_sibling {
+        for has_next_sibling in
+            &frame.ancestor_has_next_sibling[..frame.depth.min(MAX_VISIBLE_ANCESTORS)]
+        {
             output.push_str(if *has_next_sibling { "│  " } else { "   " });
         }
         output.push_str(if frame.is_last { "└─" } else { "├─" });
@@ -64,15 +71,28 @@ pub(crate) fn render_session_tree(session: &Session) -> String {
         output.push_str(&entry.id.0);
         output.push_str("  ");
         output.push_str(entry_kind(entry));
+        if frame.depth > MAX_VISIBLE_ANCESTORS {
+            use std::fmt::Write;
+            write!(
+                output,
+                "  [depth={} parent={}]",
+                frame.depth,
+                entry.parent.as_ref().expect("non-root entry").0
+            )
+            .expect("writing to a String");
+        }
         output.push('\n');
 
         let mut next_ancestors = frame.ancestor_has_next_sibling;
-        next_ancestors.push(!frame.is_last);
+        if frame.depth < MAX_VISIBLE_ANCESTORS {
+            next_ancestors[frame.depth] = !frame.is_last;
+        }
         let node_children = &children[frame.index];
         for (position, child) in node_children.iter().enumerate().rev() {
             stack.push(TreeFrame {
                 index: *child,
-                ancestor_has_next_sibling: next_ancestors.clone(),
+                depth: frame.depth + 1,
+                ancestor_has_next_sibling: next_ancestors,
                 is_last: position + 1 == node_children.len(),
             });
         }
@@ -85,7 +105,8 @@ pub(crate) fn render_session_tree(session: &Session) -> String {
 #[derive(Debug)]
 struct TreeFrame {
     index: usize,
-    ancestor_has_next_sibling: Vec<bool>,
+    depth: usize,
+    ancestor_has_next_sibling: [bool; MAX_VISIBLE_ANCESTORS],
     is_last: bool,
 }
 
@@ -177,6 +198,54 @@ mod tests {
             )
         );
         assert_eq!(render_session_tree(&session), tree);
+    }
+
+    #[test]
+    fn deep_tree_has_bounded_lines_and_explicit_fork_edges() {
+        let directory = tempfile::tempdir().unwrap();
+        for count in [1_000, 10_000] {
+            let path = directory.path().join(format!("deep-{count}.jsonl"));
+            // Build the durable fixture in one write rather than syncing each
+            // append; rendering must not recurse or copy unbounded ancestry.
+            let mut records = String::new();
+            for index in 0..count {
+                let parent = (index > 0).then(|| format!("entry-{}", index - 1));
+                let record = serde_json::json!({
+                    "type": "entry", "id": format!("entry-{index}"), "parent": parent,
+                    "value": config("fixture"),
+                });
+                records.push_str(&serde_json::to_string(&record).unwrap());
+                records.push('\n');
+            }
+            let parent = format!("entry-{}", count - 2);
+            let fork = serde_json::json!({
+                "type": "entry", "id": "fork", "parent": parent,
+                "value": config("fork"),
+            });
+            records.push_str(&serde_json::to_string(&fork).unwrap());
+            records
+                .push_str("\n{\"type\":\"head\",\"id\":\"fork\",\"total_cost_microdollars\":0}\n");
+            std::fs::write(&path, records).unwrap();
+            let session = Session::open_read_only(path).unwrap();
+            let tree = render_session_tree(&session);
+            let lines = tree
+                .lines()
+                .filter(|line| line.contains("  config"))
+                .collect::<Vec<_>>();
+            assert_eq!(lines.len(), count + 1);
+            assert!(lines.iter().all(|line| line.chars().count() < 140));
+            assert!(tree.len() < 160 * (count + 1));
+            assert!(tree.contains(&format!(
+                "fork  config  [depth={} parent={parent}]",
+                count - 1
+            )));
+            assert!(tree.contains(&format!(
+                "entry-{}  config  [depth={} parent={parent}]",
+                count - 1,
+                count - 1
+            )));
+            assert!(tree.contains("└─* fork"));
+        }
     }
 
     #[test]

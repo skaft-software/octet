@@ -188,7 +188,7 @@ FIND_OUTPUT_SCHEMA: Dict[str, Any] = {
 
 
 ext = Extension(
-    api_version="0.2",
+    api_version="0.4",
     max_concurrent_requests=4,
     supported_features=(
         "request_cancellation",

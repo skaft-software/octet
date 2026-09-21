@@ -9,6 +9,10 @@
 //! never implicit fallbacks.
 
 #[cfg(any(unix, windows))]
+#[path = "bash_spill.rs"]
+mod spill;
+
+#[cfg(any(unix, windows))]
 use std::collections::VecDeque;
 #[cfg(any(unix, windows))]
 use std::path::PathBuf;
@@ -46,6 +50,9 @@ use crate::tools::parse_args;
 use crate::tools::validate_effect_path;
 
 const MAX_BASH_COMMAND_BYTES: usize = 128 * 1024;
+/// Spill storage is independently bounded from the model-visible head/tail.
+#[cfg(any(unix, windows))]
+const MAX_BASH_SPILL_BYTES: usize = 16 * 1024 * 1024;
 
 /// One Bash-compatible shell request.
 #[derive(Deserialize)]
@@ -68,6 +75,18 @@ struct BashArgs {
 /// Windows, the child is assigned to a private Job Object before it resumes.
 pub struct BashTool;
 
+impl BashTool {
+    /// Release private spill files when the host resource owner is retired.
+    /// Cleanup runs off the caller thread; in-flight captures cannot retain
+    /// further output in the retired owner's store.
+    pub fn release_owner(resource_owner: &str) {
+        #[cfg(any(unix, windows))]
+        spill::release_owner(resource_owner);
+        #[cfg(not(any(unix, windows)))]
+        let _ = resource_owner;
+    }
+}
+
 #[async_trait::async_trait]
 impl Tool for BashTool {
     fn definition(&self) -> ToolDef {
@@ -78,7 +97,10 @@ impl Tool for BashTool {
                           Omit cwd to run at the workspace root. Output reports the exit \
                           status and bounded stdout/stderr. Complete streams end with \
                           complete_<stream>=true; truncated_<stream>=... means bytes \
-                          were omitted. Truncated output includes a full_output_path to a private spill file."
+                          were omitted. Truncated output may include a private full_output_path, \
+                          or partial_output_path containing only a prefix if the 16 MiB per-stream \
+                          spill limit was reached or storage failed. Spills are limited to 64 MiB / \
+                          32 files per resource owner and expire oldest-first or at owner shutdown."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -296,14 +318,16 @@ impl BashTool {
                     capture_budget,
                     &stdout_progress,
                     OutputStream::Stdout,
-                    checkpoints
+                    checkpoints,
+                    (ctx.resource_owner, ctx.execution_scope),
                 ),
                 read_bounded_with_progress(
                     &mut stderr_pipe,
                     capture_budget,
                     &stderr_progress,
                     OutputStream::Stderr,
-                    checkpoints
+                    checkpoints,
+                    (ctx.resource_owner, ctx.execution_scope),
                 ),
                 wait_for_bash_process(&mut child, handoff),
             );
@@ -892,14 +916,16 @@ impl BashTool {
                     capture_budget,
                     &stdout_progress,
                     OutputStream::Stdout,
-                    checkpoints
+                    checkpoints,
+                    (ctx.resource_owner, ctx.execution_scope),
                 ),
                 read_bounded_with_progress(
                     &mut stderr_pipe,
                     capture_budget,
                     &stderr_progress,
                     OutputStream::Stderr,
-                    checkpoints
+                    checkpoints,
+                    (ctx.resource_owner, ctx.execution_scope),
                 ),
                 child.wait(),
             );
@@ -983,8 +1009,9 @@ struct Capture {
     tail: VecDeque<u8>,
     total_bytes: usize,
     truncated: bool,
-    spill: Option<tempfile::NamedTempFile>,
-    spill_path: Option<PathBuf>,
+    spill: Option<spill::Spill>,
+    spill_bytes: usize,
+    spill_truncated: bool,
     spill_error: bool,
 }
 
@@ -997,7 +1024,8 @@ impl Capture {
             total_bytes: 0,
             truncated: false,
             spill: None,
-            spill_path: None,
+            spill_bytes: 0,
+            spill_truncated: false,
             spill_error: false,
         }
     }
@@ -1020,12 +1048,8 @@ impl Capture {
             self.tail.drain(..self.tail.len() - tail_cap);
         }
         self.truncated = true;
-        if let Some(file) = self.spill.take() {
-            if file.as_file().sync_data().is_err() { self.spill_error = true; }
-            match file.keep() {
-                Ok((_file,path)) => self.spill_path = Some(path),
-                Err(_) => self.spill_error = true,
-            }
+        if let Some(spill) = self.spill.as_mut() {
+            spill.retain();
         }
     }
 
@@ -1049,10 +1073,27 @@ impl Capture {
     fn render(&self, name: &str) -> String {
         let mut text = self.render_capture(name);
         if self.truncated {
-            if let Some(path) = &self.spill_path {
-                text.push_str(&format!("\n{}_output_path={}", if self.spill_error { "partial" } else { "full" }, path.display()));
+            if let Some(spill) = &self.spill {
+                if spill.expired() {
+                    text.push_str("\nspill_expired=true (owner retention evicted this output)");
+                } else {
+                    text.push_str(&format!(
+                        "\n{}_output_path={}",
+                        if self.spill_error || self.spill_truncated {
+                            "partial"
+                        } else {
+                            "full"
+                        },
+                        spill.path.display()
+                    ));
+                }
             }
-            if self.spill_error { text.push_str("\nspill_error=true (full output could not be retained)"); }
+            if self.spill_truncated {
+                text.push_str("\nspill_truncated=true (per-stream byte limit reached)");
+            }
+            if self.spill_error {
+                text.push_str("\nspill_error=true (full output could not be retained)");
+            }
         }
         text
     }
@@ -1106,6 +1147,29 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     progress: &ToolProgressSink,
     stream: OutputStream,
     checkpoints: Option<&BashCheckpoints>,
+    ownership: (&str, &str),
+) -> Capture {
+    read_bounded_with_spill_limit(
+        reader,
+        budget,
+        progress,
+        stream,
+        checkpoints,
+        MAX_BASH_SPILL_BYTES,
+        ownership,
+    )
+    .await
+}
+
+#[cfg(any(unix, windows))]
+async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
+    reader: &mut Option<R>,
+    budget: usize,
+    progress: &ToolProgressSink,
+    stream: OutputStream,
+    checkpoints: Option<&BashCheckpoints>,
+    spill_limit: usize,
+    ownership: (&str, &str),
 ) -> Capture {
     let Some(reader) = reader.as_mut() else {
         return Capture::empty();
@@ -1114,22 +1178,17 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     let tail_cap = budget.saturating_sub(head_cap);
 
     let mut capture = Capture::empty();
+    let writer = spill::Writer::start(spill::owner(ownership.0), ownership.1.to_owned(), spill_limit);
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
-            Err(_) => { capture.spill_error = true; break; },
+            Err(_) => {
+                capture.spill_error = true;
+                break;
+            }
             Ok(n) => {
-                if capture.spill.is_none() && !capture.spill_error {
-                    match tempfile::Builder::new().prefix("octet-bash-").suffix(".log").tempfile() {
-                        Ok(file) => capture.spill = Some(file),
-                        Err(_) => capture.spill_error = true,
-                    }
-                }
-                if let Some(file) = &mut capture.spill {
-                    use std::io::Write;
-                    if file.write_all(&buf[..n]).is_err() { capture.spill_error = true; }
-                }
+                writer.chunk(&buf[..n]).await;
                 progress.output(stream, Bytes::copy_from_slice(&buf[..n]));
                 capture.total_bytes += n;
                 let mut chunk = &buf[..n];
@@ -1155,6 +1214,11 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
             }
         }
     }
+    let outcome = writer.finish().await;
+    capture.spill = outcome.spill;
+    capture.spill_bytes = outcome.bytes;
+    capture.spill_truncated = outcome.truncated;
+    capture.spill_error |= outcome.error;
     capture
 }
 
@@ -1181,6 +1245,24 @@ fn shared_capture_budgets(
 
 #[cfg(any(unix, windows))]
 fn rebalance_captures(stdout: &mut Capture, stderr: &mut Capture, budget: usize) {
+    // Complete inline output needs no spill-path envelope. When truncating,
+    // reserve the actual private path lengths rather than assuming /tmp is
+    // short (macOS and host-selected temporary roots need not be).
+    let budget = if stdout.total_bytes.saturating_add(stderr.total_bytes) > budget {
+        let paths = [stdout.spill.as_ref(), stderr.spill.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|spill| spill.path.as_os_str().len())
+            .sum::<usize>();
+        let second_section = if stdout.total_bytes > 0 && stderr.total_bytes > 0 {
+            128
+        } else {
+            0
+        };
+        budget.saturating_sub(paths + second_section)
+    } else {
+        budget
+    };
     let (stdout_budget, stderr_budget) =
         shared_capture_budgets(stdout.total_bytes, stderr.total_bytes, budget);
     stdout.fit_to_budget(stdout_budget);
@@ -1240,6 +1322,67 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         !process_is_alive(pid)
+    }
+
+    #[tokio::test]
+    async fn spill_quota_keeps_a_prefix_and_drains_the_rest() {
+        use tokio::io::AsyncWriteExt;
+        let bytes = b"first\nsecond\nthird\nfourth\nfifth\nlast\n";
+        let (mut writer, reader) = tokio::io::duplex(4);
+        let mut reader = Some(reader);
+        let progress = ToolProgressSink::null();
+        let drain = read_bounded_with_spill_limit(
+            &mut reader,
+            12,
+            &progress,
+            OutputStream::Stdout,
+            None,
+            9,
+            ("quota-test", "quota-call"),
+        );
+        let write = async {
+            writer.write_all(bytes).await.unwrap();
+            writer.shutdown().await.unwrap();
+        };
+        let (mut capture, ()) =
+            tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(drain, write) })
+                .await
+                .expect("quota must not stop pipe draining");
+        assert_eq!(capture.total_bytes, bytes.len());
+        assert_eq!(capture.spill_bytes, 9);
+        assert!(capture.spill_truncated);
+        assert!(!capture.spill_error);
+        capture.fit_to_budget(12);
+        let path = &capture.spill.as_ref().unwrap().path;
+        assert_eq!(std::fs::read(path).unwrap(), bytes[..9]);
+        let rendered = capture.render("stdout");
+        assert!(rendered.contains("partial_output_path="), "{rendered}");
+        assert!(rendered.contains("spill_truncated=true"), "{rendered}");
+        assert!(!rendered.contains("full_output_path="), "{rendered}");
+        assert!(!rendered.contains("spill_error=true"), "{rendered}");
+        assert!(
+            rendered.contains("last"),
+            "tail after quota was lost: {rendered}"
+        );
+        std::fs::remove_file(path).unwrap();
+
+        // Exactly reaching the cap still preserves a complete spill; only
+        // seeing an omitted byte can change the path label to partial.
+        let mut reader = Some(std::io::Cursor::new(bytes));
+        let mut capture = read_bounded_with_spill_limit(
+            &mut reader,
+            12,
+            &progress,
+            OutputStream::Stdout,
+            None,
+            bytes.len(),
+            ("quota-test", "quota-call-2"),
+        )
+        .await;
+        capture.fit_to_budget(12);
+        assert!(capture.render("stdout").contains("full_output_path="));
+        assert!(!capture.spill_truncated);
+        BashTool::release_owner("quota-test");
     }
 
     #[test]

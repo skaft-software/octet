@@ -48,8 +48,8 @@ class ReleaseAndFixtureTests(unittest.TestCase):
         for exact in (
             'name = "octet-web-search"',
             'version = "0.7.6"',
-            'api_version = "0.2"',
-            'requires_octet = "=0.7.6"',
+            'api_version = "0.4"',
+            'requires_octet = "=0.8.0"',
             'command = "extension.py"',
             'tools = ["web_search", "web_fetch", "web_find"]',
             'commands = ["web-search"]',
@@ -68,7 +68,7 @@ class ReleaseAndFixtureTests(unittest.TestCase):
             "id": 1,
             "method": "initialize",
             "params": {
-                "api_version": "0.2",
+                "api_version": "0.4",
                 "contributes": {
                     "tools": ["web_search", "web_fetch", "web_find"],
                     "commands": ["web-search"],
@@ -76,7 +76,7 @@ class ReleaseAndFixtureTests(unittest.TestCase):
                     "presentation": True,
                 },
                 "protocol": {
-                    "version": "0.2",
+                    "version": "0.4",
                     "required_features": ["request_cancellation", "content_parts"],
                     "optional_features": ["request_progress"],
                     "limits": {"max_concurrent_requests": 2},
@@ -109,7 +109,7 @@ class ReleaseAndFixtureTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         messages = [json.loads(line) for line in completed.stdout.splitlines()]
         initialized = next(item for item in messages if item.get("id") == 1)
-        self.assertEqual(initialized["result"]["api_version"], "0.2")
+        self.assertEqual(initialized["result"]["api_version"], "0.4")
         self.assertEqual(len(initialized["result"]["tools"]), 3)
         self.assertEqual(
             [item["name"] for item in initialized["result"]["commands"]],

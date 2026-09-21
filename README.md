@@ -4,13 +4,22 @@
 
 # octet
 
-**A high-performance coding agent, extensible in any language.**
+**A high-performance coding agent.**
 
 [![Release: 0.7.6](https://img.shields.io/badge/release-0.7.6-536dfe?style=flat-square)](docs/releases/v0.7.6.md)
 
 octet reads code, edits files, and runs commands from your terminal. It has a
 native Rust core, supports cloud and local models, saves resumable sessions,
-and lets you add tools through subprocess extensions.
+and lets you add tools through subprocess extensions in any language.
+
+Extensions add bounded, host-shaped integrations—not an everything-as-extension
+platform or a promise to run unchanged Pi extensions. Browse, MCP, web search,
+and host-owned subagents remain optional integrations; Serve is a separate
+graphical application. The host keeps authority over sessions, approvals,
+lifecycle, and resource limits.
+
+The source tree is a local **0.8.0 release candidate**, not a published release.
+The installation links below remain pinned to 0.7.6.
 
 [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 

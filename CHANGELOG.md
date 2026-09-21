@@ -12,6 +12,26 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Interaction
 
+- Silence routine session lookup/replay/fork progress during startup, including
+  resumed launches. Keep input, setup, errors, and coordinated shutdown live.
+  Fresh launches skip the unnecessary session-replay worker and full-config copy.
+
+- Quiet routine reload output: remove the startup arming banner, queued-path
+  chatter, and automatic success summaries. Only explicit reload commands get a
+  completion summary. Host, worker-deferral, extension, provider-catalog, and
+  watch-limit problems appear once per component/condition and reappear after a
+  successful check clears them; skipped components retain their diagnostics.
+  Resource/bootstrap and keybinding checks now use the same checked-component
+  recurrence rule, without hiding explicit command diagnostics.
+  Actual work losses are always reported, counting only discarded
+  extension host requests. Automatic permission paths never open a picker or
+  probe an unconsented replacement; explicit consent remains required.
+  Watch/timing details remain available through `/reload --dry-run`.
+
+- Hide the root elapsed clock while retry status is active, including after its
+  countdown expires, while keeping the interrupt hint. Normal Working/Thinking
+  elapsed clocks are unchanged.
+
 - Ease the resting activity colours off the profile extremes: the dark theme's
   Working/Thinking label now rests at a slightly greyed off-white (about #f9
   instead of #fd) and the light theme's rests at a soft near-black (about #16
@@ -79,17 +99,17 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   prompt, theme, context-file, keybinding, settings, and extension roots in use
   plus the resolved executable (`current_exe()` re-resolved every poll) on a
   bounded 1000 ms metadata poll, and applies a pass only at the idle prompt in
-  the fixed order resources → extensions → host. Saves are debounced (200 ms,
+  the order host eligibility/consent → resources → extensions; an admitted host
+  replacement supersedes in-process rebuilding. Saves are debounced (200 ms,
   2 s hard ceiling) and coalesced; a pass is never admitted while a run owns the
   session, so evidence queued behind a busy boundary is applied at the next idle
-  prompt. It is enabled by default and announces itself once (`live reload
-  armed: N watched paths, poll …`) with a per-layer report on every applied pass;
+  prompt. It is enabled silently by default; `/reload --dry-run` exposes watch
+  settings and per-layer details, while automatic passes omit success summaries;
   `reload`, `reload_poll_ms`, `reload_debounce_ms`, and `reload_max_files` are
   user-level settings, `/reload --dry-run` previews a pass without changing
-  anything, and `/reload --force` takes one immediately while naming the four
-  losses (in-flight model call, in-flight tool call, an extension's in-flight
-  host request, a worker mid-call) and the durable records that survive. Plain
-  `/reload` keeps its existing transactional resource reload and re-exec path.
+  anything, and `/reload --force` takes one at the idle boundary while previewing
+  possible interruptions from currently pending host requests and workers.
+  Plain `/reload` rebuilds resources/extensions without selecting the host layer.
 - `/reload` now also reloads the **host binary**. When the executable on disk
   changed, the candidate is validated first with a side-effect-free internal
   probe (`--internal-reexec-probe`, which initializes no provider, extension,
@@ -165,6 +185,12 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Providers, codecs and tools
 
+- Share a 64 MiB / 32-file Bash spill budget per owner, including active captures;
+  evict oldest files and move disk capture/cleanup off the async path. Keep the
+  16 MiB per-stream cap and distinguish expired, partial, and complete spills.
+- Advance Responses replay/capacity projections by suffix, retain control-queue
+  reservations through delivery, and cap combined extension schemas at 4 MiB.
+
 - Decode the reasoning a provider advertises through accepted request parameters
   (`supported_parameters` containing `reasoning`, `reasoning_effort` or
   `reasoning.effort`). It was read as an undecodable assertion, so a newly
@@ -228,6 +254,9 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### CLI and sessions
 
+- Remove the 64 MiB session-catalog cliff; use indexed substring search,
+  targeted lookups, and bounded maintenance batches without capping total disk.
+
 - Add `--powershell` (additive Windows `powershell` opt-in, reported inert on
   other hosts, conflicting with an exclusive `--tools`/`--no-tools` list) and
   ordered `--models` patterns that resolve a literal `provider/model`/bare-id
@@ -250,6 +279,10 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Telemetry
 
+- Move optional JSONL writes to an ordered 256-record / 1-MiB worker with
+  observable loss/failure and bounded lifecycle drain; durable accounting stays
+  authoritative and unchanged.
+
 - Add a callback-based, vendor-neutral telemetry substrate
   (`TelemetryContext`/`TelemetrySpan`, NOOP and InMemory implementations,
   serializable typed schema and a span-assertion harness) with no global and no
@@ -262,6 +295,11 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   `cacheWrite1h` bucket, preserving uncertainty.
 
 ### Editor and TUI
+
+- Keep active inspection and consent panels inside the polling run loop. Use
+  shared semantic snapshots and renderer-private layout, with post-write
+  revision-fenced geometry and consent receipts instead of a long-held input lock.
+- Bound undo and redo to 64 snapshots / 4 MiB each, with oversized-edit barriers.
 
 - Add reusable keybinding parsing/conflict detection, editor undo/redo,
   kill/yank, word/line actions and OSC 133 zone primitives. Product key dispatch,

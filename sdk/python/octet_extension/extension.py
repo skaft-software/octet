@@ -579,7 +579,7 @@ class Extension:
             raise ValueError("tool description must be non-empty")
         schema = dict(parameters) if parameters is not None else {"type": "object"}
         result_schema = dict(output_schema) if output_schema is not None else None
-        if result_schema is not None and self.api_version != "0.2":
+        if result_schema is not None and self.api_version not in ("0.2", "0.4"):
             raise ValueError("output_schema requires extension API 0.2")
 
         def decorate(handler: Handler) -> Handler:
@@ -613,7 +613,7 @@ class Extension:
 
     def hook(self, name: str) -> Callable[[Handler], Handler]:
         self._validate_name("hook", name)
-        if name in _TYPED_MUTATION_HOOKS and self.api_version != "0.2":
+        if name in _TYPED_MUTATION_HOOKS and self.api_version not in ("0.2", "0.4"):
             raise ValueError(f"{name} requires extension API 0.2")
 
         def decorate(handler: Handler) -> Handler:
@@ -708,7 +708,7 @@ class Extension:
         process-scoped state.
         """
 
-        if self.api_version != "0.2":
+        if self.api_version not in ("0.2", "0.4"):
             raise RpcError(-32601, "semantic presentation requires extension API 0.2")
         self._require_capability("presentation")
         if not isinstance(snapshot, Mapping):
@@ -829,7 +829,7 @@ class Extension:
             raise ValueError("request method must be non-empty")
         self._require_initialized()
         payload = dict(params) if params is not None else {}
-        if self.api_version == "0.2" and correlate_parent:
+        if self.api_version in ("0.2", "0.4") and correlate_parent:
             parent = self._resolve_parent(parent_request_id, required=operation_scoped)
             if parent is not _MISSING:
                 payload["parent_request_id"] = parent
@@ -1052,7 +1052,7 @@ class Extension:
             "confirmation/request",
             params,
             parent_request_id=parent_request_id,
-            operation_scoped=self.api_version == "0.2",
+            operation_scoped=self.api_version in ("0.2", "0.4"),
         )
         if not isinstance(result, Mapping) or not isinstance(result.get("confirmed"), bool):
             raise RpcError(-32603, "invalid confirmation response")
@@ -1083,7 +1083,7 @@ class Extension:
         if not isinstance(secret, bool):
             raise TypeError("input secret must be a boolean")
         self._require_initialized()
-        if self.api_version != "0.2":
+        if self.api_version not in ("0.2", "0.4"):
             raise RpcError(-32601, "input/request requires extension API 0.2")
         result = self.request(
             "input/request",
@@ -1876,11 +1876,11 @@ class Extension:
         self._validate_declarations()
 
         protocol_response: Optional[dict[str, Any]] = None
-        if self.api_version == "0.2":
+        if self.api_version in ("0.2", "0.4"):
             protocol = params.get("protocol")
             if not isinstance(protocol, Mapping):
                 raise RpcError(-32602, "API 0.2 initialize requires a protocol object")
-            if protocol.get("version") != "0.2":
+            if protocol.get("version") not in ("0.2", "0.4"):
                 raise RpcError(-32000, "unsupported executable-extension protocol version")
             required = self._feature_list(protocol.get("required_features", []), "required_features")
             optional = self._feature_list(protocol.get("optional_features", []), "optional_features")
@@ -1910,7 +1910,7 @@ class Extension:
                 with self._tool_catalog_lock:
                     self._tool_catalogs[0] = dict(self._tools)
             protocol_response = {
-                "version": "0.2",
+                "version": self.api_version,
                 "features": features,
                 "limits": {"max_concurrent_requests": self._negotiated_concurrency},
             }
@@ -1973,7 +1973,7 @@ class Extension:
             if catalog_revision is _MISSING:
                 catalog = self._tools
             else:
-                if self.api_version != "0.2" or "dynamic_tools" not in self._features:
+                if self.api_version not in ("0.2", "0.4") or "dynamic_tools" not in self._features:
                     raise RpcError(
                         -32602,
                         "tool/call catalog_revision requires negotiated dynamic_tools",
@@ -2012,7 +2012,7 @@ class Extension:
             raise
         except Exception as error:
             self.logger.error("tool handler failed", tool=name, error=str(error))
-            if self.api_version == "0.2":
+            if self.api_version in ("0.2", "0.4"):
                 return self._tool_result(
                     tool_result(text_content(str(error)), is_error=True),
                     tool,
@@ -2491,7 +2491,7 @@ class Extension:
 
     def _require_feature(self, feature: str) -> None:
         self._require_initialized()
-        if self.api_version != "0.2" or feature not in self._features:
+        if self.api_version not in ("0.2", "0.4") or feature not in self._features:
             raise RpcError(-32601, f"API 0.2 feature is not negotiated: {feature}")
 
     def _require_declared_name(self, key: str, name: str) -> None:

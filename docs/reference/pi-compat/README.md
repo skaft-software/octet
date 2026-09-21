@@ -1,13 +1,23 @@
 # `octet-pi-compat`
 
+> **Archived Pi bridge evidence — non-shipping, not a release gate.**
+> Preserved from the local pre-reduction 0.8.0 candidate. The Pi execution bridge
+> and `octet pi` command family are removed; commands, tests, “current” claims,
+> and release requirements below describe the historical implementation only.
+> Referenced bridge source/fixtures are no longer installed or executable here.
+> The JSON profiles are preserved byte-for-byte as inert evidence, not runtime
+> configuration. No receipt here qualifies the reduced RC or a published release.
+> Current [Pi inventory/import](../../pi-migration.md) and native providers are
+> separate from Pi extension execution.
+
 Run a bounded subset of reviewed Pi extension source through Pi's public loader.
 octet still owns the model loop, JSON-RPC transport, trust gates, persistence,
-and process cleanup. See [Pi migration](../../docs/pi-migration.md) to inspect or
+and process cleanup. See [Pi migration](../../pi-migration.md) to inspect or
 import a setup first; a generated link is not proof of compatibility.
 
 ## Create a local link
 
-With [octet 0.8.0 installed](../../docs/installation.md) and a separately reviewed
+With [octet 0.8.0 installed](../../installation.md) and a separately reviewed
 local Pi installation:
 
 ```console
@@ -33,9 +43,12 @@ details source order, fingerprints, integrity, link identity, and rollback.
 ## Pinned compatibility profile
 
 The bridge distribution remains `0.7.0`, independently of octet `0.8.0`;
-Pi `0.84.4` and the live API version are also independent contracts. It requires exactly
-`@earendil-works/pi-coding-agent@0.84.4` and Node 22.19 or newer, validated before
-importing extension code. It never silently adopts a newer Pi runtime from
+Pi `0.84.4` and the live API version are also independent contracts. It accepts
+`@earendil-works/pi-coding-agent` `>=0.84.4 <0.86.0` and Node 22.19 or newer,
+validated before importing extension code. The *conformance profile* stays pinned to
+`0.84.4`: that is the revision the ledger, fixtures, and release claim are validated
+against, while runtime acceptance covers newer patch/minor releases in the same
+family instead of refusing them by string equality. It never silently adopts a newer Pi runtime from
 `PATH`. `octet pi plan --pi-package DIR` records a canonical nonstandard package
 location without relying on ambient extension-environment inheritance.
 
@@ -122,7 +135,7 @@ Settlement, shutdown and replacement fence queued updates, clear contributions,
 abort editor waits and dispose component/provider instances. Generated links
 include both helper modules before their manifest becomes discoverable. There is
 no new credential, process, terminal or API `0.3` authority. The
-[qualification record](../../docs/qualification/pi-ui-current-candidate.md)
+[qualification record](../../qualification/pi-ui-current-candidate.md)
 distinguishes bridge fixtures from still-unrun Rust-host and real-Pi gates.
 
 ## API 0.3 provider mode
@@ -181,10 +194,18 @@ OCTET_PI_REAL_PACKAGE=/path/to/@earendil-works/pi-coding-agent \
 ```
 
 The real-Pi suite covers the official hello example and an unchanged `plan-mode`
-load plus `/todos` smoke, not plan-mode behavioral parity. Flags, shortcuts,
-active-tool overlays, session entries, root messages, full editor/widget parity,
-and durable custom entries remain explicit blockers. Fake-Pi provider cases cover
-catalog, authorization, hooks, streaming, cancellation, mutation, and cleanup only.
+load plus `/todos` smoke, not plan-mode behavioral parity. Flags, full editor/widget
+parity, widget transport, session/tree mutation, compaction control, and
+model/thinking selection remain explicit blockers. The composer surface, runtime
+shortcut registration with `shortcut/trigger` dispatch, session naming, user-message
+injection, and the `lifecycle_events_v2` notifications whose host producers exist are
+available behind the negotiated Wave-1 features (`composer`, `shortcuts`,
+`session_entries`, `message_injection`, `lifecycle_events_v2`, `active_tools`).
+`pi.appendEntry`, `pi.setLabel`, `pi.setActiveTools`, and assistant/system
+`pi.sendMessage` are bridge-forwarded but still refused by the shipped host with a
+typed `unsupported_feature`: it has no durable entry/label API, no live tool policy,
+and no assistant/system injection path. Fake-Pi provider cases cover catalog,
+authorization, hooks, streaming, cancellation, mutation, and cleanup only.
 
 The separate [unchanged-source full gate](COMPATIBILITY.md#integrity-verified-unchanged-source-full-gate)
 uses `conformance.py --full --network-isolated` with local coding-agent/TUI tarballs,
@@ -197,7 +218,8 @@ alone, or a smoke test as real-runtime proof.
 ## Selected newer source reference
 
 The separately inspected Pi revision `8a7b0c03dfb702663acafb6dc29f8acaa4ffe391`
-identifies coding-agent `0.85.1`. It is **not** an admitted runtime profile: the
-bridge still requires `0.84.4`, and no integrity-verified `0.85.1` runtime campaign
-has been run. Updating the host requirement to octet `0.8.0` does not change that
+identifies coding-agent `0.85.1`. It is **not** a validated conformance profile: the
+bridge accepts it as a runtime (it is inside the supported range), but the ledger,
+fixtures, and release claim remain validated against `0.84.4`, and no
+integrity-verified `0.85.1` runtime campaign has been run. Updating the host requirement to octet `0.8.0` does not change that
 runtime identity or remove the ledger's host-primitive and real-runtime blockers.

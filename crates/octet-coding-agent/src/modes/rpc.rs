@@ -112,7 +112,7 @@ impl RpcOutput {
 /// Pi's JSON mode removes cumulative snapshots from delta records. Native
 /// session persistence and authoritative message_end records remain unchanged.
 fn compact_json_event(value: &mut Value) {
-    if value["type"] != "message_update" {
+    if value["type"] != "message_update" || value.get("message").is_none() {
         return;
     }
     let message = value
@@ -1260,6 +1260,56 @@ fn rpc_error_diagnostic(model: &Model, error: &AgentError) -> String {
     octet_agent::public_error_diagnostic(error, &model.endpoint.id.0, &model.spec.id.0)
 }
 
+// Live progress is a display projection, not the authoritative tool result.
+// Keep a bounded UTF-8 prefix plus an explicit display-byte omission count.
+const MAX_RPC_TOOL_PROGRESS_BYTES: usize = 64 * 1024;
+
+#[derive(Default)]
+struct RpcToolProgress {
+    text: String,
+    omitted: u64,
+}
+
+impl RpcToolProgress {
+    fn push_str(&mut self, text: &str) {
+        let mut keep = MAX_RPC_TOOL_PROGRESS_BYTES
+            .saturating_sub(self.text.len())
+            .min(text.len());
+        while !text.is_char_boundary(keep) {
+            keep -= 1;
+        }
+        // Once truncated, keep a contiguous prefix (never append later bytes
+        // into spare space left by a split multibyte character).
+        if self.omitted != 0 {
+            keep = 0;
+        }
+        self.text.push_str(&text[..keep]);
+        self.omitted = self.omitted.saturating_add((text.len() - keep) as u64);
+    }
+
+    fn separator(&mut self) {
+        if !self.text.is_empty() || self.omitted != 0 {
+            self.push_str("\n");
+        }
+    }
+
+    fn snapshot(&self) -> String {
+        if self.omitted == 0 {
+            self.text.clone()
+        } else {
+            format!(
+                "{}\n[{} UTF-8 display bytes omitted from live progress]",
+                self.text, self.omitted
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static PARTIAL_SNAPSHOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 struct EventTranslator {
     endpoint: String,
     model: Model,
@@ -1273,7 +1323,7 @@ struct EventTranslator {
     pending_turn: Option<Value>,
     pending_tool_results: Vec<Value>,
     expected_tools: usize,
-    tools: HashMap<String, (String, Value, String)>,
+    tools: HashMap<String, (String, Value, RpcToolProgress)>,
     messages: Vec<Value>,
     run_messages: Vec<Value>,
     last_assistant_text: String,
@@ -1311,6 +1361,8 @@ impl EventTranslator {
     }
 
     fn partial_message(&self) -> Value {
+        #[cfg(test)]
+        PARTIAL_SNAPSHOTS.with(|count| count.set(count.get() + 1));
         let content = self
             .channels
             .iter()
@@ -1374,26 +1426,36 @@ impl EventTranslator {
             .iter()
             .position(|candidate| *candidate == channel)
             .unwrap_or_default();
+        // JSON mode never constructs the growing prefix just to discard it.
+        // RPC retains both compatibility snapshots, including on channel start.
+        let mut send = |event: Value| {
+            if output.delta_only {
+                output.send(json!({
+                    "type": "message_update",
+                    "usage": usage_value(&Usage::default(), None),
+                    "assistantMessageEvent": event
+                }))
+            } else {
+                let message = self.partial_message();
+                let mut event = event;
+                event["partial"] = message.clone();
+                output.send(json!({
+                    "type": "message_update",
+                    "message": message,
+                    "assistantMessageEvent": event
+                }))
+            }
+        };
         if first {
-            output.send(json!({
-                "type": "message_update",
-                "message": self.partial_message(),
-                "assistantMessageEvent": {
-                    "type": format!("{kind}_start"),
-                    "contentIndex": content_index,
-                    "partial": self.partial_message()
-                }
+            send(json!({
+                "type": format!("{kind}_start"),
+                "contentIndex": content_index
             }))?;
         }
-        output.send(json!({
-            "type": "message_update",
-            "message": self.partial_message(),
-            "assistantMessageEvent": {
-                "type": format!("{kind}_delta"),
-                "contentIndex": content_index,
-                "delta": text,
-                "partial": self.partial_message()
-            }
+        send(json!({
+            "type": format!("{kind}_delta"),
+            "contentIndex": content_index,
+            "delta": text
         }))
     }
 
@@ -1640,8 +1702,10 @@ impl EventTranslator {
                 }))?,
             },
             AgentEvent::ToolStarted { id, name, args } => {
-                self.tools
-                    .insert(id.0.clone(), (name.clone(), args.clone(), String::new()));
+                self.tools.insert(
+                    id.0.clone(),
+                    (name.clone(), args.clone(), RpcToolProgress::default()),
+                );
                 output.send(json!({
                     "type": "tool_execution_start",
                     "toolCallId": id.0,
@@ -1659,15 +1723,11 @@ impl EventTranslator {
                             accumulated.push_str(&String::from_utf8_lossy(&bytes));
                         }
                         ToolProgress::Status(status) => {
-                            if !accumulated.is_empty() {
-                                accumulated.push('\n');
-                            }
+                            accumulated.separator();
                             accumulated.push_str(&status);
                         }
                         ToolProgress::Decoration(decoration) => {
-                            if !accumulated.is_empty() {
-                                accumulated.push('\n');
-                            }
+                            accumulated.separator();
                             accumulated.push_str(decoration.label());
                             if let Some(detail) = decoration.detail() {
                                 accumulated.push_str(" · ");
@@ -1688,7 +1748,7 @@ impl EventTranslator {
                         "toolCallId": id.0,
                         "toolName": name,
                         "args": args,
-                        "partialResult": {"content": [{"type": "text", "text": accumulated}]}
+                        "partialResult": {"content": [{"type": "text", "text": accumulated.snapshot()}]}
                     }))?;
                 }
             }
@@ -1696,7 +1756,7 @@ impl EventTranslator {
                 let (name, _args, _) = self
                     .tools
                     .remove(&id.0)
-                    .unwrap_or_else(|| (String::new(), Value::Null, String::new()));
+                    .unwrap_or_else(|| (String::new(), Value::Null, RpcToolProgress::default()));
                 let (text, is_error) = match result {
                     Ok(output_value) => {
                         let is_error = output_value.is_error();
@@ -1922,10 +1982,81 @@ fn queued_input(
     })
 }
 
+// A pending admission owns its input until the bounded RunControl send succeeds.
+// Queue/settings projections and command acknowledgments commit only afterward.
+enum RpcControlRequest {
+    Steer(QueuedInput),
+    FollowUp(QueuedInput),
+    SteeringMode(String),
+    FollowUpMode(String),
+}
+
+struct RpcAdmission {
+    id: Option<String>,
+    command: String,
+    request: RpcControlRequest,
+    replay: bool,
+}
+
+impl RpcAdmission {
+    async fn send(&self, control: &RunControl) -> Result<(), AgentError> {
+        match &self.request {
+            RpcControlRequest::Steer(queued) => control.steer(queued.input.clone()).await,
+            RpcControlRequest::FollowUp(queued) => control.follow_up(queued.input.clone()).await,
+            RpcControlRequest::SteeringMode(mode) => {
+                control.set_steering_mode(queue_mode(mode)).await
+            }
+            RpcControlRequest::FollowUpMode(mode) => {
+                control.set_follow_up_mode(queue_mode(mode)).await
+            }
+        }
+    }
+
+    fn complete(
+        self,
+        result: Result<(), AgentError>,
+        queue: &mut QueueState,
+        settings: &mut RpcSettings,
+        output: &mut RpcOutput,
+    ) -> anyhow::Result<()> {
+        // Replayed inputs were already acknowledged and remain in QueueState
+        // until delivery; failed admission must not discard or duplicate them.
+        if self.replay {
+            return Ok(());
+        }
+        if let Err(error) = result {
+            return output.error(self.id.as_deref(), &self.command, error.to_string());
+        }
+        let queue_changed = match self.request {
+            RpcControlRequest::Steer(queued) => {
+                queue.steering.push_back(queued);
+                true
+            }
+            RpcControlRequest::FollowUp(queued) => {
+                queue.follow_up.push_back(queued);
+                true
+            }
+            RpcControlRequest::SteeringMode(mode) => {
+                settings.steering_mode = mode;
+                false
+            }
+            RpcControlRequest::FollowUpMode(mode) => {
+                settings.follow_up_mode = mode;
+                false
+            }
+        };
+        output.success(self.id.as_deref(), &self.command, None)?;
+        if queue_changed {
+            output.send(queue.event())?;
+        }
+        Ok(())
+    }
+}
+
 // RPC active-run routing intentionally exposes the independently borrowed
 // protocol registries, queues, settings, and output sink at this dispatch boundary.
 #[allow(clippy::too_many_arguments)]
-async fn active_input(
+fn active_input(
     command: Value,
     control: &RunControl,
     skills: &Arc<dyn SkillRegistry>,
@@ -1938,10 +2069,10 @@ async fn active_input(
     settings: &mut RpcSettings,
     output: &mut RpcOutput,
     deferred: &mut VecDeque<Value>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<RpcAdmission>> {
     let id = command_id(&command).map(str::to_owned);
     let kind = command_type(&command).unwrap_or("parse").to_owned();
-    let result: anyhow::Result<()> = async {
+    let result: anyhow::Result<Option<RpcControlRequest>> = (|| {
         match kind.as_str() {
             "abort" => {
                 control.abort();
@@ -1963,15 +2094,11 @@ async fn active_input(
                     workspace,
                     &settings.registered_tools,
                 )?;
-                if kind == "steer" {
-                    control.steer(queued.input.clone()).await?;
-                    queue.steering.push_back(queued);
+                return Ok(Some(if kind == "steer" {
+                    RpcControlRequest::Steer(queued)
                 } else {
-                    control.follow_up(queued.input.clone()).await?;
-                    queue.follow_up.push_back(queued);
-                }
-                output.success(id.as_deref(), &kind, None)?;
-                output.send(queue.event())?;
+                    RpcControlRequest::FollowUp(queued)
+                }));
             }
             "prompt" => {
                 let behavior = command
@@ -1991,33 +2118,21 @@ async fn active_input(
                     workspace,
                     &settings.registered_tools,
                 )?;
-                match behavior {
-                    "steer" => {
-                        control.steer(queued.input.clone()).await?;
-                        queue.steering.push_back(queued);
-                    }
-                    "followUp" => {
-                        control.follow_up(queued.input.clone()).await?;
-                        queue.follow_up.push_back(queued);
-                    }
+                return Ok(Some(match behavior {
+                    "steer" => RpcControlRequest::Steer(queued),
+                    "followUp" => RpcControlRequest::FollowUp(queued),
                     _ => anyhow::bail!("streamingBehavior must be steer or followUp"),
-                }
-                output.success(id.as_deref(), "prompt", None)?;
-                output.send(queue.event())?;
+                }));
             }
             "set_steering_mode" => {
                 let mode = required_string(&command, "mode")?;
-                let delivery = parse_queue_mode(mode)?;
-                control.set_steering_mode(delivery).await?;
-                settings.steering_mode = mode.to_owned();
-                output.success(id.as_deref(), &kind, None)?;
+                parse_queue_mode(mode)?;
+                return Ok(Some(RpcControlRequest::SteeringMode(mode.to_owned())));
             }
             "set_follow_up_mode" => {
                 let mode = required_string(&command, "mode")?;
-                let delivery = parse_queue_mode(mode)?;
-                control.set_follow_up_mode(delivery).await?;
-                settings.follow_up_mode = mode.to_owned();
-                output.success(id.as_deref(), &kind, None)?;
+                parse_queue_mode(mode)?;
+                return Ok(Some(RpcControlRequest::FollowUpMode(mode.to_owned())));
             }
             "get_state" => output.success(
                 id.as_deref(),
@@ -2036,13 +2151,20 @@ async fn active_input(
             // boundary. Their response is deliberately delayed until applied.
             _ => deferred.push_back(command),
         }
-        Ok(())
+        Ok(None)
+    })();
+    match result {
+        Ok(request) => Ok(request.map(|request| RpcAdmission {
+            id,
+            command: kind,
+            request,
+            replay: false,
+        })),
+        Err(error) => {
+            output.error(id.as_deref(), &kind, error.to_string())?;
+            Ok(None)
+        }
     }
-    .await;
-    if let Err(error) = result {
-        output.error(id.as_deref(), &kind, error.to_string())?;
-    }
-    Ok(())
 }
 
 // The run loop coordinates independently owned protocol state and channels;
@@ -2066,19 +2188,44 @@ async fn drive_run(
     control
         .set_follow_up_mode(settings.follow_up_mode())
         .await?;
-    // A prior abort leaves RPC queues intact. Re-submit those messages to the
-    // new agent run; delivery events remove them from QueueState exactly once.
-    for queued in &queue.steering {
-        control.steer(queued.input.clone()).await?;
-    }
-    for queued in &queue.follow_up {
-        control.follow_up(queued.input.clone()).await?;
-    }
-
+    // Replay is ordered, but cannot await a full control channel without
+    // polling the caller-driven Run. Only the two initial mode sends above
+    // happen before polling (a fresh Run has room for both).
+    let mut admissions: VecDeque<_> = queue
+        .steering
+        .iter()
+        .cloned()
+        .map(RpcControlRequest::Steer)
+        .chain(
+            queue
+                .follow_up
+                .iter()
+                .cloned()
+                .map(RpcControlRequest::FollowUp),
+        )
+        .map(|request| RpcAdmission {
+            id: None,
+            command: String::new(),
+            request,
+            replay: true,
+        })
+        .collect();
     let mut deferred = VecDeque::new();
+    // Bounded lookahead lets abort/EOF bypass a blocked control admission.
+    // Other commands retain FIFO order and backpressure the stdin reader.
+    let mut waiting = VecDeque::new();
     let mut eof = false;
+    enum Ready {
+        Input(Option<RpcInput>),
+        Event(Option<AgentEvent>),
+        Waiting,
+    }
     let finish = loop {
-        tokio::select! {
+        // Admit ready controls before advancing the next boundary. This can
+        // send at most the bounded channel capacity before Run must be polled.
+        // Within that backpressure, stdin and Run selection is fair, so a
+        // continuously ready input stream cannot starve run/abort settlement.
+        let ready = tokio::select! {
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
                 control.abort();
@@ -2089,23 +2236,72 @@ async fn drive_run(
                 // Coordinated process shutdown truncates the active RPC turn.
                 // Avoid emitting a partial settlement tail that cannot be
                 // followed by `agent_end` and `agent_settled`.
-                break HostRunOutcome::shutdown();
+                return Ok((deferred, eof, HostRunOutcome::shutdown()));
             }
-            inbound = input.recv(), if !eof => match inbound {
-                Some(RpcInput::Value(command)) => {
-                    active_input(
-                        command, &control, &skills, prompts.as_ref(), &workspace,
-                        app_snapshot, commands, translator, queue, settings,
-                        output, &mut deferred,
-                    ).await?;
+            admitted = async { admissions.front().expect("pending admission").send(&control).await }, if !admissions.is_empty() => {
+                admissions.pop_front().expect("pending admission")
+                    .complete(admitted, queue, settings, output)?;
+                continue;
+            }
+            ready = async {
+                tokio::select! {
+                    _ = std::future::ready(()), if admissions.is_empty() && !waiting.is_empty() => Ready::Waiting,
+                    inbound = input.recv(), if !eof && waiting.len() < 64 => Ready::Input(inbound),
+                    event = run.next() => Ready::Event(event),
                 }
-                Some(RpcInput::ParseError(error)) => output.error(None, "parse", error)?,
-                Some(RpcInput::Eof) | None => {
-                    eof = true;
-                    control.abort();
+            } => ready,
+        };
+        match ready {
+            Ready::Waiting => {
+                let command = waiting.pop_front().expect("waiting command");
+                if let Some(admission) = active_input(
+                    command,
+                    &control,
+                    &skills,
+                    prompts.as_ref(),
+                    &workspace,
+                    app_snapshot,
+                    commands,
+                    translator,
+                    queue,
+                    settings,
+                    output,
+                    &mut deferred,
+                )? {
+                    admissions.push_back(admission);
                 }
-            },
-            event = run.next() => {
+            }
+            Ready::Input(Some(RpcInput::Value(command))) => {
+                let cancellation = matches!(command_type(&command), Some("abort" | "abort_retry"));
+                if cancellation || (admissions.is_empty() && waiting.is_empty()) {
+                    if let Some(admission) = active_input(
+                        command,
+                        &control,
+                        &skills,
+                        prompts.as_ref(),
+                        &workspace,
+                        app_snapshot,
+                        commands,
+                        translator,
+                        queue,
+                        settings,
+                        output,
+                        &mut deferred,
+                    )? {
+                        admissions.push_back(admission);
+                    }
+                } else {
+                    waiting.push_back(command);
+                }
+            }
+            Ready::Input(Some(RpcInput::ParseError(error))) => {
+                output.error(None, "parse", error)?
+            }
+            Ready::Input(Some(RpcInput::Eof) | None) => {
+                eof = true;
+                control.abort();
+            }
+            Ready::Event(event) => {
                 let Some(event) = event else {
                     let outcome = HostRunOutcome::stream_lost();
                     translator.settle(outcome.clone(), output)?;
@@ -2117,6 +2313,30 @@ async fn drive_run(
             }
         }
     };
+    for admission in admissions {
+        admission.complete(Err(AgentError::RunEnded), queue, settings, output)?;
+    }
+    // Commands read while active retain active routing even if settlement wins
+    // admission: a prompt must not silently become a new idle run. Only the
+    // existing lifecycle-command branch may defer work to the idle boundary.
+    for command in waiting {
+        if let Some(admission) = active_input(
+            command,
+            &control,
+            &skills,
+            prompts.as_ref(),
+            &workspace,
+            app_snapshot,
+            commands,
+            translator,
+            queue,
+            settings,
+            output,
+            &mut deferred,
+        )? {
+            admission.complete(Err(AgentError::RunEnded), queue, settings, output)?;
+        }
+    }
     Ok((deferred, eof, finish))
 }
 
@@ -2825,6 +3045,400 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[derive(Clone, Default)]
+    struct RpcCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for RpcCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl RpcCapture {
+        fn output(&self, delta_only: bool) -> RpcOutput {
+            RpcOutput {
+                stdout: Box::new(self.clone()),
+                delta_only,
+            }
+        }
+        fn frames(&self) -> Vec<Value> {
+            serde_json::Deserializer::from_slice(&self.0.lock().unwrap())
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+    }
+
+    fn rpc_loopback_app(uri: &str) -> (tempfile::TempDir, App) {
+        let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let mut model = app.model.clone();
+        Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiChat;
+        let endpoint = Arc::make_mut(&mut model.endpoint);
+        endpoint.base_url = format!("{uri}/").parse().unwrap();
+        endpoint.auth = octet_ai::Auth::None;
+        endpoint.default_headers.clear();
+        endpoint.transport = octet_ai::EndpointTransport::Http;
+        endpoint.runtime = octet_ai::RequestRuntime::default();
+        app.agent = octet_agent::Agent::new(octet_agent::AgentConfig {
+            client: app.client.clone(),
+            model: model.clone(),
+            session: octet_agent::Session::create(directory.path().join("rpc-live.jsonl")).unwrap(),
+            system: "test".into(),
+            sandbox: SandboxConfig::new(directory.path()),
+            effect_broker: octet_agent::EffectBroker::new(octet_agent::EffectPolicy::Controlled),
+            extensions: octet_agent::ExtensionHost::new(),
+            max_turns: Some(128),
+            reasoning: octet_ai::ReasoningConfig::Off,
+            reasoning_mode: octet_ai::ReasoningMode::Standard,
+            cache_retention: octet_ai::CacheRetention::Short,
+            session_id: None,
+        })
+        .unwrap();
+        app.model = model;
+        (directory, app)
+    }
+
+    fn rpc_test_queued(text: String) -> QueuedInput {
+        let input = UserInput::from(text.clone());
+        QueuedInput {
+            message: user_input_value(&input),
+            input,
+            text,
+        }
+    }
+
+    const RPC_TEST_SSE: &str = concat!(
+        "data: {\"id\":\"fixture\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"fixture\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    #[tokio::test]
+    async fn rpc_liveness_replays_queues_beyond_control_capacity_in_order() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(RPC_TEST_SSE, "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        for mode in ["all", "one-at-a-time"] {
+            let (_directory, mut app) = rpc_loopback_app(&server.uri());
+            let capture = RpcCapture::default();
+            let mut output = capture.output(false);
+            let mut translator = EventTranslator::new(&app, user_value("initial"));
+            let mut queue = QueueState::default();
+            for index in 0..16 {
+                queue
+                    .steering
+                    .push_back(rpc_test_queued(format!("steer-{index}")));
+                queue
+                    .follow_up
+                    .push_back(rpc_test_queued(format!("follow-{index}")));
+            }
+            let mut settings = RpcSettings {
+                steering_mode: mode.into(),
+                follow_up_mode: mode.into(),
+                ..RpcSettings::default()
+            };
+            let (_tx, mut input) = mpsc::channel(64);
+            let mut run = app.agent.prompt("initial").await.unwrap();
+            let (deferred, eof, outcome) = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                drive_run(
+                    &mut run,
+                    &mut input,
+                    &mut output,
+                    &json!({}),
+                    &json!({}),
+                    app.skills.clone(),
+                    app.prompts.clone(),
+                    app.config.workspace.clone(),
+                    &mut translator,
+                    &mut queue,
+                    &mut settings,
+                ),
+            )
+            .await
+            .expect("replay must poll Run while admitting more than eight controls")
+            .unwrap();
+            assert_eq!(outcome, HostRunOutcome::Completed);
+            assert!(!eof);
+            assert!(deferred.is_empty());
+            assert_eq!(queue.len(), 0);
+            let delivered: Vec<_> = translator
+                .run_messages
+                .iter()
+                .filter(|message| message["role"] == "user")
+                .filter_map(|message| message["content"][0]["text"].as_str())
+                .collect();
+            for prefix in ["steer", "follow"] {
+                let actual: Vec<_> = delivered
+                    .iter()
+                    .filter(|text| text.starts_with(prefix))
+                    .copied()
+                    .collect();
+                let expected: Vec<_> = (0..16).map(|index| format!("{prefix}-{index}")).collect();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_liveness_sustained_active_controls_and_abort_settle() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Send headers and a delta immediately, then keep the SSE body open.
+        // A delayed-header fixture would test provider opening instead of an
+        // active stream (the agent does not consume controls while opening).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}", listener.local_addr().unwrap());
+        let provider = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buffer[..count]);
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            let first = RPC_TEST_SSE.split("\n\n").next().unwrap().to_owned() + "\n\n";
+            socket
+                .write_all(format!("{:x}\r\n{}\r\n", first.len(), first).as_bytes())
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (_directory, mut app) = rpc_loopback_app(&uri);
+        let capture = RpcCapture::default();
+        let mut output = capture.output(false);
+        let mut translator = EventTranslator::new(&app, user_value("initial"));
+        let mut queue = QueueState::default();
+        let mut settings = RpcSettings::default();
+        let (tx, mut input) = mpsc::channel(64);
+        let producer_capture = capture.clone();
+        let producer = async move {
+            while !producer_capture
+                .frames()
+                .iter()
+                .any(|frame| frame["type"] == "message_update")
+            {
+                tokio::task::yield_now().await;
+            }
+
+            for index in 0..128 {
+                let command = match index % 4 {
+                    0 => json!({"type": "set_steering_mode", "mode": "all"}),
+                    1 => json!({"type": "set_follow_up_mode", "mode": "one-at-a-time"}),
+                    2 => json!({"type": "steer", "message": format!("steer-{index}")}),
+                    _ => json!({"type": "follow_up", "message": format!("follow-{index}")}),
+                };
+                let mut command = command;
+                command["id"] = json!(format!("control-{index}"));
+                tx.send(RpcInput::Value(command)).await.unwrap();
+            }
+            tx.send(RpcInput::Value(
+                json!({"type": "get_state", "id": "barrier"}),
+            ))
+            .await
+            .unwrap();
+            loop {
+                if producer_capture
+                    .frames()
+                    .iter()
+                    .any(|frame| frame["id"] == "barrier")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            tx.send(RpcInput::Value(json!({"type": "abort", "id": "abort"})))
+                .await
+                .unwrap();
+            // Keep stdin open: settlement must be caused by abort, not EOF.
+            tx
+        };
+        let mut run = app.agent.prompt("initial").await.unwrap();
+        let state = json!({});
+        let commands = json!({});
+        let drive = drive_run(
+            &mut run,
+            &mut input,
+            &mut output,
+            &state,
+            &commands,
+            app.skills.clone(),
+            app.prompts.clone(),
+            app.config.workspace.clone(),
+            &mut translator,
+            &mut queue,
+            &mut settings,
+        );
+        let ((deferred, eof, outcome), _tx) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let (result, tx) = tokio::join!(drive, producer);
+                (result.unwrap(), tx)
+            })
+            .await
+            .expect("active controls must not stop Run polling or abort settlement");
+        provider.abort();
+        let _ = provider.await;
+        assert_eq!(outcome, HostRunOutcome::Aborted);
+        assert!(!eof);
+        assert!(deferred.is_empty());
+        let frames = capture.frames();
+        for index in 0..128 {
+            let responses: Vec<_> = frames
+                .iter()
+                .filter(|frame| frame["id"] == format!("control-{index}"))
+                .collect();
+            assert_eq!(responses.len(), 1);
+            assert_eq!(responses[0]["success"], true);
+        }
+        assert!(frames
+            .iter()
+            .any(|frame| frame["id"] == "abort" && frame["success"] == true));
+    }
+
+    #[test]
+    fn json_delta_schema_matches_compacted_rpc_without_prefix_snapshots() {
+        let (_directory, app) = crate::compaction::tests::app_for_estimate();
+        let rpc_capture = RpcCapture::default();
+        let json_capture = RpcCapture::default();
+        let mut rpc_output = rpc_capture.output(false);
+        let mut json_output = json_capture.output(true);
+        let mut rpc = EventTranslator::new(&app, user_value("initial"));
+        let mut json = EventTranslator::new(&app, user_value("initial"));
+        rpc.message_timestamp = 1;
+        json.message_timestamp = 1;
+        for (channel, text) in [
+            (OutputChannel::Reasoning, "理由"),
+            (OutputChannel::Text, "answer"),
+            (OutputChannel::Text, " tail"),
+        ] {
+            rpc.emit_delta(&mut rpc_output, channel, text.into())
+                .unwrap();
+            json.emit_delta(&mut json_output, channel, text.into())
+                .unwrap();
+        }
+        let final_message = rpc.partial_message();
+        rpc.emit_content_ends(&mut rpc_output, &final_message)
+            .unwrap();
+        json.emit_content_ends(&mut json_output, &final_message)
+            .unwrap();
+        let assistant = AssistantMessage {
+            model: app.model.spec.id.clone(),
+            protocol: app.model.spec.protocol,
+            content: vec![AssistantPart::ToolCall(octet_ai::ToolCall {
+                id: octet_ai::ToolCallId("call-1".into()),
+                name: "read".into(),
+                arguments_json: r#"{"path":"file"}"#.into(),
+                argument_error: None,
+            })],
+        };
+        let tool_message = assistant_value(
+            &assistant,
+            "fixture",
+            &Usage::default(),
+            None,
+            &StopReason::ToolUse,
+            Some(1),
+        );
+        rpc.emit_tool_call_updates(&mut rpc_output, &assistant, &tool_message)
+            .unwrap();
+        json.emit_tool_call_updates(&mut json_output, &assistant, &tool_message)
+            .unwrap();
+        for output in [&mut rpc_output, &mut json_output] {
+            output
+                .send(json!({"type": "message_end", "message": tool_message}))
+                .unwrap();
+        }
+        let rpc_frames = rpc_capture.frames();
+        for frame in rpc_frames
+            .iter()
+            .filter(|frame| frame["type"] == "message_update")
+        {
+            assert_eq!(frame["message"], frame["assistantMessageEvent"]["partial"]);
+            assert!(frame.get("message").is_some());
+        }
+        let expected: Vec<_> = rpc_frames
+            .into_iter()
+            .map(|mut frame| {
+                compact_json_event(&mut frame);
+                frame
+            })
+            .collect();
+        assert_eq!(json_capture.frames(), expected);
+        PARTIAL_SNAPSHOTS.with(|count| count.set(0));
+        json.partial_text = "retained prefix".repeat(100_000);
+        for _ in 0..128 {
+            json.emit_delta(&mut json_output, OutputChannel::Text, "x".into())
+                .unwrap();
+        }
+        PARTIAL_SNAPSHOTS.with(|count| {
+            assert_eq!(
+                count.get(),
+                0,
+                "JSON chunks must not build cumulative snapshots"
+            )
+        });
+    }
+
+    #[test]
+    fn rpc_progress_retention_is_bounded_utf8_with_honest_omission() {
+        let mut progress = RpcToolProgress::default();
+        progress.push_str(&"x".repeat(MAX_RPC_TOOL_PROGRESS_BYTES - 1));
+        progress.push_str("é");
+        progress.push_str("z");
+        assert_eq!(progress.text.len(), MAX_RPC_TOOL_PROGRESS_BYTES - 1);
+        assert_eq!(progress.omitted, 3);
+        for _ in 0..32 {
+            progress.push_str(&"界".repeat(32_000));
+        }
+        assert!(progress.text.len() <= MAX_RPC_TOOL_PROGRESS_BYTES);
+        assert_eq!(progress.omitted, 3 + 32 * 96_000);
+        assert!(progress
+            .snapshot()
+            .ends_with("[3072003 UTF-8 display bytes omitted from live progress]"));
+    }
+
+    #[test]
+    fn rpc_failed_admission_does_not_mutate_queue_or_settings() {
+        let capture = RpcCapture::default();
+        let mut output = capture.output(false);
+        let mut queue = QueueState::default();
+        let mut settings = RpcSettings::default();
+        for request in [
+            RpcControlRequest::Steer(rpc_test_queued("not admitted".into())),
+            RpcControlRequest::SteeringMode("all".into()),
+        ] {
+            RpcAdmission {
+                id: Some("refused".into()),
+                command: "test".into(),
+                request,
+                replay: false,
+            }
+            .complete(
+                Err(AgentError::RunEnded),
+                &mut queue,
+                &mut settings,
+                &mut output,
+            )
+            .unwrap();
+        }
+        assert_eq!(queue.len(), 0);
+        assert_eq!(settings.steering_mode, "one-at-a-time");
+        assert!(capture
+            .frames()
+            .iter()
+            .all(|frame| frame["success"] == false));
+    }
 
     #[tokio::test]
     async fn changelog_rpc_prompt_and_queue_reject_without_session_mutation() {

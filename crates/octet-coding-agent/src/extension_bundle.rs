@@ -255,7 +255,7 @@ fn validate_bundle_manifest(
     }
     if !octet_agent::extension_api_v03::bundle_supports_api_version(&manifest.api_version) {
         anyhow::bail!(
-            "installable extension bundles require a bundle-supported API (0.2 or 0.3); manifest declares {:?}",
+            "installable extension bundles require a bundle-supported API (0.2, 0.3, or 0.4); manifest declares {:?}",
             manifest.api_version
         );
     }
@@ -1003,7 +1003,7 @@ mod tests {
     #[test]
     fn bundle_version_policy_keeps_api_v02_installable() {
         let source = manifest("test-extension");
-        for version in ["0.2", "0.3"] {
+        for version in ["0.2", "0.3", "0.4"] {
             let manifest = source.replace(
                 &format!("api_version = \"{}\"", octet_agent::EXTENSION_API_VERSION),
                 &format!("api_version = \"{version}\""),

@@ -3222,94 +3222,143 @@ fn initial_build_records_configuration_provenance() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn unknown_api_03_last_initial_provider_model_preflights_restarts_and_reloads_with_fresh_routes(
 ) {
-    let node = std::process::Command::new("node")
-        .arg("--version")
-        .status()
-        .expect("node is required for the checked-in Pi bridge fixture");
-    assert!(
-        node.success(),
-        "node must be usable for the Pi bridge fixture"
-    );
-
     let directory = tempfile::tempdir().unwrap();
     let extension_root = directory.path().join("extensions");
-    let provider = extension_root.join("pi-provider");
+    let provider = extension_root.join("native-provider");
     std::fs::create_dir_all(&provider).unwrap();
-    let launcher = provider.join("launch-bridge.sh");
-    std::fs::write(&launcher, "#!/bin/sh\nexec node \"$@\"\n").unwrap();
+    // This retained provider lifecycle is independent of the removed Pi bridge.
+    std::fs::write(
+        provider.join("provider.py"),
+        r#"#!/usr/bin/env python3
+import json
+import sys
+import time
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def receive():
+    line = sys.stdin.readline()
+    assert line, "host closed stdin"
+    value = json.loads(line)
+    assert line.rstrip("\n") == canonical(value), line
+    return value
+
+
+def send(value):
+    sys.stdout.write(canonical(value) + "\n")
+    sys.stdout.flush()
+
+
+def provider(provider_id, model_id):
+    return {
+        "provider": {
+            "id": provider_id,
+            "label": provider_id + " provider",
+            "auth": {"kind": "none"},
+        },
+        "models": [{
+            "id": model_id,
+            "api_name": model_id,
+            "protocol": "openai_chat",
+            "context_window": 8192,
+            "max_output_tokens": 1024,
+            "capabilities": {
+                "tools": False,
+                "parallel_tool_calls": False,
+                "structured_output": False,
+                "reasoning": False,
+            },
+        }],
+    }
+
+
+def reverse_request(identifier, method, params):
+    send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+    response = receive()
+    assert response.get("id") == identifier and "result" in response, response
+    return response["result"]
+
+
+initialize = receive()
+assert initialize["method"] == "initialize", initialize
+contract = initialize["params"]["contract"]
+provider_capabilities = {"provider_catalog", "provider_stream", "provider_auth"}
+provider_methods = {
+    "providers/complete",
+    "providers/register",
+    "providers/update",
+    "providers/unregister",
+    "provider/stream",
+    "provider/event",
+    "provider/cancel",
+    "provider/auth/request",
+    "provider/auth/revoke",
+}
+selection = {
+    "schema": contract["schema"],
+    "encoding": contract["encoding"],
+    "capabilities": [
+        capability
+        for capability in contract["required_capabilities"] + contract["optional_capabilities"]
+        if capability in contract["required_capabilities"] or capability in provider_capabilities
+    ],
+    "methods": [
+        method
+        for method in contract["required_methods"] + contract["optional_methods"]
+        if method in contract["required_methods"] or method in provider_methods
+    ],
+    "limits": contract["limits"],
+}
+send({
+    "jsonrpc": "2.0",
+    "id": initialize["id"],
+    "result": {
+        "api_version": "0.3",
+        "tools": [],
+        "contract": selection,
+    },
+})
+reverse_request("first", "providers/register", provider("fixture-first-provider", "fixture-first-model"))
+time.sleep(0.075)
+reverse_request("second", "providers/register", provider("fixture-second-provider", "fixture-second-model"))
+send({"jsonrpc": "2.0", "method": "providers/complete", "params": {}})
+shutdown = receive()
+assert shutdown["method"] == "shutdown", shutdown
+send({"jsonrpc": "2.0", "id": shutdown["id"], "result": {"terminal": "shutdown"}})
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(provider.join("provider.py")).unwrap().permissions();
     use std::os::unix::fs::PermissionsExt as _;
-    let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
     permissions.set_mode(0o700);
-    std::fs::set_permissions(&launcher, permissions).unwrap();
-    let repository = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("coding-agent crate has a repository root")
-        .to_owned();
-    // The staged launcher must select a complete package: the bridge resolves
-    // its helpers under the host-supplied OCTET_EXTENSION_DIR, not beside an
-    // out-of-package script argument. Missing helpers fail before initialize.
-    for file in ["bridge.mjs", "semantic_ui.mjs", "editor_handoff.mjs"] {
-        std::fs::copy(
-            repository.join("extensions/octet-pi-compat").join(file),
-            provider.join(file),
-        )
-        .unwrap();
-    }
-    let bridge = provider.join("bridge.mjs").to_string_lossy().into_owned();
-    let provider_extension = repository
-        .join("extensions/octet-pi-compat/tests/fixtures/provider-extension.mjs")
-        .to_string_lossy()
-        .into_owned();
-    let fixtures = repository.join("extensions/octet-pi-compat/tests/fixtures");
-    let fake_pi = directory.path().join("fake-pi");
-    // Keep authored dependency sources outside node_modules in source archives.
-    for (source, destination) in [
-        ("fake-pi/package.json", "package.json"),
-        ("fake-pi/dist/index.js", "dist/index.js"),
-        (
-            "fake-pi-ai/package.json",
-            "node_modules/@earendil-works/pi-ai/package.json",
-        ),
-        (
-            "fake-pi-ai/index.js",
-            "node_modules/@earendil-works/pi-ai/index.js",
-        ),
-    ] {
-        let destination = fake_pi.join(destination);
-        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        std::fs::copy(fixtures.join(source), destination).unwrap();
-    }
-    let fake_pi = fake_pi.to_string_lossy().into_owned();
+    std::fs::set_permissions(provider.join("provider.py"), permissions).unwrap();
     std::fs::write(
         provider.join("extension.toml"),
-        format!(
-            r#"name = "pi-provider"
+        r#"name = "native-provider"
 version = "0.3.0"
 api_version = "0.3"
 
 [entrypoint]
-command = "launch-bridge.sh"
-args = [{bridge:?}, "--extension", {provider_extension:?}, "--pi-package", {fake_pi:?}, "--api-version", "0.3"]
-env = {{ OCTET_PI_FIXTURE_API_VERSION = "0.3", OCTET_PI_FIXTURE_PROVIDER_AUTH = "none", OCTET_PI_FIXTURE_PROVIDER_REGISTER_DELAY_MS = "75", OCTET_PI_FIXTURE_INITIAL_PROVIDER_COUNT = "2" }}
+command = "provider.py"
 
 [contributes]
-tools = ["pi"]
 providers = true
-"#
-        ),
+"#,
     )
     .unwrap();
 
-    // The fake Pi fixture queues this declaration after the first provider.
+    // The native fixture queues this declaration after the first provider.
     // Selecting it proves preflight waits for the owner's complete batch rather
     // than returning after the first reverse registration.
     let model_id = "fixture-second-provider/fixture-second-model";
     let mut config = config(directory.path(), Some(model_id));
     config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
     config.extension_paths = vec![extension_root];
-    config.enabled_extensions = vec!["pi-provider".into()];
-    config.invocation_trusted_extensions = vec!["pi-provider".into()];
+    config.enabled_extensions = vec!["native-provider".into()];
+    config.invocation_trusted_extensions = vec!["native-provider".into()];
 
     let boot = bootstrap(config).unwrap();
     boot.preflight_extension_providers().unwrap();
@@ -3335,7 +3384,7 @@ providers = true
     assert!(
         reloads
             .iter()
-            .any(|message| message.starts_with("reloaded pi-provider (generation ")),
+            .any(|message| message.starts_with("reloaded native-provider (generation ")),
         "provider reload failed: {reloads:?}"
     );
     app.synchronize_extension_provider_catalog();

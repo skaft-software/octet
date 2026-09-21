@@ -27,10 +27,11 @@ security, artifact signing and public-install verification remain required.
 Nothing on this page authorizes a live run.
 
 The live procedure below builds `octet-host` and tests **native-host protocol 1**,
-not extension API 0.3 or the graphical Serve transport. In particular, native
+not extension API 0.4 or the graphical Serve transport. In particular, native
 audio acceptance does not establish web attachment support: production Serve
-supports images and bounded prompt documents, not audio. The bundled extension
-runtime examples are not qualified API 0.3 authoring examples.
+supports images and bounded prompt documents, not audio. Current extension
+authoring and its distinct retained wires are documented in the
+[extension guide](../../extensions.md); none is qualified by native-host checks.
 
 <a id="supported-provider-matrix"></a>
 

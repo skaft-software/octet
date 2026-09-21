@@ -210,7 +210,7 @@ text docs/experimental/octet-serve/p0-p1-delivery.md
 text docs/experimental/octet-serve/provider-acceptance.md
 text docs/experimental/octet-serve/web-acceptance.md
 text docs/extensions.md
-text docs/extensions/API-0.3-REFERENCE.md
+text docs/extensions/API-0.4-REFERENCE.md
 text docs/extensions/HOOK-ENRICHMENT.md
 text docs/extensions/event-bus.md
 text docs/extensions/PROTOCOL-REFERENCE.md
@@ -240,6 +240,7 @@ text docs/parity/REVIEW-agent.md
 text docs/parity/REVIEW-ai.md
 text docs/parity/REVIEW-bootstrap.md
 text docs/parity/REVIEW-extensions.md
+text docs/parity/REVIEW-HANDOFF-w15.md
 text docs/parity/REVIEW-host-boundary.md
 text docs/parity/REVIEW-rendering.md
 text docs/parity/REVIEW-serve-regressions.md
@@ -300,7 +301,12 @@ text docs/qualification/theme-reload-full.md
 text docs/qualification/windows-distribution-current-candidate.md
 text docs/qualification/windows-process-current-candidate.md
 text docs/qualification/v0.7.4-recovery.md
+text docs/qualification/v0.8.0-reduction-rc.md
 text docs/reference/historical-installation.md
+text docs/reference/pi-compat/COMPATIBILITY.md
+text docs/reference/pi-compat/README.md
+text docs/reference/pi-compat/profiles/0.84.4.json
+text docs/reference/pi-compat/profiles/0.84.4.ledger.json
 text docs/release/npm-trusted-publishing.md
 text docs/releases/v0.1.0-alpha.md
 text docs/releases/v0.1.1-alpha.md
@@ -355,6 +361,7 @@ text docs/swarm-audit/EXECUTION-tui.md
 text docs/swarm-audit/EXECUTION-verify7.md
 text docs/swarm-audit/EXECUTION-wiring9.md
 text docs/swarm-audit/LEDGER-rows-api.md
+text docs/swarm-audit/LEDGER-2026-09-16.md
 text docs/swarm-audit/LEDGER-rows-audits.md
 text docs/swarm-audit/LEDGER-rows-computer.md
 text docs/swarm-audit/LEDGER-rows-later.md
@@ -423,16 +430,11 @@ text extensions/octet-import-pi/README.md
 text extensions/octet-mcp/README.md
 text extensions/octet-mcp/REFERENCE.md
 text extensions/octet-mcp/fixtures/tls/README.md
-text extensions/octet-pi-compat/COMPATIBILITY.md
-text extensions/octet-pi-compat/README.md
-text extensions/octet-pi-compat/profiles/0.84.4.json
-text extensions/octet-pi-compat/profiles/0.84.4.ledger.json
 text extensions/octet-serve/README.md
 text extensions/octet-subagents/README.md
 text extensions/octet-subagents/REFERENCE.md
 text extensions/octet-web-search/README.md
 text extensions/octet-web-search/REFERENCE.md
-text scripts/bench-pi-runtime.py
 text scripts/bench-systems.py
 text sdk/python/README.md
 text sdk/python/legacy-runtime.md

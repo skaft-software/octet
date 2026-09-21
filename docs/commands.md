@@ -29,7 +29,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/model [id]` | Open the model picker or select an ID. |
 | `/fast [on\|off\|status]` | Toggle/inspect capability-gated Responses priority; active changes wait for a safe boundary. |
 | `/thinking [level]` | Inspect/change [model-supported reasoning](providers.md#reasoning). |
-| `/theme [auto\|light\|dark]` | Choose the compiled terminal appearance or open its picker. |
+| `/theme [auto\|light\|dark]` | Choose the terminal appearance; without an argument, open the picker. |
 | `/answer [instruction]` | Stop tool use at the next safe boundary and answer from gathered evidence. |
 | `/compact [instructions]` | Request compaction at the next safe boundary; bounded custom instructions apply to local summaries, not native Responses compact. |
 | `/verbose [on\|off]` | Expand/collapse retained reasoning, compaction, and bounded tool evidence. |
@@ -56,6 +56,18 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/help [command]` | Local command help and self-documentation. |
 | `/exit` | Exit octet. |
 
+Automatic reloads do not add success summaries, startup banners, or debounce
+bookkeeping to the transcript. Host, worker-deferral, extension, provider-catalog,
+and watch-limit problems are reported on appearance or change, and again if a
+successful check clears them before they recur. Skipping a component does not
+clear its remembered problem. Resource/bootstrap and keybinding checks use the
+same component-scoped recurrence rule. Actual work-loss events are always reported.
+Explicit `/reload` commands still show current results.
+`/reload --dry-run` shows watch counts, timing, host policy, and possible
+interruptions without applying changes. Automatic passes never open confirmation
+pickers: a replacement binary or worker detach requiring consent is deferred to
+`/reload --force`. Explicit command consent checks remain in place.
+
 ### Local shell escapes
 
 A draft beginning with `!` is a **local** command, not model input: `!command`
@@ -69,7 +81,7 @@ call settles, so a call is never separated from its result). `--no-process` or
 The capture is bounded by `max_output_bytes` and `bash_timeout_secs`; it is not
 a persistent shell session.
 
-`/theme` changes only the compiled terminal appearance selector; it does not
+`/theme` selects a built-in Auto/Light/Dark appearance. This command does not
 load arbitrary theme files. [Theme status](themes.md).
 Additional extension commands depend on the enabled, independently trusted
 package; its README is authoritative for arguments.

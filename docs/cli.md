@@ -10,7 +10,7 @@ octet -p "Explain the code" --tools read,search
 This is the documented source surface, not generated help or release
 qualification. Uppercase metavariables are values you supply; square brackets
 mark optional arguments. Use `octet --help`, `octet sessions --help`,
-`octet migrate pi --help`, and `octet pi --help` for authoritative parser details.
+and `octet migrate pi --help` for authoritative parser details.
 The frozen docs are supplemented by a source inventory of static `octet` and
 `octet setup` declarations, not a captured `--help` dump. Unlisted nested-command
 choices, generated extension flags, and defaults are not inferred here.
@@ -20,7 +20,7 @@ choices, generated extension flags, and defaults are not inferred here.
 | Form | Contract |
 | --- | --- |
 | `--print` / `-p`, followed by prompt text | Final response on stdout; does not itself remove tool authority. |
-| `--mode rpc` | Pi-compatible JSONL automation frontend; conflicts with `--print`. Separate from native-host protocol 1 and extension API 0.3; [interface limits](terminal.md#choose-a-frontend). |
+| `--mode rpc` | Pi-compatible JSONL automation frontend; conflicts with `--print`. Separate from native-host protocol 1 and extension API 0.4; [interface limits](terminal.md#choose-a-frontend). |
 | `--plain` | Chronological frontend without cursor control. |
 | `--color VALUE` | Terminal color selection; documented example `auto`; capability fallbacks still apply. |
 | `--mouse auto\|terminal\|off\|app` | Default `auto`; only `app` captures mouse and selects the semantic viewport from startup. |
@@ -253,8 +253,6 @@ before use; this is not stable transport qualification.
 
 ```text
 octet migrate pi --dry-run [--json] [--pi-home PATH] [--project PATH] [--npm-root PATH]
-octet pi install PATH
-octet pi list
 ```
 
 Inventory reads bounded Pi settings/manifests and local/npm/git package locations,
@@ -265,9 +263,10 @@ only an explicit legacy `node_modules` search root.
 
 Separate explicit `octet migrate import pi` and `octet migrate restore` cover a
 bounded portable subset without copying credentials or modifying Pi sources.
-`pi install` links reviewed local sources inertly; the pinned bridge remains
-disabled and untrusted until activated. Exact import/restore, plan/preflight,
-compatibility profile, bounds, and gaps stay in [Pi migration](pi-migration.md).
+Pi extension execution and its former install/plan/preflight/publish commands are
+not supported. Inventory classifications are not runtime compatibility claims.
+Import/restore bounds stay in [Pi migration](pi-migration.md); [native provider
+support](providers.md) is independent of Pi extensions.
 
 ## Updates and legacy inputs
 

@@ -1,5 +1,10 @@
 # octet documentation
 
+octet is a fast, small coding host across cloud and local models. Extensions add
+tools and bounded host-shaped integrations; they do not promise Pi execution
+parity or an everything-as-extension platform. These source docs include the
+local 0.8.0 RC; [published installation](installation.md) remains separate.
+
 ## Getting started
 
 - [Installation](installation.md)
@@ -47,9 +52,7 @@
 
 - [Extension authoring](extensions.md)
 - [Extension event bus (bounded, host-mediated)](extensions/event-bus.md)
-- [Extension API 0.3 reference](extensions/API-0.3-REFERENCE.md)
-- [Additive Pi parity ledger](parity/README.md) and its
-  [extension-surface detail page](parity/extensions.md)
+- [Extension API 0.4 and retained wire reference](extensions/API-0.4-REFERENCE.md)
 - [Native embedding — host protocol 1](sdk.md)
 - [Examples and their compatibility status](../examples/README.md)
 - Architecture: [model clients](design/octet-ai.md), [agent runtime](design/octet-agent.md),

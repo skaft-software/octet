@@ -463,7 +463,7 @@ fn compose_instructions_at(config: &Config, global: &Path) -> anyhow::Result<Str
                     MAX_CONTEXT_TOTAL_BYTES
                 );
             }
-            crate::output::stderr_line(format!("context: loaded {}", path.display()));
+            crate::output::routine_diagnostic(format!("context: loaded {}", path.display()));
             context.push(format!(
                 "<project_instructions path=\"{}\">\n{}\n</project_instructions>",
                 xml_attribute(&prompt_path(path)),
@@ -1230,13 +1230,20 @@ impl FileSystemSkillRegistry {
             }
         }
         let descriptors = selected.into_values().collect::<Vec<_>>();
-        for diagnostic in &diagnostics {
-            crate::output::stderr_line(format!(
-                "resource: skill {}: {}",
-                diagnostic.path.display(),
-                diagnostic.message
-            ));
-        }
+        crate::output::checked_diagnostics(
+            crate::output::DiagnosticComponent::Resource("skills"),
+            diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    format!(
+                        "resource: skill {}: {}",
+                        diagnostic.path.display(),
+                        diagnostic.message
+                    )
+                })
+                .collect(),
+            true,
+        );
         Ok(Self {
             descriptors: Arc::from(descriptors),
             diagnostics: Arc::from(diagnostics),
@@ -1676,7 +1683,7 @@ Environment:
             "LICENSE",
             "extensions/octet-browse/REFERENCE.md",
             "extensions/octet-subagents/REFERENCE.md",
-            "extensions/octet-pi-compat/profiles/0.84.4.json",
+            "docs/reference/pi-compat/profiles/0.84.4.json",
             "crates/octet-ai/src/responses_ws.rs",
             "sdk/typescript/src/api_v03.ts",
             "sdk/typescript/src/api_v03.mjs",

@@ -32,6 +32,7 @@ struct MatchSegment {
     end: usize,
 }
 
+#[derive(Clone)]
 struct CorpusSpan {
     start: usize,
     end: usize,
@@ -39,7 +40,7 @@ struct CorpusSpan {
     linear: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SearchCache {
     source: Option<(u64, u16)>,
     corpus: String,
@@ -211,8 +212,9 @@ impl SearchCache {
 #[derive(Default)]
 struct TranscriptSearch {
     editor: TextEditor,
-    cache: SearchCache,
+    cache: std::sync::Arc<SearchCache>,
     current: usize,
+    pending_steps: isize,
     anchor_row: usize,
     select_from_anchor: bool,
     reveal: bool,
@@ -255,6 +257,49 @@ pub(super) struct TranscriptNavigation {
 }
 
 impl TranscriptNavigation {
+    /// Bounded presentation snapshot: the at-most-1-KiB query is copied, while
+    /// immutable corpus/match storage is shared with the renderer. No terminal
+    /// layout or history-sized copy happens under the input-owner lock.
+    pub(super) fn render_snapshot(&self) -> Self {
+        Self {
+            search: self.search.as_ref().map(|search| {
+                let mut editor = TextEditor::new();
+                editor.set_text(search.editor.text());
+                editor.set_cursor(search.editor.cursor());
+                TranscriptSearch {
+                    editor,
+                    cache: search.cache.clone(),
+                    current: search.current,
+                    pending_steps: search.pending_steps,
+                    anchor_row: search.anchor_row,
+                    select_from_anchor: search.select_from_anchor,
+                    reveal: search.reveal,
+                    hover: search.hover,
+                }
+            }),
+            mode: self.mode,
+            hover: self.hover,
+            drag_offset: self.drag_offset,
+            hide_at: self.hide_at,
+            frame: self.frame,
+        }
+    }
+
+    /// The caller must fence this by the complete shell input/render revision.
+    /// Draft/query edits never flow backwards from a completed renderer frame.
+    pub(super) fn apply_render_feedback(&mut self, rendered: &Self) {
+        self.frame = rendered.frame;
+        if let (Some(search), Some(result)) = (&mut self.search, &rendered.search) {
+            if search.editor.text() == result.editor.text() {
+                search.cache = result.cache.clone();
+                search.current = result.current;
+                search.pending_steps = result.pending_steps;
+                search.select_from_anchor = result.select_from_anchor;
+                search.reveal = result.reveal;
+            }
+        }
+    }
+
     pub(super) fn reset_session(&mut self) {
         *self = Self {
             mode: self.mode,
@@ -329,20 +374,32 @@ impl ShellState {
     }
 
     pub(super) fn refresh_transcript_search(&self, width: u16) {
-        if !self.transcript_search_active() {
+        if !self.transcript_search_active() || self.render_threaded {
             return;
         }
         let lines = self.rendered_transcript(width);
         let cache = self.transcript_cache.borrow();
         let mut nav = self.transcript_navigation.borrow_mut();
         let search = nav.search.as_mut().expect("active search");
-        search.cache.update(
-            &lines,
-            cache.generation,
-            cache.width.unwrap_or(width),
-            cache.last_update_start,
-            search.editor.text(),
-        );
+        let columns = cache.width.unwrap_or(width);
+        let query = search
+            .editor
+            .text()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if search.cache.source != Some((cache.generation, columns)) || search.cache.query != query {
+            // Snapshot and feedback share immutable search results. Only an
+            // actual content/query revision takes ownership of their cache.
+            std::sync::Arc::make_mut(&mut search.cache).update(
+                &lines,
+                cache.generation,
+                columns,
+                cache.last_update_start,
+                search.editor.text(),
+            );
+        }
         if std::mem::take(&mut search.select_from_anchor) {
             let index = search
                 .cache
@@ -357,6 +414,12 @@ impl ShellState {
         search.current = search
             .current
             .min(search.cache.matches.len().saturating_sub(1));
+        let count = search.cache.matches.len();
+        if count > 0 && search.pending_steps != 0 {
+            search.current = (search.current as isize)
+                .saturating_add(std::mem::take(&mut search.pending_steps))
+                .rem_euclid(count as isize) as usize;
+        }
     }
 
     /// Render only the active query owner's cursor. Buttons precede the result
@@ -622,16 +685,16 @@ impl InteractiveShell {
         }
         self.reset_input_interaction();
         let mut state = self.state.borrow_mut();
-        let chrome = shell_chrome(&state, state.size.0, Instant::now());
-        let length = state.rendered_transcript(state.size.0).len();
-        let scroll = resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
-        let anchor_row =
-            length
-                .saturating_sub(scroll)
-                .saturating_sub(transcript_viewport_capacity(
-                    chrome.transcript_rows,
-                    scroll > 0,
-                ));
+        let anchor_row = if state.render_threaded {
+            state
+                .retained_render_geometry()
+                .map_or(0, |geometry| geometry.visible_start)
+        } else {
+            let chrome = shell_chrome(&state, state.size.0, Instant::now());
+            let length = state.rendered_transcript(state.size.0).len();
+            let scroll = resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
+            length.saturating_sub(scroll).saturating_sub(transcript_viewport_capacity(chrome.transcript_rows, scroll > 0))
+        };
         state.application_viewport_requested = true;
         state.follow_tail = false;
         state.pending_selection_anchor = None;
@@ -680,6 +743,7 @@ impl InteractiveShell {
         }
         let changed = revision != search.editor.text_revision();
         if changed {
+            search.pending_steps = 0;
             search.anchor_row = search
                 .cache
                 .matches
@@ -700,6 +764,16 @@ impl InteractiveShell {
         state.refresh_transcript_search(state.size.0);
         let mut nav = state.transcript_navigation.borrow_mut();
         if let Some(search) = nav.search.as_mut() {
+            if state.render_threaded {
+                search.pending_steps =
+                    search
+                        .pending_steps
+                        .saturating_add(if forward { 1 } else { -1 });
+                search.reveal = true;
+                drop(nav);
+                state.follow_tail = false;
+                return;
+            }
             let length = search.cache.matches.len();
             if length > 0 {
                 search.current = if forward {
@@ -876,7 +950,9 @@ impl InteractiveShell {
         }
         let mut nav = state.transcript_navigation.borrow_mut();
         let frame = nav.frame.filter(|frame| {
-            frame.size == state.size && {
+            frame.size == state.size && if state.render_threaded {
+                state.retained_render_geometry().is_some_and(|geometry| geometry.generation == frame.generation)
+            } else {
                 let cache = state.transcript_cache.borrow();
                 !cache.dirty && frame.generation == cache.generation
             }

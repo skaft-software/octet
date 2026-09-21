@@ -19,7 +19,7 @@ octet migrate import pi --source /reviewed/pi/agent
 
 For a typed protocol client, start `./extension.sh`, negotiate the optional
 `migration.adapter.v1` capability and its two methods using the
-[API 0.3 contract](../../docs/extensions/API-0.3-REFERENCE.md), then send an
+[API 0.3 contract](../../docs/extensions/API-0.4-REFERENCE.md), then send an
 absolute `source_root` to `migration/detect`. Pass the returned `config_paths`
 to `migration/import`. The result is bounded non-secret models, skill content,
 local stdio MCP declarations and diagnostics, not destination writes.

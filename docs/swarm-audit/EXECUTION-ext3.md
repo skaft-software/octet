@@ -24,7 +24,7 @@
   `validate_theme_select_params/result`, `resolve_theme_selection`.
 - Regenerated (mechanical derivatives): crates/octet-agent/src/extension_api_v03.rs (mine),
   sdk/python/octet_extension/api_v03.py (mine), sdk/typescript/src/api_v03.{ts,d.ts,mjs},
-  protocol/fixtures/**, docs/extensions/API-0.3-REFERENCE.md.
+  protocol/fixtures/**, docs/extensions/API-0.4-REFERENCE.md.
 - Vendored SDK copies synced (required by extensions/*/tests/test_release.py sha assertions):
   extensions/octet-subagents/vendor/octet_extension/api_v03.py,
   extensions/octet-browse/vendor/octet_extension/api_v03.py (now identical, sha 98ca43bc…).

@@ -1,6 +1,18 @@
 # Pi 0.84.4 compatibility ledger
 
+> **Archived Pi bridge evidence — non-shipping, not a release gate.**
+> Preserved from the local pre-reduction 0.8.0 candidate. The Pi execution bridge
+> and `octet pi` command family are removed; commands, tests, “current” claims,
+> and release requirements below describe the historical implementation only.
+> Referenced bridge source/fixtures are no longer installed or executable here.
+> The JSON profiles are preserved byte-for-byte as inert evidence, not runtime
+> configuration. No receipt here qualifies the reduced RC or a published release.
+> Current [Pi inventory/import](../../pi-migration.md) and native providers are
+> separate from Pi extension execution.
+
 This is the human view of the canonical machine-readable [0.84.4 ledger](profiles/0.84.4.ledger.json). It targets the public API exported by `@earendil-works/pi-coding-agent@0.84.4` and `@earendil-works/pi-tui@0.84.4`; private `dist/` imports are outside the target.
+
+The *runtime* selector accepts `@earendil-works/pi-coding-agent` `>=0.84.4 <0.86.0` so a newer patch/minor in the same family is not refused by string equality. The *conformance profile* remains pinned to `0.84.4`: every row, fixture, and claim below is validated against that revision only, and no newer runtime has passed an integrity-verified campaign.
 
 ## Claim and status vocabulary
 
@@ -45,7 +57,7 @@ unsupported. Both API `0.3` provider mode and the private projection helper reje
 legacy UI admission. The helper describes only legacy `0.2` features, not a
 canonical `0.3` schema or capability grant.
 
-See the [candidate qualification](../../docs/qualification/pi-ui-current-candidate.md)
+See the [candidate qualification](../../qualification/pi-ui-current-candidate.md)
 for exact fixture coverage and outstanding generated-link/Rust-host/native gates.
 The deferred widget/editor statements in the baseline tables and plan-mode
 journeys below retain that no-optional-UI scope, not a full parity claim.
@@ -141,6 +153,58 @@ the pinned `0.84.4` profile and all baseline ledger statuses remain unchanged.
 The optional typed host `event_bus` offer is recognized but not selected or
 translated into arbitrary Pi cross-process event authority.
 
+## Wave-1 negotiated power-parity surfaces
+
+The Wave-1 rows in the tables below that are marked **passing** are driven by
+`tests/test_bridge_wave1.py` against the real bridge. Every one of them is
+gated by a negotiated API `0.2` feature — `composer`, `shortcuts`,
+`session_entries`, `message_injection`, `lifecycle_events_v2`, `active_tools` —
+and the API version remains `0.2`. A host that offers none of them still sees
+the declared refusal, which the same suite pins in the feature-absent tests, and
+the baseline public-surface probes keep reporting an explicit refusal.
+
+The fixtures prove the observable contract rather than a declaration: the
+extension-visible value round trip, the exact owner-scoped request envelope
+(`parent_request_id` plus only the contract fields plus an optional shaped
+`resource_owner`, never a fabricated owner; the settled-parent admission that
+field exists for is a host contract and is not yet bridge-observable), the host
+entry id returned to `pi.appendEntry`, `bounds_exceeded`/`invalid_request`
+local refusals before a frame is written, `not_foreground_owner` refusals from
+the host that stay typed at the Pi surface, and a single coalesced
+`message/updated` fan-out that opens no per-delta round trip. `shortcut/trigger`
+for a refused registration fails closed and never runs a handler.
+
+`ui_context.editor` stays a **safe divergence**: `ctx.ui.editor` is acknowledged
+through the negotiated `editor_handoff` surface (and refused without it), but
+the edited text stays host-owned and is never fabricated. Themes, focused
+remote components, replacement editors, session replacement, `ctx.reload`,
+and `ctx.shutdown` stay explicitly refused.
+
+## Wave-1 host application status
+
+Every Wave-1 row is now split by what the **shipped host** actually does, and the
+tables above reflect that split exactly:
+
+- **Applied end to end:** the composer trio (`composer/get|set|insert` against the
+  real frontend composer), `shortcut/register` plus `shortcut/trigger` dispatch
+  (host keymap entries, with reserved host bindings refused visibly),
+  `session/append_entry` and `session/set_label` (durable, extension-scoped,
+  never model-visible), `session/set_name`, `session/send_user_message` (queued
+  on the real turn path), `tools/set_active` (narrowing only, enforced at the
+  host-policed tool surface and at dispatch; unknown or policy-excluded names are
+  refused with no state change), and every `lifecycle_events_v2` notification the
+  coding agent produces — `message/started|updated|settled`,
+  `compaction/started|settled|failed`, `dialog/started|settled`,
+  `session/info_changed`, `model/selected`, `reasoning/selected`, `bash/user`.
+  These rows are **passing**.
+- **Still an explicit safe divergence:** `pi.sendMessage` for the `assistant` and
+  `system` roles. octet injects into the real turn path only for user messages;
+  fabricating an assistant or system turn would falsify transcript provenance and
+  usage accounting, so the role is refused with the typed `unsupported_feature`
+  rather than silently accepted. `flags` projection and the full editor/widget
+  transport stay deferred for the same reason: they are absent capabilities, not
+  hidden ones.
+
 ## Executable inventory
 
 `python3 extensions/octet-pi-compat/conformance.py --check --json` validates the 118 public-surface rows, all 78 official extension entries (69 files and 9 directories), all 33 Pi TUI audit rows, the six plan-mode journeys, fixture links, and the raw-byte profile integrity sidecar.
@@ -156,12 +220,12 @@ translated into arbitrary Pi cross-process event authority.
 | `project_trust` | safe divergence | `events:project_trust` | Event registration is diagnosed explicitly because project_trust is not emitted by the bounded bridge. |
 | `resources_discover` | safe divergence | `events:resources_discover` | Event registration is diagnosed explicitly because resources_discover is not emitted by the bounded bridge. |
 | `session_start` | safe divergence | `events:session_start` | Emitted from session/started with a host-derived reason. |
-| `session_info_changed` | safe divergence | `events:session_info_changed` | Event registration is diagnosed explicitly because session_info_changed is not emitted by the bounded bridge. |
+| `session_info_changed` | passing | `events:session_info_changed` | Emits the host `session/info_changed` notification as the Pi `session_info_changed` event when `lifecycle_events_v2` is negotiated. |
 | `session_before_switch` | safe divergence | `events:session_before_switch` | Event registration is diagnosed explicitly because session_before_switch is not emitted by the bounded bridge. |
 | `session_before_fork` | safe divergence | `events:session_before_fork` | Event registration is diagnosed explicitly because session_before_fork is not emitted by the bounded bridge. |
-| `session_before_compact` | safe divergence | `events:session_before_compact` | Event registration is diagnosed explicitly because session_before_compact is not emitted by the bounded bridge. |
-| `session_compact` | safe divergence | `events:session_compact` | Event registration is diagnosed explicitly because session_compact is not emitted by the bounded bridge. |
-| `session_compact_failed` | safe divergence | `events:session_compact_failed` | Event registration is diagnosed explicitly because session_compact_failed is not emitted by the bounded bridge. |
+| `session_before_compact` | passing | `events:session_before_compact` | Emits the host `compaction/started` notification as the Pi `session_before_compact` event when `lifecycle_events_v2` is negotiated. |
+| `session_compact` | passing | `events:session_compact` | Emits the host `compaction/settled` notification as the Pi `session_compact` event when `lifecycle_events_v2` is negotiated. |
+| `session_compact_failed` | passing | `events:session_compact_failed` | Emits the host `compaction/failed` notification as the Pi `session_compact_failed` event when `lifecycle_events_v2` is negotiated. |
 | `session_shutdown` | safe divergence | `events:session_shutdown` | Emitted once from settlement or shutdown with a synthetic reason. |
 | `session_before_tree` | safe divergence | `events:session_before_tree` | Event registration is diagnosed explicitly because session_before_tree is not emitted by the bounded bridge. |
 | `session_tree` | safe divergence | `events:session_tree` | Event registration is diagnosed explicitly because session_tree is not emitted by the bounded bridge. |
@@ -173,19 +237,19 @@ translated into arbitrary Pi cross-process event authority.
 | `agent_start` | safe divergence | `events:agent_start` | Emitted from turn/started with the bridge lifecycle payload. |
 | `agent_end` | safe divergence | `events:agent_end` | Emitted after response settlement with reduced messages. |
 | `agent_settled` | safe divergence | `events:agent_settled` | Emitted after the synthetic agent_end event. |
-| `ui_prompt_start` | safe divergence | `events:ui_prompt_start` | Event registration is diagnosed explicitly because ui_prompt_start is not emitted by the bounded bridge. |
-| `ui_prompt_end` | safe divergence | `events:ui_prompt_end` | Event registration is diagnosed explicitly because ui_prompt_end is not emitted by the bounded bridge. |
+| `ui_prompt_start` | safe divergence | `events:ui_prompt_start` | Emits the host `dialog/started` notification as the Pi `ui_prompt_start` event when `lifecycle_events_v2` is negotiated. The octet coding agent has no producer for this notification yet, so the event does not fire on this release. |
+| `ui_prompt_end` | safe divergence | `events:ui_prompt_end` | Emits the host `dialog/settled` notification as the Pi `ui_prompt_end` event when `lifecycle_events_v2` is negotiated. The octet coding agent has no producer for this notification yet, so the event does not fire on this release. |
 | `turn_start` | safe divergence | `events:turn_start` | Emitted with a synthetic turn index and timestamp. |
 | `turn_end` | safe divergence | `events:turn_end` | Emitted with reduced tool-result and message history. |
-| `message_start` | safe divergence | `events:message_start` | Event registration is diagnosed explicitly because message_start is not emitted by the bounded bridge. |
-| `message_update` | safe divergence | `events:message_update` | Event registration is diagnosed explicitly because message_update is not emitted by the bounded bridge. |
-| `message_end` | safe divergence | `events:message_end` | Event registration is diagnosed explicitly because message_end is not emitted by the bounded bridge. |
+| `message_start` | safe divergence | `events:message_start` | Emits the host `message/started` notification as the Pi `message_start` event when `lifecycle_events_v2` is negotiated (the host coalescer exists and is unit-tested). The octet coding agent has no producer for this notification yet, so the event does not fire on this release. |
+| `message_update` | safe divergence | `events:message_update` | Forwards one coalesced `message/updated` batch once, in host order, as the Pi `message_update` event; the bridge opens no per-delta round trip. the octet coding agent has no producer for this notification yet, so the event does not fire on this release. |
+| `message_end` | safe divergence | `events:message_end` | Emits the host `message/settled` notification as the Pi `message_end` event when `lifecycle_events_v2` is negotiated. The octet coding agent has no producer for this notification yet, so the event does not fire on this release. |
 | `tool_execution_start` | safe divergence | `events:tool_execution_start` | Emitted from host tool/started lifecycle. |
 | `tool_execution_update` | safe divergence | `events:tool_execution_update` | Pi partial results route through bounded octet progress. |
 | `tool_execution_end` | safe divergence | `events:tool_execution_end` | Emitted from host tool/settled lifecycle with reduced result details. |
-| `model_select` | safe divergence | `events:model_select` | Event registration is diagnosed explicitly because model_select is not emitted by the bounded bridge. |
-| `thinking_level_select` | safe divergence | `events:thinking_level_select` | Event registration is diagnosed explicitly because thinking_level_select is not emitted by the bounded bridge. |
-| `user_bash` | safe divergence | `events:user_bash` | Event registration is diagnosed explicitly because user_bash is not emitted by the bounded bridge. |
+| `model_select` | passing | `events:model_select` | Emits the host `model/selected` notification as the Pi `model_select` event when `lifecycle_events_v2` is negotiated. |
+| `thinking_level_select` | passing | `events:thinking_level_select` | Emits the host `reasoning/selected` notification as the Pi `thinking_level_select` event when `lifecycle_events_v2` is negotiated. |
+| `user_bash` | safe divergence | `events:user_bash` | Emits the host `bash/user` notification as the Pi `user_bash` event when `lifecycle_events_v2` is negotiated. The octet coding agent has no producer for this notification yet, so the event does not fire on this release. |
 | `input` | safe divergence | `events:input` | Event registration is diagnosed explicitly because input is not emitted by the bounded bridge. |
 | `tool_call` | safe divergence | `events:tool_call` | Blocks and Pi-tool argument preparation are preserved; unrepresentable mutation fails. |
 | `tool_result` | safe divergence | `events:tool_result` | Pi-tool content/details/error transforms are preserved and hook usage applies; executed usage/termination cross only under their negotiated result features, and an unnegotiated result field fails explicitly instead of being dropped. |
@@ -197,22 +261,22 @@ translated into arbitrary Pi cross-process event authority.
 | `on` | safe divergence | `extension_api:on` | Supported events are registered; unavailable events emit a startup diagnostic. |
 | `registerTool` | safe divergence | `extension_api:registerTool` | Initial tool registration and execution use the public Pi runner; promptSnippet/promptGuidelines are projected into the model-facing description, executionMode: "sequential" is enforced by a bridge execution lane, and a constrainedSampling requirement fails closed. |
 | `registerCommand` | safe divergence | `extension_api:registerCommand` | Initial commands become native octet commands when runtime_commands is negotiated. |
-| `registerShortcut` | safe divergence | `extension_api:registerShortcut` | Shortcut registration is diagnosed at startup; host key dispatch remains deferred. |
+| `registerShortcut` | passing | `extension_api:registerShortcut` | Registers one runtime shortcut through `shortcut/register` when `shortcuts` is negotiated; `shortcut/trigger` dispatches only an admitted registration. |
 | `registerFlag` | safe divergence | `extension_api:registerFlag` | Pi exposes flags only after loading extension code, while octet discovers trusted API `0.3` manifest flags before startup; bridge registration remains diagnosed. |
 | `getFlag` | safe divergence | `extension_api:getFlag` | Returns Pi runtime/default values; the API `0.2` bridge cannot receive octet's API `0.3` pre-start invocation values. |
 | `registerMessageRenderer` | safe divergence | `extension_api:registerMessageRenderer` | Remote component rendering is rejected explicitly. |
 | `registerMarkdownTransformer` | safe divergence | `extension_api:registerMarkdownTransformer` | Transcript mutation is rejected explicitly. |
 | `registerEntryRenderer` | safe divergence | `extension_api:registerEntryRenderer` | Remote component rendering is rejected explicitly. |
-| `sendMessage` | safe divergence | `extension_api:sendMessage` | Root-session delivery is rejected explicitly; host message projection is deferred. |
-| `sendUserMessage` | safe divergence | `extension_api:sendUserMessage` | Root-session delivery is rejected explicitly; host message projection is deferred. |
-| `appendEntry` | safe divergence | `extension_api:appendEntry` | Durable custom entries are rejected explicitly; session-state projection is deferred. |
-| `setSessionName` | safe divergence | `extension_api:setSessionName` | Session-name mutation is rejected explicitly; session-state projection is deferred. |
+| `sendMessage` | safe divergence | `extension_api:sendMessage` | Refuses `pi.sendMessage` for the `assistant` and `system` roles with a typed `unsupported_feature`: fabricating an assistant or system turn would falsify transcript provenance and usage accounting. The user-message path (`pi.sendUserMessage`) is live. |
+| `sendUserMessage` | passing | `extension_api:sendUserMessage` | Injects one bounded user message through `session/send_user_message` when `message_injection` is negotiated. |
+| `appendEntry` | passing | `extension_api:appendEntry` | Appends one bounded durable entry through `session/append_entry` when `session_entries` is negotiated and returns the host entry id. The entry is durable, extension-scoped, and never model-visible. |
+| `setSessionName` | passing | `extension_api:setSessionName` | Sets the bounded session name through `session/set_name` when `session_entries` is negotiated. |
 | `getSessionName` | safe divergence | `extension_api:getSessionName` | Returns the latest host session-name snapshot. |
-| `setLabel` | safe divergence | `extension_api:setLabel` | Entry-label mutation is rejected explicitly. |
+| `setLabel` | passing | `extension_api:setLabel` | Labels one durable entry through `session/set_label` when `session_entries` is negotiated. The label is durable and replaceable; an unknown entry id is refused with no state change. |
 | `exec` | safe divergence | `extension_api:exec` | Runs only inside the explicitly trusted Pi extension process, never through octet bash. |
 | `getActiveTools` | safe divergence | `extension_api:getActiveTools` | Reports bridge-local Pi tools rather than the full octet policy. |
 | `getAllTools` | safe divergence | `extension_api:getAllTools` | Reports bridge-local Pi tool information. |
-| `setActiveTools` | safe divergence | `extension_api:setActiveTools` | Active-tool policy mutation is rejected explicitly; host policy projection is deferred. |
+| `setActiveTools` | passing | `extension_api:setActiveTools` | Replaces the active tool set through `tools/set_active` when `active_tools` is negotiated. The change can only narrow the host-policed surface; unknown or policy-excluded names are refused with no state change. |
 | `getCommands` | safe divergence | `extension_api:getCommands` | Reports commands registered by the Pi runner. |
 | `setModel` | safe divergence | `extension_api:setModel` | Model mutation remains host-owned and errors explicitly. |
 | `getThinkingLevel` | safe divergence | `extension_api:getThinkingLevel` | Derives a read-only level from the host reasoning snapshot. |
@@ -241,10 +305,10 @@ translated into arbitrary Pi cross-process event authority.
 | `setHeader` | safe divergence | `ui_context:setHeader` | Remote header components are rejected explicitly. |
 | `setTitle` | safe divergence | `ui_context:setTitle` | Terminal title ownership stays in octet and errors explicitly. |
 | `custom` | safe divergence | `ui_context:custom` | Focused remote components are rejected explicitly. |
-| `pasteToEditor` | safe divergence | `ui_context:pasteToEditor` | Composer mutation is rejected explicitly. |
-| `setEditorText` | safe divergence | `ui_context:setEditorText` | Composer mutation is rejected explicitly. |
-| `getEditorText` | safe divergence | `ui_context:getEditorText` | Composer state is rejected explicitly. |
-| `editor` | safe divergence | `ui_context:editor` | Editor dialog transport is rejected explicitly; the host-owned editor handoff is not a Pi bridge surface. |
+| `pasteToEditor` | passing | `ui_context:pasteToEditor` | Inserts text at the host composer cursor through `composer/insert` when `composer` is negotiated; the text is bounded and owner-scoped. |
+| `setEditorText` | passing | `ui_context:setEditorText` | Replaces the host composer text through `composer/set` when `composer` is negotiated; the text is bounded and owner-scoped. |
+| `getEditorText` | passing | `ui_context:getEditorText` | Returns the host composer text through `composer/get` when `composer` is negotiated; the snapshot stays bounded and owner-scoped. |
+| `editor` | safe divergence | `ui_context:editor` | Acknowledges the host editor handoff by seeding the requested prefill and focusing the host editor through the negotiated `editor_handoff` surface, and stays explicitly refused without it; the edited text stays host-owned and is never returned. |
 | `addAutocompleteProvider` | safe divergence | `ui_context:addAutocompleteProvider` | Autocomplete mutation is rejected explicitly. |
 | `setEditorComponent` | safe divergence | `ui_context:setEditorComponent` | Remote editor components are rejected explicitly. |
 | `getEditorComponent` | safe divergence | `ui_context:getEditorComponent` | Remote editor components are rejected explicitly. |
@@ -263,7 +327,7 @@ translated into arbitrary Pi cross-process event authority.
 | `mode` | safe divergence | `context:mode` | Always Pi RPC mode rather than an interactive Pi TUI. |
 | `hasUI` | safe divergence | `context:hasUI` | True only for bridged dialogs, not arbitrary Pi components. |
 | `cwd` | safe divergence | `context:cwd` | Uses the canonical octet workspace. |
-| `sessionManager` | safe divergence | `context:sessionManager` | Session snapshots and mutation are host-owned and rejected explicitly. |
+| `sessionManager` | passing | `context:sessionManager` | Supplies a read-only foreground session snapshot (session id, host-assigned name, model, reasoning, bounded active skills, cwd) through `context/session_manager` when `session_context` is negotiated. A missing session or workspace is refused with a typed error rather than answered with a fabricated placeholder. |
 | `modelRegistry` | safe divergence | `context:modelRegistry` | Credential/model registry access is rejected explicitly. |
 | `model` | safe divergence | `context:model` | A Pi Model object is not reconstructed from a octet model id. |
 | `scopedModels` | safe divergence | `context:scopedModels` | Returns an empty read-only snapshot. |
@@ -272,11 +336,11 @@ translated into arbitrary Pi cross-process event authority.
 | `isProjectTrusted` | safe divergence | `context:isProjectTrusted` | Conservatively returns false because octet trust is not projected. |
 | `signal` | safe divergence | `context:signal` | Binds to the active octet request cancellation signal. |
 | `abort` | safe divergence | `context:abort` | Cancels the active bridged request. |
-| `hasPendingMessages` | safe divergence | `context:hasPendingMessages` | Queue inspection is rejected explicitly. |
+| `hasPendingMessages` | passing | `context:hasPendingMessages` | Reports the number of queued follow-up messages the foreground shell has not yet admitted, observed from the exact queue `session/send_user_message` feeds, through `context/pending_messages` when `session_context` is negotiated. |
 | `shutdown` | safe divergence | `context:shutdown` | Extension code cannot terminate the host and errors explicitly. |
 | `getContextUsage` | safe divergence | `context:getContextUsage` | Returns unknown without a bounded host usage snapshot. |
 | `compact` | safe divergence | `context:compact` | Compaction is host-owned and errors explicitly. |
-| `getSystemPrompt` | safe divergence | `context:getSystemPrompt` | Exact effective prompt disclosure is rejected explicitly. |
+| `getSystemPrompt` | passing | `context:getSystemPrompt` | Discloses the exact composed system prompt through `context/system_prompt` when `system_prompt_read` is negotiated AND the extension manifest declares `capabilities.system_prompt = true`; the feature is not offered to any other extension and an undeclared echo fails negotiation. An over-bound prompt is refused as `bounds_exceeded` rather than truncated. |
 | `getSystemPromptOptions` | safe divergence | `context:getSystemPromptOptions` | Returns only canonical cwd. |
 | `waitForIdle` | safe divergence | `context:waitForIdle` | Returns at an observed idle boundary; a busy owner errors because the host idle-wait service is unavailable. |
 | `newSession` | safe divergence | `context:newSession` | Session replacement is rejected explicitly. |
@@ -421,14 +485,14 @@ integrity-verified unchanged-source full gate.
 | --- | --- | --- |
 | plan-toggle-and-policy | `plan-mode:toggle-policy` | Deferred: active-tool policy and widget mutation reject explicitly; status contributions remain available. |
 | plan-interception | `plan-mode:interception` | Supported: bounded tool-call interception routes through the declared mutation hook. |
-| plan-persistence-resume | `plan-mode:persistence-resume` | Deferred: durable custom entries and session snapshots remain host-owned and reject explicitly. |
+| plan-persistence-resume | `plan-mode:persistence-resume` | Supported: durable extension entries and entry labels are stored behind `session_entries`; session snapshots and session/tree replacement stay host-owned and reject explicitly. |
 | plan-dialogs-and-widgets | `plan-mode:dialogs-widgets` | Deferred: select/input dialogs remain available, while editor and widget transport reject explicitly. |
-| plan-messaging | `plan-mode:messaging` | Deferred: root-session message delivery and session-name mutation reject explicitly. |
-| plan-commands-flags-shortcuts | `plan-mode:commands-flags-shortcuts` | Deferred: native command catalog remains available; flag projection and shortcut dispatch reject explicitly. |
+| plan-messaging | `plan-mode:messaging` | Supported: session naming and user-message injection behind `session_entries`/`message_injection`; assistant/system `sendMessage` and replacement-session delivery reject explicitly. |
+| plan-commands-flags-shortcuts | `plan-mode:commands-flags-shortcuts` | Supported: native command catalog plus runtime shortcut registration and `shortcut/trigger` dispatch behind `shortcuts`; flag projection stays deferred and rejects explicitly. |
 
-The current bridge does not consume `host.pi_compat`, emit `pi/*` child methods,
-or accept `shortcut/trigger`. Shortcut routing, CLI/flag projection, session
-control, root-session messaging, widget/editor transport, and the remaining Pi
+The current bridge does not consume `host.pi_compat` or emit `pi/*` child methods.
+CLI/flag projection, session/tree replacement, assistant/system message
+injection, widget/editor transport, and the remaining Pi
 bridge surfaces are deliberately deferred. Outside the explicit API `0.3`
 provider mode, provider/OAuth registration remains an explicit safe divergence;
 even in that mode callbacks, credential payloads, endpoint/header/transport

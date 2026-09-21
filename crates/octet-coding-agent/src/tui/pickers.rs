@@ -31,10 +31,10 @@ const SUBAGENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from
 const SUBAGENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 #[derive(Default)]
-struct SecretInputBuffer(Vec<u8>);
+pub(crate) struct SecretInputBuffer(Vec<u8>);
 
 impl SecretInputBuffer {
-    fn push(&mut self, character: char) {
+    pub(crate) fn push(&mut self, character: char) {
         let mut encoded = [0; 4];
         let bytes = character.encode_utf8(&mut encoded).as_bytes();
         if self.0.len().saturating_add(bytes.len()) <= MAX_SECRET_INPUT_BYTES {
@@ -43,7 +43,7 @@ impl SecretInputBuffer {
         encoded.fill(0);
     }
 
-    fn extend_paste(&mut self, pasted: &str) {
+    pub(crate) fn extend_paste(&mut self, pasted: &str) {
         let pasted = pasted.trim_end_matches(['\r', '\n']);
         let remaining = MAX_SECRET_INPUT_BYTES.saturating_sub(self.0.len());
         let mut end = pasted.len().min(remaining);
@@ -53,7 +53,7 @@ impl SecretInputBuffer {
         self.0.extend_from_slice(&pasted.as_bytes()[..end]);
     }
 
-    fn backspace(&mut self) {
+    pub(crate) fn backspace(&mut self) {
         let Some((start, _)) = std::str::from_utf8(&self.0)
             .ok()
             .and_then(|text| text.char_indices().last())
@@ -64,7 +64,7 @@ impl SecretInputBuffer {
         self.0.truncate(start);
     }
 
-    fn take(&mut self) -> Vec<u8> {
+    pub(crate) fn take(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.0)
     }
 }
@@ -540,7 +540,7 @@ where
 {
     shell.open_panel(Panel::ReadOnlyDocument {
         title: title.into(),
-        text: crate::tui::view::sanitize_for_terminal(&text),
+        text: crate::tui::view::sanitize_for_terminal(&text).into(),
         styled: false,
         scroll_from_bottom: 0,
     });
@@ -602,7 +602,7 @@ where
 {
     shell.open_panel(Panel::ReadOnlyDocument {
         title: title.into(),
-        text,
+        text: text.into(),
         styled: true,
         scroll_from_bottom: 0,
     });
@@ -1374,11 +1374,11 @@ fn model_provider_heading(catalog: &ModelCatalog, model: &octet_ai::ModelSpec) -
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ModelPickerPresentation {
-    ids: Vec<ModelId>,
-    providers: Vec<String>,
-    labels: Vec<String>,
-    descriptions: Vec<Option<String>>,
+pub(crate) struct ModelPickerPresentation {
+    pub(crate) ids: Vec<ModelId>,
+    pub(crate) providers: Vec<String>,
+    pub(crate) labels: Vec<String>,
+    pub(crate) descriptions: Vec<Option<String>>,
 }
 
 fn pad_visible_right(value: &str, width: usize) -> String {
@@ -1395,7 +1395,7 @@ fn pad_visible_left(value: &str, width: usize) -> String {
     )
 }
 
-fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPresentation {
+pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPresentation {
     let mut rows = catalog
         .models()
         .map(|model| {

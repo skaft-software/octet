@@ -116,8 +116,8 @@ if not isinstance(manifest["version"], str) or re.fullmatch(
     manifest["version"],
 ) is None:
     raise SystemExit("extension.toml version is not semantic versioning")
-if manifest["api_version"] not in ("0.2", "0.3"):
-    raise SystemExit("release bundles must declare api_version = '0.2' or '0.3'")
+if manifest["api_version"] not in ("0.2", "0.3", "0.4"):
+    raise SystemExit("release bundles must declare api_version = '0.2', '0.3', or '0.4'")
 expected_octet = f"={octet_version}"
 if manifest["requires_octet"] != expected_octet:
     raise SystemExit(

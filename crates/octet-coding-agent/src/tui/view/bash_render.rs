@@ -58,6 +58,7 @@ struct CompactBashOutput {
     lines: Vec<String>,
     capture_truncations: Vec<BashCaptureTruncation>,
     panel_elided: bool,
+    spill_notices: Vec<&'static str>,
 }
 
 fn bash_capture_footer(line: &str) -> Option<(&'static str, &str)> {
@@ -107,6 +108,11 @@ fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
     let mut panel_elided = false;
     let mut protocol_error = false;
     let mut expect_stream_header = false;
+    let framed_result = result.lines().next().is_some_and(|line| {
+        (line.starts_with("exit=") && line.contains("duration=")) || line.starts_with("error ")
+    });
+    let mut capture_metadata = false;
+    let mut spill_notices = Vec::new();
     for (line_index, raw) in result.lines().enumerate() {
         let line = raw.trim_end();
         let trimmed = line.trim();
@@ -120,13 +126,41 @@ fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
             continue;
         }
         if expect_stream_header && is_bash_stream_header(trimmed) {
+            capture_metadata = false;
             protocol_error = false;
             expect_stream_header = false;
             continue;
         }
         if bash_capture_footer(trimmed).is_some() || is_bash_complete_footer(trimmed) {
+            capture_metadata = framed_result;
             expect_stream_header = true;
             continue;
+        }
+        // Spill locations are capture-envelope metadata, not evidence. Limit
+        // this filtering to the footer region: a command may legitimately print
+        // `full_output_path=...` or `spill_error=true` as ordinary output.
+        if capture_metadata {
+            if trimmed.starts_with("full_output_path=")
+                || trimmed.starts_with("partial_output_path=")
+            {
+                continue;
+            }
+            let notice = if trimmed.starts_with("spill_expired=true") {
+                Some("spill output expired; unavailable to expand")
+            } else if trimmed.starts_with("spill_truncated=true") {
+                Some("spill byte limit reached; remaining bytes unavailable to expand")
+            } else if trimmed.starts_with("spill_error=true") {
+                Some("spill capture failed; full output unavailable to expand")
+            } else {
+                None
+            };
+            if let Some(notice) = notice {
+                spill_notices.push(notice);
+                continue;
+            }
+            if !trimmed.is_empty() {
+                capture_metadata = false;
+            }
         }
         if trimmed.is_empty()
             || trimmed == "(no output)"
@@ -149,6 +183,7 @@ fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
         lines: content,
         capture_truncations,
         panel_elided,
+        spill_notices,
     }
 }
 
@@ -173,7 +208,11 @@ fn bash_content_gutter() -> usize {
 }
 
 fn capture_loss_details(compact: &CompactBashOutput) -> Vec<String> {
-    let mut details = Vec::new();
+    let mut details: Vec<String> = compact
+        .spill_notices
+        .iter()
+        .map(|notice| (*notice).to_owned())
+        .collect();
     if compact.panel_elided {
         details.push("older live output was elided; unavailable to expand".to_owned());
     }
@@ -324,6 +363,35 @@ mod tests {
     use crate::presentation::summarize_tool;
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use crate::tui::theme::{test_theme, test_theme_with};
+
+    #[test]
+    fn bash_output_excludes_capture_paths_but_keeps_literal_output_and_loss_notices() {
+        let output = "exit=0 duration=1ms\nstdout: 999 bytes, showing first 2 and last 1 lines\nfull_output_path=ordinary-output\nspill_error=true ordinary-output\nretained tail\ntruncated_stdout=head:2 tail:1 omitted_bytes:123\nfull_output_path=/private/capture.log\npartial_output_path=/private/partial.log\nspill_truncated=true (per-stream byte limit reached)\nspill_error=true (full output could not be retained)\nstderr: 999 bytes, showing first 1 and last 1 lines\nretained stderr\ntruncated_stderr=head:1 tail:1 omitted_bytes:456\nspill_expired=true (owner retention evicted this output)";
+        let panel = ToolPanel::new(
+            ToolCallId("projection".into()),
+            "bash".into(),
+            "{}".into(),
+            summarize_tool("bash", &serde_json::json!({"command":"printf retained"})),
+            output.into(),
+            true,
+            false,
+            None,
+            None,
+        );
+        let theme = test_theme();
+        let text = plain_rows(&render_compact_bash_output(&panel, &theme, 160, true, "")).join("\n");
+        assert!(text.contains("full_output_path=ordinary-output"));
+        assert!(text.contains("spill_error=true ordinary-output"));
+        assert!(text.contains("retained tail"));
+        assert!(text.contains("retained stderr"));
+        assert!(!text.contains("/private/"));
+        assert!(!text.contains("spill_truncated=true"));
+        assert!(text.contains("spill byte limit reached"));
+        assert!(text.contains("spill capture failed"));
+        assert!(text.contains("spill output expired"));
+        assert!(text.contains("123 bytes"));
+        assert!(text.contains("456 bytes"));
+    }
 
     fn plain_rows(rows: &[String]) -> Vec<String> {
         rows.iter()

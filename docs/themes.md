@@ -1,11 +1,9 @@
 # octet themes
 
-Theme-file customization is disabled. octet uses one compiled default theme
-whose model-family accents adapt focused controls and startup atmosphere without
-changing layout or semantic status colours.
+octet's compiled default theme retains model-family accents,
+terminal-background adaptation, and semantic status colours.
 
-On the first capable interactive TUI launch, octet offers three built-in
-terminal appearances:
+The built-in theme picker offers:
 
 - `Auto (recommended)` detects the terminal background through reliable
   environment or terminal capability signals and uses a readable neutral
@@ -14,9 +12,9 @@ terminal appearances:
   contrast profile and override detection.
 
 Moving through the picker previews each appearance without saving it. Confirming
-persists `theme = "auto"`, `theme = "light"`, or `theme = "dark"` in the user
-config without replacing unrelated settings. Use `/theme` later to revisit it;
-`/theme auto`, `/theme light`, and `/theme dark` are also accepted. Cancelling
+persists `theme = "auto"`, `theme = "light"`, or `theme = "dark"` in the
+user config without replacing unrelated settings.
+Use `/theme` later to revisit it. Cancelling
 `/theme` restores the previous appearance; dismissing first-run onboarding uses
 Auto. Existing configured installations do not reopen onboarding, and
 print/plain/RPC, redirected, and `TERM=dumb` sessions never open it.
@@ -26,7 +24,7 @@ names, `--theme-dir`, and arbitrary theme files are accepted only through the
 bounded file loader: a name that resolves through normal resource discovery
 (global `~/.octet/themes`, a trusted project `.octet/themes`, or `--theme-dir`)
 is loaded at startup when named by `--theme`/`OCTET_THEME`, while the
-interactive `/theme` command still accepts only `auto`, `light`, and `dark`.
+interactive `/theme` command accepts only `auto`, `light`, and `dark`.
 There is no theme marketplace, and an unrecognized or malformed name falls back
 to the compiled default. An explicit
 `OCTET_COLOR_SCHEME` is also treated as an existing terminal-appearance choice,
@@ -35,8 +33,8 @@ onboarding.
 
 ## Activity status contrast
 
-`Thinking` and `Working` use model-family foreground colours only; the shimmer never
-paints a character background. On known Dark/Light TrueColor or ANSI256 profiles,
+`Thinking` and `Working` use model-family foreground colours only; the shimmer
+never paints a character background. On known Dark/Light TrueColor or ANSI256 profiles,
 the default physical shimmer uses a raised-cosine light field: it has a short
 leading edge, a longer trailing tail, and a small central glint. Dark labels move
 from about `0.55` toward `0.99` luminance; light labels move from about `0.0085`

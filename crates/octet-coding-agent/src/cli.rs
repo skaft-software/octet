@@ -20,7 +20,6 @@ use crate::config::{
 };
 use crate::extension_package::ExtensionCommand;
 use crate::migrate::MigrationCommand;
-use crate::pi::PiCommand;
 use crate::session_commands::SessionCommand;
 
 pub(crate) mod catalog_publish;
@@ -109,11 +108,6 @@ pub enum TopLevelCommand {
     Migrate {
         #[command(subcommand)]
         command: MigrationCommand,
-    },
-    /// Link existing Pi extensions through octet's compatibility host.
-    Pi {
-        #[command(subcommand)]
-        command: PiCommand,
     },
     /// Check for, and install, a newer octet release.
     Update {
@@ -238,9 +232,8 @@ pub struct Cli {
     /// Workspace root override.
     #[arg(long)]
     pub workspace: Option<PathBuf>,
-    /// Terminal appearance selector: auto, light, or dark. Arbitrary theme
-    /// names remain compatibility inputs and never load filesystem themes.
-    #[arg(long, value_name = "NAME", hide = true)]
+    /// Terminal theme: auto, light, or dark.
+    #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,
     /// Legacy theme directory option; the current runtime does not load custom themes.
     #[arg(long = "theme-dir", value_name = "DIR", hide = true)]
@@ -2164,7 +2157,6 @@ pub fn build_config(cli: Cli, cwd: &Path) -> anyhow::Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pi::PiBridgeApiVersion;
 
     fn cwd() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -2489,23 +2481,23 @@ mod tests {
         let os = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
 
         assert!(!invocation_has_top_level_subcommand(
-            &os(&["octet", "--fixture-label", "pi"]),
+            &os(&["octet", "--fixture-label", "migrate"]),
             &registered,
         ));
         assert!(invocation_has_top_level_subcommand(
-            &os(&["octet", "--fixture-enabled", "pi", "--help"]),
+            &os(&["octet", "--fixture-enabled", "migrate", "--help"]),
             &registered,
         ));
         assert!(invocation_has_top_level_subcommand(
-            &os(&["octet", "--fixture-count", "-7", "pi"]),
+            &os(&["octet", "--fixture-count", "-7", "migrate"]),
             &registered,
         ));
         assert!(invocation_has_top_level_subcommand(
-            &os(&["octet", "--workspace", "/tmp", "pi", "list"]),
+            &os(&["octet", "--workspace", "/tmp", "migrate", "pi"]),
             &registered,
         ));
         assert!(invocation_has_top_level_subcommand(
-            &os(&["octet", "--unknown-extension-flag", "pi", "--help"]),
+            &os(&["octet", "--unknown-extension-flag", "migrate", "--help"]),
             &registered,
         ));
     }
@@ -2520,8 +2512,8 @@ mod tests {
             "octet",
             "--workspace",
             "/tmp",
+            "migrate",
             "pi",
-            "list",
         ])));
         assert!(!uses_runtime_extension_flag_parser(&os(&[
             "octet",
@@ -2530,19 +2522,21 @@ mod tests {
         assert!(uses_runtime_extension_flag_parser(&os(&[
             "octet",
             "--extension-flag",
-            "pi",
+            "migrate",
         ])));
         assert!(!uses_runtime_extension_flag_parser(&os(&[
             "octet",
             "--extension-flag",
-            "pi",
+            "migrate",
             "--login",
             "codex",
         ])));
         assert!(uses_runtime_extension_flag_parser(&os(&[
             "octet", "--", "--login"
         ])));
-        assert!(!uses_runtime_extension_flag_parser(&os(&["octet", "pi"])));
+        assert!(!uses_runtime_extension_flag_parser(&os(&[
+            "octet", "migrate"
+        ])));
     }
 
     #[test]
@@ -3684,17 +3678,25 @@ max_output_bytes = 4096
         )
         .unwrap();
 
-        persist_theme_to_path("light", &path).unwrap();
+        for choice in ["light", "dark", "auto"] {
+            persist_theme_to_path(choice, &path).unwrap();
 
-        let content = std::fs::read_to_string(&path).unwrap();
-        let parsed: toml::Value = toml::from_str(&content).unwrap();
-        assert_eq!(parsed["theme"].as_str(), Some("light"));
-        assert_eq!(parsed["model"].as_str(), Some("gpt-4o-mini"));
-        assert_eq!(
-            parsed["compaction"]["keep_recent_tokens"].as_integer(),
-            Some(8)
-        );
-        assert!(content.contains("# keep this comment"), "{content}");
+            let content = std::fs::read_to_string(&path).unwrap();
+            let parsed: toml::Value = toml::from_str(&content).unwrap();
+            assert_eq!(parsed["theme"].as_str(), Some(choice));
+            assert_eq!(parsed["model"].as_str(), Some("gpt-4o-mini"));
+            assert_eq!(
+                parsed["compaction"]["keep_recent_tokens"].as_integer(),
+                Some(8)
+            );
+            assert!(content.contains("# keep this comment"), "{content}");
+        }
+    }
+
+    #[test]
+    fn removed_cutline_theme_cannot_be_persisted() {
+        let error = persist_theme_choice("compact").unwrap_err();
+        assert!(error.to_string().contains("use auto, light, or dark"));
     }
 
     #[test]
@@ -3976,100 +3978,54 @@ max_output_bytes = 4096
     }
 
     #[test]
-    fn pi_install_parses_without_a_prompt() {
-        let cli = Cli::try_parse_from([
-            "octet",
-            "pi",
-            "install",
-            "./private-extension.ts",
-            "--pi-home",
-            "./pi/agent",
-            "--pi-package",
-            "./node_modules/@earendil-works/pi-coding-agent",
-        ])
-        .unwrap();
-        assert!(cli.message.is_none());
+    fn pi_compatibility_command_is_not_exposed_and_bridge_options_are_rejected() {
+        let mut command = Cli::command();
+        assert!(command.find_subcommand("pi").is_none());
+        assert!(command.find_subcommand("migrate").is_some());
+        let help = command.render_long_help().to_string();
+        assert!(!help
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some("pi")));
+        for arguments in [
+            vec![
+                "octet",
+                "pi",
+                "install",
+                "./extension.ts",
+                "--pi-package",
+                "./pi",
+            ],
+            vec!["octet", "pi", "list", "--extension-root", "./extensions"],
+            vec!["octet", "pi", "publish", "--plan", "./plan.json"],
+        ] {
+            let error = Cli::try_parse_from(arguments).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
+
+    #[test]
+    fn pi_is_an_ordinary_prompt_not_a_compatibility_command() {
+        // Removing a subcommand does not reserve or reject ordinary prompt text.
+        for arguments in [vec!["octet", "pi"], vec!["octet", "pi", "list"]] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(cli.command.is_none());
+            assert_eq!(cli.message.as_deref(), Some("pi"));
+        }
+    }
+
+    #[test]
+    fn pi_import_remains_available_without_the_compatibility_bridge() {
+        let cli = Cli::try_parse_from(["octet", "migrate", "import", "pi", "--dry-run"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(TopLevelCommand::Pi {
-                command: PiCommand::Install {
-                    pi_home: Some(_),
-                    pi_package: Some(_),
-                    ..
-                }
+            Some(TopLevelCommand::Migrate {
+                command: MigrationCommand::Import {
+                    command: crate::migrate::MigrationImportCommand::Pi { dry_run: true, .. },
+                },
             })
         ));
-    }
-
-    #[test]
-    fn pi_install_selects_api_03_only_when_explicit() {
-        let default =
-            Cli::try_parse_from(["octet", "pi", "install", "./private-extension.ts"]).unwrap();
-        let explicit = Cli::try_parse_from([
-            "octet",
-            "pi",
-            "install",
-            "./private-extension.ts",
-            "--api-version",
-            "0.3",
-        ])
-        .unwrap();
-        let Some(TopLevelCommand::Pi {
-            command:
-                PiCommand::Install {
-                    api_version: default_api_version,
-                    ..
-                },
-        }) = default.command
-        else {
-            panic!("expected default pi install command");
-        };
-        let Some(TopLevelCommand::Pi {
-            command:
-                PiCommand::Install {
-                    api_version: explicit_api_version,
-                    ..
-                },
-        }) = explicit.command
-        else {
-            panic!("expected explicit pi install command");
-        };
-        assert_eq!(default_api_version, PiBridgeApiVersion::V02);
-        assert_eq!(explicit_api_version, PiBridgeApiVersion::V03);
-    }
-
-    #[test]
-    fn pi_install_preserves_explicit_aggregate_source_order() {
-        let cli = Cli::try_parse_from([
-            "octet",
-            "pi",
-            "install",
-            "./first.ts",
-            "--with",
-            "./second.ts",
-            "--with",
-            "./third-package",
-        ])
-        .unwrap();
-        let Some(TopLevelCommand::Pi {
-            command:
-                PiCommand::Install {
-                    source,
-                    additional_sources,
-                    ..
-                },
-        }) = cli.command
-        else {
-            panic!("expected pi install command");
-        };
-        assert_eq!(source, PathBuf::from("./first.ts"));
-        assert_eq!(
-            additional_sources,
-            [
-                PathBuf::from("./second.ts"),
-                PathBuf::from("./third-package"),
-            ]
-        );
+        let cli = Cli::try_parse_from(["octet", "explain pi migration"]).unwrap();
+        assert_eq!(cli.message.as_deref(), Some("explain pi migration"));
     }
 
     #[test]

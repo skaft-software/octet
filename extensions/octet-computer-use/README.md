@@ -5,7 +5,7 @@ mocked-native macOS composition**. This is not an installed/native-qualified
 computer-use product. Standalone startup remains inert.
 
 Read [CONTRACT.md](CONTRACT.md) before embedding. The exact extension wire is
-[API 0.3](../../docs/extensions/API-0.3-REFERENCE.md); capability ownership and
+[API 0.3](../../docs/extensions/API-0.4-REFERENCE.md); capability ownership and
 process trust remain governed by [extensions](../../docs/extensions.md) and
 [security](../../SECURITY.md).
 

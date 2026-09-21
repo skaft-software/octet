@@ -77,7 +77,7 @@ def initialize_request(*, agent_sessions: bool = True):
         1,
         "initialize",
         {
-            "api_version": "0.2",
+            "api_version": "0.4",
             "workspace": "/workspace",
             "contributes": {
                 "tools": [
@@ -97,7 +97,7 @@ def initialize_request(*, agent_sessions: bool = True):
                 "active_skills": [],
             },
             "protocol": {
-                "version": "0.2",
+                "version": "0.4",
                 "required_features": required,
                 "optional_features": optional,
                 "limits": {"max_concurrent_requests": 8},

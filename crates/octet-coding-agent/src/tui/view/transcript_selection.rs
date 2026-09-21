@@ -40,11 +40,8 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
             sanitize_for_terminal(&compaction.label),
             sexy_tui_rs::parse_markdown(&compaction.summary).plain_text()
         ),
-        TranscriptBlock::Assistant(markdown) => {
-            sexy_tui_rs::parse_markdown(&markdown.text).plain_text()
-        }
-        TranscriptBlock::Reasoning(reasoning) => {
-            sexy_tui_rs::parse_markdown(reasoning.markdown.raw_text()).plain_text()
+        TranscriptBlock::Assistant(markdown) | TranscriptBlock::Reasoning(markdown) => {
+            markdown.copy_text()
         }
         TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some() => {
             sanitize_for_terminal(&subagent_activity_copy_text(
@@ -301,10 +298,20 @@ pub(super) fn visual_line_for_transcript_position(
     state: &ShellState,
     position: TranscriptPosition,
 ) -> Option<usize> {
-    let cache = state.transcript_cache.borrow();
-    let start = *cache.block_starts.get(position.block)?;
-    let total_rows = *cache.block_lengths.get(position.block)?;
-    let geometry = *cache.block_geometries.get(position.block)?;
+    let (start, total_rows, geometry) = if state.render_threaded {
+        let block = state
+            .retained_render_geometry()?
+            .blocks
+            .iter()
+            .find(|block| block.index == position.block)?;
+        if state.transcript_commit_ids.get(block.index) != Some(&block.id) {
+            return None;
+        }
+        (block.start, block.rows, block.surface)
+    } else {
+        let cache = state.transcript_cache.borrow();
+        (*cache.block_starts.get(position.block)?, *cache.block_lengths.get(position.block)?, *cache.block_geometries.get(position.block)?)
+    };
     let content_rows = total_rows
         .saturating_sub(geometry.transition_rows)
         .saturating_sub(geometry.leading_rows)
@@ -312,8 +319,6 @@ pub(super) fn visual_line_for_transcript_position(
     if content_rows == 0 {
         return None;
     }
-    drop(cache);
-
     let block = state.transcript.get(position.block)?;
     let copy_text = block_copy_text(block);
     let content_row = copy_offset_to_visual_row(
@@ -337,21 +342,20 @@ pub(super) fn selection_position_for_visual_cell(
     visual_line: usize,
     col: u16,
 ) -> Option<TranscriptPosition> {
-    let cache = state.transcript_cache.borrow();
-    let block = cache
-        .block_starts
-        .partition_point(|start| *start <= visual_line)
-        .checked_sub(1)?;
-    let local_row = visual_line.checked_sub(cache.block_starts[block])?;
-    let total_rows = *cache.block_lengths.get(block)?;
-    let geometry = *cache.block_geometries.get(block)?;
+    let (block, local_row, total_rows, geometry) = if state.render_threaded {
+        let block = state.retained_render_geometry()?.blocks.iter().find(|block| visual_line >= block.start && visual_line < block.start + block.rows)?;
+        if state.transcript_commit_ids.get(block.index) != Some(&block.id) { return None; }
+        (block.index, visual_line - block.start, block.rows, block.surface)
+    } else {
+        let cache = state.transcript_cache.borrow();
+        let block = cache.block_starts.partition_point(|start| *start <= visual_line).checked_sub(1)?;
+        (block, visual_line.checked_sub(cache.block_starts[block])?, *cache.block_lengths.get(block)?, *cache.block_geometries.get(block)?)
+    };
     if local_row >= total_rows {
         return None;
     }
     let content_row = geometry.content_row(local_row, total_rows)?;
     let content_col = geometry.content_col(col);
-    drop(cache);
-
     let transcript_block = state.transcript.get(block)?;
     let text = block_copy_text(transcript_block);
     let offset = visual_cell_to_copy_offset(

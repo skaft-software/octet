@@ -1,4 +1,12 @@
-# Octet — complete remaining worklist
+# Octet — selected gates and historical backlog snapshot
+
+> **Scope update:** [ROADMAP.md](ROADMAP.md) owns current selection. This board
+> export is retained as historical inventory, not an instruction to implement
+> every row. Pi-extension parity/execution (#190, #257–260, #272, #397) and
+> platform-wide extension expansion are superseded, non-release-gate plans.
+> Their issue titles, statuses, and evidence below are historical; no remote
+> issue or board state has been changed. Existing bounded integrations and
+> protocol/SDK conformance remain live. 0.8.0 is a local RC, not published.
 
 Generated from `ROADMAP.md`, all GitHub issues (310 total, 142 open), and
 **Project 5 “Octet engineering backlog”** (157 items: 141 open, 16 done).
@@ -22,11 +30,14 @@ Phase 3 (acceptance audits, 20) → Phase 4 (later, 58) → epics (17 umbrellas)
 ## Phase 0 — release gates (Queue: Now, 9)
 
 Roadmap “Now”: verify install/TUI/`/model`/resumable sessions (#354), dependable media (#379),
-reconnect + responsive API waits + stable Browse focus (#350, #346, #377), runnable API 0.3
-authoring path (#253). Most items are verification/evidence on released builds, not rewrites.
+reconnect + responsive API waits + stable Browse focus (#350, #346, #377), and a bounded
+API 0.4 authoring smoke (#253): discover/enable a local tool, negotiate, call, cancel,
+and shut down. Keep generated-contract, SDK, and conformance checks; complete Pi
+parity and every optional protocol surface are not acceptance criteria. Qualify the
+selected candidate honestly; a source test is not released-install evidence.
 
 - [ ] **[#193](https://github.com/skaft-software/octet/issues/193) Docs: qualify current install, media, extension and roadmap journeys** — Evidence & launch · Acceptance audit · documentation
-- [ ] **[#253](https://github.com/skaft-software/octet/issues/253) Extensions: qualify the API 0.3 contract and a runnable authoring example** — Daily driver · Acceptance audit · enhancement
+- [ ] **[#253](https://github.com/skaft-software/octet/issues/253) Extensions: qualify a bounded API 0.4 tool-authoring smoke (local scope; historical issue title may differ)** — Daily driver · Acceptance audit · enhancement
 - [ ] **[#346](https://github.com/skaft-software/octet/issues/346) Stability: qualify responsive TUI input and redraw during API waits** — Daily driver · Acceptance audit · effort M · Independent review · bug
 - [ ] **[#350](https://github.com/skaft-software/octet/issues/350) Stability: qualify Codex reconnect recovery on released builds** — Daily driver · Acceptance audit · effort M · Security review · bug
 - [ ] **[#354](https://github.com/skaft-software/octet/issues/354) Next release: qualify core workflows, media and extension authoring** — Daily driver · Accepted / Next · effort Epic · Human decision · type/epic
@@ -55,8 +66,10 @@ authoring path (#253). Most items are verification/evidence on released builds, 
 
 ## Phase 2 — accepted but blocked on prerequisites (Queue: Blocked, 25)
 
-Accepted scope queued behind epics: Pi provider runtime (#2), Pi compatibility (#190),
+Historical queue dependencies: Pi provider runtime (#2), Pi compatibility (#190),
 computer use (#345), TUI image pipeline (#153), extension runtime (#190/#163).
+These are not current release dependencies; native providers and bounded extension
+integrations do not depend on restoring the Pi bridge.
 
 ### 2a. Pi provider implementations + compatibility (6)
 
@@ -67,7 +80,7 @@ computer use (#345), TUI image pipeline (#153), extension runtime (#190/#163).
 - [ ] **[#252](https://github.com/skaft-software/octet/issues/252) provider: close the remaining pinned Pi provider compatibility inventory** — Pi & runtime · Accepted / Next · enhancement
 - [ ] **[#271](https://github.com/skaft-software/octet/issues/271) extensions: broker provider OAuth and credentials through host-owned policy** — Pi & runtime · Accepted / Next · enhancement
 
-### 2b. Pi compatibility (5)
+### 2b. Pi compatibility (5) — superseded, not selected
 
 - [ ] **[#258](https://github.com/skaft-software/octet/issues/258) pi-compat: pass plan mode, all 78 examples, and the complete public-surface ledger** — Pi & runtime · Accepted / Next · enhancement
 - [ ] **[#259](https://github.com/skaft-software/octet/issues/259) pi-compat: add bounded semantic UI contributions and renderer transport** — Pi & runtime · Accepted / Next · enhancement
@@ -262,8 +275,8 @@ Members of each epic sit in the phases above by their own queue (e.g. #190 → 2
 ---
 
 ## Not promised (roadmap §Not promised / §Later) — out of scope unless selected
-- Unchanged Pi extensions **without** compat layers, computer-use parity, benchmark superiority in the next release.
-- Needs separate selection: Pi compatibility, themes, Serve, companions, voice, computer use.
+- Pi extension execution with or without a bridge, parity completion, computer-use parity, or benchmark superiority.
+- Further themes, companions, voice, and computer use need separate selection. Existing Serve, Browse, MCP, web-search, and subagents remain bounded supported integrations.
 - Epic #414 is explicit: user-authored themes are unscheduled possibilities, not a v0.8 commitment.
 
 ## Done — do not re-implement (16 board-Done items + 168 closed issues)
@@ -276,7 +289,7 @@ All 168 closed issues are complete — treat closed as done.
 
 ---
 
-## Fastest vibe-code path
+## Historical execution order — superseded, not release instructions
 1. **Phase 0** — evidence/qualification + real code bugs: #429 (Enter invokes selected slash command — keymap fix), #428 (web-search shared deadline / cooperative I/O — known unshipped fix direction), #379 (media attachments), #377 (browse focus/flicker).
 2. **#430** doc fix — minutes.
 3. **Phase 1** — #179 already in progress; then TUI cluster #349 → #392 → #393 → #381, #276 image foundation (unblocks 2d), #424 provider self-description, #313 config diagnostics, #383/#378 browser/desktop policy groundwork.

@@ -47,11 +47,27 @@ pub(super) fn max_scroll_from_bottom(state: &ShellState, width: u16) -> usize {
     if state.overlay.is_some() {
         return 0;
     }
+    if state.render_threaded {
+        // A stale frame cannot supply a clamp. Keep the requested keyboard
+        // delta pending; the renderer clamps it against the next exact layout.
+        return state
+            .retained_render_geometry()
+            .map_or(usize::MAX, |geometry| {
+                geometry
+                    .total_rows
+                    .saturating_sub(geometry.viewport_rows.max(1))
+            });
+    }
     let chrome = shell_chrome(state, width, Instant::now());
     max_scroll_for_available(transcript_lines(state, width).len(), chrome.transcript_rows)
 }
 
 pub(super) fn transcript_viewport_capacity_for_state(state: &ShellState, width: u16) -> usize {
+    if state.render_threaded {
+        return state
+            .retained_render_geometry()
+            .map_or(0, |geometry| geometry.viewport_rows);
+    }
     if state.overlay.is_some() {
         return 0;
     }
@@ -366,6 +382,37 @@ fn capture_viewport_anchor(state: &ShellState, start: usize, end: usize) {
 /// growth above the reader from growth below it.
 pub(super) fn retain_viewport_anchor(state: &ShellState) {
     if state.follow_tail || state.overlay.is_some() {
+        return;
+    }
+    if state.render_threaded {
+        if state.viewport_anchor.get().is_some() {
+            return;
+        }
+        let Some(geometry) = state.retained_render_geometry() else {
+            return;
+        };
+        let row = geometry
+            .total_rows
+            .saturating_sub(state.scroll_from_bottom.get())
+            .saturating_sub(geometry.viewport_rows);
+        if let Some(block) = geometry
+            .blocks
+            .iter()
+            .find(|block| row >= block.start && row < block.start + block.rows)
+        {
+            state.viewport_anchor.set(Some(ViewportAnchor {
+                commit_id: block.id,
+                block_hint: block.index,
+                text_offset: 0,
+                trailing_affinity: false,
+                visual_width: state.size.0,
+                semantic_row_correction: 0,
+                fallback_block_row: row - block.start,
+                fallback_visual_row: row,
+                desired_screen_row: 0,
+                semantic: false,
+            }));
+        }
         return;
     }
     let chrome = shell_chrome(state, state.size.0, Instant::now());

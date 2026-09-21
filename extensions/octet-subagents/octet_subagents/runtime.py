@@ -506,7 +506,7 @@ def _error_result(operation: str, error: Exception) -> Dict[str, Any]:
 
 def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
     extension = Extension(
-        api_version="0.2",
+        api_version="0.4",
         max_concurrent_requests=4,
         max_pending_requests=16,
         supported_features=(

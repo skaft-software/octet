@@ -1,15 +1,29 @@
 # Executable extensions
 
-Write new extensions against **API `0.3`**. An extension is a trusted local
-process in any language that can implement the canonical JSON-RPC contract.
-The [generated API reference](extensions/API-0.3-REFERENCE.md) is the exact
-contract for fields, bounds, errors, methods, and availability.
+Extensions add tools and bounded, host-shaped integrations to octet's fast,
+small coding host. They are not a promise to run unchanged Pi extensions or to
+replace every host subsystem. Browse, MCP, web search, and host-owned subagents
+remain supported integrations with their package-specific limits; Serve remains
+a separate application.
+
+Write new process extensions against **API `0.4`**, the current working-tree
+version. It uses the feature-negotiated JSON-RPC wire retained from API `0.2`.
+API `0.3` remains supported on its distinct canonical wire; API `0.1` stays
+frozen. Exact manifest selection, host offers, and frontend bindings determine
+what an extension can actually use—not the API number alone.
+
+The [generated reference](extensions/API-0.4-REFERENCE.md) retains version policy
+and the live canonical schema/models. The [feature-negotiated wire reference](extensions/PROTOCOL-REFERENCE.md)
+retains commands, hooks, status, presentation, dynamic tools, artifacts,
+`agent_sessions`, approvals, and other existing low-level services. Those
+contracts and their safety/conformance tests remain live; their breadth is not
+an obligation to expose every service in the coding product.
 
 A manifest can declare options without executing extension code. This is a
 **manifest fragment, not a runnable extension**:
 
 ```toml
-api_version = "0.3"
+api_version = "0.4"
 
 [contributes]
 flags = [
@@ -20,25 +34,31 @@ flags = [
 ```
 
 The host resolves these options before startup and supplies their values in
-[`initialize.params.flag_values`](extensions/API-0.3-REFERENCE.md#initializerequest).
-See [CLI flags](#api-03-cli-flags) for validation and parsing rules.
+`initialize.params.flag_values` (the shared generated
+[`InitializeFlagValue`](extensions/API-0.4-REFERENCE.md#initializeflagvalue) shape).
+See [CLI flags](#api-04-cli-flags) for validation and parsing rules.
 
-## Qualified API `0.3` example
+## Bounded authoring path
 
-The [minimal ordinary-process example](../examples/extensions/api-v03-minimal/README.md)
-is the qualified current-API quickstart. It starts from a clean octet `0.7.6`
-installation, uses only Python 3's standard library, performs exact API/schema
-negotiation, exposes and handles a real `echo` tool, and exercises cancellation
-and graceful shutdown. Its README records prerequisites, trust and enablement,
-expected output, and process-level verification. Use it as a wire reference for
-other languages; it is intentionally not a general-purpose SDK runtime.
+Use the [Python API `0.4` process recipe](../sdk/python/README.md#minimal-api-04-tool)
+for a local tool. The SDK handles framing, negotiated scheduling, cancellation,
+and shutdown; implement only the contributions you need. This is a source recipe
+for the local **0.8.0 RC**, not a published SDK or installed-release claim.
 
-The retained [Python `Extension` runtime](../sdk/python/README.md) is an API
-`0.1`/`0.2` adapter. Generated `octet_extension.api_v03` types are contract
-bindings, not a complete process runtime. The [TypeScript example](../sdk/typescript/README.md)
-demonstrates contract negotiation, not a running extension. The existing
-[extension examples](../examples/README.md#legacy-extension-examples) remain
-legacy references; do not retag their manifests.
+The retained [ordinary-process API `0.3` example](../examples/extensions/api-v03-minimal/README.md)
+uses only Python's standard library and exercises canonical negotiation, an
+`echo` tool, cancellation, and shutdown. Its manifest intentionally pins octet
+`0.7.6`; do not retag it as `0.4` or claim that it installs unchanged on this RC.
+Generated `octet_extension.api_v03` and [TypeScript bindings](../sdk/typescript/README.md)
+remain live contract implementations, not complete process runtimes.
+[Earlier examples](../examples/README.md#legacy-extension-examples) retain their
+exact API versions.
+
+The selected #253 release gate is a working bounded authoring smoke: discovery
+and explicit enablement, exact negotiation, one real tool call, cooperative
+cancellation, and clean shutdown. Keep the existing generated, SDK, and
+conformance checks. Full Pi parity and every optional protocol service are not
+part of this gate.
 
 ## Kernel boundary
 
@@ -110,20 +130,21 @@ for config examples, bounded manifest reads, diagnostics, and resolver APIs.
 
 ## Manifest
 
-Select `api_version = "0.3"` exactly; an extension's own `version` does not select
-the wire. octet 0.7.6 source uses `octet_version`, `requires_octet`, `OCTET_*`, and
+Select `api_version = "0.4"` exactly; an extension's own `version` does not select
+the wire. Current source uses `octet_version`, `requires_octet`, `OCTET_*`, and
 `octet_extension`, with no aliases for earlier first-party wire names or imports.
-The first-party source distribution version is **0.7.6**, independent of API
-`0.3`. Catalog installation requires version-matched published assets; see
+The local host is **0.8.0 RC**; SDK distribution metadata remains **0.7.6**.
+Neither selects an extension API or establishes publication. Catalog installation
+requires version-matched published assets; see
 [installation](installation.md) and the [release record](releases/v0.7.6.md).
 
 Declare the entrypoint and tools for the implementation you actually supply.
-Return the complete tool catalog and a valid selected contract from
-[`initialize`](extensions/API-0.3-REFERENCE.md#initializeresponse). Do not copy
-legacy command, context, presentation, or broker declarations into a new API
-`0.3` implementation and assume the old methods exist. Existing implementations
-have a separate [legacy manifest reference](extensions/legacy-authoring.md#manifest),
-not a current-API template.
+Return the complete tool/command catalogs and the selected protocol features from
+[`initialize`](extensions/PROTOCOL-REFERENCE.md#11-initialize). Only select features
+actually offered by the host. The canonical API `0.3` `contract` negotiation is
+different; do not copy it into a `0.4` process. The [retained manifest
+reference](extensions/legacy-authoring.md#manifest) preserves earlier examples
+and shared host operations, not a license to retag their implementations.
 
 `requires_octet` is optional for an unpackaged local extension, enforced when
 present, and mandatory as an exact running-version requirement for an installed
@@ -133,7 +154,9 @@ code. Full-access trust is a runtime policy, not an installer side effect. See
 Published-catalog examples remain publication-gated; use a reviewed source or
 local archive when matching publication has not been verified.
 
-### API `0.3` CLI flags
+<a id="api-03-cli-flags"></a>
+
+### API `0.4` CLI flags
 
 Each `[contributes].flags` declaration needs a globally visible `name`, an exact
 `type`, and a typed `default`. Types are exactly `boolean`, `string`, and
@@ -151,16 +174,27 @@ Each `[contributes].flags` declaration needs a globally visible `name`, an exact
   extensions. Collisions with built-in options, another selected extension, or
   a generated boolean inverse reject the invocation before startup.
 - Flags appear in `octet --help` for ordinary no-subcommand startup.
-  Authentication, package/migration/Pi, and other early-exit paths retain their
+  Authentication, package/migration, and other early-exit paths retain their
   static parsing.
 - All values, including omitted defaults, are sent as a sorted `{name, value}`
   list in `initialize.params.flag_values`.
 
-Legacy manifests cannot declare these flags and keep their exact initialization
-wires. Pi compatibility links cannot turn runtime `registerFlag` calls into this
-pre-start manifest surface; see [Pi migration](pi-migration.md).
+API `0.1` manifests cannot declare these flags. Supported later manifests retain
+their selected initialization wires; declaration does not execute third-party
+code or imply Pi `registerFlag` compatibility.
 
 ## Transport contract
+
+API `0.4` uses UTF-8 JSON-RPC, one compact object per line, with stdout reserved
+for protocol and bounded diagnostics on stderr. Initialization negotiates a
+`protocol` feature list and concurrency bound, not the canonical `contract`
+object. See the [wire reference](extensions/PROTOCOL-REFERENCE.md) for exact
+messages, feature dependencies, request/owner correlation, and limits. Dynamic
+tools used by MCP, `agent_sessions` used by subagents, and command/status/
+presentation surfaces remain available subject to their existing host gates.
+A documented approval or secret broker is not automatically offered by a host.
+
+### Retained canonical API `0.3` wire
 
 Use UTF-8 canonical JSON followed by exactly one LF, with stdout reserved for
 protocol and bounded diagnostics on stderr. API `0.3` framing is stricter than
@@ -173,22 +207,23 @@ the offered limits atomically for both directions after initialization.
 Implement against these exact reference sections rather than adapting a legacy
 JSON example:
 
-- [Canonical envelopes](extensions/API-0.3-REFERENCE.md#canonical-framing-and-json-rpc-envelopes)
-  and [all bounds](extensions/API-0.3-REFERENCE.md#bounds).
-- [Host offer](extensions/API-0.3-REFERENCE.md#contractoffer),
-  [selection](extensions/API-0.3-REFERENCE.md#contractselection), and
-  [initialization fields](extensions/API-0.3-REFERENCE.md#initializerequest).
-- [Capabilities](extensions/API-0.3-REFERENCE.md#capabilities),
-  [method directions and terminal semantics](extensions/API-0.3-REFERENCE.md#methods-and-terminal-semantics),
-  and [exact error code/message pairs](extensions/API-0.3-REFERENCE.md#errors).
-- [Tool arguments](extensions/API-0.3-REFERENCE.md#toolcallparams),
-  [results](extensions/API-0.3-REFERENCE.md#toolcallresult),
-  [cancellation](extensions/API-0.3-REFERENCE.md#cancelrequestparams), and
-  [shutdown](extensions/API-0.3-REFERENCE.md#shutdownparams).
+- [Canonical envelopes](extensions/API-0.4-REFERENCE.md#canonical-framing-and-json-rpc-envelopes)
+  and [all bounds](extensions/API-0.4-REFERENCE.md#bounds).
+- [Host offer](extensions/API-0.4-REFERENCE.md#contractoffer),
+  [selection](extensions/API-0.4-REFERENCE.md#contractselection), and
+  [initialization fields](extensions/API-0.4-REFERENCE.md#initializerequest).
+- [Capabilities](extensions/API-0.4-REFERENCE.md#capabilities),
+  [method directions and terminal semantics](extensions/API-0.4-REFERENCE.md#methods-and-terminal-semantics),
+  and [exact error code/message pairs](extensions/API-0.4-REFERENCE.md#errors).
+- [Tool arguments](extensions/API-0.4-REFERENCE.md#toolcallparams),
+  [results](extensions/API-0.4-REFERENCE.md#toolcallresult),
+  [cancellation](extensions/API-0.4-REFERENCE.md#cancelrequestparams), and
+  [shutdown](extensions/API-0.4-REFERENCE.md#shutdownparams).
 
-Only foundation methods/capabilities may be negotiated, and optional services
+On this canonical wire, only foundation methods/capabilities may be negotiated, and optional services
 may be omitted when the host cannot safely bind them. `dynamic_tools`,
-`tools/register`, `tools/unregister`, and `context/collect` are deferred.
+`tools/register`, `tools/unregister`, and `context/collect` are deferred **on
+API `0.3`**, not removed from the feature-negotiated API `0.2`/`0.4` wire.
 `ContentPart` has foundation text; image and audio variants are deferred.
 Legacy artifact, progress, command, presentation, secret, and child-session
 methods are not implicit API `0.3` capabilities.
@@ -212,7 +247,7 @@ its legacy observational methods are not API `0.3` methods.
 
 ### Provider-retry observations and advice
 
-The Rust `ProviderRetryKind` and retained API `0.2` provider-retry hook wire
+The Rust `ProviderRetryKind` and retained API `0.2`/`0.4` provider-retry hook wire
 add `InterruptedInference` / `interrupted_inference` and `WaitingForNetwork` /
 `waiting_for_network`. `max_attempts` is optional (`Option<usize>` in the Rust
 hook context, JSON `null` for sustained pre-send waiting), not a fabricated
@@ -250,14 +285,14 @@ api_version = "0.3"
 hooks = ["session_start", "session_end"]
 ```
 
-API `0.3` rejects a partial pair or legacy request-path hooks alongside it.
+Under canonical API `0.3` the hooks are declared as a pair; a partial pair is rejected.
 Initialization must select both optional `lifecycle_events` and `hook/run`, or
 neither; a declaration/selection mismatch is rejected. These hooks are distinct
 from the optional `session_lifecycle` service.
 
 One `hook/run` with `hook: "session_start"` is delivered when the coding product
 activates its durable session owner, and one with `hook: "session_end"` when that
-binding settles. [`SessionBinding`](extensions/API-0.3-REFERENCE.md#sessionbinding)
+binding settles. [`SessionBinding`](extensions/API-0.4-REFERENCE.md#sessionbinding)
 contains only an opaque SHA-256-derived owner key, a host-created extension
 instance fence, and process generation. `SessionEnd` adds a generated outcome,
 `shutdown`, `reload`, `crash`, or `cancelled` reason, and duration in milliseconds.
@@ -279,23 +314,23 @@ interactive product configures a safely bound active-session driver.
 `session/create` and `session/fork` return durable IDs without switching;
 `session/switch` accepts an existing workspace session ID; `session/reload`
 rereads the active durable session at an idle boundary. See
-[the generated request models](extensions/API-0.3-REFERENCE.md#sessioncreateparams).
+[the generated request models](extensions/API-0.4-REFERENCE.md#sessioncreateparams).
 
 ## Retained reference topics
 
-[Retained API `0.2` hook enrichments](extensions/HOOK-ENRICHMENT.md) document
+[Retained feature-negotiated hook enrichments](extensions/HOOK-ENRICHMENT.md) document
 bounded progress decoration, namespaced pre-persistence metadata, and
 PostMutation rescans, including current product integration limits.
 
 The following anchors preserve links from the former combined guide. The linked
-maintenance references retain API `0.1`/`0.2` details without teaching them as
-current authoring interfaces.
+maintenance references retain earlier wire examples and the services reused by
+API `0.4`. Version-specific payloads and host-availability limits still apply.
 
 - <a id="runtime-lifecycle-and-sharing"></a>[Runtime lifecycle and sharing](extensions/legacy-authoring.md#runtime-lifecycle-and-sharing)
-- <a id="live-tool-catalogs"></a>[Legacy live tool catalogs](extensions/legacy-authoring.md#live-tool-catalogs)
-- <a id="semantic-presentation-snapshots"></a>[Legacy semantic presentation](extensions/legacy-authoring.md#semantic-presentation-snapshots)
-- <a id="child-model-session-service"></a>[Legacy child model-session service](extensions/legacy-authoring.md#child-model-session-service)
-- <a id="optional-kernel-services"></a>[Legacy brokers, correlation, input, and approvals](extensions/legacy-authoring.md#optional-kernel-services)
+- <a id="live-tool-catalogs"></a>[Live tool catalogs](extensions/legacy-authoring.md#live-tool-catalogs)
+- <a id="semantic-presentation-snapshots"></a>[Semantic presentation](extensions/legacy-authoring.md#semantic-presentation-snapshots)
+- <a id="child-model-session-service"></a>[Child model-session service](extensions/legacy-authoring.md#child-model-session-service)
+- <a id="optional-kernel-services"></a>[Brokers, correlation, input, and approvals](extensions/legacy-authoring.md#optional-kernel-services)
 - <a id="python-sdk"></a>[Python SDK status](../sdk/python/README.md) and [legacy runtime](../sdk/python/legacy-runtime.md)
 - <a id="capability-boundaries"></a>[Capability ownership boundaries](extensions/legacy-authoring.md#capability-boundaries)
 - <a id="installable-extension-bundles"></a>[Bundle installation, update, removal, and validation](extensions/legacy-authoring.md#installable-extension-bundles)

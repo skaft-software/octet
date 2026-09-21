@@ -1,5 +1,11 @@
 # API 0.3 current-candidate qualification
 
+> **Historical API 0.3 qualification record.** The canonical example and its
+> conformance tests remain live; these receipts do not qualify the current API
+> 0.4 authoring path. The selected #253 gate is a bounded local tool smoke
+> (negotiation, call, cancellation, shutdown), not Pi parity or every optional
+> protocol service. See the [current guide](../extensions.md#bounded-authoring-path).
+
 **Issue:** #253  
 **Frozen qualification snapshot:** `71e2c317dc0559654423a9485ef3a2b7d76ab6e4` (read-only)  
 **Prior authoring candidate:** `1dee2148c6af152e660007f7971c6f53372937af`  

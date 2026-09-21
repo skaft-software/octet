@@ -9,8 +9,11 @@ two real Python process fixtures and product discovery/bus tests execute in the
 current receipts. **A real active-session switch A→B→A with both surviving
 processes, and fenced incoming requests across that switch, are still not
 captured as product evidence**, so surviving-peer recovery is not claimed as
-qualified behavior. See the [generated contract](API-0.3-REFERENCE.md) for exact
-wire models and [extension parity](../parity/extensions.md) for remaining gates.
+qualified behavior. See the [generated contract](API-0.4-REFERENCE.md) for exact
+wire models and [historical extension evidence](../parity/extensions.md) for
+the unqualified cases. Those cases are not a blanket parity release gate.
+Current API `0.4` uses a different feature-negotiated wire: the canonical bus
+contract below does not become available by changing a manifest version.
 
 The coding product binds one bus to its active session's isolated API `0.3`
 processes, after ordinary enablement, trust, source and process-policy checks.
@@ -114,7 +117,7 @@ bounded desired set. Missing or invalid lifecycle control fails the participant
 closed instead of continuing on an apparently current stale ledger.
 
 The SDK's legacy `Extension` runtime does **not** become an API `0.3` runtime;
-wire these helpers to an ordinary current-API process loop. Recreating a helper
+wire these helpers to an ordinary canonical API `0.3` process loop. Recreating a helper
 still is not a substitute for consuming `bus/lifecycle`, and no publication is
 replayed: a peer that misses a notice is retired, not silently resynchronized.
 

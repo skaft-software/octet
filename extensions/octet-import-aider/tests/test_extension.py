@@ -30,7 +30,7 @@ def initialize_request(request_id=1):
         "id": request_id,
         "method": "initialize",
         "params": {
-            "api_version": "0.3",
+            "api_version": "0.4",
             "octet_version": "0.7.6",
             "extension": {"name": "qualification-host"},
             "workspace": str(FIXTURES.resolve()),

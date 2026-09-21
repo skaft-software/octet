@@ -6,6 +6,7 @@ use std::io::{IsTerminal, Write as IoWrite};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -124,6 +125,10 @@ fn is_subagent_tool(name: &str) -> bool {
 const COMPACT_EXEC_OUTPUT_ROWS: usize = 5;
 /// Maximum physical rows one inline tool image can reserve inside its tool card.
 const MAX_TOOL_IMAGE_RENDER_ROWS: u16 = 16;
+/// Bounded wait for one renderer-thread suspension acknowledgement. The join
+/// that follows is the hard fence, so this only keeps a wedged frame from
+/// blocking the terminal handoff for longer than a couple of frames.
+const RENDERER_SUSPEND_ACK_DEADLINE: Duration = Duration::from_millis(250);
 
 /// Output from an interactive `!` shell command, stored as a collapsible
 /// block so the transcript is not overwhelmed by long command output.
@@ -168,6 +173,7 @@ enum NoticeTone {
     Error,
 }
 
+#[derive(Clone)]
 enum TranscriptBlock {
     User {
         text: String,
@@ -409,7 +415,7 @@ struct QueuedSteering {
 enum ShellOverlay {
     /// Legacy one-shot text overlay retained for transient compatibility paths
     /// that do not yet own an ordinary report record.
-    Text(String),
+    Text(Arc<str>),
     /// A scrollable, semantic report using the same title/purpose/status/action
     /// contract as ordinary pickers without becoming a persistent dashboard.
     Report(ReportOverlay),
@@ -419,9 +425,9 @@ enum ShellOverlay {
 /// only explicit, internally styled content may retain trusted theme ANSI.
 #[derive(Clone, Debug)]
 enum ReportBody {
-    Text { text: String, styled: bool },
-    Context(crate::tui::context::ContextReport),
-    Markdown(sexy_tui_rs::Document),
+    Text { text: Arc<str>, styled: bool },
+    Context(Arc<crate::tui::context::ContextReport>),
+    Markdown(Arc<sexy_tui_rs::Document>),
 }
 
 /// Mutable presentation state for a report over the transcript viewport.
@@ -607,7 +613,7 @@ pub(crate) enum Panel {
     /// boundary and carries trusted theme ANSI; rendering must preserve it.
     ReadOnlyDocument {
         title: String,
-        text: String,
+        text: Arc<str>,
         styled: bool,
         /// Visual rows retained below the current viewport tail.
         scroll_from_bottom: usize,
@@ -1836,6 +1842,11 @@ pub struct ShellExtensionUi {
     pub statuses: Vec<ShellExtensionUiLine>,
     pub above_editor: Vec<ShellExtensionUiLine>,
     pub below_editor: Vec<ShellExtensionUiLine>,
+    /// Extension-owned header surface lines, rendered above every other
+    /// extension chrome row.
+    pub header: Vec<ShellExtensionUiLine>,
+    /// Extension-owned footer surface lines, rendered below every composer row.
+    pub footer: Vec<ShellExtensionUiLine>,
     pub working: Option<ShellExtensionWorking>,
     pub hidden_thinking_label: Option<String>,
 }
@@ -1881,6 +1892,18 @@ struct ShellAutocompleteOverlay {
 
 #[derive(Default)]
 pub(crate) struct ShellState {
+    render_revision: u64,
+    transcript_semantic_revision: u64,
+    render_geometry: Option<Arc<renderer_geometry::RenderedGeometry>>,
+    render_threaded: bool,
+    rendered_animation_addressability: HashMap<u64, bool>,
+    panel_epoch: u64,
+    pending_panel_document_top: Option<usize>,
+    painted_panel: Option<renderer_geometry::PanelRenderReceipt>,
+    painted_report: Option<renderer_geometry::ReportRenderReceipt>,
+    #[cfg(test)]
+    render_gate: Option<Arc<renderer_runtime::RenderGate>>,
+    render_publication: renderer_model::Publication,
     /// Newer stable version for this invocation's mutable startup splash.
     available_update: Option<semver::Version>,
     /// Invocation-wide late notice retained through model/session rehydration.
@@ -1949,9 +1972,11 @@ pub(crate) struct ShellState {
     /// tool output changed.
     block_revisions: Vec<u64>,
     /// Steering messages accepted while a run is active but not yet injected.
-    steering_queue: Vec<QueuedSteering>,
+    // Immutable queue roots make render publication O(1), including payloads.
+    // A queue mutation copies only Arc handles, never other accepted messages.
+    steering_queue: Arc<Vec<Arc<QueuedSteering>>>,
     /// Enter-submitted follow-ups remain local and editable until run settlement.
-    follow_up_queue: std::collections::VecDeque<ComposedInput>,
+    follow_up_queue: Arc<std::collections::VecDeque<Arc<ComposedInput>>>,
     follow_up_ready: bool,
     /// Successful prompts retained only by this interactive shell for recall.
     prompt_history: Vec<PromptHistoryEntry>,
@@ -1963,7 +1988,7 @@ pub(crate) struct ShellState {
     pub(crate) input_modalities: ModalitySet,
     /// Workspace root and its lazily built mention-completion index.
     pub(crate) workspace: Option<PathBuf>,
-    file_index: Option<Vec<String>>,
+    file_index: Option<Arc<Vec<String>>>,
     /// Selected result in the bounded path/mention completion list.
     path_selection: usize,
     /// Cached wrapped transcript lines. Scrolling only slices this cache, and
@@ -2316,16 +2341,19 @@ impl ShellState {
     }
 
     fn invalidate_transcript(&mut self) {
+        self.transcript_semantic_revision = self.transcript_semantic_revision.wrapping_add(1);
         self.transcript_cache.get_mut().dirty = true;
     }
 
     fn invalidate_transcript_layout(&mut self) {
+        self.transcript_semantic_revision = self.transcript_semantic_revision.wrapping_add(1);
         let cache = self.transcript_cache.get_mut();
         cache.width = None;
         cache.dirty = true;
     }
 
     fn invalidate_disclosure(&mut self) {
+        self.transcript_semantic_revision = self.transcript_semantic_revision.wrapping_add(1);
         let indices = self
             .transcript
             .iter()
@@ -2342,6 +2370,7 @@ impl ShellState {
             })
             .collect::<Vec<_>>();
         for index in &indices {
+            self.render_publication.touch(*index);
             if let Some(revision) = self.block_revisions.get_mut(*index) {
                 *revision = revision.saturating_add(1);
             }
@@ -2365,6 +2394,7 @@ impl ShellState {
     }
 
     fn update_image_rendering(&mut self, enabled: bool, capabilities: ImageCapabilities) {
+        self.render_publication.reset();
         self.image_rendering = ToolImageRendering {
             enabled,
             capabilities,
@@ -2494,6 +2524,7 @@ impl ShellState {
         self.next_transcript_commit_id.0 = commit_id
             .checked_add(1)
             .expect("transcript commit identity space exhausted");
+        self.render_publication.reset();
         self.transcript.insert(index, block);
         self.transcript_commit_ids.insert(index, commit_id);
         self.block_revisions.insert(index, 0);
@@ -2773,6 +2804,8 @@ impl ShellState {
     }
 
     fn touch_block(&mut self, index: usize) {
+        self.transcript_semantic_revision = self.transcript_semantic_revision.wrapping_add(1);
+        self.render_publication.touch(index);
         if let Some(revision) = self.block_revisions.get_mut(index) {
             *revision = revision.saturating_add(1);
         }
@@ -2805,6 +2838,7 @@ impl ShellState {
     }
 
     fn remove_transient_activity_block(&mut self, index: usize) {
+        self.transcript_semantic_revision = self.transcript_semantic_revision.wrapping_add(1);
         if index >= self.transcript.len() {
             return;
         }
@@ -2814,6 +2848,7 @@ impl ShellState {
             .truncate_tail_block(index, self.transcript.len());
         self.unregister_active_event(index);
         self.reindex_subagent_activity_after_removal(index);
+        self.render_publication.remove(index, self.transcript.len());
         self.transcript.remove(index);
         self.transcript_commit_ids.remove(index);
         self.block_revisions.remove(index);
@@ -3159,6 +3194,14 @@ impl ShellState {
     }
 
     fn animation_block_is_addressable(&self, index: usize) -> bool {
+        if self.render_threaded && !self.application_viewport_requested {
+            return self
+                .transcript_commit_ids
+                .get(index)
+                .and_then(|id| self.rendered_animation_addressability.get(id))
+                .copied()
+                .unwrap_or(true);
+        }
         let Some(top) = self.native_animation_viewport_top.get() else {
             return true;
         };
@@ -3633,6 +3676,9 @@ pub struct InteractiveShell {
     render_tx: Arc<Mutex<Option<SyncSender<RenderCommand>>>>,
     render_thread: Option<JoinHandle<()>>,
     capture_mouse: bool,
+    /// Shared with the one input stream: while set, the host reads no raw bytes
+    /// because an extension grant owns the terminal.
+    terminal_ceded: Arc<AtomicBool>,
 }
 
 impl InteractiveShell {
@@ -3693,6 +3739,7 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(Some(render_tx))),
             render_thread: Some(render_thread),
             capture_mouse,
+            terminal_ceded: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -3724,6 +3771,72 @@ impl InteractiveShell {
             render_tx: Arc::new(Mutex::new(None)),
             render_thread: None,
             capture_mouse: false,
+            terminal_ceded: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Real renderer thread with a deterministic layout gate. The caller must
+    /// always release the gate before dropping the shell, including on failure.
+    #[cfg(test)]
+    pub(crate) fn test_blocked_renderer() -> (Self, Arc<renderer_runtime::RenderGate>) {
+        let mut shell = Self::test_shell();
+        shell.tui.take();
+        let gate = Arc::new(renderer_runtime::RenderGate::default());
+        shell.state.borrow_mut().render_gate = Some(gate.clone());
+        let state = shell.state.clone();
+        let size = shell.size.clone();
+        let terminal = TestTerminal { size: size.clone() };
+        let (tx, rx) = mpsc::sync_channel(1);
+        *shell.render_tx.lock().unwrap() = Some(tx);
+        shell.render_thread = Some(thread::spawn(move || {
+            renderer_runtime::render_loop_with_terminal(terminal, state, size, rx, false, false, false, |_, _| false);
+        }));
+        (shell, gate)
+    }
+
+    /// The shared parking flag for the host's one input stream.
+    pub fn terminal_input_parking(&self) -> Arc<AtomicBool> {
+        self.terminal_ceded.clone()
+    }
+
+    /// Park the host input stream: the raw terminal is ceded to an extension.
+    ///
+    /// The host stops reading raw bytes instead of racing the granted child on
+    /// `/dev/tty`; [`Self::release_terminal_input`] returns ownership.
+    pub fn cede_terminal_input(&self) {
+        self.terminal_ceded.store(true, Ordering::SeqCst);
+    }
+
+    /// Return input ownership to the host after a released or revoked grant.
+    pub fn release_terminal_input(&self) {
+        self.terminal_ceded.store(false, Ordering::SeqCst);
+    }
+
+    /// The process terminal dimensions the host currently renders at.
+    pub fn terminal_dimensions(&self) -> (u16, u16) {
+        *self.size.lock().expect("terminal size mutex poisoned")
+    }
+
+    /// Suspend the renderer with an explicit final-frame acknowledgement.
+    fn suspend_renderer(&mut self) {
+        let render_tx = self
+            .render_tx
+            .lock()
+            .expect("renderer sender mutex poisoned")
+            .take();
+        if let Some(render_tx) = render_tx {
+            let (acknowledge, acknowledged) = mpsc::channel();
+            if render_tx.send(RenderCommand::Suspend(acknowledge)).is_ok() {
+                // Bounded: the renderer owes exactly one acknowledgement, and
+                // the join below is the hard fence for a wedged frame.
+                let _ = acknowledged.recv_timeout(RENDERER_SUSPEND_ACK_DEADLINE);
+            }
+        }
+        if let Some(render_thread) = self.render_thread.take() {
+            let _ = render_thread.join();
+        }
+        if let Some(mut tui) = self.tui.take() {
+            tui.stop();
         }
     }
 
@@ -3748,7 +3861,7 @@ impl InteractiveShell {
     /// OAuth uses this so the hosted verification code and browser fallback are
     /// visible in an ordinary terminal.
     pub fn suspend(&mut self) {
-        self.stop_renderer();
+        self.suspend_renderer();
         force_restore();
     }
 
@@ -4009,6 +4122,15 @@ impl InteractiveShell {
     }
 
     pub fn on_run_event(&mut self, id: RunId, event: &AgentEvent) {
+        // A renderer may retain the immutable pending queue. Preparing the
+        // delivered transcript text must not clone a large paste under the
+        // semantic lock; queue removal and transcript insertion remain atomic.
+        let steering_displays = if let AgentEvent::SteeringDelivered { messages } = event {
+            let queued = self.state.borrow().steering_queue.clone();
+            Some(messages.iter().enumerate().map(|(index, message)| {
+                queued.get(index).map_or_else(|| message.clone(), |entry| entry.display.clone())
+            }).collect::<Vec<_>>())
+        } else { None };
         let mut state = self.state.borrow_mut();
         // A session-scoped delegation roster is not run state. The endpoint
         // keeps publishing worker states after the run settles (and the
@@ -4159,12 +4281,9 @@ impl InteractiveShell {
                 state.close_streaming_blocks();
                 let model_lab = state.executing_model_lab();
                 let prompt_color = state.executing_prompt_color();
-                for message in messages {
-                    let display = if state.steering_queue.is_empty() {
-                        message.clone()
-                    } else {
-                        state.steering_queue.remove(0).display
-                    };
+                let delivered = messages.len().min(state.steering_queue.len());
+                Arc::make_mut(&mut state.steering_queue).drain(..delivered);
+                for display in steering_displays.expect("steering event projected above") {
                     state.push_block(TranscriptBlock::User {
                         text: display,
                         model_lab,
@@ -4578,8 +4697,15 @@ impl InteractiveShell {
     /// Keeping its typed parts here makes Option+Up genuinely retractable.
     pub fn queue_follow_up(&mut self, composed: ComposedInput) {
         if !composed.is_empty() {
-            self.state.borrow_mut().follow_up_queue.push_back(composed);
+            Arc::make_mut(&mut self.state.borrow_mut().follow_up_queue)
+                .push_back(Arc::new(composed));
         }
+    }
+
+    /// Number of follow-up messages queued but not yet admitted to the Agent.
+    /// This is the exact queue `session/send_user_message` feeds.
+    pub fn queued_follow_up_len(&self) -> usize {
+        self.state.borrow().follow_up_queue.len()
     }
 
     /// Only authoritative completion or an explicit Escape dispatch arms the
@@ -4594,7 +4720,11 @@ impl InteractiveShell {
         if !std::mem::take(&mut state.follow_up_ready) {
             return None;
         }
-        state.follow_up_queue.pop_front()
+        let next = Arc::make_mut(&mut state.follow_up_queue).pop_front();
+        drop(state);
+        // Execution admission may need an owned value while a paint still
+        // references the old queue; never copy that payload under the UI lock.
+        next.map(Arc::unwrap_or_clone)
     }
 
     /// Recall only local, unadmitted input. Never overwrite a draft or pretend
@@ -4604,9 +4734,12 @@ impl InteractiveShell {
         if !normal_editor_focused(&state) || !state.editor.text().is_empty() {
             return;
         }
-        let Some(composed) = state.follow_up_queue.pop_back() else {
+        let Some(composed) = Arc::make_mut(&mut state.follow_up_queue).pop_back() else {
             return;
         };
+        drop(state);
+        let composed = Arc::unwrap_or_clone(composed);
+        let mut state = self.state.borrow_mut();
         state.prompt_history_navigation = None;
         state.editor.set_text(composed.display_text);
         state.ledger.restore(composed.attachments);
@@ -4619,12 +4752,12 @@ impl InteractiveShell {
         if composed.is_empty() {
             return;
         }
-        let mut state = self.state.borrow_mut();
-        state.steering_queue.push(QueuedSteering {
+        let queued = Arc::new(QueuedSteering {
             display: composed.transcript_text.clone(),
             editor_display: composed.display_text.clone(),
             attachments: composed.attachments.clone(),
         });
+        Arc::make_mut(&mut self.state.borrow_mut().steering_queue).push(queued);
     }
 
     /// Move undelivered steering messages back into the editor. This is used
@@ -4635,12 +4768,15 @@ impl InteractiveShell {
             return;
         }
         let queued = std::mem::take(&mut state.steering_queue);
+        drop(state);
         let mut attachments = Vec::new();
         let mut displays = Vec::with_capacity(queued.len());
-        for entry in queued {
+        for entry in Arc::unwrap_or_clone(queued) {
+            let entry = Arc::unwrap_or_clone(entry);
             displays.push(entry.editor_display);
             attachments.extend(entry.attachments);
         }
+        let mut state = self.state.borrow_mut();
         state.ledger.restore(attachments);
         let restored = displays.join("\n\n");
         let current = state.editor.take_text();
@@ -4777,7 +4913,7 @@ impl InteractiveShell {
             && state.file_index.is_none()
         {
             if let Some(root) = state.workspace.clone() {
-                state.file_index = Some(composer::workspace_files(&root, 10_000));
+                state.file_index = Some(Arc::new(composer::workspace_files(&root, 10_000)));
             }
         }
         invalidate_editor_autocomplete(&mut state);
@@ -5035,7 +5171,7 @@ impl InteractiveShell {
             .is_some_and(|query| !composer::is_path_query(query))
             && state.file_index.is_none()
         {
-            state.file_index = Some(composer::workspace_files(&root, 10_000));
+            state.file_index = Some(Arc::new(composer::workspace_files(&root, 10_000)));
         }
         let suggestions = input_path_suggestions(&state);
         let selected = state
@@ -5562,6 +5698,11 @@ impl InteractiveShell {
         row: u16,
         col: u16,
     ) -> Option<TranscriptPosition> {
+        if state.render_threaded {
+            let geometry = state.retained_render_geometry()?;
+            if usize::from(row) >= geometry.visible_lines.len() { return None; }
+            return selection_position_for_visual_cell(state, geometry.visible_start + usize::from(row), col);
+        }
         let chrome = shell_chrome(state, state.size.0, Instant::now());
         let transcript = transcript_lines(state, state.size.0);
         let scroll = resolved_scroll_from_bottom(state, transcript.len(), chrome.transcript_rows);
@@ -5585,6 +5726,13 @@ impl InteractiveShell {
     /// this reports the validated target and never opens or fetches anything.
     pub fn transcript_link_at_screen_cell(&self, row: u16, col: u16) -> Option<String> {
         let state = self.state.borrow();
+        if state.render_threaded {
+            let line = state
+                .retained_render_geometry()?
+                .visible_lines
+                .get(usize::from(row))?;
+            return sexy_tui_rs::hyperlink_at_column(line, usize::from(col));
+        }
         let chrome = shell_chrome(&state, state.size.0, Instant::now());
         let transcript = transcript_lines(&state, state.size.0);
         let scroll = resolved_scroll_from_bottom(&state, transcript.len(), chrome.transcript_rows);
@@ -5843,7 +5991,8 @@ impl InteractiveShell {
     pub fn show_overlay_text(&mut self, text: String) {
         self.close_transcript_navigation();
         self.reset_input_interaction();
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(sanitize_for_terminal(&text)));
+        let text = Arc::from(sanitize_for_terminal(&text));
+        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(text));
     }
 
     fn show_report(&mut self, surface: OrdinarySurfaceMetadata, body: ReportBody) {
@@ -5867,7 +6016,7 @@ impl InteractiveShell {
         self.show_report(
             OrdinarySurfaceMetadata::with_purpose(title, purpose),
             ReportBody::Text {
-                text: sanitize_for_terminal(&text),
+                text: sanitize_for_terminal(&text).into(),
                 styled: false,
             },
         );
@@ -5881,7 +6030,7 @@ impl InteractiveShell {
                 format!("Changelog v{}", env!("CARGO_PKG_VERSION")),
                 "Bundled release notes for this version",
             ),
-            ReportBody::Markdown(parse_markdown(crate::commands::CURRENT_CHANGELOG)),
+            ReportBody::Markdown(Arc::new(parse_markdown(crate::commands::CURRENT_CHANGELOG))),
         );
     }
 
@@ -5895,7 +6044,7 @@ impl InteractiveShell {
     ) {
         self.show_report(
             OrdinarySurfaceMetadata::with_purpose(title, purpose),
-            ReportBody::Text { text, styled: true },
+            ReportBody::Text { text: text.into(), styled: true },
         );
     }
 
@@ -5908,7 +6057,7 @@ impl InteractiveShell {
             &state.theme,
             command,
             &text,
-        )));
+        ).into()));
     }
 
     pub fn show_context_report(&mut self, report: crate::tui::context::ContextReport) {
@@ -5917,7 +6066,7 @@ impl InteractiveShell {
                 "Context",
                 "Review the estimated request context before the next turn",
             ),
-            ReportBody::Context(report),
+            ReportBody::Context(Arc::new(report)),
         );
     }
 
@@ -6016,7 +6165,7 @@ impl InteractiveShell {
     /// Show picker output that already contains octet-generated foreground SGR.
     #[allow(dead_code)]
     pub fn show_styled_overlay_text(&mut self, text: String) {
-        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(text));
+        self.state.borrow_mut().overlay = Some(ShellOverlay::Text(text.into()));
     }
 
     pub fn show_status_text_with_telemetry(&mut self, text: String) {
@@ -6047,8 +6196,33 @@ impl InteractiveShell {
         if !matches!(state.overlay.as_ref(), Some(ShellOverlay::Report(_))) {
             return OverlayInputResult::Legacy;
         }
-        let (maximum, page_rows) =
-            self::viewport::report_scroll_metrics_for_state(&state).unwrap_or((0, 1));
+        // Dismissal (including close keys) never parses a report. Navigation
+        // consumes renderer-owned wrapping counts once a frame was emitted.
+        let navigation = matches!(event, crossterm::event::Event::Key(key)
+            if crate::tui::keymap::accepts_key_event(key) && key.modifiers.is_empty()
+                && matches!(key.code, crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
+                    | crossterm::event::KeyCode::PageUp | crossterm::event::KeyCode::PageDown
+                    | crossterm::event::KeyCode::Home | crossterm::event::KeyCode::End));
+        if !navigation {
+            if matches!(event, crossterm::event::Event::Key(key) if !crate::tui::keymap::accepts_key_event(key))
+            {
+                return OverlayInputResult::Consumed;
+            }
+            state.overlay = None;
+            return OverlayInputResult::Closed;
+        }
+        let (maximum, page_rows) = if state.render_threaded {
+            let Some(receipt) = state
+                .painted_report
+                .as_ref()
+                .filter(|receipt| receipt.is_current(&state))
+            else {
+                return OverlayInputResult::Consumed;
+            };
+            (receipt.maximum, receipt.page_rows)
+        } else {
+            self::viewport::report_scroll_metrics_for_state(&state).unwrap_or((0, 1))
+        };
         let mut close = false;
         if let crossterm::event::Event::Key(key) = event {
             if crate::tui::keymap::accepts_key_event(key) {
@@ -6115,12 +6289,20 @@ impl InteractiveShell {
     pub fn open_panel(&mut self, panel: Panel) {
         self.close_transcript_navigation();
         self.reset_input_interaction();
-        self.state.borrow_mut().panel = Some(panel);
+        let mut state = self.state.borrow_mut();
+        state.panel_epoch = state.panel_epoch.wrapping_add(1);
+        state.painted_panel = None;
+        state.pending_panel_document_top = None;
+        state.panel = Some(panel);
     }
 
     /// Close any open panel and return to normal editing.
     pub fn close_panel(&mut self) {
-        self.state.borrow_mut().panel = None;
+        let mut state = self.state.borrow_mut();
+        state.panel_epoch = state.panel_epoch.wrapping_add(1);
+        state.painted_panel = None;
+        state.pending_panel_document_top = None;
+        state.panel = None;
     }
 
     pub fn has_panel(&self) -> bool {
@@ -6305,7 +6487,6 @@ impl InteractiveShell {
     /// a reader at the tail follows newly appended transcript rows. The text
     /// is sanitized; styled documents must use
     /// [`Self::update_read_only_document_styled`] instead.
-    #[cfg(test)]
     pub fn update_read_only_document(&mut self, text: String) {
         self.update_read_only_document_inner(crate::tui::view::sanitize_for_terminal(&text));
     }
@@ -6318,7 +6499,28 @@ impl InteractiveShell {
     }
 
     fn update_read_only_document_inner(&mut self, new_text: String) {
+        let new_text: Arc<str> = new_text.into();
         let mut state = self.state.borrow_mut();
+        if state.render_threaded {
+            let old_scroll = match state.panel.as_ref() {
+                Some(Panel::ReadOnlyDocument {
+                    scroll_from_bottom, ..
+                }) => *scroll_from_bottom,
+                _ => return,
+            };
+            let top = if old_scroll == 0 { None } else {
+                state.pending_panel_document_top.or_else(|| state.painted_panel.as_ref()
+                    .filter(|receipt| receipt.is_current(&state))
+                    .map(|receipt| receipt.document_rows.saturating_sub(receipt.document_body_rows).saturating_sub(old_scroll)))
+            };
+            if let Some(Panel::ReadOnlyDocument { text, .. }) = state.panel.as_mut() {
+                *text = new_text;
+            }
+            state.pending_panel_document_top = top;
+            state.panel_epoch = state.panel_epoch.wrapping_add(1);
+            state.painted_panel = None;
+            return;
+        }
         let (old_text, old_scroll, styled) = match state.panel.as_ref() {
             Some(Panel::ReadOnlyDocument {
                 text: current_text,
@@ -6376,6 +6578,39 @@ impl InteractiveShell {
         let normalized = self.panel_event(event);
         let event = &normalized;
         let mut state = self.state.borrow_mut();
+        let action = match state.panel.as_ref()? {
+            Panel::SelectList { action, .. } => action.clone(),
+            Panel::SessionPicker { .. } => PanelAction::SessionPicker,
+            Panel::MessagePicker { .. } => PanelAction::MessagePicker,
+            Panel::ReadOnlyDocument { .. } => PanelAction::ReadOnlyDocument,
+        };
+        // Control traffic never consults presentation geometry. In particular,
+        // closing a huge inspection document cannot trigger wrapping first.
+        if let crossterm::event::Event::Key(key) = event {
+            if crate::tui::keymap::is_close_key(key) {
+                state.close_requested = true;
+                drop(state);
+                self.close_panel();
+                return Some((PanelResult::Cancel, action));
+            }
+            let cancel = crate::tui::keymap::accepts_key_event(key) && match state.panel.as_ref()? {
+                Panel::SelectList { .. } => key.code == crossterm::event::KeyCode::Esc,
+                Panel::MessagePicker { .. } => key.code == crossterm::event::KeyCode::Esc && key.modifiers.is_empty(),
+                Panel::ReadOnlyDocument { .. } => matches!(key.code, crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Left) && key.modifiers.is_empty(),
+                // Rename/delete Escape belongs to that nested picker owner.
+                Panel::SessionPicker { .. } => false,
+            };
+            if cancel {
+                drop(state);
+                self.close_panel();
+                return Some((PanelResult::Cancel, action));
+            }
+        }
+        if let crossterm::event::Event::Resize(columns, rows) = event {
+            drop(state);
+            self.set_size(*columns, *rows);
+            return None;
+        }
         let size = state.size;
         let base_page_step = usize::from(size.1).saturating_sub(8).max(1);
         let picker_layout =
@@ -6409,41 +6644,37 @@ impl InteractiveShell {
         } else {
             base_page_step
         };
-        let rendered_panel = shell_chrome(&state, size.0, Instant::now()).panel;
-        let visible_panel_rows = rendered_panel.len();
-        let confirmation_render = match state.panel.as_ref() {
-            Some(Panel::SelectList {
-                action: PanelAction::Confirmation,
-                ..
-            }) => self::panel_render::confirmation_metadata_for_rendered_panel(
-                &state,
-                size.0,
-                &rendered_panel,
-            ),
-            _ => None,
+        let panel_receipt = if state.render_threaded {
+            state
+                .painted_panel
+                .as_ref()
+                .filter(|receipt| receipt.is_current(&state))
+                .cloned()
+        } else if matches!(
+            state.panel.as_ref(),
+            Some(
+                Panel::ReadOnlyDocument { .. }
+                    | Panel::SelectList {
+                        action: PanelAction::Confirmation,
+                        ..
+                    }
+            )
+        ) {
+            // Deterministic inline fixtures retain their explicit layout owner;
+            // production input consumes only a completed renderer receipt.
+            let rendered = shell_chrome(&state, size.0, Instant::now()).panel;
+            renderer_geometry::PanelRenderReceipt::capture(&state, &rendered)
+        } else {
+            None
         };
-        let document_page_step =
-            self::panel_render::document_body_rows(&state, size.0, visible_panel_rows);
-        let document_visual_rows = match state.panel.as_ref() {
-            Some(Panel::ReadOnlyDocument { text, styled, .. }) => {
-                self::panel_render::document_visual_row_count_styled(
-                    text,
-                    &state.theme,
-                    size.0,
-                    *styled,
-                )
-            }
-            _ => 0,
-        };
+        let confirmation_render = panel_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.confirmation.clone());
+        let document_metrics = panel_receipt
+            .as_ref()
+            .map(|receipt| (receipt.document_body_rows, receipt.document_rows));
         let unicode = state.theme.unicode();
         let panel = state.panel.as_mut()?;
-        // Snapshot the action before we potentially mutate/drop the panel.
-        let action = match panel {
-            Panel::SelectList { action, .. } => action.clone(),
-            Panel::SessionPicker { .. } => PanelAction::SessionPicker,
-            Panel::MessagePicker { .. } => PanelAction::MessagePicker,
-            Panel::ReadOnlyDocument { .. } => PanelAction::ReadOnlyDocument,
-        };
         let confirmation = matches!(&action, PanelAction::Confirmation);
         match panel {
             Panel::SelectList {
@@ -6928,8 +7159,10 @@ impl InteractiveShell {
                 scroll_from_bottom, ..
             } => {
                 use crossterm::event::{Event, KeyCode};
-                let viewport_rows = document_page_step;
-                let visual_rows = document_visual_rows;
+                // Missing/stale frame: wait for renderer geometry without
+                // moving the reading position or wrapping on the input owner.
+                let (viewport_rows, visual_rows) = document_metrics?;
+                let document_page_step = viewport_rows;
                 let maximum = visual_rows.saturating_sub(viewport_rows);
                 *scroll_from_bottom = (*scroll_from_bottom).min(maximum);
                 match event {
@@ -7176,6 +7409,7 @@ impl InteractiveShell {
         state.next_transcript_commit_id = NextTranscriptCommitId::default();
         state.reset_terminal_images();
         state.tool_image_budget = image_budget;
+        state.render_publication.reset();
         state.transcript.clear();
         state.transcript_navigation.get_mut().reset_session();
         state.provisional_blocks.clear();
@@ -7183,7 +7417,7 @@ impl InteractiveShell {
         state.transcript_commit_ids.clear();
         state.block_revisions.clear();
         state.invalidate_transcript_layout();
-        state.steering_queue.clear();
+        state.steering_queue = Arc::default();
         state.tool_panels.clear();
         state.close_streaming_blocks();
         state.jump_to_tail();
@@ -7281,7 +7515,7 @@ impl InteractiveShell {
                 }
             }
         }
-        for message in &state.steering_queue {
+        for message in state.steering_queue.iter() {
             result.push('\n');
             result.push_str("Steering: ");
             result.push_str(&message.display);
@@ -7351,6 +7585,8 @@ mod outcome_render;
 mod output_window;
 mod panel_render;
 mod reasoning_render;
+mod renderer_geometry;
+mod renderer_model;
 mod renderer_runtime;
 mod shell_chrome;
 mod startup_update;

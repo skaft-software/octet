@@ -1,9 +1,9 @@
 # Retained API 0.2 hook enrichments
 
-These are maintenance interfaces for existing API `0.2` processes and native
-Rust extensions. They are **not API `0.3` methods** and do not change frozen API
+These are retained feature-negotiated interfaces for API `0.2`/`0.4` processes
+and native Rust extensions. They are **not API `0.3` methods** and do not change frozen API
 `0.1`. New authoring uses the [current guide](../extensions.md) and
-[generated contract](API-0.3-REFERENCE.md). Ordinary hook framing is in the
+[generated contract](API-0.4-REFERENCE.md). Ordinary hook framing is in the
 [legacy protocol reference](PROTOCOL-REFERENCE.md#14-hookrun).
 
 ## Bounded progress decorations
@@ -113,7 +113,7 @@ owner, only after commit or completed rollback. A migration CLI with no safely
 bound executable-extension owner cannot manufacture one by starting extensions
 solely to observe the write. Dry-run, no-op, preview, failed/partial writes and
 incomplete rollback must never emit. Current emitter coverage is tracked in
-[extension parity](../parity/extensions.md); a bridge/fixture is not proof that
+[historical extension evidence](../parity/extensions.md); a bridge/fixture is not proof that
 all configuration and migration paths emit.
 
 The process fixtures in `crates/octet-coding-agent/src/extensions/hook_tests.rs`

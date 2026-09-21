@@ -2,10 +2,9 @@
 
 Prompts, skills, and executable extensions share one filesystem
 resolver. Resource-specific parsers own their schemas; the resolver owns the
-cross-cutting local safety and precedence contract. Theme-file customization
-and filesystem theme discovery remain disabled. The compiled default theme
-offers built-in `auto`, `light`, and `dark` terminal appearances through `/theme`;
-these choices do not load theme files. See [Theme status](themes.md).
+cross-cutting local safety and precedence contract. Built-in `auto`, `light`,
+and `dark` appearances are available through `/theme` without
+theme files. Named theme files follow the separate bounded [theme loader](themes.md).
 
 ## Locations and precedence
 
@@ -98,6 +97,12 @@ Invalid UTF-8, invalid names, inaccessible roots, rejected links, oversized
 files, parser failures, and precedence decisions become inspectable
 diagnostics. One broken customization does not prevent the core binary from
 starting.
+
+Automatic reload suppresses repeated resource/bootstrap and keybinding problems
+per checked component. A successful check clears that component's remembered
+problem, allowing a later recurrence to appear; skipped checks do not clear it.
+Explicit commands still report their diagnostics, and actual work losses are
+never suppressed as duplicate configuration warnings.
 
 ## Reload
 

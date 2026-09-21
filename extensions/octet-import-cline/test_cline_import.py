@@ -61,7 +61,7 @@ def initialize(max_frame_bytes: int = 1_048_576) -> dict[str, object]:
         "id": 1,
         "method": "initialize",
         "params": {
-            "api_version": "0.3",
+            "api_version": "0.4",
             "octet_version": "0.7.6",
             "extension": {},
             "workspace": str(ROOT),

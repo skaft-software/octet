@@ -60,4 +60,5 @@ not a second user manual.
 Beyond the [codebase map](../README.md#codebase): `fuzz/` holds the session-record
 fuzz target, `deploy/` the non-root container build, `scripts/` the pinned installer,
 and `third_party/` upstream license texts. `sdk/python/` is the dependency-free
-legacy extension SDK; current authoring uses [API 0.3](extensions/API-0.3-REFERENCE.md).
+extension SDK with a current API 0.4 process runtime and retained earlier wires;
+see [current authoring](extensions.md) and the [wire reference](extensions/API-0.4-REFERENCE.md).

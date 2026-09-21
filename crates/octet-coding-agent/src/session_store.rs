@@ -14,9 +14,8 @@ use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::session_catalog::{
-    CachedTranscriptSummary, CatalogFingerprint, CatalogUpdate, IndexedEntry, IndexedEntryHit,
-    IndexedEntryKind, IndexedEntryUpdate, SessionCatalog, MAX_INDEXED_ENTRIES_PER_SESSION,
-    MAX_INDEXED_ENTRY_CHARS,
+    CachedTranscriptSummary, CatalogFingerprint, CatalogUpdate, IndexedEntry, IndexedEntryKind,
+    IndexedEntryUpdate, SessionCatalog, MAX_INDEXED_ENTRIES_PER_SESSION, MAX_INDEXED_ENTRY_CHARS,
 };
 
 static NEXT_SESSION_SUFFIX: AtomicU64 = AtomicU64::new(1);
@@ -1981,7 +1980,7 @@ impl SessionStore {
 
     /// The current entry-index revision, for callers that poll for changes.
     pub fn entry_index_revision(&self) -> anyhow::Result<i64> {
-        let (catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        let catalog = SessionCatalog::open_recovering(&self.dir)?;
         catalog.entry_revision()
     }
 
@@ -1995,7 +1994,7 @@ impl SessionStore {
         F: Fn(&Path) -> anyhow::Result<Vec<IndexedEntry>>,
     {
         let candidates = self.candidates();
-        let (mut catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         let indexed = catalog.entry_fingerprints()?;
         let current_ids = candidates
             .iter()
@@ -2012,7 +2011,8 @@ impl SessionStore {
             .filter(|id| !current_ids.contains(*id))
             .cloned()
             .collect::<HashSet<_>>();
-        let mut updates = Vec::new();
+        let mut scanned_sessions = 0;
+        let mut index_changed = catalog.apply_entries(&[], &stale_ids)?;
         for candidate in &candidates {
             let Some(id) = candidate
                 .path
@@ -2029,15 +2029,22 @@ impl SessionStore {
                 continue;
             }
             if let Ok(entries) = extractor(&candidate.path) {
-                updates.push(IndexedEntryUpdate {
-                    session_id: id,
-                    fingerprint,
-                    entries,
-                });
+                // Retain at most one session's bounded projection during rebuild,
+                // never all workspace text in a pending update vector.
+                index_changed |= catalog.apply_entries(
+                    &[IndexedEntryUpdate {
+                        session_id: id,
+                        fingerprint,
+                        entries,
+                    }],
+                    &HashSet::new(),
+                )?;
+                scanned_sessions += 1;
+            } else if indexed.contains_key(&id) {
+                // A changed/unreadable transcript must not leave old search hits.
+                index_changed |= catalog.apply_entries(&[], &HashSet::from([id]))?;
             }
         }
-        let scanned_sessions = updates.len();
-        let index_changed = catalog.apply_entries(&updates, &stale_ids)?;
         let revision = catalog.entry_revision()?;
         let hits = catalog
             .search_entries(query, limit)?
@@ -2403,7 +2410,7 @@ impl SessionStore {
         &self,
         ids: impl IntoIterator<Item = &'a str>,
     ) -> anyhow::Result<Vec<(String, SessionCatalogEntry)>> {
-        let (mut catalog, cached) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         let mut updates = Vec::new();
         let mut entries = Vec::new();
 
@@ -2412,9 +2419,10 @@ impl SessionStore {
                 continue;
             };
             let fingerprint = catalog_fingerprint(&candidate);
+            let cached = catalog.lookup(id)?;
             if let Some(summary) = fingerprint.and_then(|fingerprint| {
                 cached
-                    .get(id)
+                    .as_ref()
                     .filter(|cached| cached.fingerprint == fingerprint)
                     .map(|cached| cached.summary.clone())
             }) {
@@ -2506,7 +2514,7 @@ impl SessionStore {
                 message_count: active_branch_message_count(session),
             },
         };
-        let (mut catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         catalog.apply(&[update], &HashSet::new())
     }
 
@@ -2518,7 +2526,7 @@ impl SessionStore {
         if !SessionCatalog::exists(&self.dir) {
             return Ok(());
         }
-        let (mut catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         catalog.apply(&[], &HashSet::from([id.to_owned()]))
     }
 
@@ -2566,15 +2574,13 @@ impl SessionStore {
                     .map(str::to_owned)
             })
             .collect::<HashSet<_>>();
-        let (catalog, cached) = match SessionCatalog::open_loaded(&self.dir) {
-            Ok((catalog, cached)) => (Some(catalog), cached),
-            Err(_) => (None, HashMap::new()),
-        };
-        let stale_ids = cached
-            .keys()
-            .filter(|id| !current_ids.contains(*id))
-            .cloned()
-            .collect::<HashSet<_>>();
+        let mut catalog = SessionCatalog::open_recovering(&self.dir).ok();
+        if let Some(catalog) = &mut catalog {
+            if let Ok(cached_ids) = catalog.session_ids() {
+                let stale_ids = cached_ids.difference(&current_ids).cloned().collect();
+                let _ = catalog.apply(&[], &stale_ids);
+            }
+        }
         let mut updates = Vec::new();
         let mut discovered = Vec::new();
 
@@ -2588,10 +2594,13 @@ impl SessionStore {
                 continue;
             };
             let fingerprint = catalog_fingerprint(&candidate);
+            let cached = catalog
+                .as_ref()
+                .and_then(|catalog| catalog.lookup(&id).ok().flatten());
             let summary = fingerprint
                 .and_then(|fingerprint| {
                     cached
-                        .get(&id)
+                        .as_ref()
                         .filter(|cached| cached.fingerprint == fingerprint)
                 })
                 .map(|cached| cached.summary.clone())
@@ -2616,6 +2625,12 @@ impl SessionStore {
                     // are shown but deliberately not retained in the catalog.
                     Err(_) => CachedTranscriptSummary::Unreadable,
                 });
+            if updates.len() >= 32 {
+                if let Some(catalog) = &mut catalog {
+                    let _ = catalog.apply(&updates, &HashSet::new());
+                }
+                updates.clear();
+            }
             if let Some(meta) = self.meta_from_cached_summary(candidate, id, summary) {
                 discovered.push(meta);
                 if first_only {
@@ -2625,7 +2640,7 @@ impl SessionStore {
         }
 
         if let Some(mut catalog) = catalog {
-            let _ = catalog.apply(&updates, &stale_ids);
+            let _ = catalog.apply(&updates, &HashSet::new());
         }
         discovered
     }
@@ -3872,6 +3887,74 @@ mod tests {
             "the change fires the notification"
         );
         assert_eq!(delta.hits.len(), 3);
+    }
+
+    #[test]
+    fn old_search_schema_rebuilds_and_unreadable_refresh_removes_stale_hits() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("search.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("migration needle".into())],
+            })))
+            .unwrap();
+        drop(session);
+        assert_eq!(store.search_entries("needle", 10).unwrap().hits.len(), 1);
+        let connection = rusqlite::Connection::open(SessionCatalog::path(store.dir())).unwrap();
+        connection
+            .execute_batch("DROP TABLE indexed_entry_grams; PRAGMA user_version = 4;")
+            .unwrap();
+        drop(connection);
+        let rebuilt = store.search_entries("needle", 10).unwrap();
+        assert_eq!(rebuilt.scanned_sessions, 1);
+        assert_eq!(rebuilt.hits.len(), 1);
+        std::fs::write(&path, "changed and temporarily unreadable").unwrap();
+        let refreshed = store
+            .search_entries_with("needle", 10, |_| anyhow::bail!("unreadable"))
+            .unwrap();
+        assert!(refreshed.hits.is_empty());
+        assert!(refreshed.index_changed);
+        let retry = store
+            .search_entries_with("needle", 10, |_| anyhow::bail!("unreadable"))
+            .unwrap();
+        assert!(retry.hits.is_empty());
+        assert!(!retry.index_changed);
+    }
+
+    #[test]
+    fn oversized_catalog_keeps_warm_discovery_and_search_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let mut session = Session::create(store.dir().join("oldest.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("retained needle".into())],
+            })))
+            .unwrap();
+        drop(session);
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.search_entries("needle", 10).unwrap().hits.len(), 1);
+        let connection = rusqlite::Connection::open(SessionCatalog::path(store.dir())).unwrap();
+        connection.execute_batch("CREATE TABLE padding (data BLOB); INSERT INTO padding VALUES (zeroblob(65 * 1024 * 1024)); PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        drop(connection);
+        let discovered = store.discover_with_summarizer(store.candidates(), false, |_| {
+            panic!("warm oversized catalog must not rescan transcripts")
+        });
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].title, "retained needle");
+        let search = store
+            .search_entries_with("needle", 10, |_| {
+                panic!("warm oversized index must not rescan transcripts")
+            })
+            .unwrap();
+        assert_eq!(search.hits.len(), 1);
+        assert_eq!(search.scanned_sessions, 0);
     }
 
     #[test]

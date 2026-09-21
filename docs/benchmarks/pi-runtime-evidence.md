@@ -1,4 +1,10 @@
-# Pi runtime evidence harness
+# Pi runtime evidence harness (historical)
+
+> **Historical reference:** the Pi bridge, `scripts/bench-pi-runtime.py`, and
+> its contract test were removed from the current product. The commands and
+> proposed gates below describe the archived fixture capture, are not runnable
+> in this checkout, and are not current release requirements. See the
+> [local reduction qualification](../qualification/v0.8.0-reduction-rc.md).
 
 This is a reproducible, credential-free **harness**, not a published performance
 result. It exercises the checked-in Pi compatibility fixture and writes bounded

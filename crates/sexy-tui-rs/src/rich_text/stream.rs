@@ -1573,6 +1573,70 @@ mod tests {
     }
 
     #[test]
+    fn tabbed_open_code_layout_work_grows_linearly() {
+        fn work(chunks: usize, multiline: bool, wrap: bool) -> StreamingLayoutStats {
+            let mut stream = StreamingMarkdown::new();
+            let mut renderer = RichRenderer::plain();
+            let mut options = renderer.options();
+            options.code_overflow = if wrap {
+                super::super::render::CodeOverflow::Wrap
+            } else {
+                super::super::render::CodeOverflow::Clip
+            };
+            renderer.set_options(options);
+            let mut cache = StreamingRenderCache::default();
+            let mut frame = Vec::new();
+            stream.push_str("```rust\n");
+            for _ in 0..chunks {
+                // Split an EGC before a tab; tab stops must use its final width.
+                for chunk in [
+                    "\t界 e",
+                    "\u{301}\t\x1b[31m",
+                    if multiline { "\n" } else { " " },
+                ] {
+                    stream.push_str(chunk);
+                    let update = cache.render_line_update(&stream, &renderer, 40, false);
+                    frame.truncate(update.stable_prefix);
+                    frame.extend(update.replacement);
+                }
+            }
+            assert_eq!(
+                frame,
+                renderer.render_unstable(stream.preview(), 40).plain_lines()
+            );
+            let stats = cache.stats();
+            assert_eq!(stats.literal_transform_fallbacks, 0, "{stats:?}");
+            assert_eq!(stats.full_tail_layouts, 0, "{stats:?}");
+            let source = stream.raw_text().to_owned();
+            stream.finish();
+            assert_eq!(
+                cache
+                    .render_line_update(&stream, &renderer, 40, false)
+                    .replacement,
+                renderer.render(&markdown::parse(&source), 40).plain_lines()
+            );
+            stats
+        }
+        for multiline in [false, true] {
+            for wrap in [false, true] {
+                let small = work(256, multiline, wrap);
+                let large = work(512, multiline, wrap);
+                let processed = |s: StreamingLayoutStats| {
+                    s.checked_bytes
+                        + s.measured_bytes
+                        + s.laid_out_bytes
+                        + s.copied_bytes
+                        + s.fallback_source_bytes
+                };
+                assert!(
+                    processed(large) <= processed(small) * 5 / 2,
+                    "{small:?} -> {large:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn long_plain_and_open_code_layout_work_grows_linearly() {
         for fence in [false, true] {
             for multiline in [false, true] {
@@ -1605,6 +1669,7 @@ mod tests {
             format!("```rust\n{}", "  let 界 = e\u{301}; // 👩\u{200d}💻\n\n".repeat(12)),
             "# head\n\nplain\ttext\r\n\x1b[31m\u{202e} more\n\n```text\nhello\tworld\r\n\n```\n\nend".to_owned(),
             "```text\nold\n```\n```rust\nnew\n".to_owned(),
+            format!("```rust\n{}", "\t界 e\u{301}\t👩\u{200d}💻\t\x1b[31m\u{202e}\n".repeat(12)),
         ];
         for source in cases {
             for seed in 1..=4u64 {

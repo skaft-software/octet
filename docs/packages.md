@@ -2,11 +2,12 @@
 
 [Documentation](README.md) · [Extensions](extensions.md) · [Serve](experimental/octet-serve/README.md)
 
-octet ships the octet Serve runtime as a separately installable **extension
-package** and can install it atomically alongside the core binary. The package
-manager is intentionally small: the only official package name today is
-`octet-serve` (`PACKAGE_ID` in
-`crates/octet-coding-agent/src/extension_package.rs:22`).
+octet installs four executable bundles—Browse, MCP, subagents, and web search—
+and the separate Serve application through `octet extension`. See
+[executable bundle setup](installation.md#optional-packages) for the tool
+integrations. The application-package format on this page is specifically for
+`octet-serve`; Serve is not an executable-extension activation target.
+The local 0.8.0 RC does not imply matching published packages.
 
 ## Commands
 
@@ -78,10 +79,11 @@ packages**: a manifest plus a script or module, discovered through the normal
 resource roots and enabled/trusted explicitly. They are not installed by
 `octet extension` and not distributed as release archives.
 [Extension authoring](extensions.md) owns the manifest and API contract; the
-[Extensions API 0.3 reference](extensions/API-0.3-REFERENCE.md) owns the
+[Extension API 0.4 and retained wire reference](extensions/API-0.4-REFERENCE.md) owns the
 protocol.
 
 ## Pi packages
 
-Pi npm packages and their dependencies are handled separately by the
-[Pi compatibility host](pi-migration.md) and are not octet extension packages.
+Pi npm packages are not octet extension packages and cannot run unchanged here.
+[Pi inventory and portable import](pi-migration.md) are separate read/convert
+workflows, not a compatibility host or dependency installer.

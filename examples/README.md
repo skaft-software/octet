@@ -9,12 +9,20 @@ boundaries:
 - [Pi migration skill](skills/pi-migration/SKILL.md): low-token cleanup around the
   zero-token Pi inventory.
 
+## Current extension authoring
+
+Use the [Python API 0.4 tool recipe](../sdk/python/README.md#minimal-api-04-tool)
+for a bounded local process. The [canonical API 0.3 example](extensions/api-v03-minimal/README.md)
+and generated conformance suite remain live, with their exact versions and
+host pins. This checkout is a local RC, not a new SDK or bundle publication.
+
 ## Legacy extension examples
 
 These are **legacy implementation references**, not current extension authoring
-quickstarts. New extensions use [API `0.3`](../docs/extensions.md). The Python
-`Extension` runtime handles API `0.1`/`0.2`; generated API `0.3` types do not
-supply a complete `Extension` runtime. Do not retag these examples.
+quickstarts. New extensions use [API `0.4`](../docs/extensions.md). The Python
+`Extension` runtime handles the feature-negotiated API `0.4` wire and retained
+API `0.1`/`0.2`; generated API `0.3` types serve the distinct canonical wire.
+Do not retag these examples.
 
 - [hello-world](extensions/hello-world/README.md): API `0.1` initialization,
   model tool, command, hooks, context, status, renderer, and notification.

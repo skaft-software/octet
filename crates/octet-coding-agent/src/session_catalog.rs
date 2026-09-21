@@ -13,8 +13,9 @@ use rusqlite::{params, Connection, OpenFlags};
 
 const CATALOG_DIRECTORY: &str = ".catalog";
 const CATALOG_FILE: &str = "sessions-v1.sqlite3";
-const CATALOG_SCHEMA_VERSION: i64 = 4;
-const MAX_CATALOG_BYTES: u64 = 64 * 1024 * 1024;
+const CATALOG_SCHEMA_VERSION: i64 = 5;
+// Bound SQLite resident pages, not the complete disposable on-disk index.
+const CATALOG_CACHE_KIB: i64 = 4 * 1024;
 const STATUS_SUMMARY: i64 = 0;
 const STATUS_UNREADABLE: i64 = 1;
 
@@ -110,22 +111,17 @@ pub(crate) const MAX_INDEXED_ENTRIES_PER_SESSION: usize = 4_096;
 
 pub(crate) struct SessionCatalog {
     connection: Connection,
+    #[cfg(test)]
+    search_steps: std::cell::Cell<i32>,
 }
 
 impl SessionCatalog {
-    pub(crate) fn open_loaded(
-        workspace_store: &Path,
-    ) -> anyhow::Result<(Self, HashMap<String, CachedSession>)> {
-        match Self::open(workspace_store).and_then(|catalog| {
-            let cached = catalog.load()?;
-            Ok((catalog, cached))
-        }) {
-            Ok(loaded) => Ok(loaded),
+    pub(crate) fn open_recovering(workspace_store: &Path) -> anyhow::Result<Self> {
+        match Self::open(workspace_store) {
+            Ok(catalog) => Ok(catalog),
             Err(error) if catalog_error_is_rebuildable(&error) => {
                 reset_catalog_files(workspace_store)?;
-                let catalog = Self::open(workspace_store)?;
-                let cached = catalog.load()?;
-                Ok((catalog, cached))
+                Self::open(workspace_store)
             }
             Err(error) => Err(error),
         }
@@ -165,12 +161,18 @@ impl SessionCatalog {
 
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
-        connection.pragma_update(None, "temp_store", "MEMORY")?;
+        connection.pragma_update(None, "temp_store", "FILE")?;
+        connection.pragma_update(None, "cache_size", -CATALOG_CACHE_KIB)?;
+        connection.pragma_update(None, "mmap_size", 0)?;
+        connection.pragma_update(None, "journal_size_limit", 4 * 1024 * 1024)?;
         connection.pragma_update(None, "trusted_schema", false)?;
 
         if schema_version < CATALOG_SCHEMA_VERSION {
             connection.execute_batch(
-                "DROP TABLE IF EXISTS sessions;
+                "DROP TABLE IF EXISTS indexed_entry_grams;
+                 DROP TABLE IF EXISTS indexed_entries;
+                 DROP TABLE IF EXISTS indexed_entry_sessions;
+                 DROP TABLE IF EXISTS sessions;
                  CREATE TABLE sessions (
                      id TEXT PRIMARY KEY NOT NULL,
                      file_size INTEGER NOT NULL CHECK (file_size >= 0),
@@ -197,7 +199,7 @@ impl SessionCatalog {
             )?;
         }
 
-        // Additive entry-level search projection (schema 4). It accelerates
+        // Entry-level search projection. It accelerates
         // bounded incremental entry search and is rebuilt from JSONL whenever a
         // session's fingerprint changes; it is still disposable.
         connection.execute_batch(
@@ -209,6 +211,15 @@ impl SessionCatalog {
                  text TEXT NOT NULL,
                  PRIMARY KEY (session_id, entry_id)
              ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS indexed_entries_order ON indexed_entries(session_id, ordinal);
+             CREATE TABLE IF NOT EXISTS indexed_entry_grams (
+                 gram TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 ordinal INTEGER NOT NULL,
+                 entry_id TEXT NOT NULL,
+                 PRIMARY KEY (gram, session_id, ordinal)
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS indexed_entry_grams_session ON indexed_entry_grams(session_id);
              CREATE TABLE IF NOT EXISTS indexed_entry_sessions (
                  session_id TEXT PRIMARY KEY NOT NULL,
                  file_size INTEGER NOT NULL CHECK (file_size >= 0),
@@ -219,17 +230,42 @@ impl SessionCatalog {
                  value INTEGER NOT NULL
              ) WITHOUT ROWID;
              INSERT OR IGNORE INTO catalog_meta (key, value) VALUES ('entry_revision', 1);
-             PRAGMA user_version = 4;",
+             PRAGMA user_version = 5;",
         )?;
 
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            #[cfg(test)]
+            search_steps: std::cell::Cell::new(0),
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn load(&self) -> anyhow::Result<HashMap<String, CachedSession>> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT id, file_size, modified_ns, status, title, configured_model, configured_reasoning, message_count FROM sessions")?;
-        let rows = statement.query_map([], |row| {
+        self.load_selected(None)
+    }
+
+    pub(crate) fn session_ids(&self) -> anyhow::Result<HashSet<String>> {
+        self.connection
+            .prepare("SELECT id FROM sessions")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn lookup(&self, id: &str) -> anyhow::Result<Option<CachedSession>> {
+        Ok(self.load_selected(Some(id))?.remove(id))
+    }
+
+    fn load_selected(&self, id: Option<&str>) -> anyhow::Result<HashMap<String, CachedSession>> {
+        let select = "SELECT id, file_size, modified_ns, status, title, configured_model, configured_reasoning, message_count FROM sessions";
+        let sql = if id.is_some() {
+            format!("{select} WHERE id = ?1")
+        } else {
+            select.to_owned()
+        };
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(id), |row| {
             let configured_reasoning_type = row.get_ref(6)?.data_type();
             let configured_reasoning = match configured_reasoning_type {
                 Type::Null => None,
@@ -406,6 +442,11 @@ impl SessionCatalog {
         {
             let mut delete_entries =
                 transaction.prepare("DELETE FROM indexed_entries WHERE session_id = ?1")?;
+            let mut delete_grams =
+                transaction.prepare("DELETE FROM indexed_entry_grams WHERE session_id = ?1")?;
+            let mut insert_gram = transaction.prepare(
+                "INSERT INTO indexed_entry_grams (gram, session_id, ordinal, entry_id) VALUES (?1, ?2, ?3, ?4)",
+            )?;
             let mut delete_session =
                 transaction.prepare("DELETE FROM indexed_entry_sessions WHERE session_id = ?1")?;
             let mut insert_entry = transaction.prepare(
@@ -416,6 +457,7 @@ impl SessionCatalog {
             )?;
             for update in updates {
                 delete_entries.execute([&update.session_id])?;
+                delete_grams.execute([&update.session_id])?;
                 delete_session.execute([&update.session_id])?;
                 insert_session.execute(params![
                     update.session_id,
@@ -425,6 +467,14 @@ impl SessionCatalog {
                     update.fingerprint.modified_ns,
                 ])?;
                 for (ordinal, entry) in update.entries.iter().enumerate() {
+                    for gram in entry_grams(&entry.text) {
+                        insert_gram.execute(params![
+                            gram,
+                            update.session_id,
+                            ordinal as i64,
+                            entry.entry_id
+                        ])?;
+                    }
                     insert_entry.execute(params![
                         update.session_id,
                         entry.entry_id,
@@ -437,6 +487,7 @@ impl SessionCatalog {
             }
             for id in stale_ids {
                 delete_entries.execute([id])?;
+                delete_grams.execute([id])?;
                 delete_session.execute([id])?;
             }
         }
@@ -468,14 +519,32 @@ impl SessionCatalog {
         query: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<IndexedEntryHit>> {
+        // SQLite LIKE folds ASCII only. Keep its exact substring semantics,
+        // including escaped metacharacters and NUL termination, while selecting
+        // candidates through postings even for one/two-character queries.
+        let gram: String = query
+            .split('\0')
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(3)
+            .map(|ch| ch.to_ascii_lowercase())
+            .collect();
         let pattern = format!("%{}%", escape_like(query));
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut statement = self.connection.prepare(
+        let sql = if gram.is_empty() {
             "SELECT session_id, entry_id, ordinal, kind, text FROM indexed_entries
-             WHERE text LIKE ?1 ESCAPE '\\'
-             ORDER BY session_id, ordinal LIMIT ?2",
-        )?;
-        let rows = statement.query_map(params![pattern, limit], |row| {
+             WHERE text LIKE ?1 ESCAPE '\\' AND ?3 = ''
+             ORDER BY session_id, ordinal LIMIT ?2"
+        } else {
+            "SELECT e.session_id, e.entry_id, e.ordinal, e.kind, e.text
+             FROM indexed_entry_grams g JOIN indexed_entries e
+             ON e.session_id = g.session_id AND e.entry_id = g.entry_id
+             WHERE g.gram = ?3 AND e.text LIKE ?1 ESCAPE '\\'
+             ORDER BY g.session_id, g.ordinal LIMIT ?2"
+        };
+        let mut statement = self.connection.prepare(sql)?;
+        let rows = statement.query_map(params![pattern, limit, gram], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -501,6 +570,9 @@ impl SessionCatalog {
                 text,
             });
         }
+        #[cfg(test)]
+        self.search_steps
+            .set(statement.get_status(rusqlite::StatementStatus::VmStep));
         Ok(hits)
     }
 
@@ -513,6 +585,19 @@ impl SessionCatalog {
     pub(crate) fn path(workspace_store: &Path) -> std::path::PathBuf {
         workspace_store.join(CATALOG_DIRECTORY).join(CATALOG_FILE)
     }
+}
+
+/// Unique short n-grams bound temporary retention to one projected entry.
+/// Disk postings grow with searchable data; no eviction can hide old sessions.
+fn entry_grams(text: &str) -> HashSet<String> {
+    let chars: Vec<_> = text.chars().map(|ch| ch.to_ascii_lowercase()).collect();
+    let mut grams = HashSet::new();
+    for size in 1..=3 {
+        for window in chars.windows(size) {
+            grams.insert(window.iter().collect());
+        }
+    }
+    grams
 }
 
 /// Escape LIKE metacharacters so a user query is matched literally.
@@ -568,10 +653,6 @@ fn prepare_private_database_file(path: &Path) -> anyhow::Result<()> {
         }
         Err(error) => return Err(error.into()),
     };
-    let file_size = file.metadata()?.len();
-    if file_size > MAX_CATALOG_BYTES {
-        anyhow::bail!("session catalog is {file_size} bytes (limit {MAX_CATALOG_BYTES})");
-    }
     drop(file);
     Ok(())
 }
@@ -579,6 +660,153 @@ fn prepare_private_database_file(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn update(id: &str, texts: &[&str]) -> IndexedEntryUpdate {
+        IndexedEntryUpdate {
+            session_id: id.into(),
+            fingerprint: CatalogFingerprint {
+                file_size: 1,
+                modified_ns: 1,
+            },
+            entries: texts
+                .iter()
+                .enumerate()
+                .map(|(i, text)| IndexedEntry {
+                    entry_id: format!("entry-{i}"),
+                    kind: IndexedEntryKind::User,
+                    text: (*text).into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn postings_preserve_like_search_and_invalidate_replacements() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut catalog = SessionCatalog::open(temp.path()).unwrap();
+        let texts = [
+            "Hello WORLD",
+            "helLo_%\\tail",
+            "éÉ🦀",
+            "a",
+            "ab",
+            "abc",
+            "x\0abc",
+            "line\nnext",
+        ];
+        catalog
+            .apply_entries(&[update("a", &texts), update("b", &texts)], &HashSet::new())
+            .unwrap();
+        for query in [
+            "",
+            "h",
+            "HE",
+            "HELLO",
+            "world",
+            "%",
+            "_",
+            "\\",
+            "_%\\",
+            "é",
+            "É",
+            "🦀",
+            "a",
+            "ab",
+            "abc",
+            "\0",
+            "x\0abc",
+            "line\n",
+            "not present",
+        ] {
+            for limit in [0, 1, 100] {
+                let mut baseline = catalog.connection.prepare(
+                    "SELECT session_id, entry_id FROM indexed_entries WHERE text LIKE ?1 ESCAPE '\\' ORDER BY session_id, ordinal LIMIT ?2"
+                ).unwrap();
+                let expected = baseline
+                    .query_map(
+                        params![format!("%{}%", escape_like(query)), limit as i64],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let actual: Vec<_> = catalog
+                    .search_entries(query, limit)
+                    .unwrap()
+                    .into_iter()
+                    .map(|hit| (hit.session_id, hit.entry_id))
+                    .collect();
+                assert_eq!(actual, expected, "query={query:?}, limit={limit}");
+            }
+        }
+        catalog
+            .apply_entries(
+                &[update("a", &["replacement"])],
+                &HashSet::from(["b".into()]),
+            )
+            .unwrap();
+        assert!(catalog.search_entries("hello", 100).unwrap().is_empty());
+        assert_eq!(catalog.search_entries("replacement", 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn selective_search_work_does_not_scale_with_unrelated_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut catalog = SessionCatalog::open(temp.path()).unwrap();
+        catalog
+            .apply_entries(&[update("target", &["rare ∆x needle"])], &HashSet::new())
+            .unwrap();
+        for query in ["∆", "∆x", "∆x needle"] {
+            assert_eq!(catalog.search_entries(query, 10).unwrap().len(), 1);
+        }
+        let baseline = catalog.search_steps.get();
+        let mut background = update("background", &[]);
+        background.entries = (0..4096)
+            .map(|i| IndexedEntry {
+                entry_id: format!("{i:05}"),
+                kind: IndexedEntryKind::User,
+                text: format!("ordinary unrelated history number {i}"),
+            })
+            .collect();
+        catalog
+            .apply_entries(&[background], &HashSet::new())
+            .unwrap();
+        for query in ["∆", "∆x", "∆x needle"] {
+            assert_eq!(catalog.search_entries(query, 10).unwrap().len(), 1);
+            assert!(
+                catalog.search_steps.get() <= baseline + 10,
+                "{} vs {baseline}",
+                catalog.search_steps.get()
+            );
+        }
+    }
+
+    #[test]
+    fn catalogs_beyond_the_old_size_cliff_remain_searchable_with_bounded_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut catalog = SessionCatalog::open(temp.path()).unwrap();
+        catalog
+            .apply_entries(
+                &[update("oldest", &["still discoverable"])],
+                &HashSet::new(),
+            )
+            .unwrap();
+        // Grow a real SQLite file, not malformed trailing bytes. A formerly
+        // valid >64 MiB catalog used to become unusable on the next open.
+        catalog.connection.execute_batch("CREATE TABLE padding (data BLOB); INSERT INTO padding VALUES (zeroblob(65 * 1024 * 1024)); PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        assert!(SessionCatalog::path(temp.path()).metadata().unwrap().len() > 64 * 1024 * 1024);
+        drop(catalog);
+        let catalog = SessionCatalog::open_recovering(temp.path()).unwrap();
+        assert_eq!(
+            catalog.search_entries("discoverable", 10).unwrap()[0].session_id,
+            "oldest"
+        );
+        let cache: i64 = catalog
+            .connection
+            .pragma_query_value(None, "cache_size", |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache, -CATALOG_CACHE_KIB);
+    }
 
     #[test]
     fn non_text_reasoning_rows_are_ignored_for_transcript_rebuild() {

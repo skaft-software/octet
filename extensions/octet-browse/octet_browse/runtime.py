@@ -204,7 +204,7 @@ def create_runtime(
     *, controller_factory: Optional[Any] = None
 ) -> Tuple[Extension, BrowseController, BrowsePresentation, PresentationPublisher]:
     extension = Extension(
-        api_version="0.2",
+        api_version="0.4",
         max_concurrent_requests=8,
         max_pending_requests=32,
         supported_features=("request_cancellation", "content_parts", "artifacts"),

@@ -23,7 +23,7 @@ class ExtensionBundleTests(unittest.TestCase):
         self.entrypoint.chmod(0o755)
         self.archive = self.output / "fixture-extension-0.8.0.tar.gz"
 
-    def manifest(self, api="0.3", requirement="=0.8.0", command="extension.py"):
+    def manifest(self, api="0.4", requirement="=0.8.0", command="extension.py"):
         (self.source / "extension.toml").write_text(
             'name = "fixture-extension"\nversion = "1.2.3"\n'
             f'api_version = "{api}"\nrequires_octet = "{requirement}"\n'
@@ -39,7 +39,7 @@ class ExtensionBundleTests(unittest.TestCase):
         )
 
     def test_legacy_and_current_api_bundle_bytes_are_deterministic(self):
-        for api in ("0.2", "0.3"):
+        for api in ("0.2", "0.3", "0.4"):
             with self.subTest(api=api):
                 self.manifest(api)
                 result = self.package()
@@ -58,7 +58,7 @@ class ExtensionBundleTests(unittest.TestCase):
                 self.archive.unlink()
 
     def test_unknown_and_unpackaged_only_apis_are_refused(self):
-        for api in ("0.1", "0.3.0", "0.4", "", "latest"):
+        for api in ("0.1", "0.3.0", "0.5", "", "latest"):
             with self.subTest(api=api):
                 self.manifest(api)
                 result = self.package()
@@ -97,7 +97,7 @@ class ExtensionBundleTests(unittest.TestCase):
         executable.chmod(0o755)
         linked = self.source / "linked"
         linked.symlink_to(outside, target_is_directory=True)
-        for api in ("0.2", "0.3"):
+        for api in ("0.2", "0.3", "0.4"):
             for command in ("extension.py", "linked/bin/extension.py"):
                 with self.subTest(api=api, command=command):
                     self.manifest(api=api, command=command)

@@ -1460,6 +1460,88 @@ struct DurableFleet {
 /// Bounded roster file limit. A larger or malformed file fails closed instead
 /// of being partially trusted.
 const MAX_FLEET_ROSTER_BYTES: usize = 256 * 1024;
+/// The roster is an index into the durable child sessions, not another copy
+/// of every answer. Preserve full live/provenance output; only its restart
+/// projection shares the remaining roster byte budget. Both native and extension
+/// workers accumulate Completed/LimitReached text solely from TurnFinished, which
+/// the agent emits only after append_assistant_turn_with_metadata succeeds.
+/// Failure and approval diagnostics are metadata, never output-budget candidates.
+fn encode_durable_fleet(mut fleet: DurableFleet) -> io::Result<Vec<u8>> {
+    let mut texts = Vec::new();
+    for (index, record) in fleet.records.iter_mut().enumerate() {
+        if let Some(text) = roster_status_text(&mut record.status) {
+            if !text.is_empty() {
+                texts.push((index, std::mem::take(text)));
+            }
+        }
+    }
+    let base_bytes = serde_json::to_vec(&fleet).map_err(io::Error::other)?.len();
+    let available = MAX_FLEET_ROSTER_BYTES.saturating_sub(base_bytes);
+    let requested: usize = texts.iter().map(|(_, text)| json_text_bytes(text)).sum();
+    let budget = available / texts.len().max(1);
+    // Metadata still fails closed. Never turn a status into an unmarked empty
+    // answer just to make an overfull roster fit.
+    if base_bytes > MAX_FLEET_ROSTER_BYTES
+        || (requested > available && budget < json_text_bytes(ROSTER_OUTPUT_SUFFIX))
+    {
+        return Err(io::Error::other(
+            "durable fleet metadata exceeded its bounded size",
+        ));
+    }
+    for (index, text) in texts {
+        *roster_status_text(&mut fleet.records[index].status).expect("saved status text") =
+            if requested <= available {
+                text
+            } else {
+                bound_roster_text(&text, budget)
+            };
+    }
+    let encoded = serde_json::to_vec(&fleet).map_err(io::Error::other)?;
+    debug_assert!(encoded.len() <= MAX_FLEET_ROSTER_BYTES);
+    Ok(encoded)
+}
+
+const ROSTER_OUTPUT_SUFFIX: &str = "\n...[truncated in fleet roster; inspect child session]";
+
+fn roster_status_text(status: &mut DelegatedAgentStatus) -> Option<&mut String> {
+    match status {
+        DelegatedAgentStatus::Completed { output }
+        | DelegatedAgentStatus::LimitReached { output, .. } => Some(output),
+        _ => None,
+    }
+}
+
+// serde_json's escaped string content size (excluding the two quotes). A raw
+// UTF-8 budget alone is insufficient: control bytes expand by up to six times.
+fn json_char_bytes(ch: char) -> usize {
+    match ch {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        '\u{0}'..='\u{1f}' => 6,
+        _ => ch.len_utf8(),
+    }
+}
+
+fn json_text_bytes(text: &str) -> usize {
+    text.chars().map(json_char_bytes).sum()
+}
+
+fn bound_roster_text(text: &str, budget: usize) -> String {
+    if json_text_bytes(text) <= budget {
+        return text.to_owned();
+    }
+    let mut remaining = budget - json_text_bytes(ROSTER_OUTPUT_SUFFIX);
+    let mut end = 0;
+    for ch in text.chars() {
+        let size = json_char_bytes(ch);
+        if size > remaining {
+            break;
+        }
+        remaining -= size;
+        end += ch.len_utf8();
+    }
+    format!("{}{ROSTER_OUTPUT_SUFFIX}", &text[..end])
+}
+
 const FLEET_ROSTER_VERSION: u32 = 1;
 const FLEET_ROSTER_FILE: &str = "fleet.json";
 /// Versioned durable claim that fences execution of one session's fleet to a
@@ -2399,7 +2481,7 @@ impl DelegationManager {
             root_session: self.root_session.clone(),
             records: state.records.values().map(durable_fleet_record).collect(),
         };
-        let encoded = match serde_json::to_vec(&fleet) {
+        let encoded = match encode_durable_fleet(fleet) {
             Ok(encoded) => encoded,
             Err(error) => {
                 self.fail_persistence_locked(state, &io::Error::other(error));
@@ -10606,6 +10688,184 @@ mod tests {
         let state = manager.state.lock().unwrap();
         assert!(state.persistence_error.is_some());
         assert!(state.records["agent-1"].pending_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn roster_output_prefixes_preserve_full_child_sessions_after_reload() {
+        for (count, bytes, extension) in [(16, 16 * 1024, true), (2, 128 * 1024, false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let output = "x".repeat(bytes);
+            {
+                let manager = writable_manager(directory.path());
+                for index in 0..count {
+                    let session_path = directory.path().join(format!("child-{index}.jsonl"));
+                    let mut session = Session::create(&session_path).unwrap();
+                    // The production TurnFinished boundary has already appended
+                    // this complete message before execute_child_run collects it.
+                    session
+                        .append(crate::session::EntryValue::Message(
+                            octet_ai::Message::Assistant(octet_ai::AssistantMessage {
+                                content: vec![AssistantPart::Text(output.clone())],
+                                model: manager.template.model.spec.id.clone(),
+                                protocol: manager.template.model.spec.protocol,
+                            }),
+                        ))
+                        .unwrap();
+                    drop(session);
+                    let id = format!("agent-{}", index + 1);
+                    let policy = extension.then(|| {
+                        let mut policy = test_extension_policy();
+                        policy.max_output_bytes = bytes;
+                        policy
+                    });
+                    insert_fixture_record(
+                        &manager,
+                        DurableFleetRecord {
+                            agent_id: id.clone(),
+                            agent_path: format!("/root/worker-{index}"),
+                            parent_id: ROOT_AGENT_ID.into(),
+                            depth: 1,
+                            session_path,
+                            status: DelegatedAgentStatus::Running,
+                            extension_policy: policy,
+                            ..DurableFleetRecord::default()
+                        },
+                        false,
+                        false,
+                        true,
+                    );
+                    let status = if index % 2 == 0 {
+                        DelegatedAgentStatus::Completed {
+                            output: output.clone(),
+                        }
+                    } else {
+                        DelegatedAgentStatus::LimitReached {
+                            output: output.clone(),
+                            turn_count: 1,
+                            turn_limit: 1,
+                        }
+                    };
+                    assert!(manager.set_status(&id, status, false));
+                }
+                assert!(manager.state.lock().unwrap().persistence_error.is_none());
+            }
+            let manager = writable_manager(directory.path());
+            manager.restore_durable_fleet();
+            let mut state = manager.state.lock().unwrap();
+            assert_eq!(state.records.len(), count);
+            for record in state.records.values_mut() {
+                let prefix = roster_status_text(&mut record.status).unwrap();
+                assert!(prefix.ends_with(ROSTER_OUTPUT_SUFFIX));
+                let session = Session::open_read_only(&record.session_path).unwrap();
+                let complete: Vec<&str> = session
+                    .entries()
+                    .iter()
+                    .filter_map(|entry| {
+                        if let crate::session::EntryValue::Message(octet_ai::Message::Assistant(
+                            message,
+                        )) = &entry.value
+                        {
+                            message.content.iter().find_map(|part| match part {
+                                AssistantPart::Text(text) => Some(text.as_str()),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(complete, vec![output.as_str()]);
+            }
+        }
+    }
+
+    #[test]
+    fn allowed_worker_outputs_compose_with_durable_roster_budget() {
+        for (count, bytes, character) in [
+            (16, 16 * 1024, 'x'),
+            (2, 128 * 1024, 'é'),
+            (16, 16 * 1024, '\0'),
+        ] {
+            let output = character.to_string().repeat(bytes / character.len_utf8());
+            let fleet = DurableFleet {
+                version: FLEET_ROSTER_VERSION,
+                root_session: PathBuf::from("root.jsonl"),
+                records: (0..count)
+                    .map(|index| DurableFleetRecord {
+                        agent_id: format!("agent-{index}"),
+                        session_path: PathBuf::from(format!("child-{index}.jsonl")),
+                        status: DelegatedAgentStatus::Completed {
+                            output: output.clone(),
+                        },
+                        ..DurableFleetRecord::default()
+                    })
+                    .collect(),
+            };
+            assert!(serde_json::to_vec(&fleet).unwrap().len() > MAX_FLEET_ROSTER_BYTES);
+            let encoded = encode_durable_fleet(fleet).unwrap();
+            assert!(encoded.len() <= MAX_FLEET_ROSTER_BYTES);
+            let restored: DurableFleet = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(restored.records.len(), count);
+            for (index, record) in restored.records.iter().enumerate() {
+                assert_eq!(
+                    record.session_path,
+                    PathBuf::from(format!("child-{index}.jsonl"))
+                );
+                let DelegatedAgentStatus::Completed { output: retained } = &record.status else {
+                    panic!("lost status")
+                };
+                assert!(retained.ends_with(ROSTER_OUTPUT_SUFFIX));
+                assert!(output.starts_with(retained.strip_suffix(ROSTER_OUTPUT_SUFFIX).unwrap()));
+            }
+        }
+        let small = DurableFleet {
+            version: FLEET_ROSTER_VERSION,
+            root_session: PathBuf::from("root.jsonl"),
+            records: vec![DurableFleetRecord {
+                status: DelegatedAgentStatus::Completed {
+                    output: "small answer".into(),
+                },
+                ..DurableFleetRecord::default()
+            }],
+        };
+        assert_eq!(
+            encode_durable_fleet(small.clone()).unwrap(),
+            serde_json::to_vec(&small).unwrap()
+        );
+        for status in [
+            DelegatedAgentStatus::Failed {
+                error: "e".repeat(128 * 1024),
+            },
+            DelegatedAgentStatus::AwaitingApproval {
+                reason: "a".repeat(128 * 1024),
+            },
+        ] {
+            let fleet = DurableFleet {
+                version: FLEET_ROSTER_VERSION,
+                root_session: PathBuf::from("root.jsonl"),
+                records: vec![
+                    DurableFleetRecord {
+                        status: status.clone(),
+                        ..DurableFleetRecord::default()
+                    },
+                    DurableFleetRecord {
+                        status: DelegatedAgentStatus::Completed {
+                            output: "x".repeat(128 * 1024),
+                        },
+                        ..DurableFleetRecord::default()
+                    },
+                ],
+            };
+            let restored: DurableFleet =
+                serde_json::from_slice(&encode_durable_fleet(fleet).unwrap()).unwrap();
+            assert_eq!(restored.records[0].status, status);
+        }
+        let oversized_metadata = DurableFleet {
+            version: FLEET_ROSTER_VERSION,
+            root_session: PathBuf::from("x".repeat(MAX_FLEET_ROSTER_BYTES)),
+            records: vec![],
+        };
+        assert!(encode_durable_fleet(oversized_metadata).is_err());
     }
 
     #[test]

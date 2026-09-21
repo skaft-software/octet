@@ -70,7 +70,7 @@ or the command to the model.
 
 ## Build from a checkout
 
-A source checkout can differ from the published release. Check `octet --version`
+This checkout is a local 0.8.0 RC, not a published release. Check `octet --version`
 and use matching executable bundles; source builds do not establish signed
 publication or replace an installed binary.
 
@@ -120,13 +120,12 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
-The four executable bundles in this snapshot still declare API 0.2. They are
-legacy implementation references, not API 0.3 authoring examples. New authoring
-uses [Extension API 0.3](extensions/API-0.3-REFERENCE.md); generated Python 0.3
-types alone are not a complete 0.3 `Extension` runtime. The
-[API 0.3 minimal example](../examples/extensions/api-v03-minimal/README.md)
-provides a standard-library executable and a real-host conformance test; this
-is deterministic candidate evidence, not installed-release qualification.
+The four executable bundles in the working tree declare API 0.4. Their exact
+`requires_octet` pins still control admission: a current API number does not
+make a 0.7.6-pinned bundle usable on a 0.8.0 RC. No matching RC catalog
+publication is claimed. See [current authoring](extensions.md) for the Python
+API 0.4 process recipe and retained API 0.3 conformance example; generated
+contract bindings alone are not a process runtime.
 
 ## Container
 

@@ -1,6 +1,6 @@
 //! The agent: configuration, the procedural run loop, and run control.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -35,17 +35,17 @@ use crate::effect::{
     EffectBroker, EffectIntent, EffectReservation, ToolEffect, ToolPolicyDenialCode,
 };
 use crate::events::{
-    AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control,
+    AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control as UnreservedControl,
     DelegationTelemetrySnapshot, DeferredRunResumed, DeferredRunSuspended, FinishReason,
     OutputChannel, QueueDeliveryMode, ToolPolicyDecision,
 };
 use crate::extension::{
     AssistantPersistenceContext, EventObserver, ExtensionHost, ProviderRetryAdvice,
     ProviderRetryContext, ProviderRetryHook, ProviderRetryKind, RegisteredPersistenceMetadataHook,
-    ToolCallHook, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+    ToolCallHook, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY, MAX_REFUSED_ACTIVE_TOOL_NAMES,
 };
 use crate::extension_process::{ExtensionProcess, EXTENSION_FEATURE_AGENT_SESSIONS};
-use crate::input::UserInput;
+use crate::input::{InputPart, UserInput};
 use crate::sandbox::SandboxConfig;
 use crate::session::{
     now_unix_millis, DelegatedUsage, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
@@ -233,9 +233,23 @@ pub enum AgentError {
         /// Diagnostic starting with Pi's exact invalid-handle wording.
         diagnostic: String,
     },
+    /// An active-tool narrowing request named tools that are not in the
+    /// host-policed registered surface; the request changed nothing. The list
+    /// is sorted and bounded, and names the refused tools.
+    #[error("cannot activate unknown tool(s): {0:?}")]
+    UnknownActiveTools(Vec<String>),
+    /// The host refused an otherwise validated active-tool narrowing request,
+    /// for example because a concurrent extension catalog change removed a
+    /// requested name before publication. The request changed nothing.
+    #[error("active tool set refused: {0}")]
+    ActiveToolSetRefused(String),
     /// A control message was sent after the run finished.
     #[error("the run has already finished")]
     RunEnded,
+    /// Input was not accepted because the run's queued count or byte budget
+    /// (including inputs awaiting durable delivery) is exhausted.
+    #[error("the run control queue is full; input was not accepted")]
+    ControlQueueFull,
 }
 
 /// Format an agent failure for a public frontend.
@@ -617,7 +631,10 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
         | AgentError::UsageUncertain
         | AgentError::OutputLimitUnavailable
         | AgentError::NetworkWaitLimit { .. }
-        | AgentError::RunEnded => None,
+        | AgentError::UnknownActiveTools(_)
+        | AgentError::ActiveToolSetRefused(_)
+        | AgentError::RunEnded
+        | AgentError::ControlQueueFull => None,
     }
 }
 
@@ -780,6 +797,7 @@ pub struct Agent {
     compaction_keep_recent_tokens: u64,
     session_id: String,
     resource_owner: String,
+    bash_owner: BashOwnerLease,
     tool_scope: String,
     completion_policy: CompletionPolicy,
     output_modalities: OutputModalities,
@@ -820,6 +838,39 @@ pub struct Agent {
     /// [`NOOP_TELEMETRY_CONTEXT`](crate::telemetry::spans::NOOP_TELEMETRY_CONTEXT)
     /// loses observations, never accounting.
     telemetry: TelemetryContext,
+}
+
+// Embedders can reopen the same durable session before dropping the old Agent.
+// Retire Bash retention only after the last live Agent with that owner leaves.
+static BASH_OWNER_LEASES: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct BashOwnerLease(String);
+
+impl BashOwnerLease {
+    fn acquire(owner: &str) -> Self {
+        let mut owners = BASH_OWNER_LEASES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *owners.entry(owner.to_owned()).or_default() += 1;
+        Self(owner.to_owned())
+    }
+}
+
+impl Drop for BashOwnerLease {
+    fn drop(&mut self) {
+        let mut owners = BASH_OWNER_LEASES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let leases = owners.get_mut(&self.0).expect("live Bash owner lease");
+        *leases -= 1;
+        if *leases == 0 {
+            owners.remove(&self.0);
+            // Keep retirement serialized with acquisition; the tool offloads
+            // filesystem cleanup so no slow unlink runs under this fence.
+            crate::tools::BashTool::release_owner(&self.0);
+        }
+    }
 }
 
 impl Drop for Agent {
@@ -980,16 +1031,126 @@ impl Stream for Run<'_> {
     }
 }
 
+// Reservations follow semantic input out of the bounded ingress channel and
+// into pending steering/follow-up batches, until persistence or run termination.
+const MAX_PENDING_CONTROL_INPUTS: usize = 64;
+const MAX_PENDING_CONTROL_BYTES: usize = 64 * 1024 * 1024;
+
+struct ReservedInput {
+    input: UserInput,
+    _count: tokio::sync::OwnedSemaphorePermit,
+    _bytes: tokio::sync::OwnedSemaphorePermit,
+}
+
+enum Control {
+    Steer(ReservedInput),
+    FollowUp(ReservedInput),
+    FinishNow(ReservedInput),
+    SetSteeringMode(QueueDeliveryMode),
+    SetFollowUpMode(QueueDeliveryMode),
+    Abort,
+}
+
+/// Logical retained payload bytes, including part slots, media, references and
+/// transcripts. Count inline data directly rather than allocating base64 JSON.
+fn control_input_bytes(input: &UserInput) -> usize {
+    input.parts.iter().fold(
+        input
+            .parts
+            .len()
+            .saturating_mul(std::mem::size_of::<InputPart>()),
+        |total, part| {
+            let bytes = match part {
+                InputPart::Text(text) => text.len(),
+                InputPart::Media(Media::Image(image)) => {
+                    let source = match &image.source {
+                        ImageSource::Inline(data) => data.len(),
+                        ImageSource::Url(url) => url.as_str().len(),
+                        ImageSource::ProviderRef(reference) => reference.id.len(),
+                    };
+                    source.saturating_add(
+                        image
+                            .media_type
+                            .as_ref()
+                            .map_or(0, |mime| mime.as_ref().len()),
+                    )
+                }
+                InputPart::Media(Media::Audio(audio)) => {
+                    let source = match &audio.payload {
+                        AudioPayload::Inline(data) => data.len(),
+                        AudioPayload::ProviderRef(reference) => reference.id.len(),
+                        AudioPayload::InlineWithProviderRef { data, reference } => {
+                            data.len().saturating_add(reference.id.len())
+                        }
+                    };
+                    source.saturating_add(audio.transcript.as_ref().map_or(0, String::len))
+                }
+            };
+            total.saturating_add(bytes)
+        },
+    )
+}
+
 /// Clonable control handle for an active [`Run`].
+///
+/// Steering, follow-up and FinishNow share a 64-input / 64-MiB logical payload
+/// budget, including inputs drained into pending delivery batches. Saturation
+/// returns [`AgentError::ControlQueueFull`] before acceptance. Successful sends
+/// remain reserved until durable delivery or run termination; cancellation
+/// bypasses this queue entirely.
 #[derive(Clone)]
 pub struct RunControl {
     admission: Arc<std::sync::Mutex<bool>>,
     tx: mpsc::Sender<Control>,
+    pending_count: Arc<tokio::sync::Semaphore>,
+    pending_bytes: Arc<tokio::sync::Semaphore>,
     abort: Arc<AbortFlag>,
 }
 
 impl RunControl {
-    async fn send(&self, control: Control) -> Result<(), AgentError> {
+    fn reserve_input(&self, input: UserInput) -> Result<ReservedInput, AgentError> {
+        let bytes = control_input_bytes(&input);
+        if bytes > MAX_PENDING_CONTROL_BYTES {
+            return Err(AgentError::ControlQueueFull);
+        }
+        let count = self
+            .pending_count
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AgentError::ControlQueueFull)?;
+        let bytes = self
+            .pending_bytes
+            .clone()
+            .try_acquire_many_owned(bytes as u32)
+            .map_err(|_| AgentError::ControlQueueFull)?;
+        Ok(ReservedInput {
+            input,
+            _count: count,
+            _bytes: bytes,
+        })
+    }
+
+    fn reserve_control(&self, control: UnreservedControl) -> Result<Control, AgentError> {
+        if self.tx.is_closed()
+            || !*self
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        {
+            return Err(AgentError::RunEnded);
+        }
+        Ok(match control {
+            UnreservedControl::Steer(input) => Control::Steer(self.reserve_input(input)?),
+            UnreservedControl::FollowUp(input) => Control::FollowUp(self.reserve_input(input)?),
+            UnreservedControl::FinishNow(input) => Control::FinishNow(self.reserve_input(input)?),
+            UnreservedControl::SetSteeringMode(mode) => Control::SetSteeringMode(mode),
+            UnreservedControl::SetFollowUpMode(mode) => Control::SetFollowUpMode(mode),
+            UnreservedControl::Abort => Control::Abort,
+        })
+    }
+
+    async fn send(&self, control: UnreservedControl) -> Result<(), AgentError> {
+        let control = self.reserve_control(control)?;
         let permit = self.tx.reserve().await.map_err(|_| AgentError::RunEnded)?;
         let admission = self
             .admission
@@ -1002,8 +1163,12 @@ impl RunControl {
         Ok(())
     }
 
-    fn try_send(&self, control: Control) -> Result<(), AgentError> {
-        let permit = self.tx.try_reserve().map_err(|_| AgentError::RunEnded)?;
+    fn try_send(&self, control: UnreservedControl) -> Result<(), AgentError> {
+        let control = self.reserve_control(control)?;
+        let permit = self.tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => AgentError::ControlQueueFull,
+            mpsc::error::TrySendError::Closed(_) => AgentError::RunEnded,
+        })?;
         let admission = self
             .admission
             .lock()
@@ -1018,43 +1183,43 @@ impl RunControl {
     /// Injects input into the conversation at the next model-turn boundary of
     /// the active run (persisted to the session when applied).
     pub async fn steer(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.send(Control::Steer(input.into())).await
+        self.send(UnreservedControl::Steer(input.into())).await
     }
 
     /// Attempts to enqueue steering without allowing a producer to wait behind
     /// the run's bounded control queue.
     pub(crate) fn try_steer(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.try_send(Control::Steer(input.into()))
+        self.try_send(UnreservedControl::Steer(input.into()))
     }
 
     /// Queues input for after the current run settles: when the model completes
     /// a turn without tool calls, the run continues with this input instead of
     /// finishing.
     pub async fn follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.send(Control::FollowUp(input.into())).await
+        self.send(UnreservedControl::FollowUp(input.into())).await
     }
 
     /// Requests a final answer at the next safe turn boundary. The supplied
     /// input is persisted like steering, but subsequent requests in this run
     /// expose no tools.
     pub async fn finish_now(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.send(Control::FinishNow(input.into())).await
+        self.send(UnreservedControl::FinishNow(input.into())).await
     }
 
     /// Attempts to enqueue a follow-up without allowing a producer to wait
     /// behind the run's bounded control queue.
     pub(crate) fn try_follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.try_send(Control::FollowUp(input.into()))
+        self.try_send(UnreservedControl::FollowUp(input.into()))
     }
 
     /// Changes how pending steering messages are delivered.
     pub async fn set_steering_mode(&self, mode: QueueDeliveryMode) -> Result<(), AgentError> {
-        self.send(Control::SetSteeringMode(mode)).await
+        self.send(UnreservedControl::SetSteeringMode(mode)).await
     }
 
     /// Changes how pending follow-up messages are delivered.
     pub async fn set_follow_up_mode(&self, mode: QueueDeliveryMode) -> Result<(), AgentError> {
-        self.send(Control::SetFollowUpMode(mode)).await
+        self.send(UnreservedControl::SetFollowUpMode(mode)).await
     }
 
     /// Aborts the run at the next safe boundary: the in-flight model stream is
@@ -3900,7 +4065,7 @@ fn estimate_request_tokens(system: &str, messages: &[Message], tools: &[ToolDef]
 
 struct ExactResponsesReplay {
     input: ResponsesInput,
-    replay: Vec<ResponsesReplayItem>,
+    replay: Arc<Vec<ResponsesReplayItem>>,
     instructions: Option<String>,
 }
 
@@ -3913,7 +4078,7 @@ fn exact_responses_replay(
         return None;
     }
     let replay = session
-        .responses_replay_items(&model.endpoint.id, &model.spec.id)
+        .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
         .ok()
         .flatten()?;
     let instructions = matches!(replay.first(), Some(ResponsesReplayItem::Compacted(_)))
@@ -4018,7 +4183,7 @@ fn native_responses_options(
 ) -> Result<ResponsesOptions, AgentError> {
     let service_tier = resolve_service_tier(model, requested_service_tier)?;
     let replay = session
-        .responses_replay_items(&model.endpoint.id, &model.spec.id)?
+        .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)?
         .ok_or_else(|| {
             AgentError::InvalidCompactionPolicy(
                 "native Responses mode requires complete route-affine opaque replay before every provider request"
@@ -4120,6 +4285,11 @@ fn provider_context_estimate(session: &Session, model: &Model) -> Option<u64> {
     // Only the suffix after the newest usable measurement contributes. Walking
     // backwards avoids allocating/copying the entire active branch on startup,
     // context inspection, and capacity-cache rebuilds in long sessions.
+    // Advance through the ledger at most once. Index only usable records for
+    // this route/model, newest first, while retaining the constant-work common
+    // case where the head assistant has the newest measurement.
+    let mut usage_records = session.usage_records().iter().rev();
+    let mut usage_by_assistant = HashMap::new();
     let mut cursor = session.head_ref();
     while let Some(id) = cursor {
         #[cfg(test)]
@@ -4129,17 +4299,31 @@ fn provider_context_estimate(session: &Session, model: &Model) -> Option<u64> {
             EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. } => break,
             EntryValue::Message(message) => {
                 if matches!(message, Message::Assistant(_)) {
-                    if let Some(record) = session.usage_records().iter().rev().find(|record| {
-                        #[cfg(test)]
-                        PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(visits.get() + 1));
-                        matches!(
-                            &record.kind,
-                            crate::session::UsageRecordKind::AssistantTurn { assistant }
-                                if assistant == &entry.id
-                        ) && record.endpoint.as_ref() == Some(&model.endpoint.id)
-                            && record.model.as_ref() == Some(&model.spec.id)
-                            && usage_context_tokens(&record.usage) > 0
-                    }) {
+                    let measured = usage_by_assistant.get(&entry.id).copied().or_else(|| {
+                        for record in usage_records.by_ref() {
+                            #[cfg(test)]
+                            PROVIDER_CONTEXT_USAGE_VISITS
+                                .with(|visits| visits.set(visits.get() + 1));
+                            let crate::session::UsageRecordKind::AssistantTurn { assistant } =
+                                &record.kind
+                            else {
+                                continue;
+                            };
+                            let tokens = usage_context_tokens(&record.usage);
+                            if record.endpoint.as_ref() != Some(&model.endpoint.id)
+                                || record.model.as_ref() != Some(&model.spec.id)
+                                || tokens == 0
+                            {
+                                continue;
+                            }
+                            if assistant == &entry.id {
+                                return Some(tokens);
+                            }
+                            usage_by_assistant.entry(assistant).or_insert(tokens);
+                        }
+                        None
+                    });
+                    if let Some(tokens) = measured {
                         // Estimate only after finding usable usage. Sessions with
                         // no measurement must not serialize their entire history.
                         let mut trailing = 0u64;
@@ -4156,7 +4340,7 @@ fn provider_context_estimate(session: &Session, model: &Model) -> Option<u64> {
                             }
                             tail = tail_entry.parent.as_ref();
                         }
-                        return Some(usage_context_tokens(&record.usage).saturating_add(trailing));
+                        return Some(tokens.saturating_add(trailing));
                     }
                 }
             }
@@ -4754,7 +4938,7 @@ fn settle_tool_progress(
 /// context tracker is still observed (its error ignored) so observers see the
 /// partial delivery before the run ends.
 fn deliver_control_inputs(
-    queued: Vec<UserInput>,
+    queued: Vec<ReservedInput>,
     kind: ControlDeliveryKind,
     session: &mut Session,
     metadata: &EntryMetadata,
@@ -4762,7 +4946,12 @@ fn deliver_control_inputs(
     observation: &ContextObservation<'_>,
 ) -> ControlDelivery {
     let mut delivered = Vec::with_capacity(queued.len());
-    for input in queued {
+    for ReservedInput {
+        input,
+        _count,
+        _bytes,
+    } in queued
+    {
         let summary = input.text_summary();
         terminal_gate_requests.push(summary.clone());
         if let Err(e) = session.append_with_metadata(user_message(input), Some(metadata.clone())) {
@@ -4775,11 +4964,14 @@ fn deliver_control_inputs(
             };
         }
         delivered.push(summary);
+        // Never free admission capacity merely because ingress was drained.
+        // Both permits remain live through the successful durable append.
+        drop((_count, _bytes));
     }
     if !delivered.is_empty() {
         if let Err(error) = observation.observe(session) {
             return ControlDelivery::Interrupted {
-                event: None,
+                event: Some(kind.delivered_event(delivered)),
                 finish: FinishReason::Failed(error.into()),
             };
         }
@@ -5110,14 +5302,16 @@ struct CapacityEstimate {
 /// The first value is seeded from the exact context observation. For ordinary
 /// canonical-message appends, later values advance from the cached head using
 /// a per-message upper bound instead of serializing the complete history. A
-/// branch checkout, local compaction, tool-surface change, or Responses replay
-/// falls back to the exact estimator. The detailed category breakdown remains
+/// branch checkout, compaction, tool-surface change, or replay-mode change
+/// falls back to the exact estimator. Responses appends estimate only the new
+/// route-affine opaque replay items, not the complete unchanged prefix. The detailed category breakdown remains
 /// the on-demand telemetry path in [`context_breakdown`].
 struct ContextCapacityCache {
     head: Option<EntryId>,
     tool_generation: u64,
     structural_tokens: u64,
     provider_tokens: Option<u64>,
+    responses_items: Option<usize>,
     valid: bool,
     #[cfg(test)]
     full_rebuilds: usize,
@@ -5130,6 +5324,7 @@ impl ContextCapacityCache {
             tool_generation,
             structural_tokens: context.structural_tokens,
             provider_tokens: context.provider_tokens,
+            responses_items: None,
             valid: true,
             #[cfg(test)]
             full_rebuilds: 0,
@@ -5186,6 +5381,56 @@ impl ContextCapacityCache {
         true
     }
 
+    fn advance_for_model(&mut self, session: &Session, model: &Model) -> bool {
+        if model.spec.protocol != Protocol::OpenAiResponses {
+            return self.advance_messages(session);
+        }
+        if !self.valid {
+            return false;
+        }
+        let Ok(replay) = session.responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
+        else {
+            return false;
+        };
+        let Some(replay) = replay else {
+            return self.responses_items.is_none() && self.advance_messages(session);
+        };
+        let Some(first_new) = self.responses_items else {
+            return false;
+        };
+        // A compacted window can grow beyond the old length: length alone is
+        // not an invalidation fence. Check only the new durable ancestry.
+        let mut cursor = session.head_ref();
+        while cursor != self.head.as_ref() {
+            let Some(entry) = cursor.and_then(|id| session.entry(id)) else {
+                return false;
+            };
+            if matches!(
+                entry.value,
+                EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. }
+            ) {
+                return false;
+            }
+            cursor = entry.parent.as_ref();
+        }
+        let Some(suffix) = replay.get(first_new..) else {
+            return false;
+        };
+        if !suffix.is_empty() {
+            let input = octet_ai::responses::encode_responses_replay(model, None, suffix);
+            // Standalone framing is a conservative upper bound on appending
+            // the same opaque output/user items to the existing wire window.
+            let delta = estimate_responses_request_tokens(&input, suffix, &[], None);
+            self.structural_tokens = self.structural_tokens.saturating_add(delta);
+            if let Some(provider) = &mut self.provider_tokens {
+                *provider = provider.saturating_add(delta);
+            }
+        }
+        self.responses_items = Some(replay.len());
+        self.head = session.head();
+        true
+    }
+
     /// Replaces the cache with a route-accurate full estimate.
     fn rebuild(
         &mut self,
@@ -5201,6 +5446,15 @@ impl ContextCapacityCache {
         self.tool_generation = tool_generation;
         self.structural_tokens = estimate.structural_tokens;
         self.provider_tokens = estimate.provider_tokens;
+        self.responses_items = (model.spec.protocol == Protocol::OpenAiResponses)
+            .then(|| {
+                session
+                    .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
+                    .ok()
+                    .flatten()
+            })
+            .flatten()
+            .map(|items| items.len());
         self.valid = true;
         #[cfg(test)]
         {
@@ -5218,10 +5472,9 @@ impl ContextCapacityCache {
         tool_generation: u64,
     ) -> Result<RequestContextEstimate, SessionError> {
         let messages = session.context_ref()?;
-        let can_advance = model.spec.protocol != Protocol::OpenAiResponses
-            && self.valid
+        let can_advance = self.valid
             && self.tool_generation == tool_generation
-            && self.advance_messages(session);
+            && self.advance_for_model(session, model);
         if !can_advance {
             self.rebuild(session, model, system, &messages, tools, tool_generation);
         }
@@ -5243,8 +5496,8 @@ impl ContextCapacityCache {
     /// A zero usage report is left on the incrementally advanced estimate,
     /// matching `provider_context_estimate`'s behavior of ignoring unusable
     /// records rather than replacing a usable older measurement with zero.
-    fn observe_assistant_response(&mut self, session: &Session, usage: &Usage) {
-        if !self.advance_messages(session) {
+    fn observe_assistant_response(&mut self, session: &Session, model: &Model, usage: &Usage) {
+        if !self.advance_for_model(session, model) {
             self.invalidate();
             return;
         }
@@ -5580,7 +5833,7 @@ impl CompactionContext<'_> {
             }
             let replay = self
                 .session
-                .responses_replay_items(&self.model.endpoint.id, &self.model.spec.id)?
+                .responses_replay_snapshot(&self.model.endpoint.id, &self.model.spec.id)?
                 .ok_or_else(|| {
                     AgentError::InvalidCompactionPolicy(
                         "native Responses compaction requires complete route-affine opaque replay"
@@ -6307,6 +6560,7 @@ impl Agent {
         let session_id = config.session_id.unwrap_or_else(|| resource_owner.clone());
         let max_output_tokens = config.model.spec.limits.max_output_tokens;
         let tool_scope = next_tool_scope();
+        let bash_owner = BashOwnerLease::acquire(&resource_owner);
         Ok(Self {
             client: config.client,
             model: config.model,
@@ -6325,6 +6579,7 @@ impl Agent {
             compaction_keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             session_id,
             resource_owner,
+            bash_owner,
             tool_scope,
             completion_policy: CompletionPolicy::Natural,
             output_modalities: OutputModalities::Text,
@@ -6556,10 +6811,7 @@ impl Agent {
         &self,
         process: &ExtensionProcess,
     ) -> Result<bool, AgentError> {
-        if !process
-            .negotiated_features()
-            .contains(EXTENSION_FEATURE_AGENT_SESSIONS)
-        {
+        if !process.supports_feature(EXTENSION_FEATURE_AGENT_SESSIONS) {
             return Ok(false);
         }
         let binding = self.delegation.as_ref().ok_or_else(|| {
@@ -6849,7 +7101,7 @@ impl Agent {
         if mode == AgentCompactionMode::NativeResponses
             && self
                 .session
-                .responses_replay_items(&self.model.endpoint.id, &self.model.spec.id)?
+                .responses_replay_snapshot(&self.model.endpoint.id, &self.model.spec.id)?
                 .is_none()
         {
             return Err(AgentError::InvalidCompactionPolicy(
@@ -6939,7 +7191,7 @@ impl Agent {
         }
         let Some(replay) = self
             .session
-            .responses_replay_items(&self.model.endpoint.id, &self.model.spec.id)?
+            .responses_replay_snapshot(&self.model.endpoint.id, &self.model.spec.id)?
         else {
             return Ok(None);
         };
@@ -7097,7 +7349,7 @@ impl Agent {
         }
         let replay = self
             .session
-            .responses_replay_items(&self.model.endpoint.id, &self.model.spec.id)?
+            .responses_replay_snapshot(&self.model.endpoint.id, &self.model.spec.id)?
             .ok_or_else(|| {
                 AgentError::InvalidCompactionPolicy(
                     "native Responses compaction requires complete route-affine opaque replay"
@@ -7683,6 +7935,7 @@ impl Agent {
             persist_pending_cancellations(&mut self.session)?;
         }
         let resource_owner = session.resource_owner_key();
+        self.bash_owner = BashOwnerLease::acquire(&resource_owner);
         self.session_id = resource_owner.clone();
         self.resource_owner = resource_owner;
         self.session = session;
@@ -7715,19 +7968,53 @@ impl Agent {
         self.extensions.tool_definitions()
     }
 
-    /// Exact registered tool names after the frontend has applied all policy
-    /// filters and extension registration. The sorted result is suitable for
-    /// deterministic diagnostics and capability validation at idle boundaries.
+    /// Exact host-policed registered tool names, sorted.
+    ///
+    /// The result lists every name registered after the frontend has applied
+    /// all policy filters and extension registration. It still includes names
+    /// that [`set_active_tool_names`](Self::set_active_tool_names) has
+    /// deactivated, so it is the stable validation surface for active-tool
+    /// requests; use
+    /// [`registered_tool_definitions`](Self::registered_tool_definitions) for
+    /// the exact schemas the next provider request would advertise.
     pub fn registered_tool_names(&self) -> Vec<String> {
-        let mut names = self
-            .extensions
-            .tool_snapshot()
-            .1
-            .iter()
-            .map(|tool| tool.definition().name)
-            .collect::<Vec<_>>();
-        names.sort();
-        names
+        self.extensions.policed_tool_names()
+    }
+
+    /// Narrows the host-policed tool surface this agent advertises and
+    /// executes to exactly `names`.
+    ///
+    /// `Some(set)` activates only the requested registered names. Unknown or
+    /// already policy-excluded names fail with
+    /// [`AgentError::UnknownActiveTools`] and change nothing; `None` restores
+    /// the full host-policed surface; `Some(empty)` is valid and leaves the
+    /// agent with no callable tools.
+    ///
+    /// Activation strictly narrows: it can never add a tool, re-admit a name
+    /// the sandbox, effect broker, or frontend policy excluded, or widen what
+    /// an admitted tool may do. Every accepted call bumps the host
+    /// tool-snapshot revision, so an in-flight run drops deactivated schemas
+    /// and refuses calls to deactivated tools with the existing `unknown tool`
+    /// result at its next turn boundary.
+    pub fn set_active_tool_names(
+        &mut self,
+        names: Option<BTreeSet<String>>,
+    ) -> Result<(), AgentError> {
+        if let Some(names) = names.as_ref() {
+            let registered = self.registered_tool_names();
+            let mut refused = names
+                .iter()
+                .filter(|name| !registered.iter().any(|registered| registered == *name))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !refused.is_empty() {
+                refused.truncate(MAX_REFUSED_ACTIVE_TOOL_NAMES);
+                return Err(AgentError::UnknownActiveTools(refused));
+            }
+        }
+        self.extensions
+            .set_active_tools(names.as_ref())
+            .map_err(AgentError::ActiveToolSetRefused)
     }
 
     /// Reconciles unresolved calls from the latest persisted assistant turn.
@@ -7923,6 +8210,8 @@ impl Agent {
         let control = RunControl {
             admission: control_admission.clone(),
             tx: control_tx,
+            pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
+            pending_bytes: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_BYTES)),
             abort: abort.clone(),
         };
 
@@ -8066,8 +8355,8 @@ impl Agent {
             let mut announced_tools: std::collections::HashSet<String> =
                 registered_tools.iter().cloned().collect();
 
-            let mut pending_steer: Vec<UserInput> = Vec::new();
-            let mut followups: VecDeque<UserInput> = VecDeque::new();
+            let mut pending_steer: Vec<ReservedInput> = Vec::new();
+            let mut followups: VecDeque<ReservedInput> = VecDeque::new();
             // Preserve octet's historical defaults; frontends that expose queue
             // modes can update either mode through RunControl.
             let mut steering_mode = QueueDeliveryMode::All;
@@ -9094,7 +9383,7 @@ impl Agent {
                 ) {
                     break 'run FinishReason::Failed(error.into());
                 }
-                context_capacity.observe_assistant_response(session, &turn_usage);
+                context_capacity.observe_assistant_response(session, &model, &turn_usage);
                 add_usage(&mut run_usage, &turn_usage);
                 let turn_cost = response.cost;
                 run_cost.add(turn_cost);
@@ -10320,6 +10609,10 @@ impl Agent {
                 );
             }
             *control_admission.lock().unwrap_or_else(|error| error.into_inner()) = false;
+            control_rx.close();
+            while control_rx.try_recv().is_ok() {}
+            pending_steer.clear();
+            followups.clear();
             // A fully driven prompt always leaves an explicit durable restore
             // point, including controlled abort/max-turn/failure outcomes. A
             // dropped stream is not complete and never reaches this boundary.
@@ -10524,6 +10817,262 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
+
+    fn test_run_control(byte_limit: usize) -> (RunControl, mpsc::Receiver<Control>) {
+        let (tx, rx) = mpsc::channel(8);
+        (
+            RunControl {
+                admission: Arc::new(Mutex::new(true)),
+                tx,
+                pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
+                pending_bytes: Arc::new(tokio::sync::Semaphore::new(byte_limit)),
+                abort: Arc::new(AbortFlag::default()),
+            },
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn pending_controls_stay_reserved_after_ingress_drain_until_durable_delivery() {
+        let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        let mut pending = Vec::new();
+        for index in 0..MAX_PENDING_CONTROL_INPUTS {
+            control.follow_up(format!("input-{index}")).await.unwrap();
+            let Control::FollowUp(input) = rx.recv().await.unwrap() else {
+                panic!("follow-up")
+            };
+            pending.push(input);
+        }
+        assert_eq!(control.pending_count.available_permits(), 0);
+        assert!(matches!(
+            control.steer("rejected").await,
+            Err(AgentError::ControlQueueFull)
+        ));
+        assert!(matches!(
+            control.finish_now("rejected").await,
+            Err(AgentError::ControlQueueFull)
+        ));
+        // Mode/cancellation controls do not spend semantic-input reservations.
+        control
+            .set_follow_up_mode(QueueDeliveryMode::OneAtATime)
+            .await
+            .unwrap();
+        assert!(matches!(rx.recv().await, Some(Control::SetFollowUpMode(_))));
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("controls.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let tracker = ContextTracker::default();
+        let observation = ContextObservation {
+            tracker: &tracker,
+            model: &model,
+            system: "",
+            tools: &[],
+        };
+        let mut gate = Vec::new();
+        let delivered = deliver_control_inputs(
+            pending,
+            ControlDeliveryKind::FollowUp,
+            &mut session,
+            &EntryMetadata::default(),
+            &mut gate,
+            &observation,
+        );
+        let ControlDelivery::Completed {
+            event: Some(AgentEvent::FollowUpDelivered { messages }),
+        } = delivered
+        else {
+            panic!("durable delivery must be acknowledged")
+        };
+        assert_eq!(
+            messages,
+            (0..MAX_PENDING_CONTROL_INPUTS)
+                .map(|i| format!("input-{i}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(session.entries().len(), MAX_PENDING_CONTROL_INPUTS);
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+        assert_eq!(
+            control.pending_bytes.available_permits(),
+            MAX_PENDING_CONTROL_BYTES
+        );
+        control.try_steer("accepted again").unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_byte_and_ingress_saturation_are_typed_and_rollback_reservations() {
+        let input = UserInput::from(vec![InputPart::Media(Media::audio_bytes(
+            bytes::Bytes::from_static(b"audio-payload"),
+            octet_ai::AudioFormat::Wav,
+        ))]);
+        let bytes = control_input_bytes(&input);
+        assert!(bytes >= b"audio-payload".len() + std::mem::size_of::<InputPart>());
+        let (control, mut rx) = test_run_control(bytes);
+        control.try_follow_up(input).unwrap();
+        let held = rx.recv().await.unwrap();
+        assert_eq!(control.pending_bytes.available_permits(), 0);
+        assert!(matches!(
+            control.try_steer("x"),
+            Err(AgentError::ControlQueueFull)
+        ));
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS - 1
+        );
+        control.abort();
+        assert!(control.abort.is_set());
+        drop(held);
+        assert_eq!(control.pending_bytes.available_permits(), bytes);
+
+        let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        for _ in 0..8 {
+            control.try_steer("queued").unwrap();
+        }
+        let reserved = control.pending_bytes.available_permits();
+        assert!(matches!(
+            control.try_follow_up("full ingress"),
+            Err(AgentError::ControlQueueFull)
+        ));
+        assert_eq!(control.pending_bytes.available_permits(), reserved);
+        // A cancelled async admission was never accepted and frees its permit.
+        use futures_util::FutureExt;
+        assert!(control.steer("waiting").now_or_never().is_none());
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS - 8
+        );
+        rx.close();
+        assert!(matches!(
+            control.try_steer("ended"),
+            Err(AgentError::RunEnded)
+        ));
+        drop(rx);
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_control_reservations_release_on_failed_persistence_and_run_abort_or_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("failed-delivery.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let tracker = ContextTracker::default();
+        let observation = ContextObservation {
+            tracker: &tracker,
+            model: &model,
+            system: "",
+            tools: &[],
+        };
+        let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        control.try_steer("accepted before failure").unwrap();
+        let Control::Steer(input) = rx.recv().await.unwrap() else {
+            panic!("steer")
+        };
+        // A concurrent writer makes the session's observed-length fence fail.
+        let mut other = Session::open(&path).unwrap();
+        other.append(user_message("other writer".into())).unwrap();
+        let result = deliver_control_inputs(
+            vec![input],
+            ControlDeliveryKind::Steering,
+            &mut session,
+            &EntryMetadata::default(),
+            &mut Vec::new(),
+            &observation,
+        );
+        assert!(matches!(
+            result,
+            ControlDelivery::Interrupted {
+                event: None,
+                finish: FinishReason::Failed(_)
+            }
+        ));
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+        assert!(session.entries().is_empty());
+
+        for abort in [false, true] {
+            let path = directory.path().join(format!("run-{abort}.jsonl"));
+            let mut agent = active_tool_test_agent(
+                directory.path(),
+                Session::create(path).unwrap(),
+                ExtensionHost::new(),
+            );
+            let mut run = agent.prompt("start").await.unwrap();
+            let control = run.control();
+            for _ in 0..8 {
+                control.try_follow_up("accepted").unwrap();
+            }
+            if abort {
+                control.abort();
+                let mut finished = 0;
+                while let Some(event) = run.next().await {
+                    if let AgentEvent::RunFinished { reason, .. } = event {
+                        assert!(matches!(reason, FinishReason::Aborted));
+                        finished += 1;
+                        assert_eq!(
+                            control.pending_count.available_permits(),
+                            MAX_PENDING_CONTROL_INPUTS
+                        );
+                    }
+                }
+                assert_eq!(finished, 1);
+            }
+            drop(run);
+            assert!(matches!(
+                control.try_follow_up("after termination"),
+                Err(AgentError::RunEnded)
+            ));
+            assert_eq!(
+                control.pending_count.available_permits(),
+                MAX_PENDING_CONTROL_INPUTS
+            );
+        }
+    }
+
+    #[test]
+    fn bash_owner_retirement_waits_for_overlapping_agents() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owner.jsonl");
+        let first = active_tool_test_agent(
+            directory.path(),
+            Session::create(&path).unwrap(),
+            ExtensionHost::new(),
+        );
+        let owner = first.resource_owner.clone();
+        let mut second = active_tool_test_agent(
+            directory.path(),
+            Session::open(&path).unwrap(),
+            ExtensionHost::new(),
+        );
+        assert_eq!(BASH_OWNER_LEASES.lock().unwrap()[&owner], 2);
+        drop(first);
+        assert_eq!(BASH_OWNER_LEASES.lock().unwrap()[&owner], 1);
+        second
+            .replace_session_at_idle(Session::open(&path).unwrap())
+            .unwrap();
+        assert_eq!(BASH_OWNER_LEASES.lock().unwrap()[&owner], 1);
+        second
+            .replace_session_at_idle(Session::create(directory.path().join("other.jsonl")).unwrap())
+            .unwrap();
+        assert!(!BASH_OWNER_LEASES.lock().unwrap().contains_key(&owner));
+        let next_owner = second.resource_owner.clone();
+        drop(second);
+        assert!(!BASH_OWNER_LEASES.lock().unwrap().contains_key(&next_owner));
+    }
 
     struct PromptTool {
         name: &'static str,
@@ -11485,6 +12034,67 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
     }
 
     #[test]
+    fn responses_capacity_estimates_only_new_opaque_items_and_rebuilds_on_compaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session =
+            Session::create(directory.path().join("responses-capacity.jsonl")).unwrap();
+        let model = tool_media_model(Protocol::OpenAiResponses, octet_ai::ModalitySet::none());
+        session.append(user_message("prefix".into())).unwrap();
+        let baseline =
+            context_breakdown(&session, &model, "system", &session.context().unwrap(), &[]);
+        let mut cache = ContextCapacityCache::seeded(&session, 1, &baseline);
+        cache.estimate(&session, &model, "system", &[], 1).unwrap();
+        for turn in 0..32 {
+            session.append(user_message("request".into())).unwrap();
+            let output = octet_ai::ResponsesOutput::new(vec![octet_ai::ResponsesItem::new(
+                serde_json::json!({
+                    "type": "message", "id": format!("message-{turn}"),
+                    "role": "assistant", "content": [{"type": "output_text", "text": "answer"}],
+                    "opaque_future_field": "large payload".repeat(1024)
+                }),
+            )
+            .unwrap()]);
+            session
+                .append_assistant_turn(
+                    AssistantMessage {
+                        content: vec![AssistantPart::Text("answer".into())],
+                        model: model.spec.id.clone(),
+                        protocol: Protocol::OpenAiResponses,
+                    },
+                    model.endpoint.id.clone(),
+                    model.spec.id.clone(),
+                    Usage::default(),
+                    None,
+                    StopReason::EndTurn,
+                    Some(output),
+                )
+                .unwrap();
+            let incremental = cache.estimate(&session, &model, "system", &[], 1).unwrap();
+            let full = reconcile_context_estimate(
+                &session,
+                &model,
+                "system",
+                &session.context().unwrap(),
+                &[],
+            );
+            assert!(incremental.input_tokens >= full.input_tokens);
+            assert_eq!(cache.full_rebuilds(), 1);
+        }
+        let kept = session.append(user_message("kept".into())).unwrap();
+        session.compact("summary", kept).unwrap();
+        let incremental = cache.estimate(&session, &model, "system", &[], 1).unwrap();
+        let full = reconcile_context_estimate(
+            &session,
+            &model,
+            "system",
+            &session.context().unwrap(),
+            &[],
+        );
+        assert_eq!(incremental, full);
+        assert_eq!(cache.full_rebuilds(), 2);
+    }
+
+    #[test]
     fn canonical_capacity_advances_new_messages_without_rebuilding_history() {
         use octet_ai::{ModelCatalog, ModelId};
 
@@ -11601,7 +12211,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
                 None,
             )
             .unwrap();
-        cache.observe_assistant_response(&session, &usage);
+        cache.observe_assistant_response(&session, &model, &usage);
         let incremental = cache.estimate(&session, &model, system, &[], 1).unwrap();
         let full_messages = session.context().unwrap();
         let full = reconcile_context_estimate(&session, &model, system, &full_messages, &[]);
@@ -12448,7 +13058,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
 
         let session = Session::open(path).unwrap();
         let replay = session
-            .responses_replay_items(&model.endpoint.id, &model.spec.id)
+            .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
             .unwrap()
             .expect("explicit local provenance must not look like a missing sidecar");
         assert!(matches!(
@@ -12742,6 +13352,65 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
                 provider_context_estimate_reference(&session, &model)
             );
         }
+    }
+
+    #[test]
+    fn provider_usage_unmatched_assistants_scan_the_ledger_only_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("unmatched.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let anchor = append_usage_fixture(&mut session, &model, 1234);
+        // Preserve newest usable record semantics even with repeated accounting
+        // for one assistant and a newer zero-token record.
+        for tokens in [2345, 0] {
+            session
+                .record_assistant_usage(
+                    anchor.clone(),
+                    model.endpoint.id.clone(),
+                    model.spec.id.clone(),
+                    Usage {
+                        total_tokens: tokens,
+                        ..Usage::default()
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let mut other = model.clone();
+        Arc::make_mut(&mut other.spec).id = octet_ai::ModelId("other-model".into());
+        for history in [8, 32, 128] {
+            while session.entries().len() < history {
+                append_usage_fixture(&mut session, &other, 99);
+            }
+            PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+            assert_eq!(
+                provider_context_estimate(&session, &model),
+                provider_context_estimate_reference(&session, &model)
+            );
+            assert_eq!(
+                PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.get()),
+                session.usage_records().len()
+            );
+            // No matching model at all must also be a single ledger pass.
+            let mut absent = model.clone();
+            Arc::make_mut(&mut absent.spec).id = octet_ai::ModelId("absent".into());
+            PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+            assert_eq!(provider_context_estimate(&session, &absent), None);
+            assert_eq!(
+                PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.get()),
+                session.usage_records().len()
+            );
+        }
+        session.checkout(anchor).unwrap();
+        PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+        assert_eq!(provider_context_estimate(&session, &model), Some(2345));
+        append_usage_fixture(&mut session, &model, 3456);
+        PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+        assert_eq!(provider_context_estimate(&session, &model), Some(3456));
+        assert_eq!(PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.get()), 1);
     }
 
     /// Offline matched microbenchmark, not provider or end-to-end launch latency.
@@ -13183,6 +13852,235 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             .await
             .expect("level-triggered wait");
         assert!(flag.is_set());
+    }
+
+    fn active_tool_test_agent(
+        directory: &std::path::Path,
+        session: Session,
+        extensions: ExtensionHost,
+    ) -> Agent {
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        Agent::new(AgentConfig {
+            client: AiClient::new(),
+            model,
+            session,
+            system: "system".into(),
+            sandbox: SandboxConfig::new(directory),
+            effect_broker: EffectBroker::default(),
+            extensions,
+            max_turns: Some(1),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: ReasoningMode::Standard,
+            cache_retention: CacheRetention::Short,
+            session_id: None,
+        })
+        .unwrap()
+    }
+
+    fn active_tool_test_extensions(names: &[&'static str]) -> ExtensionHost {
+        let mut extensions = ExtensionHost::new();
+        for &name in names {
+            extensions.tool(PromptTool {
+                name,
+                snippet: None,
+                guidelines: &[],
+            });
+        }
+        extensions
+    }
+
+    fn advertised_tool_names(agent: &Agent) -> Vec<String> {
+        agent
+            .registered_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect()
+    }
+
+    fn persisted_tool_result_texts(session: &Session) -> Vec<String> {
+        session
+            .context()
+            .unwrap()
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.content.iter()),
+                Message::Assistant(_) => None,
+            })
+            .flatten()
+            .filter_map(|part| match part {
+                UserPart::ToolResult(result) => Some(result.content.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|part| match part {
+                ToolResultPart::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn set_active_tool_names_narrows_the_advertised_surface_and_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("active-tools.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![
+                    AssistantPart::ToolCall(ToolCall {
+                        id: octet_ai::ToolCallId("call-alpha".into()),
+                        name: "alpha".into(),
+                        arguments_json: "{}".into(),
+                        argument_error: None,
+                    }),
+                    AssistantPart::ToolCall(ToolCall {
+                        id: octet_ai::ToolCallId("call-beta".into()),
+                        name: "beta".into(),
+                        arguments_json: "{}".into(),
+                        argument_error: None,
+                    }),
+                ],
+                model: octet_ai::ModelId("test".into()),
+                protocol: Protocol::AnthropicMessages,
+            })))
+            .unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            session,
+            active_tool_test_extensions(&["alpha", "beta"]),
+        );
+        assert_eq!(advertised_tool_names(&agent), ["alpha", "beta"]);
+        let revision = agent.extensions.tool_snapshot().0;
+
+        agent
+            .set_active_tool_names(Some(BTreeSet::from(["alpha".to_owned()])))
+            .unwrap();
+
+        assert_eq!(advertised_tool_names(&agent), ["alpha"]);
+        assert!(agent.extensions.tool_snapshot().0 > revision);
+
+        // A persisted call issued before the change resolves against the
+        // narrowed dispatch map: the deactivated tool gets the existing
+        // unknown-tool result while the active tool still dispatches.
+        agent.recover_pending_tools(false).await.unwrap();
+        let texts = persisted_tool_result_texts(agent.session());
+        assert!(
+            texts.iter().any(|text| text.contains("unknown tool: beta")),
+            "a deactivated tool must be refused by the dispatch map: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("`alpha` was not replayed")),
+            "the still-active tool must remain dispatched: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn set_active_tool_names_refuses_unknown_names_without_state_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("active-unknown.jsonl")).unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            session,
+            active_tool_test_extensions(&["alpha", "beta"]),
+        );
+        let revision = agent.extensions.tool_snapshot().0;
+
+        let error = agent
+            .set_active_tool_names(Some(BTreeSet::from([
+                "alpha".to_owned(),
+                "ghost".to_owned(),
+            ])))
+            .unwrap_err();
+        match error {
+            AgentError::UnknownActiveTools(refused) => assert_eq!(refused, ["ghost"]),
+            other => panic!("expected UnknownActiveTools, got {other:?}"),
+        }
+        assert_eq!(advertised_tool_names(&agent), ["alpha", "beta"]);
+        assert_eq!(agent.extensions.tool_snapshot().0, revision);
+    }
+
+    #[test]
+    fn set_active_tool_names_cannot_readmit_policy_excluded_tools() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("active-policy.jsonl")).unwrap();
+        let mut extensions = active_tool_test_extensions(&["read", "write"]);
+        extensions.set_tool_policy(|name| name != "write");
+        let mut agent = active_tool_test_agent(directory.path(), session, extensions);
+
+        assert_eq!(advertised_tool_names(&agent), ["read"]);
+        assert_eq!(agent.registered_tool_names(), ["read"]);
+        let revision = agent.extensions.tool_snapshot().0;
+
+        for requested in [
+            BTreeSet::from(["write".to_owned()]),
+            BTreeSet::from(["read".to_owned(), "write".to_owned()]),
+        ] {
+            let error = agent.set_active_tool_names(Some(requested)).unwrap_err();
+            match error {
+                AgentError::UnknownActiveTools(refused) => assert_eq!(refused, ["write"]),
+                other => panic!("expected UnknownActiveTools, got {other:?}"),
+            }
+        }
+        assert_eq!(advertised_tool_names(&agent), ["read"]);
+        assert_eq!(agent.extensions.tool_snapshot().0, revision);
+
+        agent
+            .set_active_tool_names(Some(BTreeSet::from(["read".to_owned()])))
+            .unwrap();
+        assert_eq!(advertised_tool_names(&agent), ["read"]);
+    }
+
+    #[test]
+    fn set_active_tool_names_none_restores_the_host_policed_surface() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("active-restore.jsonl")).unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            session,
+            active_tool_test_extensions(&["alpha", "beta"]),
+        );
+
+        agent
+            .set_active_tool_names(Some(BTreeSet::from(["alpha".to_owned()])))
+            .unwrap();
+        assert_eq!(advertised_tool_names(&agent), ["alpha"]);
+        // Deactivated names stay registered, so they can be requested again.
+        assert_eq!(agent.registered_tool_names(), ["alpha", "beta"]);
+
+        agent.set_active_tool_names(None).unwrap();
+        assert_eq!(advertised_tool_names(&agent), ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn set_active_tool_names_bump_the_revision_the_run_host_observes() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("active-run-host.jsonl")).unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            session,
+            active_tool_test_extensions(&["alpha", "beta"]),
+        );
+        // `Agent::prompt` hands a clone of the host to the streaming loop.
+        let run_host = agent.extensions.clone();
+        let before = run_host.tool_snapshot().0;
+
+        agent
+            .set_active_tool_names(Some(BTreeSet::from(["beta".to_owned()])))
+            .unwrap();
+
+        let (revision, tools) = run_host.tool_snapshot();
+        assert!(revision > before);
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.definition().name.clone())
+                .collect::<Vec<_>>(),
+            ["beta"]
+        );
     }
 }
 

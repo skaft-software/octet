@@ -19,7 +19,10 @@ vocabulary that uses that hierarchy without adding a second TUI.
   screen and saved lines before replaying the complete frame. PageUp transfers
   rendering to the bounded, application-owned semantic viewport for the rest of
   that shell. Explicit `--mouse app` selects that viewport from startup.
-- octet uses one compiled default theme with three built-in terminal appearance selectors: Auto adapts to a reliably detected background with a neutral fallback, while Light and Dark explicitly select contrast. Runtime theme-file loading and reload remain disabled; model-aware accents change atmosphere without changing layout or semantic status colours.
+- Auto, Light, and Dark use the compiled default layout. Auto adapts to the
+  detected terminal background; Light and Dark explicitly select contrast. All
+  retain model-aware accents and semantic status colours. Named file loading
+  follows the bounded [theme loader](../themes.md).
 - Raw mode, bracketed paste, keyboard enhancements, and mouse reporting are
   enabled only when supported and restored idempotently. Matching Pi, every
   interactive frame is bracketed by CSI 2026 synchronized-output markers;
@@ -44,6 +47,14 @@ vocabulary that uses that hierarchy without adding a second TUI.
   directory; these traces are sensitive because they include displayed content.
 
 ## Startup identity
+
+Routine startup phases are silent, including session lookup, replay, and fork
+preparation on fresh, continued, resumed, and forked launches. Saved-session I/O
+uses the silent lifecycle input owner; a fresh launch resolves configuration
+inline without cloning the full config or dispatching a replay worker. The
+composer remains editable until the atomic ready frame installs history and
+identity. Setup/selection panels and actionable errors keep their normal owners;
+quiet startup does not suppress cancellation or shutdown diagnostics.
 
 The working directory appears only in the footer, not again in the splash.
 The splash keeps its byte-aligned spacing, model identity, permissions, and
@@ -468,7 +479,10 @@ a definitely pre-send failure has no new provisional answer to discard. It shows
 Retry activity is one typed, presentation-only record on the mutable `Working`
 row. Repeated retries replace it rather than appending causes to the transcript.
 Its countdown derives from the observed backoff; once the delay elapses it says
-`Retrying`, not an invented provider deadline. `TurnStarted`, meaningful output,
+`Retrying`, not an invented provider deadline. While retry state is present, the interrupt hint
+remains but the run-elapsed suffix is omitted, even after the countdown expires.
+The countdown still uses the existing one-second refresh cadence.
+`TurnStarted`, meaningful output,
 compaction/tool transitions, cancellation admission, and settlement end that
 backoff presentation. Raw causes remain with the event/diagnostic consumers;
 print, plain, and RPC output retain their existing contracts. Removing rejected

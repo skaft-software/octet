@@ -1914,7 +1914,7 @@ fn responses_websocket_stream(
     pool_key: Option<String>,
     model: Model,
     requested_service_tier: Option<crate::types::ServiceTier>,
-    mut events: mpsc::Receiver<Result<serde_json::Value, AiError>>,
+    mut events: crate::responses_ws::EventReceiver,
     diagnostics: Vec<crate::error::Diagnostic>,
     tool_definitions: Vec<ToolDef>,
     buffer_ambiguous_compatibility_content: bool,
@@ -3130,7 +3130,7 @@ mod tests {
         let model = catalog.resolve(&id).unwrap();
         for deadline in [Duration::ZERO, Duration::from_secs(5)] {
             let pool = ResponsesWsPool::default();
-            let (sender, receiver) = mpsc::channel(1);
+            let (sender, receiver) = crate::responses_ws::event_channel(1);
             sender
                 .send(Ok(serde_json::json!({
                     "type": "error", "code": "invalid_request_error", "message": "invalid"

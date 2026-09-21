@@ -19,6 +19,82 @@ use sexy_tui_rs::CURSOR_MARKER;
 #[path = "scroll_regressions.rs"]
 mod scroll_regressions;
 
+/// PTY-driven proof that suspending the real renderer restores the process
+/// terminal, that resuming re-enters raw mode and returns, and that a ceded
+/// input stream never consumes the bytes the ceded side owns.
+///
+/// Inert without `OCTET_TEST_TERMINAL_HANDOFF`; the sibling
+/// `terminal_handoff_pty_contract` test drives it through a pty.
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_handoff_pty_fixture() {
+    use futures_util::StreamExt as _;
+
+    let Ok(directory) = std::env::var("OCTET_TEST_TERMINAL_HANDOFF") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    let signal = |name: &str| {
+        std::fs::write(directory.join(name), b"1").expect("handoff marker");
+    };
+
+    let theme = crate::tui::theme::test_theme();
+    let size = Arc::new(Mutex::new(crossterm::terminal::size().unwrap_or((80, 24))));
+    let mut shell =
+        InteractiveShell::enter_with_mouse(theme, size, false).expect("enter raw terminal");
+    let mut input = crate::tui::terminal::TerminalInput::new()
+        .with_cede_flag(shell.terminal_input_parking());
+    signal("ready");
+
+    // Cede exactly as the arbiter does, then hold the terminal.
+    shell.cede_terminal_input();
+    shell.suspend();
+    signal("ceded");
+
+    // A parked stream never polls its source, so a ceded byte stays unread.
+    let parked = tokio::time::timeout(Duration::from_millis(400), input.next()).await;
+    assert!(
+        parked.is_err(),
+        "a ceded input stream must not consume terminal bytes"
+    );
+
+    signal("resuming");
+    shell.release_terminal_input();
+    shell.resume().expect("resume the renderer");
+    let first = tokio::time::timeout(Duration::from_secs(10), input.next())
+        .await
+        .expect("released input is polled again")
+        .expect("a terminal event")
+        .expect("a decoded event");
+    assert!(
+        matches!(first, crossterm::event::Event::Key(key)
+            if key.code == crossterm::event::KeyCode::Char('X')),
+        "the ceded keystroke was preserved: {first:?}"
+    );
+
+    shell.leave();
+}
+
+/// Drives the fixture above through a pty and asserts termios restoration at
+/// every handoff boundary. Skips nothing: `python3` is the same offline tool the
+/// updater's pty lane already depends on.
+#[cfg(unix)]
+#[test]
+fn terminal_handoff_pty_contract() {
+    let output = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(include_str!("../terminal/handoff_pty.py"))
+        .arg(std::env::current_exe().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 struct EmulatedTerminal {
     size: Arc<Mutex<(u16, u16)>>,
     bytes: Arc<Mutex<Vec<u8>>>,
@@ -194,6 +270,7 @@ fn emulated_shell_with_mode(
             render_tx: Arc::new(Mutex::new(None)),
             render_thread: None,
             capture_mouse: application_viewport,
+            terminal_ceded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
         bytes,
     )
@@ -13453,7 +13530,8 @@ fn read_only_document_panel_scrolls_and_returns_to_its_owner() {
         text: (0..30)
             .map(|line| format!("transcript line {line:02}"))
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+            .into(),
         styled: false,
         scroll_from_bottom: 0,
     });
@@ -13516,7 +13594,8 @@ fn read_only_document_home_reaches_top_with_wrapped_error_and_header_chrome() {
         text: (0..40)
             .map(|line| format!("document row {line:02}"))
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+            .into(),
         styled: false,
         scroll_from_bottom: 0,
     });

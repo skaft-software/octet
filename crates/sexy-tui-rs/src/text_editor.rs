@@ -295,6 +295,11 @@ impl TextEditorProjection {
     }
 }
 
+// Each direction retains at most 64 snapshots / 4 MiB, bounding the combined
+// undo + redo history to 128 snapshots / 8 MiB of snapshot storage.
+const HISTORY_COUNT: usize = 64;
+const HISTORY_BYTES: usize = 4 * 1024 * 1024;
+
 /// One detached editor state used by the undo/redo history.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EditorSnapshot {
@@ -355,7 +360,7 @@ pub struct TextEditor {
     /// Undo history of detached pre-edit snapshots.
     undo: UndoStack<EditorSnapshot>,
     /// Redo history, filled by undo and cleared by any new edit.
-    redo: Vec<EditorSnapshot>,
+    redo: UndoStack<EditorSnapshot>,
     /// Emacs-style kill ring shared by every kill and yank action.
     kill_ring: KillRing,
     /// Kind of the most recent action, for coalescing and accumulation.
@@ -373,8 +378,8 @@ impl Default for TextEditor {
             revision: 0,
             text_revision: 0,
             cached_layout: RefCell::new(None),
-            undo: UndoStack::new(),
-            redo: Vec::new(),
+            undo: UndoStack::with_limits(HISTORY_COUNT, HISTORY_BYTES),
+            redo: UndoStack::with_limits(HISTORY_COUNT, HISTORY_BYTES),
             kill_ring: KillRing::new(),
             last_action: None,
             last_yank: None,
@@ -401,8 +406,8 @@ impl TextEditor {
             revision: 0,
             text_revision: 0,
             cached_layout: RefCell::new(None),
-            undo: UndoStack::new(),
-            redo: Vec::new(),
+            undo: UndoStack::with_limits(HISTORY_COUNT, HISTORY_BYTES),
+            redo: UndoStack::with_limits(HISTORY_COUNT, HISTORY_BYTES),
             kill_ring: KillRing::new(),
             last_action: None,
             last_yank: None,
@@ -731,7 +736,7 @@ impl TextEditor {
             return false;
         }
         let cursor = previous_grapheme_boundary(&self.text, self.cursor);
-        self.finish_after_motion(cursor);
+        self.finish_after_boundary_motion(cursor);
         true
     }
 
@@ -740,7 +745,7 @@ impl TextEditor {
             return false;
         }
         let cursor = next_grapheme_boundary(&self.text, self.cursor);
-        self.finish_after_motion(cursor);
+        self.finish_after_boundary_motion(cursor);
         true
     }
 
@@ -937,7 +942,7 @@ impl TextEditor {
         let Some(snapshot) = self.undo.pop() else {
             return false;
         };
-        self.redo.push(self.snapshot());
+        Self::save_snapshot(&self.text, self.cursor, &mut self.redo);
         self.restore(snapshot);
         true
     }
@@ -947,27 +952,37 @@ impl TextEditor {
         let Some(snapshot) = self.redo.pop() else {
             return false;
         };
-        self.undo.push(&self.snapshot());
+        Self::save_snapshot(&self.text, self.cursor, &mut self.undo);
         self.restore(snapshot);
         true
     }
 
-    fn snapshot(&self) -> EditorSnapshot {
-        EditorSnapshot {
-            text: self.text.clone(),
-            cursor: self.cursor,
+    fn save_snapshot(text: &str, cursor: usize, history: &mut UndoStack<EditorSnapshot>) {
+        // A fresh String has exactly the copied text's capacity; account for
+        // both its UTF-8 bytes and the fixed snapshot fields. Reject before
+        // cloning a large paste, not after allocating another large buffer.
+        let bytes = text
+            .len()
+            .saturating_add(std::mem::size_of::<EditorSnapshot>());
+        if bytes > HISTORY_BYTES {
+            history.clear();
+            return;
         }
+        history.push_owned_with_size(
+            EditorSnapshot { text: text.to_owned(), cursor },
+            bytes,
+        );
     }
 
     fn push_undo(&mut self) {
-        self.undo.push(&self.snapshot());
+        Self::save_snapshot(&self.text, self.cursor, &mut self.undo);
         self.redo.clear();
     }
 
     fn restore(&mut self, snapshot: EditorSnapshot) {
         let text_changed = self.text != snapshot.text;
         self.text = snapshot.text;
-        self.cursor = clamp_to_grapheme_boundary(&self.text, snapshot.cursor);
+        self.cursor = snapshot.cursor;
         self.preferred_column = None;
         self.last_action = None;
         self.last_yank = None;
@@ -1016,7 +1031,7 @@ impl TextEditor {
         let line = &layout.lines[layout.cursor_row];
         let cursor = if end { line.visible_end } else { line.start };
         let changed = cursor != self.cursor;
-        self.finish_after_motion(cursor);
+        self.finish_after_boundary_motion(cursor);
         changed
     }
 
@@ -1035,6 +1050,11 @@ impl TextEditor {
 
     fn finish_after_motion(&mut self, cursor: usize) {
         let cursor = clamp_to_grapheme_boundary(&self.text, cursor);
+        self.finish_after_boundary_motion(cursor);
+    }
+
+    /// The caller already obtained this offset from grapheme navigation/layout.
+    fn finish_after_boundary_motion(&mut self, cursor: usize) {
         let changed = self.cursor != cursor;
         self.cursor = cursor;
         self.preferred_column = None;
@@ -1803,6 +1823,44 @@ mod tests {
         assert!(editor.apply(TextEditAction::Char('z'), 80));
         assert_eq!(editor.text(), "abcz");
         assert!(!editor.apply(TextEditAction::Redo, 80));
+    }
+
+    #[test]
+    fn bounded_history_preserves_recent_unicode_pastes_and_cursor() {
+        let mut editor = TextEditor::new();
+        let atom = "👩🏽‍💻e\u{301}界[image:1]";
+        for _ in 0..HISTORY_COUNT + 10 {
+            assert!(editor.apply(TextEditAction::Paste(atom.into()), 80));
+        }
+        assert_eq!(editor.undo.len(), HISTORY_COUNT);
+        assert!(editor.undo.retained_bytes() <= HISTORY_BYTES);
+        for remaining in (10..HISTORY_COUNT + 10).rev() {
+            assert!(editor.apply(TextEditAction::Undo, 80));
+            assert_eq!(editor.text(), atom.repeat(remaining));
+            assert_eq!(editor.cursor(), editor.text().len());
+        }
+        assert!(!editor.apply(TextEditAction::Undo, 80));
+        for _ in 0..HISTORY_COUNT {
+            assert!(editor.apply(TextEditAction::Redo, 80));
+        }
+        assert_eq!(editor.text(), atom.repeat(HISTORY_COUNT + 10));
+        assert!(!editor.apply(TextEditAction::Redo, 80));
+    }
+
+    #[test]
+    fn history_bytes_evict_oldest_and_oversize_is_an_undo_barrier() {
+        let mut editor = TextEditor::with_text("界".repeat(HISTORY_BYTES / 12));
+        for _ in 0..12 {
+            editor.apply(TextEditAction::Paste("界".into()), 80);
+        }
+        assert!(editor.undo.len() < 12);
+        assert!(editor.undo.retained_bytes() <= HISTORY_BYTES);
+        assert!(editor.undo());
+        assert!(editor.redo.retained_bytes() <= HISTORY_BYTES);
+        editor.set_text("x".repeat(HISTORY_BYTES));
+        editor.apply(TextEditAction::Paste("界".into()), 80);
+        assert!(editor.undo.is_empty());
+        assert!(!editor.undo());
     }
 
     #[test]

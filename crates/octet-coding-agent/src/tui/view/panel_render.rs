@@ -1034,6 +1034,8 @@ pub(super) fn document_visual_lines_styled(
     width: u16,
     styled: bool,
 ) -> Vec<String> {
+    #[cfg(test)]
+    panel_render_test_hook::record_document_layout();
     let plan = PresentationLayout::new(theme, width);
     let inset = usize::from(plan.inset);
     let available = usize::from(plan.content_width);
@@ -2258,6 +2260,13 @@ mod grouped_model_tests {
 
 #[cfg(test)]
 pub mod panel_render_test_hook {
+    thread_local! { static DOCUMENT_LAYOUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+    pub(super) fn record_document_layout() {
+        DOCUMENT_LAYOUTS.with(|calls| calls.set(calls.get() + 1));
+    }
+    pub fn take_document_layouts() -> usize {
+        DOCUMENT_LAYOUTS.with(|calls| calls.replace(0))
+    }
     pub fn document_lines(text: &str, width: u16, styled: bool) -> Vec<String> {
         let theme = crate::tui::theme::test_theme();
         super::document_visual_lines_styled(text, &theme, width, styled)

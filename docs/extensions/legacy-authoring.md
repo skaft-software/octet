@@ -1,17 +1,18 @@
 # Legacy extension authoring and host operations
 
-This is a **maintenance reference for API `0.1` and `0.2` implementations**,
-retained from the former combined extension guide. It is not a new-extension
-quickstart. New authoring uses [API `0.3`](../extensions.md); the
-[generated contract](API-0.3-REFERENCE.md) alone defines that wire. Shared host
-operations below do not upgrade legacy methods or SDKs.
+This is a **retained wire and host-operations reference**, with API `0.1`/`0.2`
+examples and services reused by current API `0.4`. New authoring starts with
+[the current guide](../extensions.md). The [generated reference](API-0.4-REFERENCE.md)
+defines version policy and the distinct canonical API `0.3` models. Earlier
+example versions remain intentional; these shared operations do not translate
+wires or make every low-level service a supported coding-product feature.
 
 **Identity boundary:** octet 0.7.6 source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
 The source SDK distributions and four official executable bundles are version
-`0.7.6`; the Pi compatibility bridge and independent examples keep their own
-versions. This is not SDK registry publication; see
+`0.7.6`; independent examples keep their own versions. The host source is a
+local 0.8.0 RC, not a published release. This is not SDK registry publication; see
 [installation and availability](../installation.md).
 
 The [legacy protocol reference](PROTOCOL-REFERENCE.md) retains complete API
@@ -32,9 +33,9 @@ The host owns services that an extension needs in order to exist safely:
 - resource-limit policy for memory, messages, concurrent work, artifacts, and
   child processes.
 
-Product capabilities belong in subprocess extensions. MCP bridging, web search,
-browser use, computer use, memory, LSP, subagent orchestration, and caffeinate
-are domain behavior, not kernel prerequisites. Artifact ingestion and child
+Optional domain integrations can live in subprocess extensions. MCP bridging,
+web search, browser use, and subagent orchestration do not require an
+everything-as-extension platform or arbitrary replacement of host subsystems. Artifact ingestion and child
 model-session creation are generic host services. This architectural boundary
 is not a claim that a first-party package for every capability ships.
 
@@ -66,17 +67,19 @@ Manifest-selected versions are exact:
   artifacts, lifecycle observations, policy intents, and live tool catalogs are
   optional. Child model sessions, single-use approvals, and owner-scoped secrets
   are conditional; parent-correlated ephemeral input is part of the base wire.
-- API `0.3` is current, canonical, and schema-generated, not an implicit upgrade
+- API `0.3` remains canonical and schema-generated, not an implicit upgrade
   of either legacy wire. Its bounds, methods, errors, capabilities, and
-  availability belong to the [generated reference](API-0.3-REFERENCE.md).
-  Its [CLI values and paired session hooks](../extensions.md#api-03-cli-flags)
-  do not exist in the legacy APIs.
+  availability belong to the [generated reference](API-0.4-REFERENCE.md).
+  Its paired session hooks are distinct from feature-negotiated lifecycle
+  observations; manifest flag support does not merge those wires.
+- API `0.4` is current and uses the feature-negotiated wire retained from `0.2`.
+  Exact host offers and frontend bindings govern available services.
 
 No version adds an OS sandbox or implicit access beyond negotiated host
 capabilities. Pi migration is capability-oriented, not Pi's in-process ABI:
-`octet migrate pi --dry-run` inventories resources without executing them;
-`octet pi install` creates an inert wrapper for the bounded `octet-pi-compat`
-subset. See [Pi migration](../pi-migration.md).
+`octet migrate pi --dry-run` inventories resources without executing them.
+The Pi execution bridge is removed; portable import and native providers are
+separate. See [Pi migration](../pi-migration.md).
 
 Discovery is available under every effect policy; executable extensions remain
 disabled until explicitly enabled. In the coding product, startup requires
@@ -225,7 +228,7 @@ The host supplies `OCTET_EXTENSION_API_VERSION`, `OCTET_EXTENSION_NAME`,
 `OCTET_EXTENSION_DIR`, `OCTET_EXTENSION_MANIFEST`, `OCTET_WORKSPACE`, and
 `OCTET_EXTENSION_SCRATCH` for host-verified artifact publication each generation.
 Leave `api_version = "0.1"` to retain the frozen wire. Semantic `presentation`
-is API `0.2`-only and rejected on a frozen `0.1` manifest.
+is supported by the feature-negotiated wire and rejected on frozen `0.1`.
 
 `[capabilities].secrets` is a duplicate-free allowlist, not launch-environment
 injection. Names are at most 64 ASCII bytes: letter/underscore first, then
@@ -241,12 +244,11 @@ and present, never persisted or logged by the host. This grants signing authorit
 to the trusted process; use the same full-access/OS-isolation boundary. Unknown
 names and API `0.1` declarations are rejected.
 
-### API `0.3` CLI flags
+### Manifest CLI flags
 
-This is not a legacy feature. The complete declaration, parsing, default,
-collision, and initialization rules moved to
-[API `0.3` CLI flags](../extensions.md#api-03-cli-flags). API `0.1`/`0.2`
-initialization fields are unchanged.
+The complete declaration, parsing, default, collision, and initialization rules
+live in [current CLI flags](../extensions.md#api-04-cli-flags). The frozen
+API `0.1` rejects flags; later versions keep their exact initialization wires.
 
 ## Transport contract
 
@@ -598,7 +600,9 @@ general `/reload` reruns discovery and rebuilds the product boundary.
 ## Python SDK
 
 The dependency-free `octet-extension-sdk` exposes `octet_extension.Extension`
-for **legacy API `0.1`/`0.2` only**. From a checkout:
+for **API `0.4` and retained `0.1`/`0.2`**. The illustration below keeps its
+earlier wire; [the current recipe](../../sdk/python/README.md#minimal-api-04-tool)
+uses `0.4`. From a checkout:
 
 ```console
 python3 -m pip install ./sdk/python
@@ -739,7 +743,7 @@ octet-web-search/
 ```
 
 Select a bundle-supported API and exact octet compatibility independently of the
-extension version. New packages follow [API `0.3`](API-0.3-REFERENCE.md).
+extension version. New packages follow [API `0.4`](API-0.4-REFERENCE.md).
 Existing API `0.2` packages remain installable; API `0.1` is supported only
 unpackaged for legacy runtime compatibility. This is retained **legacy package
 metadata**, not a version to substitute into a new authoring guide:
@@ -754,8 +758,9 @@ requires_octet = "=0.7.6"
 `requires_octet` is optional for unpackaged local copies but enforced when
 present. Installed bundles require an exact match to the running octet version.
 The first-party catalog is `octet-browse`, `octet-mcp`, `octet-subagents`, and
-`octet-web-search`. The four bundled manifests still declare API `0.2`;
-do not retag them to claim API `0.3` support.
+`octet-web-search`. The four working-tree manifests declare API `0.4`; their
+exact host pins still apply. The `0.2` metadata above is a retained illustration,
+not the current bundle manifest or evidence of a published 0.8.0 bundle.
 
 After matching publication is verified:
 
