@@ -297,12 +297,15 @@ impl Index {
         let Some(id) = id else {
             return Ok(None);
         };
-        Ok(self
+        let location: Option<(i64, i64)> = self
             .connection
             .query_row("SELECT offset, bytes FROM ids WHERE id = ?1", [id], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
-            .optional()?)
+            .optional()?;
+        location
+            .map(|(offset, bytes)| Ok((u64::try_from(offset)?, usize::try_from(bytes)?)))
+            .transpose()
     }
 
     fn record(

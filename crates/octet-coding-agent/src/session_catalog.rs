@@ -573,7 +573,7 @@ impl SessionCatalog {
         // adequate candidate filter for a rare suffix (especially a miss).
         let mut counts = self
             .connection
-            .prepare_cached("SELECT postings FROM indexed_entry_gram_counts WHERE gram = ?1")?;
+            .prepare("SELECT postings FROM indexed_entry_gram_counts WHERE gram = ?1")?;
         let mut selected = "";
         let mut smallest = i64::MAX;
         #[cfg(test)]
