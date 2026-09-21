@@ -174,6 +174,34 @@ pub(crate) enum TerminalBackground {
     Unknown,
 }
 
+/// The activity shimmer implementation used by the renderer.
+///
+/// Physical mode is the default for terminals with a known background and
+/// TrueColor/ANSI256 output. Classic remains available for A/B comparisons and
+/// is also the safe fallback for unknown backgrounds and ANSI16 terminals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShimmerMode {
+    Classic,
+    Physical,
+}
+
+impl ShimmerMode {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "classic" => Some(Self::Classic),
+            "physical" => Some(Self::Physical),
+            _ => None,
+        }
+    }
+
+    fn from_environment() -> Self {
+        std::env::var("OCTET_SHIMMER")
+            .ok()
+            .and_then(|value| Self::parse(&value))
+            .unwrap_or(Self::Physical)
+    }
+}
+
 /// The three terminal-appearance choices exposed by the interactive TUI.
 /// These are selectors for the compiled theme, not filesystem theme names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +277,7 @@ pub struct OctetTheme {
     inner: SexyTheme,
     capabilities: TerminalCapabilities,
     background: TerminalBackground,
+    shimmer: ShimmerMode,
     semantic_styles: BTreeMap<String, TextStyle>,
     glyphs: BTreeMap<String, String>,
     ascii_glyphs: BTreeMap<String, String>,
@@ -494,6 +523,7 @@ impl OctetTheme {
             inner,
             capabilities,
             background,
+            shimmer: ShimmerMode::from_environment(),
             semantic_styles: BTreeMap::new(),
             glyphs: default_glyphs(),
             ascii_glyphs: default_ascii_glyphs(),
@@ -559,6 +589,10 @@ impl OctetTheme {
     #[allow(dead_code)]
     pub(crate) fn background(&self) -> TerminalBackground {
         self.background
+    }
+
+    pub(crate) fn shimmer_mode(&self) -> ShimmerMode {
+        self.shimmer
     }
 
     /// Return a theme glyph with deterministic ASCII fallback. Theme files can
@@ -1618,6 +1652,17 @@ pub(crate) fn test_theme_for(
 }
 
 #[cfg(test)]
+pub(crate) fn test_theme_for_shimmer(
+    background: TerminalBackground,
+    capabilities: TerminalCapabilities,
+    shimmer: ShimmerMode,
+) -> OctetTheme {
+    let mut theme = default_theme_for(background, capabilities);
+    theme.shimmer = shimmer;
+    theme
+}
+
+#[cfg(test)]
 pub(crate) fn test_theme_from_source(source: &str) -> OctetTheme {
     test_theme_source_with(
         source,
@@ -2319,6 +2364,17 @@ mod tests {
             (right, left)
         };
         (relative_luminance(light) + 0.05) / (relative_luminance(dark) + 0.05)
+    }
+
+    #[test]
+    fn shimmer_mode_accepts_only_the_documented_values() {
+        assert_eq!(ShimmerMode::parse("classic"), Some(ShimmerMode::Classic));
+        assert_eq!(
+            ShimmerMode::parse(" PHYSICAL "),
+            Some(ShimmerMode::Physical)
+        );
+        assert_eq!(ShimmerMode::parse("legacy"), None);
+        assert_eq!(ShimmerMode::parse(""), None);
     }
 
     #[test]

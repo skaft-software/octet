@@ -36,18 +36,20 @@ onboarding.
 ## Activity status contrast
 
 `Thinking` and `Working` use model-family foreground colours only; the shimmer never
-paints a character background. On a dark profile the resting label is a readable
-light foreground with a narrow darker sweep. On a light profile the foreground
-and sweep invert. The margin dot has a quieter resting foreground and gains
-contrast as that same sweep crosses it: brighter on dark profiles, darker on
-light ones, without changing its glyph or size. The sweep crosses the whole
-label before both dot and label return to rest.
+paints a character background. On known Dark/Light TrueColor or ANSI256 profiles,
+the default physical shimmer uses a raised-cosine light field: it has a short
+leading edge, a longer trailing tail, and a small central glint. Dark labels move
+from about `0.55` toward `0.99` luminance; light labels move from about `0.0085`
+toward `0.11`. The motion completes in roughly 0.85–1.0 seconds and then parks
+for two ticks before repeating. The margin dot shares that phase without changing
+its glyph or size.
 
-Reduced-motion and no-colour profiles keep the label and dot static. The
-unknown-background fallback is unchanged. The qualification fixture checks
-representative dark/light composited surfaces; it does not measure an arbitrary
-terminal's real transparency or replace choosing the appearance profile that
-matches that terminal. Custom ANSI16 palettes can also change perceived contrast.
+Set `OCTET_SHIMMER=classic` to use the legacy stepped shimmer for A/B testing.
+Classic is also forced for ANSI16, unknown-background, no-colour, and reduced-motion
+profiles. An unrecognized variable value uses the physical default when the
+terminal profile supports it. The qualification fixture checks representative
+Dark/Light composited surfaces; it does not measure arbitrary transparency.
+Custom ANSI16 palettes can also change perceived contrast.
 
 ## Startup and terminal replies
 
