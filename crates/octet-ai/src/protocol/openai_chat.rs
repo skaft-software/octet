@@ -4935,14 +4935,27 @@ mod fixture_tests {
             content_event("ordinary 🙂 text").data,
             "{}".to_owned(),
             r#"{"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}"#.to_owned(),
-            "[DONE]".to_owned(),
         ] {
             events.extend(
                 decode_stream_event(&model, &SseEvent { event: None, data }, &mut builder).unwrap(),
             );
         }
         assert_eq!(super::CHAT_STREAM_JSON_DECODES.with(|count| count.get()), 3);
-        assert_eq!(builder.provider_event_count, 4);
+        assert_eq!(builder.provider_event_count, 3);
+        events.extend(
+            decode_stream_event(
+                &model,
+                &SseEvent {
+                    event: None,
+                    data: "[DONE]".to_owned(),
+                },
+                &mut builder,
+            )
+            .unwrap(),
+        );
+        assert_eq!(super::CHAT_STREAM_JSON_DECODES.with(|count| count.get()), 3);
+        // finish_mut replaces the consumed response builder with an empty one.
+        assert_eq!(builder.provider_event_count, 0);
         assert_eq!(joined_text(&events), "ordinary 🙂 text");
         assert_eq!(harness::finished(&events).usage.total_tokens, 13);
 
@@ -5236,10 +5249,9 @@ mod fixture_tests {
                     format!("{}{suffix}", text.repeat(count))
                 );
                 assert_eq!(builder.buffered_content_bytes, 0);
-                assert_eq!(
-                    builder.aggregate_content_bytes,
-                    text.len() * count + suffix.len()
-                );
+                // Finalization consumes these counters along with the content;
+                // the pre-finish assertions above verify the retained budget.
+                assert_eq!(builder.aggregate_content_bytes, 0);
                 assert_eq!(
                     harness::finished(&events).stop_reason,
                     StopReason::Other("tool_output_locked".to_owned())
@@ -5293,6 +5305,11 @@ mod fixture_tests {
                             .unwrap(),
                         );
                     }
+                    assert_eq!(
+                        builder.aggregate_content_bytes + builder.buffered_content_bytes,
+                        expected.len(),
+                        "split={split}, finish={finish_chunk}"
+                    );
                     events.extend(
                         decode_stream_event(
                             &model,
@@ -5310,7 +5327,7 @@ mod fixture_tests {
                         "split={split}, finish={finish_chunk}"
                     );
                     assert_eq!(builder.buffered_content_bytes, 0);
-                    assert_eq!(builder.aggregate_content_bytes, expected.len());
+                    assert_eq!(builder.aggregate_content_bytes, 0);
                     assert_eq!(
                         harness::finished(&events).stop_reason,
                         if locked {
