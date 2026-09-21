@@ -3257,7 +3257,10 @@ mod tests {
         let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
         let mut plan = supervisor.force();
         plan.record_reload(ReloadLayer::Resources);
-        plan.record(ReloadLayer::Host, LayerOutcome::Skipped(SkipReason::NoChange));
+        plan.record(
+            ReloadLayer::Host,
+            LayerOutcome::Skipped(SkipReason::NoChange),
+        );
         let report = supervisor.finish(plan).unwrap();
         assert!(report
             .notices()
