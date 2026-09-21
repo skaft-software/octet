@@ -1349,6 +1349,11 @@ impl ReloadReport {
                     "reload: {} reload failed; the previous state is kept",
                     line.layer.label()
                 )),
+                LayerOutcome::Skipped(SkipReason::NoChange)
+                    if detailed && line.layer == ReloadLayer::Host =>
+                {
+                    notices.push("reload: binary unchanged".to_owned());
+                }
                 LayerOutcome::Reloaded | LayerOutcome::Skipped(_) => {}
             }
             if detailed && !line.detached.is_empty() {
@@ -3245,6 +3250,23 @@ mod tests {
         ] {
             assert!(detailed.contains(detail), "{detailed}");
         }
+    }
+
+    #[test]
+    fn unchanged_host_is_reported_on_demand_but_not_in_automatic_diagnostics() {
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        let mut plan = supervisor.force();
+        plan.record_reload(ReloadLayer::Resources);
+        plan.record(ReloadLayer::Host, LayerOutcome::Skipped(SkipReason::NoChange));
+        let report = supervisor.finish(plan).unwrap();
+        assert!(report
+            .notices()
+            .iter()
+            .any(|line| line == "reload: binary unchanged"));
+        assert!(!report
+            .diagnostics()
+            .iter()
+            .any(|line| line.contains("binary unchanged")));
     }
 
     #[test]
