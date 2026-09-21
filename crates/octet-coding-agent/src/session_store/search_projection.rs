@@ -447,6 +447,11 @@ impl<R: BufRead> LineSource<'_, R> {
         }
     }
     fn skip_ascii_string_run(&mut self) -> io::Result<usize> {
+        // Serde may read again while attaching error context. Just like next(),
+        // the fast path must not cross a physical line's permanent EOF.
+        if self.ended {
+            return Ok(0);
+        }
         let count = match inspect_buffer(self.reader, |bytes| {
             bytes
                 .iter()
@@ -760,6 +765,27 @@ mod tests {
     }
     fn visible(text: &str) -> serde_json::Value {
         serde_json::json!({"type":"entry","id":"a","value":{"type":"message","User":{"content":[{"Text":text}]}}})
+    }
+
+    #[test]
+    fn ended_line_cannot_skip_bytes_from_the_next_record() {
+        let mut reader = b"\nnext-record".as_slice();
+        let mut observed = 0;
+        {
+            let mut source = LineSource {
+                reader: &mut reader,
+                observed: &mut observed,
+                ended: false,
+                newline: false,
+                source_error: None,
+            };
+            assert_eq!(source.next().unwrap(), None);
+            assert_eq!(source.skip_ascii_string_run().unwrap(), 0);
+            assert_eq!(source.next().unwrap(), None);
+            assert!(source.finish().unwrap());
+        }
+        assert_eq!(observed, 1);
+        assert_eq!(reader, b"next-record");
     }
 
     #[test]

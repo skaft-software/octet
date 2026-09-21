@@ -541,7 +541,7 @@ fn a_rendered_frame_shows_the_roster_exactly_once() {
 }
 
 #[test]
-fn an_active_roster_never_commits_into_native_history() {
+fn active_roster_remains_canonical_in_native_and_mutable_in_pinned_history() {
     for native in [false, true] {
         let mut shell = InteractiveShell::test_shell();
         shell.set_size(80, 24);
@@ -565,10 +565,9 @@ fn an_active_roster_never_commits_into_native_history() {
         let start = shell.state.borrow().transcript_cache.borrow().block_starts[index];
         assert!(start > 0, "the prompt precedes the roster: {start}");
 
-        // The production path (row replacements consumed by the Pi renderer)
-        // keeps the active roster in the mutable tail seam. The bounded preview
-        // may clip its worker rows, but the seam and the block's own heading
-        // still start at the roster.
+        // Pi retains the full canonical roster and everything after it. An
+        // unchanged frame reuses those rows; a real lifecycle update replaces
+        // them, including saved-history repair when required by the backend.
         let mut frame = ShellFrameState::default();
         let update = super::native_scrollback::render_shell_update_without_cursor(
             &shell.state.borrow(),
@@ -578,23 +577,20 @@ fn an_active_roster_never_commits_into_native_history() {
         );
         assert!(update.stable_prefix <= start, "{}", update.stable_prefix);
         assert!(update.replacement.join("\n").contains("Subagents"));
+        assert!(update.replacement.join("\n").contains("filler-39"));
+        let transcript_len = shell.state.borrow().transcript_cache.borrow().lines.len();
         let update = super::native_scrollback::render_shell_update_without_cursor(
             &shell.state.borrow(),
             80,
             Instant::now(),
             &mut frame,
         );
-        assert!(
-            update.stable_prefix <= start,
-            "an active roster must stay in the mutable tail: {} <= {start}",
-            update.stable_prefix
-        );
-        assert_eq!(frame.pending_tool_start, Some(start));
-        assert!(update.replacement.join("\n").contains("Subagents"));
+        assert_eq!(update.stable_prefix, transcript_len);
+        assert_eq!(frame.pending_tool_start, None);
 
-        // The pinned/extended path owns the same invariant through its commit
-        // ledger: no row of the active roster may be proven immutable and no
-        // commit target may cross it.
+        // The pinned/extended path instead owns an immutable commit ledger:
+        // no row of the active roster may be proven immutable and no commit
+        // target may cross it.
         let pinned = render_shell_update(
             &shell.state.borrow(),
             80,
@@ -617,21 +613,24 @@ fn an_active_roster_never_commits_into_native_history() {
             committed.target
         );
 
-        // Settlement releases the tail on both paths: the same block becomes
-        // ordinary history without changing identity.
+        // Settlement repairs Pi's historical rows and releases the pinned
+        // commit boundary without changing the block's identity.
         publish_roster(
             &mut shell,
             native,
             &[named_worker("LIVE-WORKER", "completed")],
         );
         assert_eq!(shell.state.borrow().subagent_activity_block, Some(index));
-        let mut frame = ShellFrameState::default();
-        let _ = super::native_scrollback::render_shell_update_without_cursor(
+        let update = super::native_scrollback::render_shell_update_without_cursor(
             &shell.state.borrow(),
             80,
             Instant::now(),
             &mut frame,
         );
+        assert!(update.stable_prefix <= start, "{}", update.stable_prefix);
+        let replacement = update.replacement.join("\n");
+        assert!(replacement.contains("completed"), "{replacement}");
+        assert!(replacement.contains("filler-39"), "{replacement}");
         assert_eq!(
             frame.pending_tool_start, None,
             "a settled roster is ordinary transcript history"

@@ -5,6 +5,7 @@ struct NativeReplay {
     shell: InteractiveShell,
     bytes: Arc<Mutex<Vec<u8>>>,
     terminal: vt100::Parser,
+    replay_frames: Vec<(u16, u16, Vec<u8>)>,
     width: u16,
     height: u16,
 }
@@ -38,6 +39,7 @@ impl NativeReplay {
             shell,
             bytes,
             terminal: vt100::Parser::new(height, width, 2048),
+            replay_frames: Vec::new(),
             width,
             height,
         }
@@ -64,6 +66,7 @@ impl NativeReplay {
             self.width,
             2048,
         );
+        self.replay_frames.push((self.height, self.width, bytes));
         output
     }
 
@@ -90,18 +93,33 @@ impl NativeReplay {
         assert_eq!(actual, expected, "Pi retained stale transcript rows");
     }
 
-    fn history(&mut self) -> String {
-        // Read saved rows without resizing the emulated terminal: callers can
-        // keep replaying after this snapshot with the same cursor/viewport.
-        self.terminal.set_scrollback(usize::MAX);
-        let saved_rows = self.terminal.screen().scrollback();
-        let mut rows = Vec::new();
-        for offset in (1..=saved_rows).rev() {
-            self.terminal.set_scrollback(offset);
-            rows.push(self.terminal.screen().rows(0, self.width).next().unwrap());
+    fn history(&self) -> String {
+        // vt100 0.15 underflows when a scrollback offset exceeds its viewport
+        // height. Replay the same bytes/resizes into a disposable parser, then
+        // enlarge only that snapshot. Resizing the retained parser would alter
+        // cursor/wrap state and could hide defects in subsequent paints.
+        let mut snapshot = vt100::Parser::new(self.height, self.width, 2048);
+        for (height, width, bytes) in &self.replay_frames {
+            if snapshot.screen().size() != (*height, *width) {
+                snapshot.set_size(*height, *width);
+            }
+            process_vt100_with_saved_line_clear(&mut snapshot, bytes, *height, *width, 2048);
         }
-        self.terminal.set_scrollback(0);
-        rows.extend(self.terminal.screen().rows(0, self.width));
+        snapshot.set_size(2048, self.width);
+        snapshot.set_scrollback(usize::MAX);
+        let saved_rows = snapshot.screen().scrollback();
+        let mut rows = snapshot
+            .screen()
+            .rows(0, self.width)
+            .take(saved_rows)
+            .collect::<Vec<_>>();
+        snapshot.set_scrollback(0);
+        rows.extend(
+            snapshot
+                .screen()
+                .rows(0, self.width)
+                .take(usize::from(self.height)),
+        );
         let physical = rows.join("\n");
         for index in 0..30 {
             let marker = format!("NATIVE-HISTORY-{index:02}");
