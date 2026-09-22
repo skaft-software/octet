@@ -29,36 +29,36 @@ Bundle documentation: [extension README](../extensions/octet-subagents/README.md
 
 ## Per-worker provider, model, and reasoning
 
-`subagent_spawn` accepts `provider`, `model`, and `reasoning` per worker. All
-three default to `inherit`, which copies the parent session's already-normalized
-selection exactly and is the recommended default.
+`subagent_spawn` accepts optional `provider`, `model`, and `reasoning` identifiers.
+Omitted values (or `inherit`) inherit the parent's selection. Explicit selections
+require negotiated `agent_model_selection_v1`; older hosts fail closed before
+creating a worker. The host resolves configured, credential-available routes and
+never substitutes the parent model for an unknown or unavailable route.
+
+Use `subagent_models` first to discover exact identifiers and supported reasoning:
 
 ```json
-{
-  "name": "cheap-reader",
-  "task": "List every caller of the auth helper.",
-  "profile": "explore",
-  "provider": "inherit",
-  "model": "inherit",
-  "reasoning": "inherit",
-  "tools": ["read", "search"]
-}
+{"query": "haiku", "limit": 10}
 ```
 
-The selection is validated fail-closed, never silently coerced:
+`query` is optional plain text (at most 128 UTF-8 bytes); `limit` defaults to 50
+and is bounded to 1–100. Results contain `models` and `truncated`; rows expose
+provider/model identifiers, display name, reasoning levels, context window and
+maximum output tokens, never credentials. Narrow the query when truncated.
+Discovery is owner-bound and read-only; it does not authenticate or start workers.
 
-- a `model` this session **cannot confirm as configured** is refused with the
-  typed `unsupported_model` error (API `0.2` exposes no provider catalog and the
-  host reports exactly one model to the extension — the parent session's);
-- a `provider` supplied without a matching `model`, or a malformed id, is refused
-  with `unsupported_model`;
-- an unknown `reasoning` level is refused with `unsupported_reasoning`;
-- a level above the target model's ceiling is **clamped** by the same ladder the
-  coding agent uses (`crates/octet-coding-agent/src/app/mod.rs`), with an explicit
-  note. The extension mirrors that policy; it does not invent a second one.
+Reasoning identifiers are `inherit`, `off`, `on`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, `max`, and `ultra`; use the choices returned for the target model.
+`on` supports binary/always-on models; the host remains authoritative.
 
-The panel and inspector show both the requested and the effective selection, and
-mark a request the host has not confirmed rather than implying it took effect.
+Supply an explicit model with an explicit provider. Unknown routes and unsupported
+reasoning fail with `unsupported_model` / `unsupported_reasoning`. The host alone
+normalizes reasoning against configured model metadata. The legacy
+`reasoning_capability` input is only a compatibility hint and cannot affect
+execution. Requested and host-confirmed effective selections stay separate in
+the inspector, survive restoration, and are preserved by continuation. Host
+`policy.resolved_model` carries effective provider/model and serialized
+`ReasoningConfig`; the extension does not guess an effective route or clamp effort.
 
 ## Drive the fleet
 
@@ -71,7 +71,7 @@ mark a request the host has not confirmed rather than implying it took effect.
 | `/subagents stop <name-or-id\|all>` | Owner-bound interruption. |
 | `/subagents open-all tmux\|herdr` | Reopen the parent and every running worker as interactive sessions, one pane each. |
 
-The model-facing equivalents are `subagent_spawn`, `subagent_status`,
+The model-facing equivalents are `subagent_models`, `subagent_spawn`, `subagent_status`,
 `subagent_wait`, `subagent_stop`, and `subagent_continue`.
 
 ## Open the fleet in panes

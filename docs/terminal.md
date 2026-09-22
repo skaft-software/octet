@@ -144,7 +144,12 @@ output preview.
 
 The transcript's **Subagents** event indents the complete worker roster beneath
 its heading. Rows retain state, input/output tokens, and cost, but omit call
-counts; the underlying telemetry and inspector remain unchanged.
+counts; the underlying telemetry and inspector remain unchanged. One session-scoped
+roster updates in its original transcript position across root prompts, including
+new and continued workers. Raw first-party orchestration calls and their matching
+results stay hidden during live execution and replay; actionable failures remain
+visible. Resume starts a fresh telemetry roster rather than replaying raw calls.
+Already committed child cost is not added again when telemetry is refreshed.
 
 `octet --show-images` (or `show_images = true` in user configuration) opts in to
 bounded inline **tool-result display**, off by default. Validated inline image

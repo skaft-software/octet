@@ -17,7 +17,7 @@ process = false
 network = false
 
 [contributes]
-tools = ["subagent_spawn", "subagent_status", "subagent_wait", "subagent_stop", "subagent_continue"]
+tools = ["subagent_models", "subagent_spawn", "subagent_status", "subagent_wait", "subagent_stop", "subagent_continue"]
 commands = ["subagents"]
 ui = ["status"]
 presentation = true

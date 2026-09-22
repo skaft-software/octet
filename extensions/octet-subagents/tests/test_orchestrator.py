@@ -59,96 +59,40 @@ class PolicyTests(unittest.TestCase):
                     SpawnRequest.parse(arguments)
                 self.assertEqual(raised.exception.code, code)
 
-    def test_per_worker_model_and_reasoning_selection_is_validated_and_clamped(self):
-        """TASK 2: provider/model/reasoning spawn inputs, default inherit."""
+    def test_per_worker_selection_defers_to_host_not_caller_capability(self):
         inherited = SpawnRequest.parse({"name": "worker", "task": "x"})
-        self.assertEqual(
-            (inherited.provider, inherited.model, inherited.reasoning),
-            ("inherit", "inherit", "inherit"),
-        )
-        self.assertTrue(inherited.inherits_model_policy)
-        self.assertIsNone(inherited.reasoning_note)
+        self.assertIsNone(inherited.model_selection)
+        selected = SpawnRequest.parse({"name": "worker", "task": "x",
+            "provider": "anthropic", "model": "claude-haiku-4-5", "reasoning": "max",
+            "reasoning_capability": {"ceiling": "medium"}})
+        self.assertEqual(selected.model_selection, {
+            "provider": "anthropic", "model": "claude-haiku-4-5", "reasoning": "max"})
+        self.assertNotEqual(selected.fingerprint, inherited.fingerprint)
+        other = SpawnRequest.parse({"name": "worker", "task": "x", "model": "other"})
+        self.assertEqual(other.model_selection, {"model": "other"})
 
-        # Only a model this session can confirm as configured is accepted: the
-        # parent session's own observed model is the sole verifiable selection.
-        confirmed = SpawnRequest.parse(
-            {
-                "name": "worker",
-                "task": "x",
-                "provider": "anthropic",
-                "model": "anthropic/claude-haiku-4-5",
-                "reasoning": "max",
-                "reasoning_capability": {"ceiling": "medium", "floor": "minimal"},
-            },
-            known_models=("anthropic/claude-haiku-4-5",),
-        )
-        self.assertEqual(confirmed.provider, "anthropic")
-        self.assertEqual(confirmed.model, "anthropic/claude-haiku-4-5")
-        self.assertEqual(confirmed.reasoning, "max")
-        self.assertFalse(confirmed.inherits_model_policy)
-        # Clamped by the mirrored ceiling policy, with an explicit note.
-        self.assertEqual(confirmed.effective_reasoning, "medium")
-        self.assertIn("clamped to medium", confirmed.reasoning_note or "")
-        self.assertNotEqual(confirmed.fingerprint, inherited.fingerprint)
+    def test_binary_reasoning_on_is_forwarded_unchanged(self):
+        from octet_subagents.reasoning import parse_level
+        from octet_subagents.runtime import SPAWN_SCHEMA
+        self.assertEqual(parse_level("on"), "on")
+        self.assertIn("on", SPAWN_SCHEMA["properties"]["reasoning"]["enum"])
+        request = SpawnRequest.parse({"name": "worker", "task": "x", "reasoning": "on"})
+        self.assertEqual(request.model_selection, {"reasoning": "on"})
 
-        # A level inside the advertised range is never clamped.
-        for level in ("inherit", "off", "low", "high"):
-            with self.subTest(level=level):
-                request = SpawnRequest.parse({"name": "worker", "task": "x", "reasoning": level})
-                self.assertEqual(request.reasoning, level)
-                self.assertEqual(request.effective_reasoning, level)
-                if level != "inherit":
-                    self.assertIsNone(request.reasoning_note)
-
-        # Unknown provider/model/effort and partial selections are refused with a
-        # typed error, never silently coerced to the inherited selection.
-        for arguments in (
-            {"name": "worker", "task": "x", "reasoning": "turbo"},
-            {"name": "worker", "task": "x", "model": ""},
-            {"name": "worker", "task": "x", "model": "a b"},
-            {"name": "worker", "task": "x", "provider": "../etc/passwd"},
-            {"name": "worker", "task": "x", "provider": "anthropic"},
-            {"name": "worker", "task": "x", "reasoning_capability": {"ceiling": "ludicrous"}},
-            {"name": "worker", "task": "x", "reasoning_capability": {"ceiling": "high", "nope": 1}},
-        ):
-            with self.subTest(arguments=arguments):
-                with self.assertRaises(SubagentError) as raised:
-                    SpawnRequest.parse(arguments)
-                self.assertIn(
-                    raised.exception.code, {"unsupported_model", "unsupported_reasoning"}
-                )
-
-    def test_unknown_model_is_rejected_even_when_well_formed(self):
-        """`{"model": "other"}` must fail closed: this process cannot confirm it."""
-        for known_models in ((), ("anthropic/claude-sonnet-5",)):
-            with self.subTest(known_models=known_models):
-                with self.assertRaises(SubagentError) as raised:
-                    SpawnRequest.parse(
-                        {"name": "worker", "task": "x", "model": "other"},
-                        known_models=known_models,
-                    )
-                self.assertEqual(raised.exception.code, "unsupported_model")
-                self.assertIn("confirm as configured", str(raised.exception))
-        # A provider that disagrees with the confirmed model is refused too.
-        with self.assertRaises(SubagentError) as raised:
-            SpawnRequest.parse(
-                {
-                    "name": "worker",
-                    "task": "x",
-                    "provider": "openai",
-                    "model": "anthropic/claude-sonnet-5",
-                },
-                known_models=("anthropic/claude-sonnet-5",),
-            )
-        self.assertEqual(raised.exception.code, "unsupported_model")
+    def test_configured_identifier_syntax_and_host_width(self):
+        for model in ("@cf/openai/gpt-oss-120b", "a" * 256):
+            request = SpawnRequest.parse({"name": "worker", "task": "x", "model": model})
+            self.assertEqual(request.model_selection, {"model": model})
+        for arguments in ({"model": "a" * 257}, {"reasoning": "@cf/low"}):
+            with self.assertRaises(SubagentError):
+                SpawnRequest.parse(dict(name="worker", task="x", **arguments))
 
     def test_worker_selection_is_recorded_as_requested_and_never_implied_applied(self):
-        """A confirmed selection is applied; an unconfirmable one is refused."""
+        """Only the host may confirm execution settings."""
         clock = ManualClock()
         host = FakeHostState(clock)
         client = host.client()
         orchestrator = Orchestrator(publish=lambda snapshot: None, now_ms=clock)
-        # The parent session's observed model is the one confirmable selection.
         result = orchestrator.spawn(
             client,
             owner(),
@@ -164,14 +108,13 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(worker["reasoning_policy"], "low")
         self.assertTrue(worker["model_policy_applied"])
         self.assertEqual(worker["model"], "claude-sonnet-test")
-        # A requested reasoning level is never claimed applied by the host.
-        self.assertEqual(worker["reasoning"], "inherited")
+        # The fake host confirms its normalized reasoning.
+        self.assertEqual(worker["reasoning"], "low")
 
-        with self.assertRaises(SubagentError) as raised:
+        with self.assertRaisesRegex(FakeAgentSessionsError, "unsupported_model"):
             orchestrator.spawn(
                 client, owner(), {"name": "other-reader", "task": "x", "model": "other"}
             )
-        self.assertEqual(raised.exception.code, "unsupported_model")
 
         # Positive inherit path: nothing supplied means the child copies the
         # parent session's already-normalized selection exactly, and the panel
@@ -188,8 +131,43 @@ class PolicyTests(unittest.TestCase):
             ("inherit", "inherit", "inherit"),
         )
         self.assertFalse(inherited["model_policy_applied"])
-        self.assertEqual(inherited["model"], owner().inherited_model)
+        self.assertEqual(inherited["model"], "inherited")
         self.assertEqual(inherited["reasoning"], "inherited")
+
+    def test_host_normalization_restoration_continuation_and_retry(self):
+        host = FakeHostState()
+        client = host.client()
+        orchestrator = Orchestrator(publish=lambda snapshot: None, now_ms=host.clock)
+        args = {"name": "reader", "task": "x", "model": "haiku", "reasoning": "max",
+                "reasoning_capability": {"ceiling": "high"}, "idempotency_key": "route-v1"}
+        first = orchestrator.spawn(client, owner(), args)["worker"]
+        self.assertEqual(first["model"], "haiku")
+        self.assertEqual(first["reasoning"], "low")
+        self.assertEqual(first["reasoning_policy"], "max")
+        restored = Orchestrator(publish=lambda snapshot: None, now_ms=host.clock)
+        retry = restored.spawn(client, owner(), args)["worker"]
+        for field in ("id", "model", "reasoning", "model_policy", "reasoning_policy"):
+            self.assertEqual(first[field], retry[field])
+        host.complete(first["id"], "done")
+        continued = restored.continue_worker(client, owner(), {
+            "target": first["id"], "message": "next"})["worker"]
+        self.assertEqual(continued["model"], "haiku")
+        self.assertEqual(continued["reasoning"], "low")
+        with self.assertRaises(SubagentError):
+            restored.spawn(client, owner(), dict(args, model="another"))
+        self.assertEqual(len(host.agents), 1)
+
+    def test_host_must_confirm_route_and_serialized_reasoning(self):
+        from octet_subagents.orchestrator import _host_model_policy
+        for reasoning, rendered in (({"type": "off"}, "off"), ({"type": "on"}, "on"),
+                                    ({"type": "budget", "value": 2048}, "budget=2048")):
+            policy = {"model_selection": {"model": "haiku"}, "resolved_model": {
+                "provider": "anthropic", "model": "haiku", "reasoning": reasoning}}
+            self.assertEqual(_host_model_policy({"policy": policy})["effective_reasoning"], rendered)
+        for policy in ({"model_selection": {"model": "haiku"}},
+                       {"resolved_model": {"provider": "anthropic", "model": "haiku", "reasoning": "low"}}):
+            with self.assertRaises(SubagentError):
+                _host_model_policy({"policy": policy})
 
     def test_canonical_child_message_keeps_task_as_data_and_never_grants_writer(self):
         request = SpawnRequest.parse(

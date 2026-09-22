@@ -393,8 +393,76 @@ impl DelegationBinding {
     }
 }
 
+/// Secret-free requested or host-confirmed worker selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentModelSelection {
+    /// Configured provider identifier.
+    pub provider: String,
+    /// Configured model identifier or resolved host model.
+    pub model: String,
+    /// Reasoning selection or supported choices.
+    pub reasoning: String,
+}
+impl Default for AgentModelSelection {
+    fn default() -> Self {
+        Self {
+            provider: "inherit".into(),
+            model: "inherit".into(),
+            reasoning: "inherit".into(),
+        }
+    }
+}
+/// Bounded public configured-model discovery record. Never include transport or credentials.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentModelDescriptor {
+    /// Configured model identifier or resolved host model.
+    pub model: String,
+    /// Configured provider identifier.
+    pub provider: String,
+    /// Optional human-facing label.
+    pub display_name: Option<String>,
+    /// Reasoning selection or supported choices.
+    pub reasoning: Vec<String>,
+    /// Context capacity in tokens.
+    pub context_window: u64,
+    /// Output capacity in tokens.
+    pub max_output_tokens: u64,
+}
+/// Host-only resolved transport and effective public selection.
+pub struct ResolvedAgentModel {
+    /// Configured model identifier or resolved host model.
+    pub model: octet_ai::Model,
+    /// Reasoning selection or supported choices.
+    pub reasoning: octet_ai::ReasoningConfig,
+    /// Canonical effective nonsecret selection.
+    pub metadata: AgentModelSelection,
+}
+/// Product-owned configured catalog and reasoning policy. Errors must be secret-free.
+pub trait AgentModelResolver: Send + Sync {
+    /// Resolve against configured inventory and normalize with product reasoning policy.
+    fn resolve(
+        &self,
+        selection: &AgentModelSelection,
+        parent_model: &octet_ai::Model,
+        parent_reasoning: &octet_ai::ReasoningConfig,
+    ) -> Result<ResolvedAgentModel, String>;
+    /// Return at most limit matches; the host requests one extra row for truncation.
+    fn models(
+        &self,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AgentModelDescriptor>, String>;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExtensionAgentSessionPolicy {
+    #[serde(default)]
+    pub(crate) model_selection: Option<AgentModelSelection>,
+    #[serde(default)]
+    pub(crate) resolved_model: Option<AgentModelSelection>,
+    #[serde(default)]
+    pub(crate) resolved_reasoning: Option<octet_ai::ReasoningConfig>,
     /// Child tool scope: a non-empty duplicate-free subset of the standard
     /// tools `read`, `search`, `edit`, `write`, and `bash`.
     pub(crate) tools: Vec<String>,
@@ -422,6 +490,27 @@ pub(crate) struct ExtensionAgentSessionPolicy {
     pub(crate) timeout_ms: Option<u64>,
 }
 
+fn resolved_model_json(policy: Option<&ExtensionAgentSessionPolicy>) -> Value {
+    match policy.and_then(|p| p.resolved_model.as_ref().map(|m| (p, m))) {
+        Some((policy, model)) => {
+            json!({"provider": model.provider, "model": model.model, "reasoning": policy.resolved_reasoning})
+        }
+        None => Value::Null,
+    }
+}
+
+/// Project effective policy without exposing the internal recovery encoding.
+fn public_policy_json(policy: Option<&ExtensionAgentSessionPolicy>) -> Value {
+    let Some(policy) = policy else {
+        return Value::Null;
+    };
+    let mut value = serde_json::to_value(policy).expect("policy is JSON serializable");
+    let object = value.as_object_mut().expect("policy serializes as object");
+    object.remove("resolved_reasoning");
+    object.insert("resolved_model".into(), resolved_model_json(Some(policy)));
+    value
+}
+
 fn child_orchestration_provenance(
     extension_policy: Option<&ExtensionAgentSessionPolicy>,
 ) -> DelegationOrchestrationProvenance {
@@ -439,6 +528,19 @@ fn child_orchestration_provenance(
 
 impl ExtensionAgentSessionPolicy {
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if let Some(selection) = &self.model_selection {
+            if selection.provider != "inherit" && selection.model == "inherit" {
+                return Err("unsupported_model: provider requires explicit model".into());
+            }
+            if [&selection.provider, &selection.model, &selection.reasoning]
+                .iter()
+                .any(|value| {
+                    value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+                })
+            {
+                return Err("unsupported_model: invalid selection identifier".into());
+            }
+        }
         if self.tools.is_empty() || self.tools.len() > EXTENSION_CHILD_TOOLS.len() {
             return Err(
                 "child tools must be a non-empty subset of the standard child tool names".into(),
@@ -642,6 +744,15 @@ impl DelegationBinding {
             .map_err(AgentError::Delegation)
     }
 
+    pub(crate) fn set_model_resolver(&self, resolver: Arc<dyn AgentModelResolver>) {
+        *self
+            .manager
+            .template
+            .model_resolver
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(resolver);
+    }
+
     pub(crate) fn update_base_system(&self, system: String) {
         if self.identity.id == ROOT_AGENT_ID {
             *self
@@ -809,6 +920,76 @@ impl ExtensionDelegationService {
         }
     }
 
+    pub(crate) fn models(
+        &self,
+        resource_owner: &str,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Value, String> {
+        if !(1..=100).contains(&limit)
+            || query.is_some_and(|q| q.len() > 128 || q.chars().any(char::is_control))
+        {
+            return Err("invalid model discovery bounds".into());
+        }
+        let manager = self.manager()?;
+        let owner = self.owner_identity(&manager, resource_owner)?;
+        if owner.depth != 0 {
+            return Err("model discovery is root-owner only".into());
+        }
+        let resolver = manager
+            .template
+            .model_resolver
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut models = if let Some(resolver) = resolver.as_ref() {
+            resolver.models(query, limit + 1)?
+        } else {
+            let resolved = manager.template.resolve_model(None)?;
+            let m = &resolved.model.spec;
+            vec![AgentModelDescriptor {
+                model: resolved.metadata.model,
+                provider: resolved.metadata.provider,
+                display_name: m.display_name.clone(),
+                reasoning: vec![resolved.metadata.reasoning],
+                context_window: m.limits.context_window,
+                max_output_tokens: m.limits.max_output_tokens,
+            }]
+        };
+        if models.len() > limit + 1
+            || models.iter().any(|m| {
+                [&m.model, &m.provider]
+                    .iter()
+                    .any(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+                    || m.display_name
+                        .as_ref()
+                        .is_some_and(|name| name.len() > 512 || name.chars().any(char::is_control))
+                    || m.reasoning.len() > 32
+                    || m.reasoning
+                        .iter()
+                        .any(|r| r.is_empty() || r.len() > 256 || r.chars().any(char::is_control))
+            })
+        {
+            return Err("configured model discovery exceeded public metadata bounds".into());
+        }
+        if let Some(query) = query {
+            let query = query.to_lowercase();
+            models.retain(|m| {
+                format!(
+                    "{} {} {}",
+                    m.model,
+                    m.provider,
+                    m.display_name.as_deref().unwrap_or("")
+                )
+                .to_lowercase()
+                .contains(&query)
+            });
+        }
+        let truncated = models.len() > limit;
+        models.truncate(limit);
+        Ok(json!({"models": models, "truncated": truncated}))
+    }
+
     pub(crate) fn spawn(
         &self,
         resource_owner: &str,
@@ -846,11 +1027,6 @@ impl ExtensionDelegationService {
             manager.publish_external_failure("spawn_rejected", &error);
             error
         };
-        if policy.max_cost_microdollars.is_some() && manager.template.model.spec.pricing.is_none() {
-            return Err(reject_spawn(
-                "extension children with a cost ceiling require trusted model pricing".into(),
-            ));
-        }
         let mut service_state = self
             .state
             .lock()
@@ -1160,6 +1336,7 @@ pub(crate) struct DelegationRuntimeSettings {
 }
 
 pub(crate) struct DelegationTemplate {
+    pub(crate) model_resolver: RwLock<Option<Arc<dyn AgentModelResolver>>>,
     pub(crate) client: octet_ai::AiClient,
     pub(crate) model: octet_ai::Model,
     pub(crate) base_system: RwLock<String>,
@@ -1171,6 +1348,116 @@ pub(crate) struct DelegationTemplate {
     pub(crate) reasoning_mode: octet_ai::ReasoningMode,
     pub(crate) cache_retention: octet_ai::CacheRetention,
     pub(crate) runtime: RwLock<DelegationRuntimeSettings>,
+}
+
+fn lower_child_reasoning(mut resolved: ResolvedAgentModel) -> ResolvedAgentModel {
+    // Astra's host-side Ultra tier enables V2 collaboration, but the
+    // observed child-run wire contract is xhigh. Keep root and generic
+    // Ultra lowering unchanged by translating only this child boundary.
+    let reasoning = if resolved.model.spec.api_name == "gpt-6-astra"
+        && resolved.model.spec.capabilities.agent_delegation == Some(octet_ai::AgentDelegation::V2)
+        && resolved
+            .model
+            .spec
+            .capabilities
+            .reasoning
+            .as_ref()
+            .is_some_and(|reasoning| reasoning.max_effort == octet_ai::ReasoningEffort::Ultra)
+        && resolved.reasoning == octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra)
+    {
+        octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Xhigh)
+    } else {
+        resolved.reasoning.clone()
+    };
+    if reasoning != resolved.reasoning {
+        resolved.reasoning = reasoning;
+        resolved.metadata.reasoning = "xhigh".into();
+    }
+    resolved
+}
+
+impl DelegationTemplate {
+    fn resolve_model(
+        &self,
+        policy: Option<&ExtensionAgentSessionPolicy>,
+    ) -> Result<ResolvedAgentModel, String> {
+        let mut selection = policy
+            .and_then(|p| p.resolved_model.as_ref().or(p.model_selection.as_ref()))
+            .cloned()
+            .unwrap_or_default();
+        // A newly inherited worker must retain the parent's exact binding, not
+        // re-select updated catalog metadata merely because admission pinned IDs.
+        if policy.is_some_and(|p| {
+            p.model_selection
+                .as_ref()
+                .is_none_or(|s| s == &AgentModelSelection::default())
+                && p.resolved_model
+                    .as_ref()
+                    .is_some_and(|m| m.model == self.model.spec.id.0)
+                && p.resolved_reasoning.as_ref() == Some(&self.reasoning)
+        }) {
+            selection = AgentModelSelection::default();
+        }
+        if let Some(resolver) = self
+            .model_resolver
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            let resolved = lower_child_reasoning(resolver.resolve(
+                &selection,
+                &self.model,
+                &self.reasoning,
+            )?);
+            if let Some(policy) = policy {
+                if policy
+                    .resolved_model
+                    .as_ref()
+                    .is_some_and(|pinned| pinned != &resolved.metadata)
+                    || policy
+                        .resolved_reasoning
+                        .as_ref()
+                        .is_some_and(|pinned| pinned != &resolved.reasoning)
+                {
+                    return Err(
+                        "unsupported_model: saved worker selection no longer resolves exactly"
+                            .into(),
+                    );
+                }
+            }
+            return Ok(resolved);
+        }
+        let metadata = AgentModelSelection {
+            provider: self.model.spec.endpoint.0.clone(),
+            model: self.model.spec.id.0.clone(),
+            reasoning: match &self.reasoning {
+                octet_ai::ReasoningConfig::Off => "off".into(),
+                octet_ai::ReasoningConfig::On => "on".into(),
+                octet_ai::ReasoningConfig::Effort(effort) => format!("{effort:?}").to_lowercase(),
+                octet_ai::ReasoningConfig::Budget(n) => format!("budget={n}"),
+            },
+        };
+        let resolved = lower_child_reasoning(ResolvedAgentModel {
+            model: self.model.clone(),
+            reasoning: self.reasoning.clone(),
+            metadata,
+        });
+        if (selection.provider != "inherit" && selection.provider != resolved.metadata.provider)
+            || (selection.model != "inherit" && selection.model != resolved.metadata.model)
+        {
+            return Err("unsupported_model: no configured model resolver".into());
+        }
+        if selection.reasoning != "inherit" && selection.reasoning != resolved.metadata.reasoning {
+            return Err("unsupported_reasoning: no configured reasoning resolver".into());
+        }
+        if policy
+            .and_then(|p| p.resolved_reasoning.as_ref())
+            .is_some_and(|pinned| pinned != &resolved.reasoning)
+        {
+            return Err("unsupported_reasoning: saved worker reasoning changed".into());
+        }
+        Ok(resolved)
+    }
 }
 
 pub(crate) struct DelegationManager {
@@ -1542,7 +1829,8 @@ fn bound_roster_text(text: &str, budget: usize) -> String {
     format!("{}{ROSTER_OUTPUT_SUFFIX}", &text[..end])
 }
 
-const FLEET_ROSTER_VERSION: u32 = 1;
+// Version 2 pins per-worker routes; v1 readers must not inherit a wrong parent route.
+const FLEET_ROSTER_VERSION: u32 = 2;
 const FLEET_ROSTER_FILE: &str = "fleet.json";
 /// Versioned durable claim that fences execution of one session's fleet to a
 /// single live owner. A larger or malformed file fails closed instead of being
@@ -2094,7 +2382,12 @@ impl DelegationManager {
                         .clone()
                         .unwrap_or_else(|| record.task_name.clone()),
                     profile: record.extension_profile.clone(),
-                    model: self.template.model.spec.id.0.clone(),
+                    model: record
+                        .extension_policy
+                        .as_ref()
+                        .and_then(|p| p.resolved_model.as_ref())
+                        .map(|m| m.model.clone())
+                        .unwrap_or_else(|| self.template.model.spec.id.0.clone()),
                     state: record.status.label().to_owned(),
                     phase: if !record.active_tools.is_empty() {
                         "using_tool".to_owned()
@@ -2605,7 +2898,9 @@ impl DelegationManager {
         let Ok(fleet) = serde_json::from_slice::<DurableFleet>(&bytes) else {
             return;
         };
-        if fleet.version != FLEET_ROSTER_VERSION || fleet.root_session != self.root_session {
+        if !matches!(fleet.version, 1 | FLEET_ROSTER_VERSION)
+            || fleet.root_session != self.root_session
+        {
             return;
         }
         let effective_tool_policy = self
@@ -3151,6 +3446,28 @@ impl DelegationManager {
             ExtensionDelegationService::validate_resource_owner(&provenance.resource_owner)?;
         }
         let extension_requested_policy = extension_policy.clone();
+        let resolved = self.template.resolve_model(extension_policy.as_ref())?;
+        if extension_policy.is_some()
+            && resolved.model.spec.pricing.is_none()
+            && (extension_policy
+                .as_ref()
+                .is_some_and(|p| p.max_cost_microdollars.is_some())
+                || self
+                    .template
+                    .runtime
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .max_session_cost_microdollars
+                    .is_some())
+        {
+            return Err(
+                "extension children with a cost ceiling require trusted model pricing".into(),
+            );
+        }
+        if let Some(policy) = extension_policy.as_mut() {
+            policy.resolved_model = Some(resolved.metadata.clone());
+            policy.resolved_reasoning = Some(resolved.reasoning.clone());
+        }
         if let Some(policy) = extension_policy.as_mut() {
             policy.validate()?;
             if owner.depth.saturating_add(1) > policy.max_depth {
@@ -3401,11 +3718,10 @@ impl DelegationManager {
                     recent_tools: VecDeque::new(),
                     usage: Usage::default(),
                     usage_uncertain: false,
-                    cost: (extension_policy.is_some()
-                        && self.template.model.spec.pricing.is_some())
-                    .then_some(Cost::default()),
+                    cost: (extension_policy.is_some() && resolved.model.spec.pricing.is_some())
+                        .then_some(Cost::default()),
                     cost_microdollars: (extension_policy.is_some()
-                        && self.template.model.spec.pricing.is_some())
+                        && resolved.model.spec.pricing.is_some())
                     .then_some(0),
                     deadline_at_ms,
                     turn_limit,
@@ -3459,7 +3775,8 @@ impl DelegationManager {
                 .as_ref()
                 .and_then(|provenance| provenance.fingerprint.as_deref()),
             "status": "pending",
-            "policy": result_policy,
+            "resolved_model": resolved_model_json(result_policy.as_ref()),
+            "policy": public_policy_json(result_policy.as_ref()),
             "effective_tool_policy": effective_tool_policy,
             "orchestration_provenance": orchestration_provenance,
             "created_at_ms": created_at_ms,
@@ -3653,7 +3970,13 @@ impl DelegationManager {
                         .as_ref()
                         .expect("delegated agent remains initialized")
                         .session(),
-                    self.template.model.spec.pricing.is_some(),
+                    agent
+                        .as_ref()
+                        .expect("initialized child")
+                        .model()
+                        .spec
+                        .pricing
+                        .is_some(),
                 );
                 drop(permit);
 
@@ -3907,10 +4230,14 @@ impl DelegationManager {
 
     fn build_child_agent(
         self: &Arc<Self>,
-        session: Session,
+        mut session: Session,
         identity: &AgentIdentity,
         extension_policy: Option<&ExtensionAgentSessionPolicy>,
     ) -> Result<Agent, DelegationError> {
+        let resolved = self
+            .template
+            .resolve_model(extension_policy)
+            .map_err(DelegationError::InvalidConfig)?;
         let parent_path = identity
             .path
             .rsplit_once('/')
@@ -3973,37 +4300,45 @@ impl DelegationManager {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        // Astra's host-side Ultra tier enables V2 collaboration, but the
-        // observed child-run wire contract is xhigh. Keep root and generic
-        // Ultra lowering unchanged by translating only this child boundary.
-        let child_reasoning = if self.template.model.spec.api_name == "gpt-6-astra"
-            && self.template.model.spec.capabilities.agent_delegation
-                == Some(octet_ai::AgentDelegation::V2)
-            && self
-                .template
-                .model
-                .spec
-                .capabilities
-                .reasoning
-                .as_ref()
-                .is_some_and(|reasoning| reasoning.max_effort == octet_ai::ReasoningEffort::Ultra)
-            && self.template.reasoning
-                == octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra)
-        {
-            octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Xhigh)
-        } else {
-            self.template.reasoning.clone()
-        };
+        if extension_policy.is_some() {
+            let mut cursor = session.head_ref();
+            let mut matches_config = false;
+            while let Some(id) = cursor {
+                let entry = session.entry(id).expect("session branch entries exist");
+                if let crate::session::EntryValue::Config {
+                    model, reasoning, ..
+                } = &entry.value
+                {
+                    matches_config = model.as_deref() == Some(&resolved.metadata.model)
+                        && reasoning.as_deref() == Some(&resolved.metadata.reasoning);
+                    break;
+                }
+                cursor = entry.parent.as_ref();
+            }
+            if !matches_config {
+                session.append(crate::session::EntryValue::Config {
+                    model: Some(resolved.metadata.model.clone()),
+                    reasoning: Some(resolved.metadata.reasoning.clone()),
+                    reasoning_mode: Some(
+                        match self.template.reasoning_mode {
+                            octet_ai::ReasoningMode::Standard => "standard",
+                            octet_ai::ReasoningMode::Pro => "pro",
+                        }
+                        .into(),
+                    ),
+                })?;
+            }
+        }
         let mut agent = Agent::new(AgentConfig {
             client: self.template.client.clone(),
-            model: self.template.model.clone(),
+            model: resolved.model.clone(),
             session,
             system,
             sandbox: self.template.sandbox.clone(),
             effect_broker: self.template.effect_broker.clone(),
             extensions,
             max_turns,
-            reasoning: child_reasoning,
+            reasoning: resolved.reasoning.clone(),
             reasoning_mode: self.template.reasoning_mode,
             cache_retention: self.template.cache_retention,
             session_id: None,
@@ -4029,7 +4364,11 @@ impl DelegationManager {
         agent.set_completion_policy(runtime.completion_policy);
         agent.set_output_modalities(runtime.output_modalities);
         if let Some(policy) = extension_policy {
-            agent.inherit_max_output_tokens(runtime.max_output_tokens);
+            agent.inherit_max_output_tokens(
+                runtime
+                    .max_output_tokens
+                    .min(resolved.model.spec.limits.max_output_tokens),
+            );
             let max_session_tokens = match (runtime.max_session_tokens, policy.max_tokens) {
                 (Some(parent), Some(requested)) => Some(parent.min(requested)),
                 (Some(parent), None) => Some(parent),
@@ -4046,7 +4385,11 @@ impl DelegationManager {
             agent.set_max_session_tokens(max_session_tokens);
             agent.set_max_session_cost_microdollars(max_session_cost_microdollars);
         } else {
-            agent.inherit_max_output_tokens(runtime.max_output_tokens);
+            agent.inherit_max_output_tokens(
+                runtime
+                    .max_output_tokens
+                    .min(resolved.model.spec.limits.max_output_tokens),
+            );
             agent.set_max_session_tokens(runtime.max_session_tokens);
             agent.set_max_session_cost_microdollars(runtime.max_session_cost_microdollars);
         }
@@ -6646,7 +6989,8 @@ fn extension_spawn_result_value(record: &AgentRecord) -> Value {
         "idempotency_key": record.extension_idempotency_key,
         "fingerprint": record.extension_fingerprint,
         "status": record.status,
-        "policy": record.extension_policy,
+        "resolved_model": resolved_model_json(record.extension_policy.as_ref()),
+        "policy": public_policy_json(record.extension_policy.as_ref()),
         "effective_tool_policy": record.effective_tool_policy,
         "orchestration_provenance": record.orchestration_provenance,
         "created_at_ms": record.created_at_ms,
@@ -6758,7 +7102,7 @@ pub fn resolve_launchable_child_session(
     let fleet: DurableFleet = serde_json::from_slice(&bytes).map_err(|error| {
         DelegationError::Unlaunchable(format!("unreadable delegation roster: {error}"))
     })?;
-    if fleet.version != FLEET_ROSTER_VERSION {
+    if !matches!(fleet.version, 1 | FLEET_ROSTER_VERSION) {
         return Err(DelegationError::Unlaunchable(
             "unsupported delegation roster version".into(),
         ));
@@ -6933,7 +7277,8 @@ fn agent_record_value(record: &AgentRecord) -> Value {
         "depth": record.identity.depth,
         "session": record.session_path,
         "status": record.status,
-        "policy": record.extension_policy,
+        "resolved_model": resolved_model_json(record.extension_policy.as_ref()),
+        "policy": public_policy_json(record.extension_policy.as_ref()),
         "effective_tool_policy": record.effective_tool_policy,
         "orchestration_provenance": record.orchestration_provenance,
         "profile": record.extension_profile,
@@ -7247,6 +7592,9 @@ mod tests {
 
     fn test_extension_policy() -> ExtensionAgentSessionPolicy {
         ExtensionAgentSessionPolicy {
+            model_selection: None,
+            resolved_model: None,
+            resolved_reasoning: None,
             tools: vec!["read".into(), "search".into()],
             max_depth: 1,
             max_concurrent_children: 2,
@@ -7282,6 +7630,7 @@ mod tests {
             .unwrap();
         let max_output_tokens = model.spec.limits.max_output_tokens;
         DelegationTemplate {
+            model_resolver: RwLock::new(None),
             client: octet_ai::AiClient::new(),
             model,
             base_system: RwLock::new("test".into()),
@@ -7379,6 +7728,388 @@ mod tests {
         let manager_mut = Arc::get_mut(&mut manager).expect("new manager is uniquely owned");
         manager_mut.template.extensions.load(&crate::CoreTools);
         manager
+    }
+
+    struct AlternateModelResolver {
+        model: octet_ai::Model,
+    }
+    impl AgentModelResolver for AlternateModelResolver {
+        fn resolve(
+            &self,
+            selection: &AgentModelSelection,
+            parent: &octet_ai::Model,
+            reasoning: &octet_ai::ReasoningConfig,
+        ) -> Result<ResolvedAgentModel, String> {
+            let model = match selection.model.as_str() {
+                "inherit" => parent.clone(),
+                id if id == self.model.spec.id.0 => self.model.clone(),
+                _ => return Err("unsupported_model: not configured".into()),
+            };
+            if selection.reasoning != "inherit" && selection.reasoning != "off" {
+                return Err("unsupported_reasoning: unsupported fixture level".into());
+            }
+            Ok(ResolvedAgentModel {
+                metadata: AgentModelSelection {
+                    provider: model.spec.endpoint.0.clone(),
+                    model: model.spec.id.0.clone(),
+                    reasoning: "off".into(),
+                },
+                model,
+                reasoning: reasoning.clone(),
+            })
+        }
+        fn models(
+            &self,
+            _query: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<AgentModelDescriptor>, String> {
+            Ok((0..limit)
+                .map(|_| AgentModelDescriptor {
+                    model: self.model.spec.id.0.clone(),
+                    provider: self.model.spec.endpoint.0.clone(),
+                    display_name: None,
+                    reasoning: vec!["off".into()],
+                    context_window: self.model.spec.limits.context_window,
+                    max_output_tokens: self.model.spec.limits.max_output_tokens,
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_model_routes_spawn_and_continuation_and_pins_durable_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let team = directory.path().join("team-multimodel");
+        std::fs::create_dir(&team).unwrap();
+        let parent_server = MockServer::start().await;
+        let alternate_server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+            .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"alternate answer\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5,\"total_tokens\":25}}\n\ndata: [DONE]\n\n"))
+            .expect(2).mount(&alternate_server).await;
+        let mut manager = writable_manager_with_core_tools(&team);
+        let inner = Arc::get_mut(&mut manager).unwrap();
+        Arc::make_mut(&mut inner.template.model.endpoint).base_url =
+            url::Url::parse(&format!("{}/", parent_server.uri())).unwrap();
+        let mut alternate = inner.template.model.clone();
+        Arc::make_mut(&mut inner.template.model.spec).pricing = None;
+        let spec = Arc::make_mut(&mut alternate.spec);
+        spec.id = octet_ai::ModelId("fixture-alternate".into());
+        spec.api_name = "alternate-wire-model".into();
+        spec.limits.max_output_tokens = 1024;
+        let endpoint = Arc::make_mut(&mut alternate.endpoint);
+        endpoint.base_url = url::Url::parse(&format!("{}/", alternate_server.uri())).unwrap();
+        endpoint.auth = octet_ai::Auth::None;
+        *inner.template.model_resolver.get_mut().unwrap() =
+            Some(Arc::new(AlternateModelResolver { model: alternate }));
+        let binding = manager.root_binding();
+        let telemetry = manager.attach_telemetry();
+        let service = binding
+            .extension_service("extension-routing", "parent-session", "root-owner")
+            .unwrap();
+        let request = || {
+            let mut request =
+                test_extension_spawn("routing", None, None, "use alternate", "routing-key");
+            request.policy.model_selection = Some(AgentModelSelection {
+                model: "fixture-alternate".into(),
+                ..Default::default()
+            });
+            request
+        };
+        let first = service.spawn("root-owner", request()).unwrap();
+        assert_eq!(first["resolved_model"]["model"], "fixture-alternate");
+        assert_eq!(first["resolved_model"]["reasoning"], json!({"type":"off"}));
+        assert_eq!(
+            first["policy"]["resolved_model"]["reasoning"],
+            json!({"type":"off"})
+        );
+        assert!(first["policy"].get("resolved_reasoning").is_none());
+        let id = first["agent_id"].as_str().unwrap();
+        for run in 0..2 {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let state = manager.state.lock().unwrap().records[id].status.clone();
+                    if matches!(state, DelegatedAgentStatus::Completed { .. }) {
+                        break;
+                    }
+                    assert!(
+                        !matches!(state, DelegatedAgentStatus::Failed { .. }),
+                        "{state:?}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if run == 0 {
+                service
+                    .follow_up("root-owner", id, "continue same route".into())
+                    .await
+                    .unwrap();
+            }
+        }
+        assert!(parent_server.received_requests().await.unwrap().is_empty());
+        for request in alternate_server.received_requests().await.unwrap() {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["model"], "alternate-wire-model");
+            assert!(
+                body["max_completion_tokens"]
+                    .as_u64()
+                    .or_else(|| body["max_tokens"].as_u64())
+                    .unwrap()
+                    <= 1024
+            );
+        }
+        service.state.lock().unwrap().owners.clear();
+        assert_eq!(
+            service.spawn("root-owner", request()).unwrap()["agent_id"],
+            id
+        );
+        let listed = service.list("root-owner").unwrap();
+        assert_eq!(
+            listed["agents"][0]["policy"]["resolved_model"]["reasoning"],
+            json!({"type":"off"})
+        );
+        let replay = service.spawn("root-owner", request()).unwrap();
+        assert_eq!(
+            replay["policy"]["resolved_model"]["reasoning"],
+            json!({"type":"off"})
+        );
+        let mut changed = request();
+        changed.policy.model_selection.as_mut().unwrap().reasoning = "off".into();
+        assert!(service
+            .spawn("root-owner", changed)
+            .unwrap_err()
+            .contains("different input"));
+        let state = manager.state.lock().unwrap();
+        assert!(state.records[id].cost_microdollars.is_some());
+        assert_eq!(
+            telemetry.borrow().as_ref().unwrap().children[0].model,
+            "fixture-alternate"
+        );
+        let fleet: Value =
+            serde_json::from_slice(&std::fs::read(team.join("fleet.json")).unwrap()).unwrap();
+        assert!(fleet.to_string().contains("fixture-alternate"));
+        let policy = state.records[id].extension_policy.as_ref().unwrap();
+        let encoded = serde_json::to_vec(policy).unwrap();
+        let restored: ExtensionAgentSessionPolicy = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            manager
+                .template
+                .resolve_model(Some(&restored))
+                .unwrap()
+                .model
+                .spec
+                .id
+                .0,
+            "fixture-alternate"
+        );
+        assert_eq!(
+            resolved_model_json(Some(&restored))["model"],
+            "fixture-alternate"
+        );
+        let mut changed_reasoning = restored.clone();
+        changed_reasoning.resolved_reasoning = Some(octet_ai::ReasoningConfig::On);
+        assert!(manager
+            .template
+            .resolve_model(Some(&changed_reasoning))
+            .is_err());
+        drop(state);
+        let catalog = service.models("root-owner", None, 1).unwrap();
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["truncated"], true);
+        assert!(service.models("wrong-owner", None, 1).is_err());
+        assert!(service.models("root-owner", None, 101).is_err());
+        assert!(service
+            .models("root-owner", Some(&"x".repeat(129)), 1)
+            .is_err());
+        binding.request_shutdown();
+    }
+
+    #[test]
+    fn legacy_fleet_roster_loads_and_upgrades_without_routing_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let session_path = root.join("legacy-child.jsonl");
+        Session::create(&session_path).unwrap();
+        {
+            let manager = writable_manager(&root);
+            insert_durable_detached_record(
+                &manager,
+                "agent-1",
+                "/root/legacy",
+                session_path,
+                DelegatedAgentStatus::Completed {
+                    output: "old result".into(),
+                },
+            );
+            manager.persist_durable_fleet_locked(&mut manager.state.lock().unwrap());
+        }
+        let path = root.join(FLEET_ROSTER_FILE);
+        let mut fleet: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        fleet["version"] = json!(1);
+        std::fs::write(&path, serde_json::to_vec(&fleet).unwrap()).unwrap();
+        let manager = writable_manager(&root);
+        manager.restore_durable_fleet();
+        let mut state = manager.state.lock().unwrap();
+        assert_eq!(state.records.len(), 1);
+        assert!(state.records["agent-1"].extension_policy.is_none());
+        manager.persist_durable_fleet_locked(&mut state);
+        let upgraded: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(upgraded["version"], 2);
+    }
+
+    #[tokio::test]
+    async fn configured_route_survives_fleet_reconstruction_with_a_different_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let alternate_server = MockServer::start().await;
+        let changed_parent_server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"route persisted\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+            .expect(2).mount(&alternate_server).await;
+        let mut alternate = test_template(&root).model;
+        Arc::make_mut(&mut alternate.spec).id = octet_ai::ModelId("saved-alternate".into());
+        Arc::make_mut(&mut alternate.spec).api_name = "saved-wire-model".into();
+        Arc::make_mut(&mut alternate.endpoint).base_url =
+            url::Url::parse(&format!("{}/", alternate_server.uri())).unwrap();
+        Arc::make_mut(&mut alternate.endpoint).auth = octet_ai::Auth::None;
+        let session_path = root.join("saved-child.jsonl");
+        {
+            let manager = writable_manager_with_core_tools(&root);
+            *manager.template.model_resolver.write().unwrap() =
+                Some(Arc::new(AlternateModelResolver {
+                    model: alternate.clone(),
+                }));
+            let session = Session::create(&session_path).unwrap();
+            insert_durable_detached_record(
+                &manager,
+                "agent-1",
+                "/root/saved",
+                session_path.clone(),
+                DelegatedAgentStatus::Completed {
+                    output: "first run".into(),
+                },
+            );
+            let mut policy = test_extension_policy();
+            policy.model_selection = Some(AgentModelSelection {
+                model: "saved-alternate".into(),
+                ..Default::default()
+            });
+            let resolved = manager.template.resolve_model(Some(&policy)).unwrap();
+            policy.resolved_model = Some(resolved.metadata);
+            policy.resolved_reasoning = Some(resolved.reasoning);
+            let identity = manager.state.lock().unwrap().records["agent-1"]
+                .identity
+                .clone();
+            let mut child = manager
+                .build_child_agent(session, &identity, Some(&policy))
+                .unwrap();
+            child.complete("original child task").await.unwrap();
+            let mut state = manager.state.lock().unwrap();
+            state.records.get_mut("agent-1").unwrap().extension_policy = Some(policy);
+            manager.persist_durable_fleet_locked(&mut state);
+        }
+        let fleet: Value =
+            serde_json::from_slice(&std::fs::read(root.join(FLEET_ROSTER_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            fleet["version"], 2,
+            "old v1 hosts must reject routed rosters"
+        );
+        // The old manager and child are gone. Rebuild from disk with a different
+        // parent binding and run the ordinary durable follow-up path.
+        let mut manager = writable_manager_with_core_tools(&root);
+        let template = &mut Arc::get_mut(&mut manager).unwrap().template;
+        Arc::make_mut(&mut template.model.spec).id = octet_ai::ModelId("different-parent".into());
+        Arc::make_mut(&mut template.model.endpoint).base_url =
+            url::Url::parse(&format!("{}/", changed_parent_server.uri())).unwrap();
+        *template.model_resolver.get_mut().unwrap() =
+            Some(Arc::new(AlternateModelResolver { model: alternate }));
+        manager.restore_durable_fleet();
+        assert_eq!(
+            manager.state.lock().unwrap().records["agent-1"]
+                .extension_policy
+                .as_ref()
+                .unwrap()
+                .resolved_model
+                .as_ref()
+                .unwrap()
+                .model,
+            "saved-alternate"
+        );
+        manager.prepare_owning_run(&root_identity()).unwrap();
+        manager
+            .follow_up(
+                &root_identity(),
+                FollowUpRequest {
+                    target: "agent-1".into(),
+                    message: "continue after restart".into(),
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = manager.state.lock().unwrap().records["agent-1"]
+                    .status
+                    .clone();
+                if matches!(status, DelegatedAgentStatus::Completed { .. }) {
+                    break;
+                }
+                assert!(
+                    !matches!(status, DelegatedAgentStatus::Failed { .. }),
+                    "{status:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(changed_parent_server
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty());
+        let requests = alternate_server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(body["model"], "saved-wire-model");
+        assert!(body.to_string().contains("original child task"));
+        let transcript = Session::open(&session_path).unwrap();
+        assert!(transcript.entries().iter().any(|entry| matches!(&entry.value,
+            crate::session::EntryValue::Config { model: Some(model), reasoning: Some(reasoning), .. }
+            if model == "saved-alternate" && reasoning == "off")));
+        manager.root_binding().request_shutdown();
+    }
+
+    #[test]
+    fn model_selection_refuses_before_admission_without_a_resolver() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager_with_core_tools(directory.path());
+        let service = manager
+            .root_binding()
+            .extension_service("extension-routing", "parent-session", "root-owner")
+            .unwrap();
+        for selection in [
+            AgentModelSelection {
+                model: "unknown".into(),
+                ..Default::default()
+            },
+            AgentModelSelection {
+                reasoning: "high".into(),
+                ..Default::default()
+            },
+        ] {
+            let mut request =
+                test_extension_spawn("routing", None, None, "must not run", "routing-key");
+            request.policy.model_selection = Some(selection);
+            assert!(service
+                .spawn("root-owner", request)
+                .unwrap_err()
+                .starts_with("unsupported_"));
+            assert!(manager.state.lock().unwrap().records.is_empty());
+        }
     }
 
     #[tokio::test]

@@ -112,7 +112,7 @@ pub(crate) fn tool_display_label(name: &str) -> String {
         "search" => "Explored".to_string(),
         "edit" => "Edit".to_string(),
         "write" => "Write".to_string(),
-        _ if name.starts_with("subagent_") => "Delegated".to_string(),
+        _ if super::is_subagent_tool(name) => "Delegated".to_string(),
         _ if name.starts_with("browser_") => "Browse".to_string(),
         _ if name.starts_with("ssh_") => "SSH".to_string(),
         _ => {

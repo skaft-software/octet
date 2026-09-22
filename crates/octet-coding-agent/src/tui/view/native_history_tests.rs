@@ -696,24 +696,19 @@ fn native_two_runs_keep_roster_identity_through_late_worker_completion() {
             },
         );
         replay.render(false);
-        let (first_id, first_copy) = {
+        let (first_id, first_index) = {
             let state = replay.shell.state.borrow();
             let index = state.subagent_activity_block.unwrap();
-            (
-                state.transcript_commit_ids[index],
-                block_copy_text(&state.transcript[index]),
-            )
+            (state.transcript_commit_ids[index], index)
         };
 
         let second_run = replay.shell.begin_run("fixture");
         replay.shell.on_prompt_submitted("SECOND-ROOT-PROMPT");
         publish_workers(&mut replay, vec![first.clone()]);
-        assert!(replay
-            .shell
-            .state
-            .borrow()
-            .subagent_activity_block
-            .is_none());
+        assert_eq!(
+            replay.shell.state.borrow().subagent_activity_block,
+            Some(first_index)
+        );
         let mut second = worker("SECOND-ROOT-WORKER");
         publish_workers(&mut replay, vec![first.clone(), second.clone()]);
         replay.render(false);
@@ -721,12 +716,12 @@ fn native_two_runs_keep_roster_identity_through_late_worker_completion() {
             let state = replay.shell.state.borrow();
             state.transcript_commit_ids[state.subagent_activity_block.unwrap()]
         };
-        assert_ne!(first_id, second_id);
+        assert_eq!(first_id, second_id);
         for index in 0..48 {
             replay.shell.notice(format!("SECOND-ROOT-TAIL-{index:02}"));
         }
         // The parent settles before this run's worker. A later authoritative
-        // completion still repairs that worker, never the preceding run's event.
+        // completion still repairs the same session-scoped roster in place.
         replay.shell.on_run_event(
             second_run,
             &AgentEvent::RunFinished {
@@ -749,24 +744,25 @@ fn native_two_runs_keep_roster_identity_through_late_worker_completion() {
             .unwrap();
         let second_index = state.subagent_activity_block.unwrap();
         assert_eq!(state.transcript_commit_ids[second_index], second_id);
-        assert_eq!(block_copy_text(&state.transcript[first_index]), first_copy);
+        assert_eq!(first_index, second_index);
         let second_copy = block_copy_text(&state.transcript[second_index]);
         assert!(second_copy.contains("SECOND-ROOT-WORKER"), "{second_copy}");
         assert!(second_copy.contains("failed"), "{second_copy}");
-        assert!(!second_copy.contains("FIRST-ROOT-WORKER"), "{second_copy}");
+        assert!(second_copy.contains("FIRST-ROOT-WORKER"), "{second_copy}");
         drop(state);
         for _ in 0..3 {
             replay.render(true);
         }
         for text in [replay.frame(), replay.history()] {
-            assert_eq!(text.matches("Subagents").count(), 2, "{text}");
+            assert_eq!(text.matches("Subagents").count(), 1, "{text}");
             assert_eq!(text.matches("FIRST-ROOT-WORKER").count(), 1, "{text}");
             assert_eq!(text.matches("SECOND-ROOT-WORKER").count(), 1, "{text}");
             let (old, current) = text.split_once("SECOND-ROOT-PROMPT").unwrap();
             assert!(old.contains("FIRST-ROOT-WORKER"), "{text}");
             assert!(!current.contains("FIRST-ROOT-WORKER"), "{text}");
-            assert!(current.contains("SECOND-ROOT-WORKER"), "{text}");
-            assert!(current.contains("failed"), "{text}");
+            assert!(old.contains("SECOND-ROOT-WORKER"), "{text}");
+            assert!(old.contains("failed"), "{text}");
+            assert!(!current.contains("SECOND-ROOT-WORKER"), "{text}");
             for index in 0..48 {
                 assert_eq!(
                     text.matches(&format!("SECOND-ROOT-TAIL-{index:02}"))

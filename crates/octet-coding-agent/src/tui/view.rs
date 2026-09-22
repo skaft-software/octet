@@ -110,16 +110,7 @@ use self::viewport::{
     transcript_viewport_capacity, transcript_viewport_capacity_for_state,
 };
 
-const SUBAGENT_TOOL_NAMES: [&str; 4] = [
-    "subagent_spawn",
-    "subagent_status",
-    "subagent_wait",
-    "subagent_stop",
-];
-
-fn is_subagent_tool(name: &str) -> bool {
-    SUBAGENT_TOOL_NAMES.contains(&name)
-}
+use crate::presentation::tool_display::is_subagent_tool;
 
 /// Maximum physical rows retained in a collapsed command-output tail.
 const COMPACT_EXEC_OUTPUT_ROWS: usize = 5;
@@ -1979,13 +1970,16 @@ pub(crate) struct ShellState {
     prompt_templates: Arc<[crate::prompts::PromptTemplateDescriptor]>,
     skill_commands: Arc<[(String, String)]>,
     extension_commands: Arc<[(String, String)]>,
-    /// Live state for the current root run. The corresponding presentation
-    /// block is retained in the transcript after settlement.
+    /// Session-scoped roster; updates and later root turns reuse its block.
     pub(crate) subagent_activity: Option<SubagentActivityView>,
-    /// Transcript index of the current run's presentation-only subagent tool
-    /// block. It is reset at the next root run so settled history remains
-    /// immutable while a new delegation event gets its own row.
     pub(crate) subagent_activity_block: Option<usize>,
+    /// Cumulative child spend already handed off to the root's durable ledger.
+    subagent_committed_costs: HashMap<String, u64>,
+    /// Hidden live calls remain indexed across root turns. Replay has its own
+    /// index so deferred history cannot overwrite a reused live call ID.
+    hidden_subagent_calls: HashMap<ToolCallId, String>,
+    /// Retained across hydration batches to suppress matching result cards.
+    hidden_hydrated_subagent_calls: HashMap<ToolCallId, String>,
     slash_selection: usize,
     slash_scroll: usize,
     slash_popup_dismissed: bool,
@@ -2546,6 +2540,7 @@ impl ShellState {
         if self.subagent_activity_block.is_none()
             && !subagent_activity_is_active(&view)
             && !workers.is_empty()
+            && view.failure_reason.is_none()
         {
             self.subagent_activity = None;
             self.touch_outcome_for_roster_transition(was_active, false);
@@ -2553,9 +2548,9 @@ impl ShellState {
         }
 
         // Mixed snapshots also contain the session's older terminal workers.
-        // Keep current-block members through their settlement and genuinely
-        // new/resumed work. Unseen terminal rows are also old session material,
-        // not evidence that a worker participated in this turn.
+        // Keep session-block members through settlement and new/resumed work.
+        // Unseen terminal rows are old material from before this shell attached,
+        // not evidence of a new delegation event.
         let current_workers = self
             .subagent_activity_block
             .and_then(|index| match self.transcript.get(index) {
@@ -2699,6 +2694,19 @@ impl ShellState {
             .filter(|tokens| *tokens > 0)
     }
 
+    fn refresh_subagent_committed_costs(&mut self, session: &Session) {
+        self.subagent_committed_costs.clear();
+        for record in session.usage_records() {
+            if let octet_agent::UsageRecordKind::DelegatedAgent { agent_id, .. } = &record.kind {
+                let cost = self
+                    .subagent_committed_costs
+                    .entry(agent_id.clone())
+                    .or_default();
+                *cost = cost.saturating_add(record.cost_microdollars.unwrap_or(0));
+            }
+        }
+    }
+
     pub(crate) fn displayed_session_cost_microdollars(&self) -> Option<u64> {
         let live_subagent_cost = self
             .subagent_activity
@@ -2707,11 +2715,22 @@ impl ShellState {
             .and_then(|view| {
                 if !view.telemetry.is_empty() {
                     view.telemetry.iter().try_fold(0u64, |total, child| {
-                        Some(total.saturating_add(child.cost_microdollars?))
+                        Some(total.saturating_add(child.cost_microdollars?.saturating_sub(
+                            self.subagent_committed_costs
+                                .get(&child.child_id)
+                                .copied()
+                                .unwrap_or(0),
+                        )))
                     })
                 } else {
                     view.activities.iter().try_fold(0u64, |total, activity| {
-                        Some(total.saturating_add(activity.metrics?.cost_microdollars?))
+                        let cost = activity.metrics?.cost_microdollars?;
+                        Some(total.saturating_add(cost.saturating_sub(
+                            self.subagent_committed_costs
+                                .get(&activity.id)
+                                .copied()
+                                .unwrap_or(0),
+                        )))
                     })
                 }
             });
@@ -3933,17 +3952,7 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         state.run_label.clear();
         state.clear_turn_telemetry();
-        // The roster is session-scoped, but this presentation belongs to one
-        // run. Do not carry previously accounted costs into the next live view.
-        // Clearing a live roster also removes the previous turn's
-        // delegated-workers line from its outcome block.
-        let roster_was_active = state
-            .subagent_activity
-            .as_ref()
-            .is_some_and(subagent_activity_is_active);
-        state.subagent_activity = None;
-        state.subagent_activity_block = None;
-        state.touch_outcome_for_roster_transition(roster_was_active, false);
+        // The session roster and its committed-cost watermarks outlive a run.
         state.run_model = Some(state.model.clone());
         state.run_model_lab = state.model_lab;
         state.run_prompt_color = state.prompt_color.clone();
@@ -4314,7 +4323,10 @@ impl InteractiveShell {
                 state.close_streaming_blocks();
                 state.event_dot_visible = true;
                 state.event_spinner_frame = 0;
-                if !is_subagent_tool(name) {
+                if is_subagent_tool(name) {
+                    state.hidden_subagent_calls.insert(id.clone(), name.clone());
+                } else {
+                    state.hidden_subagent_calls.remove(id);
                     let index = state.transcript.len();
                     let workspace = state.workspace.clone();
                     let display = summarize_tool_with_workspace(name, args, workspace.as_deref());
@@ -4339,6 +4351,9 @@ impl InteractiveShell {
             // and the native host protocol instead of the transcript.
             AgentEvent::ToolPolicyDecision { .. } => {}
             AgentEvent::ToolProgress { id, progress } => {
+                if state.hidden_subagent_calls.contains_key(id) {
+                    return;
+                }
                 let index = state.tool_panels.get(id).copied();
                 let refreshes_compact_tail = matches!(
                     progress,
@@ -4395,7 +4410,17 @@ impl InteractiveShell {
                 result,
                 duration,
             } => {
-                let index = state.tool_panels.get(id).copied();
+                if let Some(name) = state.hidden_subagent_calls.get(id).cloned() {
+                    if let Some(reason) = tool_failure_reason(&name, result) {
+                        state.push_block(TranscriptBlock::Notice(format!(
+                            "Delegation failed: {}",
+                            sanitize_for_terminal(&reason)
+                        )));
+                    }
+                }
+                let index = (!state.hidden_subagent_calls.contains_key(id))
+                    .then(|| state.tool_panels.get(id).copied())
+                    .flatten();
                 let completed_images = if index.is_some() {
                     match result {
                         Ok(output) => {
@@ -4418,7 +4443,7 @@ impl InteractiveShell {
                 }
                 .saturating_add(8);
                 let mut completed_name = String::new();
-                if let Some(panel) = state.tool_output_mut(id) {
+                if let Some(panel) = index.and_then(|_| state.tool_output_mut(id)) {
                     completed_name = panel.name.clone();
                     panel.finished = true;
                     panel.duration = Some(*duration);
@@ -4516,6 +4541,24 @@ impl InteractiveShell {
             AgentEvent::DelegationUpdated { .. } => {}
             AgentEvent::RunFinished { .. } => {
                 state.close_streaming_blocks();
+                if let Some(view) = state.subagent_activity.as_ref() {
+                    let costs: Vec<_> = if !view.telemetry.is_empty() {
+                        view.telemetry
+                            .iter()
+                            .filter_map(|child| {
+                                Some((child.child_id.clone(), child.cost_microdollars?))
+                            })
+                            .collect()
+                    } else {
+                        view.activities
+                            .iter()
+                            .filter_map(|activity| {
+                                Some((activity.id.clone(), activity.metrics?.cost_microdollars?))
+                            })
+                            .collect()
+                    };
+                    state.subagent_committed_costs.extend(costs);
+                }
                 if let Some(view) = state.subagent_activity.as_mut() {
                     // The root ledger is committed before RunFinished is
                     // emitted; from this boundary onward the footer must use
@@ -4559,6 +4602,7 @@ impl InteractiveShell {
             .then(|| session.total_cost_microdollars());
         let mut state = self.state.borrow_mut();
         state.session_cost_microdollars = session_cost_microdollars;
+        state.refresh_subagent_committed_costs(session);
         state.usage_uncertain |= session.has_uncertain_usage() || session.has_unpriced_usage();
         state.telemetry_model = telemetry_model;
         state.cache_hit_rate_basis_points = state
@@ -5048,15 +5092,7 @@ impl InteractiveShell {
             state.set_subagent_activity(next);
             return true;
         }
-        if snapshot.is_none() {
-            let roster_was_active = state
-                .subagent_activity
-                .as_ref()
-                .is_some_and(subagent_activity_is_active);
-            state.subagent_activity = None;
-            state.subagent_activity_block = None;
-            state.touch_outcome_for_roster_transition(roster_was_active, false);
-        }
+        // Missing/cleanup snapshots do not erase the session's roster identity.
         false
     }
 
@@ -5092,15 +5128,7 @@ impl InteractiveShell {
             state.set_subagent_activity(next);
             return true;
         }
-        if snapshot.is_none() {
-            let roster_was_active = state
-                .subagent_activity
-                .as_ref()
-                .is_some_and(subagent_activity_is_active);
-            state.subagent_activity = None;
-            state.subagent_activity_block = None;
-            state.touch_outcome_for_roster_transition(roster_was_active, false);
-        }
+        // Missing/cleanup snapshots do not erase the session's roster identity.
         false
     }
 
@@ -7371,6 +7399,9 @@ impl InteractiveShell {
         state.invalidate_transcript_layout();
         state.steering_queue = Arc::default();
         state.tool_panels.clear();
+        state.hidden_subagent_calls.clear();
+        state.hidden_hydrated_subagent_calls.clear();
+        state.refresh_subagent_committed_costs(session);
         state.close_streaming_blocks();
         state.jump_to_tail();
         state.last_turn_usage = checkpoint_usage;
@@ -7393,8 +7424,7 @@ impl InteractiveShell {
         state.run_cost_microdollars = checkpoint_cost.unwrap_or_default();
         state.run_cost_available = checkpoint_cost.is_some();
         state.run.clear();
-        // Delegation telemetry belongs to the previously active root run. A
-        // session hydrate may reuse this shell, so clear the live pointer;
+        // Session hydration may reuse this shell, so clear the roster pointer;
         // hydrated history never contains an executable worker event.
         state.subagent_activity = None;
         state.subagent_activity_block = None;

@@ -4,7 +4,8 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::time::Duration;
 
 use super::{
-    sanitize_for_terminal, AssistantBlock, CompactionBlock, ShellState, ToolPanel, TranscriptBlock,
+    is_subagent_tool, sanitize_for_terminal, AssistantBlock, CompactionBlock, ShellState, ToolPanel,
+    TranscriptBlock,
 };
 use crate::hydrate::TranscriptItem;
 use crate::presentation::{
@@ -70,6 +71,11 @@ pub(super) fn append_hydrated_items(
                 Box::new(AssistantBlock::finalized_reasoning(text)),
             )),
             TranscriptItem::ToolCall { id, name, args } => {
+                if is_subagent_tool(&name) {
+                    state.hidden_hydrated_subagent_calls.insert(id, name);
+                    continue;
+                }
+                state.hidden_hydrated_subagent_calls.remove(&id);
                 let index = state.transcript.len();
                 let display =
                     summarize_tool_with_workspace(&name, &args, state.workspace.as_deref());
@@ -95,6 +101,20 @@ pub(super) fn append_hydrated_items(
                 duration_ms,
                 images,
             } => {
+                if let Some(name) = state.hidden_hydrated_subagent_calls.get(&id) {
+                    let result = if is_error {
+                        Err(octet_agent::ToolError::new(text.clone()))
+                    } else {
+                        Ok(octet_agent::ToolOutput::new(text.clone()))
+                    };
+                    if let Some(reason) = tool_failure_reason(name, &result) {
+                        state.push_block(TranscriptBlock::Notice(format!(
+                            "Delegation failed: {}",
+                            sanitize_for_terminal(&reason)
+                        )));
+                    }
+                    continue;
+                }
                 // Malformed provider output can reuse one call ID within the
                 // same assistant turn. The durable protocol cannot identify
                 // which duplicate a result belongs to, so conservatively close

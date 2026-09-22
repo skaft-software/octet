@@ -42,6 +42,28 @@ class PresentationTests(unittest.TestCase):
         defaults.update(values)
         return Worker(**defaults)
 
+    def test_explicit_model_labels_do_not_duplicate_canonical_provider(self):
+        from octet_subagents.presentation import detail_body, worker_secondary
+        for model in ("alternate", "custom/fixture/alternate"):
+            with self.subTest(model=model):
+                worker = self.worker(
+                    requested_provider="custom/fixture", requested_model=model,
+                    effective_provider="custom/fixture", effective_model=model,
+                    requested_reasoning="off", effective_reasoning="off",
+                    model_policy_applied=True,
+                )
+                detail = detail_body(worker, worker.created_at_ms)
+                row = worker_secondary(worker, worker.created_at_ms)
+                self.assertIn("Model/profile: custom/fixture/alternate / explore", detail)
+                self.assertIn("provider/model custom/fixture/alternate", detail)
+                self.assertIn("effective custom/fixture/alternate / reasoning off", detail)
+                self.assertIn("model custom/fixture/alternate", row)
+                self.assertNotIn("custom/fixture/custom/fixture", detail + row)
+                self.assertNotIn("(inherited)", detail)
+        inherited = self.worker()
+        self.assertIn("Model/profile: claude-sonnet-test (inherited) / explore",
+                      detail_body(inherited, inherited.created_at_ms))
+
     def test_tree_is_content_free_while_detail_carries_terminal_summary(self):
         worker = self.worker(
             "done",

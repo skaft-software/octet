@@ -128,6 +128,8 @@ pub const EXTENSION_FEATURE_DYNAMIC_TOOLS: &str = "dynamic_tools";
 pub const EXTENSION_FEATURE_RUNTIME_COMMANDS: &str = "runtime_commands";
 /// API `0.2` host-owned child model-session service.
 pub const EXTENSION_FEATURE_AGENT_SESSIONS: &str = "agent_sessions";
+/// Host-confirmed configured worker routing and bounded discovery.
+pub const EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1: &str = "agent_model_selection_v1";
 /// API `0.2` first-party delegation telemetry contract.
 pub const EXTENSION_FEATURE_DELEGATION_TELEMETRY: &str = "delegation_telemetry_v1";
 /// Stable schema label shown by `/extensions status`.
@@ -2722,6 +2724,9 @@ pub struct ToolCatalogUpdateResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionPolicy {
+    /// Optional configured provider, model and reasoning selection.
+    #[serde(default)]
+    pub model_selection: Option<crate::delegation::AgentModelSelection>,
     /// Requested upper-bound tool allowlist. Accepted standard tools are
     /// `read`, `search`, `edit`, `write`, and `bash`.
     pub tools: Vec<String>,
@@ -2755,6 +2760,9 @@ pub struct AgentSessionPolicy {
 impl From<AgentSessionPolicy> for ExtensionAgentSessionPolicy {
     fn from(policy: AgentSessionPolicy) -> Self {
         Self {
+            model_selection: policy.model_selection,
+            resolved_model: None,
+            resolved_reasoning: None,
             tools: policy.tools,
             max_depth: policy.max_depth,
             max_concurrent_children: policy.max_concurrent_children,
@@ -2819,6 +2827,20 @@ pub struct AgentSessionTargetRequest {
 pub struct AgentSessionListRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+}
+
+/// Owner-bound, bounded configured-model discovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionModelsRequest {
+    /// Active host request defining the resource owner.
+    pub parent_request_id: u64,
+    #[serde(default)]
+    /// Optional case-insensitive search, at most 128 bytes.
+    pub query: Option<String>,
+    #[serde(default)]
+    /// Maximum rows, default 50, range 1 through 100.
+    pub limit: Option<usize>,
 }
 
 /// API `0.2` request to wait for owned child-session state changes.
@@ -5659,6 +5681,8 @@ pub mod methods {
     pub const AGENT_FOLLOW_UP: &str = "agent/follow_up";
     /// Extension request to inspect owned child sessions.
     pub const AGENT_LIST: &str = "agent/list";
+    /// Discover configured worker model choices for an owner.
+    pub const AGENT_MODELS: &str = "agent/models";
     /// Extension request to wait for owned child-session state changes.
     pub const AGENT_WAIT: &str = "agent/wait";
     /// Extension request to interrupt an owned child-session tree.
@@ -11823,6 +11847,7 @@ async fn spawn_connection(
         .collect::<Vec<_>>();
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());
+        optional_features.push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.to_owned());
     }
     if offered_host_services.approvals {
         optional_features.push(EXTENSION_FEATURE_APPROVALS.to_owned());
@@ -12424,6 +12449,7 @@ fn negotiate_contributions_with_host_services(
                 .collect::<BTreeSet<_>>();
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
+                allowed.insert(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1);
                 if manifest.name == "octet-subagents" {
                     allowed.insert(EXTENSION_FEATURE_DELEGATION_TELEMETRY);
                 }
@@ -12460,6 +12486,13 @@ fn negotiate_contributions_with_host_services(
                 return Err(ExtensionRuntimeError::Protocol(format!(
                     "first-party octet-subagents requires `{EXTENSION_FEATURE_DELEGATION_TELEMETRY}`; reinstall the current workspace bundle"
                 )));
+            }
+            if features.contains(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
+                && !features.contains(EXTENSION_FEATURE_AGENT_SESSIONS)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "agent_model_selection_v1 negotiation requires agent_sessions".into(),
+                ));
             }
             if features.contains(EXTENSION_FEATURE_APPROVALS)
                 && !features.contains(EXTENSION_FEATURE_POLICY_INTENTS)
@@ -13596,6 +13629,10 @@ impl ProtocolReadState {
 }
 
 enum AgentSessionOperation {
+    Models {
+        query: Option<String>,
+        limit: usize,
+    },
     Spawn {
         task_name: String,
         profile: Option<String>,
@@ -13653,6 +13690,9 @@ async fn execute_agent_session_operation(
         }
         AgentSessionOperation::FollowUp { target, message } => {
             service.follow_up(&resource_owner, &target, message).await
+        }
+        AgentSessionOperation::Models { query, limit } => {
+            service.models(&resource_owner, query.as_deref(), limit)
         }
         AgentSessionOperation::List => service.list(&resource_owner),
         AgentSessionOperation::Wait { timeout } => {
@@ -15775,6 +15815,13 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                         )
                     }
                 };
+                if request.policy.model_selection.is_some() {
+                    if let Err(error) =
+                        require_feature(state, EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
+                    {
+                        return reject_unparented_child_request(state, id, error);
+                    }
+                }
                 let policy: ExtensionAgentSessionPolicy = request.policy.into();
                 if let Err(error) = policy.validate() {
                     return reject_unparented_child_request(
@@ -15843,6 +15890,36 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                     AgentSessionOperation::FollowUp {
                         target: request.target,
                         message: request.message,
+                    },
+                )?;
+            }
+            methods::AGENT_MODELS => {
+                let id = parse_child_request_id(object, methods::AGENT_MODELS)?;
+                if let Err(error) = require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)
+                    .and_then(|()| {
+                        require_feature(state, EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
+                    })
+                {
+                    return reject_unparented_child_request(state, id, error);
+                }
+                let request: AgentSessionModelsRequest = match serde_json::from_value(params) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return reject_unparented_child_request(
+                            state,
+                            id,
+                            format!("invalid model discovery request: {error}"),
+                        )
+                    }
+                };
+                queue_agent_session_operation(
+                    state,
+                    id,
+                    request.parent_request_id,
+                    methods::AGENT_MODELS,
+                    AgentSessionOperation::Models {
+                        query: request.query,
+                        limit: request.limit.unwrap_or(50),
                     },
                 )?;
             }
@@ -22566,9 +22643,16 @@ command = "agent-service"
             ),
             Err(ExtensionRuntimeError::Protocol(message)) if message.contains("agent_sessions")
         ));
+        let mut routing_response = response();
+        routing_response
+            .protocol
+            .as_mut()
+            .unwrap()
+            .features
+            .push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.into());
         let (_, protocol) = negotiate_contributions_with_host_services(
             &manifest,
-            response(),
+            routing_response.clone(),
             DEFAULT_PENDING_REQUESTS,
             OfferedHostServices {
                 agent_sessions: true,
@@ -22577,6 +22661,17 @@ command = "agent-service"
         )
         .unwrap();
         assert!(protocol.supports(EXTENSION_FEATURE_AGENT_SESSIONS));
+        assert!(protocol.supports(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1));
+        routing_response
+            .protocol
+            .as_mut()
+            .unwrap()
+            .features
+            .retain(|f| f != EXTENSION_FEATURE_AGENT_SESSIONS);
+        assert!(matches!(negotiate_contributions_with_host_services(
+            &manifest, routing_response, DEFAULT_PENDING_REQUESTS,
+            OfferedHostServices { agent_sessions: true, ..OfferedHostServices::default() },
+        ), Err(ExtensionRuntimeError::Protocol(message)) if message.contains("requires agent_sessions")));
     }
 
     #[test]

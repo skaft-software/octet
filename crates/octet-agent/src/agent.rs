@@ -832,6 +832,7 @@ pub struct Agent {
     /// parent even when they do not carry a nested delegation binding.
     ultra_observation_managed: bool,
     delegation: Option<DelegationBinding>,
+    delegation_model_resolver: Option<Arc<dyn crate::delegation::AgentModelResolver>>,
     last_run_lifecycle: Option<Arc<RunLifecycle>>,
     /// Explicit, caller-owned span observer for the run/turn/provider/tool
     /// boundaries. Inert by default: dropping to
@@ -6709,6 +6710,7 @@ impl Agent {
             owner_tool_images_enabled: false,
             ultra_observation_managed: false,
             delegation: None,
+            delegation_model_resolver: None,
             last_run_lifecycle: None,
             telemetry: TelemetryContext::default(),
         })
@@ -6868,6 +6870,17 @@ impl Agent {
         self.enable_v2_delegation_with_surface(config, false)
     }
 
+    /// Installs or refreshes the host-owned configured-model routing service.
+    pub fn set_delegation_model_resolver(
+        &mut self,
+        resolver: Arc<dyn crate::delegation::AgentModelResolver>,
+    ) {
+        if let Some(binding) = &self.delegation {
+            binding.set_model_resolver(resolver.clone());
+        }
+        self.delegation_model_resolver = Some(resolver);
+    }
+
     fn enable_v2_delegation_with_surface(
         &mut self,
         config: DelegationConfig,
@@ -6877,6 +6890,7 @@ impl Agent {
             return Err(DelegationError::AlreadyEnabled);
         }
         let template = DelegationTemplate {
+            model_resolver: std::sync::RwLock::new(self.delegation_model_resolver.clone()),
             client: self.client.clone(),
             model: self.model.clone(),
             base_system: std::sync::RwLock::new(self.system.clone()),

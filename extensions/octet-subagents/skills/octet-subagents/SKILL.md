@@ -3,6 +3,7 @@ name: octet-subagents
 description: Delegate bounded tasks to up to 8 host-owned octet workers (32 per owner) with inherited models and the parent's full standard tool scope by default; optionally narrow to read-only for pure investigations, steer active workers or resume finished ones with subagent_continue, then integrate the evidence without team-chat or graph orchestration.
 version: 0.7.6
 required-tools:
+  - subagent_models
   - subagent_spawn
   - subagent_status
   - subagent_wait
@@ -17,7 +18,7 @@ tags:
 Use this skill only after the separately installed extension is explicitly enabled and trusted, and only when independent investigation is likely to improve the answer.
 
 1. Keep the parent responsible for decomposition and the final answer. Launch up to 8 concurrent single-purpose workers (32 total per owner) with short, non-overlapping tasks and stable lowercase names.
-2. Prefer `profile: explore` for locating evidence, `review` for correctness review, `test-analysis` for inspecting tests/failures, and `research` for a narrow comparison. `model` must remain `inherit` under API 0.2.
+2. Prefer `profile: explore` for locating evidence, `review` for correctness review, `test-analysis` for inspecting tests/failures, and `research` for a narrow comparison. Provider/model/reasoning default to `inherit`. Use `subagent_models` with an optional query and bounded limit to discover configured, credential-available routes and supported reasoning before selecting an explicit model. The host resolves selections fail-closed without parent fallback; caller reasoning capability hints are not authority.
 3. Workers inherit the parent's full standard tool scope (`read, search, edit, write, bash`) by default. Narrow the `tools` list to `read, search` when a task is pure investigation and you want a hard read-only guarantee. Never request network, browser, computer-control, another agent primitive, or any tool outside that set. Give mutating workers exclusive path ownership until settlement; repository-wide Git state remains parent-owned. Verify their diffs before relaying success.
 4. Use an explicit stable `idempotency_key` when a tool call may be retried. Never reuse a key for different input. A background spawn acknowledgement is not a completion claim.
 5. Continue useful parent work after a background spawn. Use `subagent_status` for a purposeful inspection or one bounded `subagent_wait`; do not poll in a loop. octet owns durable sessions and duplicate-free completion claim/ack into a legal parent turn.

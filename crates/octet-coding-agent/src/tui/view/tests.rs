@@ -11134,12 +11134,12 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
 
     let state = shell.state.borrow();
     assert!(
-        state.subagent_activity.is_none(),
-        "a settled roster must not be retained as live state for the new turn"
+        state.subagent_activity.is_some(),
+        "the session roster remains available across root turns"
     );
     assert!(
-        state.subagent_activity_block.is_none(),
-        "a settled roster must not open a block in the new turn"
+        state.subagent_activity_block.is_some(),
+        "the session roster retains its original block"
     );
     let replayed = state
         .rendered_transcript(120)
@@ -11193,7 +11193,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
 /// The same rule with a live worker: a roster for the *current* turn still
 /// renders, so the fix is attribution and not a blanket suppression.
 #[test]
-fn live_workers_for_the_current_turn_still_open_a_block() {
+fn live_workers_for_a_later_turn_update_the_session_block() {
     use octet_agent::{EntryId, FinishReason};
 
     let mut shell = InteractiveShell::test_shell();
@@ -11289,8 +11289,8 @@ fn live_workers_for_the_current_turn_still_open_a_block() {
     );
     assert_eq!(
         rendered.matches("Subagents").count(),
-        2,
-        "the new turn gets exactly one additional block: {rendered}"
+        1,
+        "new workers update the one session roster: {rendered}"
     );
     assert!(shell.state.borrow().subagent_activity_block.is_some());
 }

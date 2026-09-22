@@ -57,6 +57,7 @@ API_V02_FEATURES = (
     "policy_intents",
     "dynamic_tools",
     "agent_sessions",
+    "agent_model_selection_v1",
     "delegation_telemetry_v1",
     "approvals",
     "secrets",
@@ -1361,6 +1362,7 @@ class Extension:
         timeout_ms: Optional[int] = None,
         profile: Optional[str] = None,
         fingerprint: Optional[str] = None,
+        model_selection: Optional[Mapping[str, str]] = None,
         parent_request_id: Any = _MISSING,
     ) -> dict[str, Any]:
         """Create a host-bounded child owned by the active request; omitted ceilings inherit the parent session's limits."""
@@ -1456,6 +1458,21 @@ class Extension:
                 "timeout_ms": timeout_ms,
             },
         }
+        if model_selection is not None:
+            self._require_feature("agent_model_selection_v1")
+            if not isinstance(model_selection, Mapping) or set(model_selection) - {"provider", "model", "reasoning"}:
+                raise ValueError("agent model_selection must contain only provider, model, reasoning")
+            for key, value in model_selection.items():
+                if key == "reasoning":
+                    if not isinstance(value, str) or value not in {
+                        "inherit", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+                    }:
+                        raise ValueError("agent reasoning must be inherit or a supported effort identifier")
+                elif (not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256
+                      or not (value[0].isascii() and (value[0].isalnum() or value[0] == "@"))
+                      or any(not (c.isascii() and (c.isalnum() or c in "._+:/@-")) for c in value)):
+                    raise ValueError("agent model_selection identifiers must be bounded plain identifiers")
+            params["policy"]["model_selection"] = dict(model_selection)
         if profile is not None:
             params["profile"] = profile
         if fingerprint is not None:
@@ -1523,6 +1540,28 @@ class Extension:
         )
         if not isinstance(result, Mapping):
             raise RpcError(-32603, f"invalid {method} response")
+        return dict(result)
+
+    def list_agent_models(
+        self, *, query: Optional[str] = None, limit: int = 50,
+        parent_request_id: Any = _MISSING,
+    ) -> dict[str, Any]:
+        """Discover bounded configured routes available to the current owner, without credentials."""
+        self._require_feature("agent_sessions")
+        self._require_feature("agent_model_selection_v1")
+        if query is not None and (not isinstance(query, str) or len(query.encode("utf-8")) > 128
+                                  or any(ord(c) < 32 or ord(c) == 127 for c in query)):
+            raise ValueError("agent model query must be plain text of at most 128 bytes")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("agent model limit must be an integer between 1 and 100")
+        params: dict[str, Any] = {"limit": limit}
+        if query is not None:
+            params["query"] = query
+        result = self.request("agent/models", params, parent_request_id=parent_request_id,
+                              operation_scoped=True)
+        if (not isinstance(result, Mapping) or not isinstance(result.get("models"), list)
+            or len(result["models"]) > limit or type(result.get("truncated")) is not bool):
+            raise RpcError(-32603, "invalid agent models response")
         return dict(result)
 
     def list_agents(

@@ -39,19 +39,19 @@ identical spawn key is retry-safe; using it with different input fails.
 
 | Tool | Use |
 | --- | --- |
+| `subagent_models` | Discover configured, credential-available worker models; optional query and limit (default 50, max 100). |
 | `subagent_spawn` | Start a named worker; `background: false` requests a bounded foreground wait. |
 | `subagent_status` | Resync one `target` or list all owned workers. |
 | `subagent_wait` | Wait 1–60 seconds; cancelling or expiring the wait does not stop workers. |
 | `subagent_stop` | Supply exactly one of `{"target":"explore-auth"}` or `{"all":true}`. Acknowledgement is not terminal completion. |
 | `subagent_continue` | Supply `target` and `message` to steer an active worker or resume a settled one with its conversation retained. Stopping, `awaiting_approval`, and detached workers are rejected with stable errors. |
 
-`provider`, `model`, and `reasoning` select the worker's orchestration policy per
-spawn and default to `inherit` (copy the parent session exactly). A selection is
-validated fail-closed: a `model` this session cannot confirm as configured is
-refused with `unsupported_model`, an unknown reasoning level with
-`unsupported_reasoning`, and a level above the model's ceiling is clamped by the
-coding agent's own policy — never silently coerced. Requested and effective
-selections are both visible in the panel and inspector.
+`provider`, `model`, and `reasoning` default to `inherit`. Use `subagent_models`
+to discover exact configured routes and supported reasoning before selecting one.
+Explicit routing requires negotiated `agent_model_selection_v1`; the host alone
+validates and normalizes it, and unknown routes never fall back to the parent.
+Requested and host-confirmed effective selections are visible in the inspector
+and preserved across restoration/continuation. Credentials are never returned.
 
 <a id="enable-the-local-bundle"></a>
 
@@ -147,7 +147,7 @@ contract is a bundled-runtime reference, not a current extension SDK tutorial.
 - <a id="lifecycle-and-restart-behavior"></a>[Lifecycle and restart behavior](REFERENCE.md#lifecycle-and-restart-behavior): authoritative states, retries, resync, and shutdown.
   - <a id="session-scoped-delegation-reattachment"></a>[Session-scoped delegation (reattachment)](REFERENCE.md#session-scoped-delegation-reattachment): detached is recoverable, not terminal.
 - <a id="subagents-open-all-tmuxherdr"></a>[/subagents open-all <tmux|herdr>](REFERENCE.md#subagents-open-all-tmuxherdr): the pane-per-worker escape hatch.
-- <a id="per-worker-provider-model-and-reasoning"></a>[Per-worker provider, model, and reasoning](REFERENCE.md#per-worker-provider-model-and-reasoning): fail-closed selection and mirrored clamping.
+- <a id="per-worker-provider-model-and-reasoning"></a>[Per-worker provider, model, and reasoning](REFERENCE.md#per-worker-provider-model-and-reasoning): host-resolved selection and reasoning.
 - <a id="tui-and-serve-presentation"></a>[TUI and Serve presentation](REFERENCE.md#tui-and-serve-presentation): privacy, usage, and owner-fenced inspection.
   - <a id="subagents-headlessnarrow-fallback"></a>[/subagents headless/narrow fallback](REFERENCE.md#subagents-headlessnarrow-fallback).
 - <a id="release-smoke-recipe"></a>[Release smoke recipe](REFERENCE.md#release-smoke-recipe): measured inputs versus deterministic fixtures; no claimed live gain.

@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 pub mod bootstrap;
+mod delegation_models;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -641,6 +642,11 @@ impl App {
             self.executable_extensions
                 .synchronize_provider_catalog(&mut self.catalog, &self.client),
         );
+        if self.executable_extensions.has_agent_session_service() {
+            self.agent.set_delegation_model_resolver(Arc::new(
+                delegation_models::CodingAgentModelResolver::new(self.catalog.clone()),
+            ));
+        }
         diagnostics
     }
 

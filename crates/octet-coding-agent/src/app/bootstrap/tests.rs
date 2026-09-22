@@ -6245,3 +6245,22 @@ fn the_app_enrichment_seam_is_idempotent_and_keeps_the_active_model() {
     );
     assert!(app.catalog.resolve(&effective).is_ok());
 }
+
+#[test]
+fn delegation_completes_deferred_catalog_only_for_a_live_service() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = config(directory.path(), Some("codex/gpt-6-astra"));
+    let mut catalog = ModelCatalog::default();
+    let mut readiness = CatalogReadiness::Routes(vec!["codex"]);
+    let mut notes = CodexContextNotes::default();
+    complete_delegation_catalog(false, &config, &mut catalog, &mut readiness, &mut notes).unwrap();
+    assert!(!readiness.is_fleet());
+    assert_eq!(catalog.models().count(), 0);
+    complete_delegation_catalog(true, &config, &mut catalog, &mut readiness, &mut notes).unwrap();
+    assert!(readiness.is_fleet());
+    assert!(catalog.resolve(&ModelId("claude-sonnet-4-6".into())).is_ok());
+    assert!(catalog.resolve(&ModelId("gpt-4o-mini".into())).is_ok());
+    let count = catalog.models().count();
+    complete_delegation_catalog(true, &config, &mut catalog, &mut readiness, &mut notes).unwrap();
+    assert_eq!(catalog.models().count(), count);
+}

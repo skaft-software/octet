@@ -1,22 +1,13 @@
-"""Reasoning-effort policy mirrored from the coding agent's own product policy.
+"""Reasoning identifier validation and retained legacy effort helpers.
 
-This module is a *mirror*, not a second policy. It reproduces the effort path of
+Spawn requests validate identifiers here, then forward them unchanged. The host
+alone resolves configured models and normalizes reasoning using its model
+metadata; discovery exposes its supported choices. Caller capability hints are
+legacy input, not execution authority.
 
-* `crates/octet-coding-agent/src/app/mod.rs` -- `thinking_to_reasoning`,
-  `supported_levels_with_subagents`, `supported_levels_for_model`, and
-  `model_supports_ultra`, plus the tests `clamps_effort_to_model_ceiling` and
-  `supported_levels_gate_on_ceiling`;
-* `crates/octet-ai/src/types.rs` -- `ReasoningCapability::choices` for an
-  effort-controlled model, `default_min_effort` (Minimal) and
-  `default_max_effort` (High).
-
-The extension runs in its own process and the host exposes neither its provider
-catalog nor per-model reasoning metadata (`agent/spawn` carries no model field),
-so the extension cannot read a real ceiling for an arbitrary model. It therefore
-never guesses one: the ceiling comes either from an explicit caller declaration
-of the target model's advertised `max_effort`/`min_effort`, or from the wire
-defaults above. Requests are clamped with the same ladder algorithm the product
-uses, and an unknown level is rejected with a typed error rather than coerced.
+The standalone effort helpers retain their historical ladder/clamp behavior for
+legacy consumers and tests. They are not used to resolve worker settings and do
+not model binary or always-on reasoning controls.
 """
 
 from __future__ import annotations
@@ -38,10 +29,9 @@ EFFORT_LADDER: Tuple[str, ...] = (
     "max",
     "ultra",
 )
-# ThinkingLevel labels the product accepts (`config.rs`), minus `on`/`off`,
-# which are not efforts and are normalized by the host's control mode.
+# Legacy effort-helper choices; on/off control modes are normalized by the host.
 EFFORT_LEVELS: Tuple[str, ...] = ("off",) + EFFORT_LADDER
-INHERITABLE_LEVELS: Tuple[str, ...] = (INHERIT,) + EFFORT_LEVELS
+INHERITABLE_LEVELS: Tuple[str, ...] = (INHERIT, "on") + EFFORT_LEVELS
 
 # wire defaults: `default_min_effort` / `default_max_effort`.
 DEFAULT_FLOOR = "minimal"
@@ -50,7 +40,7 @@ DEFAULT_CEILING = "high"
 
 @dataclass(frozen=True)
 class ReasoningCapability:
-    """The effort facts the product reads off a model spec."""
+    """Legacy caller hint, never authoritative for worker execution."""
 
     ceiling: str = DEFAULT_CEILING
     floor: str = DEFAULT_FLOOR
@@ -101,12 +91,12 @@ def _boolean(value: Any, name: str) -> bool:
 
 
 def parse_level(value: Any, name: str = "reasoning") -> str:
-    """Reject an unknown effort level with a typed error; never coerce."""
+    """Validate a reasoning identifier without applying model policy."""
     if value is None:
         return INHERIT
     if not isinstance(value, str) or value not in INHERITABLE_LEVELS:
         raise SubagentError(
-            "%s must be `inherit` or one of: %s" % (name, ", ".join(EFFORT_LEVELS)),
+            "%s must be one of: %s" % (name, ", ".join(INHERITABLE_LEVELS)),
             code="unsupported_reasoning",
         )
     return value

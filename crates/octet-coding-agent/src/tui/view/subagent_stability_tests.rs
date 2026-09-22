@@ -360,7 +360,7 @@ fn roster_rows(
 }
 
 #[test]
-fn mixed_session_rosters_do_not_replay_known_or_unseen_terminal_workers() {
+fn mixed_session_rosters_update_one_session_block_and_account_only_new_spend() {
     for native in [false, true] {
         let mut shell = InteractiveShell::test_shell();
         let run = shell.begin_run("fixture");
@@ -379,12 +379,15 @@ fn mixed_session_rosters_do_not_replay_known_or_unseen_terminal_workers() {
             },
         );
 
+        let original_index = shell.state.borrow().subagent_activity_block.unwrap();
+        let original_id = shell.state.borrow().transcript_commit_ids[original_index];
         shell.begin_run("fixture");
         shell.on_prompt_submitted("second prompt");
         shell.state.borrow_mut().session_cost_microdollars = Some(100_000);
         let old = named_worker("OLD-WORKER", "completed");
         let unseen = named_worker("UNSEEN-OLD-WORKER", "completed");
-        // A first-observed all-terminal roster is history, even after resume.
+        // Republished terminal workers update the original session roster;
+        // unseen terminal history does not open another block.
         publish_roster(
             &mut shell,
             native,
@@ -393,7 +396,7 @@ fn mixed_session_rosters_do_not_replay_known_or_unseen_terminal_workers() {
                 named_worker("FINISHED-BEFORE-ATTACH", "completed"),
             ],
         );
-        assert!(shell.state.borrow().subagent_activity_block.is_none());
+        assert_eq!(shell.state.borrow().subagent_activity_block, Some(original_index));
 
         let fresh = named_worker("FRESH-WORKER", "running");
         publish_roster(
@@ -404,9 +407,12 @@ fn mixed_session_rosters_do_not_replay_known_or_unseen_terminal_workers() {
         let index = shell.state.borrow().subagent_activity_block.unwrap();
         let text = transcript_text(&shell);
         let tail = text.split_once("second prompt").unwrap().1;
-        assert!(tail.contains("FRESH-WORKER"), "{text}");
+        assert!(text.contains("FRESH-WORKER"), "{text}");
+        assert!(!tail.contains("FRESH-WORKER"), "{text}");
+        assert_eq!(index, original_index);
+        assert_eq!(shell.state.borrow().transcript_commit_ids[index], original_id);
         assert!(!tail.contains("OLD-WORKER"), "{text}");
-        assert_eq!(text.matches("Subagents").count(), 2, "{text}");
+        assert_eq!(text.matches("Subagents").count(), 1, "{text}");
         assert_eq!(
             shell.state.borrow().displayed_session_cost_microdollars(),
             Some(107_200)
@@ -449,7 +455,7 @@ fn mixed_session_rosters_do_not_replay_known_or_unseen_terminal_workers() {
         shell.begin_run("fixture");
         shell.on_prompt_submitted("third prompt");
         publish_roster(&mut shell, native, &[old, unseen, settled]);
-        assert!(shell.state.borrow().subagent_activity_block.is_none());
+        assert_eq!(shell.state.borrow().subagent_activity_block, Some(original_index));
         let text = transcript_text(&shell);
         assert!(!text
             .split_once("third prompt")
@@ -458,11 +464,18 @@ fn mixed_session_rosters_do_not_replay_known_or_unseen_terminal_workers() {
             .contains("Subagents"));
         publish_roster(&mut shell, native, &[fresh]);
         let text = transcript_text(&shell);
-        assert!(text
+        assert!(!text
             .split_once("third prompt")
             .unwrap()
             .1
             .contains("FRESH-WORKER"));
+        assert_eq!(shell.state.borrow().subagent_activity_block, Some(original_index));
+        assert_eq!(shell.state.borrow().transcript_commit_ids[original_index], original_id);
+        assert_eq!(shell.state.borrow().displayed_session_cost_microdollars(), Some(100_000));
+        let mut continued = named_worker("FRESH-WORKER", "running");
+        continued.cost_microdollars = Some(8_200);
+        publish_roster(&mut shell, native, &[continued]);
+        assert_eq!(shell.state.borrow().displayed_session_cost_microdollars(), Some(101_000));
     }
 }
 
@@ -845,4 +858,251 @@ fn grid_header_cells_align_with_the_worker_column_on_both_profiles() {
             "header and worker rows pay the same prefix: {rows:?}"
         );
     }
+}
+
+#[test]
+fn all_first_party_subagent_tools_hide_live_cards_and_keep_failures() {
+    for name in crate::presentation::tool_display::SUBAGENT_TOOL_NAMES {
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("fixture");
+        let id = ToolCallId(name.into());
+        assert_eq!(
+            summarize_tool_with_workspace(name, &serde_json::json!({}), None).plain_tag,
+            "delegation"
+        );
+        shell.on_agent_event(&AgentEvent::ToolStarted {
+            id: id.clone(),
+            name: name.into(),
+            args: serde_json::json!({"prompt": "SECRET-PROMPT"}),
+        });
+        shell.on_agent_event(&AgentEvent::ToolProgress {
+            id: id.clone(),
+            progress: ToolProgress::Status("SECRET-PROGRESS".into()),
+        });
+        shell.on_agent_event(&AgentEvent::ToolFinished {
+            id: id.clone(),
+            result: Ok(octet_agent::ToolOutput::new("SECRET-RESULT")),
+            duration: Duration::ZERO,
+        });
+        assert!(shell.state.borrow().tool_panels.is_empty());
+        assert!(!shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .any(|block| matches!(block, TranscriptBlock::Tool(_))));
+        assert!(!transcript_text(&shell).contains("SECRET"));
+        shell.on_agent_event(&AgentEvent::ToolFinished {
+            id,
+            result: Err(octet_agent::ToolError::new("worker quota reached")),
+            duration: Duration::ZERO,
+        });
+        assert!(transcript_text(&shell).contains("Delegation failed: worker quota reached"));
+    }
+}
+
+#[test]
+fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
+    use crate::hydrate::TranscriptItem;
+    let mut state = ShellState::default();
+    for name in crate::presentation::tool_display::SUBAGENT_TOOL_NAMES {
+        let id = ToolCallId(name.into());
+        append_hydrated_items(
+            &mut state,
+            [TranscriptItem::ToolCall {
+                id: id.clone(),
+                name: name.into(),
+                args: serde_json::json!({}),
+            }],
+        );
+        for _ in 0..2 {
+            append_hydrated_items(
+                &mut state,
+                [TranscriptItem::ToolResult {
+                    id: id.clone(),
+                    text: "SECRET-RESULT".into(),
+                    is_error: false,
+                    duration_ms: None,
+                    images: Vec::new(),
+                }],
+            );
+        }
+    }
+    assert!(state.transcript.is_empty());
+    let id = ToolCallId("subagent_models".into());
+    append_hydrated_items(
+        &mut state,
+        [TranscriptItem::ToolResult {
+            id: id.clone(),
+            text: "catalog unavailable".into(),
+            is_error: true,
+            duration_ms: None,
+            images: Vec::new(),
+        }],
+    );
+    assert!(
+        matches!(&state.transcript[0], TranscriptBlock::Notice(text) if text.contains("catalog unavailable"))
+    );
+    append_hydrated_items(
+        &mut state,
+        [
+            TranscriptItem::ToolCall {
+                id: id.clone(),
+                name: "read".into(),
+                args: serde_json::json!({"path": "file"}),
+            },
+            TranscriptItem::ToolResult {
+                id,
+                text: "ordinary result".into(),
+                is_error: false,
+                duration_ms: None,
+                images: Vec::new(),
+            },
+        ],
+    );
+    assert!(
+        matches!(&state.transcript[1], TranscriptBlock::Tool(panel) if panel.finished && panel.output == "ordinary result")
+    );
+}
+
+#[test]
+fn subagent_tail_hydration_and_deferred_prepend_hide_boundary_results() {
+    use octet_ai::{
+        AssistantMessage, AssistantPart, ModelId, Protocol, ToolCall, ToolResult, ToolResultPart,
+        UserMessage, UserPart,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+    for i in 0..70 {
+        session
+            .append(EntryValue::Message(octet_ai::Message::User(UserMessage {
+                content: vec![UserPart::Text(format!("HISTORY-{i}"))],
+            })))
+            .unwrap();
+    }
+    for name in crate::presentation::tool_display::SUBAGENT_TOOL_NAMES {
+        session
+            .append(EntryValue::Message(octet_ai::Message::Assistant(
+                AssistantMessage {
+                    content: vec![AssistantPart::ToolCall(ToolCall {
+                        id: ToolCallId(name.into()),
+                        name: name.into(),
+                        arguments_json: "{}".into(),
+                        argument_error: None,
+                    })],
+                    model: ModelId("fixture".into()),
+                    protocol: Protocol::OpenAiResponses,
+                },
+            )))
+            .unwrap();
+        session
+            .append(EntryValue::Message(octet_ai::Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: ToolCallId(name.into()),
+                    content: vec![ToolResultPart::Text("SECRET-RESULT".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                })],
+            })))
+            .unwrap();
+    }
+    // A cut directly at the last result still brings its matching call with it.
+    let (items, truncated) = crate::hydrate::hydrate_transcript_tail(&session, 1).unwrap();
+    assert!(truncated);
+    let mut state = ShellState::default();
+    append_hydrated_items(&mut state, items);
+    assert!(state.transcript.is_empty());
+
+    let mut shell = InteractiveShell::test_shell();
+    shell.capture_mouse = true;
+    shell.set_size(80, 8);
+    shell.hydrate(&session).unwrap();
+    assert!(shell.state.borrow().deferred_session_history.is_some());
+    let run = shell.begin_run("fixture");
+    publish(&mut shell, &child());
+    let index = shell.state.borrow().subagent_activity_block.unwrap();
+    let commit = shell.state.borrow().transcript_commit_ids[index];
+    // Replay must not replace a live classification when providers reuse IDs.
+    shell.on_agent_event(&AgentEvent::ToolStarted {
+        id: ToolCallId("subagent_models".into()),
+        name: "subagent_continue".into(),
+        args: serde_json::json!({}),
+    });
+    assert!(shell.materialize_deferred_history().unwrap());
+    assert_eq!(
+        shell.state.borrow().hidden_subagent_calls[&ToolCallId("subagent_models".into())],
+        "subagent_continue"
+    );
+    let state = shell.state.borrow();
+    let index = state.subagent_activity_block.unwrap();
+    assert_eq!(state.transcript_commit_ids[index], commit);
+    assert!(state.tool_panels.keys().all(|id| id.0 == "subagents"));
+    assert!(!state
+        .rendered_transcript(120)
+        .join("\n")
+        .contains("SECRET-RESULT"));
+    drop(state);
+    shell.on_run_event(
+        run,
+        &AgentEvent::RunFinished {
+            head: octet_agent::EntryId("head".into()),
+            reason: octet_agent::FinishReason::Completed,
+        },
+    );
+    shell.hydrate(&session).unwrap();
+    assert!(shell.state.borrow().subagent_activity_block.is_none());
+    publish(&mut shell, &child());
+    assert_eq!(transcript_text(&shell).matches("Subagents").count(), 1);
+}
+#[test]
+fn subagent_restart_and_durable_refresh_subtract_committed_worker_spend() {
+    use octet_agent::{SessionRecord, UsageRecord, UsageRecordKind};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("session.jsonl");
+    drop(Session::create(&path).unwrap());
+    let record = SessionRecord::Usage {
+        record: UsageRecord {
+            kind: UsageRecordKind::DelegatedAgent {
+                agent_id: "worker-1".into(),
+                turn_count: 1,
+                tool_call_count: 0,
+            },
+            usage: Usage::default(),
+            stop_reason: None,
+            endpoint: None,
+            model: None,
+            completed_at_unix_ms: None,
+            cost: None,
+            cost_microdollars: Some(7_200),
+            session_cost_microdollars: Some(7_200),
+            session_cost_picodollars_remainder: None,
+        },
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
+    drop(file);
+    let session = Session::open_read_only(&path).unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    shell.hydrate(&session).unwrap();
+    let mut worker = child();
+    publish(&mut shell, &worker);
+    assert_eq!(
+        shell.state.borrow().displayed_session_cost_microdollars(),
+        Some(7_200)
+    );
+    worker.cost_microdollars = Some(8_200);
+    publish(&mut shell, &worker);
+    assert_eq!(
+        shell.state.borrow().displayed_session_cost_microdollars(),
+        Some(8_200)
+    );
+    shell.state.borrow_mut().subagent_committed_costs.clear();
+    shell.set_session_telemetry(&session, None);
+    assert_eq!(
+        shell.state.borrow().displayed_session_cost_microdollars(),
+        Some(8_200)
+    );
 }

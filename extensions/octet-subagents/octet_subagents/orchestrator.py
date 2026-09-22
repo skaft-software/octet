@@ -62,18 +62,50 @@ REATTACHED_PHASE = "reattached to the owning session; the host record is live ag
 DETACHED_HOST_STATES = frozenset({"shutdown", "orphaned", "detached"})
 
 
-def known_models_for(owner: Owner) -> Tuple[str, ...]:
-    """The provider/model ids this session can confirm as configured.
+def _host_model_policy(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """Render only host-confirmed settings; never infer a route from a request."""
+    from .model import _model_id
 
-    API 0.2 exposes exactly one model to the extension -- the parent session's
-    observed model -- and no provider catalog, so that is the only per-worker
-    selection the extension can verify. Anything else is refused fail-closed by
-    `SpawnRequest.parse` rather than silently coerced to the inherited model.
-    """
-    model = owner.inherited_model
-    if not isinstance(model, str) or not model or len(model.encode("utf-8")) > 128:
-        return ()
-    return (model,)
+    policy = record.get("policy")
+    policy = policy if isinstance(policy, Mapping) else {}
+    selection = policy.get("model_selection") or {}
+    resolved = policy.get("resolved_model")
+    if not isinstance(selection, Mapping):
+        raise SubagentError("invalid host model selection", code="host_state_invalid")
+    requested = {key: _model_id(selection.get(key, INHERIT), key) for key in ("provider", "model", "reasoning")}
+    fields: Dict[str, Any] = {
+        "requested_provider": requested["provider"], "requested_model": requested["model"],
+        "requested_reasoning": requested["reasoning"], "effective_provider": "inherited",
+        "effective_model": "inherited", "effective_reasoning": "inherited",
+        "model_policy_applied": False, "reasoning_note": None,
+    }
+    if resolved is None:
+        if selection:
+            raise SubagentError("host did not confirm the requested child route", code="host_state_invalid")
+        return fields
+    if not isinstance(resolved, Mapping):
+        raise SubagentError("invalid host model settings", code="host_state_invalid")
+    provider = _model_id(resolved.get("provider"), "provider")
+    model = _model_id(resolved.get("model"), "model")
+    reasoning = resolved.get("reasoning")
+    if not isinstance(reasoning, Mapping):
+        raise SubagentError("invalid host reasoning settings", code="host_state_invalid")
+    kind, value = reasoning.get("type"), reasoning.get("value")
+    if not isinstance(kind, str):
+        raise SubagentError("invalid host reasoning settings", code="host_state_invalid")
+    if kind in {"off", "on"}:
+        effective = kind
+    elif kind == "effort" and isinstance(value, str) and value in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+        effective = value
+    elif kind == "budget" and type(value) is int and 0 < value < 2**64:
+        effective = "budget=%d" % value
+    else:
+        raise SubagentError("invalid host reasoning settings", code="host_state_invalid")
+    fields.update(effective_provider=provider, effective_model=model,
+                  effective_reasoning=effective, model_policy_applied=True)
+    if requested["reasoning"] not in {INHERIT, effective}:
+        fields["reasoning_note"] = "Host normalized reasoning=%s to %s." % (requested["reasoning"], effective)
+    return fields
 
 
 def _host_policy(
@@ -251,6 +283,7 @@ class AgentSessions(Protocol):
         max_cost_microdollars: Optional[int],
         max_output_bytes: int,
         timeout_ms: Optional[int],
+        model_selection: Optional[Mapping[str, str]],
     ) -> Mapping[str, Any]: ...
 
     def list_agents(self) -> Mapping[str, Any]: ...
@@ -311,9 +344,7 @@ class Orchestrator:
         arguments: Mapping[str, Any],
         cancellation: Optional[Cancellation] = None,
     ) -> Dict[str, Any]:
-        request = SpawnRequest.parse(
-            arguments, known_models=known_models_for(owner)
-        )
+        request = SpawnRequest.parse(arguments)
         self._check_cancelled(cancellation)
         state = self._owner_state(owner)
         self._refresh(client, state, cancellation)
@@ -335,6 +366,7 @@ class Orchestrator:
         try:
             self._check_cancelled(cancellation)
             response = client.spawn_agent(
+                model_selection=request.model_selection,
                 task_name=request.name,
                 profile=request.profile,
                 fingerprint=request.fingerprint,
@@ -1195,8 +1227,7 @@ class Orchestrator:
             depth=depth_from_record(record),
             name=safe_label(task_name),
             profile=profile,
-            requested_model="inherit",
-            effective_model=owner.inherited_model or "inherited",
+            **_host_model_policy(record),
             tools=effective_tools,
             state="restarted",
             phase="recovered from host ancestry",
@@ -1221,6 +1252,8 @@ class Orchestrator:
     def _update_worker_from_record(
         self, worker: Worker, record: Mapping[str, Any]
     ) -> None:
+        for key, value in _host_model_policy(record).items():
+            setattr(worker, key, value)
         worker.host_present = True
         worker.launchable = record.get("launchable") is True
         worker.live_task = record.get("live_task") if type(record.get("live_task")) is bool else None
@@ -1550,6 +1583,16 @@ class Orchestrator:
                 "agent_sessions did not retain the requested recovery metadata",
                 code="host_state_invalid",
             )
+        model_policy = _host_model_policy(response)
+        if request.model_selection is not None and (
+            any(model_policy["requested_" + key] != value for key, value in
+                (("provider", request.provider), ("model", request.model), ("reasoning", request.reasoning)))
+            or not model_policy["model_policy_applied"]
+        ):
+            raise SubagentError(
+                "host did not confirm the requested child route",
+                code="host_state_invalid",
+            )
         state_name, _ = host_state(response)
         created_at_ms, started_at_ms, completed_at_ms = _host_timestamps(
             response, state_name, deadline_at_ms
@@ -1566,23 +1609,7 @@ class Orchestrator:
             depth=depth,
             name=request.name,
             profile=request.profile,
-            requested_model=request.model,
-            effective_model=owner.inherited_model or "inherited",
-            # Per-worker orchestration selection. API 0.2 `agent/spawn` carries
-            # no provider/model/reasoning field, so a confirmed model request is
-            # only ever the parent's own observed model (the one selection this
-            # process can verify); it is applied because the child demonstrably
-            # runs it. A requested reasoning level is surfaced as requested-only
-            # until the host reports a per-worker selection, and a level above the
-            # declared ceiling is clamped by the mirrored product policy.
-            requested_provider=request.provider,
-            effective_provider=(
-                request.provider if request.model != INHERIT else "inherited"
-            ),
-            requested_reasoning=request.reasoning,
-            effective_reasoning="inherited",
-            model_policy_applied=request.model != INHERIT,
-            reasoning_note=request.reasoning_note,
+            **model_policy,
             tools=effective_tools,
             state="queued",
             phase="queued by host",

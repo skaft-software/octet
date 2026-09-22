@@ -7024,6 +7024,27 @@ fn subagents_surface_available(
             .any(|definition| definition.name == "subagent_spawn")
 }
 
+/// A live worker surface can select any configured provider while the root run
+/// borrows the App. Complete deferred inventories at this idle boundary, not in
+/// a model tool on a Tokio worker. Disabled/unavailable extensions retain the
+/// ordinary narrow startup. Extension routes are reprojected by the caller.
+fn complete_delegation_catalog(
+    service_available: bool,
+    config: &Config,
+    catalog: &mut ModelCatalog,
+    readiness: &mut CatalogReadiness,
+    notes: &mut CodexContextNotes,
+) -> anyhow::Result<()> {
+    if service_available && !readiness.is_fleet() {
+        let (complete, additional_notes) =
+            model_catalog_for_readiness(config.offline, &CatalogReadiness::Fleet)?;
+        *catalog = complete;
+        notes.merge(additional_notes);
+        *readiness = CatalogReadiness::Fleet;
+    }
+    Ok(())
+}
+
 fn configure_v2_delegation(
     agent: &mut Agent,
     model: &Model,
@@ -7112,8 +7133,8 @@ pub(crate) fn build_app_with_runtime_manager(
         prestarted_extensions,
         prepared_session,
         modeless: _,
-        codex_context_notes,
-        readiness,
+        mut codex_context_notes,
+        mut readiness,
     } = boot;
     let mut system = system;
     startup_phase("app.build");
@@ -7161,6 +7182,13 @@ pub(crate) fn build_app_with_runtime_manager(
         &sessions,
         runtime_manager,
         provider_runtime,
+    )?;
+    complete_delegation_catalog(
+        executable_extensions.has_agent_session_service(),
+        &config,
+        &mut catalog,
+        &mut readiness,
+        &mut codex_context_notes,
     )?;
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
     let model = catalog.resolve(&launch.model)?;
@@ -7238,6 +7266,11 @@ pub(crate) fn build_app_with_runtime_manager(
         config.compaction.keep_recent_tokens,
     )?;
     agent.set_max_session_cost_microdollars(config.max_cost_microdollars);
+    if service_available {
+        agent.set_delegation_model_resolver(Arc::new(
+            super::delegation_models::CodingAgentModelResolver::new(catalog.clone()),
+        ));
+    }
     configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
     executable_extensions.bind_agent_sessions(&agent)?;
     agent.finalize_tool_surface();
@@ -7320,7 +7353,7 @@ pub fn rebuild_app(
     // Idle rebuilds of the same session preserve delivery. A new or resumed
     // different session owns a fresh latch; the previous session's notice must
     // not suppress the effective-model note in the newly opened transcript.
-    let codex_context_notes = app.codex_context_notes.clone();
+    let mut codex_context_notes = app.codex_context_notes.clone();
     if selection.as_ref().is_some_and(|selection| {
         let path = match selection {
             SessionSelection::CreateNew(path) | SessionSelection::OpenExisting(path) => path,
@@ -7329,7 +7362,7 @@ pub fn rebuild_app(
     }) {
         codex_context_notes.delivered.set(false);
     }
-    let readiness = app.readiness.clone();
+    let mut readiness = app.readiness.clone();
     let compact_model = config
         .compaction
         .compact_model
@@ -7478,6 +7511,13 @@ pub fn rebuild_app(
         runtime_manager,
         provider_runtime,
     )?;
+    complete_delegation_catalog(
+        executable_extensions.has_agent_session_service(),
+        &config,
+        &mut catalog,
+        &mut readiness,
+        &mut codex_context_notes,
+    )?;
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
     let service_available = executable_extensions.has_agent_session_service();
     let subagents_available = service_available
@@ -7536,6 +7576,11 @@ pub fn rebuild_app(
         config.compaction.keep_recent_tokens,
     )?;
     agent.set_max_session_cost_microdollars(config.max_cost_microdollars);
+    if service_available {
+        agent.set_delegation_model_resolver(Arc::new(
+            super::delegation_models::CodingAgentModelResolver::new(catalog.clone()),
+        ));
+    }
     configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
     executable_extensions.bind_agent_sessions(&agent)?;
     agent.finalize_tool_surface();

@@ -35,6 +35,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(
             manifest["contributes"]["tools"],
             [
+                "subagent_models",
                 "subagent_spawn",
                 "subagent_status",
                 "subagent_wait",

@@ -483,6 +483,7 @@ pub(super) fn render_loop_with_terminal(
         if !coalesce_render_commands(&rx, last_render, &tui, &mut suspended) {
             if let Some(reply) = suspended.take() {
                 suspend_terminal(&mut tui, reply);
+                return;
             }
             break;
         }
@@ -502,8 +503,16 @@ pub(super) fn render_loop_with_terminal(
         last_render = Some(Instant::now());
     }
 
+    // Stop (or channel closure) can overtake a coalesced Render. Publish the
+    // latest semantic state before restoring the terminal, not after it.
+    tui.request_render();
+    state.frame_written();
     tui.stop();
 }
+
+#[cfg(test)]
+#[path = "renderer_shutdown_tests.rs"]
+mod shutdown_tests;
 
 #[cfg(test)]
 mod scheduler_tests {

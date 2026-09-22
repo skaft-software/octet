@@ -71,7 +71,7 @@ def initialize_request(*, agent_sessions: bool = True):
     optional = ["lifecycle_events"]
     required = ["request_cancellation", "content_parts"]
     if agent_sessions:
-        optional.append("agent_sessions")
+        optional.extend(["agent_sessions", "agent_model_selection_v1"])
         required.append("delegation_telemetry_v1")
     return rpc_request(
         1,
@@ -81,6 +81,7 @@ def initialize_request(*, agent_sessions: bool = True):
             "workspace": "/workspace",
             "contributes": {
                 "tools": [
+                    "subagent_models",
                     "subagent_spawn",
                     "subagent_status",
                     "subagent_wait",
