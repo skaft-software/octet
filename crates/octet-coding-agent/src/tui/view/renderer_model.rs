@@ -445,6 +445,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         extension_commands,
         subagent_activity,
         subagent_activity_block,
+        subagent_committed_costs,
         slash_selection,
         slash_scroll,
         slash_popup_dismissed,
@@ -522,6 +523,105 @@ mod tests {
             follow_tail: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn published_worker_costs_preserve_durable_watermarks_across_both_boundaries() {
+        use super::super::SubagentActivityView;
+        use octet_agent::{
+            DelegationOrchestrationProvenance, DelegationPolicySource, DelegationTelemetryChild,
+            EffectPolicy, SandboxConfig,
+        };
+
+        let worker = |id: &str| DelegationTelemetryChild {
+            child_id: id.into(),
+            task_name: id.into(),
+            profile: None,
+            model: "fixture".into(),
+            state: "running".into(),
+            phase: "thinking".into(),
+            current_tool: None,
+            tool_use_count: 0,
+            input_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 0,
+            cost: None,
+            cost_microdollars: Some(7_200),
+            elapsed_ms: 0,
+            failure_class: None,
+            failure_reason: None,
+            effective_tool_policy: SandboxConfig::new(".")
+                .effective_tool_policy(EffectPolicy::Controlled),
+            orchestration_provenance: DelegationOrchestrationProvenance::all(
+                DelegationPolicySource::ParentInherited,
+            ),
+            session: None,
+        };
+        let mut semantic = state();
+        semantic.session_cost_microdollars = Some(100_000);
+        semantic
+            .subagent_committed_costs
+            .insert("old".into(), 7_200);
+        let mut roster = SubagentActivityView {
+            telemetry: vec![worker("old"), worker("new")],
+            include_cost_in_session_total: true,
+            ..Default::default()
+        };
+        semantic.set_subagent_activity(roster.clone());
+        let mut renderer = RenderOwner::default();
+
+        // The old worker's spend is already in the root ledger; only the new
+        // worker's spend is provisional. Both publication copies must agree.
+        let first = RenderModel::capture(&mut semantic);
+        assert_eq!(
+            semantic.displayed_session_cost_microdollars(),
+            Some(107_200)
+        );
+        assert_eq!(
+            first.chrome.displayed_session_cost_microdollars(),
+            Some(107_200)
+        );
+        renderer.accept(first);
+        assert_eq!(
+            renderer.state.displayed_session_cost_microdollars(),
+            Some(107_200)
+        );
+
+        // A continued worker can spend more without re-adding its old cost.
+        roster.telemetry[0].cost_microdollars = Some(9_200);
+        semantic.set_subagent_activity(roster.clone());
+        renderer.accept(RenderModel::capture(&mut semantic));
+        assert_eq!(
+            renderer.state.displayed_session_cost_microdollars(),
+            Some(109_200)
+        );
+
+        // A later durable handoff changes the watermark, not the total.
+        semantic.session_cost_microdollars = Some(109_200);
+        semantic
+            .subagent_committed_costs
+            .insert("old".into(), 9_200);
+        semantic
+            .subagent_committed_costs
+            .insert("new".into(), 7_200);
+        renderer.accept(RenderModel::capture(&mut semantic));
+        assert_eq!(
+            renderer.state.subagent_committed_costs,
+            semantic.subagent_committed_costs
+        );
+        assert_eq!(
+            renderer.state.displayed_session_cost_microdollars(),
+            Some(109_200)
+        );
+
+        // Replacing the session must also replace, rather than retain, the map.
+        let mut replacement = state();
+        renderer.accept(RenderModel::capture(&mut replacement));
+        assert!(renderer.state.subagent_committed_costs.is_empty());
+        assert_eq!(renderer.state.displayed_session_cost_microdollars(), None);
     }
 
     #[test]

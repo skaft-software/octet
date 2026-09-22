@@ -1074,6 +1074,30 @@ async fn paste_clipboard_text(shell: &mut InteractiveShell, event: &Event) -> bo
     true
 }
 
+/// Settle only into the exact editor revision that admitted the native read.
+/// Any intervening text/cursor edit (including extension replacement) invalidates
+/// both its text and fallback gesture. The normal composer must still own focus;
+/// search/panels/tool input must never receive its result. Snapshot text is cloned
+/// only at admission, completion, and fallback replay—not on each loop poll.
+fn settle_active_clipboard_read(
+    shell: &mut InteractiveShell,
+    revision: u64,
+    text: Option<String>,
+    gesture: Option<Event>,
+) -> Option<Event> {
+    let editor = shell.extension_editor_snapshot();
+    if !editor.focused || editor.revision != revision {
+        return None;
+    }
+    if let Some(text) = text {
+        shell.apply_edit(crate::tui::keymap::EditAction::Paste(text));
+        shell.render();
+        None
+    } else {
+        gesture
+    }
+}
+
 /// Native **text** clipboard read (parity row 2c.6). Clipboard image capture is
 /// an explicit exclusion, so only text ever leaves the clipboard and nothing in
 /// this module writes to it. The existing write transport (pbcopy plus OSC 52 in
@@ -1226,6 +1250,10 @@ mod clipboard_read {
 
     pub(super) async fn read_text() -> Option<String> {
         #[cfg(test)]
+        if let Some(helper) = TEST_HELPER.with(|slot| slot.borrow_mut().take()) {
+            return helper.await;
+        }
+        #[cfg(test)]
         if let Some(overridden) = test_override() {
             return overridden;
         }
@@ -1238,11 +1266,23 @@ mod clipboard_read {
     }
 
     #[cfg(test)]
+    type TestHelper = std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>;
+
+    #[cfg(test)]
     thread_local! {
-        /// Test-only stand-in for the platform helper. The outer `None` means no
-        /// override is installed; per-thread state keeps parallel tests apart.
+        /// One-shot controllable helper; no developer clipboard is accessed.
+        static TEST_HELPER: std::cell::RefCell<Option<TestHelper>> =
+            const { std::cell::RefCell::new(None) };
+        /// The outer `None` means no override; per-thread state isolates tests.
         static OVERRIDE: std::cell::RefCell<Option<Option<String>>> =
             const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_helper(
+        helper: impl std::future::Future<Output = Option<String>> + Send + 'static,
+    ) {
+        TEST_HELPER.with(|slot| *slot.borrow_mut() = Some(Box::pin(helper)));
     }
 
     #[cfg(test)]
@@ -2844,6 +2884,12 @@ where
         .ok_or_else(|| anyhow::anyhow!("cannot drive a run without presentation state"))?;
     let mut intents = VecDeque::<ControlIntent>::new();
     let mut in_flight: Option<ControlFuture> = None;
+    // Loop-owned, not spawned: dropping this future also drops the helper's
+    // kill-on-drop child. No clipboard task can outlive the run.
+    let mut clipboard: Option<Pin<Box<dyn Future<Output = Option<String>>>>> = None;
+    let mut clipboard_gesture = None;
+    let mut clipboard_revision = 0;
+    let mut clipboard_fallback = None;
     let mut aborting = false;
     let mut dispatch_queued = false;
     shell.settle_queued_follow_ups(false);
@@ -2868,6 +2914,9 @@ where
 
     loop {
         if aborting || shell.close_requested() {
+            clipboard = None;
+            clipboard_gesture = None;
+            clipboard_fallback = None;
             if !interactions.is_empty() {
                 interactions.clear();
                 shell.close_panel();
@@ -2901,6 +2950,7 @@ where
         tokio::select! {
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                drop(clipboard.take());
                 control.abort();
                 *quit_requested = true;
                 shell.restore_queued_steering();
@@ -2911,6 +2961,14 @@ where
                 )
                 .await;
                 return Ok(HostRunOutcome::shutdown());
+            }
+            result = futures_util::future::OptionFuture::from(clipboard.as_mut().map(|f| f.as_mut())), if clipboard.is_some() => {
+                clipboard = None;
+                // A background extension can replace the composer without an
+                // InputAction. Fence completion as well as explicit handoffs.
+                clipboard_fallback = settle_active_clipboard_read(
+                    shell, clipboard_revision, result.flatten(), clipboard_gesture.take(),
+                );
             }
             result = futures_util::future::OptionFuture::from(in_flight.as_mut().map(|f| f.as_mut())), if in_flight.is_some() => {
                 // A run may have ended before a pending control was delivered.
@@ -2965,7 +3023,14 @@ where
                     shell.render();
                 }
             }
-            maybe = input.next(), if input_open => {
+            incoming = async {
+                if let Some(event) = clipboard_fallback.take() {
+                    (Some(Ok(event)), true)
+                } else {
+                    (input.next().await, false)
+                }
+            }, if input_open => {
+                let (maybe, clipboard_replay) = incoming;
                 let event = match maybe {
                     Some(Ok(event)) => event,
                     Some(Err(error)) => {
@@ -2988,13 +3053,23 @@ where
                         continue;
                     }
                 };
+                if clipboard_replay {
+                    // A higher-priority branch may have changed ownership since
+                    // the failed read settled on the preceding select iteration.
+                    let editor = shell.extension_editor_snapshot();
+                    if !editor.focused || editor.revision != clipboard_revision {
+                        continue;
+                    }
+                }
                 // Search owns its query before any extension or clipboard
                 // admission; pasted paths/text must not become composer input.
-                if interactions.is_empty() && !shell.has_panel() && shell.intercept_transcript_input(&event) {
+                if !clipboard_replay && interactions.is_empty() && !shell.has_panel() && shell.intercept_transcript_input(&event) {
                     continue;
                 }
-                observe_extension_terminal_event(executable_extensions, &event);
-                if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
+                if !clipboard_replay {
+                    observe_extension_terminal_event(executable_extensions, &event);
+                }
+                if !clipboard_replay && matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
                     request_active_close(
                         control,
                         shell,
@@ -3009,7 +3084,7 @@ where
                 }
                 // Tool consent preempts ordinary inspection. No provider events are
                 // buffered by a modal and no request can hide behind a report.
-                if let Some(interaction) = interactions.front_mut() {
+                if let Some(interaction) = interactions.front_mut().filter(|_| !clipboard_replay) {
                     if interaction.input(shell, &event) {
                         interactions.pop_front();
                         if let Some(next) = interactions.front() { next.open(shell); }
@@ -3017,12 +3092,14 @@ where
                     shell.render();
                     continue;
                 }
-                if shell.has_panel() {
+                if !clipboard_replay && shell.has_panel() {
                     // Ctrl+C remains draft-sensitive even while an ordinary picker
                     // owns navigation. Escape only dismisses that picker.
                     if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press
                         && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
                         if !shell.pending().is_empty() {
+                            clipboard = None;
+                            clipboard_gesture = None;
                             shell.clear_editor();
                         } else {
                             control.abort(); aborting = true;
@@ -3113,7 +3190,7 @@ where
                         },
                     }
                 }
-                if let Some(shortcut) = executable_extensions.dispatch_shortcut_for_event(&event) {
+                if let Some(shortcut) = (!clipboard_replay).then(|| executable_extensions.dispatch_shortcut_for_event(&event)).flatten() {
                     shell.notice(format!(
                         "running extension shortcut {}: {}",
                         shortcut.extension, shortcut.description
@@ -3121,10 +3198,14 @@ where
                     shell.render();
                     continue;
                 }
-                // Native clipboard paste reaches the composer during a live run
-                // too; the draft it edits is the same one a queued follow-up
-                // uses. A failed read falls through untouched.
-                if paste_clipboard_text(shell, &event).await {
+                // Keep polling input and the run while a native helper waits.
+                // Coalesce held/repeated gestures to one bounded read.
+                if !clipboard_replay && matches!(&event, Event::Key(key) if is_clipboard_paste_key(key)) {
+                    if !aborting && clipboard.is_none() {
+                        clipboard_revision = shell.extension_editor_snapshot().revision;
+                        clipboard = Some(Box::pin(clipboard_read::read_text()));
+                        clipboard_gesture = Some(event);
+                    }
                     continue;
                 }
                 let action = match shell.translate_input(Some(event), true) {
@@ -3138,6 +3219,14 @@ where
                     }
                     action => action,
                 };
+                // These actions consume or replace the draft that admitted the
+                // read. Its eventual text must not enter the next composer.
+                if matches!(&action, InputAction::Queue(_) | InputAction::Steer(_)
+                    | InputAction::Command(_) | InputAction::EditQueued | InputAction::ClearEditor)
+                {
+                    clipboard = None;
+                    clipboard_gesture = None;
+                }
                 match action {
                     InputAction::CompletePath => {
                         if shell.accept_extension_autocomplete() {
@@ -10621,6 +10710,358 @@ mod tests {
 
         assert!(matches!(idle, Idle::Quit));
         assert_eq!(shell.pending(), "terminal bracketed paste");
+    }
+
+    #[tokio::test]
+    async fn active_clipboard_completion_preserves_native_and_terminal_paste() {
+        for native in [Some("native draft".to_owned()), None] {
+            let (_server, _workspace, mut agent) =
+                scripted_agent_with_delay(Duration::from_secs(2)).await;
+            let mut shell = InteractiveShell::test_shell();
+            clipboard_read::set_test_text(native.clone());
+            let gesture = Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            ));
+            let mut events = vec![Ok(gesture)];
+            if native.is_none() {
+                events.push(Ok(Event::Paste("terminal draft".into())));
+            }
+            events.push(Ok(ctrl_key('d')));
+            let mut input = tokio_stream::iter(events).chain(futures_util::stream::pending());
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let mut deadline = None;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(1),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut pending,
+                    &mut quit,
+                    None,
+                    None,
+                    &mut extensions,
+                    &mut false,
+                    test_run_inspection(),
+                    &mut deadline,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            clipboard_read::clear_test_text();
+            assert_eq!(ended, HostRunOutcome::Aborted);
+            assert!(quit);
+            assert_eq!(
+                shell.pending(),
+                native.as_deref().unwrap_or("terminal draft")
+            );
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn active_clipboard_slow_helper_cancels_on_ctrl_c_and_settlement() {
+        for cancel in [true, false] {
+            let (_server, _workspace, mut agent) = scripted_agent_with_delay(if cancel {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(10)
+            })
+            .await;
+            let mut shell = InteractiveShell::test_shell();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            // A deterministic wedged helper: input cannot send Ctrl-C until the
+            // read is actually polled, and the helper cannot finish on its own.
+            clipboard_read::set_test_helper(async move {
+                let _guard = dropped_tx;
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Some("must never reach the draft".into())
+            });
+            let gesture = Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            ));
+            let mut input = tokio_stream::iter([Ok(gesture)])
+                .chain(
+                    futures_util::stream::once(async move {
+                        started_rx.await.unwrap();
+                        if cancel {
+                            Ok(ctrl_key('c'))
+                        } else {
+                            futures_util::future::pending().await
+                        }
+                    })
+                    .boxed(),
+                )
+                .chain(futures_util::stream::pending());
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let mut deadline = None;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(1),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut pending,
+                    &mut quit,
+                    None,
+                    None,
+                    &mut extensions,
+                    &mut false,
+                    test_run_inspection(),
+                    &mut deadline,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                ended,
+                if cancel {
+                    HostRunOutcome::Aborted
+                } else {
+                    HostRunOutcome::Completed
+                }
+            );
+            assert!(shell.pending().is_empty());
+            assert!(!quit);
+            assert!(matches!(
+                dropped_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ));
+            shell.extension_set_editor("replacement composer".into());
+            assert!(
+                release_tx.send(()).is_err(),
+                "settled helper must be dropped"
+            );
+            tokio::task::yield_now().await;
+            assert_eq!(shell.pending(), "replacement composer");
+        }
+    }
+
+    #[tokio::test]
+    async fn active_clipboard_editor_ownership_fences_text_and_fallback() {
+        for text in [Some("stale native text".to_owned()), None] {
+            for owner in ["extension", "search", "panel"] {
+                let text = text.clone();
+                let mut shell = InteractiveShell::test_shell();
+                shell.begin_run("test");
+                shell.extension_set_editor("original draft".into());
+                let revision = shell.extension_editor_snapshot().revision;
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+                let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
+                clipboard_read::set_test_helper(async move {
+                    let _guard = dropped_tx;
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    text
+                });
+                let mut read = Box::pin(clipboard_read::read_text());
+                assert!(futures_util::poll!(&mut read).is_pending());
+                started_rx.await.unwrap();
+                // These changes bypass InputAction ownership-transfer checks.
+                // Search and panels leave the normal editor revision unchanged.
+                match owner {
+                    "extension" => {
+                        shell.extension_set_editor("replacement composer".into());
+                        assert_ne!(shell.extension_editor_snapshot().revision, revision);
+                    }
+                    "search" => {
+                        assert!(shell.intercept_transcript_input(&transcript_search_open_key()));
+                        assert!(shell.transcript_search_active());
+                    }
+                    "panel" => shell.open_panel(Panel::ReadOnlyDocument {
+                        title: "Inspection".into(),
+                        text: "Read-only document".into(),
+                        styled: false,
+                        scroll_from_bottom: 0,
+                    }),
+                    _ => unreachable!(),
+                }
+                if owner != "extension" {
+                    let editor = shell.extension_editor_snapshot();
+                    assert_eq!(editor.revision, revision);
+                    assert!(!editor.focused);
+                }
+                let before = shell.debug_snapshot();
+                release_tx.send(()).unwrap();
+                let gesture = Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Char('v'),
+                    if cfg!(windows) {
+                        KeyModifiers::ALT
+                    } else {
+                        KeyModifiers::CONTROL
+                    },
+                ));
+                let fallback =
+                    settle_active_clipboard_read(&mut shell, revision, read.await, Some(gesture));
+                assert!(
+                    fallback.is_none(),
+                    "stale gestures must not be replayed either"
+                );
+                assert_eq!(
+                    shell.pending(),
+                    if owner == "extension" {
+                        "replacement composer"
+                    } else {
+                        "original draft"
+                    }
+                );
+                assert_eq!(
+                    shell.debug_snapshot(),
+                    before,
+                    "{owner} must not receive stale paste"
+                );
+                assert!(matches!(
+                    dropped_rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn active_clipboard_draft_handoff_drops_pending_read_before_replacement() {
+        for boundary in ["queue", "steer", "recall", "command"] {
+            let (_server, _workspace, mut agent) =
+                scripted_agent_with_delay(Duration::from_secs(2)).await;
+            let mut shell = InteractiveShell::test_shell();
+            shell.extension_set_editor(if boundary == "command" {
+                "/answer answer now".into()
+            } else {
+                "original draft".into()
+            });
+            let boundary_key = match boundary {
+                "steer" => ctrl_key('s'),
+                "recall" => {
+                    let queued = shell.drain_composed();
+                    shell.queue_follow_up(queued);
+                    Event::Key(crossterm::event::KeyEvent::new(
+                        KeyCode::Up,
+                        KeyModifiers::ALT,
+                    ))
+                }
+                _ => Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                )),
+            };
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            clipboard_read::set_test_helper(async move {
+                let _guard = dropped_tx;
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Some("late clipboard payload".into())
+            });
+            let gesture = Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            ));
+            let mut input = tokio_stream::iter([Ok(gesture)])
+                .chain(
+                    futures_util::stream::once(async move {
+                        started_rx.await.unwrap();
+                        Ok(boundary_key)
+                    })
+                    .boxed(),
+                )
+                .chain(
+                    futures_util::stream::once(async move {
+                        // Checked before close or run settlement can clean up the
+                        // helper: ownership transfer itself must cancel the read.
+                        assert!(
+                            matches!(
+                                dropped_rx.try_recv(),
+                                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                            ),
+                            "{boundary}"
+                        );
+                        assert!(release_tx.send(()).is_err(), "{boundary}");
+                        Ok(Event::Paste(" replacement composer".into()))
+                    })
+                    .boxed(),
+                )
+                .chain(tokio_stream::iter([Ok(ctrl_key('d'))]))
+                .chain(futures_util::stream::pending());
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let mut deadline = None;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(1),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut pending,
+                    &mut quit,
+                    None,
+                    None,
+                    &mut extensions,
+                    &mut false,
+                    test_run_inspection(),
+                    &mut deadline,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(ended, HostRunOutcome::Aborted, "{boundary}");
+            assert!(quit);
+            assert!(
+                shell.pending().contains("replacement composer"),
+                "{boundary}"
+            );
+            assert!(
+                !shell.pending().contains("late clipboard payload"),
+                "{boundary}"
+            );
+        }
     }
 
     #[tokio::test]

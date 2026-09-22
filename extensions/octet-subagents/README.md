@@ -98,9 +98,9 @@ generation, and negotiated features. The packaged skill is separately opt-in wit
 `/subagents` opens the host-owned worker list. Use Up/Down to select, Enter for a
 scrollable read-only transcript, and Escape or Left to return. The transcript's
 complete worker roster is indented beneath **Subagents** and shows state, token
-usage, and cost without per-worker call counts. Tool-call telemetry remains in
-the inspector; prompts, tool arguments/results, and running model prose stay
-out of the roster.
+usage, and cost, with an optional `tools` column for tool-call counts (not
+model turns). Ctrl+O expands counted groups to show all retained workers (up to
+32); prompts, tool arguments/results, and running model prose stay out of the roster.
 Serve inspection is also owner-bound and read-only; inspection cannot send a
 prompt. `/subagents inspect <name-or-id>` provides cached detail and
 `/extensions inspect agent-session:<digest>` is the explicit-reference fallback.

@@ -154,6 +154,23 @@ fn actual_thread_blocked_layout_accepts_control_and_recovers_every_character() {
             std::thread::sleep(Duration::from_millis(1));
         }
         shell.render();
+        // DumpFrame is deliberately a read of the last painted frame, not a
+        // render barrier. Wait for the current publication's paint receipt;
+        // otherwise a coalesced Render can be overtaken by this diagnostic.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let state = shell.state.borrow();
+            if state
+                .render_geometry
+                .as_ref()
+                .is_some_and(|geometry| geometry.is_current(&state))
+            {
+                break;
+            }
+            drop(state);
+            assert!(Instant::now() < deadline, "latest publication was not painted");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let (reply, receive) = mpsc::channel();
         shell
             .render_tx

@@ -1106,3 +1106,306 @@ fn subagent_restart_and_durable_refresh_subtract_committed_worker_spend() {
         Some(8_200)
     );
 }
+
+#[test]
+fn every_host_worker_state_has_consistent_group_filter_and_marker() {
+    use octet_agent::DelegatedAgentStatus as Status;
+    use SubagentStateGroup::{Completed, Failed, Running, Stopped};
+    let states = [
+        (Status::Pending, Running),
+        (Status::Running, Running),
+        (
+            Status::Completed {
+                output: String::new(),
+            },
+            Completed,
+        ),
+        (
+            Status::LimitReached {
+                output: String::new(),
+                turn_count: 2,
+                turn_limit: 2,
+            },
+            Failed,
+        ),
+        (Status::Interrupted, Stopped),
+        (
+            Status::Failed {
+                error: String::new(),
+            },
+            Failed,
+        ),
+        (Status::TimedOut, Failed),
+        (Status::Detached, Stopped),
+        (
+            Status::AwaitingApproval {
+                reason: String::new(),
+            },
+            Stopped,
+        ),
+        (Status::Shutdown, Stopped),
+    ];
+    for (status, group) in states {
+        let wire = serde_json::to_value(status).unwrap();
+        let label = wire["state"].as_str().unwrap();
+        let worker = named_worker("STATE-WORKER", label);
+        let mut view = SubagentActivityView {
+            telemetry: vec![worker.clone()],
+            ..Default::default()
+        };
+        assert_eq!(
+            SubagentStateGroup::of_declared_state(label),
+            group,
+            "{label}"
+        );
+        assert_eq!(subagent_activity_aggregate(&view), Some(group), "{label}");
+        assert_eq!(
+            subagent_activity_is_active(&view),
+            group == Running,
+            "{label}"
+        );
+        assert_eq!(
+            subagent_activity_has_failure(&view),
+            matches!(group, Failed | Stopped),
+            "{label}"
+        );
+        let theme = crate::tui::theme::test_theme();
+        for filter in SubagentStateGroup::ORDER {
+            view.state_filter = Some(filter);
+            let text = roster_rows(&view, &theme, 120, false).join("\n");
+            assert_eq!(
+                text.contains("STATE-WORKER"),
+                filter == group,
+                "{label}: {text}"
+            );
+            if filter == group {
+                assert!(text.contains(label), "{label}: {text}");
+            }
+        }
+        let mut shell = InteractiveShell::test_shell();
+        publish(&mut shell, &named_worker("STATE-WORKER", "running"));
+        publish(&mut shell, &worker);
+        let state = shell.state.borrow();
+        let index = state.subagent_activity_block.unwrap();
+        let dot = if state.theme.unicode() { "•" } else { "*" };
+        let expected = match group {
+            Running => state.theme.fg("foreground", dot),
+            Completed => state.theme.settled_event_dot("success", dot),
+            Failed | Stopped => state.theme.settled_event_dot("error", dot),
+        };
+        assert_eq!(
+            super::surface_frame::event_margin_marker_with_frame(
+                &state.transcript[index],
+                &state.theme,
+                0,
+                None,
+                0,
+                false,
+            ),
+            Some(expected),
+            "{label}",
+        );
+    }
+}
+
+#[test]
+fn expanded_full_retained_roster_exposes_all_workers_across_groups() {
+    let theme = crate::tui::theme::test_theme();
+    let mut view = SubagentActivityView {
+        telemetry: (0..32)
+            .map(|index| {
+                let state = ["running", "completed", "failed", "shutdown"][index / 8];
+                let mut worker = named_worker(&format!("W{index:02}"), state);
+                worker.failure_reason = (state == "failed").then(|| "fixture failure".into());
+                worker
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let collapsed = roster_rows(&view, &theme, 240, false).join("\n");
+    for group in ["completed", "failed", "stopped"] {
+        assert!(collapsed.contains(&format!("{group} · 8")), "{collapsed}");
+    }
+    assert_eq!(
+        collapsed.matches("ctrl+o shows all").count(),
+        3,
+        "{collapsed}"
+    );
+    for width in [24, 80, 240] {
+        let expanded = roster_rows(&view, &theme, width, true).join("\n");
+        for worker in &view.telemetry {
+            assert_eq!(
+                expanded.matches(&worker.task_name).count(),
+                1,
+                "{width}: {expanded}"
+            );
+        }
+        assert!(!expanded.contains("ctrl+o shows all"), "{expanded}");
+        assert!(!expanded.contains(" more"), "{expanded}");
+    }
+    for group in SubagentStateGroup::ORDER {
+        view.state_filter = Some(group);
+        let filtered = roster_rows(&view, &theme, 120, false).join("\n");
+        for worker in &view.telemetry {
+            assert_eq!(
+                filtered.contains(&worker.task_name),
+                SubagentStateGroup::of_declared_state(&worker.state) == group,
+                "{filtered}"
+            );
+        }
+        assert!(!filtered.contains("ctrl+o shows all"), "{filtered}");
+    }
+}
+
+#[test]
+fn roster_tool_count_column_names_the_reported_metric() {
+    let theme = crate::tui::theme::test_theme();
+    let view = SubagentActivityView {
+        telemetry: vec![child()],
+        ..Default::default()
+    };
+    let text = roster_rows(&view, &theme, 240, true).join("\n");
+    assert!(text.contains("tools"), "{text}");
+    assert!(!text.contains("turns"), "{text}");
+    let rows = subagent_rows(&view);
+    assert_eq!(
+        subagent_cell_text(&rows[0], SubagentColumn::Tools, true),
+        "4"
+    );
+    let activity = serde_json::from_value(serde_json::json!({
+        "id": "fallback", "kind": "subagent", "state": "running", "summary": "fallback",
+        "metrics": {"tool_calls": 17}
+    }))
+    .unwrap();
+    let fallback = SubagentActivityView {
+        activities: vec![activity],
+        ..Default::default()
+    };
+    let rows = subagent_rows(&fallback);
+    assert_eq!(
+        subagent_cell_text(&rows[0], SubagentColumn::Tools, true),
+        "17"
+    );
+}
+
+#[test]
+fn generic_panel_filter_mirrors_worker_membership_not_lossy_state_labels() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut shell = InteractiveShell::test_shell();
+    let mut workers = vec![
+        named_worker("LIMIT", "running"),
+        named_worker("DETACHED", "running"),
+        named_worker("APPROVAL", "running"),
+        named_worker("PENDING", "running"),
+    ];
+    publish_roster(&mut shell, true, &workers);
+    for (worker, state) in
+        workers
+            .iter_mut()
+            .zip(["limit_reached", "detached", "awaiting_approval", "pending"])
+    {
+        worker.state = state.into();
+    }
+    publish_roster(&mut shell, true, &workers);
+    let items: Vec<_> = workers
+        .iter()
+        .map(|worker| worker.task_name.clone())
+        .collect();
+    let panel = SubagentPanel {
+        node_ids: workers
+            .iter()
+            .map(|worker| format!("worker:{}", worker.child_id))
+            .collect(),
+        groups: vec![
+            SubagentGroup {
+                label: "Blocked".into(),
+                indices: vec![0, 1],
+                collapsible: false,
+            },
+            SubagentGroup {
+                label: "Queued".into(),
+                indices: vec![2, 3],
+                collapsible: false,
+            },
+        ],
+        collapsed: true,
+        revealed_node: None,
+        state_filter: None,
+    };
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Subagents"),
+        items: items.clone(),
+        descriptions: vec![None; 4],
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectSubagent(panel.clone()),
+    });
+    let press = |shell: &mut InteractiveShell| {
+        shell.panel_input(&crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+    };
+    let assert_members = |shell: &InteractiveShell, expected: &[&str]| {
+        let text = transcript_text(shell);
+        for worker in &workers {
+            assert_eq!(
+                text.contains(&worker.task_name),
+                expected.contains(&worker.task_name.as_str()),
+                "{text}"
+            );
+        }
+    };
+    press(&mut shell);
+    assert_members(&shell, &["LIMIT", "DETACHED"]);
+    assert!(transcript_text(&shell).contains("state: Blocked"));
+    // Republishing telemetry must retain the exact selected membership in both
+    // semantic copies, even though Blocked spans Failed and Stopped groups.
+    publish_roster(&mut shell, true, &workers);
+    assert_members(&shell, &["LIMIT", "DETACHED"]);
+    let state = shell.state.borrow();
+    assert_eq!(
+        state
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .panel_filter
+            .as_ref()
+            .unwrap()
+            .node_ids,
+        vec!["worker:LIMIT", "worker:DETACHED"]
+    );
+    drop(state);
+    press(&mut shell);
+    assert_members(&shell, &["APPROVAL", "PENDING"]);
+    assert!(transcript_text(&shell).contains("state: Queued"));
+    // Membership is refreshed by stable ID when the selected group changes.
+    let mut next = panel.clone();
+    next.groups[0].indices = vec![0, 1, 3];
+    next.groups[1].indices = vec![2];
+    shell.refresh_subagent_panel("Subagents".into(), items.clone(), vec![None; 4], next);
+    assert_members(&shell, &["APPROVAL"]);
+    // Removing the selected group restores All rather than leaving stale IDs.
+    let mut next = panel;
+    next.groups.remove(1);
+    next.groups[0].indices = vec![0, 1, 2, 3];
+    shell.refresh_subagent_panel("Subagents".into(), items, vec![None; 4], next);
+    assert_members(&shell, &["LIMIT", "DETACHED", "APPROVAL", "PENDING"]);
+
+    // The fallback projection uses activity:{id}, while collection nodes use
+    // worker:{id}; both refer to the same semantic worker.
+    let activity = serde_json::from_value(serde_json::json!({
+        "id": "activity:DETACHED", "kind": "subagent", "state": "degraded", "summary": "DETACHED"
+    }))
+    .unwrap();
+    let fallback = SubagentActivityView {
+        activities: vec![activity],
+        panel_filter: Some(SubagentPanelFilter {
+            label: "Blocked".into(),
+            node_ids: vec!["worker:DETACHED".into()],
+        }),
+        ..Default::default()
+    };
+    let text = roster_rows(&fallback, &crate::tui::theme::test_theme(), 120, false).join("\n");
+    assert!(text.contains("DETACHED"), "{text}");
+}

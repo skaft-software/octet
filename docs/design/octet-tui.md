@@ -192,7 +192,10 @@ tokens, and cost; transient child-tool names stay in the inspector
 rather than shifting those columns on each tool start/finish. The roster's active
 dot is steady. Full host telemetry remains current, but hidden phase/elapsed
 or call-count changes do not invalidate transcript rows. Call counts remain
-retained telemetry, not row text. Native `DelegationUpdated` events
+retained telemetry; wide grids label their tool-call metric `tools`, never
+`turns`. Collapsed groups retain counts; expansion reveals all retained workers
+without a second row ceiling consuming workers for headers or failure details.
+Native `DelegationUpdated` events
 feed this view directly; it does not poll the extension's slash command.
 
 Live child cost is added to the host-owned cumulative footer only until root

@@ -390,7 +390,9 @@ persistent transcript event immediately above the composer from native
 `AgentEvent::DelegationUpdated` events; ordinary tool disclosure never truncates
 it. It does not poll `/subagents status` for the composer block. Worker rows are
 indented beneath **Subagents** and show `name  state · ↑input ↓output • $cost`.
-Per-worker call counts remain retained telemetry, not transcript-row text. Input
+Wide rows may include elapsed time, model, and `tools` (tool-call count, not
+model turns). Terminal groups collapse to counted summaries; Ctrl+O exposes
+every retained worker, including later groups and failure details. Input
 includes the three disjoint uncached/cache-read/cache-write buckets, while
 reasoning remains a subset of output.
 

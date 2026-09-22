@@ -312,6 +312,7 @@ impl ToolPanel {
             // narrowing the reader selected.
             next.sort = previous.sort;
             next.state_filter = previous.state_filter;
+            next.panel_filter = previous.panel_filter.clone();
         }
         self.finished = !subagent_activity_is_active(&next);
         self.is_error = subagent_activity_has_failure(&next);
@@ -694,6 +695,23 @@ impl SubagentPanel {
         self.state_filter = order.get(position + 1).cloned().flatten();
     }
 
+    /// Preserve membership, not the lossy generic lifecycle label. For example,
+    /// Blocked can contain both limit-reached and detached native workers.
+    fn activity_filter(&self) -> Option<SubagentPanelFilter> {
+        let label = self.state_filter.as_ref()?;
+        let node_ids = self
+            .groups
+            .iter()
+            .filter(|group| &group.label == label)
+            .flat_map(|group| group.indices.iter())
+            .filter_map(|index| self.node_ids.get(*index).cloned())
+            .collect();
+        Some(SubagentPanelFilter {
+            label: label.clone(),
+            node_ids,
+        })
+    }
+
     fn counts(&self, visible: &[usize]) -> Vec<usize> {
         self.groups
             .iter()
@@ -856,6 +874,14 @@ pub(crate) struct SubagentActivityView {
     /// narrowing is explicit, so the filtered group renders expanded even when
     /// the transcript is in its collapsed disclosure mode.
     pub(crate) state_filter: Option<SubagentStateGroup>,
+    panel_filter: Option<SubagentPanelFilter>,
+}
+
+/// Exact worker membership selected in the generic presentation panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SubagentPanelFilter {
+    label: String,
+    node_ids: Vec<String>,
 }
 
 impl SubagentActivityView {
@@ -966,8 +992,10 @@ pub(super) fn subagent_activity_aggregate(
 fn subagent_activity_has_failure(view: &SubagentActivityView) -> bool {
     view.failure_reason.is_some()
         || view.telemetry.iter().any(|child| {
-            matches!(child.state.as_str(), "failed" | "cancelled" | "stopped")
-                || child.failure_reason.is_some()
+            matches!(
+                SubagentStateGroup::of_declared_state(&child.state),
+                SubagentStateGroup::Failed | SubagentStateGroup::Stopped
+            ) || child.failure_reason.is_some()
         })
         || view.activities.iter().any(|activity| {
             matches!(
@@ -1062,8 +1090,10 @@ impl SubagentStateGroup {
     fn of_declared_state(state: &str) -> Self {
         match state {
             "completed" | "succeeded" => Self::Completed,
-            "failed" | "cancelled" | "timed_out" | "unavailable" => Self::Failed,
-            "stopped" => Self::Stopped,
+            "failed" | "cancelled" | "timed_out" | "unavailable" | "limit_reached" => Self::Failed,
+            // Stopped is a display group, not retirement: detached and parked
+            // workers can resume, but have no live task and did not succeed.
+            "stopped" | "interrupted" | "shutdown" | "detached" | "awaiting_approval" => Self::Stopped,
             // `pending`, `running`, `queued`, and an unpublished state all mean
             // "not settled yet", which is the one thing that must never be
             // hidden behind a collapsed terminal group.
@@ -1073,22 +1103,6 @@ impl SubagentStateGroup {
 
     fn of_activity(state: octet_agent::ExtensionPresentationState) -> Self {
         Self::of_declared_state(subagent_activity_state_label(state))
-    }
-
-    /// Canonical group of one `/subagents` panel group label. The panel names
-    /// its groups with the presentation protocol's own words, so a narrowing
-    /// chosen there must land on the group the transcript block prints for the
-    /// same workers.
-    fn of_panel_label(label: &str) -> Self {
-        match label.to_lowercase().as_str() {
-            "done" | "completed" | "succeeded" | "finished" => Self::Completed,
-            "failed" | "unavailable" | "cancelled" | "timed_out" => Self::Failed,
-            "stopped" => Self::Stopped,
-            // `running`, `queued`, `blocked`, `active`, `pending state`, and an
-            // unpublished label all mean "not settled yet", which is the one
-            // classification that never hides a worker.
-            _ => Self::Running,
-        }
     }
 
     fn is_terminal(self) -> bool {
@@ -1121,22 +1135,18 @@ impl SubagentStateGroup {
     }
 }
 
-/// Bounded row ceiling for the settled delegation event. The host already
-/// bounds a team to eight concurrent workers; this is the defensive ceiling
-/// that keeps a hostile or future-unbounded roster from rendering an unbounded
-/// list into the transcript.
-pub(super) const MAX_SUBAGENT_ACTIVITY_ROWS: usize = 24;
 const SUBAGENT_WORKER_MAX_WIDTH: usize = 26;
 
 /// One worker row projected out of either telemetry source, so the renderer
 /// owns exactly one column layout.
 struct SubagentRow {
+    node_id: String,
     group: SubagentStateGroup,
     worker: String,
     state: String,
     elapsed_ms: Option<u64>,
     model: String,
-    turns: Option<u64>,
+    tools: Option<u64>,
     tokens: Option<(u64, u64)>,
     cost_microdollars: Option<u64>,
     reason: Option<String>,
@@ -1148,7 +1158,7 @@ enum SubagentColumn {
     State,
     Elapsed,
     Model,
-    Turns,
+    Tools,
     Tokens,
     Cost,
 }
@@ -1160,14 +1170,14 @@ impl SubagentColumn {
             Self::State => "state",
             Self::Elapsed => "elapsed",
             Self::Model => "model",
-            Self::Turns => "turns",
+            Self::Tools => "tools",
             Self::Tokens => "tokens",
             Self::Cost => "cost",
         }
     }
 
     fn right_aligned(self) -> bool {
-        matches!(self, Self::Elapsed | Self::Turns | Self::Cost)
+        matches!(self, Self::Elapsed | Self::Tools | Self::Cost)
     }
 
     /// Columns a roster always tries to show, in reading order. Worker, state,
@@ -1184,6 +1194,7 @@ fn subagent_rows(view: &SubagentActivityView) -> Vec<SubagentRow> {
             .telemetry
             .iter()
             .map(|child| SubagentRow {
+                node_id: format!("worker:{}", child.child_id),
                 group: SubagentStateGroup::of_declared_state(&child.state),
                 worker: sanitize_for_terminal(&child.task_name),
                 state: if child.state.is_empty() {
@@ -1193,7 +1204,7 @@ fn subagent_rows(view: &SubagentActivityView) -> Vec<SubagentRow> {
                 },
                 elapsed_ms: Some(child.elapsed_ms),
                 model: sanitize_for_terminal(&child.model),
-                turns: Some(child.tool_use_count),
+                tools: Some(child.tool_use_count),
                 tokens: Some((
                     child
                         .input_tokens
@@ -1209,6 +1220,11 @@ fn subagent_rows(view: &SubagentActivityView) -> Vec<SubagentRow> {
     view.activities
         .iter()
         .map(|activity| SubagentRow {
+            node_id: activity
+                .id
+                .strip_prefix("activity:")
+                .map(|id| format!("worker:{id}"))
+                .unwrap_or_else(|| activity.id.clone()),
             group: SubagentStateGroup::of_activity(activity.state),
             worker: sanitize_for_terminal(&activity.summary),
             state: subagent_activity_state_label(activity.state).to_owned(),
@@ -1217,7 +1233,7 @@ fn subagent_rows(view: &SubagentActivityView) -> Vec<SubagentRow> {
                 .zip(activity.completed_at_ms)
                 .map(|(started, completed)| completed.saturating_sub(started)),
             model: String::new(),
-            turns: activity.metrics.map(|metrics| metrics.tool_calls),
+            tools: activity.metrics.map(|metrics| metrics.tool_calls),
             tokens: activity.metrics.map(|metrics| {
                 (
                     metrics
@@ -1257,7 +1273,7 @@ fn subagent_cell_text(row: &SubagentRow, column: SubagentColumn, unicode: bool) 
             })
             .unwrap_or_default(),
         SubagentColumn::Model => row.model.clone(),
-        SubagentColumn::Turns => row.turns.map(|turns| turns.to_string()).unwrap_or_default(),
+        SubagentColumn::Tools => row.tools.map(|tools| tools.to_string()).unwrap_or_default(),
         SubagentColumn::Tokens => row
             .tokens
             .map(|tokens| subagent_tokens_cell(tokens, unicode))
@@ -1364,7 +1380,7 @@ fn subagent_columns(
     }
     for column in [
         SubagentColumn::Elapsed,
-        SubagentColumn::Turns,
+        SubagentColumn::Tools,
         SubagentColumn::Tokens,
         SubagentColumn::Cost,
     ] {
@@ -1488,7 +1504,9 @@ fn subagent_compact_line(
 /// single-word heading exactly as before.
 fn subagent_activity_scope(view: &SubagentActivityView) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(filter) = view.state_filter {
+    if let Some(filter) = &view.panel_filter {
+        parts.push(format!("state: {}", sanitize_for_terminal(&filter.label)));
+    } else if let Some(filter) = view.state_filter {
         parts.push(format!("state: {}", filter.filter_label()));
     }
     if view.sort != SubagentActivitySort::State {
@@ -1574,10 +1592,11 @@ pub(super) fn subagent_activity_render_rows(
     let unicode = theme.unicode();
     let separator = if unicode { " · " } else { " | " };
     let mut rows = subagent_rows(view);
-    // A declared-state narrowing is explicit, so it is applied before the row
-    // ceiling is measured: the reader asked for the failed workers and the
-    // bound then applies to that view, never to the whole roster.
-    if let Some(filter) = view.state_filter {
+    // Narrowing is display-only; the host already bounds the retained roster.
+    // Expansion must reveal every retained worker, including later groups.
+    if let Some(filter) = &view.panel_filter {
+        rows.retain(|row| filter.node_ids.contains(&row.node_id));
+    } else if let Some(filter) = view.state_filter {
         rows.retain(|row| row.group == filter);
     }
     sort_subagent_rows(&mut rows, view.sort);
@@ -1628,14 +1647,16 @@ pub(super) fn subagent_activity_render_rows(
             .saturating_add(widths.iter().take(mandatory).copied().sum::<usize>())
             .saturating_add(2 * mandatory.saturating_sub(1))
             <= usize::from(width);
-    let mut remaining = MAX_SUBAGENT_ACTIVITY_ROWS;
     let mut rendered_groups = 0;
     for group in SubagentStateGroup::ORDER {
         let members: Vec<&SubagentRow> = rows.iter().filter(|row| row.group == group).collect();
-        if members.is_empty() || remaining == 0 {
+        if members.is_empty() {
             continue;
         }
-        let collapsed = group.is_terminal() && !expanded && view.state_filter.is_none();
+        let collapsed = group.is_terminal()
+            && !expanded
+            && view.state_filter.is_none()
+            && view.panel_filter.is_none();
         if collapsed {
             // One bounded row names the group, its count, and the workers it
             // hides, so nothing disappears silently and the live rows above
@@ -1656,7 +1677,6 @@ pub(super) fn subagent_activity_render_rows(
                 ),
                 width,
             ));
-            remaining = remaining.saturating_sub(1);
             rendered_groups += 1;
             continue;
         }
@@ -1664,28 +1684,12 @@ pub(super) fn subagent_activity_render_rows(
         // Every row names its own state in the state cell, so a per-group
         // sub-heading would only repeat it. The collapsed summary above already
         // accounts for the workers a terminal group hides.
-        if grid_fits && remaining > 0 {
+        if grid_fits {
             lines.push(subagent_grid_header_line(
                 theme, &columns, &widths, group, width,
             ));
-            remaining = remaining.saturating_sub(1);
         }
         for (index, row) in members.iter().enumerate() {
-            if remaining == 0 {
-                let omitted = members.len() - index;
-                lines.push(fit_line(
-                    &subdued_text(
-                        theme,
-                        &format!(
-                            "{}{} {omitted} more{separator}ctrl+o shows all",
-                            if unicode { "└" } else { "`-" },
-                            theme.glyph("ellipsis"),
-                        ),
-                    ),
-                    width,
-                ));
-                break;
-            }
             let elbow = if unicode { "└" } else { "`-" };
             let branch = if unicode { "├" } else { "+-" };
             let elbow = if index + 1 == members.len() {
@@ -1710,7 +1714,6 @@ pub(super) fn subagent_activity_render_rows(
                     include_state,
                 ));
             }
-            remaining = remaining.saturating_sub(1);
             if let Some(reason) = row.reason.as_deref() {
                 let text = format!("Failed: {reason}");
                 lines.push(fit_line(
@@ -1727,7 +1730,6 @@ pub(super) fn subagent_activity_render_rows(
                     ),
                     width,
                 ));
-                remaining = remaining.saturating_sub(1);
             }
         }
         rendered_groups += 1;
@@ -2575,6 +2577,9 @@ impl ShellState {
         if let Some(index) = self.subagent_activity_block {
             if let Some(TranscriptBlock::Tool(panel)) = self.transcript.get_mut(index) {
                 if let Some(previous) = panel.subagent_activity.as_ref() {
+                    view.sort = previous.sort;
+                    view.state_filter = previous.state_filter;
+                    view.panel_filter = previous.panel_filter.clone();
                     let same_presentation = previous.same_presentation(&view);
                     let was_panel_active = !panel.finished;
                     panel.update_subagent_activity(&view);
@@ -6079,7 +6084,10 @@ impl InteractiveShell {
             None => Some(SubagentStateGroup::Running),
             Some(current) => current.next_filter(),
         };
-        Self::apply_subagent_activity_controls(&mut state, |view| view.state_filter = next);
+        Self::apply_subagent_activity_controls(&mut state, |view| {
+            view.state_filter = next;
+            view.panel_filter = None;
+        });
         next.map_or("all", SubagentStateGroup::filter_label)
     }
 
@@ -6108,16 +6116,16 @@ impl InteractiveShell {
     ) {
         let mut changed = false;
         if let Some(view) = state.subagent_activity.as_mut() {
-            let before = (view.sort, view.state_filter);
+            let before = (view.sort, view.state_filter, view.panel_filter.clone());
             apply(view);
-            changed |= (view.sort, view.state_filter) != before;
+            changed |= (view.sort, view.state_filter, view.panel_filter.clone()) != before;
         }
         if let Some(index) = state.subagent_activity_block {
             if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get_mut(index) {
                 if let Some(view) = panel.subagent_activity.as_mut() {
-                    let before = (view.sort, view.state_filter);
+                    let before = (view.sort, view.state_filter, view.panel_filter.clone());
                     apply(view);
-                    changed |= (view.sort, view.state_filter) != before;
+                    changed |= (view.sort, view.state_filter, view.panel_filter.clone()) != before;
                 }
             }
             if changed {
@@ -6460,6 +6468,20 @@ impl InteractiveShell {
             })
             .and_then(|raw| filtered.iter().position(|candidate| *candidate == raw))
             .unwrap_or_else(|| (*selected).min(filtered.len().saturating_sub(1)));
+        let mirror = action
+            .subagent_panel()
+            .and_then(SubagentPanel::activity_filter);
+        if mirror.is_some()
+            || state
+                .subagent_activity
+                .as_ref()
+                .is_some_and(|view| view.panel_filter.is_some())
+        {
+            Self::apply_subagent_activity_controls(&mut state, |view| {
+                view.state_filter = None;
+                view.panel_filter = mirror.clone();
+            });
+        }
     }
 
     /// Replace the body of a read-only document without changing its title or
@@ -6779,11 +6801,7 @@ impl InteractiveShell {
                                 {
                                     subagents.cycle_state_filter();
                                     *selected = 0;
-                                    Some(
-                                        subagents
-                                            .state_filter_label()
-                                            .map(SubagentStateGroup::of_panel_label),
-                                    )
+                                    Some(subagents.activity_filter())
                                 } else {
                                     None
                                 };
@@ -6794,7 +6812,8 @@ impl InteractiveShell {
                                     // The panel borrow ends here; the settled
                                     // event is a separate transcript block.
                                     Self::apply_subagent_activity_controls(&mut state, |view| {
-                                        view.state_filter = filter
+                                        view.state_filter = None;
+                                        view.panel_filter = filter.clone();
                                     });
                                 }
                             }

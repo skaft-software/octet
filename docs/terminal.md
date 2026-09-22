@@ -62,6 +62,13 @@ share the bounded hint above the composer. Option+Up (Alt+Up) recalls the newest
 local follow-up into an empty composer, preserving attachment/paste chips. It
 never submits or retracts already-admitted steering.
 
+Native clipboard reads during active work do not block input, cancellation, or
+run progress. A pending read is discarded when the run settles or is cancelled,
+or when the draft is cleared, submitted, steered, recalled, or consumed by a
+command. Results are also discarded after intervening text/cursor edits or loss
+of composer focus, so late clipboard output cannot enter a replacement draft or
+another input surface.
+
 Escape first closes the current panel/slash popup; with the composer focused,
 it interrupts active work and dispatches the oldest queued follow-up **after**
 the run settles. It never submits an unqueued draft. Ctrl+C clears a nonempty
@@ -143,9 +150,16 @@ and collapses it again; this does not alter the executed command or the separate
 output preview.
 
 The transcript's **Subagents** event indents the complete worker roster beneath
-its heading. Rows retain state, input/output tokens, and cost, but omit call
-counts; the underlying telemetry and inspector remain unchanged. One session-scoped
-roster updates in its original transcript position across root prompts, including
+its heading. Rows retain state, model, and available metrics; the `tools` column
+counts tool calls, not model turns. Terminal groups collapse to counted summaries;
+Ctrl+O reveals every retained worker (up to 32), including failure details.
+Host `limit_reached` belongs to the failed group; `interrupted`, `shutdown`,
+`detached`, and `awaiting_approval` belong to the stopped display group.
+Detached/approval-parked workers remain recoverable, not successful; their exact
+states remain on expanded rows. Only an all-successful settled host roster is green.
+The panel’s Ctrl+F state filter mirrors its exact worker membership into the
+transcript, including mixed native states under generic Blocked/Queued labels.
+One session-scoped roster updates in its original transcript position across root prompts, including
 new and continued workers. Raw first-party orchestration calls and their matching
 results stay hidden during live execution and replay; actionable failures remain
 visible. Resume starts a fresh telemetry roster rather than replaying raw calls.

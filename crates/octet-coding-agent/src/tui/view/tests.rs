@@ -10829,7 +10829,7 @@ fn subagent_transcript_aligns_columns_by_visible_width() {
         let (header_cells, live_cells) = if native {
             (
                 [
-                    "worker", "state", "model", "elapsed", "turns", "tokens", "cost",
+                    "worker", "state", "model", "elapsed", "tools", "tokens", "cost",
                 ]
                 .as_slice(),
                 [
@@ -10845,7 +10845,7 @@ fn subagent_transcript_aligns_columns_by_visible_width() {
             )
         } else {
             (
-                ["worker", "state", "turns", "tokens", "cost"].as_slice(),
+                ["worker", "state", "tools", "tokens", "cost"].as_slice(),
                 ["審査", "running", "0", "↑5.6m ↓3.9k", "$0.165"].as_slice(),
             )
         };
@@ -11802,10 +11802,10 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
 
 /// Maintainer screenshot: 32 rows where 22 dead workers buried 8 live ones
 /// ("8 running · 2 done · 8 failed · 14 stopped"). The live workers must stay
-/// visible, every terminal group must collapse to one counted row, and the
-/// event must stay bounded in both disclosure modes.
+/// visible, every terminal group must collapse to one counted row, and
+/// expansion must reveal the entire host-bounded roster.
 #[test]
-fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
+fn subagent_transcript_collapses_groups_and_expands_every_worker() {
     let mut shell = InteractiveShell::test_shell();
     let child = |id: &str, task: &str, state: &str, elapsed: u64, reason: Option<&str>| {
         octet_agent::DelegationTelemetryChild {
@@ -11910,7 +11910,7 @@ fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
         collapsed.contains("running"),
         "the live rows name their state: {collapsed}"
     );
-    // The 22 dead workers are three summary rows, not 22 rows of their own: 32
+    // The 24 terminal workers are three summary rows, not 24 rows of their own: 32
     // workers render as heading + column header + 8 live rows + 3 collapsed
     // summaries.
     let lines = collapsed.lines().collect::<Vec<_>>();
@@ -11962,23 +11962,24 @@ fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
         "{narrow:?}"
     );
 
-    // Expanding still bounds the row count: the reader never gets an unbounded
-    // list, and the omitted tail is reported instead of silently dropped.
+    // The host bounds the roster, not its expanded physical rows. Every
+    // retained worker must be visible, including the last terminal group.
     shell.toggle_disclosure();
     let expanded = render(&shell, 120);
-    assert!(
-        expanded.len() <= 29,
-        "{} rows: {expanded:?}",
-        expanded.len()
-    );
-    assert!(
-        expanded.iter().any(|row| row.contains("more")),
-        "the bounded tail must be reported: {expanded:?}"
-    );
-    assert!(
-        expanded.join("\n").contains("live worker 0"),
-        "{expanded:?}"
-    );
+    for (prefix, count) in [("live", 8), ("done", 2), ("failed", 8), ("stopped", 14)] {
+        for index in 0..count {
+            let cell = format!("{prefix} worker {index}  ");
+            assert_eq!(
+                expanded.iter().filter(|row| row.contains(&cell)).count(),
+                1,
+                "missing or repeated {cell}: {expanded:?}"
+            );
+        }
+    }
+    assert!(expanded.iter().all(|row| visible_width(row) <= 120));
+    assert!(!expanded
+        .iter()
+        .any(|row| row.contains("ctrl+o shows all") || row.contains(" more")));
 }
 
 /// The keyboard controls for the settled event: `ctrl+f` cycles the declared
@@ -12042,6 +12043,31 @@ fn subagent_panel_keyboard_cycles_the_state_filter_and_the_row_ordering() {
     assert!(rows(&shell).contains("Subagents"), "{}", rows(&shell));
 
     open_grouped_subagent_panel(&mut shell, 1, 1);
+    // Mirror real stable worker IDs rather than unrelated synthetic rows.
+    if let Some(Panel::SelectList {
+        items,
+        descriptions,
+        action,
+        ..
+    }) = shell.state.borrow_mut().panel.as_mut()
+    {
+        *items = vec![
+            "alpha".into(),
+            "beta".into(),
+            "gamma".into(),
+            "failed".into(),
+            "stopped".into(),
+        ];
+        *descriptions = vec![None; 5];
+        let PanelAction::SelectSubagent(panel) = action else {
+            unreachable!()
+        };
+        panel.node_ids = items.iter().map(|id| format!("worker:{id}")).collect();
+        panel.groups[0].indices = vec![0, 1];
+        panel.groups[1].indices = vec![2];
+        panel.groups[2].indices = vec![3];
+        panel.groups[3].indices = vec![4];
+    }
     let press = |shell: &mut InteractiveShell, character: char| {
         shell.panel_input(&panel_key_with_modifiers(
             crossterm::event::KeyCode::Char(character),
@@ -12053,11 +12079,11 @@ fn subagent_panel_keyboard_cycles_the_state_filter_and_the_row_ordering() {
     // the same narrowing so the two presentations cannot disagree.
     press(&mut shell, 'f');
     let filtered = rows(&shell);
-    assert!(filtered.contains("state: running"), "{filtered}");
+    assert!(filtered.contains("state: Running"), "{filtered}");
     press(&mut shell, 'f');
     let filtered = rows(&shell);
-    assert!(filtered.contains("state: completed"), "{filtered}");
-    assert!(!filtered.contains("state: running"), "{filtered}");
+    assert!(filtered.contains("state: Done"), "{filtered}");
+    assert!(!filtered.contains("state: Running"), "{filtered}");
     assert!(
         !filtered.contains("alpha"),
         "the narrowing must hide the live rows: {filtered}"
