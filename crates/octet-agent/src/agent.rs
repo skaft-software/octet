@@ -4620,7 +4620,15 @@ fn durable_responses_options(
     let service_tier = resolve_service_tier(model, requested_service_tier)?;
     let reasoning_state = session.responses_reasoning(&model.endpoint.id, &model.spec.id)?;
     let replay = exact_responses_replay(session, model, system);
-    if reasoning_state.is_some() && replay.is_none() {
+    // A baseline pin is represented by `Request.reasoning`; only an ordered
+    // update item must occupy its chronological position in opaque replay.
+    // Existing Codex sessions predate route-affine sidecars and remain valid
+    // through canonical replay when no update has been recorded.
+    if reasoning_state
+        .as_ref()
+        .is_some_and(|(baseline, effective)| baseline != effective)
+        && replay.is_none()
+    {
         return Err(AgentError::InvalidCompactionPolicy(
             "reasoning update history requires complete route-affine Responses replay".into(),
         ));
@@ -14238,6 +14246,49 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         let options = durable_responses_options(&session, &model, "system", Some(ServiceTier::Flex))
             .unwrap()
             .expect("a requested tier always produces options");
+        // A baseline pin is request metadata, not an ordered input update.
+        // Legacy sessions without opaque sidecars must keep canonical replay.
+        Arc::make_mut(&mut model.endpoint)
+            .runtime
+            .responses_features
+            .reasoning_effort_updates = true;
+        Arc::make_mut(&mut model.spec)
+            .capabilities
+            .responses_features
+            .reasoning_effort_updates = true;
+        let baseline = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium);
+        session
+            .append(EntryValue::ResponsesReasoning {
+                endpoint: model.endpoint.id.clone(),
+                model: model.spec.id.clone(),
+                baseline: baseline.clone(),
+                update: None,
+            })
+            .unwrap();
+        assert!(
+            durable_responses_options(&session, &model, "system", None)
+                .unwrap()
+                .is_none(),
+            "baseline-only reasoning history remains canonically replayable"
+        );
+        session
+            .append(EntryValue::ResponsesReasoning {
+                endpoint: model.endpoint.id.clone(),
+                model: model.spec.id.clone(),
+                baseline: baseline.clone(),
+                update: Some(octet_ai::ResponsesConfigurationUpdate {
+                    reasoning: ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+                }),
+            })
+            .unwrap();
+        let error = durable_responses_options(&session, &model, "system", None).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "reasoning update history requires complete route-affine Responses replay"
+            ),
+            "{error}"
+        );
+
         assert_eq!(options.service_tier, Some(ServiceTier::Flex));
         assert!(options.input.is_none());
         assert_eq!(options.previous_response_id, None);
