@@ -348,6 +348,56 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   and add a bounded, self-contained Mermaid box-drawing engine; both fail closed
   on unsupported syntax instead of misrendering it.
 
+### Herdr integration
+
+- Report octet's agent lifecycle to [Herdr](https://herdr.dev) from the
+  interactive frontend, so a pane running octet appears as a first-class agent
+  in the sidebar, agent list, state rollups, notifications, and waits. The
+  implementation follows Herdr's official Pi integration (integration version
+  9) on the documented custom-agent surface: `pane.report_agent` for semantic
+  `idle`/`working`/`blocked` state, `pane.report_agent_session` for session
+  identity, and `pane.release_agent` on exit, with a strictly increasing `seq`
+  seeded from wall-clock milliseconds so a restarted process cannot report
+  stale sequence numbers.
+
+  State comes from the run stream itself — ready at startup, `working` from the
+  moment a prompt is accepted, `blocked` while an approval or input prompt is
+  on screen, and `idle` when the run settles — so the pane cannot disagree with
+  octet. Reporting is bounded to one 500 ms socket attempt plus one 1500 ms
+  retry, silent on every failure, and active only when `HERDR_ENV=1` with a
+  pane id and transport, so it is a complete no-op outside Herdr. A slow Herdr
+  server can add at most the bounded delivery attempts at a report boundary.
+  Only the opaque session id (never a
+  transcript path) and the bounded on-screen approval prompt leave the process;
+  display-only presentation stays with `herdr pane report-metadata`.
+
+  Transports are direct socket IPC on `HERDR_SOCKET_PATH` (Linux/macOS) and the
+  documented `HERDR_BIN_PATH` CLI wrapper (Windows), each as an argv list with
+  no shell.
+
+- Resume octet sessions in restored Herdr panes without a Herdr-side change,
+  using Herdr's documented plugin surface instead of a native agent kind. While
+  octet runs in a pane it keeps one small owner-private record (`pane id`,
+  Herdr session scope, session id, cwd, session-store root, workspace, pid) under
+  `~/.octet/herdr/panes/`, and
+  `octet herdr install-plugin` generates a manifest whose single `[[startup]]`
+  hook is `octet herdr restore` — no events, actions, panes, build steps, or
+  state outside octet's own directories. Herdr runs startup hooks after it
+  restores the session and the API socket is ready, so that pass reopens each
+  recorded pane with `octet --resume <id>` and the recorded `--session-dir` and
+  `--workspace` scope.
+
+  The pass is bounded and fails closed: records are capped, size-limited,
+  owner-private, written atomically, pruned after 14 days or when their pane is
+  gone, and only resumed when the record belongs to this Herdr session, the pane
+  still exists, it currently hosts no agent, and its directory still matches the
+  recorded one. At most 16 panes per start; every skip is reported with its
+  reason; session ids are token-validated and absolute paths are bounded and
+  shell-quoted. The pane-list response is drained concurrently and capped. The
+  record survives a Herdr server stop (`SIGHUP` to the pane, measured against
+  Herdr 0.9.0) and is dropped on a deliberate exit, so a later restore never
+  resurrects a session the user closed. See [`docs/herdr.md`](docs/herdr.md).
+
 ### Repository tooling and docs
 
 - Add `scripts/changelog.py` (release extraction and link repair) and

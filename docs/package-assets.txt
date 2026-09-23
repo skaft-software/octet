@@ -217,6 +217,7 @@ text docs/extensions/event-bus.md
 text docs/extensions/PROTOCOL-REFERENCE.md
 text docs/extensions/legacy-authoring.md
 text docs/getting-started.md
+text docs/herdr.md
 text docs/installation.md
 text docs/instructions.md
 text docs/issue-evidence/382/v0.7.4-qualification.md

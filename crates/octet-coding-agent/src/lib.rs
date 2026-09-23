@@ -16,6 +16,8 @@ mod doctor;
 mod extension_bundle;
 mod extension_package;
 mod extensions;
+/// Best-effort Herdr pane lifecycle reporting (`pane.report_agent`).
+mod herdr;
 /// Versioned NDJSON process boundary for non-Rust consumers.
 pub mod host;
 mod hydrate;
@@ -170,6 +172,12 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(cli::TopLevelCommand::Sessions { command }) = top_level_command.clone() {
         return session_commands::run(command, &config);
+    }
+    if let Some(cli::TopLevelCommand::Herdr { command }) = top_level_command.clone() {
+        // `octet herdr restore` is also the Herdr plugin's startup hook, so it
+        // must stay a self-contained command: no provider discovery, no model
+        // resolution, and no terminal ownership.
+        return herdr::run_command(command);
     }
     if let Some(cli::TopLevelCommand::Catalog { command }) = top_level_command.clone() {
         return cli::catalog_publish::run(command, &config);

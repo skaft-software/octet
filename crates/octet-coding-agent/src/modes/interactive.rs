@@ -5797,11 +5797,20 @@ where
     let _diagnostics = crate::output::defer_tui_diagnostics();
     let had_fast = app.agent.service_tier().is_some();
     let host_notification = HostNotification::of(&reconfig);
+    // A transition may replace the active durable session (`/resume`, `/new`,
+    // `/fork`, `/clone`). Herdr's pane reference must follow it, exactly as the
+    // Pi integration refreshes its session reference on every `agent_start`.
+    let previous_session_id = herdr_session_id(&app);
+    let start_source = herdr_reconfig_source(&reconfig);
     let mut app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
         apply_reconfig(app, reconfig)
     })
     .await?;
     shell.hydrate(app.agent.session())?;
+    let session_id = herdr_session_id(&app);
+    if session_id != previous_session_id {
+        shell.herdr_session_changed(session_id, start_source, herdr_launch_scope(&app));
+    }
     // Model and thinking changes are acknowledged by stable chrome, not a
     // duplicate transcript notice. Session-operation notices remain caller-owned.
     update_status(shell, &app);
@@ -5812,6 +5821,44 @@ where
         .activate_session_lifecycle_driver();
     host_notification.publish(&mut app.executable_extensions);
     Ok(app)
+}
+
+/// The opaque, path-free session id `octet --resume <id>` accepts, when the
+/// active session has a usable durable identity.
+///
+/// Only the id is ever reported: Herdr's Pi integration also sends an
+/// `agent_session_path`, and octet deliberately does not — its transcript path
+/// never leaves the process.
+fn herdr_session_id(app: &App) -> Option<String> {
+    terminal_goal_session_id(app.agent.session()).ok()
+}
+
+/// A restored lookup needs the same store root and workspace as the live App;
+/// a session id alone is only unique within that pair.
+fn herdr_launch_scope(app: &App) -> crate::herdr::restore::LaunchScope {
+    crate::herdr::restore::LaunchScope::new(
+        &app.config.session_dir,
+        &app.config.workspace,
+        &app.config.invocation_cwd,
+    )
+}
+
+/// The Pi-style `session_start` reason for a launch selection.
+fn herdr_startup_source(selector: &ResumeSelector) -> Option<&'static str> {
+    match selector {
+        ResumeSelector::New => Some("startup"),
+        ResumeSelector::Continue | ResumeSelector::Resume(_) => Some("resume"),
+        ResumeSelector::Fork(_) => Some("fork"),
+    }
+}
+
+/// The Pi-style `session_start` reason for an in-process session transition.
+fn herdr_reconfig_source(reconfig: &Reconfig) -> Option<&'static str> {
+    match reconfig {
+        Reconfig::NewSession => Some("startup"),
+        Reconfig::Resume(_) => Some("resume"),
+        Reconfig::Model(_) | Reconfig::Thinking(_) | Reconfig::ThinkingMode { .. } => None,
+    }
 }
 
 fn bounded_extension_session_id(session_id: String) -> anyhow::Result<String> {
@@ -9227,6 +9274,14 @@ async fn run_interactive_once(
         .activate_session_lifecycle_driver();
     update_status(&mut shell, &app);
     request_extension_ui(&mut shell, &mut app);
+    // The pane is ready for input. Reporting here (not earlier) means the
+    // session identity is already resolved, and a headless/plain run never
+    // reaches this point at all — the equivalent of Pi's TUI-only gate.
+    shell.herdr_attach(
+        herdr_session_id(&app),
+        herdr_startup_source(&app.config.resume),
+        herdr_launch_scope(&app),
+    );
     let mut startup_input = prepare_startup_input(&app, &mut shell, startup_prompt);
     crate::app::bootstrap::startup_phase("frame.ready");
     shell.finish_startup();
@@ -9296,6 +9351,16 @@ async fn run_interactive_once(
                     // deadline target the discarded driver.
                     goal_deadline = recovered_goal_deadline(&app)?;
                     next_prompt_source = GoalTurnSource::User;
+                    // `session/switch` and `session/reload` are the only
+                    // lifecycle operations that replace the active durable
+                    // session; `create`/`fork` return dormant ids without
+                    // switching. Herdr's stored reference follows the active
+                    // session, exactly as the Pi integration refreshes it.
+                    shell.herdr_session_changed(
+                        herdr_session_id(&app),
+                        Some("resume"),
+                        herdr_launch_scope(&app),
+                    );
                 }
             }
             // The one place a live-reload pass is applied. Only idle-boundary
@@ -9572,6 +9637,10 @@ async fn run_interactive_once(
                     shell.notice(diagnostic);
                 }
 
+                // Capture the pane's session identity before the run borrows
+                // the agent mutably: Herdr must learn the session reference at
+                // the same moment the prompt is accepted.
+                let pane_session_id = herdr_session_id(&app);
                 // Snapshot the read-only application facts the run cannot lend
                 // out (it owns `&mut Agent`), so inspection commands still work.
                 let inspection = ActiveRunInspection::capture(&app);
@@ -9606,6 +9675,9 @@ async fn run_interactive_once(
                 prepare_prompt(&mut shell);
                 shell.on_composed_prompt_submitted(&retry_composed);
                 let run_id = shell.begin_run(&app.model.endpoint.id.0);
+                // Working from the moment the prompt is accepted, before any
+                // provider event: Pi reports `working` on `agent_start`.
+                shell.herdr_run_started(pane_session_id);
                 shell.mark_prompt_persisted();
                 shell.set_awaiting_provider(run_id);
                 shell.render();

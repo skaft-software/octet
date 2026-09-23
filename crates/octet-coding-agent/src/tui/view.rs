@@ -3415,6 +3415,8 @@ pub struct InteractiveShell {
     /// Shared with the one input stream: while set, the host reads no raw bytes
     /// because an extension grant owns the terminal.
     terminal_ceded: Arc<AtomicBool>,
+    /// Best-effort Herdr pane lifecycle reporting. Inert outside Herdr.
+    herdr: crate::herdr::PaneReporter,
 }
 
 impl InteractiveShell {
@@ -3476,6 +3478,7 @@ impl InteractiveShell {
             render_thread: Some(render_thread),
             capture_mouse,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
+            herdr: crate::herdr::PaneReporter::detect(),
         })
     }
 
@@ -3508,6 +3511,9 @@ impl InteractiveShell {
             render_thread: None,
             capture_mouse: false,
             terminal_ceded: Arc::new(AtomicBool::new(false)),
+            // Renderer tests must never report to a real Herdr pane, even when
+            // the test process inherits one.
+            herdr: crate::herdr::PaneReporter::disabled(),
         }
     }
 
@@ -3645,8 +3651,49 @@ impl InteractiveShell {
         Ok(())
     }
 
+    /// Install the Herdr pane session identity and report the ready state.
+    ///
+    /// `start_source` mirrors Pi's `session_start` reason (`startup`,
+    /// `resume`, `fork`, ...) when the launch reason is known.
+    pub(crate) fn herdr_attach(
+        &self,
+        session_id: Option<String>,
+        start_source: Option<&str>,
+        launch_scope: crate::herdr::restore::LaunchScope,
+    ) {
+        self.herdr.attach(session_id, start_source, launch_scope);
+    }
+
+    /// Report that a prompt was accepted: the pane is now working.
+    pub(crate) fn herdr_run_started(&self, session_id: Option<String>) {
+        self.herdr.run_started(session_id);
+    }
+
+    /// Report that the active durable session changed (`/resume`, `/new`,
+    /// `/fork`, `/clone`, or an extension lifecycle switch/reload).
+    pub(crate) fn herdr_session_changed(
+        &self,
+        session_id: Option<String>,
+        start_source: Option<&str>,
+        launch_scope: crate::herdr::restore::LaunchScope,
+    ) {
+        self.herdr.session_changed(session_id, start_source, launch_scope);
+    }
+
     /// Stop rendering and restore the process terminal.
     pub fn leave(mut self) {
+        // Release Herdr lifecycle authority before the pane's agent exits, so
+        // no late report reclaims a pane that no longer runs octet. Silent and
+        // bounded; a no-op outside Herdr.
+        //
+        // A Herdr server stop sends SIGHUP to the pane's foreground process
+        // (measured against Herdr 0.9.0). That is the workspace-teardown case
+        // where the pane record must survive so `octet herdr restore` can hand
+        // the pane back after Herdr restores the layout; every other exit is
+        // deliberate and drops the record.
+        let keep_for_restore = crate::tui::terminal::received_shutdown_signal()
+            .is_some_and(|signal| signal == signal_hook::consts::signal::SIGHUP);
+        self.herdr.finish(keep_for_restore);
         self.stop_renderer();
         force_restore();
     }
@@ -3868,6 +3915,10 @@ impl InteractiveShell {
         if !update.accepted {
             return;
         }
+        // Herdr observes semantic lifecycle only: which prompt is running,
+        // and whether the run is parked on a human decision. It never sees
+        // transcript content.
+        self.herdr.on_run_event(event);
         if matches!(
             event,
             AgentEvent::TurnStarted

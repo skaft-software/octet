@@ -99,6 +99,11 @@ pub enum TopLevelCommand {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// Integrate with the Herdr terminal workspace manager.
+    Herdr {
+        #[command(subcommand)]
+        command: crate::herdr::HerdrCommand,
+    },
     /// Install and manage extension packages.
     Extension {
         #[command(subcommand)]
