@@ -1377,8 +1377,17 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
             assert!(parser.screen().contents().contains("Set up a provider"));
             assert!(!parser.screen().hide_cursor());
         }
-        // Open the existing endpoint-input owner, type without submitting, and
-        // Ctrl-C out. This never probes a service or writes provider state.
+        // Local endpoints are nested under the cloud-first setup menu. Open
+        // the endpoint-input owner, type without submitting, and Ctrl-C out.
+        // This never probes a service or writes provider state.
+        octet.pty.write_input(b"Local\r");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "› LM Studio",
+            STARTUP_TIMEOUT,
+        );
         octet.pty.write_input(b"\x1b[B\r");
         await_screen(
             &mut octet,
@@ -1405,8 +1414,16 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
             STARTUP_TIMEOUT,
         );
         assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        octet.pty.write_input(b"\x1b"); // Leave nested local setup.
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Add an API key",
+            STARTUP_TIMEOUT,
+        );
         let readiness_start = consumed;
-        octet.pty.write_input(b"\x1b[B\x1b[B\r"); // Continue without a provider.
+        octet.pty.write_input(b"Continue without\r");
         octet.wait_until(STARTUP_TIMEOUT, |bytes| {
             synchronized_frame_end_containing(&bytes[readiness_start..], b"setup needed").is_some()
         });
@@ -2871,7 +2888,7 @@ fn real_octet_initial_changelog_without_model_preserves_setup_choice() {
         "Set up a provider",
         STARTUP_TIMEOUT,
     );
-    octet.pty.write_input(b"\x1b[B\x1b[B\r");
+    octet.pty.write_input(b"Continue without\r");
     await_screen(
         &mut octet,
         &mut parser,

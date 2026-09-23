@@ -22,6 +22,12 @@ pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
 pub const SUMMARY_OUTPUT_TOKENS: u64 = 13_107; // floor(0.8 * Pi's 16,384-token reserve)
 /// Maximum output budget for a split-turn prefix summary.
 pub const TURN_PREFIX_OUTPUT_TOKENS: u64 = 8_192; // floor(0.5 * Pi's 16,384-token reserve)
+/// Largest durable local-compaction handoff, including host-derived file lists.
+///
+/// Two bounded model calls can contribute at most 21,299 tokens. 128 KiB leaves
+/// room for their UTF-8 output and the small structured host footer while
+/// preventing a malformed provider response from becoming durable context.
+pub const MAX_COMPACTION_HANDOFF_BYTES: usize = 128 * 1024;
 
 const SUMMARIZATION_PROMPT: &str = r#"The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
@@ -642,6 +648,30 @@ pub fn finish_handoff(summary: String, details: &CompactionDetails) -> String {
     format!("{summary}{}", format_file_operations(details))
 }
 
+/// Append host-derived file lists only when the complete handoff fits `max_bytes`.
+///
+/// This deliberately refuses rather than truncating either model text or file
+/// evidence. Callers must also reject empty model text before calling this.
+pub fn finish_handoff_bounded(
+    mut summary: String,
+    details: &CompactionDetails,
+    max_bytes: usize,
+) -> Option<String> {
+    if summary.len() > max_bytes {
+        return None;
+    }
+    let file_operations = format_file_operations(details);
+    if summary
+        .len()
+        .checked_add(file_operations.len())
+        .is_none_or(|bytes| bytes > max_bytes)
+    {
+        return None;
+    }
+    summary.push_str(&file_operations);
+    Some(summary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,6 +679,22 @@ mod tests {
         AssistantMessage, AudioFormat, AudioMedia, AudioPayload, ModelId, Protocol, ToolCall,
         ToolCallArgumentError, ToolCallId, ToolResult, ToolResultPart,
     };
+
+    #[test]
+    fn bounded_handoff_refuses_oversize_without_truncating() {
+        let details = CompactionDetails::default();
+        assert_eq!(
+            finish_handoff_bounded("summary".into(), &details, 7),
+            Some("summary".into())
+        );
+        assert!(finish_handoff_bounded("summary".into(), &details, 6).is_none());
+
+        let details = CompactionDetails {
+            read_files: vec!["src/lib.rs".into()],
+            modified_files: Vec::new(),
+        };
+        assert!(finish_handoff_bounded("summary".into(), &details, 7).is_none());
+    }
 
     fn assistant(parts: Vec<AssistantPart>) -> Message {
         Message::Assistant(AssistantMessage {

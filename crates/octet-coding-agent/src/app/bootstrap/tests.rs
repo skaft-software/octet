@@ -1569,6 +1569,108 @@ fn codex_astra_live_object_metadata_requires_explicit_ultra_and_v2() {
 }
 
 #[test]
+fn codex_observed_sol_luna_inventory_preserves_exact_ids_and_oauth_routes() {
+    // Model-only projection of authenticated GET /backend-api/codex/models on
+    // 2026-09-23 with client_version=0.153.2 and installed codex-cli 0.154.0.
+    // Both returned these 5.6 slugs, not gpt-6-sol/gpt-6-luna. No inference,
+    // output limit, price, or alias equivalence was established by that GET.
+    let body = serde_json::json!({"models": [
+        {
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6-Sol",
+            "context_window": 272_000,
+            "max_context_window": 872_000,
+            "default_reasoning_level": "low",
+            "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}
+            ],
+            "use_responses_lite": true,
+            "multi_agent_version": "v2",
+            "visibility": "list",
+            "supported_in_api": true,
+            "minimal_client_version": "0.144.0",
+            "input_modalities": ["text", "image"]
+        },
+        {
+            "slug": "gpt-5.6-luna",
+            "display_name": "GPT-5.6-Luna",
+            "context_window": 272_000,
+            "max_context_window": 872_000,
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}
+            ],
+            "use_responses_lite": true,
+            "multi_agent_version": "v1",
+            "visibility": "list",
+            "supported_in_api": true,
+            "minimal_client_version": "0.144.0",
+            "input_modalities": ["text", "image"]
+        }
+    ]});
+    let directory = tempfile::tempdir().unwrap();
+    for plan in ["plus", "pro"] {
+        let path = directory.path().join(format!("{plan}-codex.json"));
+        write_codex_credential(&path, false, plan);
+        let store = crate::auth::codex::CredentialStore::new(path);
+        let claims = crate::auth::codex::usable_subscription_claims(&store)
+            .unwrap()
+            .unwrap();
+        let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+        assert_eq!(models.len(), 2);
+        for model in &models {
+            let sol = model.id == "gpt-5.6-sol";
+            assert!(sol || model.id == "gpt-5.6-luna");
+            assert_eq!(model.default_context_window, 272_000);
+            assert_eq!(model.max_context_window, 872_000);
+            assert_eq!(
+                model.context_window,
+                if !sol && plan == "pro" { 372_000 } else { 272_000 }
+            );
+            assert_eq!(model.max_output_tokens, CODEX_MAX_OUTPUT_TOKENS);
+            assert_eq!(model.min_effort, octet_ai::ReasoningEffort::Low);
+            assert_eq!(
+                model.reasoning_options.default.as_deref(),
+                Some(if sol { "low" } else { "medium" })
+            );
+            let mut expected = vec!["low", "medium", "high", "xhigh", "max"];
+            if sol {
+                expected.push("ultra");
+            }
+            assert_eq!(model.reasoning_options.values, expected);
+            assert_eq!(model.agent_delegation, sol.then_some(AgentDelegation::V2));
+            assert!(model.responses_lite);
+        }
+        save_codex_model_cache(&store, &CodexDiscovery { claims, models }).unwrap();
+        let mut catalog = ModelCatalog::default();
+        // Registration uses an account-bound fixture cache, never the network.
+        // Its conservative offline reduction must retain exact ordinary choices.
+        register_openai_codex(&mut catalog, store, true).unwrap();
+        for id in ["gpt-5.6-sol", "gpt-5.6-luna"] {
+            let model = catalog.resolve(&ModelId(id.into())).unwrap();
+            assert_eq!(model.spec.api_name, id);
+            assert_eq!(model.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
+            assert_eq!(model.endpoint.base_url.as_str(), crate::providers::CODEX.base_url);
+            assert!(matches!(model.endpoint.auth, Auth::Dynamic(_)));
+            assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+            let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+            assert_eq!(
+                reasoning.options.as_ref().unwrap().values,
+                ["low", "medium", "high", "xhigh", "max"]
+            );
+            assert!(!reasoning.supports(&ReasoningConfig::Off));
+            assert!(!model.spec.capabilities.responses_lite);
+            assert_eq!(model.spec.capabilities.agent_delegation, None);
+        }
+        for absent in ["gpt-6-sol", "gpt-6-luna", "codex/gpt-6-sol", "codex/gpt-6-luna"] {
+            assert!(catalog.resolve(&ModelId(absent.into())).is_err());
+        }
+    }
+}
+
+#[test]
 fn codex_live_inventory_does_not_inject_unadvertised_astra() {
     let models = codex_models_from_response(
         &serde_json::json!({"models": [{"slug": "gpt-5.6-sol"}]}),
@@ -4405,13 +4507,9 @@ fn newly_discovered_openrouter_model_decodes_its_advertised_reasoning_parameters
         capability.openai_chat_mode,
         OpenAiChatReasoningMode::OpenRouter
     );
-    assert!(
-        capability
-            .options
-            .as_ref()
-            .is_some_and(|options| options.values.iter().any(|value| value == "high")),
-        "the default OpenRouter effort set remains available: {capability:?}"
-    );
+    assert_eq!(capability.choices(), vec![ReasoningConfig::On]);
+    assert_eq!(capability.control, ReasoningControl::AlwaysOn);
+    assert_eq!(octet_ai::select_auxiliary_reasoning(&advertised).unwrap(), ReasoningConfig::On);
     // A model that does not advertise reasoning stays without it.
     let text_only = catalog
         .resolve(&ModelId("openrouter/vendor/text-only".into()))
@@ -4422,6 +4520,290 @@ fn newly_discovered_openrouter_model_decodes_its_advertised_reasoning_parameters
         .resolve(&ModelId("openrouter/vendor/explicit-off".into()))
         .unwrap();
     assert!(explicit_off.spec.capabilities.reasoning.is_none());
+}
+
+#[test]
+fn openrouter_saved_off_emits_diagnostics_during_build_and_session_rebuild() {
+    const CHILD: &str = "OCTET_TEST_OPENROUTER_REASONING_DIAGNOSTIC";
+    if std::env::var_os(CHILD).is_none() {
+        // Exercise the real stderr route without replacing a process-global
+        // descriptor underneath concurrently running unit tests.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "app::bootstrap::tests::openrouter_saved_off_emits_diagnostics_during_build_and_session_rebuild",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(
+            stderr
+                .matches("cannot honor reasoning=off; using advertised reasoning=max")
+                .count(),
+            2,
+            "{stderr}"
+        );
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut boot = bootstrap(config(directory.path(), Some("gpt-4o-mini"))).unwrap();
+    let declaration = &crate::providers::OPENROUTER;
+    boot.catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openrouter_models_from_response(&mut boot.catalog, declaration, &serde_json::json!({"data":[{
+        "id":"fixture/mandatory", "context_length":1310720, "max_completion_tokens":16384,
+        "reasoning":{"mandatory":true,"default_enabled":true,"supported_efforts":["max","high","low"],"default_effort":"max"}
+    }]})).unwrap();
+    let model = ModelId("openrouter/fixture/mandatory".into());
+    let saved_path = directory.path().join("saved-off.jsonl");
+    let mut saved = Session::create(&saved_path).unwrap();
+    append_config_if_changed(
+        &mut saved,
+        &model,
+        &ReasoningConfig::Off,
+        ReasoningMode::Standard,
+    )
+    .unwrap();
+    drop(saved);
+    let app = build_app(
+        boot,
+        LaunchSelection {
+            model: model.clone(),
+            session: SessionSelection::CreateNew(directory.path().join("initial-off.jsonl")),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: ReasoningMode::Standard,
+        },
+        "system".into(),
+    )
+    .unwrap();
+    let expected = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max);
+    assert_eq!(app.reasoning, expected);
+    let app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::OpenExisting(saved_path)),
+    )
+    .unwrap();
+    assert_eq!(app.reasoning, expected);
+    assert_eq!(
+        persisted_session_config(app.agent.session())
+            .unwrap()
+            .reasoning,
+        Some(expected)
+    );
+}
+
+#[test]
+fn openrouter_mandatory_reasoning_drives_picker_resume_and_summary_selection() {
+    use octet_ai::ReasoningEffort;
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "openrouter")
+        .unwrap();
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openrouter_models_from_response(
+        &mut catalog,
+        declaration,
+        &serde_json::json!({"data":[{
+            "id":"z-ai/glm-5.3-flash", "context_length":1_310_720,
+            "top_provider":{"context_length":1_048_576,"max_completion_tokens":943_718},
+            "supported_parameters":["tools","reasoning","reasoning_effort"],
+            "reasoning":{"mandatory":true,"default_enabled":true,
+                         "supported_efforts":["max","high","low"],"default_effort":"max"}
+        }]}),
+    )
+    .unwrap();
+    let model = catalog
+        .resolve(&ModelId("openrouter/z-ai/glm-5.3-flash".into()))
+        .unwrap();
+    let capability = model.spec.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        capability.options.as_ref().unwrap().values,
+        ["max", "high", "low"]
+    );
+    assert_eq!(
+        capability.options.as_ref().unwrap().default.as_deref(),
+        Some("max")
+    );
+    assert!(!capability.supports(&ReasoningConfig::Off));
+    assert!(!capability.supports(&ReasoningConfig::Effort(ReasoningEffort::Medium)));
+    let expected = ReasoningConfig::Effort(ReasoningEffort::Max);
+    assert_eq!(
+        octet_ai::select_auxiliary_reasoning(&model).unwrap(),
+        expected
+    );
+    let (selected, _, warning) = normalize_reasoning_selection_for_model_with_subagents(
+        &ReasoningConfig::Off,
+        ReasoningMode::Standard,
+        &model,
+        false,
+    )
+    .unwrap();
+    assert_eq!(selected, expected);
+    assert!(warning.unwrap().contains("cannot honor reasoning=off"));
+
+    // A million-token route is not automatically restricted to a 128K working set.
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path(), None);
+    assert_eq!(
+        effective_compaction_threshold_fraction(&config, &model),
+        1.0
+    );
+    config.compaction.max_active_tokens = Some(120_000);
+    assert_eq!(
+        effective_compaction_threshold_fraction(&config, &model),
+        120_000.0 / 1_310_720.0
+    );
+    config.compaction.max_active_tokens = Some(0);
+    assert_eq!(
+        effective_compaction_threshold_fraction(&config, &model),
+        1.0
+    );
+}
+
+#[test]
+fn openrouter_reasoning_optional_toggle_and_malformed_contracts() {
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "openrouter")
+        .unwrap();
+    let decode = |reasoning| {
+        builtin_discovery_reasoning(
+            &serde_json::json!({
+                "reasoning": reasoning, "supported_parameters":["reasoning_effort"]
+            }),
+            Some(declaration),
+        )
+    };
+    let mandatory = decode(serde_json::json!({"mandatory":true})).unwrap();
+    let capability =
+        discovered_reasoning_capability(declaration, Protocol::OpenAiChat, "fixture", &mandatory)
+            .unwrap();
+    assert_eq!(capability.control, ReasoningControl::AlwaysOn);
+    assert_eq!(capability.choices(), vec![ReasoningConfig::On]);
+    let optional = decode(serde_json::json!({"mandatory":false,"default_enabled":false})).unwrap();
+    assert_eq!(optional.control, Some(ReasoningControl::Toggle));
+    assert_eq!(optional.options.unwrap().default.as_deref(), Some("false"));
+    let optional = decode(
+        serde_json::json!({"mandatory":false,"default_enabled":false,
+        "supported_efforts":["high","low"],"default_effort":"high"}),
+    )
+    .unwrap();
+    let options = optional.options.unwrap();
+    assert_eq!(options.default.as_deref(), Some("false"));
+    assert!(options.choices().contains(&ReasoningConfig::Off));
+    let optional = decode(serde_json::json!({"mandatory":false,"supported_efforts":["none","high"],"default_effort":"none"})).unwrap();
+    assert_eq!(optional.options.unwrap().values, ["none", "high"]);
+    let optional = decode(serde_json::json!({"mandatory":false,"default_enabled":true,
+        "supported_efforts":["high","medium","low","none"],"default_effort":"none"}))
+    .unwrap();
+    assert_eq!(optional.options.unwrap().default.as_deref(), Some("none"));
+    for invalid in [
+        serde_json::json!({"mandatory":"true"}),
+        serde_json::json!({"mandatory":true,"default_enabled":false}),
+        serde_json::json!({"mandatory":true,"supported_efforts":["none","high"]}),
+        serde_json::json!({"mandatory":true,"supported_efforts":["low"],"default_effort":"max"}),
+        serde_json::json!({"mandatory":true,"supported_efforts":[]}),
+        serde_json::json!({"mandatory":true,"default_effort":"max"}),
+        serde_json::json!({"mandatory":false,"default_enabled":"false"}),
+        serde_json::json!({"mandatory":false,"supported_efforts":["high","high"]}),
+        serde_json::json!({"mandatory":false,"supported_efforts":["on"]}),
+    ] {
+        assert!(decode(invalid.clone()).is_err(), "accepted {invalid}");
+    }
+    // A negative assertion still wins, even against the native object.
+    let disabled = builtin_discovery_reasoning(
+        &serde_json::json!({
+            "reasoning":{"mandatory":true}, "supports_reasoning":false,
+            "supported_parameters":["reasoning_effort"]
+        }),
+        Some(declaration),
+    )
+    .unwrap();
+    assert_eq!(disabled.supported, Some(false));
+}
+
+#[tokio::test]
+async fn openrouter_discovery_to_summary_wire_uses_the_endpoint_contract() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"summary\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n",
+                "data: [DONE]\n\n"
+            )))
+        .expect(4)
+        .mount(&server).await;
+    let declaration = &crate::providers::OPENROUTER;
+    let mut catalog = metadata_fixture_catalog(declaration, &format!("{}/", server.uri()));
+    register_openrouter_models_from_response(&mut catalog, declaration, &serde_json::json!({"data":[
+        {"id":"fixture/mandatory","context_length":1_310_720,"max_completion_tokens":16384,
+         "supported_parameters":["reasoning","reasoning_effort"],
+         "reasoning":{"mandatory":true,"default_enabled":true,"supported_efforts":["max","high","low"],"default_effort":"max"}},
+        {"id":"fixture/toggle","context_length":64000,"max_completion_tokens":8192,
+         "reasoning":{"mandatory":false,"default_enabled":true}},
+        {"id":"fixture/parameter-only","context_length":64000,"max_completion_tokens":8192,
+         "supported_parameters":["reasoning_effort"]}
+    ]})).unwrap();
+    let client = AiClient::new();
+    for (id, selection) in [
+        ("mandatory", None),
+        ("toggle", Some(ReasoningConfig::On)),
+        ("toggle", Some(ReasoningConfig::Off)),
+        ("parameter-only", None),
+    ] {
+        let model = catalog
+            .resolve(&ModelId(format!("openrouter/fixture/{id}")))
+            .unwrap();
+        let reasoning =
+            selection.unwrap_or_else(|| octet_ai::select_auxiliary_reasoning(&model).unwrap());
+        client
+            .complete(
+                &model,
+                octet_ai::Request {
+                    system: Some("Summarize the conversation".into()),
+                    messages: vec![octet_ai::Message::User(octet_ai::UserMessage {
+                        content: vec![octet_ai::UserPart::Text("history".into())],
+                    })],
+                    tools: vec![],
+                    tool_choice: octet_ai::ToolChoice::Auto,
+                    max_output_tokens: Some(1024),
+                    temperature: None,
+                    stop: vec![],
+                    reasoning,
+                    reasoning_mode: ReasoningMode::Standard,
+                    responses: None,
+                    output_format: octet_ai::OutputFormat::Text,
+                    output_modalities: octet_ai::OutputModalities::Text,
+                    compatibility: octet_ai::CompatibilityMode::Strict,
+                    cache_retention: octet_ai::CacheRetention::Short,
+                    session_id: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let requests = server.received_requests().await.unwrap();
+    let bodies = requests
+        .iter()
+        .map(|request| serde_json::from_slice::<serde_json::Value>(&request.body).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(bodies[0]["reasoning"], serde_json::json!({"effort":"max"}));
+    assert_eq!(bodies[1]["reasoning"], serde_json::json!({"enabled":true}));
+    assert!(bodies[2].get("reasoning").is_none());
+    assert!(bodies[3].get("reasoning").is_none());
+    assert!(bodies
+        .iter()
+        .all(|body| body.get("reasoning_effort").is_none()));
 }
 
 #[test]

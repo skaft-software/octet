@@ -127,7 +127,7 @@ extension processes stopped. [Discovery and trust](resources.md).
 | Shift+Enter | Newline when enhanced terminal key events are available. |
 | Ctrl+S | Steer at the next model boundary; in the resume picker, cycle sorting. |
 | Escape | Interrupt active work, then dispatch the oldest queued follow-up after settlement (never the draft); close/back out of a panel or slash popup first. |
-| Option+Up / Alt+Up | Move the newest queued follow-up into an empty composer for editing; no submission or interruption. |
+| Option+Up / Alt+Up | Recall the newest editable queued steering message or follow-up into an empty composer; no submission or interruption. |
 | Ctrl+C | Clear a nonempty draft; otherwise abort active work, no-op while idle. |
 | Ctrl+D | Close from any interactive input surface after active-work and child-process cleanup. |
 | Ctrl+P / Ctrl+Shift+P | Cycle models within the available resolved `--models` scope (or the available catalog without a scope); backward is Alt+P on Windows/WSL. Drafts are preserved. |
@@ -145,11 +145,14 @@ are contextual. Keyboard ownership and native mouse history are explained in
 [terminal scrolling](terminal.md#scrolling-and-rendering).
 
 Follow-ups remain local until dispatch, one per settled run in FIFO order.
-Ctrl+S is different: it admits live steering at the next model boundary and
-cannot be retracted with Option+Up. Failed runs, Ctrl+C cancellation, and close
-do not auto-dispatch follow-ups; retained entries can still be recalled while
-idle. Option+Up never overwrites a nonempty draft. Attachment/paste chips retain
-their payloads when recalled. Held-key repeats do not submit, interrupt, or pop
+Ctrl+S is different: it queues live steering for the next model boundary.
+Option+Up can retract it until the agent claims it for persistence; once that
+boundary is crossed it cannot be recalled, even before the UI displays delivery.
+The newest eligible steering message or follow-up is recalled, preserving its
+attachment/paste chips. `/answer` is not retractable because it changes the run's
+tool policy. Failed runs, Ctrl+C cancellation, and close do not auto-dispatch
+follow-ups; retained entries can still be recalled while idle. Option+Up never
+overwrites a nonempty draft. Held-key repeats do not submit, interrupt, or pop
 queue entries.
 
 ## User keybindings and transcript search

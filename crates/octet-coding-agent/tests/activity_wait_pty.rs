@@ -497,17 +497,29 @@ fn await_screen(
     consumed: &mut usize,
     text: &str,
 ) {
+    await_screen_matching(candidate, parser, consumed, text, |screen| {
+        screen.contents().contains(text)
+    });
+}
+
+fn await_screen_matching(
+    candidate: &mut Candidate,
+    parser: &mut vt100::Parser,
+    consumed: &mut usize,
+    description: &str,
+    matches: impl Fn(&vt100::Screen) -> bool,
+) {
     let deadline = Instant::now() + WAIT_TIMEOUT;
     loop {
         candidate.pty.read_available();
         parser.process(&candidate.pty.output[*consumed..]);
         *consumed = candidate.pty.output.len();
-        if parser.screen().contents().contains(text) {
+        if matches(parser.screen()) {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "screen did not show {text:?}: {}",
+            "screen did not show {description:?}: {}",
             parser.screen().contents()
         );
         assert!(
@@ -516,6 +528,22 @@ fn await_screen(
         );
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+// Pending previews contain the same text as recalled input. Check the actual
+// cursor row so seeing the queued preview cannot masquerade as composer recall.
+fn await_composer_text(
+    candidate: &mut Candidate,
+    parser: &mut vt100::Parser,
+    consumed: &mut usize,
+    text: &str,
+) {
+    await_screen_matching(candidate, parser, consumed, text, |screen| {
+        screen
+            .rows(0, INITIAL_COLUMNS)
+            .nth(usize::from(screen.cursor_position().0))
+            .is_some_and(|row| row.trim_end().ends_with(text))
+    });
 }
 
 fn frame_ranges(bytes: &[u8]) -> Vec<Range<usize>> {
@@ -749,4 +777,110 @@ fn real_queued_input_escape_dispatch_and_option_up_edit_pty_contract() {
     api.release_response();
     candidate.shutdown();
     assert_eq!(api.count.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn real_queued_steering_option_up_edit_pty_contract() {
+    let _guard = pty_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let api = HeldApi::start();
+    let mut candidate = Candidate::spawn(&api.url, "dark", "never");
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+    let mut consumed = 0;
+    await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
+    candidate.pty.write_input(b"steering fixture initial\r");
+    api.wait_for_request(&mut candidate, 1);
+
+    // Ctrl+S admits steering to the active run, unlike the Enter follow-ups
+    // covered above. The held response keeps its model boundary unreachable.
+    candidate.pty.write_input(b"STEER-ORIGINAL\x13");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "Steering");
+    let edit_hint = if cfg!(target_os = "macos") {
+        "(option+↑ to edit)"
+    } else {
+        "(alt+↑ to edit)"
+    };
+    await_screen(&mut candidate, &mut parser, &mut consumed, edit_hint);
+
+    // A nonempty composer must neither be overwritten nor remove the queued
+    // steer. The suffix acknowledges input *after* the attempted recall.
+    candidate.pty.write_input(b"PROTECTED-DRAFT\x1b[1;3A-KEPT");
+    await_composer_text(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "PROTECTED-DRAFT-KEPT",
+    );
+    assert!(parser.screen().contents().contains("STEER-ORIGINAL"));
+
+    candidate.pty.write_input(b"\x03\x1b[1;3A"); // clear, then Option/Alt+Up
+    await_composer_text(&mut candidate, &mut parser, &mut consumed, "STEER-ORIGINAL");
+    assert!(
+        !parser.screen().contents().contains(edit_hint),
+        "recalled steering must leave the pending queue: {}",
+        parser.screen().contents()
+    );
+    candidate
+        .pty
+        .write_input(b"\x03STEER-EDITED\x13DRAFT-NEVER-SUBMIT");
+    await_composer_text(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "DRAFT-NEVER-SUBMIT",
+    );
+    await_screen(&mut candidate, &mut parser, &mut consumed, edit_hint);
+    assert_eq!(
+        api.count.load(Ordering::SeqCst),
+        1,
+        "recall and requeue must not interrupt or submit a provider request"
+    );
+
+    api.release_response();
+    api.wait_for_request(&mut candidate, 2);
+    {
+        let bodies = api.bodies.lock().unwrap();
+        let request = String::from_utf8_lossy(&bodies[1]);
+        assert_eq!(request.matches("STEER-EDITED").count(), 1, "{request}");
+        assert!(!request.contains("STEER-ORIGINAL"), "{request}");
+        assert!(!request.contains("PROTECTED-DRAFT"), "{request}");
+        assert!(!request.contains("DRAFT-NEVER-SUBMIT"), "{request}");
+    }
+    api.release_response();
+    await_screen(&mut candidate, &mut parser, &mut consumed, "completed");
+    await_composer_text(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "DRAFT-NEVER-SUBMIT",
+    );
+
+    // The authoritative session must agree with the wire request, not merely
+    // hide the original steer in the transient pending preview.
+    fn collect_sessions(path: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in fs::read_dir(path).expect("session directory") {
+            let path = entry.expect("session entry").path();
+            if path.is_dir() {
+                collect_sessions(&path, files);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+                && path.file_name().unwrap() != "ephemeral-sessions.jsonl"
+            {
+                files.push(path);
+            }
+        }
+    }
+    let mut sessions = Vec::new();
+    collect_sessions(&candidate._root.path().join("sessions"), &mut sessions);
+    assert_eq!(sessions.len(), 1, "steering must stay in the same session");
+    let session = fs::read_to_string(&sessions[0]).expect("persisted steering session");
+    assert_eq!(session.matches("STEER-EDITED").count(), 1, "{session}");
+    assert!(!session.contains("STEER-ORIGINAL"), "{session}");
+    assert!(!session.contains("PROTECTED-DRAFT"), "{session}");
+    assert!(!session.contains("DRAFT-NEVER-SUBMIT"), "{session}");
+
+    candidate.shutdown();
+    assert_eq!(api.count.load(Ordering::SeqCst), 2);
 }

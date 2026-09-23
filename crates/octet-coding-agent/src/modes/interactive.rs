@@ -65,10 +65,16 @@ use crate::tui::view::{
     SubagentPanel,
 };
 
+mod onboarding;
+
 /// Ordered controls sent to the frozen Agent during an active run.
-#[derive(Debug)]
 enum ControlIntent {
-    Steer(octet_agent::UserInput),
+    /// Retractable live steering whose payload and recall receipt already live
+    /// in the shell queue. Sending through `steer_retractable` keeps the
+    /// receipt authoritative, so an Option/Alt+Up recall before delivery is a
+    /// successful no-op instead of a duplicate append. Nonretractable `/answer`
+    /// steering keeps using [`ControlIntent::FinishNow`].
+    SteerPrepared(octet_agent::PreparedSteering),
     FinishNow(octet_agent::UserInput),
 }
 
@@ -479,7 +485,7 @@ where
                     }
                     InputAction::CycleThinking => return Ok(Idle::CycleThinking),
                     InputAction::EditQueued => {
-                        shell.edit_queued_follow_up();
+                        shell.edit_queued_message();
                         shell.render();
                     }
                     InputAction::ClearEditor => {
@@ -2940,7 +2946,9 @@ where
                 let control = control.clone();
                 in_flight = Some(Box::pin(async move {
                     match intent {
-                        ControlIntent::Steer(text) => control.steer(text).await,
+                        ControlIntent::SteerPrepared(prepared) => {
+                            control.steer_retractable(prepared).await
+                        }
                         ControlIntent::FinishNow(text) => control.finish_now(text).await,
                     }
                 }));
@@ -3256,7 +3264,7 @@ where
                         shell.render();
                     }
                     InputAction::EditQueued => {
-                        shell.edit_queued_follow_up();
+                        shell.edit_queued_message();
                         shell.render();
                     }
                     InputAction::ClearEditor => {
@@ -3301,8 +3309,32 @@ where
                                 )
                                 .await?
                             {
-                                shell.queue_steering(&composed);
-                                intents.push_back(ControlIntent::Steer(composed.into_user_input()));
+                                // Reserve synchronously before publishing a shell receipt.
+                                // A full/ended control queue has accepted no payload, so its
+                                // editable projection returns directly to the composer instead
+                                // of becoming a stale FIFO entry ahead of later steering.
+                                let ComposedInput {
+                                    display_text,
+                                    transcript_text,
+                                    parts,
+                                    attachments,
+                                    ..
+                                } = composed;
+                                match control.prepare_steer(parts) {
+                                    Ok((prepared, receipt)) => {
+                                        shell.queue_retractable_steering(
+                                            receipt,
+                                            transcript_text,
+                                            display_text,
+                                            attachments,
+                                        );
+                                        intents.push_back(ControlIntent::SteerPrepared(prepared));
+                                    }
+                                    Err(error) => {
+                                        shell.restore_unqueued_steering(display_text, attachments);
+                                        shell.error(format!("could not queue steering: {error}"));
+                                    }
+                                }
                             }
                         }
                         shell.render();
@@ -8433,12 +8465,15 @@ enum GuidedSetupPreset {
     OpenAiCompatible,
 }
 
-async fn guided_setup_input(
+async fn guided_setup_input<S>(
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     prompt: &str,
     secret: bool,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<String>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     // This is the existing bounded temporary-input surface. Secret values are
     // never copied into the ordinary composer or rendered frame.
     extension_input_picker(
@@ -8474,12 +8509,12 @@ async fn guided_provider_setup(
             vec![
                 "LM Studio".to_owned(),
                 "OpenAI-compatible endpoint".to_owned(),
-                "Continue without a provider".to_owned(),
+                "Cancel setup".to_owned(),
             ],
             vec![
                 Some("Use an explicitly selected local OpenAI-compatible endpoint".to_owned()),
                 Some("Use one endpoint you enter; octet will not scan for services".to_owned()),
-                Some("Open the session read-only; no provider data is written".to_owned()),
+                Some("Cancel local endpoint setup without writing provider data".to_owned()),
             ],
             0,
         )
@@ -8981,21 +9016,13 @@ async fn run_interactive_once(
         shell.leave();
         return Ok(InteractiveExit::Finished);
     }
-    // Offer setup only when bootstrap has no runnable provider inventory. An
-    // explicit --model remains authoritative, and resumed provenance is still
-    // resolved after this optional first-run transaction.
-    if !boot.config.model_explicit && boot.catalog.models().next().is_none() {
-        let config = boot.config.clone();
-        if let Some(completed) = guided_provider_setup(&mut shell, &mut input, &config).await? {
-            boot.catalog = completed.catalog;
-            boot.config.model = Some(completed.model.clone());
-            // Keep this as a persisted default rather than an invocation
-            // override, so an existing session's provenance remains eligible.
-            boot.config.model_explicit = false;
-            shell.set_runtime_config(boot.config.clone());
-            shell.notice(format!("provider setup saved · {}", completed.model.0));
-            shell.render();
-        }
+    // Onboarding keeps explicit selection and resumed provenance authoritative.
+    // Cloud authentication refreshes this bootstrap before the ordinary model
+    // picker runs; local setup retains its reviewed default model.
+    onboarding::run(&mut shell, &mut input, &mut boot).await?;
+    if shell.close_requested() {
+        shell.leave();
+        return Ok(InteractiveExit::Finished);
     }
     // The shell owns a dedicated renderer thread, but sexy-tui still renders
     // synchronously when that thread receives a request. This clock only
@@ -9692,7 +9719,7 @@ mod tests {
         crate::tui::theme::test_theme()
     }
 
-    fn terminal_theme_test_config(workspace: PathBuf) -> Config {
+    pub(super) fn terminal_theme_test_config(workspace: PathBuf) -> Config {
         use crate::config::{CompactionPolicy, Mode, ResumeSelector, SandboxPolicy};
 
         Config {
@@ -13708,7 +13735,7 @@ mod tests {
                 dispatch.then(|| "queued first".to_owned())
             );
             assert!(shell.take_ready_follow_up().is_none());
-            shell.edit_queued_follow_up();
+            shell.edit_queued_message();
             assert_eq!(shell.pending(), "queued second edited");
         }
     }
@@ -14138,6 +14165,264 @@ mod tests {
                     octet_ai::UserPart::Text(text) if text.starts_with("steer ")
                 ))
         )));
+    }
+
+    /// Drive one scripted run with a fixed event script and return its settled
+    /// outcome. The sender stays alive so the input stream remains pending
+    /// rather than signalling a close that would abort the run.
+    async fn drive_scripted_events(
+        agent: &mut octet_agent::Agent,
+        shell: &mut InteractiveShell,
+        events: Vec<Event>,
+    ) -> (HostRunOutcome, bool) {
+        use tokio_stream::wrappers::ReceiverStream;
+        let (sender, receiver) = tokio::sync::mpsc::channel(64);
+        for event in events {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let mut goal_deadline = None;
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_active_run(
+                &mut run,
+                &control,
+                shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut executable_extensions,
+                &mut false,
+                test_run_inspection(),
+                &mut goal_deadline,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(run);
+        (ended, quit)
+    }
+
+    /// Every durable user-message text in the session, in order.
+    fn delivered_user_text(agent: &octet_agent::Agent) -> Vec<String> {
+        agent
+            .session()
+            .context()
+            .unwrap()
+            .iter()
+            .filter_map(|message| match message {
+                octet_ai::Message::User(user) => Some(
+                    user.content
+                        .iter()
+                        .filter_map(|part| match part {
+                            octet_ai::UserPart::Text(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn full_steering_admission_restores_the_draft_without_a_shell_entry() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_secs(2)).await;
+        let mut shell = InteractiveShell::test_shell();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let reservations = (0..64)
+            .map(|_| control.prepare_steer("occupied").unwrap().0)
+            .collect::<Vec<_>>();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        sender.send(Ok(Event::Paste("refused steering".into()))).await.unwrap();
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+            ))))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))))
+            .await
+            .unwrap();
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let mut goal_deadline = None;
+
+        let ended = drive_active_run(
+            &mut run,
+            &control,
+            &mut shell,
+            &mut input,
+            &mut ticker,
+            &mut pending,
+            &mut quit,
+            None,
+            None,
+            &mut extensions,
+            &mut false,
+            test_run_inspection(),
+            &mut goal_deadline,
+        )
+        .await
+        .unwrap();
+        drop(reservations);
+        drop(run);
+
+        assert_eq!(ended, HostRunOutcome::Aborted);
+        assert_eq!(shell.pending(), "refused steering");
+        assert!(!shell.debug_snapshot().contains("Steering:"));
+        assert!(
+            !delivered_user_text(&agent)
+                .iter()
+                .any(|text| text.contains("refused steering")),
+        );
+    }
+
+    #[tokio::test]
+    async fn recalled_live_steering_returns_to_the_editor_without_delivery() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_secs(2)).await;
+        let mut shell = InteractiveShell::test_shell();
+        let (ended, quit) = drive_scripted_events(
+            &mut agent,
+            &mut shell,
+            vec![
+                Event::Paste("steer recalled".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                // Option/Alt+Up recalls the newest retractable live steering
+                // before the provider boundary can claim it.
+                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ],
+        )
+        .await;
+        assert_eq!(ended, HostRunOutcome::Aborted);
+        assert!(!quit);
+        assert_eq!(shell.pending(), "steer recalled");
+        assert!(!shell.debug_snapshot().contains("Steering:"));
+        assert!(
+            !delivered_user_text(&agent)
+                .iter()
+                .any(|text| text.contains("steer recalled")),
+            "a recalled submission must not also be delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn requeued_edited_live_steering_is_what_the_next_provider_request_carries() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_millis(200)).await;
+        let mut shell = InteractiveShell::test_shell();
+        let (ended, quit) = drive_scripted_events(
+            &mut agent,
+            &mut shell,
+            vec![
+                Event::Paste("original".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                Event::Paste(" edited".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            ],
+        )
+        .await;
+        assert_eq!(ended, HostRunOutcome::Completed);
+        assert!(!quit);
+        let delivered = delivered_user_text(&agent);
+        assert!(
+            delivered.iter().any(|text| text == "original edited"),
+            "requeued edited steering is delivered: {delivered:?}"
+        );
+        assert!(
+            !delivered.iter().any(|text| text == "original"),
+            "the recalled draft is not delivered twice: {delivered:?}"
+        );
+        assert!(shell.pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recalled_live_steering_is_not_double_counted_in_the_editor() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_secs(2)).await;
+        let mut shell = InteractiveShell::test_shell();
+        let (ended, _quit) = drive_scripted_events(
+            &mut agent,
+            &mut shell,
+            vec![
+                Event::Paste("alpha".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                Event::Paste("beta".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ],
+        )
+        .await;
+        assert_eq!(ended, HostRunOutcome::Aborted);
+        let pending = shell.pending();
+        // The recalled entry is restored once and the still-queued entry is
+        // restored once, with no duplicate append from either owner.
+        assert_eq!(pending, "alpha\n\nbeta");
+        assert_eq!(pending.matches("alpha").count(), 1);
+        assert_eq!(pending.matches("beta").count(), 1);
+        assert!(
+            !delivered_user_text(&agent)
+                .iter()
+                .any(|text| text.contains("alpha") || text.contains("beta")),
+            "recalled and aborted steering must not be delivered"
+        );
+    }
+
+    #[test]
+    fn sticky_answer_steering_is_not_retractable_while_live_steering_is() {
+        let mut shell = InteractiveShell::test_shell();
+        let answer = answer_now_input(Some("keep tools off".into()));
+        shell.queue_steering(&answer);
+        let (live, receipt) = octet_agent::PreparedSteering::new("live steer");
+        shell.queue_retractable_steering(
+            receipt,
+            "live steer".into(),
+            "live steer".into(),
+            Vec::new(),
+        );
+        shell.edit_queued_message();
+        // Joint recall takes the newest retractable steering entry only.
+        assert_eq!(shell.pending(), "live steer");
+        assert!(
+            shell.debug_snapshot().contains("Steering: /answer keep tools off"),
+            "sticky /answer stays queued: {}",
+            shell.debug_snapshot()
+        );
+        // The recalled live submission is a no-op rather than a second append.
+        drop(live);
     }
 
     #[tokio::test]

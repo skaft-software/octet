@@ -105,8 +105,10 @@ pub(super) fn chat(model: &Model, req: &Request, body: &mut Value) -> Result<(),
                     }
                 }
                 ThinkingFormat::OpenRouter => {
-                    if let Some(effort) = &effort {
-                        body["reasoning"] = json!({"effort": effort});
+                    if enabled {
+                        if let Some(effort) = &effort {
+                            body["reasoning"] = json!({"effort": effort});
+                        }
                     }
                 }
                 ThinkingFormat::DeepSeek | ThinkingFormat::Zai => {

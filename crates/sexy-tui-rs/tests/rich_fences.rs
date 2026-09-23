@@ -19,7 +19,8 @@ use sexy_tui_rs::{
 fn code_block(source: &str) -> sexy_tui_rs::rich_text::CodeBlock {
     let document = markdown::parse(source);
     match document.blocks.as_slice() {
-        [Block::CodeBlock(code)] => code.clone(),
+        [Block::CodeBlock(code)] | [Block::CodeBlock(code), Block::Plain(_)] => code.clone(),
+        [Block::Diagram { source, rendered }] => sexy_tui_rs::rich_text::CodeBlock { language: source.language.clone(), code: rendered.clone() },
         other => panic!("expected one code block for {source:?}, got {other:?}"),
     }
 }
@@ -63,7 +64,7 @@ fn graph_and_flowchart_fences_carry_their_own_header() {
     let document = markdown::parse("```graph TD\n  A[One] --> B[Two]\n```\n");
     assert_eq!(
         document.plain_text(),
-        "┌─────┐\n│ One │\n└──┬──┘\n   │\n   │\n   ▼\n┌─────┐\n│ Two │\n└─────┘\n"
+        format!("{}\n", sexy_tui_rs::rich_text::mermaid::render_mermaid("graph TD\n  A[One] --> B[Two]\n").unwrap().plain())
     );
     // A graph body that already starts with its own header is left alone: the
     // info string is not prepended again, so this is the LR layout.
@@ -118,6 +119,7 @@ fn unsupported_bodies_degrade_to_the_original_source() {
     assert!(rendered.contains("pie"), "{rendered}");
     assert!(rendered.contains("title Pets"), "{rendered}");
     assert!(!rendered.contains('┌'), "{rendered}");
+    assert!(rendered.contains("Mermaid diagram not rendered:"), "{rendered}");
 }
 
 #[test]
@@ -321,35 +323,16 @@ fn unknown_and_alias_fences_never_reach_a_diagram_renderer() {
     assert_eq!(code_block("```latex\tx = 1\n```\n").code, "");
 }
 
-/// `$$…$$` and `\[…\]` are **not** wired to the LaTeX renderer: the parser does
-/// not enable math events (`Event::DisplayMath`/`InlineMath` are unreachable),
-/// so math-looking prose stays literal text and never becomes box drawing.
+/// Math delimiters now use the same LaTeX renderer, not CommonMark escapes.
 #[test]
-fn math_is_not_dispatched_to_the_latex_renderer() {
-    for source in [
-        "$$\n\\frac{1}{2}\n$$\n",
-        "$$\\frac{1}{2}$$\n",
-        "\\[\n\\frac{1}{2}\n\\]\n",
-        "The value is $\\frac{1}{2}$ here.\n",
-        "Costs $5 and $10 total.\n",
-    ] {
-        let rendered = RichRenderer::plain()
-            .render(&markdown::parse(source), 80)
-            .plain_text();
-        assert!(!rendered.contains('⎛'), "{source:?} -> {rendered}");
-        assert!(!rendered.contains('│'), "{source:?} -> {rendered}");
-        assert!(!rendered.contains('─'), "{source:?} -> {rendered}");
+fn math_delimiters_dispatch_without_reinterpreting_currency() {
+    for source in ["$$\n\\frac{1}{2}\n$$\n", "$$\\frac{1}{2}$$\n", "\\[\n\\frac{1}{2}\n\\]\n"] {
+        let rendered = RichRenderer::plain().render(&markdown::parse(source), 80).plain_text();
+        assert!(rendered.contains('─'), "{source:?}: {rendered}");
+        assert!(!rendered.contains("frac"));
     }
-    // The literal text survives, and no block is lost.
-    let bracket = RichRenderer::plain()
-        .render(&markdown::parse("\\[\n\\frac{1}{2}\n\\]\n"), 80)
-        .plain_text();
-    assert!(bracket.contains("\\frac{1}{2}"), "{bracket}");
-    let display = RichRenderer::plain()
-        .render(&markdown::parse("$$\n\\frac{1}{2}\n$$\n"), 80)
-        .plain_text();
-    assert!(display.contains("$$"), "{display}");
-    assert!(display.contains("\\frac{1}{2}"), "{display}");
+    assert_eq!(markdown::parse("The value is $\\frac{1}{2}$ here.").plain_text(), "The value is 1/2 here.\n");
+    assert_eq!(markdown::parse("Costs $5 and $10 total.").plain_text(), "Costs $5 and $10 total.\n");
 }
 
 /// CRLF sources and `~~~` fences reach the same dispatcher (the fence marker
@@ -630,4 +613,17 @@ fn deeply_indented_container_closers_stay_literal() {
         .map(|line| line.styled.clone())
         .collect();
     assert_eq!(streamed, direct, "streamed rows diverged");
+}
+
+#[test]
+fn oversized_diagram_geometry_falls_back_to_source_at_layout_width() {
+    let source = fence("mermaid", "graph LR\n A[Start] --> B[Done]");
+    let document = markdown::parse(&source);
+    assert!(matches!(document.blocks.as_slice(), [Block::Diagram { .. }]));
+    let renderer = RichRenderer::plain();
+    assert!(renderer.render(&document, 80).plain_text().contains('┌'));
+    let narrow = renderer.render(&document, 12).plain_text();
+    assert!(!narrow.contains('┌'), "{narrow}");
+    assert!(narrow.contains("graph LR"), "{narrow}");
+    assert!(renderer.render(&document, 80).plain_text().contains('┌'));
 }

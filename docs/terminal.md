@@ -57,10 +57,13 @@ retaining an unbounded copy.
 
 Enter submits, or queues a local follow-up while work is active. Follow-ups
 dispatch one at a time in FIFO order after normal completion. Ctrl+S instead
-admits live steering at the next model boundary; both kinds of pending input
+queues live steering for the next model boundary; both kinds of pending input
 share the bounded hint above the composer. Option+Up (Alt+Up) recalls the newest
-local follow-up into an empty composer, preserving attachment/paste chips. It
-never submits or retracts already-admitted steering.
+editable queued steering message or follow-up into an empty composer, preserving
+attachment/paste chips. A recalled steering message is withdrawn from the Agent
+before it is persisted, so it is never also delivered; once the Agent has claimed
+it at a model boundary the recall is refused and the entry stays queued. It never
+submits, never interrupts, and never overwrites a nonempty draft.
 
 Native clipboard reads during active work do not block input, cancellation, or
 run progress. A pending read is discarded when the run settles or is cancelled,

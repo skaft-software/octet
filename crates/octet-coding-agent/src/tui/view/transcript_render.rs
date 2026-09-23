@@ -19,15 +19,9 @@ use super::tool_render::{
 use super::transcript_cache::{RenderedTranscriptBlock, SurfaceGeometry};
 use super::{
     activity_elbow, finish_transcript_block, fit_line, render_shell_output, render_user_prompt,
-    subdued_text, wrap_hanging, ToolPanel, TranscriptBlock, ACTIVITY_DETAIL_INDENT,
+    subdued_text, wrap_hanging, TranscriptBlock, ACTIVITY_DETAIL_INDENT,
 };
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
-
-fn extension_activity_state_label(state: octet_agent::ExtensionPresentationState) -> &'static str {
-    // One owner for the declared vocabulary: the grouped transcript rows print
-    // these exact words, so the fallback presentation path cannot drift from it.
-    super::subagent_activity_state_label(state)
-}
 
 fn nest_tool_output(rows: Vec<String>, theme: &OctetTheme, width: u16) -> Vec<String> {
     let mut first_content_row = true;
@@ -81,22 +75,6 @@ fn append_nested_tool_output(
         }
     }
     header.extend(nest_tool_output(rows, theme, width));
-}
-
-/// Grouped, column-aligned, bounded rows for a settled delegation event. The
-/// grouping, collapsing, column selection, and row ceiling live in
-/// `view::subagent_activity_render_rows`, so the transcript and its tests share
-/// one layout; this stays the transcript-block adapter.
-fn render_subagent_activity_panel(
-    panel: &ToolPanel,
-    theme: &OctetTheme,
-    width: u16,
-    expanded: bool,
-) -> Vec<String> {
-    let Some(view) = panel.subagent_activity.as_ref() else {
-        return Vec::new();
-    };
-    super::subagent_activity_render_rows(view, theme, width, expanded)
 }
 
 pub(super) struct RenderedTranscriptBlockUpdate {
@@ -232,18 +210,6 @@ pub(super) fn render_block_planned_with_rainbow(
             status_shimmer_frame,
             rainbow_strength,
         ),
-        TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some() => {
-            // Single surface: this transcript block is the only place a
-            // delegation roster is rendered. It stays a live, in-place-updating
-            // log entry while any child is active and freezes once it settles,
-            // so there is deliberately no roster strip in `shell_chrome`.
-            finish_transcript_block(render_subagent_activity_panel(
-                panel,
-                theme,
-                width,
-                verbose_tools,
-            ))
-        }
         TranscriptBlock::Tool(panel) => {
             let compact_bash = matches!(panel.name.as_str(), "bash" | "exec")
                 && panel.display.shell_command.is_some();

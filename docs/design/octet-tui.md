@@ -113,11 +113,13 @@ sentinels remain authoritative. These tests model emitted VT and saved-line
 reset, not a physical emulator's reflow, paint, or native selection.
 
 This closes the tested pending → progress → result/error case, not all of #392.
-Real updates to historical concurrent tools/rosters, retrospective Markdown
-changes, resize, and other structural transitions can still take the replay path
-below. Do not suppress that path without an emitted-history policy that preserves
-real results. Maintainer-reported Terminal.app, Ghostty and Ghostty → SSH acceptance preceded
-0.7.4 publication, but a subsequent model-switch regression showed stale splash
+Real updates to historical concurrent tools or aggregate run outcomes,
+retrospective Markdown changes, resize, and other structural transitions can
+still take the replay path below. Arbitrary worker-roster metric updates do not
+mutate transcript history. Do not suppress that path without an emitted-history
+policy that preserves real results. Maintainer-reported Terminal.app, Ghostty and
+Ghostty → SSH acceptance preceded 0.7.4 publication, but a subsequent model-switch
+regression showed stale splash
 rows. Acceptance of one journey does not qualify every reader/selection path.
 
 A change above the old viewport cannot be repaired with cursor addressing.
@@ -185,18 +187,36 @@ temporary viewport surface rather than transcript history, start at their first
 semantic body row, and support Up/Down, PageUp/PageDown, Home, and End scrolling;
 Escape or Left returns to the composer.
 Generic presentation snapshots do not create persistent chrome. The first-party
-`octet-subagents` observation surface is the bounded exception: while an owning
-run has workers, the host renders its complete owner-fenced `subagent` roster in
-a persistent transcript event. Compact worker rows retain task name, lifecycle,
-tokens, and cost; transient child-tool names stay in the inspector
-rather than shifting those columns on each tool start/finish. The roster's active
-dot is steady. Full host telemetry remains current, but hidden phase/elapsed
-or call-count changes do not invalidate transcript rows. Call counts remain
-retained telemetry; wide grids label their tool-call metric `tools`, never
-`turns`. Collapsed groups retain counts; expansion reveals all retained workers
-without a second row ceiling consuming workers for headers or failure details.
-Native `DelegationUpdated` events
-feed this view directly; it does not poll the extension's slash command.
+`octet-subagents` observation surface is the bounded exception: the host renders
+its owner-fenced `subagent` roster as a pinned bottom-chrome strip above the
+composer while any retained worker is active. Visibility is independent of the
+root run's activity and `follow_tail`; workers can outlive a root turn. Once all
+workers settle, the strip disappears, but telemetry remains retained for
+inspection and accounting through the existing `/subagents` surface. No synthetic
+`Subagents` `ToolPanel` or roster semantic-copy event is created. Failure or parked
+states remain actionable after the strip hides: each observed failed/stopped-group
+state/reason transition (including `timed_out` and `awaiting_approval`) appends one
+bounded transcript `Notice`, naming the worker, state, available reason, and
+`/subagents` inspection hint. These notices remain in semantic copy; duplicate
+snapshots and metric-only updates append nothing. Successful settlement hides the
+strip without a new transcript notice.
+
+The strip reuses the existing grouped worker rows, counts, and disclosure, with
+task name, lifecycle, full model identity, and width-eligible metrics. Transient
+child-tool names stay in the inspector. Host telemetry, including tool-call
+counts, remains current without dirtying transcript rows; wide grids label that
+metric `tools`, never `turns`. Native `DelegationUpdated` events feed this view
+directly; it does not poll the extension's slash command.
+
+The strip occupies at most `floor(terminal height / 3)` rows, further bounded by
+available space after other chrome with one history row reserved. This cap also
+applies under expanded disclosure; an omission row points to `/subagents` for the
+complete retained roster. Focused panels may suppress the strip. App-owned
+PageUp/history navigation keeps it visible above the composer even away from the
+live tail. Native terminal scrollback cannot overlay application chrome: octet
+cannot pin the strip over terminal-owned saved lines or observe the native scroll
+offset. Historical aggregate outcome transitions may still require replay; live
+roster metrics alone do not.
 
 Live child cost is added to the host-owned cumulative footer only until root
 settlement persists matching `delegated_agent` usage records; idle rendering
@@ -207,7 +227,9 @@ follow-ups share a compact pending-state hint above the composer. It is capped
 at two rows: a count and one clipped preview, with a `+N more` suffix. Admitted
 steering takes preview priority because it is delivered before local follow-ups.
 Explicit newlines receive a visible marker; the preview never expands into a
-second transcript.
+second transcript. The recall affordance is advertised only while at least one
+queued entry is genuinely editable, so the hint never promises a recall that the
+agent-side claim would refuse.
 
 `/extensions` opens an interactive installed-bundle activation panel instead.
 The no-argument `/subagents` command supplied by `octet-subagents` opens a
@@ -444,9 +466,15 @@ normal success, and collapsed failures keep a bounded actionable reason.
 - Ctrl+S admits live steering to RunControl at the next model boundary. Its
   pending display is removed only by the durable delivery acknowledgement;
   undelivered steering is restored on settlement.
-- Option+Up/Alt+Up moves the newest local follow-up into an empty composer for
-  editing, preserving attachment/paste payloads. It neither interrupts nor
-  retracts already-admitted steering, and never overwrites a draft.
+- Option+Up/Alt+Up recalls the newest editable pending message — an
+  Enter-submitted follow-up or a Ctrl+S steering entry — into an empty composer,
+  preserving attachment/paste payloads. Recall of steering is arbitrated by the
+  submission's own receipt, not by the delayed delivery event: it succeeds only
+  before the agent claims that input for persistence, and releases the reserved
+  control budget when it wins. A refused recall leaves the entry queued for its
+  FIFO delivery projection. Sticky `/answer` input is deliberately not
+  retractable because it changes the run's tool policy. The chord neither
+  interrupts nor submits, and never overwrites a draft.
 - Escape closes the current panel/overlay/slash popup first. At the active
   composer it interrupts and arms queued dispatch only after authoritative
   aborted settlement; it never sends the unqueued draft. Repeated Escape while

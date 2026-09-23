@@ -62,6 +62,55 @@ languages do the same. The compact syntect default set maps TypeScript through
 JavaScript and TOML through properties syntax; all other requested common
 languages use native definitions.
 
+## Math and diagrams
+
+`latex/markdown.rs` recognizes Pi-style `$…$`, `$$…$$`, `\(…\)`, and `\[…\]`
+before CommonMark can consume underscores, escapes, table pipes, or a display
+expression's standalone `=`. Inline math uses the existing LaTeX engine;
+block-delimited display math preserves fraction/matrix layout. Code, HTML, and
+link destinations are excluded. Currency and shell-variable guards leave
+ordinary `$5`, `$8k–$12k`, and `$HOME/$USER` text alone. Recognized pending math
+and unsupported expressions preserve raw delimiters/source until a complete
+render is possible. The LaTeX engine is bounded, not a complete TeX runtime.
+
+Completed `latex`, `mermaid`, `graph`, and `flowchart` fences dispatch only after
+a valid closing fence. Unknown languages, bodies above 16 KiB, empty renders,
+and incomplete fences keep their source. Failed Mermaid rendering retains the
+code block and adds a visible `Mermaid diagram not rendered: …` reason. Successful
+Mermaid art becomes `Block::Diagram { source, rendered }`, retaining both the
+original code and plain art. Width-aware layout displays the source if the art
+cannot fit the available content width after code-block chrome; it never wraps
+or crops graph rows into misleading geometry. A wider render can show the art
+again without reparsing. `Document::plain_text()` remains the width-independent
+art projection for a successful diagram.
+
+The Mermaid parser supports bounded `graph`/`flowchart` input with all four
+flow directions, nested groups, group links, node lists, chained/labelled links,
+cycles, self-links, skip-layer links, and rectangular/rounded nodes. Label cleanup
+and flowchart/group layout adapt Apache-2.0 grok-build/grok-mermaid code, separate
+from the MIT Pi ports. No Node/npm, subprocess, I/O, or new runtime dependency is
+required. `<br/>` becomes whitespace; node labels wrap at 24 cells / four lines.
+Per-subgraph directions are accepted but ignored by the reference layout.
+
+Other diagram families (state/class/ER/sequence), unsupported edge heads,
+malformed input, invalid nesting, and over-limit source fail closed. Plain art
+does not implement Pi's styled-span/warning API. Octet also accepts dotted or
+hyphenated IDs and complete punctuation-bearing inline edge labels that can
+produce a warning in grok-mermaid; this is not full Pi final-output equivalence.
+
+Source, nodes, edges, groups, and label sizes are bounded before layout. Canvas
+allocation is capped at 2^21 cells, 4096 columns, and 2048 rows. Open diagram
+fences stream as source; closing them publishes either the diagram or its
+source/error fallback. Math and diagram updates use the same committed-prefix
+and width-reflow rules as other Markdown.
+
+Verification surfaces are `tests/markdown_math.rs`, `tests/latex_render.rs`,
+`tests/mermaid_render.rs`, `tests/mermaid_parity.rs`, and `tests/rich_fences.rs`.
+The Mermaid parity test uses captured grok-mermaid output rather than self-captured
+Octet art; only its explicit corpus is an oracle. See
+[`UPSTREAM-PARITY.md`](../UPSTREAM-PARITY.md) and
+[`VENDORED.md`](../VENDORED.md) for reference and license boundaries.
+
 ## Streaming Markdown
 
 `StreamingMarkdown` has four conceptual pieces:

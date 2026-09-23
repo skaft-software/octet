@@ -1,13 +1,13 @@
 #![allow(missing_docs)]
 
-//! Frontend-neutral, transactional setup for explicitly selected custom
-//! OpenAI-compatible providers.
+//! Frontend-neutral setup for explicitly selected providers.
 //!
 //! This module deliberately owns no terminal state and constructs no Agent. A
 //! frontend gathers a draft, asks this service to probe only that draft's
 //! endpoint, presents the receipt, and commits only after an explicit final
-//! confirmation. The existing custom registry remains the sole credential
-//! store and `ModelCatalog` remains the sole runtime catalog.
+//! confirmation. Custom endpoints use the existing custom registry; built-in
+//! API keys use a separate private credential record without redefining their
+//! native routes. `ModelCatalog` remains the sole runtime catalog.
 
 use std::fmt;
 use std::io::Read;
@@ -29,6 +29,161 @@ const MAX_PROVIDER_ID_BYTES: usize = 64;
 const MAX_LABEL_BYTES: usize = 128;
 const MAX_MODEL_ID_BYTES: usize = 256;
 const MAX_ENDPOINT_BYTES: usize = 512;
+
+/// A built-in route that can be configured with just an API key. Providers
+/// requiring account/region/deployment setup are deliberately not offered by
+/// this one-field flow. Values here are declaration metadata, never secrets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ApiKeyProvider {
+    pub(crate) id: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) credential_variable: &'static str,
+}
+
+pub(crate) fn builtin_api_key_providers() -> Vec<ApiKeyProvider> {
+    crate::providers::BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .filter(|declaration| {
+            declaration.base_url_environment.is_empty()
+                && matches!(
+                    declaration.runtime_configuration,
+                    crate::providers::ProviderRuntimeConfiguration::Default
+                )
+        })
+        .filter_map(|declaration| {
+            let variable = declaration
+                .authentication
+                .environment_variables()?
+                .iter()
+                .copied()
+                .find(|variable| !octet_ai::ANTHROPIC_BEARER_TOKEN_VARIABLES.contains(variable))?;
+            Some(ApiKeyProvider {
+                id: declaration.id,
+                label: declaration.name,
+                credential_variable: variable,
+            })
+        })
+        .collect()
+}
+
+/// Owner-private, recoverable API keys for native built-in routes. The existing
+/// custom registry cannot represent native Messages/Google/Responses presets;
+/// reuse its secure filesystem primitives, not an OpenAI-compatible surrogate.
+/// No keys are put in process environment, config, receipts, or model metadata.
+#[derive(Clone, Debug)]
+pub(crate) struct BuiltinApiKeyStore {
+    directory: PathBuf,
+}
+
+const MAX_API_KEY_FILE_BYTES: usize = 8 * 1024;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApiKeyFile {
+    version: u8,
+    api_key: String,
+}
+
+impl Drop for ApiKeyFile {
+    fn drop(&mut self) {
+        // Take ownership of the allocation rather than leave the original
+        // String's bytes behind while replacing it.
+        let mut bytes = std::mem::take(&mut self.api_key).into_bytes();
+        bytes.fill(0);
+    }
+}
+
+impl BuiltinApiKeyStore {
+    #[cfg(test)]
+    pub(crate) fn for_test(directory: PathBuf) -> Self {
+        Self { directory }
+    }
+
+    pub(crate) fn default_store() -> Result<Self, ProviderSetupError> {
+        let home = dirs::home_dir()
+            .filter(|home| home.is_absolute())
+            .ok_or(ProviderSetupError::Storage)?;
+        Ok(Self {
+            directory: home.join(".octet/credentials/api-keys"),
+        })
+    }
+
+    pub(crate) fn path(&self, provider_id: &str) -> Result<PathBuf, ProviderSetupError> {
+        // Resolve only declaration-owned IDs before constructing a filename.
+        if !builtin_api_key_providers()
+            .iter()
+            .any(|provider| provider.id == provider_id)
+        {
+            return Err(ProviderSetupError::InvalidConfiguration);
+        }
+        Ok(self.directory.join(format!("{provider_id}.json")))
+    }
+
+    /// Call only after explicit confirmation. No discovery or inference occurs.
+    /// Replacement requires a separate explicit choice and uses the same private
+    /// compare-and-swap writer as custom-provider setup.
+    pub(crate) fn save(
+        &self,
+        provider_id: &str,
+        value: String,
+        replace_existing: bool,
+    ) -> Result<PathBuf, ProviderSetupError> {
+        let input = SecretInput::new(value);
+        let value = input
+            .as_str()
+            .ok_or(ProviderSetupError::InvalidConfiguration)?
+            .trim();
+        if !valid_api_key(value) {
+            return Err(ProviderSetupError::InvalidConfiguration);
+        }
+        let path = self.path(provider_id)?;
+        let previous = crate::auth::read_bounded_private(&path, MAX_API_KEY_FILE_BYTES)
+            .map_err(|_| ProviderSetupError::Storage)?;
+        if previous.is_some() && !replace_existing {
+            return Err(ProviderSetupError::State(
+                ProviderSetupState::ProviderAlreadyConfigured,
+            ));
+        }
+        let credential = ApiKeyFile {
+            version: 1,
+            api_key: value.to_owned(),
+        };
+        let mut bytes = serde_json::to_vec(&credential).map_err(|_| ProviderSetupError::Storage)?;
+        let result = octet_agent::secure_fs::write_private_atomic_if_unchanged(
+            &path,
+            previous.as_deref(),
+            &bytes,
+            MAX_API_KEY_FILE_BYTES,
+        );
+        bytes.fill(0);
+        result.map_err(|_| ProviderSetupError::Storage)?;
+        Ok(path)
+    }
+
+    /// Private runtime lookup; callers must never place the result in a public
+    /// provider definition. Environment precedence is decided by provider auth.
+    pub(crate) fn load(&self, provider_id: &str) -> Result<Option<String>, ProviderSetupError> {
+        let path = self.path(provider_id)?;
+        let Some(mut bytes) = crate::auth::read_bounded_private(&path, MAX_API_KEY_FILE_BYTES)
+            .map_err(|_| ProviderSetupError::Storage)?
+        else {
+            return Ok(None);
+        };
+        let parsed = serde_json::from_slice::<ApiKeyFile>(&bytes);
+        bytes.fill(0);
+        let mut credential = parsed.map_err(|_| ProviderSetupError::Storage)?;
+        if credential.version != 1 || !valid_api_key(&credential.api_key) {
+            return Err(ProviderSetupError::Storage);
+        }
+        Ok(Some(std::mem::take(&mut credential.api_key)))
+    }
+}
+
+fn valid_api_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= octet_ai::auth::MAX_ENV_VALUE_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
 
 /// A credential source used only while setting up one explicitly selected
 /// provider. Its secret-bearing variant never implements a revealing `Debug`.
@@ -441,7 +596,7 @@ pub(crate) enum ProviderSetupError {
     State(ProviderSetupState),
     #[error("provider setup configuration is invalid")]
     InvalidConfiguration,
-    #[error("could not read or save the custom provider registry")]
+    #[error("could not read or save the provider credential store")]
     Storage,
     #[error("the rebuilt model catalog did not expose the selected model")]
     CatalogUnavailable,
@@ -1155,6 +1310,149 @@ mod tests {
             yes: false,
             cancel: false,
             offline: false,
+        }
+    }
+
+    fn api_key_store(directory: &tempfile::TempDir) -> BuiltinApiKeyStore {
+        BuiltinApiKeyStore {
+            directory: directory.path().join("credentials/api-keys"),
+        }
+    }
+
+    #[test]
+    fn api_key_choices_preserve_native_presets_and_exclude_extra_setup() {
+        let providers = builtin_api_key_providers();
+        for id in ["openai", "anthropic", "gemini", "openrouter", "deepseek"] {
+            assert!(providers.iter().any(|provider| provider.id == id), "{id}");
+        }
+        for id in [
+            "codex",
+            "github-copilot",
+            "vertex",
+            "bedrock",
+            "azure-openai",
+            "cloudflare-workers-ai",
+            "cloudflare-ai-gateway",
+        ] {
+            assert!(!providers.iter().any(|provider| provider.id == id), "{id}");
+        }
+        assert_eq!(
+            providers
+                .iter()
+                .find(|provider| provider.id == "anthropic")
+                .unwrap()
+                .credential_variable,
+            "ANTHROPIC_API_KEY"
+        );
+    }
+
+    #[test]
+    fn builtin_api_key_round_trips_without_environment_or_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = api_key_store(&directory);
+        assert!(store.load("anthropic").unwrap().is_none());
+        let path = store
+            .save("anthropic", "  synthetic-key\n".into(), false)
+            .unwrap();
+        // A fresh store models the subsequent process's credential lookup.
+        let restarted = api_key_store(&directory);
+        assert_eq!(
+            restarted.load("anthropic").unwrap().as_deref(),
+            Some("synthetic-key")
+        );
+        assert!(!format!("{store:?}").contains("synthetic-key"));
+        assert!(!directory.path().join("config.toml").exists());
+        assert!(store
+            .save("anthropic", "replacement".into(), false)
+            .is_err());
+        assert_eq!(
+            restarted.load("anthropic").unwrap().as_deref(),
+            Some("synthetic-key")
+        );
+        store.save("anthropic", "replacement".into(), true).unwrap();
+        assert_eq!(
+            restarted.load("anthropic").unwrap().as_deref(),
+            Some("replacement")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_api_key_validation_is_bounded_and_errors_are_secret_free() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = api_key_store(&directory);
+        for invalid in [
+            String::new(),
+            " \n".into(),
+            "secret\r\nheader:value".into(),
+            "secret with space".into(),
+            "x".repeat(octet_ai::auth::MAX_ENV_VALUE_BYTES + 1),
+        ] {
+            let error = store.save("openai", invalid, false).unwrap_err();
+            assert!(!error.to_string().contains("secret"));
+        }
+        for id in ["../other", "/tmp/other", "codex", "unknown"] {
+            assert!(store.save(id, "synthetic-key".into(), false).is_err());
+        }
+        assert!(!store.directory.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_api_key_store_rejects_links_and_public_files() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let store = api_key_store(&directory);
+        let path = store.save("openai", "synthetic-key".into(), false).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(store.load("openai").is_err());
+        assert!(store.save("openai", "replacement".into(), true).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let target = directory.path().join("unrelated");
+        std::fs::write(&target, b"unchanged").unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(store.load("openai").is_err());
+        assert!(store.save("openai", "replacement".into(), true).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
+        let linked_store = BuiltinApiKeyStore {
+            directory: directory.path().join("linked"),
+        };
+        symlink(&store.directory, &linked_store.directory).unwrap();
+        assert!(linked_store
+            .save("anthropic", "synthetic-key".into(), false)
+            .is_err());
+        assert!(!store.directory.join("anthropic.json").exists());
+    }
+
+    #[test]
+    fn builtin_api_key_store_rejects_malformed_and_oversized_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = api_key_store(&directory);
+        let path = store.path("openai").unwrap();
+        for bytes in [
+            br#"{"version":2,"api_key":"synthetic-key"}"#.to_vec(),
+            br#"{"version":1,"api_key":"synthetic-key","extra":true}"#.to_vec(),
+            vec![b'x'; MAX_API_KEY_FILE_BYTES + 1],
+        ] {
+            octet_agent::secure_fs::write_private_atomic(&path, &bytes, MAX_API_KEY_FILE_BYTES + 1)
+                .unwrap();
+            let error = store.load("openai").unwrap_err();
+            assert!(!error.to_string().contains("synthetic-key"));
         }
     }
 

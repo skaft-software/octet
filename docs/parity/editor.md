@@ -139,6 +139,23 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
 - Tests: `queued_controls_are_one_shot_and_slash_escape_keeps_ownership` plus
   the updated queue/dispatch expectations.
 
+### Retractable Ctrl+S steering (follow-up to #349)
+
+- The receipt is authoritative, not the delivery event:
+  `octet_agent::PreparedSteering`/`SteeringReceipt`
+  (`crates/octet-agent/src/agent.rs`) let the shell withdraw a steering
+  submission before the agent claims it, releasing its reserved control budget;
+  `RunControl::prepare_steer`/`steer_retractable` are the admission and send
+  seam. The shell queues the entry and keeps the receipt
+  (`tui/view.rs::queue_retractable_steering`), and `edit_queued_message` recalls
+  the newest selectable entry in one shared admission order.
+- Sticky `/answer` keeps `queue_steering` (no receipt) because it changes the
+  run's tool policy, so Option+Up cannot retract it.
+- Tests: `real_queued_steering_option_up_edit_pty_contract`
+  (`tests/activity_wait_pty.rs`) drives the real binary against the held-provider
+  fixture and asserts the next request body and the durable session contain the
+  edited steering and not the recalled original.
+
 ## 2c.3 LaTeX rendering — Landed
 
 - Source: `crates/sexy-tui-rs/src/rich_text/latex/mod.rs` +
@@ -196,9 +213,8 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
   mode by `rich_text::markdown::parse` (`markdown.rs::render_diagram_fence`,
   reached only after the closure check). Other info strings, an oversized body
   (> `MAX_DIAGRAM_FENCE_BYTES`, 16 KiB), a `None` render, an empty render, and
-  an unterminated fence keep the original source. `$$…$$`/`\[…\]` math is
-  deliberately **not** wired — the parser does not enable math events; see the
-  consumer note under 2c.4.
+  an unterminated fence keep the original source. Delimited math now has a
+  separate consumer described below; it does not rely on pulldown math events.
 - Consumer verification (editor12d): the *dispatch decision* (not just the
   engine) was re-derived from pulldown's own closure code
   (`firstpass.rs::parse_fenced_code_block` + `scanners.rs::scan_closing_code_fence`
@@ -207,185 +223,106 @@ TypeScript. Owner paths: `crates/sexy-tui-rs/**`,
   markers ```` ``` ````/`~~~`): **0 fences rendered from an unclosed block, 0
   complete fences missed**.
 
-## 2c.4 Mermaid box-drawing diagrams — Landed (bounded subset)
+## 2c.3a Markdown math delimiters — Unreleased consumer
 
-- Source: `crates/sexy-tui-rs/src/rich_text/mermaid.rs`, entry point
+- Source: `crates/sexy-tui-rs/src/rich_text/latex/markdown.rs`, consumed by
+  `markdown.rs` and `stream.rs`. The newer delimiter reference is Pi
+  `890f92088`, distinct from the older LaTeX engine reference above.
+- `$…$` and `\(…\)` render inline through the existing LaTeX engine.
+  `$$…$$` and `\[…\]` can render display math at a block boundary; inside
+  prose they use inline layout. Multiline display expressions keep fraction and
+  matrix layout, including a standalone `=` that CommonMark would otherwise
+  reinterpret as a heading underline.
+- Math is recognized before CommonMark consumes escapes, underscores or table
+  pipes. Inline code, code fences, and HTML are not math input. Currency and
+  shell-variable guards preserve examples such as `Costs $5 and $10`,
+  `$8k–$12k`, and `$HOME/$USER`; escaped dollar signs remain literal.
+- Unsupported expressions and recognized incomplete math retain their raw
+  delimiters/source rather than being partly rendered or reinterpreted as
+  Markdown. During streaming, pending expressions remain raw until closed;
+  settled blocks retain the streaming parser's committed-prefix behavior.
+  The existing LaTeX nesting limit and 16 KiB math-body dispatch bound still
+  apply. This is a bounded terminal renderer, not a complete TeX implementation.
+- Fixtures: `crates/sexy-tui-rs/tests/markdown_math.rs` covers inline/display
+  examples, currency/shell/code protection, raw fallback, and chunked streaming.
+  The older LaTeX differential counts above qualify the engine only, not this
+  new delimiter consumer. Run its checks separately:
+
+  ```sh
+  cargo test -p sexy-tui-rs --test markdown_math --test latex_render --test rich_fences
+  ```
+
+## 2c.4 Mermaid box-drawing diagrams — Unreleased expansion, bounded subset
+
+- Source: `crates/sexy-tui-rs/src/rich_text/mermaid.rs` and
+  `mermaid/layout.rs`; entry point
   `sexy_tui_rs::rich_text::mermaid::render_mermaid(&str) -> Result<MermaidArt, MermaidError>`.
-- Upstream anchor:
-  `packages/coding-agent/src/modes/interactive/components/mermaid.ts` delegates
-  layout to the external `grok-mermaid` package. That dependency cannot be added
-  here (no network/npm dependency in a renderer), so this row ships a
-  self-contained engine instead of a port.
-- Covered: `graph`/`flowchart` with `TD`/`TB`/`LR` (with optional `;`, and `;`
-  may terminate the header and separate same-line statements:
-  `flowchart LR; A --> B; B --> C`), node ids with or without labels, the label
-  shapes `[]`, `()`, `{}`, `(())`, `([])`, `[[]]`, `{{}}` (all drawn as a box),
-  quoted labels including labels containing the closing delimiter (`A["a[b]c"]`)
-  and quoted `|link labels|`, `%%` comments anywhere outside a quoted label,
-  chained and repeated links, `-->`/`->` (arrow head), `---` (no head),
-  `-.->`/`==>` (arrow head; stroke styling not modelled), `|label|` edge
-  labels, `:::class` decorations, `classDef`/`class`/`style`/`linkStyle`/`click`
-  directives, quoted and CJK labels, and disconnected components.
-- Fails closed with a typed `MermaidError` (no panic, no partial diagram, no
-  unbounded work): other diagram types (`pie`, `sequenceDiagram`, …), `BT`/`RL`
-  (rejected rather than misrendered — mirroring the grid would reverse labels),
-  `subgraph`/`end`/`direction` statements, `&` node lists, `A -- text --> B`
-  inline labels, other arrow tokens, unbalanced brackets/quotes, cycles, edges
-  that skip a layer, and anything over `MAX_MERMAID_*` (16 KiB source, 64 nodes,
-  256 edges, 48-cell labels, 400×200 art).
-- Not modelled: shape outlines (diamonds/stadiums render as boxes), link stroke
-  styling, subgraphs, `BT`/`RL`, HTML-entity decoding in labels (emitted
-  literally), upstream's style-span/warning channels, and the "unrendered
-  diagram" fallback text — the fence consumer below keeps the original source
-  for every `Err`.
-- Evidence scope — do **not** overclaim: the 29 goldens below are
-  **self-captured** from this engine's own output; they pin the bounded subset,
-  they are not a differential oracle. Unlike 2c.3 (upstream `latex.ts` run under
-  Node), there is no upstream harness to diff against:
-  `packages/coding-agent/.../mermaid.ts` delegates layout to the external
-  `grok-mermaid` npm package, which is not vendored and cannot be added here (a
-  renderer must build and run offline, with no network/npm dependency). So
-  `BT`/`RL` (rejected rather than mirrored), `subgraph`/`end`/`direction`, `&`
-  node lists and HTML-entity labels are a deliberate, pinned fail-closed
-  boundary — not a verified match to `grok-mermaid`'s layout or error strings.
-  The fence-level goldens in `rich_fences.rs` are self-captured from this engine
-  too: they pin *which* blocks reach 2c.3/2c.4 and what happens when they do,
-  not that the drawn art matches upstream.
-- Consumer — Landed (supersedes the earlier "no consumer is wired yet" note):
-  `rich_text::markdown::parse` renders a *completed* fenced block whose info
-  string explicitly names `latex`, `mermaid`, `graph`, or `flowchart`
-  (`markdown.rs::render_diagram_fence`, called from `Frame::Code` only when
-  `fence_is_closed`; `graph TD`/`flowchart LR` carry their header in the info
-  string). Every other info string, any body over `MAX_DIAGRAM_FENCE_BYTES`
-  (16 KiB), a typed renderer error, an empty render, and an unterminated fence
-  keep the original bounded source as a plain `CodeBlock` — never an empty
-  block and never a reinterpretation of a non-diagram fence. While a fence is
-  open the streaming layer shows the raw growing body
-  (`stream.rs::stabilize`) and publishes the diagram once, when the closing
-  fence arrives; later chunks do not move the committed rows. The opener may
-  itself arrive in pieces — a `<3`-backtick or partial info string is withheld
-  or shown raw and never dispatches early. A body line that merely *looks* like
-  a closer — indented four spaces, or carrying trailing junk such as
-  ```` ``` not a close ```` — does not terminate the fence either:
-  `fence_is_closed` mirrors the parser's own CommonMark closure rules, so no
-  stray body line can be glued into partial art (the LaTeX engine would
-  otherwise accept the backticks as text). `$$…$$` /
-  `\[…\]` math is **not** wired: the parser does not enable math events, so
-  `$…$` stays literal text (`Costs $5 and $10 total.` is untouched, and
-  `Event::DisplayMath`/`InlineMath` in `markdown.rs` are unreachable arms).
-  Non-dispatch is asserted byte-for-byte: 15 unknown/alias info strings (`tex`,
-  `math`, `latexish`, `dot`, `graphviz`, `plantuml`, …) and a bare fence produce
-  exactly the block a `text` fence produces with the same body, for both a
-  LaTeX-shaped and a Mermaid-shaped body. The `latex`/`mermaid` label survives on
-  the block as provenance, so the rendered art is labelled and copy-text returns
-  the drawn diagram, not the source. Verified styling: with
-  `syntax_highlighting: true` and truecolor on, the glyph rows carry **no** ANSI
-  escapes (only the language label is dimmed), so the one-colour-per-grapheme /
-  no-background-fill invariants hold for rendered art. Fence-layer tests:
-  `crates/sexy-tui-rs/tests/rich_fences.rs`, 19 tests. Run:
-  `cargo test -p sexy-tui-rs --test rich_fences` =>
-  `test result: ok. 19 passed; 0 failed` (LaTeX/Mermaid box-drawing goldens
-  through the fence, `graph`/`flowchart` info-string headers, unknown-fence
-  non-reinterpretation and byte-for-byte non-dispatch, unsupported/oversized/
-  unterminated degradation, pseudo-closing lines that stay source, CRLF and
-  `~~~` fences, blockquote nesting, empty-render degradation,
-  math-not-dispatched, syntax-styling invariance, the 160-case closure matrix
-  below, the byte-at-a-time streaming publication scan, and the nested-container
-  fail-closed boundary; plus
-  three streaming tests: diagram published only at the closing fence with stable
-  committed rows, a failed fence that streams its raw source and stays literal
-  after the close, and an info string split across chunks that never dispatches
-  early).
-  Observed:
+  Pi's `packages/coding-agent/src/modes/interactive/components/mermaid.ts`
+  delegates layout to `grok-mermaid` 0.2.3. Octet adapts the upstream Rust
+  flowchart/group layout with plain-text output and hard bounds; it builds and
+  runs without npm, Node, or network access. This layout is Apache-2.0, not Pi's
+  MIT license; see [third-party notices](../../THIRD_PARTY_NOTICES.md#grok-mermaid-and-grok-build).
+- Flowchart syntax includes `graph`/`flowchart`, `TD`/`TB`/`LR`/`BT`/`RL`,
+  nested `subgraph`/`end`, group links, `&` node lists, chained links, cycles,
+  self-links, skip-layer links, inline and pipe-delimited edge labels, comments,
+  semicolon-separated statements,
+  class/style decorations, quoted/CJK labels, and label breaks and supported
+  entities. Per-subgraph `direction` is accepted but ignored, as in the
+  reference. Reverse directions preserve label order rather than mirroring
+  text. Compound layouts route around node boxes.
+- This remains a bounded flowchart subset: other diagram families, invalid
+  nesting, unsupported arrow/syntax forms, and over-limit input fail closed.
+  Nodes use rectangular or rounded boxes rather than full Mermaid shape
+  geometry; solid/dotted/thick links remain plain terminal glyphs, not Pi's
+  styled spans. No full Pi/grok-mermaid grammar, geometry, style-span,
+  warning-channel, or error-message equivalence is claimed.
+- Source is capped at 16 KiB. Node/edge counts, label rows, canvas dimensions,
+  nested groups, and total canvas cells have independent hard limits in
+  `mermaid.rs` and `mermaid/layout.rs`; labels may wrap or truncate to fit
+  the layout's bounded boxes. A typed renderer error keeps the fence's original
+  source instead of publishing partial art. `<br/>` is normalized to whitespace;
+  node labels wrap at 24 cells / four lines, not arbitrary multiline geometry.
+- Evidence boundary: the original `tests/mermaid_render.rs` goldens were
+  self-captured. The new `tests/mermaid_parity.rs` compares the explicit corpus
+  under `tests/fixtures/mermaid/` with real grok-mermaid 0.2.3 output: 67
+  flowchart cases plus the reported 64-node architecture graph with one
+  equivalent edge spelling in the oracle. That complete graph is 501 cells
+  wide and 86 rows tall; normal terminal widths must show source, not crop art. This is not a
+  full-parser oracle: Octet accepts punctuation-bearing inline labels for which
+  grok-mermaid can return partial art plus warnings; Pi's final-warning fallback
+  is a separate behavior. Dotted/hyphenated IDs are also an Octet extension.
+  Historical test counts do not qualify the expanded implementation.
 
-      ```latex\n\begin{pmatrix}1&2\\3&4\end{pmatrix}\n``` =>
-      ⎛ 1 │ 2 ⎞
-      ⎝ 3 │ 4 ⎠
-      ```mermaid\ngraph LR\n  A[Start] --> B[Done]\n``` =>
-      ┌───────┐    ┌──────┐
-      │ Start ├───▶│ Done │
-      └───────┘    └──────┘
-      ```rust\n\\frac{1}{2}\n``` =>
-      \frac{1}{2}            (unknown fence: plain code block)
-      ```tex\n\\frac{1}{2}\n``` =>
-      \frac{1}{2}            (a LaTeX alias, still not dispatched)
-      $$\\frac{1}{2}$$ => $$\frac{1}{2}$$  (math is not a fence, stays literal)
-      ```latex\n\\cfrac{1}{x}\n``` =>
-      \cfrac{1}{x}           (unsupported: original source)
-      ```latex\n{}\n``` => {} (empty render: original source, not empty block)
-- Consumer verification sweeps (editor12d, `rich_fences.rs` +
-  gitignored `_ed12d_dispatch.rs` probes):
-  (1) **closure matrix** — 192 committed cases (opener indent 0–3 × closer indent
-  0–5 × tails `""`/`" "`/`"\t"`/`" not a close"` × markers ```` ``` ````/`~~~`)
-  assert dispatch **exactly** when pulldown's own rule closes the fence
-  (indent ≤ 3 relative to the container content indent, marker run ≥ the
-  opening run, spaces-only tail), and that every other shape keeps the original
-  source; the wider 560-case probe sweep is 0 fabricated renders / 0 missed;
-  (2) **byte-at-a-time streaming scan** — pushing
-  `intro\n\n```mermaid…\n```\n\noutro\n` one character at a time, the diagram row
-  appears at exactly the byte that completes the closing fence line, is never
-  lost afterwards, never appears partially, and the committed rows equal a
-  full-document render;
-  (3) **bounds** — a 1 MiB `mermaid` body stays literal source (the 16 KiB
-  `MAX_DIAGRAM_FENCE_BYTES` cap, no art, no panic, ~2.3 s in the debug profile);
-  the LaTeX engine's output grows **linearly** with the body (17.6 KB of
-  `\frac{1}{2}` → 3 rows × 4798 cells, ~25 ms; dispatch itself stops at 16 KiB);
-  a >64-node graph is rejected by `MAX_MERMAID_NODES` before any layout; 400
-  randomized fence-soup sources survive parse + chunked streaming with no panic.
-- Known boundary, pinned by `deeply_indented_container_closers_stay_literal`: a
-  fence nested in a container whose closing line is indented more than three
-  spaces **raw** (e.g. an item at content indent 4 with its closer written at the
-  same indentation) stays literal source even though pulldown accepted the
-  closer and produced a clean body — the raw range does not reveal the container
-  content indent. `stream.rs`'s lexical scanner applies the same conservative
-  rule, so the streamed rows and the full-document render agree (asserted
-  byte-for-byte in that test). Top-level list items (content indent ≤ 3) and
-  blockquotes dispatch.
-- CHANGELOG-ready (fence wiring):
-  - Rich markdown: a completed ```` ```latex ```` fence renders through the LaTeX
-    engine in display mode, and ```` ```mermaid ````/```` ```graph ````/
-    ```` ```flowchart ```` through the Mermaid engine; the fence label stays on
-    the block, so the drawing is labelled and copy-text returns the diagram
-    rather than its source.
-  - Rich markdown fences fail closed: unknown or malformed info strings (`tex`,
-    `math`, `latexish`, `dot`, `graphviz`, `plantuml`, a bare fence) are never
-    reinterpreted, and a body over 16 KiB, a renderer error, a render that
-    produces nothing (empty expression, `{}`, header-only graph), an unterminated
-    fence and a stray "closing" line (four-space indent, trailing junk) all keep
-    the original bounded source instead of empty or partial art.
-  - Rich markdown: diagrams are published when the fence closes — the streaming
-    layer shows the raw growing body while the fence is open, the closing fence
-    replaces it once, and later chunks never move the published rows
-    (`$$…$$`/`\[…\]` math is deliberately not wired).
-- Tests: `crates/sexy-tui-rs/tests/mermaid_render.rs`, 11 tests. Run:
-  `cargo test -p sexy-tui-rs --test mermaid_render` =>
-  `test result: ok. 11 passed; 0 failed` (29 supported goldens including the
-  semicolon/comment/quoted-label cases, 20 fail-closed messages, a deterministic
-  1500-input token-soup fuzz test that must not panic or exceed the size caps,
-  width invariant, wide-label alignment, size limits).
-- Fixed while landing this row: `:::` class annotations parsed only two colons
-  (so `A[Foo]:::highlight` failed), `BT`/`RL` were silently drawn as `TD`/`LR`,
-  `---` drew an arrow head, a trailing `;` on the header line was rejected, and
-  a CJK label pushed the box's right border one column right (the covered cell
-  of a double-width glyph was emitted as a space).
-- Fixed/extended by editor11: `%%` comments are now stripped anywhere on a line
-  (outside quotes) instead of only at line start, `;` separates statements on a
-  line and may share the header line, quoted labels may contain the closing
-  delimiter, quoted `|link labels|` lose their quotes, and
-  `subgraph`/`end`/`direction` report a named typed error instead of being
-  parsed as node ids. Observed:
+### Shared fence consumer
 
-      flowchart LR; A[One] --> B[Two]; B --> C[Three] =>
-      ┌─────┐    ┌─────┐    ┌───────┐
-      │ One ├───▶│ Two ├───▶│ Three │
-      └─────┘    └─────┘    └───────┘
-      flowchart LR\n  A["a[b]c"] --> B[Two] =>
-      ┌───────┐    ┌─────┐
-      │ a[b]c ├───▶│ Two │
-      └───────┘    └─────┘
-      flowchart LR\n  A -->|"two words"| B =>
-      ┌───┐two words  ┌───┐
-      │ A ├──────────▶│ B │
-      └───┘           └───┘
-      flowchart LR\n  subgraph S\n  A --> B\n  end =>
-      Err "dropped, line 2: `subgraph` statements are not supported"
+`rich_text::markdown::parse` dispatches completed `latex`, `mermaid`, `graph`,
+and `flowchart` fences. `graph TD` and `flowchart LR` can carry the header in the
+info string. Unknown info strings (including `tex`, `math`, `dot`, `graphviz`,
+and `plantuml`), oversized bodies, renderer errors, empty renders, and unclosed
+fences retain the original code body. A failed Mermaid render also adds a visible
+`Mermaid diagram not rendered: …` reason. A successful Mermaid fence retains
+both its source and art in `Block::Diagram`: if art does not fit the available
+content width, rendering shows source rather than wrapping/cropping graph rows.
+A wider viewport can show art again. The language label remains as provenance;
+`Document::plain_text()` is the width-independent drawn-art projection.
+
+While a fence is open, streaming shows its growing source. The closing fence
+publishes the rendered diagram; later chunks preserve committed rows. Partial
+openers, four-space-indented pseudo-closers, and closers with trailing junk do
+not dispatch early. Rendered glyph rows bypass source-code syntax highlighting.
+
+The conservative nested-container boundary remains: a closing fence indented
+more than three raw spaces may stay source even when CommonMark accepts it
+inside a deeply indented list. Top-level list items and blockquotes can dispatch.
+
+`crates/sexy-tui-rs/tests/rich_fences.rs` owns fence dispatch, unknown-language
+non-dispatch, fallback, closure-matrix, styling, and chunked-streaming fixtures;
+`tests/mermaid_render.rs` owns engine goldens, bounds and token-soup cases;
+`tests/mermaid_parity.rs` owns the grok-mermaid oracle comparison. Run:
+
+```sh
+cargo test -p sexy-tui-rs --test mermaid_render --test mermaid_parity --test rich_fences
+```
+
+These are source contracts and verification commands, not claims that the
+expanded renderer has passed every fixture or physical-terminal acceptance.

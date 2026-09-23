@@ -7,7 +7,8 @@ terminal renderer used by `octet-coding-agent`.
 - Imported standalone revision: `7770c3ef52d1df5b554f597f77d9e85803d8976d`
 - Imported standalone version: `0.2.0`
 - Current octet workspace package: `0.3.1`
-- License: MIT (`LICENSE`)
+- Combined package license: `MIT AND Apache-2.0`; the imported code remains
+  MIT (`LICENSE`), while the Mermaid adaptations below retain Apache-2.0.
 
 The imported revision belongs to the standalone repository's local
 `pre-rich-rendering` line and is not currently reachable from one of its public
@@ -34,6 +35,29 @@ current target imply complete parity.
 Core ports must cite and reproduce the pinned Pi tests. Rust-only rich rendering
 and octet native-scrollback behavior are additive layers and must not redefine
 core Pi APIs or semantics. See `UPSTREAM-PARITY.md` for the port gate and order.
+
+## Mermaid layout and label cleanup
+
+`src/rich_text/mermaid/layout.rs` and `labels.rs` adapt the Apache-2.0
+[grok-build](https://github.com/xai-org/grok-build) Rust renderer and
+[grok-mermaid](https://github.com/xl0/grok-mermaid) 0.2.3, Pi's diagram dependency.
+Copyright 2023–2026 SpaceXAI and Copyright 2026 Alexey Zaytsev are retained in
+the source and `src/rich_text/mermaid/LICENSE-APACHE`.
+Octet changes include plain-text output, its bounded parser adapter, removal of
+ratatui, Rust 2021 compatibility, and hard canvas limits. No new build/runtime
+Node, npm, subprocess, or network dependency is introduced.
+
+The inspected upstream Rust file has SHA-256
+`e53c81fc02cddc78a3f7f3729237f83acd7c2678535a830210d2b1320f60529f`.
+`tests/fixtures/mermaid/README.md` records the package-tarball hash, Pi reference,
+regeneration procedure, and exact oracle scope.
+
+The crate-local license accompanies Cargo/source distributions. The workspace
+copy at `third_party/licenses/GROK-MERMAID-APACHE-2.0.txt` accompanies native
+packages; both are intentional. These components are not relicensed under Pi's
+MIT terms. See [`docs/rich-rendering.md`](docs/rich-rendering.md#math-and-diagrams)
+for the bounded behavior and [`UPSTREAM-PARITY.md`](UPSTREAM-PARITY.md) for the
+separate fixture-evidence boundary.
 
 The vendored source includes octet-specific integration changes maintained in
 this workspace. Future updates should be imported deliberately and validated

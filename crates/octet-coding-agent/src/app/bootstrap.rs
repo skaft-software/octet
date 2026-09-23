@@ -1578,6 +1578,22 @@ fn builtin_discovery_reasoning(
     declaration: Option<&ProviderDeclaration>,
 ) -> anyhow::Result<DiscoveredReasoning> {
     let mut metadata = decode_reasoning_metadata(entry)?;
+    if declaration.is_some_and(|declaration| declaration.id == "openrouter")
+        && metadata.supported != Some(false)
+    {
+        if let Some(reasoning) = entry.get("reasoning").filter(|value| {
+            [
+                "mandatory",
+                "supported_efforts",
+                "default_effort",
+                "default_enabled",
+            ]
+            .iter()
+            .any(|key| value.get(*key).is_some())
+        }) {
+            return decode_openrouter_reasoning(reasoning);
+        }
+    }
     if metadata.source == octet_ai::types::ReasoningMetadataSource::Absent {
         if advertised_reasoning_parameter(entry)
             && declaration.is_some_and(|declaration| declaration.id == "openrouter")
@@ -1595,6 +1611,80 @@ fn builtin_discovery_reasoning(
         }
     }
     Ok(metadata)
+}
+
+/// OpenRouter's endpoint contract is not the generic `reasoning.values` schema.
+/// In particular, accepting a reasoning parameter does not prove that Off (or
+/// any particular effort) is supported. Keep the advertised efforts exact.
+fn decode_openrouter_reasoning(value: &serde_json::Value) -> anyhow::Result<DiscoveredReasoning> {
+    use octet_ai::types::{ReasoningMetadataSource, ReasoningOptions};
+    let mandatory = value
+        .get("mandatory")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| anyhow::anyhow!("invalid OpenRouter reasoning mandatory flag"))?;
+    let enabled = value
+        .get("default_enabled")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("invalid OpenRouter reasoning default_enabled flag"))
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        !mandatory || enabled != Some(false),
+        "mandatory reasoning cannot default to disabled"
+    );
+    let (control, options) = if let Some(efforts) = value.get("supported_efforts") {
+        let mut options = decode_reasoning_options(efforts, value.get("default_effort"))?;
+        anyhow::ensure!(options.values.iter().all(|value| {
+            value == "none" || matches!(ReasoningConfig::from_provider_value(value), Some(ReasoningConfig::Effort(e)) if e != octet_ai::ReasoningEffort::Ultra)
+        }), "invalid OpenRouter reasoning effort");
+        let has_off = options.choices().contains(&ReasoningConfig::Off);
+        anyhow::ensure!(
+            !mandatory || !has_off,
+            "mandatory reasoning cannot advertise Off"
+        );
+        if !mandatory && !has_off {
+            // Optionality explicitly permits Off, but does not advertise an
+            // effort named `none`. Keep it separate from the exact effort set.
+            options.values.insert(0, "false".into());
+        }
+        if enabled == Some(false) {
+            options.default = Some(if has_off { "none" } else { "false" }.into());
+        }
+        // `default_enabled: true` does not override an exact `none` default:
+        // OpenRouter publishes that combination for optional GPT-5.1 routes.
+        (ReasoningControl::Effort, options)
+    } else {
+        anyhow::ensure!(
+            value.get("default_effort").is_none(),
+            "reasoning default_effort requires supported_efforts"
+        );
+        if mandatory {
+            (
+                ReasoningControl::AlwaysOn,
+                ReasoningOptions {
+                    values: vec!["default".into()],
+                    default: Some("default".into()),
+                },
+            )
+        } else {
+            (
+                ReasoningControl::Toggle,
+                ReasoningOptions {
+                    values: vec!["false".into(), "true".into()],
+                    default: enabled.map(|enabled| enabled.to_string()),
+                },
+            )
+        }
+    };
+    Ok(DiscoveredReasoning {
+        source: ReasoningMetadataSource::Explicit,
+        supported: Some(true),
+        control: Some(control),
+        options: Some(options),
+        profile: None,
+    })
 }
 
 /// Whether an inventory advertises a reasoning request parameter.
@@ -2210,6 +2300,13 @@ fn discovered_reasoning_capability(
             return Some(capability);
         }
     };
+    // A parameter-only OpenRouter inventory proves neither optionality nor
+    // effort choices. Use the endpoint default, not a fabricated disabling value.
+    if declaration.id == "openrouter" && metadata.options.is_none() {
+        let mut capability = effort_capability(mode, &["default"], Some("default"));
+        capability.control = ReasoningControl::AlwaysOn;
+        return Some(capability);
+    }
     let mut capability = known.unwrap_or_else(|| {
         effort_capability(
             mode.clone(),
@@ -3237,6 +3334,211 @@ fn merge_provider_catalog(target: &mut ModelCatalog, source: ModelCatalog) -> an
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stored_api_key_catalog_tests {
+    use super::*;
+    use crate::provider_setup::BuiltinApiKeyStore;
+
+    fn saved_keys() -> (tempfile::TempDir, BuiltinApiKeyStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("credentials/api-keys");
+        let store = BuiltinApiKeyStore::for_test(root.clone());
+        for provider in ["openai", "anthropic", "gemini"] {
+            store
+                .save(provider, "synthetic-stored-key".into(), false)
+                .unwrap();
+        }
+        // Subsequent startup resolves a fresh store, not an in-memory key.
+        (directory, BuiltinApiKeyStore::for_test(root))
+    }
+
+    fn offline_catalog(store: &BuiltinApiKeyStore) -> ModelCatalog {
+        let mut catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(None),
+                    |id| store.load(id).map_err(Into::into),
+                )
+            },
+        )
+        .unwrap();
+        // Exactly the production ordering: bind existing endpoints, then prune.
+        // Both embedded endpoints have synthetic stored credentials, so this
+        // does not consult ambient environment values or make network requests.
+        catalog.retain_configured_models();
+        catalog
+    }
+
+    #[test]
+    fn offline_stored_keys_preserve_exact_embedded_inventory_and_native_auth() {
+        let (_directory, store) = saved_keys();
+        let catalog = offline_catalog(&store);
+        let embedded = ModelCatalog::builtin().unwrap();
+        assert_eq!(catalog.models().count(), embedded.models().count());
+        assert!(catalog.models().count() > 0);
+        for spec in embedded.models() {
+            let model = catalog.resolve(&spec.id).unwrap();
+            assert_eq!(model.spec.protocol, spec.protocol);
+            assert_eq!(model.spec.api_name, spec.api_name);
+            assert_eq!(
+                model.endpoint.base_url,
+                embedded.resolve(&spec.id).unwrap().endpoint.base_url
+            );
+            match spec.endpoint.0.as_str() {
+                "openai" => assert!(matches!(model.endpoint.auth, Auth::Bearer(_))),
+                "anthropic" => assert!(
+                    matches!(&model.endpoint.auth, Auth::Header { name, .. } if name == "x-api-key")
+                ),
+                other => panic!("unexpected embedded endpoint: {other}"),
+            }
+            assert!(!format!("{:?}", model.endpoint.auth).contains("synthetic-stored-key"));
+        }
+        // Saved Gemini credentials do not authorize expanding offline inventory.
+        assert!(!catalog.models().any(|model| model.endpoint.0 == "gemini"));
+    }
+
+    #[test]
+    fn online_discovery_failure_keeps_stored_key_embedded_fallback() {
+        let (_directory, store) = saved_keys();
+        let mut catalog = offline_catalog(&store);
+        let expected = catalog
+            .models()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>();
+        merge_declaration_inventory(
+            &mut catalog,
+            &crate::providers::OPENAI,
+            Ok(Err(anyhow::anyhow!("synthetic discovery failure"))),
+        );
+        catalog.retain_configured_models();
+        for id in expected {
+            assert!(catalog.resolve(&id).is_ok());
+        }
+    }
+
+    #[test]
+    fn embedded_binding_reads_only_readiness_selected_credential_sources() {
+        let (_directory, store) = saved_keys();
+        let mut consulted = Vec::new();
+        let catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Routes(vec!["openai"]),
+            |declaration| {
+                consulted.push(declaration.id);
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(None),
+                    |id| store.load(id).map_err(Into::into),
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(consulted, ["openai"]);
+        for spec in catalog.models() {
+            let model = catalog.resolve(&spec.id).unwrap();
+            match spec.endpoint.0.as_str() {
+                "openai" => assert!(matches!(model.endpoint.auth, Auth::Bearer(_))),
+                "anthropic" => assert!(matches!(model.endpoint.auth, Auth::HeaderEnv { .. })),
+                other => panic!("unexpected embedded endpoint: {other}"),
+            }
+        }
+        bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Routes(vec!["codex"]),
+            |_| panic!("Codex readiness cannot inspect unrelated API-key stores"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn embedded_binding_preserves_environment_precedence_and_dynamic_aliases() {
+        let catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(Some("synthetic-environment-key".into())),
+                    |_| panic!("a configured environment must never access stored keys"),
+                )
+            },
+        )
+        .unwrap();
+        for spec in catalog.models() {
+            let model = catalog.resolve(&spec.id).unwrap();
+            assert!(matches!(&model.endpoint.auth, Auth::BearerEnv { var }
+                if var == "OPENAI_API_KEY" || var == "ANTHROPIC_AUTH_TOKEN"));
+        }
+    }
+
+    #[test]
+    fn embedded_binding_isolates_invalid_environment_without_stored_fallback() {
+        let (_directory, store) = saved_keys();
+        let mut catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |variable| {
+                        if declaration.id == "openai" {
+                            Err(octet_ai::ConfigError::InvalidEnv(variable.to_owned()))
+                        } else {
+                            Ok(None)
+                        }
+                    },
+                    |id| {
+                        assert_ne!(id, "openai", "invalid environment must not change identity");
+                        store.load(id).map_err(Into::into)
+                    },
+                )
+            },
+        )
+        .unwrap();
+        catalog.retain_configured_models();
+        assert!(catalog
+            .models()
+            .any(|model| model.endpoint.0 == "anthropic"));
+        assert!(!catalog.models().any(|model| model.endpoint.0 == "openai"));
+    }
+
+    #[test]
+    fn embedded_binding_isolates_invalid_stored_credentials_from_valid_accounts() {
+        let (_directory, store) = saved_keys();
+        octet_agent::secure_fs::write_private_atomic(
+            &store.path("openai").unwrap(),
+            b"synthetic-secret-invalid-json",
+            8192,
+        )
+        .unwrap();
+        let mut consulted = Vec::new();
+        let mut catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                consulted.push(declaration.id);
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(None),
+                    |id| store.load(id).map_err(Into::into),
+                )
+            },
+        )
+        .unwrap();
+        catalog.retain_configured_models();
+        consulted.sort_unstable();
+        assert_eq!(consulted, ["anthropic", "openai"]);
+        assert!(catalog
+            .models()
+            .any(|model| model.endpoint.0 == "anthropic"));
+        assert!(!catalog.has_endpoint(&EndpointId("openai".into())));
+        assert!(!catalog.models().any(|model| model.endpoint.0 == "openai"));
+    }
 }
 
 /// Declarations whose configuration was consulted while building a catalog.
@@ -6015,6 +6317,73 @@ fn base_model_catalog_with_custom_store(
     base_model_catalog_with_readiness(offline, explicit_custom_store, &CatalogReadiness::Fleet)
 }
 
+/// Bind only the embedded catalog's existing endpoints, before credential
+/// pruning. This is local credential resolution, not discovery or registration
+/// of additional static inventories. Only readiness-selected declarations may
+/// access their private credential source; protocol/model metadata stays intact.
+fn bind_embedded_provider_credentials(
+    embedded: ModelCatalog,
+    readiness: &CatalogReadiness,
+    mut resolve: impl FnMut(
+        &ProviderDeclaration,
+    ) -> anyhow::Result<Option<crate::providers::EnvironmentCredential>>,
+) -> anyhow::Result<ModelCatalog> {
+    let mut catalog = ModelCatalog::default();
+    let mut unavailable = std::collections::HashSet::new();
+    for spec in embedded.models() {
+        if unavailable.contains(&spec.endpoint) {
+            continue;
+        }
+        let model = embedded.resolve(&spec.id)?;
+        if !catalog.has_endpoint(&model.endpoint.id) {
+            let mut endpoint = (*model.endpoint).clone();
+            if let Some((declaration, route)) = BUILTIN_PROVIDER_DECLARATIONS
+                .iter()
+                .filter(|declaration| readiness.includes(declaration.id))
+                .find_map(|declaration| {
+                    declaration
+                        .routes
+                        .iter()
+                        .find(|route| route.endpoint_id == endpoint.id.0)
+                        .map(|route| (declaration, route))
+                })
+            {
+                let authentication = resolve(declaration).and_then(|credential| {
+                    credential
+                        .map(|credential| crate::providers::environment_auth(route, &credential))
+                        .transpose()
+                });
+                match bootstrap_check(
+                    format!("provider-credential:{}", declaration.id),
+                    authentication,
+                    |_| {
+                        format!(
+                            "warning: {} unavailable: could not resolve provider credentials",
+                            declaration.name
+                        )
+                    },
+                ) {
+                    Ok(Some(authentication)) => endpoint.auth = authentication,
+                    Ok(None) => {}
+                    Err(_) => {
+                        // An invalid source cannot fall back to another identity.
+                        // Omit only this account's embedded models; other accounts
+                        // and later custom-provider registration remain usable.
+                        unavailable.insert(endpoint.id.clone());
+                        continue;
+                    }
+                }
+            }
+            catalog.register_endpoint(endpoint)?;
+            if let Some(label) = embedded.endpoint_label(&model.endpoint.id) {
+                catalog.set_endpoint_label(model.endpoint.id.clone(), label)?;
+            }
+        }
+        catalog.register_model(spec.clone())?;
+    }
+    Ok(catalog)
+}
+
 fn base_model_catalog_with_readiness(
     offline: bool,
     explicit_custom_store: Option<&crate::auth::custom::CredentialStore>,
@@ -6023,11 +6392,19 @@ fn base_model_catalog_with_readiness(
     let mut catalog = ModelCatalog::builtin()?;
     // The embedded catalog describes supported integrations, not enabled
     // accounts. Do not offer a cloud model until its endpoint can resolve a
-    // credential from this process's environment. Unit tests intentionally
-    // retain the complete fixture catalog so they can exercise protocol and
-    // session behavior without ambient secrets.
+    // credential from the environment or owner-private key store. Bind existing
+    // native endpoints before pruning so offline startup and discovery failure
+    // retain exactly the same embedded fallback models for either key source.
+    // Unit tests use injected local stores rather than ambient credentials.
     #[cfg(not(test))]
-    catalog.retain_configured_models();
+    {
+        catalog = bind_embedded_provider_credentials(
+            catalog,
+            readiness,
+            crate::providers::resolve_environment,
+        )?;
+        catalog.retain_configured_models();
+    }
     startup_phase("catalog.base");
     if cfg!(test) && readiness.is_fleet() {
         // Tests keep the historical deterministic DeepSeek fixture and never
@@ -7192,12 +7569,15 @@ pub(crate) fn build_app_with_runtime_manager(
     )?;
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
     let model = catalog.resolve(&launch.model)?;
-    let requested_reasoning = normalize_reasoning_for_model(&launch.reasoning, &model)?;
+    // Keep the original persisted/explicit choice until the diagnostic boundary;
+    // pre-normalizing it there would silently hide an unsupported Off selection.
+    let requested_reasoning = launch.reasoning;
+    let normalized_reasoning = normalize_reasoning_for_model(&requested_reasoning, &model)?;
     // `bootstrap_model` can be an old provider generation. The extension host
     // state exposes only the selected model identity, but refresh both the
     // policy surface and snapshots from the final catalog before any App work.
     apply_extension_tool_policy(&mut extensions, &config, &model);
-    executable_extensions.refresh_host_state(&session, &model, &requested_reasoning, &sessions);
+    executable_extensions.refresh_host_state(&session, &model, &normalized_reasoning, &sessions);
     let compact_model = config
         .compaction
         .compact_model
@@ -7417,14 +7797,16 @@ pub fn rebuild_app(
     };
     validate_compaction_route(config.compaction.mode, &model, compact_model.as_ref())?;
     let requested_reasoning = match (new_reasoning, persisted.reasoning) {
-        (Some(reasoning), _) => normalize_reasoning_for_model(&reasoning, &model)?,
-        (None, Some(reasoning)) => normalize_reasoning_for_model(&reasoning, &model)?,
+        (Some(reasoning), _) | (None, Some(reasoning)) => reasoning,
         (None, None) if changing_model => {
             let level = level_from_reasoning(&reasoning, &old_model)?;
             thinking_to_reasoning(level, &model)?
         }
-        (None, None) => normalize_reasoning_for_model(&reasoning, &model)?,
+        (None, None) => reasoning,
     };
+    // Validate before releasing the old agent, but retain the original choice
+    // for the visible migration diagnostic after extension gates are known.
+    let normalized_reasoning = normalize_reasoning_for_model(&requested_reasoning, &model)?;
     let requested_reasoning_mode = if let Some(mode) = new_reasoning_mode {
         mode
     } else if explicit_reasoning {
@@ -7506,7 +7888,7 @@ pub fn rebuild_app(
         &config,
         &session,
         &model,
-        &requested_reasoning,
+        &normalized_reasoning,
         &sessions,
         runtime_manager,
         provider_runtime,

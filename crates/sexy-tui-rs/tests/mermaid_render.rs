@@ -1,14 +1,8 @@
 //! Behavioral goldens for the Mermaid graph renderer (parity card 2c.4).
 //!
-//! Every expected value below is the observed output of this engine — the
-//! renderer is self-contained (no upstream Rust equivalent and no network
-//! dependency), so the goldens are captured from the implementation and were
-//! checked by hand against the diagram the source describes. They exist to
-//! lock the box-drawing layout, the fail-closed behaviour and the size limits;
-//! re-generating them requires re-running the renderer, not copying a
-//! reference transcript.
-//!
-//! See `crates/sexy-tui-rs/src/rich_text/mermaid.rs` for the supported subset.
+//! Layout goldens are captured from Pi's grok-mermaid 0.2.3 (see the fixtures
+//! directory), except dotted node identifiers, an existing octet extension.
+//! Malformed syntax still fails closed rather than publishing partial art.
 
 use sexy_tui_rs::rich_text::mermaid::{render_mermaid, MermaidError};
 use sexy_tui_rs::width::display_width;
@@ -19,37 +13,37 @@ const SUPPORTED: &[(&str, &str)] = &[
     // lr_basic
     ("flowchart LR\n  A[Start] --> B[Done]", "┌───────┐    ┌──────┐\n│ Start ├───▶│ Done │\n└───────┘    └──────┘"),
     // td_basic
-    ("graph TD\n  A[Start] --> B[Done]", "┌───────┐\n│ Start │\n└───┬───┘\n    │\n    │\n    ▼\n┌──────┐\n│ Done │\n└──────┘"),
+    ("graph TD\n  A[Start] --> B[Done]", " ┌───────┐\n │ Start │\n └───┬───┘\n     │\n     ▼\n ┌──────┐\n │ Done │\n └──────┘"),
     // tb_alias
-    ("flowchart TB\n  A[One] --> B[Two]", "┌─────┐\n│ One │\n└──┬──┘\n   │\n   │\n   ▼\n┌─────┐\n│ Two │\n└─────┘"),
+    ("flowchart TB\n  A[One] --> B[Two]", " ┌─────┐\n │ One │\n └──┬──┘\n    │\n    ▼\n ┌─────┐\n │ Two │\n └─────┘"),
     // lr_chain
     ("flowchart LR\n  A[Parse] --> B[Layout] --> C[Render]", "┌───────┐    ┌────────┐    ┌────────┐\n│ Parse ├───▶│ Layout ├───▶│ Render │\n└───────┘    └────────┘    └────────┘"),
     // td_branch
-    ("flowchart TD\n  A[In] --> B{Valid?}\n  B --> C[Store]\n  B --> D[Reject]", "┌────┐\n│ In │\n└──┬─┘\n   │\n   └─┐\n     ▼\n┌────────┐\n│ Valid? │\n└────┬───┘\n     │\n    ┌┘───────────┐\n    ▼            ▼\n┌───────┐   ┌────────┐\n│ Store │   │ Reject │\n└───────┘   └────────┘"),
+    ("flowchart TD\n  A[In] --> B{Valid?}\n  B --> C[Store]\n  B --> D[Reject]", "        ┌────┐\n        │ In │\n        └──┬─┘\n           │\n           ▼\n      ╭────────╮\n      │ Valid? │\n      ╰────┬───╯\n     ┌─────┴─────┐\n     ▼           ▼\n ┌───────┐  ┌────────┐\n │ Store │  │ Reject │\n └───────┘  └────────┘"),
     // lr_branch
-    ("flowchart LR\n  A[In] --> B{Valid?}\n  B --> C[Store]\n  B --> D[Reject]", "┌────┐    ┌────────┐    ┌───────┐\n│ In ├───▶│ Valid? ├───▶│ Store │\n└────┘    └────────┘│   └───────┘\n                    │\n                    │   ┌────────┐\n                    └──▶│ Reject │\n                        └────────┘"),
+    ("flowchart LR\n  A[In] --> B{Valid?}\n  B --> C[Store]\n  B --> D[Reject]", "                        ┌───────┐\n                    ┌──▶│ Store │\n┌────┐    ╭────────╮│   └───────┘\n│ In ├───▶│ Valid? ├┤\n└────┘    ╰────────╯│   ┌────────┐\n                    └──▶│ Reject │\n                        └────────┘"),
     // lr_link_label
-    ("flowchart LR\n  A -->|start| B\n  B --> C", "┌───┐start  ┌───┐    ┌───┐\n│ A ├──────▶│ B ├───▶│ C │\n└───┘       └───┘    └───┘"),
+    ("flowchart LR\n  A -->|start| B\n  B --> C", "┌───┐ start  ┌───┐        ┌───┐\n│ A ├───────▶│ B ├───────▶│ C │\n└───┘        └───┘        └───┘"),
     // td_link_label
-    ("flowchart TD\n  A -->|start| B", "┌───┐\n│ A │\n└─┬─┘\n  │ start\n  │\n  ▼\n┌───┐\n│ B │\n└───┘"),
+    ("flowchart TD\n  A -->|start| B", " ┌───┐\n │ A │\n └─┬─┘\n   │\n   ▼start\n ┌───┐\n │ B │\n └───┘"),
     // lr_diamond
-    ("graph LR\n  A[Alpha] --> B[Beta]\n  A --> C[Gamma]\n  B --> D[Delta]\n  C --> D", "┌───────┐    ┌──────┐     ┌───────┐\n│ Alpha ├───▶│ Beta ├────▶│ Delta │\n└───────┘│   └──────┘ │   └───────┘\n         │            │\n         │   ┌───────┐│\n         └──▶│ Gamma ├┘\n             └───────┘"),
+    ("graph LR\n  A[Alpha] --> B[Beta]\n  A --> C[Gamma]\n  B --> D[Delta]\n  C --> D", "             ┌──────┐\n         ┌──▶│ Beta ├─┐\n┌───────┐│   └──────┘ │   ┌───────┐\n│ Alpha ├┤            ├──▶│ Delta │\n└───────┘│   ┌───────┐│   └───────┘\n         └──▶│ Gamma ├┘\n             └───────┘"),
     // td_decision
-    ("flowchart TD\n  A[Start] --> B{Choice}\n  B --> C[Yes]\n  B --> D[No]", "┌───────┐\n│ Start │\n└───┬───┘\n    │\n    └┐\n     ▼\n┌────────┐\n│ Choice │\n└────┬───┘\n     │\n   ┌─┘───────┐\n   ▼         ▼\n┌─────┐   ┌────┐\n│ Yes │   │ No │\n└─────┘   └────┘"),
+    ("flowchart TD\n  A[Start] --> B{Choice}\n  B --> C[Yes]\n  B --> D[No]", "    ┌───────┐\n    │ Start │\n    └───┬───┘\n        │\n        ▼\n   ╭────────╮\n   │ Choice │\n   ╰────┬───╯\n    ┌───┴────┐\n    ▼        ▼\n ┌─────┐  ┌────┐\n │ Yes │  │ No │\n └─────┘  └────┘"),
     // shapes
-    ("flowchart LR\n  A(Rounded) --> B{Diamond}", "┌─────────┐    ┌─────────┐\n│ Rounded ├───▶│ Diamond │\n└─────────┘    └─────────┘"),
+    ("flowchart LR\n  A(Rounded) --> B{Diamond}", "╭─────────╮    ╭─────────╮\n│ Rounded ├───▶│ Diamond │\n╰─────────╯    ╰─────────╯"),
     // shapes_nested_brackets
-    ("flowchart LR\n  A([Stadium]) --> B[[Subroutine]]\n  C((Circle)) --> D{{Hexagon}}", "┌─────────┐    ┌────────────┐\n│ Stadium ├───▶│ Subroutine │\n└─────────┘    └────────────┘\n\n┌────────┐     ┌─────────┐\n│ Circle ├────▶│ Hexagon │\n└────────┘     └─────────┘"),
+    ("flowchart LR\n  A([Stadium]) --> B[[Subroutine]]\n  C((Circle)) --> D{{Hexagon}}", "╭─────────╮    ┌────────────┐\n│ Stadium ├───▶│ Subroutine │\n╰─────────╯    └────────────┘\n\n╭────────╮     ╭─────────╮\n│ Circle ├────▶│ Hexagon │\n╰────────╯     ╰─────────╯"),
     // class_annotation
     ("flowchart LR\n  A[Foo]:::highlight --> B[Bar]", "┌─────┐    ┌─────┐\n│ Foo ├───▶│ Bar │\n└─────┘    └─────┘"),
     // undirected_td
-    ("flowchart TD\n  A[One] --- B[Two]", "┌─────┐\n│ One │\n└──┬──┘\n   │\n   │\n   │\n┌─────┐\n│ Two │\n└─────┘"),
+    ("flowchart TD\n  A[One] --- B[Two]", " ┌─────┐\n │ One │\n └──┬──┘\n    │\n    │\n ┌─────┐\n │ Two │\n └─────┘"),
     // undirected_lr
     ("flowchart LR\n  A[One] --- B[Two]", "┌─────┐    ┌─────┐\n│ One ├────│ Two │\n└─────┘    └─────┘"),
     // link_styles
-    ("flowchart LR\n  A[One] -.-> B[Two]\n  A ==> C[Three]", "┌─────┐    ┌─────┐\n│ One ├───▶│ Two │\n└─────┘│   └─────┘\n       │\n       │   ┌───────┐\n       └──▶│ Three │\n           └───────┘"),
+    ("flowchart LR\n  A[One] -.-> B[Two]\n  A ==> C[Three]", "           ┌─────┐\n       ┌╌╌▶│ Two │\n┌─────┐╎   └─────┘\n│ One ├┤\n└─────┘┃   ┌───────┐\n       ┗━━▶│ Three │\n           └───────┘"),
     // directives_and_comments
-    ("flowchart TD\n  %% comment\n  classDef big fill:#f00\n  A[Alpha] --> B[Beta]\n  style A fill:#0f0\n  linkStyle 0 stroke:#00f\n  class A big\n  click A \"https://example.com\";", "┌───────┐\n│ Alpha │\n└───┬───┘\n    │\n    │\n    ▼\n┌──────┐\n│ Beta │\n└──────┘"),
+    ("flowchart TD\n  %% comment\n  classDef big fill:#f00\n  A[Alpha] --> B[Beta]\n  style A fill:#0f0\n  linkStyle 0 stroke:#00f\n  class A big\n  click A \"https://example.com\";", " ┌───────┐\n │ Alpha │\n └───┬───┘\n     │\n     ▼\n ┌──────┐\n │ Beta │\n └──────┘"),
     // semicolons
     ("flowchart LR;\n  A[One] --> B[Two];", "┌─────┐    ┌─────┐\n│ One ├───▶│ Two │\n└─────┘    └─────┘"),
     // quoted_label
@@ -67,7 +61,7 @@ const SUPPORTED: &[(&str, &str)] = &[
     // quoted_label_with_delimiters
     ("flowchart LR\n  A[\"a[b]c\"] --> B[Two]", "┌───────┐    ┌─────┐\n│ a[b]c ├───▶│ Two │\n└───────┘    └─────┘"),
     // quoted_link_label
-    ("flowchart LR\n  A -->|\"two words\"| B", "┌───┐two words  ┌───┐\n│ A ├──────────▶│ B │\n└───┘           └───┘"),
+    ("flowchart LR\n  A -->|\"two words\"| B", "┌───┐ two words  ┌───┐\n│ A ├───────────▶│ B │\n└───┘            └───┘"),
     // percent_inside_quoted_label
     ("flowchart LR\n  A[\"100%% done\"] --> B[Two]", "┌────────────┐    ┌─────┐\n│ 100%% done ├───▶│ Two │\n└────────────┘    └─────┘"),
     // semicolon_inside_quoted_label
@@ -84,41 +78,55 @@ const FAIL_CLOSED: &[(&str, &str)] = &[
     // no_header
     ("A --> B", "dropped, unsupported diagram type: \"A\""),
     // pie
-    ("pie\n  title Pets", "dropped, unsupported diagram type: \"pie\""),
+    (
+        "pie\n  title Pets",
+        "dropped, unsupported diagram type: \"pie\"",
+    ),
     // sequence_diagram
-    ("sequenceDiagram\n  A->>B: hi", "dropped, unsupported diagram type: \"sequenceDiagram\""),
-    // bt_layout
-    ("graph BT\n  A --> B", "dropped, unsupported diagram type: \"BT\""),
-    // rl_layout
-    ("flowchart RL\n  A --> B", "dropped, unsupported diagram type: \"RL\""),
+    (
+        "sequenceDiagram\n  A->>B: hi",
+        "dropped, unsupported diagram type: \"sequenceDiagram\"",
+    ),
     // unknown_direction
-    ("flowchart XY\n  A --> B", "dropped, unsupported diagram type: \"XY\""),
-    // inline_link_label
-    ("flowchart LR\n  A -- text --> B", "dropped, line 2: expected a link, found \"-- text --> B\""),
-    // node_list
-    ("flowchart LR\n  A --> B & C", "dropped, line 2: node lists with `&` are not supported"),
-    // subgraph
-    ("flowchart LR\n  subgraph S\n  A --> B\n  end", "dropped, line 2: `subgraph` statements are not supported"),
+    (
+        "flowchart XY\n  A --> B",
+        "dropped, unsupported diagram type: \"XY\"",
+    ),
     // end_statement
-    ("flowchart LR\n  A --> B\n  end", "dropped, line 3: `end` statements are not supported"),
-    // direction_statement
-    ("flowchart LR\n  direction LR\n  A --> B", "dropped, line 2: `direction` statements are not supported"),
+    (
+        "flowchart LR\n  A --> B\n  end",
+        "dropped, line 3: `end` without a subgraph",
+    ),
     // unterminated_quoted_label
-    ("flowchart LR\n  A[\"oops] --> B", "dropped, line 2: unterminated quoted label opened with `[`"),
+    (
+        "flowchart LR\n  A[\"oops] --> B",
+        "dropped, line 2: unterminated quoted label opened with `[`",
+    ),
     // quoted_label_missing_delimiter
-    ("flowchart LR\n  A[\"oops\" --> B", "dropped, line 2: quoted label opened with `[` is not closed by `]`"),
-    // cycle
-    ("flowchart LR\n  A --> B --> C --> A", "dropped, cycle through node \"A\""),
-    // skips_a_layer
-    ("flowchart LR\n  A --> C\n  A --> B\n  B --> C", "dropped, link A --> C spans 2 layers; only links between adjacent layers are supported"),
+    (
+        "flowchart LR\n  A[\"oops\" --> B",
+        "dropped, line 2: quoted label opened with `[` is not closed by `]`",
+    ),
     // unbalanced_label
-    ("flowchart LR\n  A[Unbalanced --> B", "dropped, line 2: unbalanced node label opened with `[`"),
+    (
+        "flowchart LR\n  A[Unbalanced --> B",
+        "dropped, line 2: unbalanced node label opened with `[`",
+    ),
     // trailing_link
-    ("flowchart LR\n  A -->", "dropped, line 2: trailing link without a target node"),
+    (
+        "flowchart LR\n  A -->",
+        "dropped, line 2: trailing link without a target node",
+    ),
     // unterminated_link_label
-    ("flowchart LR\n  A -->|oops B", "dropped, line 2: unterminated link label"),
+    (
+        "flowchart LR\n  A -->|oops B",
+        "dropped, line 2: unterminated link label",
+    ),
     // unknown_node_after_edge
-    ("flowchart LR\n  A --> :::x", "dropped, line 2: expected a node id at \":::x\""),
+    (
+        "flowchart LR\n  A --> :::x",
+        "dropped, line 2: expected a node id at \":::x\"",
+    ),
 ];
 
 #[test]
@@ -141,10 +149,18 @@ fn unsupported_input_fails_closed_with_a_typed_error() {
 fn every_rendered_row_fits_the_reported_width() {
     for (source, _) in SUPPORTED {
         let art = render_mermaid(source).expect(source);
-        let widest = art.lines.iter().map(|line| display_width(line)).max().unwrap_or(0);
+        let widest = art
+            .lines
+            .iter()
+            .map(|line| display_width(line))
+            .max()
+            .unwrap_or(0);
         assert_eq!(art.width, widest, "source = {source:?}");
         for line in &art.lines {
-            assert!(display_width(line) <= art.width, "source = {source:?} line = {line:?}");
+            assert!(
+                display_width(line) <= art.width,
+                "source = {source:?} line = {line:?}"
+            );
         }
     }
 }
@@ -187,7 +203,11 @@ fn link_labels_sit_on_the_connector() {
     let art = render_mermaid("flowchart LR\n  A -->|start| B\n  B --> C").expect("labels");
     assert!(art.plain().contains("start"), "observed:\n{}", art.plain());
     let down = render_mermaid("flowchart TD\n  A -->|start| B").expect("labels");
-    assert!(down.plain().contains("start"), "observed:\n{}", down.plain());
+    assert!(
+        down.plain().contains("start"),
+        "observed:\n{}",
+        down.plain()
+    );
 }
 
 #[test]
@@ -196,7 +216,7 @@ fn layouts_place_the_same_graph_differently() {
     let left_right = render_mermaid(source).expect("lr");
     let top_down = render_mermaid(&source.replace(" LR", " TD")).expect("td");
     assert_eq!(left_right.lines.len(), 3);
-    assert_eq!(top_down.lines.len(), 9);
+    assert_eq!(top_down.lines.len(), 8);
     assert!(left_right.width > top_down.width);
     // Deterministic: the same source renders identically twice.
     assert_eq!(left_right, render_mermaid(source).expect("lr again"));
@@ -204,27 +224,51 @@ fn layouts_place_the_same_graph_differently() {
 
 #[test]
 fn size_limits_fail_closed() {
-    let many_nodes = format!("flowchart LR\n{}", (0..70).map(|i| format!("  n{i} --> n{}", i + 1)).collect::<Vec<_>>().join("\n"));
-    assert!(matches!(render_mermaid(&many_nodes), Err(MermaidError::TooLarge { .. })));
+    let many_nodes = format!(
+        "flowchart LR\n{}",
+        (0..130)
+            .map(|i| format!("  n{i} --> n{}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(matches!(
+        render_mermaid(&many_nodes),
+        Err(MermaidError::TooLarge { .. })
+    ));
 
-    let wide_label = format!("flowchart LR\n  A[{}] --> B", "x".repeat(49));
-    assert!(matches!(render_mermaid(&wide_label), Err(MermaidError::TooLarge { .. })));
+    let wide_label = format!("flowchart LR\n  A[{}] --> B", "x".repeat(1025));
+    assert!(matches!(
+        render_mermaid(&wide_label),
+        Err(MermaidError::TooLarge { .. })
+    ));
 
-    let huge = format!("flowchart LR\n{}", (0..3000).map(|i| format!("  a{i} --> a{}", i + 1)).collect::<Vec<_>>().join("\n"));
-    assert!(matches!(render_mermaid(&huge), Err(MermaidError::TooLarge { .. })));
+    let huge = format!(
+        "flowchart LR\n{}",
+        (0..3000)
+            .map(|i| format!("  a{i} --> a{}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(matches!(
+        render_mermaid(&huge),
+        Err(MermaidError::TooLarge { .. })
+    ));
 }
 
 #[test]
 fn error_variants_are_typed() {
-    assert!(matches!(render_mermaid(""), Err(MermaidError::UnsupportedDiagram { .. }) | Err(MermaidError::MissingHeader)));
-    assert!(matches!(render_mermaid("pie\n  title Pets"), Err(MermaidError::UnsupportedDiagram { .. })));
-    assert!(matches!(render_mermaid("graph BT\n  A --> B"), Err(MermaidError::UnsupportedDiagram { .. })));
-    assert!(matches!(render_mermaid("flowchart LR\n  A -- text --> B"), Err(MermaidError::UnsupportedSyntax { .. })));
-    assert!(matches!(render_mermaid("flowchart LR\n  A --> B --> C --> A"), Err(MermaidError::Cycle { .. })));
     assert!(matches!(
-        render_mermaid("flowchart LR\n  A --> C\n  A --> B\n  B --> C"),
-        Err(MermaidError::UnsupportedTopology { .. })
+        render_mermaid(""),
+        Err(MermaidError::UnsupportedDiagram { .. }) | Err(MermaidError::MissingHeader)
     ));
+    assert!(matches!(
+        render_mermaid("pie\n  title Pets"),
+        Err(MermaidError::UnsupportedDiagram { .. })
+    ));
+    assert!(render_mermaid("graph BT\n  A --> B").is_ok());
+    assert!(render_mermaid("flowchart LR\n  A -- text --> B").is_ok());
+    assert!(render_mermaid("flowchart LR\n  A --> B --> C --> A").is_ok());
+    assert!(render_mermaid("flowchart LR\n  A --> C\n  A --> B\n  B --> C").is_ok());
 }
 
 /// Deterministic token soup: no input may panic, exceed the documented limits,
@@ -233,9 +277,43 @@ fn error_variants_are_typed() {
 #[test]
 fn random_token_soup_never_panics_and_stays_within_limits() {
     const TOKENS: &[&str] = &[
-        "graph", "flowchart", "TD", "TB", "LR", "BT", "RL", "-->", "---", "-.->", "==>", "->", "|", "|x|", "[",
-        "]", "(", ")", "{", "}", "\"", "%%", ";", "&", "subgraph", "end", "direction", ":::c", "classDef", "A", "B",
-        "node_1", "界", "\n", " ", "pie", "\t",
+        "graph",
+        "flowchart",
+        "TD",
+        "TB",
+        "LR",
+        "BT",
+        "RL",
+        "-->",
+        "---",
+        "-.->",
+        "==>",
+        "->",
+        "|",
+        "|x|",
+        "[",
+        "]",
+        "(",
+        ")",
+        "{",
+        "}",
+        "\"",
+        "%%",
+        ";",
+        "&",
+        "subgraph",
+        "end",
+        "direction",
+        ":::c",
+        "classDef",
+        "A",
+        "B",
+        "node_1",
+        "界",
+        "\n",
+        " ",
+        "pie",
+        "\t",
     ];
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut next = move || {
@@ -251,8 +329,12 @@ fn random_token_soup_never_panics_and_stays_within_limits() {
             source.push_str(TOKENS[next() % TOKENS.len()]);
         }
         if let Ok(art) = render_mermaid(&source) {
-            assert!(art.width <= 400, "width {} for {source:?}", art.width);
-            assert!(art.lines.len() <= 200, "rows {} for {source:?}", art.lines.len());
+            assert!(art.width <= 4096, "width {} for {source:?}", art.width);
+            assert!(
+                art.lines.len() <= 2048,
+                "rows {} for {source:?}",
+                art.lines.len()
+            );
         }
     }
 }

@@ -434,8 +434,19 @@ fn publish_workers(
 
 fn assert_parent_history_is_not_worker_preview(replay: &mut NativeReplay, expanded: bool) {
     for text in [replay.frame(), replay.history()] {
-        assert_eq!(text.matches("Subagents").count(), 1, "{text}");
-        assert_eq!(text.matches("LIVE-WORKER").count(), 1, "{text}");
+        let chrome = shell_chrome(&replay.shell.state.borrow(), replay.width, Instant::now())
+            .subagents
+            .join("\n");
+        assert_eq!(
+            text.matches("Subagents").count(),
+            usize::from(chrome.contains("Subagents")),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("LIVE-WORKER").count(),
+            usize::from(chrome.contains("LIVE-WORKER")),
+            "{text}"
+        );
         assert!(!text.contains("result pending"), "{text}");
         for index in 0..48 {
             assert_eq!(
@@ -478,10 +489,13 @@ fn native_active_roster_preserves_parent_answers_results_and_authoritative_updat
         publish_workers(&mut replay, vec![live.clone()]);
         replay.render(false);
         assert!(!replay.frame().contains("result pending"));
-        let roster_id = {
-            let state = replay.shell.state.borrow();
-            state.transcript_commit_ids[state.subagent_activity_block.unwrap()]
-        };
+        assert!(!replay
+            .shell
+            .state
+            .borrow()
+            .rendered_transcript(width)
+            .join("\n")
+            .contains("LIVE-WORKER"));
 
         let mut source = String::new();
         for index in 0..48 {
@@ -497,7 +511,17 @@ fn native_active_roster_preserves_parent_answers_results_and_authoritative_updat
             if index % 16 == 15 {
                 replay.render(false);
                 let frame = replay.frame();
-                assert_eq!(frame.matches("LIVE-WORKER").count(), 1, "{frame}");
+                let chrome = shell_chrome(&replay.shell.state.borrow(), width, Instant::now());
+                assert_eq!(
+                    frame.matches("LIVE-WORKER").count(),
+                    usize::from(
+                        chrome
+                            .subagents
+                            .iter()
+                            .any(|row| row.contains("LIVE-WORKER"))
+                    ),
+                    "{frame}"
+                );
                 assert!(!frame.contains("result pending"), "{frame}");
                 for accepted in 0..=index {
                     assert_eq!(
@@ -533,7 +557,16 @@ fn native_active_roster_preserves_parent_answers_results_and_authoritative_updat
             // The ordinary trailing tool may have a preview, never the roster
             // or the already accepted answer before that tool.
             assert_eq!(replay.frame().matches("PARENT-00").count(), 1);
-            assert_eq!(replay.frame().matches("LIVE-WORKER").count(), 1);
+            let chrome = shell_chrome(&replay.shell.state.borrow(), width, Instant::now());
+            assert_eq!(
+                replay.frame().matches("LIVE-WORKER").count(),
+                usize::from(
+                    chrome
+                        .subagents
+                        .iter()
+                        .any(|row| row.contains("LIVE-WORKER"))
+                )
+            );
             let output = (0..12)
                 .map(|row| format!("FINAL-{tool}-{row:02}"))
                 .collect::<Vec<_>>()
@@ -562,9 +595,18 @@ fn native_active_roster_preserves_parent_answers_results_and_authoritative_updat
         replay.render(false);
         replay.assert_canonical_transcript();
 
-        // Real offscreen metric, growth, shrink and completion changes must
-        // repair history, not keep a stale running roster to avoid ED3.
+        // Telemetry is current even after long history and parent settlement.
+        // Real Shell -> Pi -> VT updates stay in chrome (plus the visible
+        // aggregate outcome hint): no ED3 or parent-history replay is permitted.
+        let transcript = replay
+            .shell
+            .state
+            .borrow()
+            .rendered_transcript(width)
+            .clone();
+        let revisions = replay.shell.state.borrow().block_revisions.clone();
         live.output_tokens = 987;
+        live.tool_use_count = 27;
         live.total_tokens = live.input_tokens + live.output_tokens;
         for children in [
             vec![live.clone()],
@@ -575,50 +617,42 @@ fn native_active_roster_preserves_parent_answers_results_and_authoritative_updat
                 ..live.clone()
             }],
         ] {
-            let second = children.len() == 2;
             let completed = children[0].state == "completed";
             let baseline = replay.shell.tui.as_ref().unwrap().full_redraws();
-            publish_workers(&mut replay, children);
-            let output = replay.render(false);
-            assert_eq!(output.matches("\x1b[3J").count(), 1, "{output:?}");
-            assert_eq!(
-                replay.shell.tui.as_ref().unwrap().full_redraws(),
-                baseline + 1
-            );
+            publish_workers(&mut replay, children.clone());
+            replay.render(true);
+            assert_eq!(replay.shell.tui.as_ref().unwrap().full_redraws(), baseline);
             replay.assert_canonical_transcript();
             assert_parent_history_is_not_worker_preview(&mut replay, false);
-            let physical = replay.history();
-            assert_eq!(
-                physical.matches("SECOND-WORKER").count(),
-                usize::from(second)
-            );
-            let row = physical
-                .lines()
-                .find(|row| row.contains("LIVE-WORKER"))
-                .unwrap();
-            if !completed {
-                assert!(row.contains("987"), "{row}");
-            }
-            // Uniform rosters may put their state in the heading rather than
-            // repeat a state column. Check only this roster's projection, not
-            // unrelated historical lifecycle text.
-            let roster = physical
-                .split_once("Subagents")
-                .unwrap()
-                .1
-                .split_once("PARENT-00")
-                .unwrap()
-                .0;
-            assert!(
-                roster.contains(if completed { "completed" } else { "running" }),
-                "{roster}"
-            );
             let state = replay.shell.state.borrow();
             assert_eq!(
-                state.transcript_commit_ids[state.subagent_activity_block.unwrap()],
-                roster_id
+                state.subagent_activity.as_ref().unwrap().telemetry,
+                children
             );
+            if !completed {
+                assert_eq!(*state.rendered_transcript(width), transcript);
+                assert_eq!(state.block_revisions, revisions);
+            } else {
+                // Settlement removes the outcome's aggregate running hint;
+                // all actual transcript evidence and revisions remain stable.
+                for ((block, before), after) in state
+                    .transcript
+                    .iter()
+                    .zip(&revisions)
+                    .zip(&state.block_revisions)
+                {
+                    if !matches!(block, TranscriptBlock::Outcome(_)) {
+                        assert_eq!(before, after);
+                    }
+                }
+            }
             drop(state);
+            let visible = replay.terminal.screen().contents();
+            assert_eq!(visible.contains("Subagents"), !completed, "{visible}");
+            if !completed && height >= 18 {
+                assert!(visible.contains("LIVE-WORKER"), "{visible}");
+                assert!(visible.contains("987"), "{visible}");
+            }
             replay.render(true);
         }
 
@@ -678,14 +712,14 @@ fn native_active_roster_preserves_parent_answers_results_and_authoritative_updat
 }
 
 #[test]
-fn native_two_runs_keep_roster_identity_through_late_worker_completion() {
+fn native_two_runs_retain_telemetry_and_late_settlement_never_repairs_history() {
     for (theme, width, height) in native_profile_matrix() {
         let mut replay = NativeReplay::with_theme(theme, width, height);
         let first_run = replay.shell.begin_run("fixture");
         replay.shell.on_prompt_submitted("FIRST-ROOT-PROMPT");
         let mut first = worker("FIRST-ROOT-WORKER");
         publish_workers(&mut replay, vec![first.clone()]);
-        replay.render(false);
+        replay.render(true);
         first.state = "completed".into();
         publish_workers(&mut replay, vec![first.clone()]);
         replay.shell.on_run_event(
@@ -695,33 +729,21 @@ fn native_two_runs_keep_roster_identity_through_late_worker_completion() {
                 reason: octet_agent::FinishReason::Completed,
             },
         );
-        replay.render(false);
-        let (first_id, first_index) = {
-            let state = replay.shell.state.borrow();
-            let index = state.subagent_activity_block.unwrap();
-            (state.transcript_commit_ids[index], index)
-        };
-
+        replay.render(true);
+        assert!(!replay.frame().contains("Subagents"));
         let second_run = replay.shell.begin_run("fixture");
         replay.shell.on_prompt_submitted("SECOND-ROOT-PROMPT");
         publish_workers(&mut replay, vec![first.clone()]);
-        assert_eq!(
-            replay.shell.state.borrow().subagent_activity_block,
-            Some(first_index)
-        );
+        assert!(!render_shell(&replay.shell.state.borrow(), width)
+            .join("\n")
+            .contains("Subagents"));
         let mut second = worker("SECOND-ROOT-WORKER");
         publish_workers(&mut replay, vec![first.clone(), second.clone()]);
-        replay.render(false);
-        let second_id = {
-            let state = replay.shell.state.borrow();
-            state.transcript_commit_ids[state.subagent_activity_block.unwrap()]
-        };
-        assert_eq!(first_id, second_id);
+        replay.render(true);
         for index in 0..48 {
             replay.shell.notice(format!("SECOND-ROOT-TAIL-{index:02}"));
         }
-        // The parent settles before this run's worker. A later authoritative
-        // completion still repairs the same session-scoped roster in place.
+        // The worker keeps its pinned presence after its parent settles.
         replay.shell.on_run_event(
             second_run,
             &AgentEvent::RunFinished {
@@ -730,39 +752,47 @@ fn native_two_runs_keep_roster_identity_through_late_worker_completion() {
             },
         );
         replay.render(false);
+        assert!(replay.terminal.screen().contents().contains("Subagents"));
+        let revisions = replay.shell.state.borrow().block_revisions.clone();
+        let transcript = replay
+            .shell
+            .state
+            .borrow()
+            .rendered_transcript(width)
+            .clone();
         second.state = "failed".into();
         second.failure_reason = Some("late worker failure".into());
-        publish_workers(&mut replay, vec![first, second]);
-        let output = replay.render(false);
-        assert_eq!(output.matches("\x1b[3J").count(), 1, "{output:?}");
+        publish_workers(&mut replay, vec![first.clone(), second.clone()]);
+        replay.render(true);
         replay.assert_canonical_transcript();
         let state = replay.shell.state.borrow();
-        let first_index = state
-            .transcript_commit_ids
+        assert_eq!(
+            state.subagent_activity.as_ref().unwrap().telemetry,
+            vec![first, second]
+        );
+        assert!(!transcript.join("\n").contains("ROOT-WORKER"));
+        for ((block, before), after) in state
+            .transcript
             .iter()
-            .position(|id| *id == first_id)
-            .unwrap();
-        let second_index = state.subagent_activity_block.unwrap();
-        assert_eq!(state.transcript_commit_ids[second_index], second_id);
-        assert_eq!(first_index, second_index);
-        let second_copy = block_copy_text(&state.transcript[second_index]);
-        assert!(second_copy.contains("SECOND-ROOT-WORKER"), "{second_copy}");
-        assert!(second_copy.contains("failed"), "{second_copy}");
-        assert!(second_copy.contains("FIRST-ROOT-WORKER"), "{second_copy}");
+            .zip(&revisions)
+            .zip(&state.block_revisions)
+        {
+            if !matches!(block, TranscriptBlock::Outcome(_)) {
+                assert_eq!(before, after);
+            }
+        }
         drop(state);
         for _ in 0..3 {
             replay.render(true);
         }
         for text in [replay.frame(), replay.history()] {
-            assert_eq!(text.matches("Subagents").count(), 1, "{text}");
-            assert_eq!(text.matches("FIRST-ROOT-WORKER").count(), 1, "{text}");
+            assert!(!text.contains("Subagents"), "{text}");
+            assert!(!text.contains("FIRST-ROOT-WORKER"), "{text}");
             assert_eq!(text.matches("SECOND-ROOT-WORKER").count(), 1, "{text}");
-            let (old, current) = text.split_once("SECOND-ROOT-PROMPT").unwrap();
-            assert!(old.contains("FIRST-ROOT-WORKER"), "{text}");
-            assert!(!current.contains("FIRST-ROOT-WORKER"), "{text}");
-            assert!(old.contains("SECOND-ROOT-WORKER"), "{text}");
-            assert!(old.contains("failed"), "{text}");
-            assert!(!current.contains("SECOND-ROOT-WORKER"), "{text}");
+            assert_eq!(text.matches("late worker failure").count(), 1, "{text}");
+            for prompt in ["FIRST-ROOT-PROMPT", "SECOND-ROOT-PROMPT"] {
+                assert_eq!(text.matches(prompt).count(), 1, "{text}");
+            }
             for index in 0..48 {
                 assert_eq!(
                     text.matches(&format!("SECOND-ROOT-TAIL-{index:02}"))
@@ -776,15 +806,18 @@ fn native_two_runs_keep_roster_identity_through_late_worker_completion() {
 }
 
 #[test]
-fn native_offscreen_concurrent_roster_animation_is_quiet_and_state_is_not_frozen() {
-    let mut replay = NativeReplay::new();
+fn native_concurrent_roster_updates_are_chrome_only_except_one_failure_notice() {
+    let mut replay = NativeReplay::with_size(120, 24);
     let mut children = vec![worker("ROSTER-A"), worker("ROSTER-B")];
     publish_workers(&mut replay, children.clone());
     replay.render(true);
-    for index in 0..20 {
+    for index in 0..48 {
         replay.shell.notice(format!("ROSTER-LATER-{index:02}"));
     }
     replay.render(true);
+    let transcript = replay.shell.state.borrow().rendered_transcript(120).clone();
+    let revisions = replay.shell.state.borrow().block_revisions.clone();
+    let redraws = replay.shell.tui.as_ref().unwrap().full_redraws();
     for _ in 0..12 {
         replay
             .shell
@@ -793,39 +826,65 @@ fn native_offscreen_concurrent_roster_animation_is_quiet_and_state_is_not_frozen
             .advance_event_dot_animation();
         replay.render(true);
     }
-    // Current-tool/phase/clock telemetry is retained, but not historical row text.
     children[0].current_tool = Some("read".into());
     children[0].phase = "using_tool".into();
     children[0].elapsed_ms += 250;
+    children[0].tool_use_count = 37;
+    children[0].output_tokens = 987;
     publish_workers(&mut replay, children.clone());
     replay.render(true);
+    let visible = replay.terminal.screen().contents();
+    assert!(
+        visible.contains("ROSTER-A") && visible.contains("987"),
+        "{visible}"
+    );
     children[0].state = "completed".into();
     children[1].state = "failed".into();
     children[1].failure_reason = Some("ROSTER-FAILURE".into());
-    publish_workers(&mut replay, children);
-    let output = replay.render(false);
-    // Evidence probe for the still-open semantic mutation boundary. Do not
-    // falsely satisfy no-ED3 by freezing a historical worker in running state.
-    eprintln!(
-        "#392 remaining offscreen roster state: ED3={}",
-        output.matches("\x1b[3J").count()
-    );
+    publish_workers(&mut replay, children.clone());
+    replay.render(true);
     let state = replay.shell.state.borrow();
-    let index = state.subagent_activity_block.unwrap();
-    let semantic = block_copy_text(&state.transcript[index]);
+    assert_eq!(
+        state.subagent_activity.as_ref().unwrap().telemetry,
+        children
+    );
+    assert_eq!(state.transcript.len(), revisions.len() + 1);
+    assert_eq!(
+        &state.block_revisions[..revisions.len()],
+        revisions.as_slice()
+    );
+    assert_eq!(
+        &state.rendered_transcript(120)[..transcript.len()],
+        transcript.as_slice()
+    );
     assert!(
-        semantic.contains("completed") && semantic.contains("failed"),
-        "{semantic}"
+        matches!(state.transcript.last(), Some(TranscriptBlock::Notice(text)) if text.contains("ROSTER-B") && text.contains("ROSTER-FAILURE") && text.contains("/subagents"))
     );
     drop(state);
+    assert_eq!(replay.shell.tui.as_ref().unwrap().full_redraws(), redraws);
     let physical = replay.history();
-    for id in ["ROSTER-A", "ROSTER-B"] {
-        assert_eq!(physical.matches(id).count(), 1, "{physical}");
-    }
+    assert!(!physical.contains("Subagents"), "{physical}");
     assert!(
-        !physical.contains("running"),
-        "historical running state was frozen: {physical}"
+        !physical.contains("ROSTER-A"),
+        "successful worker chrome leaked into history: {physical}"
     );
+    assert_eq!(physical.matches("ROSTER-B").count(), 1, "{physical}");
+    assert_eq!(physical.matches("ROSTER-FAILURE").count(), 1, "{physical}");
+    publish_workers(&mut replay, children);
+    replay.render(true);
+    assert_eq!(
+        replay.shell.state.borrow().transcript.len(),
+        revisions.len() + 1
+    );
+    for index in 0..48 {
+        assert_eq!(
+            physical
+                .matches(&format!("ROSTER-LATER-{index:02}"))
+                .count(),
+            1,
+            "{physical}"
+        );
+    }
 }
 
 #[test]

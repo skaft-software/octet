@@ -57,3 +57,35 @@ machine-readable source of truth while this table remains the compact human view
 Existing rich-text, capability, and opt-in inline/native-scrollback tests remain
 additive Rust behavior and do not count as evidence for a pinned Pi test unless the
 ledger names them explicitly.
+
+## Newer math and Mermaid consumer references (unreleased)
+
+These bounded additions do not change the core 0.84.4 audit target above:
+
+- `tests/markdown_math.rs` exercises delimiters and reported equations against
+  Pi `890f92088`, through the existing LaTeX renderer. It covers inline/display
+  math, code/currency protection, raw unsupported/pending expressions, nested
+  containers, and streaming. Engine-only LaTeX goldens do not by themselves
+  qualify the Markdown consumer.
+- `tests/mermaid_parity.rs` compares flowchart/group art with captured output from
+  Pi's **grok-mermaid 0.2.3** dependency: 67 flowchart fixtures plus the reported
+  64-node architecture graph with one equivalent edge spelling in the oracle. The corpus lives under
+  `tests/fixtures/mermaid/`; it is external oracle data, unlike the earlier
+  self-captured `tests/mermaid_render.rs` goldens.
+- `tests/rich_fences.rs` owns fence completion, raw/error fallback, narrow-width
+  source fallback, styling, and streaming publication. Octet is deliberately
+  fail-closed on unsupported diagrams; it does not reproduce Pi's complete
+  best-effort parser, final-warning behavior, style-span API, or every diagram
+  family. Punctuation-bearing inline labels and dotted/hyphenated IDs have named
+  differences; a selected flowchart corpus cannot establish full parity.
+
+Run the focused fixtures independently of the historical audit:
+
+```sh
+cargo test -p sexy-tui-rs --test markdown_math --test latex_render --test mermaid_render --test mermaid_parity --test rich_fences
+```
+
+These are source contracts and fixture locations, not a blanket test-pass or
+physical-terminal claim. The adapted Grok layout/label modules are Apache-2.0;
+Pi-derived modules remain MIT. See [`VENDORED.md`](VENDORED.md) and the
+[current rendering contract](docs/rich-rendering.md#math-and-diagrams).

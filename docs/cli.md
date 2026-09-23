@@ -76,6 +76,16 @@ available; this does not clear historical usage uncertainty.
 
 ## Provider setup
 
+In the unreleased interactive first-run flow, an empty catalog with no explicit
+model selection opens **Add an API key** first, then **Sign in with ChatGPT /
+other supported OAuth subscriptions**, **Local/self-hosted models**, and
+**Continue without a provider**. API-key entry is masked and saved only after
+review to owner-private, recoverable storage; it is not a command-line secret
+argument. Subscription choices are ChatGPT (Codex) and GitHub Copilot. See
+[first-run behavior and credential privacy](providers.md#first-run-setup-unreleased).
+The `octet setup` subcommand below still configures explicit custom endpoints;
+print/RPC modes never open onboarding.
+
 ```text
 octet --login codex
 octet --logout PROVIDER
@@ -89,9 +99,10 @@ octet setup --endpoint URL [--api-key-env VAR] [--model ID|--manual-model ID] [-
 The unreleased Copilot candidate accepts `--login copilot [--headless]` and
 `--logout copilot`, also under the alias `github-copilot`. It uses only its private
 OAuth store, not environment or editor credentials. Online shared catalogs can
-then discover eligible `github-copilot/<id>` models; offline adds none. TUI slash
-auth commands are not yet integrated, and native-host protocol 1 gains no auth
-command or credential field. [Candidate limits and unrun qualification](providers.md#github-copilot-unreleased-candidate).
+then discover eligible `github-copilot/<id>` models; offline adds none. First-run
+subscription setup also offers this device flow, but TUI slash auth commands
+are not yet integrated. Native-host protocol 1 gains no auth command or
+credential field. [Candidate limits and unrun qualification](providers.md#github-copilot-unreleased-candidate).
 
 Setup reviews without writing by default. `--yes` commits only the reviewed
 transaction; `--cancel` leaves the registry unchanged. An explicit `--preset

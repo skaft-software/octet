@@ -6,7 +6,9 @@
 //! `flowchart` through [`super::mermaid::render_mermaid`]. Every other fence —
 //! and every diagram body the renderer rejects, renders to nothing, is too
 //! large, or is not terminated by a closing fence — stays the original
-//! [`CodeBlock`] source, so unsupported input degrades to a plain code block
+//! [`CodeBlock`] source; Mermaid errors also show their reason. Supported Mermaid
+//! retains source alongside art for width-aware layout, so oversized art is never
+//! wrapped into a misleading diagram. Unsupported input degrades to a plain code block
 //! instead of an empty or partial diagram. See [`MAX_DIAGRAM_FENCE_BYTES`].
 //!
 //! Rendering happens here, at parse time, and only for a *complete* fenced
@@ -22,7 +24,10 @@ use std::ops::Range;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use super::{
-    latex::{render_latex, RenderLatexOptions},
+    latex::{
+        markdown::{protect, MathToken},
+        render_latex, RenderLatexOptions,
+    },
     mermaid::render_mermaid,
     Block, CodeBlock, Document, Inline, List, ListItem, ListKind, Table, TableAlignment, TableCell,
 };
@@ -39,14 +44,23 @@ pub const MAX_DIAGRAM_FENCE_BYTES: usize = 16 * 1024;
 /// names a supported diagram language. `None` keeps the original code block —
 /// for every other language, for oversized bodies, and whenever the renderer
 /// fails closed.
-fn render_diagram_fence(info: &str, code: &str) -> Option<String> {
+fn render_diagram_fence(info: &str, code: &str) -> Result<Option<String>, String> {
     if code.len() > MAX_DIAGRAM_FENCE_BYTES {
-        return None;
+        return Ok(None);
     }
-    let name = info.split_whitespace().next()?.to_ascii_lowercase();
+    let name = info
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let mut rendered = match name.as_str() {
-        "latex" => render_latex(code.trim(), RenderLatexOptions::display())?,
-        "mermaid" => render_mermaid(code).ok()?.plain(),
+        "latex" => match render_latex(code.trim(), RenderLatexOptions::display()) {
+            Some(text) => text,
+            None => return Ok(None),
+        },
+        "mermaid" => render_mermaid(code)
+            .map_err(|error| error.to_string())?
+            .plain(),
         // ```` ```graph TD ```` / ```` ```flowchart LR ```` fences carry the
         // diagram header in the info string; the body is the graph. A body that
         // already starts with its own header is left alone.
@@ -58,18 +72,20 @@ fn render_diagram_fence(info: &str, code: &str) -> Option<String> {
             } else {
                 format!("{info}\n{code}")
             };
-            render_mermaid(&body).ok()?.plain()
+            render_mermaid(&body)
+                .map_err(|error| error.to_string())?
+                .plain()
         }
-        _ => return None,
+        _ => return Ok(None),
     };
     // A renderer that succeeds but produces nothing — an empty expression,
     // `{}`, a header-only graph — is a failed render: the fence must keep its
     // original source rather than collapse into an empty block.
     if rendered.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
     rendered.push('\n');
-    Some(rendered)
+    Ok(Some(rendered))
 }
 
 /// Whether the fenced block at `range` is terminated by a valid closing fence
@@ -153,15 +169,24 @@ pub fn parser_options() -> Options {
 /// Parse Markdown into semantic content. Input is retained as text values and
 /// is sanitized only when rendered, so logging/debugging can keep the original.
 pub fn parse(source: &str) -> Document {
-    let parser = Parser::new_ext(source, parser_options()).into_offset_iter();
-    Builder::new(source).build(parser)
+    let (protected, math) = protect(source);
+    let parser = Parser::new_ext(&protected, parser_options()).into_offset_iter();
+    Builder::new(source, &math).build(parser)
 }
 
 /// Top-level block starts used by the bounded streaming parser.
 pub(crate) fn top_level_block_starts(source: &str) -> Vec<usize> {
     let mut starts = Vec::new();
     let mut block_depth = 0usize;
-    for (event, range) in Parser::new_ext(source, parser_options()).into_offset_iter() {
+    let (protected, math) = protect(source);
+    for (event, mut range) in Parser::new_ext(&protected, parser_options()).into_offset_iter() {
+        let index = math.partition_point(|token| token.range.end <= range.start);
+        if let Some(token) = math
+            .get(index)
+            .filter(|token| token.range.contains(&range.start))
+        {
+            range.start = token.range.start;
+        }
         match event {
             Event::Start(tag) if is_block_tag(&tag) => {
                 if block_depth == 0 {
@@ -278,13 +303,17 @@ enum InlineKind {
 struct Builder<'a> {
     stack: Vec<Frame>,
     source: &'a str,
+    math: &'a [MathToken],
+    next_math: usize,
 }
 
 impl<'a> Builder<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, math: &'a [MathToken]) -> Self {
         Self {
             stack: vec![Frame::Root(Vec::new())],
             source,
+            math,
+            next_math: 0,
         }
     }
 
@@ -311,9 +340,7 @@ impl<'a> Builder<'a> {
                 if let Some(Frame::Code { code, .. } | Frame::Html(code)) = self.stack.last_mut() {
                     code.push_str(&text);
                 } else {
-                    for inline in split_bare_urls(&text) {
-                        self.append_inline(inline);
-                    }
+                    self.text(&text, range);
                 }
             }
             Event::Code(code) => self.append_inline(Inline::Code(code.into_string())),
@@ -329,7 +356,12 @@ impl<'a> Builder<'a> {
             Event::FootnoteReference(label) => {
                 self.append_inline(Inline::Raw(format!("[^{}]", label)))
             }
-            Event::SoftBreak => self.append_inline(Inline::SoftBreak),
+            Event::SoftBreak => {
+                if !matches!(self.stack.last(), Some(Frame::Paragraph(content)) if content.is_empty())
+                {
+                    self.append_inline(Inline::SoftBreak);
+                }
+            }
             Event::HardBreak => self.append_inline(Inline::HardBreak),
             Event::Rule => self.append_block(Block::Divider),
             Event::TaskListMarker(checked) => {
@@ -339,6 +371,63 @@ impl<'a> Builder<'a> {
                 }) {
                     item.task = Some(checked);
                 }
+            }
+        }
+    }
+
+    fn text(&mut self, text: &str, range: Option<Range<usize>>) {
+        let Some(range) = range else {
+            return;
+        };
+        while self.next_math < self.math.len() && self.math[self.next_math].range.end <= range.start
+        {
+            self.next_math += 1;
+        }
+        if !self
+            .math
+            .get(self.next_math)
+            .is_some_and(|token| token.range.start < range.end)
+        {
+            for inline in split_bare_urls(text) {
+                self.append_inline(inline);
+            }
+            return;
+        }
+        let mut cursor = range.start;
+        while let Some(token) = self
+            .math
+            .get(self.next_math)
+            .filter(|token| token.range.start < range.end)
+        {
+            if token.range.start > cursor {
+                let prefix = &text[cursor - range.start..token.range.start - range.start];
+                for inline in split_bare_urls(prefix) {
+                    self.append_inline(inline);
+                }
+            }
+            let rendered = token.render(self.source);
+            let end = token.range.end;
+            if token.display && matches!(self.stack.last(), Some(Frame::Paragraph(_))) {
+                // The mask makes display math a whole paragraph, not inline prose.
+                if let Some(Frame::Paragraph(mut content)) = self.stack.pop() {
+                    while matches!(content.last(), Some(Inline::SoftBreak)) {
+                        content.pop();
+                    }
+                    if !content.is_empty() {
+                        self.append_block(Block::Paragraph(content));
+                    }
+                }
+                self.append_block(Block::Plain(rendered));
+                self.stack.push(Frame::Paragraph(Vec::new()));
+            } else {
+                self.append_inline(Inline::Raw(rendered));
+            }
+            cursor = end.min(range.end);
+            self.next_math += 1;
+        }
+        if cursor < range.end {
+            for inline in split_bare_urls(&text[cursor - range.start..]) {
+                self.append_inline(inline);
             }
         }
     }
@@ -420,7 +509,11 @@ impl<'a> Builder<'a> {
         };
         match frame {
             Frame::Root(blocks) => self.stack.push(Frame::Root(blocks)),
-            Frame::Paragraph(content) => self.append_block(Block::Paragraph(content)),
+            Frame::Paragraph(content) => {
+                if !content.is_empty() {
+                    self.append_block(Block::Paragraph(content));
+                }
+            }
             Frame::Heading(level, content) => self.append_block(Block::Heading { level, content }),
             Frame::Quote(blocks) => self.append_block(Block::BlockQuote(blocks)),
             Frame::Code {
@@ -433,14 +526,38 @@ impl<'a> Builder<'a> {
                 // oversized body, renderer failure or empty render,
                 // unterminated fence) keeps the original source as a plain
                 // code block.
-                let diagram = end_range
+                let diagram = if end_range
                     .as_ref()
-                    .filter(|range| fence_is_closed(self.source, range))
-                    .and_then(|_| render_diagram_fence(&info, &code));
-                if let Some(rendered) = diagram {
-                    code = rendered;
+                    .is_some_and(|range| fence_is_closed(self.source, range))
+                {
+                    render_diagram_fence(&info, &code)
+                } else {
+                    Ok(None)
+                };
+                match diagram {
+                    Ok(Some(rendered))
+                        if language
+                            .as_deref()
+                            .is_some_and(|name| !name.eq_ignore_ascii_case("latex")) =>
+                    {
+                        self.append_block(Block::Diagram {
+                            source: CodeBlock { language, code },
+                            rendered,
+                        });
+                    }
+                    Ok(rendered) => {
+                        if let Some(rendered) = rendered {
+                            code = rendered;
+                        }
+                        self.append_block(Block::CodeBlock(CodeBlock { language, code }));
+                    }
+                    Err(error) => {
+                        self.append_block(Block::CodeBlock(CodeBlock { language, code }));
+                        self.append_block(Block::Plain(format!(
+                            "Mermaid diagram not rendered: {error}"
+                        )));
+                    }
                 }
-                self.append_block(Block::CodeBlock(CodeBlock { language, code }))
             }
             Frame::Html(html) => self.append_block(Block::Plain(html)),
             Frame::List { kind, items } => self.append_block(Block::List(List { kind, items })),

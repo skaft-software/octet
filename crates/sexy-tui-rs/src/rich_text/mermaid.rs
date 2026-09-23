@@ -1,102 +1,53 @@
-//! Bounded, self-contained Mermaid `graph`/`flowchart` renderer.
+//! Bounded terminal Mermaid flowcharts, using Pi's layout algorithms.
 //!
-//! Upstream delegates diagram layout to the external `grok-mermaid` package
-//! (`packages/coding-agent/src/modes/interactive/components/mermaid.ts`), which
-//! this workspace cannot depend on (no network dependency in a renderer).
-//! [`render_mermaid`] is an honest subset: it parses `graph`/`flowchart` with
-//! `TD`/`TB`/`LR` direction, node definitions with labels, and chained/plain
-//! links, layers the graph, lays it out on a character grid and emits
-//! box-drawing output.
+//! Pi delegates to grok-mermaid 0.2.3, a TypeScript port of grok-build's Rust
+//! renderer. The Apache-2.0 Rust layout and label-cleanup code is adapted in
+//! the child modules (with retained license/attribution), without ratatui,
+//! JavaScript, subprocesses, I/O or new dependencies at build/run time.
 //!
-//! # Contract
+//! Supports `graph`/`flowchart` TD/TB/BT/LR/RL, nested subgraphs, group links,
+//! node lists, chained links, inline and pipe labels, class/style annotations,
+//! cycles, self-links, and skip-layer links. Dotted/thick strokes and rounded
+//! node outlines follow Pi. `<br/>` becomes whitespace, then node labels wrap
+//! at 24 cells / 4 lines, as in Pi. Cross-group edges attach to the enclosing
+//! group frame; local `direction` directives are accepted but ignored by Pi.
 //!
-//! [`render_mermaid`] returns [`MermaidArt`] (one plain-text line per terminal
-//! row plus the widest row's cell width) or a typed [`MermaidError`]. It never
-//! panics, never blocks on I/O, never returns a partially drawn diagram, and
-//! never exceeds the size limits exported by this module.
+//! Parsing remains fail-closed: malformed syntax, unknown arrows/diagram
+//! families, invalid nesting and over-limit source return a typed error, not
+//! partial art. State/class/ER/sequence diagrams and non-arrow edge heads are
+//! not yet supported. Dotted/hyphenated IDs remain an octet extension. Inline
+//! labels containing punctuation (e.g. `-.path ./file.->`) parse completely,
+//! unlike grok-mermaid 0.2.3's warning-producing prefix parse.
 //!
-//! # Supported
+//! [`MermaidArt::width`] is the actual terminal-cell width, not a requested
+//! viewport width. The embedding renderer must keep source when art is wider
+//! than its viewport; never wrap/crop a graph's rows. All graph/layout loops
+//! are bounded by source/node/edge/group and canvas caps. The canvas is checked
+//! before allocation (at most 2^21 cells, 4096 columns, 2048 rows).
 //!
-//! - header: `graph <dir>` / `flowchart <dir>` with `TD`, `TB` or `LR`, with an
-//!   optional trailing `;`; a `;` may also terminate the header and separate
-//!   statements on the same line (`flowchart LR; A --> B; B --> C`)
-//! - node ids (`[A-Za-z0-9_.-]`, stopped at a link token) with or without labels
-//! - shapes `id[label]`, `id(label)`, `id{label}`, `id((label))`, `id([label])`,
-//!   `id[[label]]`, `id{{label}}` — every shape renders as a box (the shape
-//!   outline itself is not modelled)
-//! - quoted labels, including labels containing the closing delimiter
-//!   (`A["a[b]c"]`) and quoted `|link labels|`; the surrounding quotes are
-//!   stripped
-//! - `%%` comments anywhere on a line, outside quoted labels
-//! - `:::class` decorations are ignored, as are `classDef`/`class`/`style`/
-//!   `linkStyle`/`click` directives
-//! - links `-->`, `->`, `-.->`, `==>` (arrow head) and `---` (no head), each
-//!   with an optional `|label|`; link *styling* is not modelled, so `-.->` and
-//!   `==>` draw the same solid connector as `-->`
-//! - wide (CJK) labels, and disconnected components (rendered as separate
-//!   bands of rows)
-//!
-//! # Fails closed (typed [`MermaidError`], never a panic or unbounded work)
-//!
-//! - any other diagram type (`pie`, `sequenceDiagram`, `stateDiagram`, …)
-//! - `BT`/`RL` layouts (accepted by Mermaid, but mirroring the grid would
-//!   reverse node labels, so they are rejected rather than misrendered)
-//! - `subgraph`/`end`/`direction` statements, `&` node lists,
-//!   `A -- text --> B` inline link labels, other arrow tokens, unbalanced node
-//!   brackets (or quotes)
-//! - cyclic graphs and any edge that skips a layer (a longer path exists), so
-//!   routing stays inside the gap between two adjacent layers
-//! - inputs over the size limits in this module
-//!
-//! # Not modelled
-//!
-//! Node shapes draw as boxes, link styling is dropped, and HTML entities in
-//! labels (`&amp;`) are emitted literally rather than decoded; upstream's
-//! style-span and warning channels are not returned (see the consumer note
-//! below).
-//!
-//! # Bounds
-//!
-//! Source bytes, node count, edge count, label width and the rendered diagram
-//! size are all capped by the `MAX_MERMAID_*` constants; over-limit input
-//! returns [`MermaidError::TooLarge`]. Layering is Kahn's algorithm (linear),
-//! and every layout loop runs a bounded number of times over at most the
-//! accepted node/edge counts.
-//!
-//! # Output and consumers
-//!
-//! The output is plain text. Upstream returns semantic style spans
-//! (`border`/`text`/`edge`/…) and a warnings channel; theming and the
-//! "unrendered diagram" fallback belong to the embedding component, which this
-//! engine reports through `Err` instead of partially-rendered output.
-//!
-//! The rich markdown renderer consumes this function: [`super::markdown::parse`]
-//! renders a completed ```` ```mermaid ````/```` ```graph ````/```` ```flowchart ````
-//! fence through [`render_mermaid`] and falls back to the original code-block
-//! source on `Err`, on oversized bodies and while a fence is unterminated (see
-//! [`super::MAX_DIAGRAM_FENCE_BYTES`]).
-//!
-//! # Tests
-//!
-//! `crates/sexy-tui-rs/tests/mermaid_render.rs` locks the observed box-drawing
-//! output for every supported construct, the fail-closed error messages, the
-//! width invariant (no row wider than [`MermaidArt::width`]) and the size
-//! limits.
+//! `tests/mermaid_parity.rs` uses real grok-mermaid output, including the full
+//! reported 64-node architecture graph. See the Mermaid fixture README for
+//! upstream evidence, the equivalent edge spelling used by that oracle, and
+//! the precise difference from Pi's final-warning fallback.
+
+mod labels;
+mod layout;
+use labels::clean_label as normalize_label;
 
 use crate::width::display_width;
 
 /// Maximum accepted source size.
 pub const MAX_MERMAID_SOURCE_BYTES: usize = 16 * 1024;
 /// Maximum accepted node count.
-pub const MAX_MERMAID_NODES: usize = 64;
+pub const MAX_MERMAID_NODES: usize = 128;
 /// Maximum accepted edge count.
-pub const MAX_MERMAID_EDGES: usize = 256;
+pub const MAX_MERMAID_EDGES: usize = 512;
 /// Maximum accepted node/edge label width in cells.
-pub const MAX_MERMAID_LABEL_CELLS: usize = 48;
+pub const MAX_MERMAID_LABEL_CELLS: usize = 1024;
 /// Maximum rendered diagram width in cells.
-pub const MAX_MERMAID_ART_WIDTH: usize = 400;
+pub const MAX_MERMAID_ART_WIDTH: usize = 4096;
 /// Maximum rendered diagram height in rows.
-pub const MAX_MERMAID_ART_HEIGHT: usize = 200;
+pub const MAX_MERMAID_ART_HEIGHT: usize = 2048;
 
 /// Why a diagram could not be rendered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,7 +69,9 @@ pub enum MermaidError {
 impl std::fmt::Display for MermaidError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingHeader => write!(formatter, "dropped, expected a graph or flowchart header"),
+            Self::MissingHeader => {
+                write!(formatter, "dropped, expected a graph or flowchart header")
+            }
             Self::UnsupportedDiagram { header } => {
                 write!(formatter, "dropped, unsupported diagram type: \"{header}\"")
             }
@@ -152,24 +105,23 @@ impl MermaidArt {
 enum Direction {
     LeftRight,
     TopDown,
+    RightLeft,
+    BottomUp,
 }
 
 #[derive(Clone, Debug)]
 struct Node {
     id: String,
     label: String,
-    /// Layer index (column for `LR`, row band for `TD`).
-    layer: usize,
-    /// Position inside the layer.
-    slot: usize,
-    x: usize,
-    y: usize,
+    group: Option<usize>,
+    rounded: bool,
 }
 
-impl Node {
-    fn box_width(&self) -> usize {
-        display_width(&self.label) + 4
-    }
+#[derive(Clone, Debug)]
+struct Group {
+    id: String,
+    title: String,
+    parent: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -180,55 +132,37 @@ struct Edge {
     /// `false` for the undirected `---` link, which draws a plain connector
     /// instead of an arrow head.
     directed: bool,
+    stroke: Stroke,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Stroke {
+    Solid,
+    Dotted,
+    Thick,
 }
 
 /// Render a Mermaid `graph`/`flowchart` block as box-drawing text.
 pub fn render_mermaid(source: &str) -> Result<MermaidArt, MermaidError> {
     if source.len() > MAX_MERMAID_SOURCE_BYTES {
         return Err(MermaidError::TooLarge {
-            detail: format!("source is {} bytes, limit is {MAX_MERMAID_SOURCE_BYTES}", source.len()),
-        });
-    }
-    let (direction, nodes, edges) = parse(source)?;
-    let (mut nodes, edges) = layer(direction, nodes, edges)?;
-    let canvas = match direction {
-        Direction::LeftRight => layout_left_right(&mut nodes, &edges),
-        Direction::TopDown => layout_top_down(&mut nodes, &edges),
-    };
-    if canvas.width > MAX_MERMAID_ART_WIDTH || canvas.rows.len() > MAX_MERMAID_ART_HEIGHT {
-        return Err(MermaidError::TooLarge {
             detail: format!(
-                "diagram is {}x{}, limit is {}x{}",
-                canvas.width,
-                canvas.rows.len(),
-                MAX_MERMAID_ART_WIDTH,
-                MAX_MERMAID_ART_HEIGHT
+                "source is {} bytes, limit is {MAX_MERMAID_SOURCE_BYTES}",
+                source.len()
             ),
         });
     }
-    let lines: Vec<String> = canvas.rows.iter().map(|row| row_to_line(row)).collect();
-    let width = lines.iter().map(|line| display_width(line)).max().unwrap_or(0);
-    Ok(MermaidArt { lines, width })
-}
-
-/// Join one grid row, dropping the grid cell that a double-width glyph covers.
-///
-/// A wide glyph occupies two terminal columns but one grid cell, so the cell a
-/// `Canvas::text` caller advanced past must not be emitted: the terminal
-/// already advances two columns for the glyph itself. Without this the right
-/// border of every box with a CJK label drifts one column right.
-fn row_to_line(row: &[char]) -> String {
-    let mut line = String::with_capacity(row.len());
-    let mut covered = 0usize;
-    for &character in row {
-        if covered > 0 {
-            covered -= 1;
-            continue;
-        }
-        covered = display_width(&character.to_string()).saturating_sub(1);
-        line.push(character);
+    if source
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return Err(syntax(
+            1,
+            "terminal control characters are not allowed".into(),
+        ));
     }
-    line.trim_end().to_owned()
+    let (direction, nodes, edges, groups) = parse(source)?;
+    layout::layout(direction, nodes, &edges, &groups)
 }
 
 // ---------------------------------------------------------------------------
@@ -237,10 +171,6 @@ fn row_to_line(row: &[char]) -> String {
 
 const LINK_TOKENS: &[&str] = &["-.->", "==>", "-->", "---", "->"];
 const DIRECTIVE_KEYWORDS: &[&str] = &["classdef", "class", "style", "linkstyle", "click"];
-/// Mermaid statements this engine recognises but does not implement. They are
-/// named in the typed error instead of being parsed as node ids.
-const STATEMENT_KEYWORDS_IN_UNSUPPORTED: &[&str] = &["subgraph", "end", "direction"];
-
 /// Drop a `%%` comment, which Mermaid allows anywhere outside a quoted label.
 fn strip_comment(line: &str) -> &str {
     let mut quoted = false;
@@ -281,10 +211,12 @@ fn split_statements(line: &str) -> Vec<&str> {
     segments
 }
 
-fn parse(source: &str) -> Result<(Direction, Vec<Node>, Vec<Edge>), MermaidError> {
+fn parse(source: &str) -> Result<(Direction, Vec<Node>, Vec<Edge>, Vec<Group>), MermaidError> {
     let mut direction: Option<Direction> = None;
     let mut nodes: Vec<Node> = Vec::new();
     let mut edges: Vec<Edge> = Vec::new();
+    let mut groups: Vec<Group> = Vec::new();
+    let mut group_stack = Vec::new();
 
     for (index, raw_line) in source.lines().enumerate() {
         let line_number = index + 1;
@@ -311,16 +243,39 @@ fn parse(source: &str) -> Result<(Direction, Vec<Node>, Vec<Edge>), MermaidError
             {
                 continue;
             }
-            if let Some(keyword) = STATEMENT_KEYWORDS_IN_UNSUPPORTED
-                .iter()
-                .find(|keyword| lowered.starts_with(**keyword) && boundary(&lowered[keyword.len()..]))
-            {
-                return Err(syntax(
-                    line_number,
-                    format!("`{keyword}` statements are not supported"),
-                ));
+            if lowered.starts_with("subgraph") && boundary(&lowered[8..]) {
+                if groups.len() >= 24 || group_stack.len() >= 6 {
+                    return Err(MermaidError::TooLarge {
+                        detail: "more than 24 subgraphs or nesting exceeds 6".into(),
+                    });
+                }
+                let (id, title) = parse_group(statement[8..].trim(), line_number)?;
+                if groups.iter().any(|group| group.id == id) {
+                    return Err(syntax(line_number, format!("duplicate subgraph id `{id}`")));
+                }
+                let parent = group_stack.last().copied();
+                groups.push(Group { id, title, parent });
+                group_stack.push(groups.len() - 1);
+                continue;
             }
-            parse_statement(statement, line_number, &mut nodes, &mut edges)?;
+            if lowered == "end" {
+                if group_stack.pop().is_none() {
+                    return Err(syntax(line_number, "`end` without a subgraph".into()));
+                }
+                continue;
+            }
+            if lowered.starts_with("direction") && boundary(&lowered[9..]) {
+                // grok-mermaid accepts but ignores per-subgraph direction.
+                parse_header(&format!("graph {}", statement[9..].trim()))?;
+                continue;
+            }
+            parse_statement(
+                statement,
+                line_number,
+                &mut nodes,
+                &mut edges,
+                group_stack.last().copied(),
+            )?;
             if nodes.len() > MAX_MERMAID_NODES {
                 return Err(MermaidError::TooLarge {
                     detail: format!("diagram has more than {MAX_MERMAID_NODES} nodes"),
@@ -337,7 +292,10 @@ fn parse(source: &str) -> Result<(Direction, Vec<Node>, Vec<Edge>), MermaidError
     let Some(direction) = direction else {
         return Err(MermaidError::MissingHeader);
     };
-    Ok((direction, nodes, edges))
+    if !group_stack.is_empty() {
+        return Err(syntax(source.lines().count(), "unclosed subgraph".into()));
+    }
+    Ok((direction, nodes, edges, groups))
 }
 
 fn boundary(rest: &str) -> bool {
@@ -355,10 +313,10 @@ fn parse_header(line: &str) -> Result<Direction, MermaidError> {
         });
     }
     let direction = match parts.next().map(str::to_ascii_uppercase).as_deref() {
-        Some("TD") | Some("TB") => Direction::TopDown,
+        None | Some("TD") | Some("TB") => Direction::TopDown,
         Some("LR") => Direction::LeftRight,
-        // `BT`/`RL` would need a mirrored grid, which would reverse the node
-        // labels; reject instead of drawing the wrong picture.
+        Some("BT") => Direction::BottomUp,
+        Some("RL") => Direction::RightLeft,
         other => {
             return Err(MermaidError::UnsupportedDiagram {
                 header: other.unwrap_or(line).to_owned(),
@@ -374,7 +332,12 @@ fn parse_header(line: &str) -> Result<Direction, MermaidError> {
     Ok(direction)
 }
 
-fn node_index(nodes: &mut Vec<Node>, id: &str, label: Option<String>) -> usize {
+fn node_index(
+    nodes: &mut Vec<Node>,
+    id: &str,
+    label: Option<String>,
+    group: Option<usize>,
+) -> usize {
     if let Some(index) = nodes.iter().position(|node| node.id == id) {
         if label.is_some() {
             nodes[index].label = label.unwrap_or_default();
@@ -384,12 +347,35 @@ fn node_index(nodes: &mut Vec<Node>, id: &str, label: Option<String>) -> usize {
     nodes.push(Node {
         id: id.to_owned(),
         label: label.unwrap_or_else(|| id.to_owned()),
-        layer: 0,
-        slot: 0,
-        x: 0,
-        y: 0,
+        group,
+        rounded: false,
     });
     nodes.len() - 1
+}
+
+fn parse_group(value: &str, line: usize) -> Result<(String, String), MermaidError> {
+    if value.is_empty() {
+        return Err(syntax(line, "expected a subgraph title".into()));
+    }
+    let chars: Vec<char> = value.chars().collect();
+    let mut position = 0;
+    let mut id = read_id(&chars, &mut position);
+    position = skip_spaces(&chars, position);
+    let label = if matches!(chars.get(position), Some('[')) {
+        let label = read_label(&chars, &mut position, line)?.unwrap();
+        if skip_spaces(&chars, position) != chars.len() {
+            return Err(syntax(
+                line,
+                "unexpected tokens after subgraph title".into(),
+            ));
+        }
+        label
+    } else {
+        id = unquote(value);
+        normalize_label(value)
+    };
+    check_label_size(&label, line)?;
+    Ok((id, label))
 }
 
 fn parse_statement(
@@ -397,68 +383,139 @@ fn parse_statement(
     line: usize,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
+    group: Option<usize>,
 ) -> Result<(), MermaidError> {
     let characters: Vec<char> = statement.chars().collect();
     let mut position = 0usize;
-    let mut pending_from: Option<usize> = None;
-    let mut pending_label: Option<Option<String>> = None;
-    let mut pending_directed = true;
-
-    loop {
+    let mut from = read_node_list(&characters, &mut position, line, nodes, group)?;
+    while position < characters.len() {
+        let (directed, stroke, inline_label, next) = read_edge(&characters, position, line)?;
+        position = skip_spaces(&characters, next);
+        let label = if inline_label.is_some() {
+            inline_label
+        } else {
+            read_link_label(&characters, &mut position, line)?
+        };
+        if let Some(label) = &label {
+            check_label_size(label, line)?;
+        }
         position = skip_spaces(&characters, position);
-        let start = position;
-        let id = read_id(&characters, &mut position);
+        if position == characters.len() {
+            return Err(syntax(line, "trailing link without a target node".into()));
+        }
+        let to = read_node_list(&characters, &mut position, line, nodes, group)?;
+        for &source in &from {
+            for &target in &to {
+                if edges.len() >= MAX_MERMAID_EDGES {
+                    return Err(MermaidError::TooLarge {
+                        detail: format!("diagram has more than {MAX_MERMAID_EDGES} links"),
+                    });
+                }
+                edges.push(Edge {
+                    from: source,
+                    to: target,
+                    label: label.clone(),
+                    directed,
+                    stroke,
+                });
+            }
+        }
+        from = to;
+    }
+    Ok(())
+}
+
+fn read_node_list(
+    chars: &[char],
+    position: &mut usize,
+    line: usize,
+    nodes: &mut Vec<Node>,
+    group: Option<usize>,
+) -> Result<Vec<usize>, MermaidError> {
+    let mut result = Vec::new();
+    loop {
+        *position = skip_spaces(chars, *position);
+        let start = *position;
+        let id = read_id(chars, position);
         if id.is_empty() {
             return Err(syntax(
                 line,
-                format!("expected a node id at \"{}\"", rest(&characters, start)),
+                format!("expected a node id at \"{}\"", rest(chars, start)),
             ));
         }
-        let label = read_label(&characters, &mut position, line)?;
-        if let Some(label) = &label {
-            check_label_size(label, line)?;
-        }
-        position = skip_class_annotation(&characters, position);
-        let index = node_index(nodes, &id, label);
-        if let Some(from) = pending_from {
-            edges.push(Edge {
-                from,
-                to: index,
-                label: pending_label.take().flatten(),
-                directed: pending_directed,
+        *position = skip_spaces(chars, *position);
+        let rounded = matches!(chars.get(*position), Some('(' | '{'))
+            || (chars.get(*position) == Some(&'[') && chars.get(*position + 1) == Some(&'('));
+        let label = read_label(chars, position, line)?;
+        let has_label = label.is_some();
+        check_label_size(label.as_deref().unwrap_or(&id), line)?;
+        *position = skip_class_annotation(chars, *position);
+        let index = node_index(nodes, &id, label, group);
+        if nodes.len() > MAX_MERMAID_NODES {
+            return Err(MermaidError::TooLarge {
+                detail: format!("diagram has more than {MAX_MERMAID_NODES} nodes"),
             });
         }
+        if has_label {
+            nodes[index].rounded = rounded;
+        }
+        result.push(index);
+        *position = skip_spaces(chars, *position);
+        if chars.get(*position) != Some(&'&') {
+            return Ok(result);
+        }
+        *position += 1;
+    }
+}
 
-        position = skip_spaces(&characters, position);
-        if position >= characters.len() {
-            return Ok(());
+/// Mermaid's inline edge labels use different opening/closing strokes.
+fn read_edge(
+    chars: &[char],
+    position: usize,
+    line: usize,
+) -> Result<(bool, Stroke, Option<String>, usize), MermaidError> {
+    if let Some((token, next)) = read_link(chars, position) {
+        return Ok((token != "---", stroke(token), None, next));
+    }
+    let remaining: String = chars[position..].iter().collect();
+    for (open, close) in [("-.", ".->"), ("--", "-->"), ("==", "==>")] {
+        if let Some(tail) = remaining.strip_prefix(open) {
+            if let Some(end) = tail.find(close) {
+                let label = normalize_label(&unquote(tail[..end].trim()));
+                if label.is_empty() {
+                    break;
+                }
+                return Ok((
+                    true,
+                    stroke(open),
+                    Some(label),
+                    position + open.chars().count() + tail[..end].chars().count() + close.len(),
+                ));
+            }
         }
-        if characters[position] == '&' {
-            return Err(syntax(line, "node lists with `&` are not supported".to_owned()));
-        }
-        let (token, next) = read_link(&characters, position).ok_or_else(|| {
-            syntax(
-                line,
-                format!("expected a link, found \"{}\"", rest(&characters, position)),
-            )
-        })?;
-        position = skip_spaces(&characters, next);
-        let label = read_link_label(&characters, &mut position, line)?;
-        if let Some(label) = &label {
-            check_label_size(label, line)?;
-        }
-        position = skip_spaces(&characters, position);
-        if position >= characters.len() {
-            return Err(syntax(line, "trailing link without a target node".to_owned()));
-        }
-        pending_from = Some(index);
-        pending_label = Some(label);
-        pending_directed = token != "---";
+    }
+    Err(syntax(
+        line,
+        format!("expected a link, found \"{}\"", rest(chars, position)),
+    ))
+}
+
+fn stroke(token: &str) -> Stroke {
+    if token.contains('=') {
+        Stroke::Thick
+    } else if token.contains('.') {
+        Stroke::Dotted
+    } else {
+        Stroke::Solid
     }
 }
 
 fn rest(characters: &[char], from: usize) -> String {
-    characters[from..].iter().collect::<String>().trim().to_owned()
+    characters[from..]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 fn skip_spaces(characters: &[char], mut position: usize) -> usize {
@@ -477,9 +534,16 @@ fn skip_class_annotation(characters: &[char], mut position: usize) -> usize {
                 cursor += 1;
             }
             while cursor < characters.len()
-                && (characters[cursor].is_alphanumeric() || characters[cursor] == '_' || characters[cursor] == '-')
+                && (characters[cursor].is_alphanumeric()
+                    || characters[cursor] == '_'
+                    || characters[cursor] == '-')
             {
                 cursor += 1;
+            }
+            // Class names may contain `-`, but the edge in `A:::c-->B`
+            // starts immediately after the name.
+            while cursor > position && characters.get(cursor - 1) == Some(&'-') {
+                cursor -= 1;
             }
             position = cursor;
             continue;
@@ -497,7 +561,10 @@ fn read_id(characters: &[char], position: &mut usize) -> String {
             *position += 1;
             continue;
         }
-        if character == '-' && read_link(characters, *position).is_none() {
+        if character == '-'
+            && !matches!(characters.get(*position + 1), Some('-' | '.'))
+            && read_link(characters, *position).is_none()
+        {
             id.push(character);
             *position += 1;
             continue;
@@ -537,7 +604,7 @@ fn read_link_label(
     }
     let label: String = characters[start..cursor].iter().collect();
     *position = cursor + 1;
-    Ok(Some(unquote(label.trim())))
+    Ok(Some(normalize_label(&unquote(label.trim()))))
 }
 
 fn read_label(
@@ -547,6 +614,8 @@ fn read_label(
 ) -> Result<Option<String>, MermaidError> {
     let (open, close) = match characters.get(*position) {
         Some('[') if characters.get(*position + 1) == Some(&'[') => ("[[", "]]"),
+        Some('[') if characters.get(*position + 1) == Some(&'(') => ("[(", ")]"),
+        Some('>') => (">", "]"),
         Some('(') if characters.get(*position + 1) == Some(&'(') => ("((", "))"),
         Some('(') if characters.get(*position + 1) == Some(&'[') => ("([", "])"),
         Some('{') if characters.get(*position + 1) == Some(&'{') => ("{{", "}}"),
@@ -555,7 +624,7 @@ fn read_label(
         Some('{') => ("{", "}"),
         _ => return Ok(None),
     };
-    let start = *position + open.chars().count();
+    let start = skip_spaces(characters, *position + open.chars().count());
     let closing: Vec<char> = close.chars().collect();
     // A quoted label may contain the closing delimiter (`A["a[b]c"]`), so a
     // leading quote is closed by its matching quote followed by the delimiter.
@@ -570,7 +639,7 @@ fn read_label(
                 format!("unterminated quoted label opened with `{open}`"),
             ));
         }
-        let close_start = quote_end + 1;
+        let close_start = skip_spaces(characters, quote_end + 1);
         if characters.len() - close_start < closing.len()
             || characters[close_start..close_start + closing.len()] != closing[..]
         {
@@ -581,7 +650,7 @@ fn read_label(
         }
         let raw: String = characters[start + 1..quote_end].iter().collect();
         *position = close_start + closing.len();
-        return Ok(Some(raw));
+        return Ok(Some(normalize_label(&raw)));
     }
     let mut cursor = start;
     while cursor < characters.len() {
@@ -590,11 +659,14 @@ fn read_label(
         {
             let raw: String = characters[start..cursor].iter().collect();
             *position = cursor + closing.len();
-            return Ok(Some(unquote(raw.trim())));
+            return Ok(Some(normalize_label(&unquote(raw.trim()))));
         }
         cursor += 1;
     }
-    Err(syntax(line, format!("unbalanced node label opened with `{open}`")))
+    Err(syntax(
+        line,
+        format!("unbalanced node label opened with `{open}`"),
+    ))
 }
 
 fn unquote(value: &str) -> String {
@@ -606,7 +678,17 @@ fn unquote(value: &str) -> String {
 }
 
 fn check_label_size(label: &str, line: usize) -> Result<(), MermaidError> {
-    if display_width(label) > MAX_MERMAID_LABEL_CELLS {
+    if label.chars().any(|c| c.is_control() && c != '\n') {
+        return Err(syntax(
+            line,
+            "terminal control characters are not allowed in labels".into(),
+        ));
+    }
+    if label.split('\n').count() > 8
+        || label
+            .split('\n')
+            .any(|row| display_width(row) > MAX_MERMAID_LABEL_CELLS)
+    {
         return Err(MermaidError::TooLarge {
             detail: format!("line {line}: label wider than {MAX_MERMAID_LABEL_CELLS} cells"),
         });
@@ -616,305 +698,4 @@ fn check_label_size(label: &str, line: usize) -> Result<(), MermaidError> {
 
 fn syntax(line: usize, detail: String) -> MermaidError {
     MermaidError::UnsupportedSyntax { line, detail }
-}
-
-// ---------------------------------------------------------------------------
-// Layering
-// ---------------------------------------------------------------------------
-
-/// Longest-path layering with cycle detection (Kahn's algorithm).
-fn layer(
-    _direction: Direction,
-    mut nodes: Vec<Node>,
-    edges: Vec<Edge>,
-) -> Result<(Vec<Node>, Vec<Edge>), MermaidError> {
-    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
-    let mut indegree: Vec<usize> = vec![0; nodes.len()];
-    for edge in &edges {
-        successors[edge.from].push(edge.to);
-        indegree[edge.to] += 1;
-    }
-
-    let mut queue: Vec<usize> = (0..nodes.len()).filter(|index| indegree[*index] == 0).collect();
-    let mut order: Vec<usize> = Vec::new();
-    let mut processed = 0usize;
-    while let Some(index) = queue.pop() {
-        order.push(index);
-        processed += 1;
-        for successor in &successors[index] {
-            indegree[*successor] -= 1;
-            if indegree[*successor] == 0 {
-                queue.push(*successor);
-            }
-        }
-    }
-    if processed != nodes.len() {
-        let stuck = indegree
-            .iter()
-            .position(|degree| *degree > 0)
-            .unwrap_or_default();
-        return Err(MermaidError::Cycle {
-            node: nodes[stuck].id.clone(),
-        });
-    }
-
-    for index in order {
-        let current = nodes[index].layer;
-        for successor in &successors[index] {
-            if nodes[*successor].layer < current + 1 {
-                nodes[*successor].layer = current + 1;
-            }
-        }
-    }
-
-    for edge in &edges {
-        let from = &nodes[edge.from];
-        let to = &nodes[edge.to];
-        if to.layer != from.layer + 1 {
-            return Err(MermaidError::UnsupportedTopology {
-                detail: format!(
-                    "link {} --> {} spans {} layers; only links between adjacent layers are supported",
-                    from.id,
-                    to.id,
-                    to.layer - from.layer
-                ),
-            });
-        }
-    }
-
-    let last_layer = nodes.iter().map(|node| node.layer).max().unwrap_or(0);
-    let mut used: Vec<usize> = vec![0; last_layer + 1];
-    for index in 0..nodes.len() {
-        let layer = nodes[index].layer;
-        nodes[index].slot = used[layer];
-        used[layer] += 1;
-    }
-    Ok((nodes, edges))
-}
-
-// ---------------------------------------------------------------------------
-// Layout
-// ---------------------------------------------------------------------------
-
-/// Growable character grid.
-#[derive(Clone, Debug, Default)]
-struct Canvas {
-    rows: Vec<Vec<char>>,
-    width: usize,
-}
-
-impl Canvas {
-    fn put(&mut self, x: usize, y: usize, character: char) {
-        while self.rows.len() <= y {
-            self.rows.push(vec![' '; self.width]);
-        }
-        if self.rows[y].len() <= x {
-            let grow_to = x + 1;
-            for row in &mut self.rows {
-                if row.len() < grow_to {
-                    row.resize(grow_to, ' ');
-                }
-            }
-            self.width = self.width.max(grow_to);
-        }
-        self.rows[y][x] = merge(self.rows[y][x], character);
-    }
-
-    fn text(&mut self, x: usize, y: usize, value: &str) {
-        let mut column = x;
-        for character in value.chars() {
-            let extra = (display_width(&character.to_string()).max(1)) - 1;
-            self.put(column, y, character);
-            column += 1 + extra;
-        }
-    }
-}
-
-/// Merge a new glyph into an occupied cell, keeping junctions readable.
-fn merge(existing: char, new: char) -> char {
-    if existing == ' ' || existing == new {
-        return new;
-    }
-    match (existing, new) {
-        ('─', '│') | ('│', '─') => '┼',
-        ('─', '┬') | ('┬', '─') => '┬',
-        ('│', '├') | ('├', '│') => '├',
-        ('├', '─') | ('─', '├') => '├',
-        ('│', '┴') | ('┴', '│') => '┴',
-        (_, new) if matches!(new, '▶' | '▼' | '┬') => new,
-        (existing, _) => existing,
-    }
-}
-
-fn draw_node(canvas: &mut Canvas, node: &Node) {
-    let width = node.box_width();
-    canvas.put(node.x, node.y, '┌');
-    for offset in 1..width - 1 {
-        canvas.put(node.x + offset, node.y, '─');
-    }
-    canvas.put(node.x + width - 1, node.y, '┐');
-
-    canvas.put(node.x, node.y + 1, '│');
-    canvas.put(node.x + 1, node.y + 1, ' ');
-    canvas.text(node.x + 2, node.y + 1, &node.label);
-    canvas.put(node.x + width - 2, node.y + 1, ' ');
-    canvas.put(node.x + width - 1, node.y + 1, '│');
-
-    canvas.put(node.x, node.y + 2, '└');
-    for offset in 1..width - 1 {
-        canvas.put(node.x + offset, node.y + 2, '─');
-    }
-    canvas.put(node.x + width - 1, node.y + 2, '┘');
-}
-
-/// Gap between two adjacent `LR` layers, widened for link labels.
-fn left_right_gaps(nodes: &[Node], edges: &[Edge], layers: usize) -> Vec<usize> {
-    let mut gaps = vec![4usize; layers.saturating_sub(1)];
-    for edge in edges {
-        let boundary = nodes[edge.from].layer;
-        if boundary >= gaps.len() {
-            continue;
-        }
-        let needed = edge
-            .label
-            .as_deref()
-            .map(|label| display_width(label) + 2)
-            .unwrap_or(4);
-        gaps[boundary] = gaps[boundary].max(needed);
-    }
-    gaps
-}
-
-fn layout_left_right(nodes: &mut [Node], edges: &[Edge]) -> Canvas {
-    let layers = nodes.iter().map(|node| node.layer).max().unwrap_or(0) + 1;
-    let gaps = left_right_gaps(nodes, edges, layers);
-    let mut layer_widths = vec![0usize; layers];
-    for node in nodes.iter() {
-        layer_widths[node.layer] = layer_widths[node.layer].max(node.box_width());
-    }
-    let mut layer_x = vec![0usize; layers];
-    for layer in 1..layers {
-        layer_x[layer] = layer_x[layer - 1] + layer_widths[layer - 1] + gaps[layer - 1];
-    }
-    for node in nodes.iter_mut() {
-        node.x = layer_x[node.layer];
-        node.y = node.slot * 4;
-    }
-
-    let mut canvas = Canvas::default();
-    for node in nodes.iter() {
-        draw_node(&mut canvas, node);
-    }
-    for edge in edges {
-        let from = &nodes[edge.from];
-        let to = &nodes[edge.to];
-        let start_x = from.x + from.box_width() - 1;
-        let start_y = from.y + 1;
-        let end_x = to.x - 1;
-        let end_y = to.y + 1;
-        canvas.put(start_x, start_y, '├');
-        if let Some(label) = &edge.label {
-            let span = end_x.saturating_sub(start_x + 1);
-            let label_width = display_width(label);
-            let label_x = start_x + 1 + span.saturating_sub(label_width) / 2;
-            canvas.text(label_x, start_y.saturating_sub(1), label);
-        }
-        if start_y == end_y {
-            for x in start_x + 1..end_x {
-                canvas.put(x, start_y, '─');
-            }
-        } else {
-            let jog_x = start_x + 1;
-            for x in start_x + 1..jog_x {
-                canvas.put(x, start_y, '─');
-            }
-            canvas.put(
-                jog_x,
-                start_y,
-                if end_y > start_y { '┐' } else { '┘' },
-            );
-            for y in (start_y.min(end_y) + 1)..start_y.max(end_y) {
-                canvas.put(jog_x, y, '│');
-            }
-            canvas.put(
-                jog_x,
-                end_y,
-                if end_y > start_y { '└' } else { '┌' },
-            );
-            for x in jog_x + 1..end_x {
-                canvas.put(x, end_y, '─');
-            }
-        }
-        canvas.put(end_x, end_y, if edge.directed { '▶' } else { '─' });
-    }
-    canvas
-}
-
-fn layout_top_down(nodes: &mut [Node], edges: &[Edge]) -> Canvas {
-    let layers = nodes.iter().map(|node| node.layer).max().unwrap_or(0) + 1;
-    let gap_rows = 3usize;
-    let mut layer_heights: Vec<usize> = Vec::with_capacity(layers);
-    let mut layer_y = vec![0usize; layers];
-    for layer in 0..layers {
-        let mut cursor = 0usize;
-        for node in nodes.iter_mut().filter(|node| node.layer == layer) {
-            node.x = cursor;
-            cursor += node.box_width() + 3;
-        }
-        layer_heights.push(3);
-    }
-    for layer in 1..layers {
-        layer_y[layer] = layer_y[layer - 1] + layer_heights[layer - 1] + gap_rows;
-    }
-    for node in nodes.iter_mut() {
-        node.y = layer_y[node.layer];
-    }
-
-    let mut canvas = Canvas::default();
-    for node in nodes.iter() {
-        draw_node(&mut canvas, node);
-    }
-    for edge in edges {
-        let from = &nodes[edge.from];
-        let to = &nodes[edge.to];
-        let start_x = from.x + from.box_width() / 2;
-        let start_y = from.y + 2;
-        let end_x = to.x + to.box_width() / 2;
-        let end_y = to.y;
-        canvas.put(start_x, start_y, '┬');
-        if start_x == end_x {
-            for y in start_y + 1..end_y.saturating_sub(1) {
-                canvas.put(start_x, y, '│');
-            }
-            canvas.put(end_x, end_y.saturating_sub(1), if edge.directed { '▼' } else { '│' });
-        } else {
-            let jog_y = end_y.saturating_sub(2);
-            for y in start_y + 1..jog_y {
-                canvas.put(start_x, y, '│');
-            }
-            let (left, right) = if start_x < end_x {
-                (start_x, end_x)
-            } else {
-                (end_x, start_x)
-            };
-            canvas.put(
-                start_x,
-                jog_y,
-                if start_x < end_x { '└' } else { '┘' },
-            );
-            for x in left + 1..right {
-                canvas.put(x, jog_y, '─');
-            }
-            canvas.put(
-                end_x,
-                jog_y,
-                if start_x < end_x { '┐' } else { '┌' },
-            );
-            canvas.put(end_x, end_y.saturating_sub(1), if edge.directed { '▼' } else { '│' });
-        }
-        if let Some(label) = &edge.label {
-            canvas.text(start_x + 2, start_y + 1, label);
-        }
-    }
-    canvas
 }

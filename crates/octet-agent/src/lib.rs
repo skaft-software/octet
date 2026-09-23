@@ -99,7 +99,7 @@ pub mod tools;
 
 pub use agent::{
     public_error_diagnostic, Agent, AgentCompactionMode, AgentConfig, AgentError, CompletionPolicy,
-    RequestContextEstimate, Run, RunControl, RunOutput,
+    PreparedSteering, RequestContextEstimate, Run, RunControl, RunOutput, SteeringReceipt,
 };
 pub use artifact::{
     ArtifactError, ArtifactGenerationSettlement, ArtifactId, ArtifactPublication, ArtifactSource,

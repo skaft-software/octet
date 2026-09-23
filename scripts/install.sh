@@ -498,6 +498,7 @@ extensions/octet-subagents/REFERENCE.md
 extensions/octet-web-search/README.md
 extensions/octet-web-search/REFERENCE.md
 scripts/bench-systems.py
+third_party/licenses/GROK-MERMAID-APACHE-2.0.txt
 third_party/licenses/PI-MIT.txt
 third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt
 OCTET_DOCUMENTATION_EXTRAS

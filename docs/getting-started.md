@@ -88,7 +88,66 @@ enabling it, trusting it, configuring it, and verifying its capability are
 separate actions. Never put a credential value in a prompt, URL, repository file,
 shell command, history, or session fixture.
 
-### A. Codex subscription
+### Interactive setup (unreleased)
+
+For an unconfigured source-candidate installation, start without `--model`:
+
+```sh
+octet --safe-mode
+```
+
+Choose **Add an API key** (the first choice), **Sign in with ChatGPT / other
+supported OAuth subscriptions**, or **Local/self-hosted models**. You can also
+continue without a provider. Existing model inventories and explicit model
+selections do not reopen this onboarding flow; print/RPC never open it.
+
+For an API key, select a listed provider, paste into the **masked secret input**,
+and review **Save API key**. Do not paste it into the conversation composer.
+Octet saves a recoverable key in owner-private storage: this is not a hash or
+an encrypted vault. No environment variable is required for this path. Saving a
+key and discovering models are separate from verifying inference; if discovery
+fails, the saved key can remain for retry. Select a model from the refreshed
+picker, then follow the read-only verification step below.
+
+For subscription sign-in, choose **ChatGPT (OpenAI Codex)** or **GitHub Copilot**
+and authorize on the provider's device-login page. Only those two subscription
+flows are offered; availability depends on your account and supported routes.
+Restart without `--offline` to sign in. For a local server, select the explicit
+endpoint and review the model/credential policy before saving.
+
+See [first-run privacy and limits](providers.md#first-run-setup-unreleased).
+The following shell alternatives also work when you do not use onboarding.
+
+### A. API key (OpenRouter example)
+
+Prerequisite: an OpenRouter account, a usable API key, and a model available to
+that account. Load the key into the environment without putting its value in a
+command. On a Bash-compatible shell, this value-free pattern reads it at a hidden
+prompt:
+
+```sh
+read -r -s OPENROUTER_API_KEY
+export OPENROUTER_API_KEY
+```
+
+If the shell does not support that pattern, use its password manager or secret
+manager integration. Never replace the commands with a literal key.
+
+Start from the repository root and choose a model from the live OpenRouter
+inventory or the `/model` picker:
+
+```sh
+octet --safe-mode --model 'openrouter/PROVIDER/MODEL'
+```
+
+The quoted ID is a placeholder. `openrouter/anthropic/claude-sonnet-4.6` is an
+example of the shape only; account, model, and endpoint availability are
+specific to OpenRouter. OpenRouter uses its built-in route and
+`OPENROUTER_API_KEY`; do not turn it into a custom endpoint merely to copy a
+credential value into a URL. Initial discovery is optional but useful for the
+picker; `--offline` skips it and still does not disable inference traffic.
+
+### B. Subscription login
 
 Prerequisite: an account that can use the hosted Codex subscription flow and a
 browser (or a second device) for device authorization. Run this in a shell; the
@@ -119,34 +178,17 @@ octet --safe-mode --model 'MODEL_ID'
 an unavailable model. `--offline` can use fresh cached/fallback metadata but does
 not verify live availability or make inference local.
 
-### B. OpenRouter API key
-
-Prerequisite: an OpenRouter account, a usable API key, and a model available to
-that account. Load the key into the environment without putting its value in a
-command. On a Bash-compatible shell, this value-free pattern reads it at a hidden
-prompt:
+For GitHub Copilot in the source candidate, use the same first-run subscription
+menu or the CLI device flow:
 
 ```sh
-read -r -s OPENROUTER_API_KEY
-export OPENROUTER_API_KEY
+octet --login copilot --headless
+octet --safe-mode --model 'github-copilot/MODEL_ID'
 ```
 
-If the shell does not support that pattern, use its password manager or secret
-manager integration. Never replace the commands with a literal key.
-
-Start from the repository root and choose a model from the live OpenRouter
-inventory or the `/model` picker:
-
-```sh
-octet --safe-mode --model 'openrouter/PROVIDER/MODEL'
-```
-
-The quoted ID is a placeholder. `openrouter/anthropic/claude-sonnet-4.6` is an
-example of the shape only; account, model, and endpoint availability are
-specific to OpenRouter. OpenRouter uses its built-in route and
-`OPENROUTER_API_KEY`; do not turn it into a custom endpoint merely to copy a
-credential value into a URL. Initial discovery is optional but useful for the
-picker; `--offline` skips it and still does not disable inference traffic.
+Select only an eligible model discovered for your account. Offline startup adds
+no Copilot models; unsupported routes are not advertised. See the
+[Copilot candidate limits](providers.md#github-copilot-unreleased-candidate).
 
 ### C. LM Studio or another local compatible server
 
@@ -248,7 +290,7 @@ shell calls.
 
 | Symptom | Recovery |
 | --- | --- |
-| No configured provider/model | Use Codex login, set the OpenRouter variable, or run the explicit local `octet setup` route. Interactive setup may offer local choices; print/RPC modes do not open a picker. |
+| No configured provider/model | In the source candidate, start interactively without `--model` and choose API key, supported subscription, or local/self-hosted setup. CLI alternatives are provider environment variables, `--login codex` / `--login copilot`, and explicit local `octet setup`; print/RPC never open a picker. |
 | Codex credential missing, expired, or without a usable refresh token | Run `octet --login codex` again; use `--headless` when browser opening is unavailable. Select only an ID shown by the refreshed account inventory. |
 | OpenRouter is absent or returns authentication failure | Set `OPENROUTER_API_KEY` through the secret manager, restart Octet, and choose a model listed for the account. `--offline` is not a credential repair. |
 | Local endpoint is unreachable | Start the server and model, then check the exact explicit `/v1/` URL. No scan or retry of other endpoints occurs. A manual offline setup can save metadata, but inference still needs the server. |

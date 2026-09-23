@@ -458,5 +458,6 @@ text sdk/typescript/src/api_v03.ts
 text sdk/typescript/tests/api_v03_conformance.mjs
 text sdk/typescript/tests/package_conformance.mjs
 text sdk/typescript/tsconfig.json
+text third_party/licenses/GROK-MERMAID-APACHE-2.0.txt
 text third_party/licenses/PI-MIT.txt
 text third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt

@@ -144,6 +144,20 @@ checks and remaining limits are recorded in [v0.7.4 recovery qualification](qual
 This is a Rust host setter, not a new NDJSON run field, CLI flag, or persisted
 configuration setting. NDJSON applications retain process-group cancellation.
 
+### Tool-schema and compaction bounds
+
+Rust embedders can call `Agent::set_tool_schema_budget_bytes(usize)` before a
+run. The default is 128KiB for the exact serialized JSON array of
+provider-visible tool definitions. A non-empty set over the limit is refused
+before provider I/O; octet never silently drops, truncates, or rewrites tools.
+A zero budget permits only `[]`. This is an SDK setter, not a protocol v1 field,
+CLI flag, or persisted setting.
+
+Local compaction similarly refuses empty, whitespace-only, or over-128KiB
+assembled handoffs before writing a checkpoint. The cap includes host-generated
+file-operation evidence; neither the model summary nor that evidence is
+truncated to fit.
+
 ## Run requests
 
 Required run-specific fields are `run_id`, `workspace`, `model`, and `prompt`,

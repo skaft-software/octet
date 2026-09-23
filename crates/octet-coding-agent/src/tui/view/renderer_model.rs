@@ -210,7 +210,6 @@ impl PublishedBlock {
                     failure_reason: panel.failure_reason.clone(),
                     extension_render_segments: panel.extension_render_segments.clone(),
                     progress_decoration: panel.progress_decoration.clone(),
-                    subagent_activity: panel.subagent_activity.clone(),
                     model_lab: panel.model_lab,
                     cached_diff: Default::default(),
                     cached_disclosure_sensitive: Default::default(),
@@ -444,7 +443,6 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         skill_commands,
         extension_commands,
         subagent_activity,
-        subagent_activity_block,
         subagent_committed_costs,
         slash_selection,
         slash_scroll,
@@ -739,7 +737,7 @@ mod tests {
 
     #[test]
     fn queued_payloads_are_shared_across_publication_and_queue_mutation() {
-        use super::super::{composer, ComposedInput, QueuedSteering};
+        use super::super::{composer, ComposedInput, QueuedFollowUp, QueuedSteering};
         let mut semantic = state();
         let payload = "large retained paste\n".repeat(32_768);
         let mut composed = ComposedInput::from_text(payload.clone());
@@ -749,11 +747,13 @@ mod tests {
             payload: composer::AttachmentPayload::PastedText(payload),
         });
         Arc::make_mut(&mut semantic.steering_queue).push(Arc::new(QueuedSteering {
+            sequence: 0,
+            recall: None,
             display: composed.transcript_text.clone(),
             editor_display: composed.display_text.clone(),
             attachments: composed.attachments.clone(),
         }));
-        Arc::make_mut(&mut semantic.follow_up_queue).push_back(Arc::new(composed));
+        Arc::make_mut(&mut semantic.follow_up_queue).push_back(Arc::new(QueuedFollowUp { sequence: 1, composed }));
         let first = RenderModel::capture(&mut semantic);
         for _ in 0..32 {
             let next = RenderModel::capture(&mut semantic);
@@ -777,7 +777,10 @@ mod tests {
         // Keeping a renderer revision alive does not make the next admission
         // duplicate any previously accepted paste, media, or editor payload.
         Arc::make_mut(&mut semantic.follow_up_queue)
-            .push_back(Arc::new(ComposedInput::from_text("next".into())));
+            .push_back(Arc::new(QueuedFollowUp {
+                sequence: 2,
+                composed: ComposedInput::from_text("next".into()),
+            }));
         assert!(!Arc::ptr_eq(
             &semantic.follow_up_queue,
             &first.chrome.follow_up_queue
@@ -787,6 +790,8 @@ mod tests {
             &first.chrome.follow_up_queue[0]
         ));
         Arc::make_mut(&mut semantic.steering_queue).push(Arc::new(QueuedSteering {
+            sequence: 0,
+            recall: None,
             display: "next".into(),
             editor_display: "next".into(),
             attachments: Vec::new(),

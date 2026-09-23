@@ -12,6 +12,12 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Interaction
 
+- Offer first-run setup in the order API key, supported OAuth subscription,
+  then local/self-hosted models. API keys use masked input and explicit review,
+  with recoverable owner-private storage rather than hashes or an encryption
+  claim. ChatGPT (Codex) and GitHub Copilot reuse host-owned device login;
+  configured launches and noninteractive modes do not reopen onboarding.
+
 - Silence routine session lookup/replay/fork progress during startup, including
   resumed launches. Keep input, setup, errors, and coordinated shutdown live.
   Fresh launches skip the unnecessary session-replay worker and full-config copy.
@@ -153,13 +159,21 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Subagents
 
-- Settle completed workers once into their owning transcript block, avoid replay
-  on later turns, and preserve history anchors while live workers update.
-- Make the transcript block the single live roster surface: the duplicate pinned
-  chrome strip is deleted, an active roster stays in the mutable tail (never
-  committed as immutable native history) and updates in place while the reader
-  scrolls back, and the marker dot pulses while any child is live and resolves
-  to success/failure/stopped once the roster settles.
+- Move the live worker roster from the synthetic `Subagents` transcript block
+  into pinned bottom chrome above the composer, with no roster semantic-copy
+  event. Show it while any retained worker is active, independently of root-run
+  activity or follow-tail; hide it when all settle while retaining telemetry,
+  accounting, and the `/subagents` inspector. Current tool counts and other roster
+  metrics no longer dirty transcript history; aggregate outcome transitions may
+  still require historical replay. Preserve one bounded, copyable worker/state/
+  reason notice with a `/subagents` hint per observed failed/parked state or reason
+  transition, including timeout and awaiting approval. Duplicate snapshots,
+  metric updates, and successful settlement add no notices.
+- Reuse grouped worker rows within one third of terminal height (rounded down),
+  further bounded by available space with one history row reserved. Omitted rows
+  point to `/subagents`; focused panels may suppress the strip. App-owned PageUp
+  history keeps the strip visible, but native terminal scrollback cannot overlay
+  application chrome.
 - Stop truncating worker model ids: worker/state/model are mandatory columns
   that never ellipsize, optional metrics drop first, and the compact fallback
   line still prints the full model. The `/subagents` picker header is now the
@@ -184,6 +198,14 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   state instead of mutating unattended.
 
 ### Providers, codecs and tools
+
+- Decode OpenRouter's per-model `reasoning` object (`mandatory`,
+  `default_enabled`, `supported_efforts`, `default_effort`) instead of treating
+  the presence of a `reasoning_effort` parameter as proof that reasoning is
+  optional. A mandatory model no longer receives a disabling
+  `reasoning.effort=none`, which OpenRouter rejected with HTTP 400; it receives
+  the endpoint's default effort or an advertised exact effort, and a saved `off`
+  is clamped to a supported choice. Advertised effort strings are sent verbatim.
 
 - Share a 64 MiB / 32-file Bash spill budget per owner, including active captures;
   evict oldest files and move disk capture/cleanup off the async path. Keep the
@@ -295,6 +317,23 @@ ledger separates tested behavior, partial implementations and blocked contracts.
   `cacheWrite1h` bucket, preserving uncertainty.
 
 ### Editor and TUI
+
+- Make Option+Up/Alt+Up recall the newest editable pending message instead of
+  only local follow-ups: a Ctrl+S live-steering submission is now withdrawn from
+  the agent before persistence, releasing its reserved control budget, so the
+  recalled text is never also delivered. Recall is arbitrated by that
+  submission's own receipt rather than the delayed delivery event, so it fails
+  closed once the agent has claimed the input for the session. Sticky `/answer`
+  input remains deliberately non-retractable, and the pending-state hint only
+  advertises the affordance while an editable entry exists.
+
+- Render Pi-style `$…$`, `$$…$$`, `\(…\)`, and `\[…\]` math through the
+  existing LaTeX engine, preserving currency, code, incomplete expressions, and
+  unsupported source rather than displaying partial art. Broaden bounded Mermaid
+  flowcharts with upstream layout, subgraphs, reverse directions, node lists,
+  and labelled links. Unsupported diagrams retain source with a visible reason;
+  diagrams wider than the viewport show source rather than cropped art. Explicit
+  grok-mermaid oracle fixtures do not establish full Pi renderer equivalence.
 
 - Keep active inspection and consent panels inside the polling run loop. Use
   shared semantic snapshots and renderer-private layout, with post-write

@@ -1048,11 +1048,22 @@ pub(crate) fn build_request(
     } else {
         None
     };
-    let reasoning = if openrouter_reasoning && !always_on {
-        Some(ChatReasoningConfig {
-            effort: wire,
-            enabled: None,
-        })
+    let reasoning = if openrouter_reasoning && !always_on && enabled {
+        // OpenRouter Off leaves the endpoint default in force, including for
+        // auxiliary summary requests. Never manufacture an explicit disable.
+        if reasoning_capability
+            .is_some_and(|c| c.control == crate::types::ReasoningControl::Toggle)
+        {
+            Some(ChatReasoningConfig {
+                effort: None,
+                enabled: Some(true),
+            })
+        } else {
+            wire.map(|effort| ChatReasoningConfig {
+                effort: Some(effort),
+                enabled: None,
+            })
+        }
     } else if matches!(
         reasoning_mode,
         Some(OpenAiChatReasoningMode::Together { .. })
@@ -2923,6 +2934,113 @@ mod tests {
             spec: Arc::new(spec),
             endpoint: Arc::new(ep),
         }
+    }
+
+    #[test]
+    fn openrouter_summary_reasoning_never_invents_a_disable() {
+        use crate::types::{ReasoningControl, ReasoningOptions};
+        let mut model = make_test_model(false, false, false, false, true, false);
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability.openai_chat_mode = OpenAiChatReasoningMode::OpenRouter;
+        capability.options = Some(ReasoningOptions {
+            values: vec!["max".into(), "high".into(), "low".into()],
+            default: Some("max".into()),
+        });
+        capability.max_effort = ReasoningEffort::Max;
+        let mut req = Request {
+            system: Some("Summarize the conversation".into()),
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("history".into())],
+            })],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: Some(1024),
+            temperature: None,
+            stop: vec![],
+            reasoning: crate::select_auxiliary_reasoning(&model).unwrap(),
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::Short,
+            session_id: None,
+        };
+        let body = |model: &Model, req: &Request| -> serde_json::Value {
+            serde_json::from_slice(&build_request(model, req).unwrap().body).unwrap()
+        };
+        assert_eq!(
+            body(&model, &req)["reasoning"],
+            serde_json::json!({"effort":"max"})
+        );
+        req.reasoning = ReasoningConfig::Off;
+        assert!(matches!(
+            build_request(&model, &req),
+            Err(AiError::Unsupported(crate::UnsupportedError::Reasoning))
+        ));
+        // Optional OpenRouter Off is omission, not an unadvertised `none`.
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability
+            .options
+            .as_mut()
+            .unwrap()
+            .values
+            .insert(0, "none".into());
+        assert!(body(&model, &req).get("reasoning").is_none());
+        Arc::make_mut(&mut model.spec).preset.thinking_format =
+            Some(crate::declarations::ThinkingFormat::OpenRouter);
+        assert!(body(&model, &req).get("reasoning").is_none());
+        Arc::make_mut(&mut model.spec).preset.thinking_format = None;
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability.control = ReasoningControl::Toggle;
+        capability.options = Some(ReasoningOptions {
+            values: vec!["false".into(), "true".into()],
+            default: Some("false".into()),
+        });
+        assert!(body(&model, &req).get("reasoning").is_none());
+        req.reasoning = ReasoningConfig::On;
+        assert_eq!(
+            body(&model, &req)["reasoning"],
+            serde_json::json!({"enabled":true})
+        );
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability.control = ReasoningControl::AlwaysOn;
+        capability.options = Some(ReasoningOptions {
+            values: vec!["default".into()],
+            default: Some("default".into()),
+        });
+        req.reasoning = crate::select_auxiliary_reasoning(&model).unwrap();
+        assert!(body(&model, &req).get("reasoning").is_none());
+        // Other profiles retain explicit Off semantics.
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability.control = ReasoningControl::Effort;
+        capability.openai_chat_mode = OpenAiChatReasoningMode::Standard;
+        capability.options = Some(ReasoningOptions {
+            values: vec!["none".into(), "high".into()],
+            default: Some("high".into()),
+        });
+        req.reasoning = ReasoningConfig::Off;
+        assert_eq!(body(&model, &req)["reasoning_effort"], "none");
     }
 
     #[test]

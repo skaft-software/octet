@@ -45,7 +45,7 @@ live-provider availability or acceptance.
 | Explicit Qwen enable profile | `enable_thinking` boolean |
 | Explicit Qwen chat-template profile | `chat_template_kwargs.enable_thinking`, with the configured `preserve_thinking` setting |
 | DeepSeek toggle/effort | Native `thinking.type`, exact advertised effort, and `reasoning_content` replay; not an unrelated Qwen control |
-| OpenRouter | Nested `reasoning` control |
+| OpenRouter | Exact enabled effort in nested `reasoning`, or `enabled: true` for a boolean-only contract; Off omits the object (provider default, **not** guaranteed disabled). Mandatory endpoints reject explicit core Off; summaries select their advertised default. |
 | Together | Typed `reasoning.enabled`, plus effort only when its profile supports it |
 | Google native | Native thinking level or token-budget control, according to the selected capability; unsupported Off is not silently omitted |
 | Anthropic / Bedrock token thinking | Native enabled thinking and token budget; budget must leave output space for an answer |

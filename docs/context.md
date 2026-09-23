@@ -80,17 +80,32 @@ compact_model = "openrouter/anthropic/claude-haiku-4.5"
 Environment controls include `OCTET_COMPACTION_MODE`,
 `OCTET_COMPACTION_THRESHOLD_FRACTION`, and `OCTET_COMPACTION_MAX_ACTIVE_TOKENS`.
 Legacy `enabled = true` and `OCTET_AUTO_COMPACT=true` still select `local`.
+The footer percentage uses the full model window, not a smaller configured
+working set. For example, `max_active_tokens = 120000` is a 9.15% ceiling on a
+1,310,720-token model; the coding-turn reserve makes the input trigger lower
+still. With no cap and the default fraction, that model's threshold is about
+98.75%. A process-local `/auto-compact` override or provider context-overflow
+recovery can also trigger earlier compaction; inspect the active setting and
+compaction reason before attributing a low percentage to the model.
 The deprecated `keep_recent_turns` key is retained for old configuration; new
 configuration uses `keep_recent_tokens`, not turn-count retention.
 
 ## What is retained
 
 Local compaction writes a bounded summary only at a safe completed-turn boundary,
-keeps a recent tail and active skill state, and does not rewrite ancestry.
-Resume reconstructs context from the selected parent chain and its compaction
-boundary. The compact footer uses the latest provider turn's authoritative usage,
-not cumulative traffic. See [session records](sessions.md#jsonl-schema) for skill
-snapshots and cumulative `details.readFiles` / `details.modifiedFiles`.
+keeps a recent tail and active skill state, and does not rewrite ancestry. Empty,
+whitespace-only, or over-128KiB local handoffs (including the host-derived file
+footer) fail closed before a checkpoint is written; octet never truncates a
+summary or file evidence. Resume reconstructs context from the selected parent
+chain and its compaction boundary. The compact footer uses the latest provider
+turn's authoritative usage, not cumulative traffic. See [session records](sessions.md#jsonl-schema)
+for skill snapshots and cumulative `details.readFiles` / `details.modifiedFiles`.
+
+Rust embedders may set `Agent::set_tool_schema_budget_bytes`; the default is
+128KiB of exact serialized provider-visible tool-definition JSON. A non-empty
+schema set over that limit is refused before provider I/O rather than having
+individual tools omitted or rewritten. A zero budget permits only an empty tool
+set.
 
 `native-responses` instead uses provider-native opaque compaction without showing
 the payload in the transcript. It requires the active OpenAI Responses endpoint

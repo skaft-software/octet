@@ -73,6 +73,7 @@
 //! running under Node with its real `visibleWidth`, so wide and combining
 //! glyphs are measured identically.
 
+pub(crate) mod markdown;
 mod tables;
 
 use crate::width::display_width;

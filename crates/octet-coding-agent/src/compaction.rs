@@ -2,10 +2,11 @@
 
 use std::io::{self, Write};
 
+use octet_agent::compaction::{MAX_COMPACTION_HANDOFF_BYTES, finish_handoff_bounded};
 use octet_agent::{
-    build_handoff_message, build_turn_prefix_handoff_message, finish_handoff, prepare_handoff,
-    CancellationToken, EntryId, InputPart, Session, SUMMARIZATION_SYSTEM_PROMPT,
-    SUMMARY_OUTPUT_TOKENS, TURN_PREFIX_OUTPUT_TOKENS,
+    CancellationToken, EntryId, InputPart, SUMMARIZATION_SYSTEM_PROMPT, SUMMARY_OUTPUT_TOKENS,
+    Session, TURN_PREFIX_OUTPUT_TOKENS, build_handoff_message, build_turn_prefix_handoff_message,
+    prepare_handoff,
 };
 use octet_ai::{AssistantPart, Media, Message, ToolResultPart, UserPart};
 
@@ -351,7 +352,15 @@ pub async fn attempt_compaction_with_instructions(
         summary.push_str("\n\n---\n\n**Turn Context (split turn):**\n\n");
         summary.push_str(&prefix_summary);
     }
-    let summary = finish_handoff(summary, &preparation.details);
+    let Some(summary) =
+        finish_handoff_bounded(summary, &preparation.details, MAX_COMPACTION_HANDOFF_BYTES)
+    else {
+        return Ok(CompactionOutcome::Skipped {
+            reason: format!(
+                "compaction summary exceeded the {MAX_COMPACTION_HANDOFF_BYTES}-byte handoff limit"
+            ),
+        });
+    };
     match app
         .agent
         .session_mut()
@@ -370,13 +379,57 @@ pub async fn attempt_compaction_with_instructions(
 pub(crate) mod tests {
     use super::*;
     use octet_agent::EntryValue;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use octet_ai::{
-        AssistantMessage, Media, ModelId, Protocol, ReasoningConfig, ToolCall, ToolCallId,
-        ToolResult, ToolResultPart, UserMessage,
+        AiError, AssistantMessage, Media, ModelId, Protocol, ReasoningConfig, Request, StopReason,
+        StreamEvent, ToolCall, ToolCallId, ToolResult, ToolResultPart, Usage, UserMessage,
     };
 
-    use crate::app::bootstrap::{bootstrap, build_app, LaunchSelection, SessionSelection};
+    use crate::app::bootstrap::{LaunchSelection, SessionSelection, bootstrap, build_app};
     use crate::config::{CompactionPolicy, Config, Mode, ResumeSelector, SandboxPolicy};
+
+    struct CompactionSummaryScript {
+        responses: Mutex<VecDeque<String>>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for CompactionSummaryScript {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            _request: Request,
+            _: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let text = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted compaction response");
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::Started { response_id: None }),
+                Ok(StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage {
+                        content: vec![AssistantPart::Text(text)],
+                        model: model.id,
+                        protocol: model.protocol,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    cost: None,
+                    response_id: None,
+                    responses_output: None,
+                    deferred: None,
+                    diagnostics: Vec::new(),
+                })),
+            ])))
+        }
+    }
 
     fn user(text: &str) -> EntryValue {
         EntryValue::Message(Message::User(UserMessage {
@@ -604,6 +657,62 @@ pub(crate) mod tests {
         )
         .unwrap();
         (directory, app)
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_refuses_invalid_main_or_split_summary_without_discarding_history() {
+        for (responses, expected_calls) in [
+            (vec![" \n\t ".to_owned()], 1),
+            (
+                vec![
+                    "## Goal\nvalid main summary".to_owned(),
+                    " \n\t ".to_owned(),
+                ],
+                2,
+            ),
+            (vec!["x".repeat(MAX_COMPACTION_HANDOFF_BYTES + 1)], 1),
+            (
+                vec![
+                    "## Goal\nvalid main summary".to_owned(),
+                    "x".repeat(MAX_COMPACTION_HANDOFF_BYTES + 1),
+                ],
+                2,
+            ),
+        ] {
+            let (_directory, mut app) = app_for_estimate();
+            app.config.compaction.keep_recent_tokens = 1;
+            for entry in [
+                user("first request"),
+                assistant("first answer"),
+                user("second request"),
+                assistant("second answer"),
+            ] {
+                app.agent.session_mut().append(entry).unwrap();
+            }
+            let first_kept = choose_first_kept(app.agent.session(), 1).unwrap();
+            let preparation = prepare_handoff(app.agent.session(), &first_kept).unwrap();
+            assert!(!preparation.messages.is_empty());
+            assert!(!preparation.turn_prefix_messages.is_empty());
+            let before = format!("{:?}", app.agent.session().context().unwrap());
+            let script = Arc::new(CompactionSummaryScript {
+                responses: Mutex::new(VecDeque::from(responses)),
+                calls: AtomicUsize::new(0),
+            });
+            app.client
+                .register_host_stream_transport(app.model.endpoint.id.clone(), script.clone());
+
+            let outcome = attempt_compaction(&mut app).await.unwrap();
+            assert!(matches!(outcome, CompactionOutcome::Skipped { .. }));
+            assert_eq!(script.calls.load(Ordering::SeqCst), expected_calls);
+            assert_eq!(format!("{:?}", app.agent.session().context().unwrap()), before);
+            assert!(
+                app.agent
+                    .session()
+                    .entries()
+                    .iter()
+                    .all(|entry| !matches!(entry.value, EntryValue::Compaction { .. }))
+            );
+        }
     }
 
     #[tokio::test]

@@ -173,6 +173,21 @@ prefixes; complete committed responses remain in the referenced child sessions.
 Approval reasons and failure diagnostics are not shortened by this output budget,
 and oversized metadata still fails closed.
 
+Initial tasks and accepted follow-ups persist their payload, random delivery
+identity, and failed-delivery count before acknowledgement. Restart reconciliation
+uses delivery identities on the child session's active ancestry, not matching
+text: identical requests remain distinct work. Explicit resume drains older
+accepted work before the new follow-up; process-local commands only wake that
+durable queue. Undelivered startup or prompt failures are retained for explicit
+retry and dead-lettered after three failed attempts, with durable diagnostics.
+Unreadable child-session authority retains accepted payloads and retry counts
+without executing them. After repair, both automatic reattachment and explicit
+resume reconcile delivery identities before replaying only undelivered inputs.
+Worker panics are supervised and wake parent waiters; neither an old supervisor
+nor an old worker's cleanup can settle a newer worker incarnation. The standard
+release build retains panic unwinding so this isolation also works in installed
+binaries; an embedder choosing `panic = "abort"` instead terminates the process.
+
 The extension models the gap as **detached, not dead**:
 
 - A worker whose host record is no longer reported becomes `detached` (the wire

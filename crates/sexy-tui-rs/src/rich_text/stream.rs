@@ -54,6 +54,7 @@ struct FenceScanner {
     searched: usize,
     scanned_bytes: u64,
     open: Option<FenceState>,
+    math: Option<(usize, &'static str)>,
     pending: PendingPresentation,
     completed_table_header: bool,
     completed_fence_end: Option<usize>,
@@ -173,6 +174,14 @@ impl FenceScanner {
                     completed_fence = true;
                     self.completed_fence_end = Some(end);
                 }
+            } else if let Some((_, closing)) = self.math {
+                if line.trim_end().ends_with(closing) {
+                    self.math = None;
+                }
+            } else if let Some((closing, body)) = display_math_opening(line) {
+                if !body.trim_end().ends_with(closing) {
+                    self.math = Some((self.offset, closing));
+                }
             } else if let Some((marker, count, info)) = opening_fence(line) {
                 self.open = Some(FenceState {
                     marker,
@@ -182,7 +191,10 @@ impl FenceScanner {
                     language: info,
                 });
             }
-            if self.open.is_none() && line.trim_start().starts_with(['|', '-', ':']) {
+            if self.open.is_none()
+                && self.math.is_none()
+                && line.trim_start().starts_with(['|', '-', ':'])
+            {
                 self.scanned_bytes += line.len() as u64;
                 self.completed_table_header |= line.contains('|')
                     && line.contains("---")
@@ -196,6 +208,9 @@ impl FenceScanner {
     }
 
     fn drain_prefix(&mut self, bytes: usize) {
+        if let Some((start, _)) = &mut self.math {
+            *start = start.saturating_sub(bytes);
+        }
         self.offset = self.offset.saturating_sub(bytes);
         self.searched = self.searched.saturating_sub(bytes);
         self.pending.start = self.pending.start.saturating_sub(bytes);
@@ -498,8 +513,12 @@ impl StreamingMarkdown {
                 &mut self.lexical_first,
                 &mut self.stats.lexical_scanned_bytes,
             ) {
-                self.commit_prefix(offset);
-                self.parse_and_commit_stable_tail();
+                if self.scanner.math.is_none_or(|(start, _)| offset <= start) {
+                    self.commit_prefix(offset);
+                    self.parse_and_commit_stable_tail();
+                } else {
+                    self.append_preview();
+                }
             } else {
                 self.append_preview();
             }
@@ -516,6 +535,10 @@ impl StreamingMarkdown {
         let starts = markdown::top_level_block_starts(&self.tail[..end]);
         if starts.len() >= 2 {
             if let Some(offset) = starts.last().copied().filter(|offset| *offset > 0) {
+                let offset = self
+                    .scanner
+                    .math
+                    .map_or(offset, |(start, _)| offset.min(start));
                 self.commit_prefix(offset);
             }
         }
@@ -538,7 +561,7 @@ impl StreamingMarkdown {
                     Inline::Text(_) | Inline::SoftBreak | Inline::HardBreak
                 )
             }),
-            Block::Plain(_) => false,
+            Block::Plain(_) => true,
             _ => true,
         });
         if rich {
@@ -592,6 +615,9 @@ impl StreamingMarkdown {
     }
 
     fn presentation_end(&mut self) -> usize {
+        if self.scanner.math.is_some() {
+            return self.tail.len();
+        }
         self.scanner.pending.end(
             &self.tail,
             self.scanner.offset,
@@ -1184,9 +1210,33 @@ fn is_closing_fence(line: &str, marker: char, minimum: usize) -> bool {
     count >= minimum && line[count..].trim().is_empty()
 }
 
+fn display_math_opening(line: &str) -> Option<(&'static str, &str)> {
+    let mut trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    while let Some(rest) = trimmed.strip_prefix('>') {
+        trimmed = rest.trim_start_matches(' ');
+    }
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            trimmed = rest.trim_start_matches(' ');
+            break;
+        }
+    }
+    if let Some(body) = trimmed.strip_prefix("$$") {
+        Some(("$$", body))
+    } else {
+        trimmed.strip_prefix("\\[").map(|body| ("\\]", body))
+    }
+}
+
 fn likely_complete_inline(source: &str) -> bool {
     let paired = |marker: char| source.matches(marker).nth(1).is_some();
-    paired('*')
+    source.contains('$')
+        || source.contains("\\(")
+        || source.contains("\\[")
+        || paired('*')
         || paired('_')
         || paired('`')
         || source.match_indices("~~").nth(1).is_some()

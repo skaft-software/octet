@@ -9409,14 +9409,9 @@ fn full_tui_colour_modes_preserve_readable_content_and_supported_encoding() {
                         "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new".into(),
                     ).render(&theme.rich_renderer(), theme, width));
                     for native in [true, false] {
-                        samples.extend(render_block(
-                            None,
-                            &TranscriptBlock::Tool(Box::new(ToolPanel::subagent_activity(
-                                &subagent_transcript_test_view(native),
-                            ))),
+                        samples.extend(subagent_activity_render_rows(
+                            &subagent_transcript_test_view(native),
                             theme,
-                            &theme.rich_renderer(),
-                            &theme.reasoning_renderer(),
                             width,
                             false,
                         ));
@@ -10408,17 +10403,16 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
         .unwrap();
 
     assert!(shell.set_subagent_presentation(Some(&snapshot), true));
-    // Idle snapshots never park worker activity above the composer.
+    // Workers stay visible even while the root run is idle.
+    assert!(!shell.state.borrow().run.is_active());
     let chrome = shell_chrome(&shell.state.borrow(), 120, Instant::now());
     assert!(
         chrome.composer.iter().all(|row| !row.contains("Subagents")),
         "{:?}",
         chrome.composer
     );
-    let activity = shell
-        .state
-        .borrow()
-        .rendered_transcript(120)
+    let activity = shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
@@ -10450,8 +10444,63 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
 }
 
 #[test]
+fn subagent_chrome_is_height_bounded_and_points_to_the_full_inspector() {
+    for width in [32, 80, 120] {
+        for height in [12, 16, 24] {
+            for expanded in [false, true] {
+                let mut shell = InteractiveShell::test_shell();
+                shell.set_size(width, height);
+                let mut view = subagent_transcript_test_view(true);
+                let worker = view.telemetry[0].clone();
+                view.telemetry = (0..8)
+                    .map(|index| {
+                        let mut child = worker.clone();
+                        child.child_id = format!("worker-{index}");
+                        child.task_name = format!("worker-{index}");
+                        child
+                    })
+                    .collect();
+                {
+                    let mut state = shell.state.borrow_mut();
+                    state.set_subagent_activity(view);
+                    state.verbose_tools = expanded;
+                    state.follow_tail = false;
+                }
+                let state = shell.state.borrow();
+                assert!(!state.run.is_active());
+                let chrome = shell_chrome(&state, width, Instant::now());
+                assert!(!chrome.subagents.is_empty());
+                assert!(chrome.subagents.len() <= usize::from(height / 3));
+                assert!(chrome.transcript_rows >= 1);
+                assert!(chrome
+                    .subagents
+                    .iter()
+                    .all(|row| visible_width(row) <= usize::from(width)));
+                assert!(chrome.subagents.last().unwrap().contains("/subagents"));
+                let grouped = subagent_activity_render_rows(
+                    state.subagent_activity.as_ref().unwrap(),
+                    &state.theme,
+                    width,
+                    expanded,
+                );
+                assert_eq!(
+                    &chrome.subagents[..chrome.subagents.len() - 1],
+                    &grouped[..chrome.subagents.len() - 1]
+                );
+                assert!(!state
+                    .rendered_transcript(width)
+                    .join("\n")
+                    .contains("worker-"));
+                assert_eq!(state.subagent_activity.as_ref().unwrap().telemetry.len(), 8);
+            }
+        }
+    }
+}
+
+#[test]
 fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
     let mut shell = InteractiveShell::test_shell();
+    shell.set_size(120, 60);
     let child = |id: &str, task: &str, state: &str, reason: Option<&str>| {
         octet_agent::DelegationTelemetryChild {
             child_id: id.into(),
@@ -10500,10 +10549,8 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         failure_class: Some("spawn_rejected".into()),
     };
     publish_current_turn_roster(&mut shell, snapshot);
-    let block = shell
-        .state
-        .borrow()
-        .rendered_transcript(120)
+    let block = shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
@@ -10527,9 +10574,8 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
     let heading_column = visible_width(&heading[..heading_byte]);
     let elbow_column = visible_width(&child[..elbow_byte]);
     let task_column = visible_width(&child[..task_byte]);
-    // The roster table nests like any other tool's output: the connector sits
-    // one level under the event heading's text, and every cell after it aligns
-    // with the connector's column.
+    // Grouped chrome aligns connectors with its heading, and worker cells
+    // begin two visible columns after the connector.
     assert_eq!(elbow_column, heading_column, "{block}");
     assert_eq!(task_column, elbow_column + 2, "{block}");
     assert!(block.contains("failed"), "{block}");
@@ -10552,15 +10598,27 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         view.failure_reason.as_deref(),
         Some("spawn rejected: worker limit reached")
     );
+    let notices = state
+        .transcript
+        .iter()
+        .filter_map(|block| match block {
+            TranscriptBlock::Notice(text) => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].contains("Audit release surface") && notices[0].contains("failed"));
+    assert!(notices[0].contains("provider request failed: upstream unavailable"));
+    assert!(notices[0].contains("/subagents"));
     drop(state);
     assert!(!shell
         .state
         .borrow()
         .rendered_transcript(120)
         .join("\n")
-        .contains("Used subagent spawn"));
+        .contains("Subagents"));
 
-    // An empty cleanup snapshot must not erase the settled transcript event.
+    // An empty cleanup snapshot must not erase retained inspector telemetry.
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 5,
@@ -10572,7 +10630,9 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         },
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(!shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
 
     shell.on_agent_event(&octet_agent::AgentEvent::ToolStarted {
         id: octet_ai::ToolCallId("spawn-call".into()),
@@ -10581,6 +10641,85 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
     });
     let transcript = shell.state.borrow().rendered_transcript(120).join("\n");
     assert!(!transcript.contains("Used subagent spawn"), "{transcript}");
+}
+
+#[test]
+fn settled_subagent_attention_is_a_deduplicated_notice_not_a_roster() {
+    for terminal in ["failed", "stopped", "awaiting_approval"] {
+        let mut shell = InteractiveShell::test_shell();
+        let mut view = subagent_transcript_test_view(true);
+        view.telemetry.truncate(1);
+        let notices = |shell: &InteractiveShell| {
+            shell
+                .state
+                .borrow()
+                .transcript
+                .iter()
+                .filter_map(|block| match block {
+                    TranscriptBlock::Notice(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        assert!(notices(&shell).is_empty());
+        view.telemetry[0].tool_use_count += 1;
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        assert!(notices(&shell).is_empty(), "live metrics are chrome-only");
+        assert!(!shell.state.borrow().run.is_active());
+
+        view.telemetry[0].state = terminal.into();
+        view.telemetry[0].failure_reason =
+            Some("action required: \x1b[31mreview worker\x1b[0m".into());
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+            .subagents
+            .is_empty());
+        let first = notices(&shell);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].contains("Read changelog") && first[0].contains(terminal));
+        assert!(first[0].contains("action required: review worker"));
+        assert!(first[0].contains("/subagents") && !first[0].contains('\x1b'));
+        assert!(!first[0].contains("test-model") && !first[0].contains("tokens"));
+
+        // Repeated state/reason, even with fresh accounting, must not spam history.
+        view.telemetry[0].output_tokens += 1;
+        view.telemetry[0].elapsed_ms += 100;
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        assert_eq!(notices(&shell), first);
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .subagent_activity
+                .as_ref()
+                .unwrap()
+                .telemetry,
+            view.telemetry
+        );
+
+        view.telemetry[0].failure_reason = Some("new diagnostic ".repeat(1000));
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        let changed = notices(&shell);
+        assert_eq!(changed.len(), 2, "a new diagnostic is actionable");
+        assert!(changed[1].contains("new diagnostic") && changed[1].contains("/subagents"));
+        assert!(changed[1].len() < view.telemetry[0].failure_reason.as_ref().unwrap().len());
+        assert!(!shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .any(|block| matches!(block, TranscriptBlock::Tool(_))));
+
+        view.telemetry[0].state = "completed".into();
+        view.telemetry[0].failure_reason = None;
+        shell.state.borrow_mut().set_subagent_activity(view);
+        assert_eq!(
+            notices(&shell),
+            changed,
+            "ordinary completion adds no history"
+        );
+    }
 }
 
 fn subagent_transcript_test_view(native: bool) -> SubagentActivityView {
@@ -10689,18 +10828,10 @@ fn subagent_transcript_test_rows(
     width: u16,
     verbose: bool,
 ) -> Vec<String> {
-    render_block(
-        None,
-        &TranscriptBlock::Tool(Box::new(ToolPanel::subagent_activity(view))),
-        theme,
-        &theme.rich_renderer(),
-        &theme.reasoning_renderer(),
-        width,
-        verbose,
-    )
-    .iter()
-    .map(|line| strip_terminal_sequences(line))
-    .collect()
+    subagent_activity_render_rows(view, theme, width, verbose)
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect()
 }
 
 #[test]
@@ -10730,7 +10861,7 @@ fn subagent_clipping_never_injects_sgr_into_no_color_rows() {
 }
 
 #[test]
-fn subagent_transcript_groups_live_workers_and_collapses_terminal_groups() {
+fn subagent_grouped_rows_groups_live_workers_and_collapses_terminal_groups() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 
     for (unicode, color) in [
@@ -10745,14 +10876,7 @@ fn subagent_transcript_groups_live_workers_and_collapses_terminal_groups() {
             for width in [24, 40, 80, 120] {
                 for verbose in [false, true] {
                     let rows = subagent_transcript_test_rows(&view, &theme, width, verbose);
-                    assert_eq!(
-                        rows[0],
-                        if unicode {
-                            "• Subagents"
-                        } else {
-                            "* Subagents"
-                        }
-                    );
+                    assert_eq!(rows[0], "Subagents");
                     assert!(
                         rows.iter()
                             .all(|line| visible_width(line) <= usize::from(width)),
@@ -10761,7 +10885,7 @@ fn subagent_transcript_groups_live_workers_and_collapses_terminal_groups() {
                     // Call counts stay out of every row in every mode.
                     assert!(!rows.join("\n").contains("call"), "{rows:?}");
                     if !unicode {
-                        // An ASCII profile renders an ASCII transcript: the
+                        // An ASCII profile renders ASCII grouped rows: the
                         // ellipsis, the connectors, and the separators all come
                         // from the theme's own glyph table.
                         assert!(rows.iter().all(|line| line.is_ascii()), "{rows:?}");
@@ -10796,7 +10920,7 @@ fn subagent_transcript_groups_live_workers_and_collapses_terminal_groups() {
 }
 
 #[test]
-fn subagent_transcript_aligns_columns_by_visible_width() {
+fn subagent_grouped_rows_aligns_columns_by_visible_width() {
     let theme = crate::tui::theme::test_theme();
     for native in [true, false] {
         let mut view = subagent_transcript_test_view(native);
@@ -10890,7 +11014,7 @@ fn subagent_transcript_aligns_columns_by_visible_width() {
 }
 
 #[test]
-fn subagent_transcript_does_not_invent_missing_activity_metrics() {
+fn subagent_grouped_rows_does_not_invent_missing_activity_metrics() {
     let theme = crate::tui::theme::test_theme();
     let mut view = subagent_transcript_test_view(false);
     for activity in &mut view.activities {
@@ -10919,7 +11043,7 @@ fn subagent_transcript_does_not_invent_missing_activity_metrics() {
 /// A spawn that failed before it produced any worker: the reason is the whole
 /// event, so it wraps under the event heading without a truncating cut.
 #[test]
-fn subagent_transcript_failure_wraps_completely() {
+fn subagent_grouped_rows_failure_wraps_completely() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 
     let view = SubagentActivityView {
@@ -10934,22 +11058,13 @@ fn subagent_transcript_failure_wraps_completely() {
         ));
         for width in [24, 40, 120] {
             let rows = subagent_transcript_test_rows(&view, &theme, width, false);
-            assert_eq!(
-                rows[0],
-                if unicode {
-                    "• Subagents"
-                } else {
-                    "* Subagents"
-                }
-            );
-            // Every continuation row keeps the event's own margin width, and the
-            // sanitized reason is complete - no escape sequence and no truncation.
+            assert_eq!(rows[0], "Subagents");
+            // The grouped renderer retains the sanitized reason completely;
+            // the chrome budget, not a fake tool margin, bounds visible rows.
             let detail = rows[1..]
                 .iter()
                 .map(|row| {
-                    let text = row
-                        .strip_prefix("  ")
-                        .unwrap_or_else(|| panic!("event margin lost: {rows:?}"));
+                    let text = row.as_str();
                     assert!(!text.contains('\x1b'), "{rows:?}");
                     text
                 })
@@ -11039,14 +11154,15 @@ fn hydrating_a_replacement_session_clears_subagent_activity() {
     shell.hydrate(&session).unwrap();
 
     assert!(shell.state.borrow().subagent_activity.is_none());
-    assert!(shell.state.borrow().subagent_activity_block.is_none());
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
 }
 
 /// Maintainer report: "EVERY new prompt shows the current session's subagents
 /// even if they're completed!" The delegation team is session-scoped, so its
 /// final snapshot keeps being republished after the turn it belongs to has
-/// ended. The settled roster must stay in the transcript at the end of *that*
-/// turn and must never open a second block below the next prompt.
+/// ended. The settled roster must stay out of both chrome and transcript.
 #[test]
 fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
     use octet_agent::{EntryId, FinishReason};
@@ -11100,8 +11216,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
             .join("\n")
     };
 
-    // Turn one: one live worker, then its settlement. Both land in the
-    // transcript where the delegation happened.
+    // Turn one: the live strip disappears on settlement without history rows.
     let run_id = shell.begin_run("test-provider");
     shell.on_run_event(
         run_id,
@@ -11112,8 +11227,11 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         &delegation(snapshot(2, vec![child("agent-1", "completed")])),
     );
     let settled = transcripts(&shell);
-    assert!(settled.contains("Subagents"), "{settled}");
-    assert!(settled.contains("completed"), "{settled}");
+    assert!(!settled.contains("Subagents"), "{settled}");
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
+    assert!(!settled.contains("Inspect tests"), "{settled}");
     shell.on_run_event(
         run_id,
         &AgentEvent::RunFinished {
@@ -11122,7 +11240,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         },
     );
     let after_finish = transcripts(&shell);
-    assert!(after_finish.contains("Subagents"), "{after_finish}");
+    assert!(!after_finish.contains("Subagents"), "{after_finish}");
 
     // Turn two: the endpoint republishes the same, already-completed roster.
     shell.begin_run("test-provider");
@@ -11138,8 +11256,10 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         "the session roster remains available across root turns"
     );
     assert!(
-        state.subagent_activity_block.is_some(),
-        "the session roster retains its original block"
+        shell_chrome(&state, 120, Instant::now())
+            .subagents
+            .is_empty(),
+        "the settled session roster never reappears in chrome"
     );
     let replayed = state
         .rendered_transcript(120)
@@ -11147,20 +11267,13 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    // The settled block still exists - exactly once, above the new prompt.
+    // Neither this turn nor the prior turn gets a synthetic roster block.
     assert_eq!(
         replayed.matches("Subagents").count(),
-        1,
+        0,
         "the completed roster must not be rendered again: {replayed}"
     );
-    let new_prompt = replayed
-        .find("next question")
-        .expect("the new prompt is in the transcript");
-    let settled_block = replayed.find("Subagents").expect("settled block");
-    assert!(
-        settled_block < new_prompt,
-        "the settled block must stay at the point it occurred: {replayed}"
-    );
+    assert!(replayed.contains("next question"));
     // And the new turn's own status row is still the last thing in the
     // transcript, so the working indicator is not displaced.
     assert!(
@@ -11193,10 +11306,11 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
 /// The same rule with a live worker: a roster for the *current* turn still
 /// renders, so the fix is attribution and not a blanket suppression.
 #[test]
-fn live_workers_for_a_later_turn_update_the_session_block() {
+fn live_workers_for_a_later_turn_reopen_the_pinned_strip() {
     use octet_agent::{EntryId, FinishReason};
 
     let mut shell = InteractiveShell::test_shell();
+    shell.set_size(120, 60);
     let live = |id: &str| octet_agent::DelegationTelemetryChild {
         child_id: id.into(),
         task_name: format!("Inspect tests {id}"),
@@ -11273,10 +11387,8 @@ fn live_workers_for_a_later_turn_update_the_session_block() {
             failure_class: None,
         },
     });
-    let rendered = shell
-        .state
-        .borrow()
-        .rendered_transcript(120)
+    let rendered = shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
@@ -11292,7 +11404,12 @@ fn live_workers_for_a_later_turn_update_the_session_block() {
         1,
         "new workers update the one session roster: {rendered}"
     );
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(!shell
+        .state
+        .borrow()
+        .rendered_transcript(120)
+        .join("\n")
+        .contains("Inspect tests"));
 }
 
 /// The maintainer's correction, spelled out: "EVERY new prompt shows the current
@@ -11383,10 +11500,12 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
     let state = shell.state.borrow();
     assert!(
         state.subagent_activity.is_none(),
-        "an all-completed roster must not become live state"
+        "an unseen all-completed roster must not become live state"
     );
     assert!(
-        state.subagent_activity_block.is_none(),
+        shell_chrome(&state, 120, Instant::now())
+            .subagents
+            .is_empty(),
         "an all-completed roster must not open a transcript block"
     );
     let rendered = state
@@ -11407,19 +11526,17 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
     );
     assert!(
         shell_chrome(&state, 120, Instant::now())
-            .composer
+            .subagents
             .iter()
             .all(|row| !row.contains("Subagents")),
         "nothing about the roster may be composed into pinned chrome"
     );
 }
 
-/// The settled delegation event is transcript material: it must end up at the
-/// point in the transcript where the delegation happened, between the prompt
-/// that started the turn and the next prompt, and it must stay there after the
-/// run finishes or is interrupted.
+/// Delegation telemetry is never a synthetic transcript event, including on
+/// settlement, interruption, and a new turn's republished session roster.
 #[test]
-fn the_settled_subagent_block_stays_at_the_point_the_delegation_happened() {
+fn subagent_lifecycle_never_inserts_synthetic_transcript_blocks() {
     use octet_agent::{EntryId, FinishReason};
 
     let mut shell = InteractiveShell::test_shell();
@@ -11455,53 +11572,33 @@ fn the_settled_subagent_block_stays_at_the_point_the_delegation_happened() {
         failure_reason: None,
         failure_class: None,
     };
-    let subagent_block = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .transcript
-            .iter()
-            .position(|block| {
-                matches!(
-                    block,
-                    TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some()
-                )
-            })
-            .expect("a settled subagent block")
-    };
-    let prompt_position = |shell: &InteractiveShell, text: &str| {
-        shell
-            .state
-            .borrow()
-            .transcript
-            .iter()
-            .position(|block| matches!(block, TranscriptBlock::User { text: prompt, .. } if prompt == text))
-            .unwrap_or_else(|| panic!("prompt {text} is in the transcript"))
+    let transcript_len = |shell: &InteractiveShell| shell.state.borrow().transcript.len();
+    let strip = |shell: &InteractiveShell| {
+        shell_chrome(&shell.state.borrow(), 120, Instant::now()).subagents
     };
 
-    // Turn one: the delegation lands inside its own turn.
+    // Turn one: the delegation appears only in pinned chrome.
     let run_id = shell.begin_run("test-provider");
     shell.on_prompt_submitted("first question");
+    let before_delegation = transcript_len(&shell);
     shell.on_run_event(
         run_id,
         &octet_agent::AgentEvent::DelegationUpdated {
             snapshot: snapshot(1, vec![child("agent-1", "running")]),
         },
     );
-    let at_delegation = subagent_block(&shell);
-    assert!(
-        at_delegation > prompt_position(&shell, "first question"),
-        "the block must follow the prompt that opened the turn"
-    );
+    assert_eq!(transcript_len(&shell), before_delegation);
+    assert!(!strip(&shell).is_empty());
 
-    // Settlement and the end of the run keep it exactly where it was.
+    // Settlement and the end of the run never insert roster history.
     shell.on_run_event(
         run_id,
         &octet_agent::AgentEvent::DelegationUpdated {
             snapshot: snapshot(2, vec![child("agent-1", "completed")]),
         },
     );
-    assert_eq!(subagent_block(&shell), at_delegation);
+    assert_eq!(transcript_len(&shell), before_delegation);
+    assert!(strip(&shell).is_empty());
     shell.on_run_event(
         run_id,
         &octet_agent::AgentEvent::RunFinished {
@@ -11509,38 +11606,21 @@ fn the_settled_subagent_block_stays_at_the_point_the_delegation_happened() {
             reason: FinishReason::Aborted,
         },
     );
-    assert_eq!(
-        subagent_block(&shell),
-        at_delegation,
-        "an interrupted run must leave the settled block in its own turn"
-    );
+    assert!(strip(&shell).is_empty());
 
-    // Turn two republishes the same, already-completed roster. The block stays
-    // in turn one and nothing new is appended below the new prompt.
+    // Turn two republishes the same completed roster without appending history.
     shell.begin_run("test-provider");
     shell.on_prompt_submitted("second question");
+    let before_republish = transcript_len(&shell);
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: snapshot(3, vec![child("agent-1", "completed")]),
     });
-    let second_prompt = prompt_position(&shell, "second question");
-    assert_eq!(subagent_block(&shell), at_delegation);
-    assert!(
-        subagent_block(&shell) < second_prompt,
-        "the settled block belongs to the turn that produced it"
-    );
-    assert!(
-        shell
-            .state
-            .borrow()
-            .transcript
-            .iter()
-            .skip(second_prompt)
-            .all(|block| !matches!(
-                block,
-                TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some()
-            )),
-        "no subagent block may open below the new prompt"
-    );
+    assert_eq!(transcript_len(&shell), before_republish);
+    assert!(strip(&shell).is_empty());
+    shell.select_all_transcript();
+    let copy = shell.copy_selected_plain_text().unwrap();
+    assert!(copy.contains("first question") && copy.contains("second question"));
+    assert!(!copy.contains("Subagents") && !copy.contains("Inspect tests"));
 }
 
 /// Maintainer report: "no working indicator or thinking for a bit" after a new
@@ -11618,7 +11698,7 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         session: Some("agent-session:opaque".into()),
     };
 
-    // A live worker keeps the transcript event active...
+    // A live worker keeps the pinned strip visible...
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 1,
@@ -11630,11 +11710,11 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         },
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(!shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
 
-    // ...and the final settlement keeps the event in the transcript (with a
-    // settled green/red margin) instead of parking it in the chrome strip.
+    // ...and final settlement hides it without adding transcript rows.
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 2,
@@ -11646,10 +11726,9 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         },
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
     assert!(
         shell_chrome(&shell.state.borrow(), 120, Instant::now())
-            .composer
+            .subagents
             .iter()
             .all(|row| !row.contains("Subagents")),
         "a settled roster never composes into pinned chrome"
@@ -11662,11 +11741,11 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(settled.contains("Subagents"), "{settled}");
-    assert!(settled.contains("Inspect tests"), "{settled}");
-    assert!(settled.contains("completed"), "{settled}");
+    assert!(!settled.contains("Subagents"), "{settled}");
+    assert!(!settled.contains("Inspect tests"), "{settled}");
+    assert!(!settled.contains("completed"), "{settled}");
 
-    // A spawn that fails outright is still transcript material.
+    // A spawn failure is retained for the inspector, not synthetic history.
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 3,
@@ -11678,6 +11757,20 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         },
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("spawn rejected: worker limit reached")
+    );
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
     let failed = shell
         .state
         .borrow()
@@ -11687,7 +11780,7 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        failed.contains("spawn rejected: worker limit reached"),
+        !failed.contains("spawn rejected: worker limit reached"),
         "{failed}"
     );
 }
@@ -11695,6 +11788,7 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
 #[test]
 fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
     let mut shell = InteractiveShell::test_shell();
+    shell.set_size(120, 120);
     let child = |id: &str, task: &str, state: &str| octet_agent::DelegationTelemetryChild {
         child_id: id.into(),
         task_name: task.into(),
@@ -11720,10 +11814,8 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         session: Some("agent-session:opaque".into()),
     };
     let render = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(120)
+        shell_chrome(&shell.state.borrow(), 120, Instant::now())
+            .subagents
             .iter()
             .map(|line| strip_terminal_sequences(line))
             .collect::<Vec<_>>()
@@ -11763,8 +11855,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         assert!(collapsed.contains(task), "missing {task}: {collapsed}");
     }
 
-    // Ctrl+O still controls ordinary tool disclosure, but a subagents event is
-    // already bounded to the complete eight-worker roster in either mode.
+    // A tall terminal can show all eight workers in either disclosure mode.
     shell.toggle_disclosure();
     assert!(shell.verbose_tools());
     let expanded = render(&shell);
@@ -11779,8 +11870,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         "{collapsed_again}"
     );
 
-    // Settlement preserves the complete roster; it does not introduce a
-    // separate disclosure mode for the subagents event.
+    // Settlement hides the strip regardless of disclosure, retaining telemetry.
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 2,
@@ -11797,7 +11887,18 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
     });
     shell.toggle_disclosure();
     assert!(shell.verbose_tools());
-    assert!(render(&shell).contains("Read release history"));
+    assert!(render(&shell).is_empty());
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .telemetry
+            .len(),
+        3
+    );
 }
 
 /// Maintainer screenshot: 32 rows where 22 dead workers buried 8 live ones
@@ -11805,7 +11906,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
 /// visible, every terminal group must collapse to one counted row, and
 /// expansion must reveal the entire host-bounded roster.
 #[test]
-fn subagent_transcript_collapses_groups_and_expands_every_worker() {
+fn subagent_grouped_rows_collapse_groups_and_expand_every_worker() {
     let mut shell = InteractiveShell::test_shell();
     let child = |id: &str, task: &str, state: &str, elapsed: u64, reason: Option<&str>| {
         octet_agent::DelegationTelemetryChild {
@@ -11881,13 +11982,16 @@ fn subagent_transcript_collapses_groups_and_expands_every_worker() {
     publish_current_turn_roster(&mut shell, snapshot);
 
     let render = |shell: &InteractiveShell, width: u16| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(width)
-            .iter()
-            .map(|line| strip_terminal_sequences(line))
-            .collect::<Vec<_>>()
+        let state = shell.state.borrow();
+        subagent_activity_render_rows(
+            state.subagent_activity.as_ref().unwrap(),
+            &state.theme,
+            width,
+            state.verbose_tools,
+        )
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>()
     };
 
     let collapsed = render(&shell, 120).join("\n");
@@ -12031,18 +12135,27 @@ fn subagent_panel_keyboard_cycles_the_state_filter_and_the_row_ordering() {
     };
     publish_current_turn_roster(&mut shell, snapshot);
     let rows = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(120)
-            .iter()
-            .map(|line| strip_terminal_sequences(line))
-            .collect::<Vec<_>>()
-            .join("\n")
+        let state = shell.state.borrow();
+        subagent_activity_render_rows(
+            state.subagent_activity.as_ref().unwrap(),
+            &state.theme,
+            120,
+            state.verbose_tools,
+        )
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>()
+        .join("\n")
     };
     assert!(rows(&shell).contains("Subagents"), "{}", rows(&shell));
 
     open_grouped_subagent_panel(&mut shell, 1, 1);
+    assert!(
+        shell_chrome(&shell.state.borrow(), 120, Instant::now())
+            .subagents
+            .is_empty(),
+        "the focused inspector replaces the pinned roster"
+    );
     // Mirror real stable worker IDs rather than unrelated synthetic rows.
     if let Some(Panel::SelectList {
         items,
@@ -12183,17 +12296,16 @@ fn extension_presentation_hides_terminal_subagent_activities() {
 
     assert!(shell.set_subagent_presentation(Some(&snapshot("running")), true));
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(!shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
 
-    // Terminal extension activities settle into the transcript event rather
-    // than being cleared from the shell chrome.
+    // Terminal extension activities hide the strip but retain accounting.
     assert!(shell.set_subagent_presentation(Some(&snapshot("succeeded")), true));
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
     assert!(
         shell_chrome(&shell.state.borrow(), 120, Instant::now())
-            .composer
+            .subagents
             .iter()
             .all(|row| !row.contains("Subagents")),
         "a settled roster never composes into pinned chrome"
@@ -12206,9 +12318,9 @@ fn extension_presentation_hides_terminal_subagent_activities() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(settled.contains("Subagents"), "{settled}");
-    assert!(settled.contains("read-diffs · using read"), "{settled}");
-    assert!(settled.contains("completed"), "{settled}");
+    assert!(!settled.contains("Subagents"), "{settled}");
+    assert!(!settled.contains("read-diffs · using read"), "{settled}");
+    assert!(!settled.contains("completed"), "{settled}");
 }
 
 #[test]
@@ -14202,18 +14314,20 @@ fn provider_retry_removes_closed_reasoning_and_text_without_removing_independent
             assert!(
                 matches!(&state.transcript[selected.anchor.block], TranscriptBlock::Notice(text) if text == "independent notice")
             );
-            let worker = state
-                .subagent_activity_block
-                .expect("independent worker survives");
             assert!(
-                matches!(&state.transcript[worker], TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some())
+                state.subagent_activity.is_some(),
+                "independent telemetry survives"
             );
+            assert!(!shell_chrome(&state, 80, Instant::now())
+                .subagents
+                .is_empty());
         }
         shell.select_all_transcript();
         let copy = shell.copy_selected_plain_text().unwrap();
         assert!(!copy.contains("rejected"));
         assert!(!copy.contains("diagnostic-only"));
         assert!(copy.contains("independent notice"));
+        assert!(!copy.contains("Subagents") && !copy.contains("Read changelog"));
         if !application_viewport {
             assert!(
                 bytes
@@ -14952,6 +15066,43 @@ fn status_render_loop_retry_compaction_and_cancellation_transitions() {
 }
 
 #[test]
+fn newest_joint_pending_input_wins_across_steering_and_follow_ups() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.begin_run("fixture");
+    let (_prepared, receipt) = octet_agent::PreparedSteering::new("first steering");
+    shell.queue_retractable_steering(
+        receipt,
+        "first steering".into(),
+        "first steering".into(),
+        Vec::new(),
+    );
+    shell.queue_follow_up(ComposedInput::from_text("newer follow-up".into()));
+
+    shell.edit_queued_message();
+    assert_eq!(shell.pending(), "newer follow-up");
+    assert_eq!(shell.state.borrow().steering_queue.len(), 1);
+
+    shell.clear_editor();
+    shell.edit_queued_message();
+    assert_eq!(shell.pending(), "first steering");
+    assert!(shell.state.borrow().steering_queue.is_empty());
+}
+
+#[test]
+fn refused_steering_admission_restores_the_draft_without_a_fifo_entry() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.restore_unqueued_steering("refused steering".into(), Vec::new());
+
+    assert_eq!(shell.pending(), "refused steering");
+    assert!(shell.state.borrow().steering_queue.is_empty());
+    let recomposed = shell.drain_composed();
+    assert!(matches!(
+        recomposed.parts.as_slice(),
+        [octet_agent::InputPart::Text(text)] if text == "refused steering"
+    ));
+}
+
+#[test]
 fn queued_follow_up_editing_preserves_payloads_and_never_overwrites_a_draft() {
     let mut shell = InteractiveShell::test_shell();
     shell.begin_run("fixture");
@@ -15225,9 +15376,6 @@ fn failed_tool_calls_never_warn_and_live_subagents_are_reported_under_the_outcom
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
-        // `same_presentation` deliberately ignores tool phases, elapsed clocks
-        // and call counts, so the fixture varies a field the roster actually
-        // prints to make the changed snapshot a real presentation change.
         output_tokens: 10 * calls,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -15295,21 +15443,13 @@ fn failed_tool_calls_never_warn_and_live_subagents_are_reported_under_the_outcom
 
     // Worker events inside the same aggregate state never repaint the outcome:
     // the detail line rides the roster's bounded aggregate cadence.
-    let (revision, roster_index, roster_revision) = {
-        let state = shell.state.borrow();
-        let roster_index = state
-            .subagent_activity_block
-            .expect("the roster block owns the live workers");
-        (
-            state.block_revisions[outcome_index],
-            roster_index,
-            state.block_revisions[roster_index],
-        )
-    };
+    let revision = shell.state.borrow().block_revisions[outcome_index];
+    let before = shell_chrome(&shell.state.borrow(), 100, Instant::now()).subagents;
     publish_current_turn_roster(&mut shell, roster(worker("running", 5)));
-    assert!(
-        shell.state.borrow().block_revisions[roster_index] > roster_revision,
-        "a changed worker snapshot repaints the roster block"
+    assert_ne!(
+        shell_chrome(&shell.state.borrow(), 100, Instant::now()).subagents,
+        before,
+        "a changed worker snapshot repaints pinned chrome even while the root run is idle"
     );
     assert_eq!(
         shell.state.borrow().block_revisions[outcome_index],

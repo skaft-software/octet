@@ -522,6 +522,34 @@ impl RichRenderer {
                 self.render_diff_as_rich_lines(&code.code, width)
             }
             Block::CodeBlock(code) => self.render_code(code, width, syntax_highlighting),
+            Block::Diagram { source, rendered } => {
+                // Pi keeps the original fence when the art does not fit. Count
+                // terminal cells, not bytes, and include our code-block chrome.
+                let natural_width = rendered
+                    .lines()
+                    .map(|line| self.options.width.line_width(&self.sanitize(line)))
+                    .max()
+                    .unwrap_or(0);
+                let language_width = visible_code_language(source)
+                    .map(|label| self.options.width.line_width(&self.sanitize(label)))
+                    .unwrap_or(0);
+                if self
+                    .code_layout(language_width, width, natural_width)
+                    .content_width
+                    < natural_width
+                {
+                    self.render_code(source, width, syntax_highlighting)
+                } else {
+                    self.render_code(
+                        &CodeBlock {
+                            language: source.language.clone(),
+                            code: rendered.clone(),
+                        },
+                        width,
+                        false,
+                    )
+                }
+            }
             Block::List(list) => self.render_list(list, width, syntax_highlighting),
             Block::BlockQuote(blocks) => self.render_quote(blocks, width, syntax_highlighting),
             Block::Divider => {

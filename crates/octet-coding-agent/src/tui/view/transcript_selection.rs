@@ -6,7 +6,7 @@ use crate::presentation::{format_duration, RunOutcome};
 use super::outcome_render::{bounded_outcome_detail, completion_text};
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{bounded_tool_failure_reason, looks_like_diff};
-use super::{subagent_activity_copy_text, ShellState, TranscriptBlock};
+use super::{ShellState, TranscriptBlock};
 
 /// Durable transcript coordinate. It deliberately names a semantic block and
 /// an offset in that block's clean copy text, never a terminal row. Reflow,
@@ -42,14 +42,6 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
         ),
         TranscriptBlock::Assistant(markdown) | TranscriptBlock::Reasoning(markdown) => {
             markdown.copy_text()
-        }
-        TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some() => {
-            sanitize_for_terminal(&subagent_activity_copy_text(
-                panel
-                    .subagent_activity
-                    .as_ref()
-                    .expect("subagent activity guard just matched"),
-            ))
         }
         TranscriptBlock::Tool(panel) => {
             let summary = if panel.finished {

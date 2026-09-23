@@ -45,16 +45,18 @@ fn publish(shell: &mut InteractiveShell, child: &octet_agent::DelegationTelemetr
 }
 
 #[test]
-fn compact_subagent_rows_retain_metrics_during_short_tools_and_keep_latest_telemetry() {
-    for width in [20, 46, 80, 120] {
+fn subagent_metrics_update_chrome_without_invalidating_transcript() {
+    for width in [20, 46, 80, 120, 240] {
         for verbose in [false, true] {
             let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, 24);
             shell.state.borrow_mut().verbose_tools = verbose;
+            shell.notice("HISTORY");
             let mut child = child();
             publish(&mut shell, &child);
-            let index = shell.state.borrow().subagent_activity_block.unwrap();
             let rows = shell.state.borrow().rendered_transcript(width).clone();
-            let revision = shell.state.borrow().block_revisions[index];
+            let revisions = shell.state.borrow().block_revisions.clone();
+            let generation = shell.state.borrow().transcript_cache.borrow().generation;
             for tool in [Some("read"), None, Some("bash"), None] {
                 child.current_tool = tool.map(str::to_owned);
                 child.phase = tool.unwrap_or("thinking").into();
@@ -63,137 +65,168 @@ fn compact_subagent_rows_retain_metrics_during_short_tools_and_keep_latest_telem
                 publish(&mut shell, &child);
                 assert_eq!(*shell.state.borrow().rendered_transcript(width), rows);
                 let state = shell.state.borrow();
-                assert_eq!(state.block_revisions[index], revision);
+                assert_eq!(state.block_revisions, revisions);
+                assert_eq!(state.transcript_cache.borrow().generation, generation);
                 assert_eq!(
                     state.subagent_activity.as_ref().unwrap().telemetry[0],
                     child
                 );
+                drop(state);
+                let frame = frame_text(&shell, width);
+                assert!(frame.contains("Subagents"), "{width}: {frame}");
+                if width == 240 {
+                    let worker_row = frame
+                        .lines()
+                        .find(|row| row.contains("inspect-markdown"))
+                        .unwrap();
+                    assert!(
+                        worker_row
+                            .split_whitespace()
+                            .any(|cell| cell == child.tool_use_count.to_string()),
+                        "{worker_row}"
+                    );
+                }
             }
-            child.output_tokens += 100;
-            publish(&mut shell, &child);
-            assert!(shell.state.borrow().block_revisions[index] > revision);
-            for state in ["failed", "running", "completed"] {
-                child.state = state.into();
-                child.failure_reason = (state == "failed").then(|| "provider unavailable".into());
+            for status in ["completed", "running", "completed"] {
+                child.state = status.into();
                 publish(&mut shell, &child);
-                let rows = shell.state.borrow().rendered_transcript(120).join("\n");
-                assert!(strip_terminal_sequences(&rows).contains(state), "{rows}");
+                assert_eq!(*shell.state.borrow().rendered_transcript(width), rows);
+                assert_eq!(
+                    frame_text(&shell, width).contains("Subagents"),
+                    status == "running"
+                );
+                assert_eq!(
+                    shell
+                        .state
+                        .borrow()
+                        .subagent_activity
+                        .as_ref()
+                        .unwrap()
+                        .telemetry[0],
+                    child
+                );
             }
         }
     }
 }
 
 #[test]
-fn live_subagent_marker_pulses_and_settles_without_shifting_rows() {
+fn late_failed_or_parked_workers_leave_one_bounded_safe_notice_per_transition() {
+    for status in ["failed", "timed_out", "awaiting_approval"] {
+        let mut shell = InteractiveShell::test_shell();
+        let run = shell.begin_run("fixture");
+        let mut worker = named_worker("LATE-WORKER", "running");
+        publish(&mut shell, &worker);
+        shell.on_run_event(
+            run,
+            &AgentEvent::RunFinished {
+                head: octet_agent::EntryId("head".into()),
+                reason: octet_agent::FinishReason::Completed,
+            },
+        );
+        assert!(!shell.state.borrow().run.is_active());
+        assert!(frame_text(&shell, 120).contains("Subagents"));
+        let block_count = shell.state.borrow().transcript.len();
+        let reason = format!(
+            "REASON-MARKER \x1b[3J\x1b]52;c;SECRET\x07\x00\x07 {}",
+            "é".repeat(5000)
+        );
+        worker.state = status.into();
+        worker.failure_reason = Some(reason.clone());
+        publish(&mut shell, &worker);
+        let notice = {
+            let state = shell.state.borrow();
+            assert_eq!(state.transcript.len(), block_count + 1);
+            let TranscriptBlock::Notice(notice) = state.transcript.last().unwrap() else {
+                panic!("the failure must append a notice, not a roster tool card");
+            };
+            assert!(
+                notice.contains("LATE-WORKER") && notice.contains(status),
+                "{notice}"
+            );
+            assert!(notice.contains("REASON-MARKER"), "{notice}");
+            assert!(notice.ends_with("inspect with /subagents"), "{notice}");
+            assert!(notice.len() <= 4096 + " · inspect with /subagents".len());
+            assert!(
+                notice.contains('…'),
+                "oversized reasons must be visibly bounded"
+            );
+            assert!(!notice.chars().any(char::is_control), "{notice:?}");
+            assert!(
+                !notice.contains("SECRET"),
+                "OSC clipboard payload must not survive: {notice:?}"
+            );
+            assert_eq!(
+                state.subagent_activity.as_ref().unwrap().telemetry[0]
+                    .failure_reason
+                    .as_deref(),
+                Some(reason.as_str())
+            );
+            notice.clone()
+        };
+        assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+            .subagents
+            .is_empty());
+        let _ = shell.state.borrow().rendered_transcript(120);
+        let revisions = shell.state.borrow().block_revisions.clone();
+        let generation = shell.state.borrow().transcript_cache.borrow().generation;
+        for update_metrics in [false, true, false] {
+            if update_metrics {
+                worker.tool_use_count += 1;
+                worker.output_tokens += 100;
+            }
+            publish(&mut shell, &worker);
+            let state = shell.state.borrow();
+            assert_eq!(state.transcript.len(), block_count + 1);
+            assert!(
+                matches!(state.transcript.last(), Some(TranscriptBlock::Notice(text)) if text == &notice)
+            );
+            let _ = state.rendered_transcript(120);
+            assert_eq!(state.block_revisions, revisions);
+            assert_eq!(state.transcript_cache.borrow().generation, generation);
+            assert_eq!(
+                state.subagent_activity.as_ref().unwrap().telemetry[0],
+                worker
+            );
+        }
+        // A genuinely changed reason is new evidence, unlike repeated snapshots.
+        worker.failure_reason = Some("UPDATED-REASON".into());
+        publish(&mut shell, &worker);
+        assert_eq!(shell.state.borrow().transcript.len(), block_count + 2);
+        assert!(
+            matches!(shell.state.borrow().transcript.last(), Some(TranscriptBlock::Notice(text)) if text.contains("UPDATED-REASON"))
+        );
+        publish(&mut shell, &worker);
+        assert_eq!(shell.state.borrow().transcript.len(), block_count + 2);
+    }
+}
+
+#[test]
+fn subagent_animation_never_invalidates_transcript_history() {
     let mut shell = InteractiveShell::test_shell();
-    publish(&mut shell, &child());
-    let index = shell.state.borrow().subagent_activity_block.unwrap();
     for n in 0..40 {
         shell.notice(format!("HISTORY-{n}"));
     }
+    publish(&mut shell, &child());
     let baseline = shell.state.borrow().rendered_transcript(80).clone();
-    let revision = shell.state.borrow().block_revisions[index];
-    shell.state.borrow_mut().advance_event_dot_animation();
-    let pulsed = shell.state.borrow().rendered_transcript(80).clone();
-    assert!(
-        shell.state.borrow().block_revisions[index] > revision,
-        "a live roster is invalidated by the shared event-dot clock"
-    );
-    assert_ne!(
-        pulsed, baseline,
-        "a live roster pulses on the shared spinner clock"
-    );
-    // The pulse is a colour-only flip on the roster's own margin dot: the
-    // historical rows above it and every roster row keep their shape.
-    assert_eq!(pulsed.len(), baseline.len(), "{pulsed:?}");
-    let changed: Vec<usize> = baseline
-        .iter()
-        .zip(pulsed.iter())
-        .enumerate()
-        .filter(|(_, (before, after))| before != after)
-        .map(|(row, _)| row)
-        .collect();
-    assert_eq!(
-        changed.len(),
-        1,
-        "only the roster's marker row may change: {pulsed:?}"
-    );
-    assert!(
-        baseline[changed[0]].contains("Subagents"),
-        "the changing row is the event heading: {pulsed:?}"
-    );
-    assert_eq!(
-        pulsed
-            .iter()
-            .filter(|line| line.contains("HISTORY-"))
-            .count(),
-        baseline
-            .iter()
-            .filter(|line| line.contains("HISTORY-"))
-            .count(),
-        "history above the event is untouched"
-    );
-
-    let state = shell.state.borrow();
-    let block = &state.transcript[index];
-    let marker = super::surface_frame::event_margin_marker_with_frame;
-    let pulse = if state.theme.unicode() { "•" } else { "*" };
-    let lit = marker(block, &state.theme, 0, None, 0, false);
-    let resting = marker(block, &state.theme, 1, None, 0, false);
-    assert_eq!(lit, Some(state.theme.fg("foreground", pulse)));
-    assert_eq!(
-        resting,
-        Some(state.theme.settled_event_dot("neutral", pulse))
-    );
-    assert_ne!(
-        lit, resting,
-        "a live roster pulses on the shared spinner clock"
-    );
-    drop(state);
-
-    // A settled roster resolves from the declared child states: green only
-    // when every worker finished successfully, red when anything else
-    // happened - a failure, a cancellation, or a stopped worker.
+    let revisions = shell.state.borrow().block_revisions.clone();
+    let generation = shell.state.borrow().transcript_cache.borrow().generation;
+    for _ in 0..12 {
+        shell.state.borrow_mut().advance_event_dot_animation();
+        assert_eq!(*shell.state.borrow().rendered_transcript(80), baseline);
+        assert_eq!(shell.state.borrow().block_revisions, revisions);
+        assert_eq!(
+            shell.state.borrow().transcript_cache.borrow().generation,
+            generation
+        );
+        assert!(frame_text(&shell, 80).contains("Subagents"));
+    }
     let mut settled = child();
     settled.state = "completed".into();
     publish(&mut shell, &settled);
-    let settled_rows = shell.state.borrow().rendered_transcript(80).clone();
-    {
-        let state = shell.state.borrow();
-        let block = &state.transcript[index];
-        assert_eq!(
-            marker(block, &state.theme, 0, None, 0, false),
-            Some(state.theme.settled_event_dot("success", pulse))
-        );
-    }
     shell.state.borrow_mut().advance_event_dot_animation();
-    assert_eq!(
-        *shell.state.borrow().rendered_transcript(80),
-        settled_rows,
-        "a settled roster stops animating"
-    );
-
-    let mut stopped = settled.clone();
-    stopped.state = "stopped".into();
-    publish(&mut shell, &stopped);
-    let state = shell.state.borrow();
-    let block = &state.transcript[index];
-    assert_eq!(
-        marker(block, &state.theme, 0, None, 0, false),
-        Some(state.theme.settled_event_dot("error", pulse))
-    );
-    drop(state);
-
-    let mut failed = settled.clone();
-    failed.state = "failed".into();
-    failed.failure_reason = Some("provider unavailable".into());
-    publish(&mut shell, &failed);
-    let state = shell.state.borrow();
-    let block = &state.transcript[index];
-    assert_eq!(
-        marker(block, &state.theme, 0, None, 0, false),
-        Some(state.theme.settled_event_dot("error", pulse))
-    );
+    assert_eq!(*shell.state.borrow().rendered_transcript(80), baseline);
+    assert!(!frame_text(&shell, 80).contains("Subagents"));
 }
 
 #[test]
@@ -205,28 +238,20 @@ fn the_roster_aggregate_stays_running_while_any_child_is_active() {
         telemetry: children,
         ..SubagentActivityView::default()
     };
-    assert_eq!(
-        subagent_activity_aggregate(&view(vec![running.clone()])),
-        Some(SubagentStateGroup::Running)
-    );
-    assert_eq!(
-        subagent_activity_aggregate(&view(vec![running.clone(), failed.clone()])),
-        Some(SubagentStateGroup::Running),
-        "a live child keeps the roster in its running shape"
-    );
-    assert_eq!(
-        subagent_activity_aggregate(&view(vec![completed.clone(), failed.clone()])),
-        Some(SubagentStateGroup::Failed)
-    );
-    assert_eq!(
-        subagent_activity_aggregate(&view(vec![completed.clone()])),
-        Some(SubagentStateGroup::Completed)
-    );
-    assert_eq!(
-        subagent_activity_aggregate(&view(vec![named_worker("STOPPED", "stopped")])),
-        Some(SubagentStateGroup::Stopped)
-    );
-    assert_eq!(subagent_activity_aggregate(&view(Vec::new())), None);
+    assert!(subagent_activity_is_active(&view(vec![running.clone()])));
+    assert!(subagent_activity_is_active(&view(vec![
+        running,
+        failed.clone()
+    ])));
+    assert!(!subagent_activity_is_active(&view(vec![
+        completed.clone(),
+        failed
+    ])));
+    assert!(!subagent_activity_is_active(&view(vec![completed])));
+    assert!(!subagent_activity_is_active(&view(vec![named_worker(
+        "STOPPED", "stopped"
+    )])));
+    assert!(!subagent_activity_is_active(&view(Vec::new())));
 }
 
 #[test]
@@ -257,15 +282,15 @@ fn fallback_subagent_call_counts_are_retained_without_invalidating_rows() {
         .state
         .borrow_mut()
         .set_subagent_activity(view(&activity));
-    let index = shell.state.borrow().subagent_activity_block.unwrap();
     let rows = shell.state.borrow().rendered_transcript(80).clone();
-    let revision = shell.state.borrow().block_revisions[index];
+    let revisions = shell.state.borrow().block_revisions.clone();
+    let before = frame_text(&shell, 240);
     activity.metrics.as_mut().unwrap().tool_calls = 99;
     shell
         .state
         .borrow_mut()
         .set_subagent_activity(view(&activity));
-    assert_eq!(shell.state.borrow().block_revisions[index], revision);
+    assert_eq!(shell.state.borrow().block_revisions, revisions);
     assert_eq!(*shell.state.borrow().rendered_transcript(80), rows);
     assert_eq!(
         shell
@@ -277,13 +302,28 @@ fn fallback_subagent_call_counts_are_retained_without_invalidating_rows() {
             .activities[0],
         activity
     );
+    let calls_updated = frame_text(&shell, 240);
+    assert!(
+        calls_updated
+            .lines()
+            .any(|row| row.contains("inspect-markdown")
+                && row.split_whitespace().any(|cell| cell == "99")),
+        "{calls_updated}"
+    );
     activity.metrics.as_mut().unwrap().output_tokens += 100;
     shell
         .state
         .borrow_mut()
         .set_subagent_activity(view(&activity));
-    assert!(shell.state.borrow().block_revisions[index] > revision);
-    assert_ne!(*shell.state.borrow().rendered_transcript(80), rows);
+    assert_eq!(shell.state.borrow().block_revisions, revisions);
+    assert_eq!(*shell.state.borrow().rendered_transcript(80), rows);
+    let after = frame_text(&shell, 240);
+    assert_ne!(before, after);
+    assert!(
+        after.lines().any(|row| row.contains("inspect-markdown")
+            && row.split_whitespace().any(|cell| cell == "99")),
+        "{after}"
+    );
 }
 
 // Exercise both native telemetry and the extension-presentation fallback at
@@ -314,6 +354,7 @@ fn publish_roster(
                 "state": if child.state == "completed" { "succeeded" } else { child.state.as_str() },
                 "summary": child.task_name,
                 "metrics": {
+                    "tool_calls": child.tool_use_count,
                     "input_tokens": child.input_tokens,
                     "output_tokens": child.output_tokens,
                     "cost_microdollars": child.cost_microdollars,
@@ -338,39 +379,28 @@ fn transcript_text(shell: &InteractiveShell) -> String {
     strip_terminal_sequences(&shell.state.borrow().rendered_transcript(120).join("\n"))
 }
 
-/// Render one roster exactly as the transcript block does.
+/// Render the full semantic roster used by the explicit disclosure surface.
 fn roster_rows(
     view: &SubagentActivityView,
     theme: &crate::tui::theme::OctetTheme,
     width: u16,
     verbose: bool,
 ) -> Vec<String> {
-    render_block(
-        None,
-        &TranscriptBlock::Tool(Box::new(ToolPanel::subagent_activity(view))),
-        theme,
-        &theme.rich_renderer(),
-        &theme.reasoning_renderer(),
-        width,
-        verbose,
-    )
-    .iter()
-    .map(|line| strip_terminal_sequences(line))
-    .collect()
+    subagent_activity_render_rows(view, theme, width, verbose)
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect()
 }
 
 #[test]
-fn mixed_session_rosters_update_one_session_block_and_account_only_new_spend() {
+fn mixed_session_rosters_stay_out_of_transcript_and_account_only_new_spend() {
     for native in [false, true] {
         let mut shell = InteractiveShell::test_shell();
         let run = shell.begin_run("fixture");
         shell.on_prompt_submitted("first prompt");
         publish_roster(&mut shell, native, &[named_worker("OLD-WORKER", "running")]);
-        publish_roster(
-            &mut shell,
-            native,
-            &[named_worker("OLD-WORKER", "completed")],
-        );
+        let old = named_worker("OLD-WORKER", "completed");
+        publish_roster(&mut shell, native, &[old.clone()]);
         shell.on_run_event(
             run,
             &AgentEvent::RunFinished {
@@ -378,72 +408,39 @@ fn mixed_session_rosters_update_one_session_block_and_account_only_new_spend() {
                 reason: octet_agent::FinishReason::Completed,
             },
         );
-
-        let original_index = shell.state.borrow().subagent_activity_block.unwrap();
-        let original_id = shell.state.borrow().transcript_commit_ids[original_index];
         shell.begin_run("fixture");
         shell.on_prompt_submitted("second prompt");
         shell.state.borrow_mut().session_cost_microdollars = Some(100_000);
-        let old = named_worker("OLD-WORKER", "completed");
         let unseen = named_worker("UNSEEN-OLD-WORKER", "completed");
-        // Republished terminal workers update the original session roster;
-        // unseen terminal history does not open another block.
-        publish_roster(
-            &mut shell,
-            native,
-            &[
-                old.clone(),
-                named_worker("FINISHED-BEFORE-ATTACH", "completed"),
-            ],
-        );
-        assert_eq!(shell.state.borrow().subagent_activity_block, Some(original_index));
-
+        publish_roster(&mut shell, native, &[old.clone(), unseen.clone()]);
+        assert!(!frame_text(&shell, 120).contains("Subagents"));
+        // The outcome's aggregate running hint may change, but no worker
+        // roster becomes transcript material.
+        let baseline = shell.state.borrow().transcript.len();
         let fresh = named_worker("FRESH-WORKER", "running");
         publish_roster(
             &mut shell,
             native,
             &[old.clone(), unseen.clone(), fresh.clone()],
         );
-        let index = shell.state.borrow().subagent_activity_block.unwrap();
-        let text = transcript_text(&shell);
-        let tail = text.split_once("second prompt").unwrap().1;
-        assert!(text.contains("FRESH-WORKER"), "{text}");
-        assert!(!tail.contains("FRESH-WORKER"), "{text}");
-        assert_eq!(index, original_index);
-        assert_eq!(shell.state.borrow().transcript_commit_ids[index], original_id);
-        assert!(!tail.contains("OLD-WORKER"), "{text}");
-        assert_eq!(text.matches("Subagents").count(), 1, "{text}");
+        assert_eq!(shell.state.borrow().transcript.len(), baseline);
+        assert!(!transcript_text(&shell).contains("WORKER"));
+        assert!(frame_text(&shell, 120).contains("FRESH-WORKER"));
         assert_eq!(
             shell.state.borrow().displayed_session_cost_microdollars(),
             Some(107_200)
         );
-
         let settled = named_worker("FRESH-WORKER", "completed");
-        publish_roster(
-            &mut shell,
-            native,
-            &[old.clone(), unseen.clone(), settled.clone()],
-        );
-        let settled_text = transcript_text(&shell);
         for _ in 0..3 {
             publish_roster(
                 &mut shell,
                 native,
                 &[old.clone(), unseen.clone(), settled.clone()],
             );
-            assert_eq!(shell.state.borrow().subagent_activity_block, Some(index));
-            assert_eq!(transcript_text(&shell), settled_text);
-            assert!(
-                shell_chrome(&shell.state.borrow(), 120, Instant::now())
-                    .composer
-                    .iter()
-                    .all(|row| !row.contains("Subagents")),
-                "a settled roster is transcript material, never pinned chrome"
-            );
+            assert_eq!(shell.state.borrow().transcript.len(), baseline);
+            assert!(!transcript_text(&shell).contains("WORKER"));
+            assert!(!frame_text(&shell, 120).contains("Subagents"));
         }
-
-        // The same durable worker can legitimately be continued later, after
-        // the owning parent run (not just its workers) has settled.
         let run = shell.current_run_id().unwrap();
         shell.on_run_event(
             run,
@@ -455,27 +452,21 @@ fn mixed_session_rosters_update_one_session_block_and_account_only_new_spend() {
         shell.begin_run("fixture");
         shell.on_prompt_submitted("third prompt");
         publish_roster(&mut shell, native, &[old, unseen, settled]);
-        assert_eq!(shell.state.borrow().subagent_activity_block, Some(original_index));
-        let text = transcript_text(&shell);
-        assert!(!text
-            .split_once("third prompt")
-            .unwrap()
-            .1
-            .contains("Subagents"));
+        assert!(!frame_text(&shell, 120).contains("Subagents"));
         publish_roster(&mut shell, native, &[fresh]);
-        let text = transcript_text(&shell);
-        assert!(!text
-            .split_once("third prompt")
-            .unwrap()
-            .1
-            .contains("FRESH-WORKER"));
-        assert_eq!(shell.state.borrow().subagent_activity_block, Some(original_index));
-        assert_eq!(shell.state.borrow().transcript_commit_ids[original_index], original_id);
-        assert_eq!(shell.state.borrow().displayed_session_cost_microdollars(), Some(100_000));
+        assert!(frame_text(&shell, 120).contains("FRESH-WORKER"));
+        assert!(!transcript_text(&shell).contains("Subagents"));
+        assert_eq!(
+            shell.state.borrow().displayed_session_cost_microdollars(),
+            Some(100_000)
+        );
         let mut continued = named_worker("FRESH-WORKER", "running");
         continued.cost_microdollars = Some(8_200);
         publish_roster(&mut shell, native, &[continued]);
-        assert_eq!(shell.state.borrow().displayed_session_cost_microdollars(), Some(101_000));
+        assert_eq!(
+            shell.state.borrow().displayed_session_cost_microdollars(),
+            Some(101_000)
+        );
     }
 }
 
@@ -501,97 +492,81 @@ fn visible_rows(shell: &InteractiveShell, width: u16) -> Vec<String> {
 }
 
 #[test]
-fn a_rendered_frame_shows_the_roster_exactly_once() {
+fn active_roster_is_pinned_once_independent_of_parent_run_and_follow_tail() {
     for native in [false, true] {
         let mut shell = InteractiveShell::test_shell();
-        shell.begin_run("fixture");
+        shell.set_size(120, 24);
+        let run = shell.begin_run("fixture");
         shell.on_prompt_submitted("owning prompt");
-        publish_roster(
-            &mut shell,
-            native,
-            &[
-                named_worker("LIVE-WORKER", "running"),
-                named_worker("DONE-WORKER", "running"),
-            ],
-        );
-        let frame = frame_text(&shell, 120);
-        assert_eq!(frame.matches("Subagents").count(), 1, "{frame}");
-        assert_eq!(frame.matches("LIVE-WORKER").count(), 1, "{frame}");
-        assert_eq!(frame.matches("DONE-WORKER").count(), 1, "{frame}");
-        assert!(
-            shell_chrome(&shell.state.borrow(), 120, Instant::now())
-                .composer
-                .iter()
-                .all(|row| !row.contains("Subagents") && !row.contains("LIVE-WORKER")),
-            "nothing above the composer repeats the roster"
-        );
-
-        // The same holds once the block sits far above the live tail: there is
-        // still no second surface to duplicate it. The native mutable-tail
-        // preview may clip worker rows entirely (absence is not a duplicate),
-        // so the one-surface invariant is the heading count plus the clean
-        // composer, and every worker name may appear at most once.
         for n in 0..80 {
-            shell.notice(format!("filler-{n}"));
+            shell.notice(format!("HISTORY-{n}"));
         }
-        let frame = frame_text(&shell, 120);
-        assert_eq!(frame.matches("Subagents").count(), 1, "{frame}");
-        assert!(frame.matches("LIVE-WORKER").count() <= 1, "{frame}");
-        assert!(frame.matches("DONE-WORKER").count() <= 1, "{frame}");
-
-        publish_roster(
-            &mut shell,
-            native,
-            &[
-                named_worker("LIVE-WORKER", "completed"),
-                named_worker("DONE-WORKER", "completed"),
-            ],
-        );
-        let frame = frame_text(&shell, 120);
-        assert_eq!(frame.matches("Subagents").count(), 1, "{frame}");
-        assert_eq!(frame.matches("LIVE-WORKER").count(), 1, "{frame}");
+        let mut workers = vec![
+            named_worker("LIVE-WORKER", "running"),
+            named_worker("OTHER-WORKER", "running"),
+        ];
+        publish_roster(&mut shell, native, &workers);
+        for parent_settled in [false, true] {
+            if parent_settled {
+                shell.on_run_event(
+                    run,
+                    &AgentEvent::RunFinished {
+                        head: octet_agent::EntryId("head".into()),
+                        reason: octet_agent::FinishReason::Completed,
+                    },
+                );
+            }
+            for follow_tail in [true, false] {
+                shell.state.borrow_mut().follow_tail = follow_tail;
+                let frame = frame_text(&shell, 120);
+                for label in ["Subagents", "LIVE-WORKER", "OTHER-WORKER"] {
+                    assert_eq!(frame.matches(label).count(), 1, "{frame}");
+                    assert!(!transcript_text(&shell).contains(label));
+                }
+            }
+        }
+        workers[0].state = "failed".into();
+        publish_roster(&mut shell, native, &workers);
+        assert!(frame_text(&shell, 120).contains("Subagents"));
+        workers[1].state = "completed".into();
+        publish_roster(&mut shell, native, &workers);
+        assert!(!frame_text(&shell, 120).contains("Subagents"));
     }
 }
 
 #[test]
-fn active_roster_remains_canonical_in_native_and_mutable_in_pinned_history() {
+fn active_roster_does_not_hold_back_transcript_commit_boundaries() {
     for native in [false, true] {
         let mut shell = InteractiveShell::test_shell();
         shell.set_size(80, 24);
-        shell.begin_run("fixture");
+        let run = shell.begin_run("fixture");
         shell.on_prompt_submitted("owning prompt");
         publish_roster(
             &mut shell,
             native,
             &[named_worker("LIVE-WORKER", "running")],
         );
-        let index = shell.state.borrow().subagent_activity_block.unwrap();
-        // Enough trailing history that the frame is taller than the viewport,
-        // which gives the pinned commit ledger a non-trivial maximum row to
-        // advance through without clipping the roster's own mutable tail.
         for n in 0..40 {
             shell.notice(format!("filler-{n}"));
         }
-        // The cache only has block starts after a frame render; this is test
-        // setup, not a product step, so render once before reading the seam.
-        let _ = render_shell(&shell.state.borrow(), 80);
-        let start = shell.state.borrow().transcript_cache.borrow().block_starts[index];
-        assert!(start > 0, "the prompt precedes the roster: {start}");
-
-        // Pi retains the full canonical roster and everything after it. An
-        // unchanged frame reuses those rows; a real lifecycle update replaces
-        // them, including saved-history repair when required by the backend.
+        shell.on_run_event(
+            run,
+            &AgentEvent::RunFinished {
+                head: octet_agent::EntryId("head".into()),
+                reason: octet_agent::FinishReason::Completed,
+            },
+        );
         let mut frame = ShellFrameState::default();
-        let update = super::native_scrollback::render_shell_update_without_cursor(
+        let _ = super::native_scrollback::render_shell_update_without_cursor(
             &shell.state.borrow(),
             80,
             Instant::now(),
             &mut frame,
         );
-        assert!(update.stable_prefix <= start, "{}", update.stable_prefix);
-        assert!(update.replacement.join("\n").contains("Subagents"));
-        assert!(update.replacement.join("\n").contains("filler-39"));
-        let transcript_len = shell.state.borrow().transcript_cache.borrow().lines.len();
+        let transcript_len = shell.state.borrow().rendered_transcript(80).len();
+        let mut worker = named_worker("LIVE-WORKER", "running");
+        worker.output_tokens += 100;
+        publish_roster(&mut shell, native, &[worker]);
         let update = super::native_scrollback::render_shell_update_without_cursor(
             &shell.state.borrow(),
             80,
@@ -600,142 +575,111 @@ fn active_roster_remains_canonical_in_native_and_mutable_in_pinned_history() {
         );
         assert_eq!(update.stable_prefix, transcript_len);
         assert_eq!(frame.pending_tool_start, None);
-
-        // The pinned/extended path instead owns an immutable commit ledger:
-        // no row of the active roster may be proven immutable and no commit
-        // target may cross it.
         let pinned = render_shell_update(
             &shell.state.borrow(),
             80,
             Instant::now(),
             &mut ShellFrameState::default(),
         );
-        let committed = pinned
-            .pinned
-            .expect("the pinned path carries commit metadata");
-        assert!(
-            committed.stable_rows <= start,
-            "the commit ledger must not prove the active roster immutable: {} <= {start}",
-            committed.stable_rows
-        );
-        assert!(
-            committed
-                .target
-                .is_none_or(|position| position.row <= start),
-            "no commit target may cross the active roster: {:?}",
-            committed.target
-        );
-
-        // Settlement repairs Pi's historical rows and releases the pinned
-        // commit boundary without changing the block's identity.
-        publish_roster(
-            &mut shell,
-            native,
-            &[named_worker("LIVE-WORKER", "completed")],
-        );
-        assert_eq!(shell.state.borrow().subagent_activity_block, Some(index));
-        let update = super::native_scrollback::render_shell_update_without_cursor(
-            &shell.state.borrow(),
-            80,
-            Instant::now(),
-            &mut frame,
-        );
-        assert!(update.stable_prefix <= start, "{}", update.stable_prefix);
-        let replacement = update.replacement.join("\n");
-        assert!(replacement.contains("completed"), "{replacement}");
-        assert!(replacement.contains("filler-39"), "{replacement}");
-        assert_eq!(
-            frame.pending_tool_start, None,
-            "a settled roster is ordinary transcript history"
-        );
-        let pinned = render_shell_update(
-            &shell.state.borrow(),
-            80,
-            Instant::now(),
-            &mut ShellFrameState::default(),
-        );
-        let committed = pinned
-            .pinned
-            .expect("the pinned path carries commit metadata");
-        assert!(
-            committed
-                .target
-                .is_some_and(|position| position.row > start),
-            "a settled roster commits normally: {:?}",
-            committed.target
-        );
+        let committed = pinned.pinned.expect("pinned commit metadata");
+        assert!(committed.stable_rows > transcript_len / 2,
+            "a roster near the start must not prevent later history committing: {} of {transcript_len}", committed.stable_rows);
+        assert!(committed.target.is_some_and(|position| position.row > 0));
     }
 }
 
 #[test]
-fn live_roster_rows_update_in_place_while_the_reader_reads_history() {
+fn live_roster_updates_leave_the_application_history_viewport_anchored() {
     for native in [false, true] {
         let mut shell = InteractiveShell::test_shell();
-        shell.set_size(80, 24);
-        shell.begin_run("fixture");
-        shell.on_prompt_submitted("owning prompt");
-        for n in 0..40 {
+        shell.capture_mouse = true;
+        shell.set_size(120, 24);
+        for n in 0..80 {
             shell.notice(format!("HISTORY-{n}"));
         }
         let mut live = named_worker("LIVE-WORKER", "running");
         publish_roster(&mut shell, native, &[live.clone()]);
-        for n in 0..4 {
-            shell.notice(format!("TAIL-{n}"));
-        }
-        shell.scroll_lines(-3);
-        shell.scroll_lines(-1);
+        shell.scroll_lines(-12);
+        assert!(!shell.state.borrow().follow_tail);
+        let before = visible_rows(&shell, 120);
         assert!(
-            !shell.state.borrow().follow_tail,
-            "the reader left the tail"
-        );
-        let before = visible_rows(&shell, 80);
-        assert!(
-            before.iter().any(|row| row.contains("LIVE-WORKER")),
+            before.iter().any(|row| row.contains("HISTORY-")),
             "{before:?}"
         );
-
-        // Same row count: only the live worker's own cell changes, so nothing
-        // the reader is looking at may move.
-        live.output_tokens += 100;
         let scroll_before = shell.state.borrow().scroll_from_bottom.get();
+        live.output_tokens += 100;
+        live.tool_use_count += 1;
         publish_roster(&mut shell, native, &[live.clone()]);
-        let after = visible_rows(&shell, 80);
+        assert_eq!(visible_rows(&shell, 120), before);
         assert_eq!(shell.state.borrow().scroll_from_bottom.get(), scroll_before);
-        assert!(!shell.state.borrow().follow_tail);
-        assert_eq!(after.len(), before.len(), "{before:?}\n{after:?}");
-        assert_eq!(
-            before.iter().zip(&after).filter(|(a, b)| a != b).count(),
-            1,
-            "{before:?}\n{after:?}"
-        );
-        assert!(
-            after.iter().any(|row| row.contains("LIVE-WORKER")),
-            "{after:?}"
-        );
-
-        // A row-count change must not yank the reader to the tail either.
+        assert!(frame_text(&shell, 120).contains("LIVE-WORKER"));
         publish_roster(
             &mut shell,
             native,
-            &[live.clone(), named_worker("NEW-WORKER", "running")],
+            &[live, named_worker("NEW-WORKER", "running")],
         );
-        assert!(
-            !shell.state.borrow().follow_tail,
-            "a live update never hijacks the reader"
-        );
-        assert!(
-            shell.state.borrow().scroll_from_bottom.get() >= scroll_before,
-            "the reader's distance from the live tail is never silently reset"
-        );
-        let grown = visible_rows(&shell, 80);
-        assert!(
-            grown.iter().any(|row| row.contains("LIVE-WORKER")),
-            "the row the reader was anchored to stays on screen: {grown:?}"
-        );
+        assert!(!shell.state.borrow().follow_tail);
+        let grown = visible_rows(&shell, 120);
+        // Changing chrome height may expose fewer history rows, but preserves
+        // the same anchored first row instead of jumping to live output.
+        assert_eq!(grown.first(), before.first(), "{before:?}\n{grown:?}");
+        assert!(frame_text(&shell, 120).contains("NEW-WORKER"));
     }
 }
 
 #[test]
+fn pinned_roster_is_bounded_and_preserves_the_composer() {
+    for width in [24, 80, 120] {
+        for height in [8, 12, 24] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, height);
+            shell.state.borrow_mut().editor.set_text("DRAFT-MARKER");
+            let workers: Vec<_> = (0..32)
+                .map(|n| named_worker(&format!("WORKER-{n:02}"), "running"))
+                .collect();
+            publish_roster(&mut shell, true, &workers);
+            let frame = frame_text(&shell, width);
+            assert!(frame.contains("DRAFT-MARKER"), "{width}x{height}: {frame}");
+            assert!(
+                frame.contains("/subagents"),
+                "omitted rows need an inspector hint: {frame}"
+            );
+            assert!(
+                workers
+                    .iter()
+                    .filter(|worker| frame.contains(&worker.task_name))
+                    .count()
+                    < workers.len()
+            );
+            let chrome = shell_chrome(&shell.state.borrow(), width, Instant::now());
+            assert!(chrome.subagents.len() <= usize::from(height) / 3);
+            let draft_row = frame
+                .lines()
+                .position(|row| row.contains("DRAFT-MARKER"))
+                .unwrap();
+            let heading_row = frame
+                .lines()
+                .position(|row| row.contains("Subagents"))
+                .unwrap();
+            assert!(
+                heading_row < draft_row,
+                "the roster belongs above the composer: {frame}"
+            );
+            assert!(
+                chrome.transcript_rows > 0,
+                "the roster must leave history space"
+            );
+            assert!(
+                frame
+                    .lines()
+                    .all(|line| visible_width(line) <= usize::from(width)),
+                "{frame}"
+            );
+            assert!(!transcript_text(&shell).contains("WORKER-"));
+        }
+    }
+}
+
 /// A roster made of one state still prints the state column on every row, and
 /// its heading stays a plain tool-call name: the state lives on the rows and
 /// the margin dot, and the count lives on nothing at all.
@@ -820,8 +764,10 @@ fn the_model_identifier_is_printed_in_full_and_never_ellipsized() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        compact.contains("deepseek/deepseek-flash")
-            || (compact.contains("deepseek") && compact.contains("flash")),
+        compact
+            .split_whitespace()
+            .collect::<String>()
+            .contains("deepseek/deepseek-flash"),
         "{compact}"
     );
 }
@@ -1020,8 +966,14 @@ fn subagent_tail_hydration_and_deferred_prepend_hide_boundary_results() {
     assert!(shell.state.borrow().deferred_session_history.is_some());
     let run = shell.begin_run("fixture");
     publish(&mut shell, &child());
-    let index = shell.state.borrow().subagent_activity_block.unwrap();
-    let commit = shell.state.borrow().transcript_commit_ids[index];
+    let retained = shell
+        .state
+        .borrow()
+        .subagent_activity
+        .as_ref()
+        .unwrap()
+        .telemetry
+        .clone();
     // Replay must not replace a live classification when providers reuse IDs.
     shell.on_agent_event(&AgentEvent::ToolStarted {
         id: ToolCallId("subagent_models".into()),
@@ -1034,9 +986,11 @@ fn subagent_tail_hydration_and_deferred_prepend_hide_boundary_results() {
         "subagent_continue"
     );
     let state = shell.state.borrow();
-    let index = state.subagent_activity_block.unwrap();
-    assert_eq!(state.transcript_commit_ids[index], commit);
-    assert!(state.tool_panels.keys().all(|id| id.0 == "subagents"));
+    assert_eq!(
+        state.subagent_activity.as_ref().unwrap().telemetry,
+        retained
+    );
+    assert!(state.tool_panels.is_empty());
     assert!(!state
         .rendered_transcript(120)
         .join("\n")
@@ -1050,9 +1004,10 @@ fn subagent_tail_hydration_and_deferred_prepend_hide_boundary_results() {
         },
     );
     shell.hydrate(&session).unwrap();
-    assert!(shell.state.borrow().subagent_activity_block.is_none());
+    assert!(shell.state.borrow().subagent_activity.is_none());
     publish(&mut shell, &child());
-    assert_eq!(transcript_text(&shell).matches("Subagents").count(), 1);
+    assert!(!transcript_text(&shell).contains("Subagents"));
+    assert!(frame_text(&shell, 120).contains("Subagents"));
 }
 #[test]
 fn subagent_restart_and_durable_refresh_subtract_committed_worker_spend() {
@@ -1108,7 +1063,7 @@ fn subagent_restart_and_durable_refresh_subtract_committed_worker_spend() {
 }
 
 #[test]
-fn every_host_worker_state_has_consistent_group_filter_and_marker() {
+fn every_host_worker_state_has_consistent_group_filter_and_chrome_visibility() {
     use octet_agent::DelegatedAgentStatus as Status;
     use SubagentStateGroup::{Completed, Failed, Running, Stopped};
     let states = [
@@ -1158,17 +1113,12 @@ fn every_host_worker_state_has_consistent_group_filter_and_marker() {
             group,
             "{label}"
         );
-        assert_eq!(subagent_activity_aggregate(&view), Some(group), "{label}");
         assert_eq!(
             subagent_activity_is_active(&view),
             group == Running,
             "{label}"
         );
-        assert_eq!(
-            subagent_activity_has_failure(&view),
-            matches!(group, Failed | Stopped),
-            "{label}"
-        );
+        assert_eq!(subagent_rows(&view)[0].group, group, "{label}");
         let theme = crate::tui::theme::test_theme();
         for filter in SubagentStateGroup::ORDER {
             view.state_filter = Some(filter);
@@ -1185,25 +1135,26 @@ fn every_host_worker_state_has_consistent_group_filter_and_marker() {
         let mut shell = InteractiveShell::test_shell();
         publish(&mut shell, &named_worker("STATE-WORKER", "running"));
         publish(&mut shell, &worker);
-        let state = shell.state.borrow();
-        let index = state.subagent_activity_block.unwrap();
-        let dot = if state.theme.unicode() { "•" } else { "*" };
-        let expected = match group {
-            Running => state.theme.fg("foreground", dot),
-            Completed => state.theme.settled_event_dot("success", dot),
-            Failed | Stopped => state.theme.settled_event_dot("error", dot),
-        };
         assert_eq!(
-            super::surface_frame::event_margin_marker_with_frame(
-                &state.transcript[index],
-                &state.theme,
-                0,
-                None,
-                0,
-                false,
-            ),
-            Some(expected),
-            "{label}",
+            frame_text(&shell, 120).contains("Subagents"),
+            group == Running,
+            "{label}"
+        );
+        assert_eq!(
+            transcript_text(&shell).contains("STATE-WORKER"),
+            matches!(group, Failed | Stopped),
+            "{label}"
+        );
+        assert!(!transcript_text(&shell).contains("Subagents"));
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .subagent_activity
+                .as_ref()
+                .unwrap()
+                .telemetry[0],
+            worker
         );
     }
 }
@@ -1347,7 +1298,14 @@ fn generic_panel_filter_mirrors_worker_membership_not_lossy_state_labels() {
         )));
     };
     let assert_members = |shell: &InteractiveShell, expected: &[&str]| {
-        let text = transcript_text(shell);
+        let state = shell.state.borrow();
+        let text = roster_rows(
+            state.subagent_activity.as_ref().unwrap(),
+            &state.theme,
+            120,
+            true,
+        )
+        .join("\n");
         for worker in &workers {
             assert_eq!(
                 text.contains(&worker.task_name),
@@ -1358,9 +1316,21 @@ fn generic_panel_filter_mirrors_worker_membership_not_lossy_state_labels() {
     };
     press(&mut shell);
     assert_members(&shell, &["LIMIT", "DETACHED"]);
-    assert!(transcript_text(&shell).contains("state: Blocked"));
-    // Republishing telemetry must retain the exact selected membership in both
-    // semantic copies, even though Blocked spans Failed and Stopped groups.
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .panel_filter
+            .as_ref()
+            .unwrap()
+            .label,
+        "Blocked"
+    );
+    // Republishing telemetry must retain the exact selected membership in
+    // the retained view, even though Blocked spans Failed and Stopped groups.
     publish_roster(&mut shell, true, &workers);
     assert_members(&shell, &["LIMIT", "DETACHED"]);
     let state = shell.state.borrow();
@@ -1378,7 +1348,19 @@ fn generic_panel_filter_mirrors_worker_membership_not_lossy_state_labels() {
     drop(state);
     press(&mut shell);
     assert_members(&shell, &["APPROVAL", "PENDING"]);
-    assert!(transcript_text(&shell).contains("state: Queued"));
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .panel_filter
+            .as_ref()
+            .unwrap()
+            .label,
+        "Queued"
+    );
     // Membership is refreshed by stable ID when the selected group changes.
     let mut next = panel.clone();
     next.groups[0].indices = vec![0, 1, 3];

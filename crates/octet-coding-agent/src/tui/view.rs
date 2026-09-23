@@ -234,11 +234,6 @@ struct ToolPanel {
     /// One bounded, replaceable live-progress annotation. This is cleared once
     /// the immutable tool result arrives and never enters session persistence.
     progress_decoration: Option<ToolProgressDecoration>,
-    /// Presentation-only delegated-worker event. It deliberately uses the
-    /// ordinary tool block lifecycle so its margin dot, scrollback stability,
-    /// and disclosure behavior match real tool calls without pretending that
-    /// `subagents` was a provider tool invocation.
-    subagent_activity: Option<SubagentActivityView>,
     /// Model family captured with the call for durable presentation
     /// provenance. Lifecycle chrome deliberately no longer consumes it:
     /// active, successful, and failed headers use muted, foreground, and
@@ -281,45 +276,10 @@ impl ToolPanel {
             failure_reason,
             extension_render_segments: Vec::new(),
             progress_decoration: None,
-            subagent_activity: None,
             model_lab,
             cached_diff: RefCell::new(None),
             cached_disclosure_sensitive: RefCell::new(None),
         }
-    }
-
-    fn subagent_activity(view: &SubagentActivityView) -> Self {
-        let mut panel = Self::new(
-            ToolCallId("subagents".into()),
-            "subagents".into(),
-            "{}".into(),
-            summarize_tool_with_workspace("subagents", &serde_json::json!({}), None),
-            subagent_activity_copy_text(view),
-            !subagent_activity_is_active(view),
-            subagent_activity_has_failure(view),
-            subagent_activity_failure_reason(view),
-            None,
-        );
-        panel.subagent_activity = Some(view.clone());
-        panel
-    }
-
-    fn update_subagent_activity(&mut self, view: &SubagentActivityView) {
-        let mut next = view.clone();
-        if let Some(previous) = self.subagent_activity.as_ref() {
-            // Display-only controls belong to the reader, not to the roster the
-            // host republishes: a refresh must never reset the ordering or the
-            // narrowing the reader selected.
-            next.sort = previous.sort;
-            next.state_filter = previous.state_filter;
-            next.panel_filter = previous.panel_filter.clone();
-        }
-        self.finished = !subagent_activity_is_active(&next);
-        self.is_error = subagent_activity_has_failure(&next);
-        self.failure_reason = subagent_activity_failure_reason(&next);
-        self.output = subagent_activity_copy_text(&next);
-        self.subagent_activity = Some(next);
-        self.cached_disclosure_sensitive.replace(None);
     }
 
     /// Produce visual image reservations only. The returned DCS anchor contains
@@ -394,13 +354,21 @@ struct PromptHistoryNavigation {
     draft: PromptHistoryDraft,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct QueuedSteering {
+    sequence: u64,
+    recall: Option<octet_agent::SteeringReceipt>,
     /// Readable transcript projection (large pasted text expanded).
     display: String,
     /// Original editor projection used if an undelivered message is restored.
     editor_display: String,
     attachments: Vec<composer::Attachment>,
+}
+
+#[derive(Clone, Debug)]
+struct QueuedFollowUp {
+    sequence: u64,
+    composed: ComposedInput,
 }
 
 #[derive(Clone, Debug)]
@@ -884,54 +852,8 @@ struct SubagentPanelFilter {
     node_ids: Vec<String>,
 }
 
-impl SubagentActivityView {
-    /// Retain complete telemetry independently of the compact projection. Tool
-    /// phases, elapsed clocks, and call counts must not invalidate roster rows.
-    fn same_presentation(&self, next: &Self) -> bool {
-        self.status_label == next.status_label
-            && self.activities.len() == next.activities.len()
-            && self.activities.iter().zip(&next.activities).all(|(a, b)| {
-                let usage = |metrics: Option<octet_agent::ExtensionPresentationMetrics>| {
-                    metrics.map(|m| {
-                        (
-                            m.input_tokens
-                                .saturating_add(m.cache_read_tokens)
-                                .saturating_add(m.cache_write_tokens),
-                            m.output_tokens,
-                            m.cost_microdollars,
-                        )
-                    })
-                };
-                a.id == b.id
-                    && a.state == b.state
-                    && a.summary == b.summary
-                    && usage(a.metrics) == usage(b.metrics)
-            })
-            && self.failure_class == next.failure_class
-            && self.failure_reason == next.failure_reason
-            && self.telemetry.len() == next.telemetry.len()
-            && self.telemetry.iter().zip(&next.telemetry).all(|(a, b)| {
-                let input = |child: &octet_agent::DelegationTelemetryChild| {
-                    child
-                        .input_tokens
-                        .saturating_add(child.cache_read_tokens)
-                        .saturating_add(child.cache_write_tokens)
-                };
-                a.child_id == b.child_id
-                    && a.task_name == b.task_name
-                    && a.state == b.state
-                    && input(a) == input(b)
-                    && a.output_tokens == b.output_tokens
-                    && a.cost_microdollars == b.cost_microdollars
-                    && a.failure_reason == b.failure_reason
-            })
-    }
-}
-
-/// Displayed worker identities of one snapshot, used to decide whether a
-/// snapshot carries anything the transcript has not already settled. Telemetry
-/// child ids are the durable identity; the extension activity id is the
-/// equivalent for the non-delegation presentation.
+/// Worker identities retained across live snapshots and settlement. Telemetry
+/// child ids are the durable identity; extension activities use their own ids.
 fn subagent_worker_ids(view: &SubagentActivityView) -> Vec<String> {
     if !view.telemetry.is_empty() {
         return view
@@ -962,92 +884,6 @@ fn subagent_activity_is_active(view: &SubagentActivityView) -> bool {
                 | octet_agent::ExtensionPresentationState::Running
         )
     })
-}
-
-/// Aggregate declared state of one delegation roster, derived from the child
-/// states the rows already print. Precedence is Running, Failed, Stopped,
-/// Completed: while any child is still active the roster stays in its running
-/// shape instead of resolving to green/red early, and once every child has
-/// settled a single failure (or cancellation) turns the event red.
-pub(super) fn subagent_activity_aggregate(
-    view: &SubagentActivityView,
-) -> Option<SubagentStateGroup> {
-    let rows = subagent_rows(view);
-    if rows.is_empty() {
-        return None;
-    }
-    let has = |group: SubagentStateGroup| rows.iter().any(|row| row.group == group);
-    if has(SubagentStateGroup::Running) {
-        return Some(SubagentStateGroup::Running);
-    }
-    if has(SubagentStateGroup::Failed) {
-        return Some(SubagentStateGroup::Failed);
-    }
-    if has(SubagentStateGroup::Stopped) {
-        return Some(SubagentStateGroup::Stopped);
-    }
-    Some(SubagentStateGroup::Completed)
-}
-
-fn subagent_activity_has_failure(view: &SubagentActivityView) -> bool {
-    view.failure_reason.is_some()
-        || view.telemetry.iter().any(|child| {
-            matches!(
-                SubagentStateGroup::of_declared_state(&child.state),
-                SubagentStateGroup::Failed | SubagentStateGroup::Stopped
-            ) || child.failure_reason.is_some()
-        })
-        || view.activities.iter().any(|activity| {
-            matches!(
-                activity.state,
-                octet_agent::ExtensionPresentationState::Failed
-                    | octet_agent::ExtensionPresentationState::Cancelled
-                    | octet_agent::ExtensionPresentationState::Stopped
-                    | octet_agent::ExtensionPresentationState::Unavailable
-            )
-        })
-}
-
-fn subagent_activity_failure_reason(view: &SubagentActivityView) -> Option<String> {
-    view.failure_reason.clone().or_else(|| {
-        view.telemetry
-            .iter()
-            .find_map(|child| child.failure_reason.clone())
-    })
-}
-
-/// Plain semantic text used by copy/width calculations for the presentation
-/// block. The renderer owns styling and compact row selection.
-pub(super) fn subagent_activity_copy_text(view: &SubagentActivityView) -> String {
-    // The copy text mirrors the rendered event shape: a plain tool-call name
-    // for the heading, then one row per worker with the declared state word and
-    // the full model identifier.
-    let mut lines = Vec::new();
-    lines.push("Subagents".to_owned());
-    if !view.telemetry.is_empty() {
-        lines.extend(view.telemetry.iter().map(|child| {
-            let state = if child.state.is_empty() {
-                "running"
-            } else {
-                child.state.as_str()
-            };
-            if child.model.is_empty() {
-                format!("{} · {state}", child.task_name)
-            } else {
-                format!("{} · {state} · {}", child.task_name, child.model)
-            }
-        }));
-    } else {
-        lines.extend(
-            view.activities
-                .iter()
-                .map(|activity| format!("{} · {:?}", activity.summary, activity.state)),
-        );
-    }
-    if let Some(reason) = view.failure_reason.as_deref() {
-        lines.push(format!("failed · {reason}"));
-    }
-    lines.join("\n")
 }
 
 /// Declared state word for an extension presentation activity. The vocabulary
@@ -1579,7 +1415,7 @@ fn collapsed_subagent_groups_row(
     text
 }
 
-/// Render the settled delegation event as grouped, column-aligned, bounded
+/// Render the delegation roster as grouped, column-aligned
 /// rows. Terminal groups collapse to one counted summary row by default so a
 /// finished team cannot bury the live workers above it; `expanded` (ctrl+o)
 /// opens them into full rows.
@@ -1600,9 +1436,7 @@ pub(super) fn subagent_activity_render_rows(
         rows.retain(|row| row.group == filter);
     }
     sort_subagent_rows(&mut rows, view.sort);
-    // The event heading is a plain tool-call name. The live margin dot carries
-    // the aggregate state, and every row prints its own, so the heading adds
-    // neither a state word nor a count.
+    // Each worker row carries its own declared lifecycle state.
     let mut heading = "Subagents".to_owned();
     if let Some(scope) = subagent_activity_scope(view) {
         heading.push_str(&format!("{separator}{scope}"));
@@ -1925,7 +1759,9 @@ pub(crate) struct ShellState {
     // A queue mutation copies only Arc handles, never other accepted messages.
     steering_queue: Arc<Vec<Arc<QueuedSteering>>>,
     /// Enter-submitted follow-ups remain local and editable until run settlement.
-    follow_up_queue: Arc<std::collections::VecDeque<Arc<ComposedInput>>>,
+    follow_up_queue: Arc<std::collections::VecDeque<Arc<QueuedFollowUp>>>,
+    /// Shared admission order across steering and follow-ups, independent of text.
+    next_pending_sequence: u64,
     follow_up_ready: bool,
     /// Successful prompts retained only by this interactive shell for recall.
     prompt_history: Vec<PromptHistoryEntry>,
@@ -1972,9 +1808,8 @@ pub(crate) struct ShellState {
     prompt_templates: Arc<[crate::prompts::PromptTemplateDescriptor]>,
     skill_commands: Arc<[(String, String)]>,
     extension_commands: Arc<[(String, String)]>,
-    /// Session-scoped roster; updates and later root turns reuse its block.
+    /// Session-scoped live roster, rendered only in composer-adjacent chrome.
     pub(crate) subagent_activity: Option<SubagentActivityView>,
-    pub(crate) subagent_activity_block: Option<usize>,
     /// Cumulative child spend already handed off to the root's durable ledger.
     subagent_committed_costs: HashMap<String, u64>,
     /// Hidden live calls remain indexed across root turns. Replay has its own
@@ -2467,6 +2302,7 @@ impl ShellState {
         self.invalidate_transcript();
     }
 
+    #[cfg(test)]
     fn insert_block(&mut self, index: usize, mut block: TranscriptBlock) {
         if let TranscriptBlock::Tool(panel) = &mut block {
             panel.image_rendering = self.image_rendering;
@@ -2494,9 +2330,6 @@ impl ShellState {
         self.active_reasoning = self
             .active_reasoning
             .map(|active| active + usize::from(active >= index));
-        self.subagent_activity_block = self
-            .subagent_activity_block
-            .map(|active| active + usize::from(active >= index));
         for panel_index in self.tool_panels.values_mut() {
             if *panel_index >= index {
                 *panel_index += 1;
@@ -2509,8 +2342,7 @@ impl ShellState {
         if let Some(anchor) = &mut self.pending_selection_anchor {
             anchor.block += usize::from(anchor.block >= index);
         }
-        // Insertion (notably the first worker roster before active reasoning)
-        // changes block identities at the seam. Retain only the valid prefix;
+        // Insertion changes block identities at the seam. Retain only the valid prefix;
         // append-only cache growth would pair old rows with the new commit IDs.
         let cache = self.transcript_cache.get_mut();
         if let Some(start) = cache.block_starts.get(index).copied() {
@@ -2524,43 +2356,26 @@ impl ShellState {
         self.invalidate_transcript();
     }
 
-    /// A transient empty thinking row is removed before the first event so the
-    /// new block is immediately followed by the model's replacement thinking
-    /// row, matching the tool-call presentation.
+    /// Retain live telemetry as chrome, never as a synthetic tool invocation.
+    /// Terminal workers observed by this shell remain available for inspection
+    /// and accounting, but old session workers do not reappear on attachment.
     fn set_subagent_activity(&mut self, mut view: SubagentActivityView) {
-        // The outcome block's delegated-workers line is derived from the live
-        // roster, so one aggregate transition repaints it. Worker events inside
-        // the same aggregate state do not.
         let was_active = self
             .subagent_activity
             .as_ref()
             .is_some_and(subagent_activity_is_active);
-        // A session roster is not a new delegation event. With no current
-        // block, an entirely terminal roster belongs to an earlier run, even
-        // if this shell never observed those workers alive (e.g. after resume).
-        let workers = subagent_worker_ids(&view);
-        if self.subagent_activity_block.is_none()
-            && !subagent_activity_is_active(&view)
-            && !workers.is_empty()
-            && view.failure_reason.is_none()
-        {
-            self.subagent_activity = None;
-            self.touch_outcome_for_roster_transition(was_active, false);
-            return;
-        }
-
-        // Mixed snapshots also contain the session's older terminal workers.
-        // Keep session-block members through settlement and new/resumed work.
-        // Unseen terminal rows are old material from before this shell attached,
-        // not evidence of a new delegation event.
         let current_workers = self
-            .subagent_activity_block
-            .and_then(|index| match self.transcript.get(index) {
-                Some(TranscriptBlock::Tool(panel)) => panel.subagent_activity.as_ref(),
-                _ => None,
-            })
+            .subagent_activity
+            .as_ref()
             .map(subagent_worker_ids)
             .unwrap_or_default();
+        if self.subagent_activity.is_none()
+            && !subagent_activity_is_active(&view)
+            && !subagent_worker_ids(&view).is_empty()
+            && view.failure_reason.is_none()
+        {
+            return;
+        }
         view.telemetry.retain(|child| {
             matches!(child.state.as_str(), "pending" | "running")
                 || current_workers.contains(&child.child_id)
@@ -2574,77 +2389,41 @@ impl ShellState {
                     | octet_agent::ExtensionPresentationState::Running
             ) || current_workers.contains(&activity.id)
         });
-        if let Some(index) = self.subagent_activity_block {
-            if let Some(TranscriptBlock::Tool(panel)) = self.transcript.get_mut(index) {
-                if let Some(previous) = panel.subagent_activity.as_ref() {
-                    view.sort = previous.sort;
-                    view.state_filter = previous.state_filter;
-                    view.panel_filter = previous.panel_filter.clone();
-                    let same_presentation = previous.same_presentation(&view);
-                    let was_panel_active = !panel.finished;
-                    panel.update_subagent_activity(&view);
-                    let is_panel_active = !panel.finished;
-                    // The retained presentation is what the drill-in, the
-                    // footer cost, and the reader's own controls read, so it
-                    // moves on every snapshot - including one whose row
-                    // projection did not change.
-                    //
-                    // `was_active`/`is_active` are the *aggregate* ladder the
-                    // outcome block reports; the panel flags above mirror it for
-                    // the retained view.
-                    let is_active = subagent_activity_is_active(&view);
-                    self.subagent_activity = Some(view);
-                    self.touch_outcome_for_roster_transition(was_active, is_active);
-                    if same_presentation {
-                        return;
-                    }
-                    if was_panel_active && !is_panel_active {
-                        self.unregister_active_event(index);
-                    } else if !was_panel_active && is_panel_active {
-                        self.register_active_event(index);
-                    }
-                    self.touch_block(index);
-                    return;
-                }
-            }
-            self.subagent_activity_block = None;
+        if let Some(previous) = &self.subagent_activity {
+            view.sort = previous.sort;
+            view.state_filter = previous.state_filter;
+            view.panel_filter = previous.panel_filter.clone();
         }
-
-        if let Some(index) = self.active_reasoning {
-            let empty = matches!(
-                self.transcript.get(index),
-                Some(TranscriptBlock::Reasoning(reasoning)) if reasoning.text.is_empty()
-            );
-            if empty {
-                self.remove_transient_activity_block(index);
+        // A disappearing strip must not silently swallow an asynchronous
+        // failure or parked worker. Keep one bounded, actionable notice per
+        // observed state/reason transition, not a synthetic roster tool card.
+        let previous_rows = self
+            .subagent_activity
+            .as_ref()
+            .map(subagent_rows)
+            .unwrap_or_default();
+        for row in subagent_rows(&view) {
+            if matches!(
+                row.group,
+                SubagentStateGroup::Failed | SubagentStateGroup::Stopped
+            ) && !previous_rows.iter().any(|previous| {
+                previous.node_id == row.node_id
+                    && previous.state == row.state
+                    && previous.reason == row.reason
+            })
+            {
+                let detail = row.reason.as_deref().unwrap_or("");
+                let message = format!("Subagent {}: {}. {}", row.worker, row.state, detail);
+                self.push_block(TranscriptBlock::Notice(format!(
+                    "{}{}inspect with /subagents",
+                    outcome_render::bounded_outcome_detail(message.trim()),
+                    semantic_separator(&self.theme)
+                )));
             }
         }
-
-        let index = self.active_reasoning.unwrap_or(self.transcript.len());
-        let panel = ToolPanel::subagent_activity(&view);
-        let active = !panel.finished;
-        self.insert_block(index, TranscriptBlock::Tool(Box::new(panel)));
-        self.subagent_activity_block = Some(index);
         let is_active = subagent_activity_is_active(&view);
         self.subagent_activity = Some(view);
         self.touch_outcome_for_roster_transition(was_active, is_active);
-        if active {
-            self.register_active_event(index);
-            // Keep the model-status row below the delegated event while the
-            // child is alive. This is the same status the hidden spawn tool
-            // would otherwise reopen after its ToolFinished event.
-            self.open_working_status();
-        }
-    }
-
-    fn reindex_subagent_activity_after_removal(&mut self, removed: usize) {
-        self.subagent_activity_block = self.subagent_activity_block.and_then(|index| {
-            if index == removed {
-                None
-            } else {
-                Some(index.saturating_sub(usize::from(index > removed)))
-            }
-        });
     }
 
     pub(crate) fn jump_to_tail(&mut self) {
@@ -2772,7 +2551,7 @@ impl ShellState {
     /// Repaint the newest outcome block when the roster's aggregate
     /// active -> settled transition changes its delegated-workers detail line.
     ///
-    /// This rides the same bounded roster refresh cadence as the roster block:
+    /// This rides the same bounded refresh cadence as the roster chrome:
     /// one touch per aggregate transition, never one per worker event.
     fn touch_outcome_for_roster_transition(&mut self, was_active: bool, is_active: bool) {
         if was_active == is_active {
@@ -2827,7 +2606,6 @@ impl ShellState {
             .get_mut()
             .truncate_tail_block(index, self.transcript.len());
         self.unregister_active_event(index);
-        self.reindex_subagent_activity_after_removal(index);
         self.render_publication.remove(index, self.transcript.len());
         self.transcript.remove(index);
         self.transcript_commit_ids.remove(index);
@@ -4012,11 +3790,8 @@ impl InteractiveShell {
         self.state.borrow_mut().run.awaiting_provider(id);
     }
 
-    /// Keep the last non-empty delegation snapshot as a transcript event.
-    ///
-    /// The manager may publish an empty cleanup snapshot after settlement;
-    /// dropping it here would make the visual event disappear just when the dot
-    /// should settle green or red.
+    /// Keep the last non-empty delegation snapshot for chrome and accounting.
+    /// Cleanup snapshots must not discard the retained inspector/cost state.
     fn apply_delegation_snapshot(
         state: &mut ShellState,
         snapshot: &octet_agent::DelegationTelemetrySnapshot,
@@ -4698,8 +4473,11 @@ impl InteractiveShell {
     /// Keeping its typed parts here makes Option+Up genuinely retractable.
     pub fn queue_follow_up(&mut self, composed: ComposedInput) {
         if !composed.is_empty() {
-            Arc::make_mut(&mut self.state.borrow_mut().follow_up_queue)
-                .push_back(Arc::new(composed));
+            let mut state = self.state.borrow_mut();
+            let sequence = state.next_pending_sequence;
+            state.next_pending_sequence += 1;
+            Arc::make_mut(&mut state.follow_up_queue)
+                .push_back(Arc::new(QueuedFollowUp { sequence, composed }));
         }
     }
 
@@ -4725,40 +4503,112 @@ impl InteractiveShell {
         drop(state);
         // Execution admission may need an owned value while a paint still
         // references the old queue; never copy that payload under the UI lock.
-        next.map(Arc::unwrap_or_clone)
+        next.map(|entry| Arc::unwrap_or_clone(entry).composed)
     }
 
-    /// Recall only local, unadmitted input. Never overwrite a draft or pretend
-    /// that steering already handed to RunControl can be retracted.
-    pub fn edit_queued_follow_up(&mut self) {
+    /// Recall the newest eligible pending input without overwriting a draft.
+    /// A steering receipt, not the delayed delivery event, arbitrates against
+    /// persistence. Refused entries stay in place for FIFO event projection.
+    pub fn edit_queued_message(&mut self) {
         let mut state = self.state.borrow_mut();
         if !normal_editor_focused(&state) || !state.editor.text().is_empty() {
             return;
         }
-        let Some(composed) = Arc::make_mut(&mut state.follow_up_queue).pop_back() else {
-            return;
+        let follow_up_sequence = state.follow_up_queue.back().map(|entry| entry.sequence);
+        let steering_index = state.steering_queue.iter().enumerate().rev().find_map(
+            |(index, entry)| {
+                if follow_up_sequence.is_some_and(|sequence| sequence > entry.sequence) {
+                    return None;
+                }
+                entry.recall.as_ref().and_then(|receipt| receipt.try_retract().then_some(index))
+            },
+        );
+        let (display, attachments) = if let Some(index) = steering_index {
+            let entry = Arc::make_mut(&mut state.steering_queue).remove(index);
+            drop(state);
+            let entry = Arc::unwrap_or_clone(entry);
+            (entry.editor_display, entry.attachments)
+        } else {
+            let Some(entry) = Arc::make_mut(&mut state.follow_up_queue).pop_back() else {
+                return;
+            };
+            drop(state);
+            let composed = Arc::unwrap_or_clone(entry).composed;
+            (composed.display_text, composed.attachments)
         };
-        drop(state);
-        let composed = Arc::unwrap_or_clone(composed);
         let mut state = self.state.borrow_mut();
         state.prompt_history_navigation = None;
-        state.editor.set_text(composed.display_text);
-        state.ledger.restore(composed.attachments);
+        state.editor.set_text(display);
+        state.ledger.restore(attachments);
         invalidate_editor_autocomplete(&mut state);
     }
 
-    /// Keep a steering message in the pending area until the Agent reports
-    /// that it has appended the message at the next model-turn boundary.
+    /// Existing callers recall from the same joint pending-input order.
+    pub fn edit_queued_follow_up(&mut self) {
+        self.edit_queued_message();
+    }
+
+    /// Keep nonretractable steering (notably sticky `/answer`) pending until
+    /// the Agent reports durable delivery at the next model-turn boundary.
     pub fn queue_steering(&mut self, composed: &ComposedInput) {
         if composed.is_empty() {
             return;
         }
-        let queued = Arc::new(QueuedSteering {
+        self.push_queued_steering(QueuedSteering {
+            sequence: 0,
+            recall: None,
             display: composed.transcript_text.clone(),
             editor_display: composed.display_text.clone(),
             attachments: composed.attachments.clone(),
         });
-        Arc::make_mut(&mut self.state.borrow_mut().steering_queue).push(queued);
+    }
+
+    /// Record Ctrl+S steering only after the active run has synchronously
+    /// reserved its capacity. The caller retains the prepared payload to send;
+    /// this shell owns only its receipt and reversible editor projection.
+    /// Sticky `/answer` must use `queue_steering` instead.
+    pub fn queue_retractable_steering(
+        &mut self,
+        receipt: octet_agent::SteeringReceipt,
+        display: String,
+        editor_display: String,
+        attachments: Vec<composer::Attachment>,
+    ) {
+        self.push_queued_steering(QueuedSteering {
+            sequence: 0,
+            recall: Some(receipt),
+            display,
+            editor_display,
+            attachments,
+        });
+    }
+
+    /// Restore a composer projection whose live-steering admission was refused
+    /// before it entered the shell queue.
+    pub fn restore_unqueued_steering(
+        &mut self,
+        editor_display: String,
+        attachments: Vec<composer::Attachment>,
+    ) {
+        let mut state = self.state.borrow_mut();
+        state.prompt_history_navigation = None;
+        state.ledger.restore(attachments);
+        let current = state.editor.take_text();
+        state.editor.set_text(if current.trim().is_empty() {
+            editor_display
+        } else if editor_display.is_empty() {
+            current
+        } else {
+            format!("{editor_display}\n\n{current}")
+        });
+        invalidate_editor_autocomplete(&mut state);
+    }
+
+    fn push_queued_steering(&mut self, mut queued: QueuedSteering) {
+        let mut state = self.state.borrow_mut();
+        queued.sequence = state.next_pending_sequence;
+        state.next_pending_sequence += 1;
+        Arc::make_mut(&mut state.steering_queue).push(Arc::new(queued));
     }
 
     /// Move undelivered steering messages back into the editor. This is used
@@ -5089,9 +4939,7 @@ impl InteractiveShell {
         });
         let mut state = self.state.borrow_mut();
         if let Some(next) = next {
-            if state.subagent_activity.as_ref() == Some(&next)
-                && state.subagent_activity_block.is_some()
-            {
+            if state.subagent_activity.as_ref() == Some(&next) {
                 return false;
             }
             state.set_subagent_activity(next);
@@ -5125,9 +4973,7 @@ impl InteractiveShell {
         });
         let mut state = self.state.borrow_mut();
         if let Some(next) = next {
-            if state.subagent_activity.as_ref() == Some(&next)
-                && state.subagent_activity_block.is_some()
-            {
+            if state.subagent_activity.as_ref() == Some(&next) {
                 return false;
             }
             state.set_subagent_activity(next);
@@ -6060,10 +5906,9 @@ impl InteractiveShell {
         self.toggle_verbose_tools();
     }
 
-    /// Cycle the settled delegation event's declared-state narrowing:
+    /// Cycle the live roster's declared-state narrowing:
     /// `all -> running -> completed -> failed -> stopped -> all`. Display-only;
-    /// the roster the host reports is untouched, and the settled block stays
-    /// exactly where it happened. Returns the label now in effect (`"all"` when
+    /// the roster the host reports is untouched. Returns the label (`"all"` when
     /// no narrowing is active).
     pub(crate) fn cycle_subagent_activity_filter(&mut self) -> &'static str {
         let mut state = self.state.borrow_mut();
@@ -6071,16 +5916,7 @@ impl InteractiveShell {
             .subagent_activity
             .as_ref()
             .and_then(|view| view.state_filter)
-            .or_else(|| {
-                state.subagent_activity_block.and_then(|index| {
-                    state.transcript.get(index).and_then(|block| match block {
-                        TranscriptBlock::Tool(panel) => {
-                            panel.subagent_activity.as_ref()?.state_filter
-                        }
-                        _ => None,
-                    })
-                })
-            }) {
+        {
             None => Some(SubagentStateGroup::Running),
             Some(current) => current.next_filter(),
         };
@@ -6091,7 +5927,7 @@ impl InteractiveShell {
         next.map_or("all", SubagentStateGroup::filter_label)
     }
 
-    /// Cycle the settled delegation event's row ordering:
+    /// Cycle the live roster's row ordering:
     /// `state -> elapsed -> tokens -> state`. Ordering is display-only and
     /// survives refreshes of the same event.
     pub(crate) fn cycle_subagent_activity_sort(&mut self) -> &'static str {
@@ -6106,31 +5942,13 @@ impl InteractiveShell {
         next.label()
     }
 
-    /// Apply one display-only control to every live copy of the delegation
-    /// event: the roaming view used by the chrome and the settled transcript
-    /// block. A control that changes nothing visible must not dirty the
-    /// transcript cache, so the block is touched only when a view changed.
+    /// Display controls affect only the live chrome, never transcript history.
     fn apply_subagent_activity_controls(
         state: &mut ShellState,
         apply: impl Fn(&mut SubagentActivityView),
     ) {
-        let mut changed = false;
         if let Some(view) = state.subagent_activity.as_mut() {
-            let before = (view.sort, view.state_filter, view.panel_filter.clone());
             apply(view);
-            changed |= (view.sort, view.state_filter, view.panel_filter.clone()) != before;
-        }
-        if let Some(index) = state.subagent_activity_block {
-            if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get_mut(index) {
-                if let Some(view) = panel.subagent_activity.as_mut() {
-                    let before = (view.sort, view.state_filter, view.panel_filter.clone());
-                    apply(view);
-                    changed |= (view.sort, view.state_filter, view.panel_filter.clone()) != before;
-                }
-            }
-            if changed {
-                state.touch_block(index);
-            }
         }
     }
 
@@ -7446,7 +7264,6 @@ impl InteractiveShell {
         // Session hydration may reuse this shell, so clear the roster pointer;
         // hydrated history never contains an executable worker event.
         state.subagent_activity = None;
-        state.subagent_activity_block = None;
         state.session_work_elapsed = Duration::ZERO;
         state.run_model = None;
         state.run_model_lab = None;

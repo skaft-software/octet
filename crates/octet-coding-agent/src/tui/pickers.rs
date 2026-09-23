@@ -172,6 +172,7 @@ where
     shell.set_tool_input_prompt(Some(request.prompt.clone()));
     shell.render();
     let mut value = SecretInputBuffer::default();
+    let mut overflowed = false;
     loop {
         let next = tokio::select! {
             biased;
@@ -200,6 +201,12 @@ where
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match key.code {
+                    KeyCode::Enter if overflowed => {
+                        // Never return a silently truncated credential. Clear the
+                        // rejected input, then let the user paste a fresh value.
+                        value = SecretInputBuffer::default();
+                        overflowed = false;
+                    }
                     KeyCode::Enter => {
                         let bytes = value.take();
                         let answer = String::from_utf8(bytes)
@@ -224,16 +231,30 @@ where
                             KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
                         ) =>
                     {
+                        overflowed |= value.0.len().saturating_add(character.len_utf8())
+                            > MAX_SECRET_INPUT_BYTES;
                         value.push(character)
                     }
                     _ => {}
                 }
             }
-            Event::Paste(pasted) => value.extend_paste(&pasted),
+            Event::Paste(pasted) => {
+                overflowed |= value
+                    .0
+                    .len()
+                    .saturating_add(pasted.trim_end_matches(['\r', '\n']).len())
+                    > MAX_SECRET_INPUT_BYTES;
+                value.extend_paste(&pasted);
+            }
             Event::Resize(columns, rows) => shell.set_size(columns, rows),
             _ => {}
         }
-        let shown = if request.secret {
+        let shown = if overflowed {
+            format!(
+                "{} [input exceeds 4 KiB; Enter to clear, Esc to cancel]",
+                request.prompt
+            )
+        } else if request.secret {
             request.prompt.clone()
         } else {
             let entered = std::str::from_utf8(&value.0).unwrap_or_default();
@@ -1544,6 +1565,120 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use tokio_stream::wrappers::ReceiverStream;
+
+    #[tokio::test]
+    async fn secret_input_paste_never_enters_the_composer_or_transcript() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.extension_set_editor("draft kept intact".into());
+        let request = ExtensionInputRequest {
+            parent_request_id: 0,
+            prompt: "API key (input hidden)".into(),
+            secret: true,
+        };
+        let mut input = futures_util::stream::iter([
+            Ok(Event::Paste("synthetic-private-key\r\n".into())),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+        ]);
+        let answer = extension_input_picker(&mut shell, &mut input, &request)
+            .await
+            .unwrap();
+        assert_eq!(answer.as_deref(), Some("synthetic-private-key"));
+        assert_eq!(shell.pending(), "draft kept intact");
+        let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+        assert!(!frame.contains("synthetic-private-key"));
+        assert!(!frame.contains("API key (input hidden)"));
+    }
+
+    #[tokio::test]
+    async fn secret_input_cancel_and_input_error_discard_the_answer_and_restore_editor() {
+        for end in [
+            Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+            Err(std::io::Error::other("synthetic input failure")),
+        ] {
+            let failed = end.is_err();
+            let mut shell = InteractiveShell::test_shell();
+            shell.extension_set_editor("original draft".into());
+            let request = ExtensionInputRequest {
+                parent_request_id: 0,
+                prompt: "API key (input hidden)".into(),
+                secret: true,
+            };
+            let mut input =
+                futures_util::stream::iter([Ok(Event::Paste("synthetic-private-key".into())), end]);
+            let answer = extension_input_picker(&mut shell, &mut input, &request).await;
+            if failed {
+                assert!(answer.is_err());
+            } else {
+                assert_eq!(answer.unwrap(), None);
+            }
+            assert_eq!(shell.pending(), "original draft");
+            let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+            assert!(!frame.contains("synthetic-private-key"));
+            assert!(!frame.contains("API key (input hidden)"));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_secret_input_cannot_submit_a_truncated_key() {
+        for oversized in [
+            vec![Ok(Event::Paste("x".repeat(MAX_SECRET_INPUT_BYTES + 1)))],
+            vec![
+                Ok(Event::Paste("x".repeat(MAX_SECRET_INPUT_BYTES))),
+                Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Char('y'),
+                    KeyModifiers::NONE,
+                ))),
+            ],
+        ] {
+            let mut shell = InteractiveShell::test_shell();
+            let request = ExtensionInputRequest {
+                parent_request_id: 0,
+                prompt: "API key (input hidden)".into(),
+                secret: true,
+            };
+            let mut events = oversized;
+            events.extend([
+                Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
+                Ok(Event::Paste("replacement-key".into())),
+                Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
+            ]);
+            let answer = extension_input_picker(
+                &mut shell,
+                &mut futures_util::stream::iter(events),
+                &request,
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer.as_deref(), Some("replacement-key"));
+            assert!(shell.pending_is_empty());
+        }
+    }
+
+    #[test]
+    fn secret_input_is_utf8_bounded_and_backspace_removes_one_character() {
+        let mut value = SecretInputBuffer::default();
+        value.extend_paste(&"x".repeat(MAX_SECRET_INPUT_BYTES - 1));
+        value.push('é');
+        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES - 1);
+        value.push('!');
+        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES);
+        value.backspace();
+        value.backspace();
+        value.extend_paste("é\r\n");
+        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES);
+        assert!(std::str::from_utf8(&value.0).unwrap().ends_with('é'));
+        value.backspace();
+        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES - 2);
+    }
 
     #[test]
     fn active_choice_is_focused_and_marked_without_reordering() {

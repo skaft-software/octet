@@ -22,8 +22,9 @@ use tokio::sync::{mpsc, watch};
 
 use crate::compaction::{
     build_handoff_message, build_turn_prefix_handoff_message, choose_first_kept_by_tokens,
-    finish_handoff, prepare_handoff, HandoffPreparation, DEFAULT_KEEP_RECENT_TOKENS,
-    SUMMARIZATION_SYSTEM_PROMPT, SUMMARY_OUTPUT_TOKENS, TURN_PREFIX_OUTPUT_TOKENS,
+    finish_handoff_bounded, prepare_handoff, HandoffPreparation, DEFAULT_KEEP_RECENT_TOKENS,
+    MAX_COMPACTION_HANDOFF_BYTES, SUMMARIZATION_SYSTEM_PROMPT, SUMMARY_OUTPUT_TOKENS,
+    TURN_PREFIX_OUTPUT_TOKENS,
 };
 use crate::context::{ContextBreakdown, ContextSnapshot, ContextTracker};
 use crate::delegation::{
@@ -154,6 +155,18 @@ pub enum AgentError {
     IncompleteResponse {
         /// Provider termination reason.
         stop_reason: String,
+    },
+    /// Provider-visible tool schemas exceeded the configured byte budget.
+    #[error(
+        "tool schema budget exceeded: {actual_bytes} bytes for {tool_count} definitions > {max_bytes} bytes; no tool definitions were sent"
+    )]
+    ToolSchemaBudgetExceeded {
+        /// Exact serialized JSON byte count for the full tool-definition array.
+        actual_bytes: usize,
+        /// Number of definitions that would have been sent.
+        tool_count: usize,
+        /// Configured hard byte limit.
+        max_bytes: usize,
     },
     /// The next billable request's conservative token reservation would cross
     /// the configured session token ceiling.
@@ -622,6 +635,7 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
         | AgentError::ExtensionMetadataNamespace(_)
         | AgentError::Delegation(_)
         | AgentError::Workspace(_)
+        | AgentError::ToolSchemaBudgetExceeded { .. }
         | AgentError::TokenLimit { .. }
         | AgentError::CostLimit { .. }
         | AgentError::CostUnavailable { .. }
@@ -789,6 +803,8 @@ pub struct Agent {
     reasoning: ReasoningConfig,
     reasoning_mode: ReasoningMode,
     cache_retention: CacheRetention,
+    /// Hard limit for the exact JSON schemas exposed to a provider request.
+    tool_schema_budget_bytes: usize,
     /// Optional provider route used for autonomous context summaries.
     /// Defaults to the active model when unset.
     compaction_model: Option<Model>,
@@ -1037,10 +1053,124 @@ impl Stream for Run<'_> {
 const MAX_PENDING_CONTROL_INPUTS: usize = 64;
 const MAX_PENDING_CONTROL_BYTES: usize = 64 * 1024 * 1024;
 
-struct ReservedInput {
-    input: UserInput,
+struct ControlReservation {
     _count: tokio::sync::OwnedSemaphorePermit,
     _bytes: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct ReservedPayload {
+    input: UserInput,
+    // None only for a prepared steering input not yet submitted.
+    reservation: Option<ControlReservation>,
+}
+
+enum ReservedInput {
+    Ready(ReservedPayload),
+    Retractable(PreparedSteering),
+}
+
+impl ReservedInput {
+    fn push_pending(self, pending: &mut Vec<Self>) {
+        // Recalled payloads release their permits immediately. Remove their
+        // empty queue slots before admitting more, so repeated editing cannot
+        // accumulate an unbounded backlog of receipt tombstones.
+        pending.retain(Self::is_pending);
+        if self.is_pending() {
+            pending.push(self);
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        match self {
+            Self::Ready(_) => true,
+            Self::Retractable(prepared) => prepared.receipt.payload.lock()
+                .unwrap_or_else(|error| error.into_inner()).is_some(),
+        }
+    }
+
+    fn claim(self) -> Option<ReservedPayload> {
+        match self {
+            Self::Ready(payload) => Some(payload),
+            Self::Retractable(prepared) => prepared.receipt.payload.lock()
+                .unwrap_or_else(|error| error.into_inner()).take(),
+        }
+    }
+}
+
+/// A single-use steering submission with a receipt available before sending.
+///
+/// Create with [`Self::new`], keep the receipt in the frontend, and move this
+/// value into [`RunControl::steer_retractable`]. Dropping the submission (including
+/// a cancelled send future) releases its input and any admission reservation.
+/// Unlike the receipt, this value cannot be cloned or submitted twice.
+pub struct PreparedSteering {
+    receipt: SteeringReceipt,
+    owner: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl PreparedSteering {
+    /// Prepares an input and its independently clonable recall receipt.
+    /// Preparation does not reserve run capacity or start asynchronous work.
+    pub fn new(input: impl Into<UserInput>) -> (Self, SteeringReceipt) {
+        let receipt = SteeringReceipt {
+            payload: Arc::new(Mutex::new(Some(ReservedPayload {
+                input: input.into(),
+                reservation: None,
+            }))),
+            recalled: CancellationToken::default(),
+        };
+        (Self { receipt: receipt.clone(), owner: None }, receipt)
+    }
+}
+
+impl Drop for PreparedSteering {
+    fn drop(&mut self) {
+        self.receipt.payload.lock()
+            .unwrap_or_else(|error| error.into_inner()).take();
+    }
+}
+
+/// Clone-safe authority to recall one exact prepared steering input.
+/// Identical text in different submissions has independent receipts.
+#[derive(Clone)]
+pub struct SteeringReceipt {
+    payload: Arc<Mutex<Option<ReservedPayload>>>,
+    recalled: CancellationToken,
+}
+
+impl std::fmt::Debug for SteeringReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SteeringReceipt")
+            .field("pending", &self.is_pending())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SteeringReceipt {
+    /// Whether this input is still eligible for recall. This is a snapshot;
+    /// only [`Self::try_retract`] establishes that recall actually won.
+    pub fn is_pending(&self) -> bool {
+        self.payload.lock().unwrap_or_else(|error| error.into_inner()).is_some()
+    }
+
+    /// Removes this input before its persistence claim, returning true only
+    /// for the caller that won recall. Success guarantees no session append or
+    /// delivery event for this input and releases any admission reservation.
+    ///
+    /// Returns false once delivery has claimed the input, even if persistence
+    /// is still in progress or later fails; also returns false after an earlier
+    /// recall or after the submission is dropped. Receipt clones share this
+    /// same one-shot authority. No lock is held during filesystem persistence.
+    pub fn try_retract(&self) -> bool {
+        let payload = self.payload.lock()
+            .unwrap_or_else(|error| error.into_inner()).take();
+        if payload.is_none() {
+            return false;
+        }
+        drop(payload);
+        self.recalled.cancel();
+        true
+    }
 }
 
 enum Control {
@@ -1110,7 +1240,15 @@ pub struct RunControl {
 
 impl RunControl {
     fn reserve_input(&self, input: UserInput) -> Result<ReservedInput, AgentError> {
-        let bytes = control_input_bytes(&input);
+        let reservation = self.reserve_input_capacity(&input)?;
+        Ok(ReservedInput::Ready(ReservedPayload {
+            input,
+            reservation: Some(reservation),
+        }))
+    }
+
+    fn reserve_input_capacity(&self, input: &UserInput) -> Result<ControlReservation, AgentError> {
+        let bytes = control_input_bytes(input);
         if bytes > MAX_PENDING_CONTROL_BYTES {
             return Err(AgentError::ControlQueueFull);
         }
@@ -1124,8 +1262,7 @@ impl RunControl {
             .clone()
             .try_acquire_many_owned(bytes as u32)
             .map_err(|_| AgentError::ControlQueueFull)?;
-        Ok(ReservedInput {
-            input,
+        Ok(ControlReservation {
             _count: count,
             _bytes: bytes,
         })
@@ -1185,6 +1322,70 @@ impl RunControl {
     /// the active run (persisted to the session when applied).
     pub async fn steer(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
         self.send(UnreservedControl::Steer(input.into())).await
+    }
+
+    /// Reserves steering capacity synchronously and returns a submission plus
+    /// its receipt before asynchronous sending starts. A frontend can retain
+    /// its draft on admission failure. Send through this control (or a clone);
+    /// dropping or recalling the prepared value immediately frees capacity.
+    pub fn prepare_steer(
+        &self,
+        input: impl Into<UserInput>,
+    ) -> Result<(PreparedSteering, SteeringReceipt), AgentError> {
+        let admission = self.admission.lock().unwrap_or_else(|error| error.into_inner());
+        if !*admission || self.tx.is_closed() {
+            return Err(AgentError::RunEnded);
+        }
+        let input = input.into();
+        let reservation = self.reserve_input_capacity(&input)?;
+        let (mut prepared, receipt) = PreparedSteering::new(input);
+        prepared.receipt.payload.lock().unwrap_or_else(|error| error.into_inner())
+            .as_mut().expect("new prepared input").reservation = Some(reservation);
+        prepared.owner = Some(self.pending_count.clone());
+        Ok((prepared, receipt))
+    }
+
+    /// Submits a prepared, retractable steering input at the next safe boundary.
+    ///
+    /// The receipt can recall local intent, an in-flight send, or accepted
+    /// pending input. A recalled submission completes successfully as a no-op;
+    /// `Ok(())` is admission, not durable delivery. Normal control budgets and
+    /// run-end admission fencing still apply. Cancelling this future before
+    /// admission drops its input and releases its reservations. Submitting an
+    /// input reserved by a different run returns [`AgentError::RunEnded`].
+    pub async fn steer_retractable(&self, prepared: PreparedSteering) -> Result<(), AgentError> {
+        if prepared.owner.as_ref().is_some_and(|owner| !Arc::ptr_eq(owner, &self.pending_count)) {
+            return Err(AgentError::RunEnded);
+        }
+        if !prepared.receipt.is_pending() {
+            return Ok(());
+        }
+        if self.tx.is_closed() || !*self.admission.lock()
+            .unwrap_or_else(|error| error.into_inner()) {
+            return Err(AgentError::RunEnded);
+        }
+        {
+            let mut payload = prepared.receipt.payload.lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(payload) = payload.as_mut() else {
+                return Ok(());
+            };
+            if payload.reservation.is_none() {
+                payload.reservation = Some(self.reserve_input_capacity(&payload.input)?);
+            }
+        }
+        let permit = tokio::select! {
+            biased;
+            _ = prepared.receipt.recalled.cancelled() => return Ok(()),
+            permit = self.tx.reserve() => permit.map_err(|_| AgentError::RunEnded)?,
+        };
+        let admission = self.admission.lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*admission {
+            return Err(AgentError::RunEnded);
+        }
+        permit.send(Control::Steer(ReservedInput::Retractable(prepared)));
+        Ok(())
     }
 
     /// Attempts to enqueue steering without allowing a producer to wait behind
@@ -1324,6 +1525,12 @@ const MAX_NETWORK_RETRIES: usize = 5;
 /// contributions. A section that would exceed it is truncated on a character
 /// boundary, so no registered tool can enlarge a system prompt without bound.
 const MAX_TOOL_PROMPT_SECTION_BYTES: usize = 8 * 1024;
+/// Hard byte budget for the exact JSON array of provider-visible tool schemas.
+///
+/// This is intentionally independent from the prose prompt-section cap: schema
+/// parameters can be arbitrarily large JSON values. A request over the budget
+/// is refused rather than dropping or rewriting any registered tool.
+pub const DEFAULT_TOOL_SCHEMA_BUDGET_BYTES: usize = 128 * 1024;
 /// Maximum number of tools rendered into that section, in registration order.
 const MAX_TOOL_PROMPT_SECTION_TOOLS: usize = 64;
 const TERMINAL_GATE_SYSTEM: &str = r#"You gate control flow for a coding agent. Output R when the candidate is a valid response to return to the user now: a substantiated completion, an answer or plan based on supplied text or general knowledge, a necessary clarification, an honest blocker or uncertainty, or a justified refusal. Output C when autonomous work should continue: promised next action, unsupported claim about current state, or requested repository or external action not substantiated by relevant successful action evidence. Do not treat an irrelevant or failed action as evidence. Respect explicit requests not to use tools or to guess. Output exactly R or C."#;
@@ -4159,6 +4366,72 @@ fn responses_replay_media_adjustment(replay: &[ResponsesReplayItem]) -> (u64, u6
     (inline_payload_bytes, semantic_tokens)
 }
 
+fn tool_schema_bytes(tools: &[ToolDef]) -> usize {
+    let mut bytes = CountingWriter::default();
+    // ToolDef is internally constructed from serializable strings and JSON
+    // values, so serialization failure would violate the provider-request
+    // invariant rather than being a recoverable user boundary.
+    serde_json::to_writer(&mut bytes, tools).expect("ToolDef serializes");
+    usize::try_from(bytes.0).unwrap_or(usize::MAX)
+}
+
+fn require_tool_schema_budget(tools: &[ToolDef], max_bytes: usize) -> Result<(), AgentError> {
+    // A zero budget intentionally permits `[]`: it advertises no callable
+    // schema, even though JSON's empty-array delimiters occupy two wire bytes.
+    if tools.is_empty() {
+        return Ok(());
+    }
+    let actual_bytes = tool_schema_bytes(tools);
+    if actual_bytes > max_bytes {
+        return Err(AgentError::ToolSchemaBudgetExceeded {
+            actual_bytes,
+            tool_count: tools.len(),
+            max_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn validate_compaction_summary_part(summary: &str) -> Result<(), AgentError> {
+    if summary.trim().is_empty() {
+        return Err(AgentError::IncompleteResponse {
+            stop_reason: "compaction summary was empty or whitespace-only".to_owned(),
+        });
+    }
+    if summary.len() > MAX_COMPACTION_HANDOFF_BYTES {
+        return Err(AgentError::IncompleteResponse {
+            stop_reason: format!(
+                "compaction summary exceeded the {MAX_COMPACTION_HANDOFF_BYTES}-byte handoff limit"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn append_compaction_turn_prefix(
+    summary: &mut String,
+    prefix_summary: &str,
+) -> Result<(), AgentError> {
+    validate_compaction_summary_part(prefix_summary)?;
+    summary.push_str("\n\n---\n\n**Turn Context (split turn):**\n\n");
+    summary.push_str(prefix_summary);
+    Ok(())
+}
+
+fn finish_validated_compaction_handoff(
+    summary: String,
+    details: &crate::compaction::CompactionDetails,
+) -> Result<String, AgentError> {
+    validate_compaction_summary_part(&summary)?;
+    finish_handoff_bounded(summary, details, MAX_COMPACTION_HANDOFF_BYTES).ok_or_else(|| {
+        AgentError::IncompleteResponse {
+            stop_reason: format!(
+                "compaction summary exceeded the {MAX_COMPACTION_HANDOFF_BYTES}-byte handoff limit"
+            ),
+        }
+    })
+}
+
 fn estimate_request_tokens(system: &str, messages: &[Message], tools: &[ToolDef]) -> u64 {
     let mut bytes = CountingWriter::default();
     if serde_json::to_writer(&mut bytes, &(system, messages, tools)).is_err() {
@@ -5056,12 +5329,13 @@ fn deliver_control_inputs(
     observation: &ContextObservation<'_>,
 ) -> ControlDelivery {
     let mut delivered = Vec::with_capacity(queued.len());
-    for ReservedInput {
-        input,
-        _count,
-        _bytes,
-    } in queued
-    {
+    for queued in queued {
+        // Linearize recall against delivery BEFORE any evidence or durable
+        // write. The payload and permits leave receipt ownership together;
+        // recall cannot succeed after this claim, including during fsync.
+        let Some(ReservedPayload { input, reservation }) = queued.claim() else {
+            continue;
+        };
         let summary = input.text_summary();
         if let Some(evidence) = terminal_gate_evidence {
             evidence.record_request(&summary);
@@ -5078,7 +5352,7 @@ fn deliver_control_inputs(
         delivered.push(summary);
         // Never free admission capacity merely because ingress was drained.
         // Both permits remain live through the successful durable append.
-        drop((_count, _bytes));
+        drop(reservation);
     }
     if !delivered.is_empty() {
         if let Err(error) = observation.observe(session) {
@@ -5796,15 +6070,19 @@ impl CompactionContext<'_> {
             summary_guard.finish(false);
             return Ok(None);
         }
-        let text = assistant_text(&response);
-        if text.is_some() {
-            CompletionAttributes::usage(&response.usage)
-                .with_uncertainty(self.session.has_uncertain_usage())
-                .record(&summary_request_guard.span);
-        }
+        let text = assistant_text(&response).ok_or_else(|| AgentError::IncompleteResponse {
+            stop_reason: "compaction summary was empty or whitespace-only".to_owned(),
+        })?;
+        // This is shared by autonomous compaction and explicit callers such as
+        // `/compact`; reject bad provider output before either path can merge
+        // it into a durable handoff.
+        validate_compaction_summary_part(&text)?;
+        CompletionAttributes::usage(&response.usage)
+            .with_uncertainty(self.session.has_uncertain_usage())
+            .record(&summary_request_guard.span);
         summary_request_guard.finish(false);
         summary_guard.finish(false);
-        Ok(text)
+        Ok(Some(text))
     }
 
     /// Generate a Pi-compatible structured handoff, including a dedicated
@@ -5829,6 +6107,7 @@ impl CompactionContext<'_> {
         let Some(mut summary) = history else {
             return Ok(None);
         };
+        validate_compaction_summary_part(&summary)?;
 
         if !preparation.turn_prefix_messages.is_empty() {
             let Some(prefix_summary) = self
@@ -5843,8 +6122,7 @@ impl CompactionContext<'_> {
             else {
                 return Ok(None);
             };
-            summary.push_str("\n\n---\n\n**Turn Context (split turn):**\n\n");
-            summary.push_str(&prefix_summary);
+            append_compaction_turn_prefix(&mut summary, &prefix_summary)?;
         }
 
         Ok(Some(summary))
@@ -6114,7 +6392,9 @@ impl CompactionContext<'_> {
                 });
             }
             let summary = match self.summarize(&preparation).await? {
-                Some(summary) => finish_handoff(summary, &preparation.details),
+                Some(summary) => {
+                    finish_validated_compaction_handoff(summary, &preparation.details)?
+                }
                 None => {
                     return Err(AgentError::IncompleteResponse {
                         stop_reason: "compaction summary did not finish normally".to_owned(),
@@ -6685,6 +6965,7 @@ impl Agent {
             reasoning: config.reasoning,
             reasoning_mode: config.reasoning_mode,
             cache_retention: config.cache_retention,
+            tool_schema_budget_bytes: DEFAULT_TOOL_SCHEMA_BUDGET_BYTES,
             compaction_model: None,
             auto_compaction_mode: AgentCompactionMode::Local,
             compaction_threshold_fraction: 1.0,
@@ -6762,10 +7043,12 @@ impl Agent {
                 durable_responses_options(&self.session, &self.model, &self.system, self.service_tier)?
             }
         };
+        let tools = self.extensions.tool_definitions();
+        require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
         let request = Request {
             system: (!self.system.is_empty()).then(|| self.system.clone()),
             messages: self.session.context()?,
-            tools: self.extensions.tool_definitions(),
+            tools,
             tool_choice: ToolChoice::Auto,
             max_output_tokens: Some(self.max_output_tokens),
             temperature: None,
@@ -6970,6 +7253,7 @@ impl Agent {
             max_session_cost_microdollars: self.max_session_cost_microdollars,
             provider_retries_enabled: self.provider_retries_enabled,
             max_network_wait: self.max_network_wait,
+            tool_schema_budget_bytes: self.tool_schema_budget_bytes,
         }
     }
 
@@ -7106,6 +7390,17 @@ impl Agent {
     #[cfg(test)]
     pub(crate) fn max_network_wait(&self) -> Option<Duration> {
         self.max_network_wait
+    }
+
+    /// Sets the maximum serialized JSON bytes for provider-visible tool schemas.
+    ///
+    /// The default is [`DEFAULT_TOOL_SCHEMA_BUDGET_BYTES`]. A request that
+    /// would exceed this hard limit is refused; octet never truncates, drops,
+    /// or rewrites tool definitions to make it fit. Zero permits only an empty
+    /// tool list.
+    pub fn set_tool_schema_budget_bytes(&mut self, max_bytes: usize) {
+        self.tool_schema_budget_bytes = max_bytes;
+        self.sync_delegation_runtime_settings();
     }
 
     /// Configure the model used for autonomous context summaries. Passing
@@ -7377,10 +7672,9 @@ impl Agent {
                 on_event,
             )
             .await?;
-        Ok(crate::compaction::finish_branch_handoff(
-            summary,
-            &preparation.details,
-        ))
+        let handoff = crate::compaction::finish_branch_handoff(summary, &preparation.details);
+        validate_compaction_summary_part(&handoff)?;
+        Ok(handoff)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7485,6 +7779,7 @@ impl Agent {
         let active_system = self.system.clone();
         let instructions = (!active_system.is_empty()).then_some(active_system.as_str());
         let tools = self.extensions.tool_definitions();
+        require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
         if replay.is_empty() {
             return Err(AgentError::InvalidCompactionPolicy(
                 "native Responses compaction requires non-empty replay".to_owned(),
@@ -8292,6 +8587,16 @@ impl Agent {
             .take()
             .is_some_and(|lifecycle| lifecycle.dropped.load(Ordering::Acquire));
         self.recover_pending_tools(previous_run_was_dropped).await?;
+        // This snapshot is both the preflight boundary and the first provider
+        // request's frozen tool surface. Refusing it before the prompt append
+        // leaves a frontend free to revise and retry the same draft.
+        let (initial_tool_revision, initial_tools) = self.extensions.tool_snapshot();
+        let initial_tool_defs: Vec<ToolDef> = if tools_enabled {
+            initial_tools.iter().map(|tool| tool.definition()).collect()
+        } else {
+            Vec::new()
+        };
+        require_tool_schema_budget(&initial_tool_defs, self.tool_schema_budget_bytes)?;
         let completion_policy = self.completion_policy;
         let mut terminal_gate_evidence =
             TerminalGateEvidence::for_run(completion_policy, &self.session, &input)?;
@@ -8348,12 +8653,6 @@ impl Agent {
         let system = self.model_visible_system(tools_enabled);
         let sandbox = self.sandbox.clone();
         let extension_host = self.extensions.clone();
-        let (initial_tool_revision, initial_tools) = extension_host.tool_snapshot();
-        let initial_tool_defs: Vec<ToolDef> = if tools_enabled {
-            initial_tools.iter().map(|tool| tool.definition()).collect()
-        } else {
-            Vec::new()
-        };
         let initial_context =
             observe_context_tracker(&context, &self.session, &model, &system, &initial_tool_defs)?;
         let initial_capacity =
@@ -8382,6 +8681,7 @@ impl Agent {
         let compaction_reserve_tokens = self.compaction_reserve_tokens();
         let max_session_tokens = self.max_session_tokens;
         let max_session_cost_microdollars = self.max_session_cost_microdollars;
+        let tool_schema_budget_bytes = self.tool_schema_budget_bytes;
         let auto_compaction_mode = self.auto_compaction_mode;
         // The caller-selected provider service tier rides on every Responses
         // request this run builds; the builder re-checks the route capability.
@@ -8454,12 +8754,9 @@ impl Agent {
             let run_guard = telemetry.begin_typed::<RunSpan>(EmptyAttributes {});
             let run_context = run_guard.context();
 
-            let (mut tool_revision, tools) = extension_host.tool_snapshot();
-            let mut tool_defs: Vec<ToolDef> = if tools_enabled {
-                tools.iter().map(|tool| tool.definition()).collect()
-            } else {
-                Vec::new()
-            };
+            let mut tool_revision = initial_tool_revision;
+            let tools = initial_tools;
+            let mut tool_defs = initial_tool_defs;
             let mut tool_map: HashMap<String, Arc<dyn Tool>> =
                 HashMap::with_capacity(if tools_enabled { tools.len() } else { 0 });
             if tools_enabled {
@@ -8638,10 +8935,10 @@ impl Agent {
                             _ = abort.wait() => break 'run FinishReason::Aborted,
                             _ = wait_network_deadline(network_deadline) => break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown }),
                             control = control_rx.recv(), if control_open => match control {
-                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
                                 Some(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
+                                    input.push_pending(&mut pending_steer);
                                     answer_only = true;
                                     finish_pending = true;
                                     context_capacity.invalidate();
@@ -8661,10 +8958,10 @@ impl Agent {
                 // ── Drain control at the turn boundary ─────────────────────
                 while control_open {
                     match control_rx.try_recv() {
-                        Ok(Control::Steer(input)) => pending_steer.push(input),
+                        Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                         Ok(Control::FollowUp(input)) => followups.push_back(input),
                         Ok(Control::FinishNow(input)) => {
-                            pending_steer.push(input);
+                            input.push_pending(&mut pending_steer);
                             answer_only = true;
                             finish_pending = true;
                             context_capacity.invalidate();
@@ -8681,6 +8978,7 @@ impl Agent {
                 }
 
                 // ── Steering enters here, at the model-turn boundary ───────
+                pending_steer.retain(ReservedInput::is_pending);
                 if !pending_steer.is_empty() {
                     let queued = if std::mem::take(&mut finish_pending) {
                         std::mem::take(&mut pending_steer)
@@ -8740,10 +9038,17 @@ impl Agent {
                 if current_revision != tool_revision {
                     tool_revision = current_revision;
                     if tools_enabled && !answer_only {
-                        tool_defs = current_tools
+                        let next_tool_defs: Vec<ToolDef> = current_tools
                             .iter()
                             .map(|tool| tool.definition())
                             .collect();
+                        if let Err(error) = require_tool_schema_budget(
+                            &next_tool_defs,
+                            tool_schema_budget_bytes,
+                        ) {
+                            break 'run FinishReason::Failed(error);
+                        }
+                        tool_defs = next_tool_defs;
                         tool_map.clear();
                         tool_map.reserve(current_tools.len());
                         for tool in &current_tools {
@@ -8808,10 +9113,10 @@ impl Agent {
                             biased;
                             _ = abort.wait() => break Err(AgentError::Cancelled),
                             control = control_rx.recv(), if control_open => match control {
-                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
                                 Some(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
+                                    input.push_pending(&mut pending_steer);
                                     answer_only = true;
                                     finish_pending = true;
                                 }
@@ -8843,6 +9148,7 @@ impl Agent {
                         };
                     }
                 };
+                pending_steer.retain(ReservedInput::is_pending);
                 if !pending_steer.is_empty() {
                     context_capacity.invalidate();
                     continue 'run;
@@ -9024,10 +9330,10 @@ impl Agent {
                                     biased;
                                     _ = abort.wait() => break Err(AgentError::Cancelled),
                             control = control_rx.recv(), if control_open => match control {
-                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
                                 Some(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
+                                    input.push_pending(&mut pending_steer);
                                     answer_only = true;
                                     finish_pending = true;
                                 }
@@ -9128,10 +9434,10 @@ impl Agent {
                             }
                             break Err(FinishReason::Aborted);
                         }
-                        Next::Ctl(Some(Control::Steer(input))) => pending_steer.push(input),
+                        Next::Ctl(Some(Control::Steer(input))) => input.push_pending(&mut pending_steer),
                         Next::Ctl(Some(Control::FollowUp(input))) => followups.push_back(input),
                         Next::Ctl(Some(Control::FinishNow(input))) => {
-                            pending_steer.push(input);
+                            input.push_pending(&mut pending_steer);
                             answer_only = true;
                             finish_pending = true;
                             context_capacity.invalidate();
@@ -9206,10 +9512,10 @@ impl Agent {
                                             biased;
                                             _ = abort.wait() => break Err(AgentError::Cancelled),
                             control = control_rx.recv(), if control_open => match control {
-                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
                                 Some(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
+                                    input.push_pending(&mut pending_steer);
                                     answer_only = true;
                                     finish_pending = true;
                                 }
@@ -9551,10 +9857,10 @@ impl Agent {
                     let mut admission = control_admission.lock().unwrap_or_else(|error| error.into_inner());
                     while control_open {
                         match control_rx.try_recv() {
-                            Ok(Control::Steer(input)) => pending_steer.push(input),
+                            Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                             Ok(Control::FollowUp(input)) => followups.push_back(input),
                             Ok(Control::FinishNow(input)) => {
-                                pending_steer.push(input);
+                                input.push_pending(&mut pending_steer);
                                 answer_only = true;
                                 finish_pending = true;
                                 context_capacity.invalidate();
@@ -9569,6 +9875,7 @@ impl Agent {
                             Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
                         }
                     }
+                    pending_steer.retain(ReservedInput::is_pending);
                     if !gated_candidate && calls.is_empty() && normal_end && !needs_continuation
                         && pending_steer.is_empty() && followups.is_empty() {
                         *admission = false;
@@ -9615,7 +9922,8 @@ impl Agent {
                     }
                     // Steering and follow-ups make this a normal intermediate
                     // turn, so commit it without spending a gate request.
-                    if !pending_steer.is_empty() {
+                    pending_steer.retain(ReservedInput::is_pending);
+                if !pending_steer.is_empty() {
                         if gated_candidate {
                             let session_cost = priced_session_subtotal(session, &model);
                             let ev = AgentEvent::TurnFinished {
@@ -9716,10 +10024,10 @@ impl Agent {
                                     biased;
                                     _ = abort.wait() => break Err(AgentError::Cancelled),
                                     control = control_rx.recv(), if control_open => match control {
-                                        Some(Control::Steer(input)) => pending_steer.push(input),
+                                        Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                         Some(Control::FollowUp(input)) => followups.push_back(input),
                                         Some(Control::FinishNow(input)) => {
-                                            pending_steer.push(input);
+                                            input.push_pending(&mut pending_steer);
                                             answer_only = true;
                                             finish_pending = true;
                                         }
@@ -9762,10 +10070,10 @@ impl Agent {
                             let mut admission = control_admission.lock().unwrap_or_else(|error| error.into_inner());
                             while control_open {
                                 match control_rx.try_recv() {
-                                    Ok(Control::Steer(input)) => pending_steer.push(input),
+                                    Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                     Ok(Control::FollowUp(input)) => followups.push_back(input),
                                     Ok(Control::FinishNow(input)) => {
-                                        pending_steer.push(input);
+                                        input.push_pending(&mut pending_steer);
                                         answer_only = true;
                                         finish_pending = true;
                                         context_capacity.invalidate();
@@ -9777,6 +10085,7 @@ impl Agent {
                                     Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
                                 }
                             }
+                            pending_steer.retain(ReservedInput::is_pending);
                             if return_candidate && pending_steer.is_empty() && followups.is_empty() {
                                 *admission = false;
                             }
@@ -9787,7 +10096,8 @@ impl Agent {
                         if decision.is_ok() {
                             // Steering and follow-ups make this a normal intermediate
                             // turn, so commit it without spending a gate request.
-                            if !pending_steer.is_empty() {
+                            pending_steer.retain(ReservedInput::is_pending);
+                if !pending_steer.is_empty() {
                                 if gated_candidate && !return_candidate {
                                     let session_cost = priced_session_subtotal(session, &model);
                                     let ev = AgentEvent::TurnFinished {
@@ -10035,10 +10345,10 @@ impl Agent {
                                         abort_observed = true;
                                     }
                                     control = control_rx.recv(), if control_open => match control {
-                                        Some(Control::Steer(input)) => pending_steer.push(input),
+                                        Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                         Some(Control::FollowUp(input)) => followups.push_back(input),
                                         Some(Control::FinishNow(input)) => {
-                                            pending_steer.push(input);
+                                            input.push_pending(&mut pending_steer);
                                             answer_only = true;
                                             finish_pending = true;
                                             context_capacity.invalidate();
@@ -10334,10 +10644,10 @@ impl Agent {
                                         _ = abort.wait() => break None,
                                         r = &mut operation => break Some(r),
                                         c = control_rx.recv(), if control_open => match c {
-                                            Some(Control::Steer(input)) => pending_steer.push(input),
+                                            Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                             Some(Control::FollowUp(input)) => followups.push_back(input),
                                             Some(Control::FinishNow(input)) => {
-                                                pending_steer.push(input);
+                                                input.push_pending(&mut pending_steer);
                                                 answer_only = true;
                                                 finish_pending = true;
                                                 context_capacity.invalidate();
@@ -11025,6 +11335,270 @@ mod tests {
     }
 
     #[test]
+    fn compaction_summary_parts_reject_empty_whitespace_and_oversize() {
+        for invalid in [
+            "".to_owned(),
+            " \n\t ".to_owned(),
+            "x".repeat(MAX_COMPACTION_HANDOFF_BYTES + 1),
+        ] {
+            assert!(matches!(
+                validate_compaction_summary_part(&invalid),
+                Err(AgentError::IncompleteResponse { .. })
+            ));
+        }
+        validate_compaction_summary_part("## Goal\ncontinue")
+            .expect("normal summaries remain valid");
+
+        let mut main = "## Goal\ncontinue".to_owned();
+        let original = main.clone();
+        assert!(matches!(
+            append_compaction_turn_prefix(&mut main, " \n\t "),
+            Err(AgentError::IncompleteResponse { .. })
+        ));
+        assert_eq!(main, original, "an invalid split prefix is never merged");
+    }
+
+    #[test]
+    fn glm_sized_default_threshold_does_not_compact_a_120k_request() {
+        let context_window = 1_310_720u64;
+        let estimate = 120_000u64;
+        let reserve = DEFAULT_COMPACTION_RESERVE_TOKENS;
+        let over_capacity = estimate > context_window.saturating_sub(reserve);
+        assert!(!over_capacity, "this case is not Overflow recovery");
+        for (fraction, expected_threshold) in [(1.0, false), (0.09, true)] {
+            let threshold = ((context_window as f64) * fraction).floor() as u64;
+            let over_threshold = estimate.saturating_add(reserve) > threshold;
+            assert_eq!(over_threshold, expected_threshold, "fraction={fraction}");
+        }
+    }
+
+    struct CompactionSummaryScript {
+        responses: Mutex<VecDeque<String>>,
+        requests: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for CompactionSummaryScript {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            request: Request,
+            _: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            assert!(
+                request.tools.is_empty(),
+                "compaction summaries are tool-free"
+            );
+            self.requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted response");
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::Started { response_id: None }),
+                Ok(StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage {
+                        content: vec![AssistantPart::Text(text)],
+                        model: model.id,
+                        protocol: model.protocol,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    cost: None,
+                    response_id: None,
+                    responses_output: None,
+                    deferred: None,
+                    diagnostics: Vec::new(),
+                })),
+            ])))
+        }
+    }
+
+    fn compaction_test_agent(
+        directory: &std::path::Path,
+        script: Arc<CompactionSummaryScript>,
+    ) -> Agent {
+        let mut session = Session::create(directory.join("compaction-guard.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("original user context".into())],
+            })))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("original assistant context".into())],
+                model: octet_ai::ModelId("test".into()),
+                protocol: Protocol::OpenAiChat,
+            })))
+            .unwrap();
+        let mut agent = active_tool_test_agent(directory, session, ExtensionHost::new());
+        agent
+            .client
+            .register_host_stream_transport(agent.model.endpoint.id.clone(), script);
+        // The tiny threshold forces the actual autonomous compaction path while
+        // retaining enough context budget for the normal successful case.
+        agent
+            .set_compaction_token_policy(true, 0.000_01, 1)
+            .unwrap();
+        agent
+    }
+
+    #[tokio::test]
+    async fn provider_compaction_refuses_invalid_summary_without_discarding_context() {
+        for invalid in [
+            "".to_owned(),
+            " \n\t ".to_owned(),
+            "x".repeat(MAX_COMPACTION_HANDOFF_BYTES + 1),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let script = Arc::new(CompactionSummaryScript {
+                responses: Mutex::new(VecDeque::from([invalid])),
+                requests: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut agent = compaction_test_agent(directory.path(), Arc::clone(&script));
+            let error = agent.complete("new task").await.unwrap_err();
+            assert!(matches!(error, AgentError::IncompleteResponse { .. }));
+            assert_eq!(script.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(
+                agent
+                    .session()
+                    .entries()
+                    .iter()
+                    .all(|entry| !matches!(entry.value, EntryValue::Compaction { .. }))
+            );
+            let retained = format!("{:?}", agent.session().context().unwrap());
+            assert!(retained.contains("original user context"));
+            assert!(retained.contains("original assistant context"));
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let script = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from([
+                "## Goal\nvalid checkpoint".into(),
+                "normal answer".into(),
+            ])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = compaction_test_agent(directory.path(), Arc::clone(&script));
+        let output = agent.complete("new task").await.unwrap();
+        assert!(matches!(output.reason, FinishReason::Completed));
+        assert_eq!(
+            script.requests.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one summary request then one normal turn"
+        );
+        assert!(format!("{:?}", agent.session().context().unwrap()).contains("normal answer"));
+        assert!(
+            agent
+                .session()
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.value, EntryValue::Compaction { .. }))
+        );
+    }
+
+    struct ToolBudgetTransport {
+        calls: std::sync::atomic::AtomicUsize,
+        expected_tool_count: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for ToolBudgetTransport {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            request: Request,
+            _: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            assert_eq!(request.tools.len(), self.expected_tool_count);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::Started { response_id: None }),
+                Ok(StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage {
+                        content: vec![AssistantPart::Text("accepted".into())],
+                        model: model.id,
+                        protocol: model.protocol,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    cost: None,
+                    response_id: None,
+                    responses_output: None,
+                    deferred: None,
+                    diagnostics: Vec::new(),
+                })),
+            ])))
+        }
+    }
+
+    #[test]
+    fn tool_schema_budget_counts_exact_json_and_refuses_without_tool_rewriting() {
+        require_tool_schema_budget(&[], 0).expect("zero budget permits no provider tools");
+        let tools = vec![ToolDef {
+            name: "schema-tool".into(),
+            description: "private description must not enter the diagnostic".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"payload": {"type": "string"}}}),
+            constrained_sampling: None,
+        }];
+        let bytes = tool_schema_bytes(&tools);
+        require_tool_schema_budget(&tools, bytes).expect("exactly at budget is accepted");
+        let error = require_tool_schema_budget(&tools, bytes - 1).unwrap_err();
+        assert!(matches!(
+            &error,
+            AgentError::ToolSchemaBudgetExceeded {
+                actual_bytes,
+                tool_count: 1,
+                max_bytes,
+            } if *actual_bytes == bytes && *max_bytes == bytes - 1
+        ));
+        let diagnostic = error.to_string();
+        assert!(diagnostic.len() < 256);
+        assert!(!diagnostic.contains("private description"));
+        assert_eq!(tools[0].name, "schema-tool", "refusal never rewrites tools");
+    }
+
+    #[tokio::test]
+    async fn tool_schema_budget_preflight_refuses_without_persisting_the_prompt_or_calling_provider()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let extensions = active_tool_test_extensions(&["schema"]);
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            Session::create(directory.path().join("schema-budget.jsonl")).unwrap(),
+            extensions,
+        );
+        let tool_count = agent.registered_tool_definitions().len();
+        let budget = tool_schema_bytes(&agent.registered_tool_definitions());
+        let transport = Arc::new(ToolBudgetTransport {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            expected_tool_count: tool_count,
+        });
+        agent.client.register_host_stream_transport(
+            agent.model.endpoint.id.clone(),
+            transport.clone(),
+        );
+
+        agent.set_tool_schema_budget_bytes(budget - 1);
+        assert!(matches!(
+            agent.prompt("retryable draft").await,
+            Err(AgentError::ToolSchemaBudgetExceeded { .. })
+        ));
+        assert!(agent.session().entries().is_empty());
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+
+        agent.set_tool_schema_budget_bytes(budget);
+        assert!(matches!(
+            agent.complete("accepted draft").await.unwrap().reason,
+            FinishReason::Completed
+        ));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn terminal_gate_receipts_retain_first_and_last_twelve_online() {
         for total in [0usize, 24, 25, 10_000] {
             let mut evidence = TerminalGateEvidence::default();
@@ -11383,6 +11957,59 @@ mod tests {
             } else {
                 assert_eq!(policy, CompletionPolicy::Natural);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn steering_receipt_claim_linearizes_before_persistence() {
+        let (control, _rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        let (prepared, receipt) = control
+            .prepare_steer("claimed but not yet persisted")
+            .unwrap();
+        let payload = ReservedInput::Retractable(prepared).claim().unwrap();
+        // The durable append has not happened, but delivery already owns this
+        // exact payload. Neither receipt clone may recall it now.
+        assert!(!receipt.is_pending());
+        assert!(!receipt.clone().try_retract());
+        assert!(!receipt.try_retract());
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS - 1
+        );
+        drop(payload);
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+    }
+
+    #[tokio::test]
+    async fn steering_receipt_racing_recall_and_claim_have_exactly_one_winner() {
+        let (control, _rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        for _ in 0..64 {
+            let (prepared, receipt) = control
+                .prepare_steer("same text, separate authority")
+                .unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                let recalled = scope.spawn(|| {
+                    barrier.wait();
+                    receipt.try_retract()
+                });
+                barrier.wait();
+                let payload = ReservedInput::Retractable(prepared).claim();
+                assert_ne!(payload.is_some(), recalled.join().unwrap());
+                drop(payload);
+            });
+            assert!(!receipt.is_pending());
+            assert_eq!(
+                control.pending_count.available_permits(),
+                MAX_PENDING_CONTROL_INPUTS
+            );
+            assert_eq!(
+                control.pending_bytes.available_permits(),
+                MAX_PENDING_CONTROL_BYTES
+            );
         }
     }
 

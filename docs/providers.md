@@ -110,10 +110,53 @@ persisting synthesized fields. Custom normalized caches advance to version 9 so
 old sparse results cannot hide self-descriptions. These are deterministic source
 contracts, not evidence that any public provider currently emits the extension.
 
+## First-run setup (unreleased)
+
+When an interactive launch has no available models and no explicit model
+selection, the setup menu offers, in order:
+
+1. **Add an API key** — choose a supported built-in provider, paste into a masked
+   input, and review before saving. This is a dedicated secret input, not the
+   conversation composer; no environment variable is required.
+2. **Sign in with ChatGPT / other supported OAuth subscriptions** — choose
+   **ChatGPT (OpenAI Codex)** or **GitHub Copilot** and complete the provider's
+   device authorization. No other subscription login is implied.
+3. **Local/self-hosted models** — choose LM Studio or an explicit
+   OpenAI-compatible endpoint, then discover/select a model and review the
+   custom registry change.
+4. **Continue without a provider** — leave setup without saving provider data.
+
+Existing available models and explicit model selections are not replaced by this
+menu. Print/RPC do not open it. Subscription sign-in requires an online launch;
+`--offline` is not a local-inference guarantee. After saving a credential, the
+catalog is refreshed and model selection uses the ordinary picker. Saving is
+not a successful inference check, and a discovery failure can leave the saved
+credential in place for retry.
+
+Built-in API keys are saved in
+`~/.octet/credentials/api-keys/<provider>.json`, with owner-private directories
+(`0700`) and files (`0600`), atomic publication, and explicit consent before
+replacement. Environment credentials take precedence over saved keys. Native
+provider routes remain native; saving a key does not turn Anthropic, Gemini, or
+OpenAI into a custom OpenAI-compatible endpoint.
+
+A saved API key must remain recoverable to authenticate provider requests:
+owner-private storage is **not hashing or encryption at rest**. Keep the store
+out of repositories, support reports, and shared backups. Keys are not copied to
+prompts, configuration, model metadata, or setup receipts. AWS/Bedrock, Azure,
+Vertex, and Cloudflare require additional account, deployment, region, or
+endpoint configuration and are not offered as one-field API-key setup; use their
+documented configuration below.
+
+See [Getting started](getting-started.md#3-choose-one-provider-lane) and
+[CLI alternatives](cli.md#provider-setup). This describes the source candidate,
+not a claim that published 0.7.6 includes this menu.
+
 ## Cloud setup
 
-Set the credential variables for the chosen row, then run `octet --model ID`.
-Do not put credentials into prompts or repository configuration.
+Alternatively, set the credential variables for the chosen row, then run
+`octet --model ID`. Do not put credentials into prompts or repository
+configuration.
 
 | Provider | Credential and routing setup | Example model ID |
 | --- | --- | --- |
@@ -258,6 +301,17 @@ plan. Missing or unusable metadata falls back conservatively. If live inventory
 omits Astra, no Codex Astra route is injected; when present, select
 `codex/gpt-6-astra` independently of a direct OpenAI preset.
 
+A read-only authenticated inventory check on 2026-09-23, using octet's Codex
+compatibility version `0.153.2` and the locally installed Codex CLI version
+`0.154.0`, returned **`gpt-5.6-sol`** and **`gpt-5.6-luna`**, both listed and
+API-supported. Neither inventory returned `gpt-6-sol` or `gpt-6-luna`; octet does
+not rename the observed IDs or assume those names are aliases. The existing
+OAuth discovery/registration path supports the returned Sol/Luna IDs. This is
+account-scoped inventory evidence, not a successful inference check or a claim
+about other accounts. The check did not establish output-token limits or pricing;
+existing conservative output budgeting and separately sourced prices remain
+unchanged. New slugs require fresh account inventory, not a static alias.
+
 For advertised Ultra/V2 support, first review and activate the subagents source
 inside an appropriate OS isolation boundary:
 
@@ -295,9 +349,10 @@ Enterprise authorities and environment endpoint overrides are not supported.
 
 Subsequent credential resolution rejects local logout/replacement and rejected
 inference origins, but logout does not remotely revoke already-running requests.
-The TUI `/login` and `/logout` commands are not yet wired to Copilot; use the CLI
-flags and restart existing catalog owners after account changes. NDJSON does not
-gain login/logout commands or OAuth payload fields. Rust embedders retain the
+First-run setup offers GitHub Copilot device sign-in. The TUI `/login` and
+`/logout` slash commands are not yet wired to Copilot; use the CLI flags for
+later account changes and restart existing catalog owners afterward. NDJSON
+does not gain login/logout commands or OAuth payload fields. Rust embedders retain the
 [credential-safe SDK seam](sdk.md#host-owned-github-copilot).
 
 This is **source integration, not build/live/native qualification**. See the
@@ -317,11 +372,11 @@ work, not implied by these codec repairs.
 
 ## Local and custom endpoints
 
-With no configured model, interactive setup offers **LM Studio** or an
-**OpenAI-compatible endpoint**. Choose one endpoint, an optional credential
-source, a discovered/manual model ID, and review before saving. No localhost or
-network scan occurs. Compatible servers include llama.cpp, vLLM, SGLang, LM Studio,
-and compatible gateways.
+Choose **Local/self-hosted models** in [first-run setup](#first-run-setup-unreleased)
+for **LM Studio** or an **OpenAI-compatible endpoint**. Choose one endpoint, an
+optional credential source, a discovered/manual model ID, and review before
+saving. No localhost or network scan occurs. Compatible servers include
+llama.cpp, vLLM, SGLang, LM Studio, and compatible gateways.
 
 For scripts, review before adding `--yes`:
 
@@ -489,6 +544,24 @@ server uses its default; always-on models also receive no control parameter.
 Unknown metadata and a lack of displayed reasoning do **not** establish that the
 server has disabled thinking. Reasoning can increase latency and token usage;
 use `--reasoning off` when the model supports it to opt out.
+
+The OpenRouter route decodes that provider's own per-model `reasoning` object
+(`mandatory`, `default_enabled`, `supported_efforts`, `default_effort`) rather
+than inferring optionality from the mere presence of a `reasoning_effort`
+parameter. Mandatory models offer only their advertised efforts (for GLM 5.3,
+`max/high/low`, default `max`), or only `on` if no efforts are published. A saved
+unsupported `off` is normalized to an advertised choice with a diagnostic.
+Local summaries use that same contract: Off only when supported, otherwise the
+advertised default. A parameter list without an exact contract offers only the
+endpoint default, never a guessed `none/minimal/low/medium/high` range.
+
+For the OpenRouter profile, `off` **omits** the reasoning object rather than
+sending `effort: "none"` or `enabled: false`; the endpoint may therefore still
+reason according to its default. Enabled efforts are sent verbatim; an enabled
+boolean-only contract sends `enabled: true`. Other providers retain their
+existing explicit-disable behavior. This is a wire-compatibility policy, not a
+guarantee that selecting Off disables reasoning on OpenRouter.
+See [reasoning selection and thinking](provider-thinking.md).
 
 ## Protocols and transport
 
