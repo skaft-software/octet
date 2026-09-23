@@ -467,6 +467,7 @@ CONTRIBUTING.md
 LICENSE
 SECURITY.md
 THIRD_PARTY_NOTICES.md
+crates/octet-ai/docs/responses-controls.md
 crates/octet-ai/models/SOURCES.md
 crates/octet-ai/src/protocol/openai_responses.rs
 crates/octet-ai/src/responses_ws.rs

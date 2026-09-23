@@ -91,6 +91,7 @@ impl BashTool {
 impl Tool for BashTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "bash".to_string(),
             description: "Run a command through the configured Bash-compatible shell. \

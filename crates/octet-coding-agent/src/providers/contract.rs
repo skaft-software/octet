@@ -557,7 +557,8 @@ impl ProviderDeclaration {
                     ));
                 }
             }
-            if route.runtime.responses_profile != ResponsesRuntimeProfile::Default
+            if (route.runtime.responses_profile != ResponsesRuntimeProfile::Default
+                || route.runtime.responses_features != octet_ai::ResponsesFeatures::default())
                 && route.protocol != Protocol::OpenAiResponses
             {
                 return Err(ProviderDefinitionError::new(
@@ -1340,6 +1341,7 @@ mod tests {
             agent_delegation: None,
             structured_output: false,
             deferred_tool_loading: false,
+            responses_features: Default::default(),
         }
     }
 
@@ -2096,6 +2098,9 @@ mod tests {
 
             let mut model = register_fixture_model(declaration, fixture_id, fixture, &base_url);
             Arc::make_mut(&mut model.endpoint).auth = fixture_auth(fixture);
+            // This inventory checks HTTP routes, auth, and codec bodies. Native
+            // WebSocket negotiation has separate transport fixtures.
+            Arc::make_mut(&mut model.endpoint).transport = octet_ai::EndpointTransport::Http;
             let response = client
                 .complete(&model, fixture_request())
                 .await
@@ -2199,7 +2204,8 @@ mod tests {
                         content: vec![UserPart::Text("continue".into())],
                     }),
                 ],
-            ),
+            )
+            .unwrap(),
         ));
         client.complete(&model, request).await.unwrap();
         let requests = server.received_requests().await.unwrap();
@@ -2385,6 +2391,12 @@ mod tests {
                 responses_profile: ResponsesRuntimeProfile::Codex,
                 openai_chat_profile: OpenAiChatRuntimeProfile::Default,
                 lifecycle_feedback: false,
+                responses_features: octet_ai::ResponsesFeatures {
+                    async_tools: false,
+                    steering: false,
+                    reasoning_effort_updates: false,
+                    compact_reasoning_effort_updates: false,
+                },
             },
         }];
         const DEFAULT_RULE: &[ModelRouteRule] = &[ModelRouteRule::Default { route: 0 }];

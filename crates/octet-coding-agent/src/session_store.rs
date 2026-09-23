@@ -592,10 +592,16 @@ enum SummaryEntryValue {
         _model: ModelId,
         output: SummaryResponsesOutput,
     },
+    ResponsesReasoning {
+        model: ModelId,
+        baseline: octet_ai::ReasoningConfig,
+        update: Option<octet_ai::ResponsesConfigurationUpdate>,
+    },
     Config {
         model: Option<String>,
         reasoning: Option<String>,
     },
+    ResponsesSteering {},
     PromptTemplateSelected {},
     SkillActivated {},
     SkillResourceRead {},
@@ -677,6 +683,22 @@ fn active_branch_catalog_config(session: &Session) -> (Option<String>, Option<St
         let Some(entry) = session.entry(id) else {
             break;
         };
+        if let EntryValue::ResponsesReasoning {
+            model: selected,
+            baseline,
+            update,
+            ..
+        } = &entry.value
+        {
+            if model.is_none() {
+                model = Some(selected.0.clone());
+            }
+            if reasoning.is_none() {
+                reasoning = Some(crate::app::reasoning_label(
+                    update.as_ref().map_or(baseline, |update| &update.reasoning),
+                ));
+            }
+        }
         if let EntryValue::Config {
             model: configured_model,
             reasoning: configured_reasoning,
@@ -1307,10 +1329,19 @@ fn summarize_session_with_usage(
                             }
                             (SummaryEntryKind::Other, None, None, None, None)
                         }
+                        SummaryEntryValue::ResponsesReasoning { model, baseline, update } => {
+                            let reasoning = crate::app::reasoning_label(
+                                update
+                                    .as_ref()
+                                    .map_or(&baseline, |update| &update.reasoning),
+                            );
+                            (SummaryEntryKind::Other, None, None, Some(model.0), Some(reasoning))
+                        }
                         SummaryEntryValue::Config { model, reasoning } => {
                             (SummaryEntryKind::Other, None, None, model, reasoning)
                         }
-                        SummaryEntryValue::PromptTemplateSelected {}
+                        SummaryEntryValue::ResponsesSteering {}
+                        | SummaryEntryValue::PromptTemplateSelected {}
                         | SummaryEntryValue::SkillActivated {}
                         | SummaryEntryValue::SkillResourceRead {}
                         | SummaryEntryValue::SkillDeactivated {} => {
@@ -3555,6 +3586,76 @@ mod tests {
             })))
             .unwrap();
         assert_eq!(store.latest().unwrap().path, newer_path);
+    }
+
+    #[test]
+    fn responses_steering_metadata_is_not_a_catalog_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("steering.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let input = octet_ai::UserMessage {
+            content: vec![UserPart::Text("steered instruction".into())],
+        };
+        session
+            .append(EntryValue::ResponsesSteering {
+                endpoint: EndpointId("fixture".into()),
+                model: ModelId("fixture".into()),
+                operation: "fixture-operation".into(),
+                local_id: 1,
+                input: Some(input.clone()),
+                state: None,
+                completed: None,
+            })
+            .unwrap();
+        assert!(summarize_session(&path).unwrap().title.is_none());
+        session
+            .append(EntryValue::Message(Message::User(input)))
+            .unwrap();
+        assert_eq!(
+            summarize_session(&path).unwrap().title.as_deref(),
+            Some("steered instruction")
+        );
+    }
+
+    #[test]
+    fn responses_reasoning_catalog_uses_durable_effective_choice() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("reasoning.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Config {
+                model: Some("fixture".into()),
+                reasoning: Some("low".into()),
+                reasoning_mode: None,
+            })
+            .unwrap();
+        let baseline = octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
+        for update in [
+            None,
+            Some(octet_ai::ResponsesConfigurationUpdate {
+                reasoning: octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+            }),
+        ] {
+            session
+                .append(EntryValue::ResponsesReasoning {
+                    endpoint: EndpointId("fixture".into()),
+                    model: ModelId("fixture".into()),
+                    baseline: baseline.clone(),
+                    update,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            active_branch_catalog_config(&session),
+            (Some("fixture".into()), Some("high".into()))
+        );
+        let summary = summarize_session(&path).unwrap();
+        assert_eq!(summary.configured_model.as_deref(), Some("fixture"));
+        assert_eq!(summary.configured_reasoning.as_deref(), Some("high"));
+        assert!(
+            summary.title.is_none(),
+            "internal control is not a user prompt"
+        );
     }
 
     #[test]

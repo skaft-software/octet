@@ -84,6 +84,7 @@ pub struct ReadTool;
 impl Tool for ReadTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "read".to_string(),
             description: "Read text, images, or audio. `path` may be a workspace-relative local path, \

@@ -298,19 +298,29 @@ This uses hosted device login instead of a manually managed API key. A successfu
 account-scoped live inventory is authoritative. octet does not infer Ultra,
 collaboration, Responses Lite, or model availability from a name or subscription
 plan. Missing or unusable metadata falls back conservatively. If live inventory
-omits Astra, no Codex Astra route is injected; when present, select
-`codex/gpt-6-astra` independently of a direct OpenAI preset.
+omits a model, no corresponding GPT-6 Codex route is injected. When advertised,
+select `codex/gpt-6-astra`, `codex/gpt-6-sol`, or `codex/gpt-6-luna`; these stay
+namespaced independently of direct OpenAI presets.
 
-A read-only authenticated inventory check on 2026-09-23, using octet's Codex
-compatibility version `0.153.2` and the locally installed Codex CLI version
-`0.154.0`, returned **`gpt-5.6-sol`** and **`gpt-5.6-luna`**, both listed and
-API-supported. Neither inventory returned `gpt-6-sol` or `gpt-6-luna`; octet does
-not rename the observed IDs or assume those names are aliases. The existing
-OAuth discovery/registration path supports the returned Sol/Luna IDs. This is
-account-scoped inventory evidence, not a successful inference check or a claim
-about other accounts. The check did not establish output-token limits or pricing;
-existing conservative output budgeting and separately sourced prices remain
-unchanged. New slugs require fresh account inventory, not a static alias.
+Codex discovery sends compatibility version **`0.156.1`**. GPT-6 Sol and Luna
+require at least `0.155.0`: older query versions filter them out on the server,
+even when the account has access. Read-only checks on 2026-09-23 confirmed that
+changing only this query version from `0.153.2`/`0.154.0` to `0.156.1` returned
+**`gpt-6-sol`** and **`gpt-6-luna`** with the same OAuth credential. Cache version
+8 invalidates the older filtered inventories; the next online launch refreshes
+them without another login. Offline launches never perform this refresh.
+
+The observed OAuth contracts include text/image input, a 272K working window,
+medium reasoning by default, and low/medium/high/xhigh/max choices; Sol also
+advertises Ultra. Both advertise Responses Lite and V2 delegation. All three
+GPT-6 routes positively advertise `supports_reasoning_effort_updates`. This
+independent capability is retained only with fresh online account metadata;
+offline reduction disables it, just like Lite/V2. These are
+account-scoped inventory observations, not successful inference checks or claims
+about other accounts. Public API `none` support is not imported into the OAuth
+choices. Output budgeting and separately sourced prices remain unchanged; the
+inventory check did not establish those values. New slugs require account
+inventory, not a static alias.
 
 For advertised Ultra/V2 support, first review and activate the subagents source
 inside an appropriate OS isolation boundary:
@@ -577,8 +587,10 @@ modalities, tools, structured output, output limits, and reasoning. Google uses
 native [generateContent](design/octet-ai.md#google-generatecontent), not an OpenAI
 translation; protocol recognition alone does not imply [native audio support](media.md#formats-and-limits).
 
-Direct OpenAI defaults to HTTP/SSE Responses. Codex uses `WebSocketPreferred`
-with HTTP/SSE fallback and endpoint-configured zstd HTTP request compression;
+Direct OpenAI and Codex declare `WebSocketPreferred` with HTTP/SSE fallback
+for ordinary requests. Native steering requires its bidirectional WebSocket
+operation and does not replay accepted input through HTTP. Codex additionally
+uses endpoint-configured zstd HTTP request compression;
 compression failure keeps the valid uncompressed body. These are provider
 [declarations](../crates/octet-coding-agent/src/providers/declarations.json),
 not automatic properties of the Responses codec.
@@ -644,22 +656,48 @@ accounting. See [historical v0.7.4 recovery qualification](qualification/v0.7.4-
 for the source comparison and outstanding live/endurance evidence; Codex parity
 is not established.
 
-## Astra source limits
+## GPT-6 contracts and execution
 
-Direct `gpt-6-astra` is declared on Responses with text/image input, a 1.05M-token
-context window, 128K output, and `low` through `max` effort. Inputs above 272K
-use the long-context price tier. Current source supports selection,
-text/images, reasoning, and ordinary/parallel tool calls. It does **not** implement
-native async tools (`async: true` and pending-call lifecycle), steering an active
-Responses WebSocket response, or coding-loop reasoning changes through
-`configuration_update` with verified cache preservation. Execution-time input is
-queued for a later model-turn boundary; `parallel_tool_calls` is not native async.
-These limits also apply to Codex Astra. Public API support does not prove OAuth
-endpoint support; additional capabilities require fresh account-scoped metadata
-or verified endpoint behavior.
+Direct `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna` are declared on Responses with
+text/image input, a 1.05M-token context window and 128K output. Astra accepts
+`low` through `max` (default low); Sol/Luna additionally accept Off/`none` and
+default to medium. Exact public pricing and its above-272K tier are recorded in
+[the catalog sources](../crates/octet-ai/models/SOURCES.md). New public prices
+are not borrowed for Codex Sol/Luna: their subscription cost remains unknown.
 
-Third-party Astra inventory does not inherit direct OpenAI capabilities from its
-name or pinned record. For example, OpenRouter must advertise image input,
-tools/structured output, and reasoning on its own route. Its snapshot can enrich
-a missing label or price, not enable Responses Lite, delegation, or extra effort
-choices.
+Model and endpoint feature declarations must **both** opt in:
+
+- **Async tools:** qualified host-parallel observations advertise `async: true`.
+  Complete calls are persisted before a bounded background job starts; the model
+  can advance while those jobs run, and each result uses its original call ID.
+  This is not speculative execution of streamed arguments. Synchronous calls,
+  effectful work, approvals, and hard usage ceilings retain their barriers.
+  Interrupted pending work is not blindly rerun after restart.
+- **Native steering:** public GPT-6 uses `response.steer` on the active socket,
+  with durable admission before dispatch and separate accounting/persistence for
+  every response segment. Provider acceptance is not proof that an instruction
+  was followed. Ambiguous disconnects are not automatically replayed. Routes or
+  input forms without qualification retain ordinary queued steering; Codex does
+  not gain native steering from its model name. Hard cumulative ceilings retain
+  the ordinary queue boundary.
+- **Thinking changes:** qualified `/thinking` changes queue for the next response
+  boundary without cancelling the root run. The request-level reasoning baseline
+  stays fixed and ordered `configuration_update` items carry ordinary effort
+  changes. Off still requires an advertised `none`; Ultra/delegation-mode changes
+  are not ordinary wire effort updates. Durable replay retains the baseline and
+  effective selection. Compaction must rebase only after a successful summary;
+  standalone native compact rejects update histories without separate authority.
+
+Codex currently qualifies reasoning updates from positive account inventory, not
+async tools or native steering. Lite/V2 do not imply either feature. Public API
+support and deterministic loopback tests are not live OAuth inference or cache-hit
+qualification. See [reasoning controls](provider-thinking.md) and
+[the protocol contract](../crates/octet-ai/docs/responses-controls.md).
+
+Third-party GPT-6 inventory does not inherit these capabilities from a name or
+snapshot. OpenRouter must advertise its own images, tools and exact reasoning
+choices; its ordinary Chat route does not become a Responses control endpoint.
+Provider-managed misalignment monitoring remains independent of host approval:
+`misalignment_policy_violation` stops automatic retry, and already completed
+work is not undone. Octet does not provision project webhooks or safety-alert
+subscriptions automatically.

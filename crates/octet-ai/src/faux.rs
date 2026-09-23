@@ -240,6 +240,7 @@ impl FauxProvider {
             display_name: Some("Faux Model".to_owned()),
             protocol: options.protocol,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -473,6 +474,7 @@ fn message_events(
             &mut assembler,
             &mut events,
             StreamEvent::ToolCallStart {
+                async_execution: false,
                 index,
                 id: ToolCallId(id),
                 name: tool_call.name.clone(),

@@ -411,6 +411,7 @@ pub(crate) fn decode_stream_event(
                     &mut events,
                     builder,
                     StreamEvent::ToolCallStart {
+                        async_execution: false,
                         index: canonical,
                         id: ToolCallId(id),
                         name,
@@ -1158,6 +1159,7 @@ mod tests {
                 content: vec![UserPart::Text("hello".into())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "echo".into(),
                 description: "fixture".into(),

@@ -165,6 +165,7 @@ fn codex_model(uri: &str, transport: EndpointTransport) -> Model {
             display_name: None,
             protocol: Protocol::OpenAiResponses,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: true,

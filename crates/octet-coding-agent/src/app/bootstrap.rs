@@ -276,6 +276,7 @@ fn extension_provider_bootstrap_model(catalog: &ModelCatalog) -> Model {
                 agent_delegation: None,
                 structured_output: false,
                 deferred_tool_loading: false,
+                responses_features: Default::default(),
             },
             limits: ModelLimits {
                 context_window: 128_000,
@@ -2100,7 +2101,7 @@ fn gpt_6_family_model(id: &str) -> bool {
 /// Sparse public OpenAI inventory entries may use the documented GPT-6 family
 /// fallback. Other compatible providers must supply capability metadata.
 fn public_openai_gpt_6_model(declaration: &ProviderDeclaration, id: &str) -> bool {
-    declaration.id == "openai" && gpt_6_family_model(id)
+    declaration.id == "openai" && matches!(id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
 }
 
 fn effort_capability(
@@ -2207,8 +2208,14 @@ fn sparse_route_reasoning(
                 Some("low"),
             ));
         }
+        if matches!(id, "gpt-6-sol" | "gpt-6-luna") {
+            return Some(effort_capability(
+                Mode::Standard,
+                &["none", "low", "medium", "high", "xhigh", "max"],
+                Some("medium"),
+            ));
+        }
         if id.starts_with("gpt-5")
-            || public_openai_gpt_6_model(declaration, id)
             || matches!(id, "o1" | "o3" | "o3-mini" | "o4-mini")
         {
             return Some(effort_capability(
@@ -2404,10 +2411,15 @@ fn register_openai_compatible_models_from_response(
             continue;
         }
         let protocol = route.protocol;
-        let context_window = model.context_window.unwrap_or(128_000);
+        let public_gpt_6 = protocol == Protocol::OpenAiResponses
+            && public_openai_gpt_6_model(declaration, api_name);
+        let context_window =
+            model
+                .context_window
+                .unwrap_or(if public_gpt_6 { 1_050_000 } else { 128_000 });
         let max_output_tokens = model
             .max_output_tokens
-            .unwrap_or(32_768)
+            .unwrap_or(if public_gpt_6 { 128_000 } else { 32_768 })
             .min(context_window);
         let reasoning = discovered_reasoning_capability(
             declaration,
@@ -2460,6 +2472,12 @@ fn register_openai_compatible_models_from_response(
                     .structured_output
                     .unwrap_or(protocol != Protocol::OpenAiChat),
                 deferred_tool_loading: false,
+                responses_features: octet_ai::ResponsesFeatures {
+                    async_tools: public_gpt_6 && model.tools,
+                    steering: public_gpt_6,
+                    reasoning_effort_updates: public_gpt_6,
+                    compact_reasoning_effort_updates: false,
+                },
             },
             ModelLimits {
                 context_window,
@@ -2554,6 +2572,7 @@ fn register_anthropic_compatible_models_from_response(
                 agent_delegation: None,
                 structured_output: model.structured_output.unwrap_or(true),
                 deferred_tool_loading: false,
+                responses_features: Default::default(),
             },
             ModelLimits {
                 context_window,
@@ -2709,6 +2728,8 @@ fn register_deepseek_legacy_alias(
             structured_output: false,
 
             deferred_tool_loading: false,
+
+            responses_features: Default::default(),
         },
         limits: ModelLimits {
             context_window,
@@ -2777,6 +2798,8 @@ fn register_deepseek_models_from_response(
                 structured_output: model.structured_output.unwrap_or(false),
 
                 deferred_tool_loading: false,
+
+                responses_features: Default::default(),
             },
             ModelLimits {
                 context_window,
@@ -3048,6 +3071,8 @@ fn openrouter_models_from_response(
                 structured_output: discovered_structured_output(entry).unwrap_or(false),
 
                 deferred_tool_loading: false,
+
+                responses_features: Default::default(),
             },
             limits: ModelLimits {
                 context_window,
@@ -3187,6 +3212,7 @@ fn register_azure_openai(
             agent_delegation: None,
             structured_output: true,
             deferred_tool_loading: false,
+            responses_features: Default::default(),
         },
         ModelLimits {
             context_window: 128_000,
@@ -4805,6 +4831,8 @@ fn register_custom_openai_provider(
                 structured_output: model.structured_output,
 
                 deferred_tool_loading: false,
+
+                responses_features: Default::default(),
             },
             limits: ModelLimits {
                 context_window: model.context_window,
@@ -5104,15 +5132,14 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
 /// Codex retains the provider-advertised maximum as discovery metadata, while
 /// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
 /// Luna uses its 372K default; smaller advertised windows remain authoritative.
-/// Version 7 records the pre-cap backend default window alongside the effective
-/// window so the explicit override and its clamp notice stay exact; version 6
-/// caches are refreshed.
-const CODEX_MODEL_CACHE_VERSION: u8 = 7;
+/// Version 8 invalidates inventories filtered by the pre-0.155 Codex client
+/// version, so a fresh cache cannot hide GPT-6 Sol/Luna after upgrading.
+const CODEX_MODEL_CACHE_VERSION: u8 = 8;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
 // filter out models that require a contemporary Codex client.
-const CODEX_MODELS_CLIENT_VERSION: &str = "0.153.2";
+const CODEX_MODELS_CLIENT_VERSION: &str = "0.156.1";
 
 pub(crate) fn effective_compaction_threshold_fraction(config: &Config, model: &Model) -> f64 {
     let Some(max_active_tokens) = config
@@ -5143,6 +5170,9 @@ struct DiscoveredCodexModel {
     max_output_tokens: u64,
     min_effort: octet_ai::ReasoningEffort,
     max_effort: octet_ai::ReasoningEffort,
+    /// Positive account-inventory authority, never inferred from a model name.
+    #[serde(default)]
+    reasoning_effort_updates: bool,
     responses_lite: bool,
     // `Option<T>` normally treats a missing key as `None`; the custom decoder
     // keeps explicit null valid while making incomplete dynamic metadata fail.
@@ -5288,8 +5318,8 @@ fn codex_models_from_response(
                 (None, Some(maximum)) => (maximum, maximum),
                 (None, None) => fallback,
             };
-        if id == "gpt-6-astra" {
-            // Keep Astra's larger advertised input envelope distinct from the
+        if matches!(id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna") {
+            // Keep the observed GPT-6 input envelope distinct from the
             // conservative Codex working budget, and never overstate the
             // provider's 872K input allowance when only a total window appears.
             max_context_window = max_context_window.min(CODEX_ASTRA_MAX_CONTEXT_WINDOW);
@@ -5349,6 +5379,10 @@ fn codex_models_from_response(
             max_output_tokens,
             min_effort,
             max_effort,
+            reasoning_effort_updates: entry
+                .get("supports_reasoning_effort_updates")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
             responses_lite,
             agent_delegation,
         });
@@ -5416,7 +5450,10 @@ fn codex_model_limits(
 }
 
 fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if model_id == "gpt-6-astra" || model_id == "gpt-5.6-luna" {
+    if matches!(
+        model_id,
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" | "gpt-5.6-luna"
+    ) {
         octet_ai::ReasoningEffort::Low
     } else {
         octet_ai::ReasoningEffort::Minimal
@@ -5426,7 +5463,9 @@ fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
 // New Codex families accept the top `max` effort tier. Live discovery narrows
 // this range when the backend publishes explicit supported reasoning levels.
 fn codex_max_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if model_id == "gpt-6-astra" || model_id.starts_with("gpt-5.6-") {
+    if matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
+        || model_id.starts_with("gpt-5.6-")
+    {
         octet_ai::ReasoningEffort::Max
     } else {
         octet_ai::ReasoningEffort::High
@@ -5439,7 +5478,7 @@ fn codex_max_effort(model_id: &str) -> octet_ai::ReasoningEffort {
 /// OAuth model to text-only.
 fn codex_supports_image_input(model_id: &str) -> bool {
     model_id == "codex-mini-latest"
-        || model_id == "gpt-6-astra"
+        || matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
         || model_id.starts_with("gpt-5.4")
         || model_id.starts_with("gpt-5.5")
         || model_id.starts_with("gpt-5.6")
@@ -5482,9 +5521,12 @@ fn load_codex_model_cache(
         return Ok(None);
     }
     for model in &mut cache.models {
-        if model.id == "gpt-6-astra" {
+        if matches!(
+            model.id.as_str(),
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        ) {
             // Current-schema caches can still contain a previously accepted
-            // over-cap Astra entry; normalize it to the fixed contract.
+            // over-cap GPT-6 entry; normalize it to the fixed contract.
             model.max_output_tokens = model.max_output_tokens.min(CODEX_MAX_OUTPUT_TOKENS);
         }
     }
@@ -5651,6 +5693,7 @@ fn conservative_offline_codex_models(
     mut models: Vec<DiscoveredCodexModel>,
 ) -> Vec<DiscoveredCodexModel> {
     for model in &mut models {
+        model.reasoning_effort_updates = false;
         model.responses_lite = false;
         model.agent_delegation = None;
         strip_codex_ultra(&mut model.reasoning_options);
@@ -5679,6 +5722,7 @@ fn fallback_codex_models(
                 max_output_tokens: limits.max_output_tokens,
                 min_effort: codex_min_effort(model_id),
                 max_effort: codex_max_effort(model_id),
+                reasoning_effort_updates: false,
                 responses_lite: false,
                 agent_delegation: None,
             }
@@ -6051,11 +6095,13 @@ fn register_openai_codex_with_notes(
     let tier = codex_context_tier(initial_claims.plan.as_ref());
 
     for model in models {
-        // Astra is always namespaced so an OAuth selection cannot be confused
-        // with the direct public OpenAI route when credentials change. Other
+        // GPT-6 routes are always namespaced so an OAuth selection cannot be
+        // confused with the public OpenAI route when credentials change. Other
         // Codex ids retain their historical collision-based compatibility.
         let catalog_id =
-            if model.id == "gpt-6-astra" || catalog.resolve(&ModelId(model.id.clone())).is_ok() {
+            if matches!(model.id.as_str(), "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
+                || catalog.resolve(&ModelId(model.id.clone())).is_ok()
+            {
                 ModelId(format!("{}/{}", declaration.id, model.id))
             } else {
                 ModelId(model.id.clone())
@@ -6110,6 +6156,11 @@ fn register_openai_codex_with_notes(
                 structured_output: false,
 
                 deferred_tool_loading: false,
+
+                responses_features: octet_ai::ResponsesFeatures {
+                    reasoning_effort_updates: model.reasoning_effort_updates,
+                    ..Default::default()
+                },
             },
             limits,
             pricing,
@@ -6176,6 +6227,7 @@ pub(crate) fn register_offline_openrouter_model(
             agent_delegation: None,
             structured_output: false,
             deferred_tool_loading: false,
+            responses_features: Default::default(),
         },
         limits: ModelLimits {
             context_window: 131_072,
@@ -6771,6 +6823,31 @@ fn persisted_session_config(session: &Session) -> anyhow::Result<PersistedSessio
         let entry = session
             .entry(id)
             .ok_or_else(|| anyhow::anyhow!("session head references missing entry {}", id.0))?;
+        if let EntryValue::ResponsesReasoning {
+            model,
+            baseline,
+            update,
+            ..
+        } = &entry.value
+        {
+            // A host-issued update is the effective selection, not the pinned
+            // request baseline. Newer route selections must never inherit an
+            // older route's effort while walking the active ancestry backwards.
+            if persisted
+                .model
+                .as_ref()
+                .is_none_or(|selected| selected == model)
+            {
+                if persisted.model.is_none() {
+                    persisted.model = Some(model.clone());
+                }
+                if persisted.reasoning.is_none() {
+                    persisted.reasoning = Some(update.as_ref()
+                        .map(|update| update.reasoning.clone())
+                        .unwrap_or_else(|| baseline.clone()));
+                }
+            }
+        }
         if let EntryValue::Config {
             model,
             reasoning,
@@ -7632,6 +7709,11 @@ pub(crate) fn build_app_with_runtime_manager(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
+    if agent.reasoning() != &reasoning {
+        // Agent resumes the durable effective effort. Apply an explicit launch
+        // override without overwriting the request's cached reasoning baseline.
+        agent.set_reasoning(reasoning.clone())?;
+    }
     #[cfg(any(unix, windows))]
     agent.enable_session_partial_output_checkpoints(
         "bash",
@@ -7943,6 +8025,9 @@ pub fn rebuild_app(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
+    if agent.reasoning() != &reasoning {
+        agent.set_reasoning(reasoning.clone())?;
+    }
     agent.set_service_tier(service_tier)?;
     #[cfg(any(unix, windows))]
     agent.enable_session_partial_output_checkpoints(

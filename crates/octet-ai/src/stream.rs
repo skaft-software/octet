@@ -125,6 +125,8 @@ pub enum StreamEvent {
 
     /// Tool call generation started.
     ToolCallStart {
+        /// Provider scheduling metadata, not tool-execution authority.
+        async_execution: bool,
         /// Canonical part index.
         index: usize,
         /// Tool call identifier.
@@ -169,6 +171,7 @@ pub type ResponseStream =
     std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<StreamEvent, AiError>> + Send>>;
 
 pub(crate) struct ToolCallBuilder {
+    pub(crate) async_execution: bool,
     pub(crate) id: ToolCallId,
     pub(crate) name: String,
     pub(crate) arguments_json: String,
@@ -524,12 +527,31 @@ impl ResponseBuilder {
                     buf.push_str(delta);
                 }
             }
-            StreamEvent::ToolCallStart { index, id, name } => {
+            StreamEvent::ToolCallStart {
+                index,
+                id,
+                name,
+                async_execution,
+            } => {
+                if *async_execution
+                    && (self.protocol != Protocol::OpenAiResponses
+                        || !self.tool_definitions.as_ref().is_some_and(|tools| {
+                            tools
+                                .iter()
+                                .any(|tool| tool.async_execution && tool.name == *name)
+                        }))
+                {
+                    return Err(DecodeError::InvalidProviderField(
+                        "async call is not advertised by the request".into(),
+                    )
+                    .into());
+                }
                 self.observe_index(*index)?;
                 self.add_content_bytes(id.0.len().saturating_add(name.len()))?;
                 self.tool_call_builders.insert(
                     *index,
                     ToolCallBuilder {
+                        async_execution: *async_execution,
                         id: id.clone(),
                         name: name.clone(),
                         arguments_json: String::new(),
@@ -813,6 +835,7 @@ impl ResponseBuilder {
                 }));
             } else if let Some(builder) = self.tool_call_builders.remove(&index) {
                 content.push(AssistantPart::ToolCall(ToolCall {
+                    async_execution: builder.async_execution,
                     id: builder.id,
                     name: builder.name,
                     arguments_json: builder.arguments_json,
@@ -1466,6 +1489,7 @@ mod tests {
 
         builder
             .on_event(&StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call_1".to_string()),
                 name: "grep".to_string(),
@@ -1490,6 +1514,7 @@ mod tests {
     #[test]
     fn schema_mismatch_marks_the_completed_event_and_retains_normalized_call() {
         let definitions = [ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "strict".to_owned(),
             description: String::new(),
@@ -1511,6 +1536,7 @@ mod tests {
             &mut events,
             &mut builder,
             StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call-canonical".to_owned()),
                 name: "strict".to_owned(),
@@ -1568,6 +1594,7 @@ mod tests {
         );
         builder
             .on_event(&StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call_truncated".to_string()),
                 name: "write".to_string(),
@@ -1611,6 +1638,7 @@ mod tests {
         builder.observe_provider_stream_event().unwrap();
         builder
             .on_event(&StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call_bad".to_string()),
                 name: "write".to_string(),
@@ -1639,6 +1667,7 @@ mod tests {
 
         builder
             .on_event(&StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call_1".to_string()),
                 name: "grep".to_string(),

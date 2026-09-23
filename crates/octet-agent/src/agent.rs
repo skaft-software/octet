@@ -1,5 +1,8 @@
 //! The agent: configuration, the procedural run loop, and run control.
 
+mod background_tools;
+mod native_steering;
+
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -552,9 +555,7 @@ fn redact_common_secret_patterns(value: &str) -> String {
 /// carriage is normalized, so the same registration always renders the same
 /// bytes (a provider prefix must not churn between turns). The result is
 /// bounded by [`MAX_TOOL_PROMPT_SECTION_BYTES`] on a character boundary.
-fn render_tool_prompt_section<'a>(
-    tools: impl IntoIterator<Item = &'a dyn Tool>,
-) -> Option<String> {
+fn render_tool_prompt_section<'a>(tools: impl IntoIterator<Item = &'a dyn Tool>) -> Option<String> {
     let contributions =
         collect_tool_prompt_contributions(tools.into_iter().take(MAX_TOOL_PROMPT_SECTION_TOOLS));
     if contributions.is_empty() {
@@ -1119,7 +1120,13 @@ impl PreparedSteering {
             }))),
             recalled: CancellationToken::default(),
         };
-        (Self { receipt: receipt.clone(), owner: None }, receipt)
+        (
+            Self {
+                receipt: receipt.clone(),
+                owner: None,
+            },
+            receipt,
+        )
     }
 }
 
@@ -1174,6 +1181,7 @@ impl SteeringReceipt {
 }
 
 enum Control {
+    SetReasoning(ReasoningConfig),
     Steer(ReservedInput),
     FollowUp(ReservedInput),
     FinishNow(ReservedInput),
@@ -1231,6 +1239,7 @@ fn control_input_bytes(input: &UserInput) -> usize {
 /// bypasses this queue entirely.
 #[derive(Clone)]
 pub struct RunControl {
+    reasoning_model: Option<Model>,
     admission: Arc<std::sync::Mutex<bool>>,
     tx: mpsc::Sender<Control>,
     pending_count: Arc<tokio::sync::Semaphore>,
@@ -1239,6 +1248,31 @@ pub struct RunControl {
 }
 
 impl RunControl {
+    /// Queues a host-authoritative effort change without interrupting generation.
+    /// The latest pending selection applies at the next response boundary;
+    /// acceptance is not a provider acknowledgement.
+    pub async fn set_reasoning(&self, reasoning: ReasoningConfig) -> Result<(), AgentError> {
+        let model = self.reasoning_model.as_ref().ok_or_else(|| {
+            AgentError::Ai(
+                octet_ai::ConfigError::Parse(
+                    "reasoning updates require a qualified Responses route".into(),
+                )
+                .into(),
+            )
+        })?;
+        validate_reasoning_update(model, &reasoning)?;
+        let permit = self.tx.reserve().await.map_err(|_| AgentError::RunEnded)?;
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*admission {
+            return Err(AgentError::RunEnded);
+        }
+        permit.send(Control::SetReasoning(reasoning));
+        Ok(())
+    }
+
     fn reserve_input(&self, input: UserInput) -> Result<ReservedInput, AgentError> {
         let reservation = self.reserve_input_capacity(&input)?;
         Ok(ReservedInput::Ready(ReservedPayload {
@@ -1903,6 +1937,16 @@ enum ParallelReadPreparation {
     Completed(ParallelReadWaveExecution),
 }
 
+fn advertised_tool_definition(tool: &dyn Tool, model: &Model) -> ToolDef {
+    let mut definition = tool.definition();
+    // Static parallel capability permits scheduling hints, never effects.
+    // Exact argument classification and broker admission still gate dispatch.
+    if model.responses_features().async_tools && tool.concurrency() == ToolConcurrency::Parallel {
+        definition.async_execution = true;
+    }
+    definition
+}
+
 fn parallel_read_candidate(
     call: &ToolCall,
     call_index: usize,
@@ -2488,8 +2532,10 @@ const REQUEST_OUTPUT_HEADROOM_MINIMUM: u64 = 256;
 const REQUEST_OUTPUT_HEADROOM_MAXIMUM: u64 = 4096;
 
 fn request_output_headroom(context_window: u64) -> u64 {
-    ((context_window / REQUEST_OUTPUT_HEADROOM_DIVISOR) * REQUEST_OUTPUT_HEADROOM_PERCENT)
-        .clamp(REQUEST_OUTPUT_HEADROOM_MINIMUM, REQUEST_OUTPUT_HEADROOM_MAXIMUM)
+    ((context_window / REQUEST_OUTPUT_HEADROOM_DIVISOR) * REQUEST_OUTPUT_HEADROOM_PERCENT).clamp(
+        REQUEST_OUTPUT_HEADROOM_MINIMUM,
+        REQUEST_OUTPUT_HEADROOM_MAXIMUM,
+    )
 }
 
 fn resolve_request_max_output_tokens(
@@ -2597,41 +2643,33 @@ fn cancelled_tool_error() -> ToolError {
 
 fn pending_tool_state(session: &Session) -> Option<(Vec<ToolCall>, HashSet<octet_ai::ToolCallId>)> {
     let mut persisted = HashSet::new();
+    let mut calls = Vec::new();
+    let mut latest_assistant = true;
     let mut cursor = session.head_ref();
     while let Some(id) = cursor {
         let entry = session.entry(id)?;
         match &entry.value {
             EntryValue::Message(Message::Assistant(assistant)) => {
-                let calls = assistant
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        AssistantPart::ToolCall(call) => Some(call.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                return (!calls.is_empty()).then_some((calls, persisted));
+                calls.extend(assistant.content.iter().filter_map(|part| match part {
+                    AssistantPart::ToolCall(call) if latest_assistant || call.async_execution => {
+                        Some(call.clone())
+                    }
+                    _ => None,
+                }));
+                latest_assistant = false;
             }
             EntryValue::Message(Message::User(user)) => {
                 for part in &user.content {
-                    let UserPart::ToolResult(result) = part else {
-                        continue;
-                    };
-                    persisted.insert(result.tool_call_id.clone());
+                    if let UserPart::ToolResult(result) = part {
+                        persisted.insert(result.tool_call_id.clone());
+                    }
                 }
             }
-            EntryValue::Compaction { .. }
-            | EntryValue::ResponsesTurn { .. }
-            | EntryValue::ResponsesCompaction { .. }
-            | EntryValue::Config { .. }
-            | EntryValue::PromptTemplateSelected { .. }
-            | EntryValue::SkillActivated { .. }
-            | EntryValue::SkillResourceRead { .. }
-            | EntryValue::SkillDeactivated { .. } => {}
+            _ => {}
         }
         cursor = entry.parent.as_ref();
     }
-    None
+    (!calls.is_empty()).then_some((calls, persisted))
 }
 
 fn tool_call_arguments_fingerprint(name: &str, args: &serde_json::Value) -> String {
@@ -3059,6 +3097,7 @@ fn close_failed_turn(session: &mut Session, model: &Model) -> Result<(), AgentEr
                 protocol: model.spec.protocol,
             })),
             Some(EntryMetadata {
+                native_steering: None,
                 local_synthetic_assistant: true,
                 ..EntryMetadata::default()
             }),
@@ -4230,6 +4269,8 @@ fn previous_message_is_user(session: &Session, entry: &crate::session::Entry) ->
             EntryValue::Compaction { .. }
             | EntryValue::ResponsesTurn { .. }
             | EntryValue::ResponsesCompaction { .. }
+            | EntryValue::ResponsesReasoning { .. }
+            | EntryValue::ResponsesSteering { .. }
             | EntryValue::Config { .. }
             | EntryValue::PromptTemplateSelected { .. }
             | EntryValue::SkillActivated { .. }
@@ -4471,7 +4512,8 @@ fn exact_responses_replay(
         model,
         (!system.is_empty()).then_some(system),
         &replay,
-    );
+    )
+    .ok()?;
     Some(ExactResponsesReplay {
         input,
         replay,
@@ -4507,6 +4549,68 @@ fn validate_native_compact_output(output: &octet_ai::ResponsesOutput) -> Result<
     }
 }
 
+fn validate_reasoning_update(model: &Model, reasoning: &ReasoningConfig) -> Result<(), AgentError> {
+    let update = octet_ai::ResponsesConfigurationUpdate {
+        reasoning: reasoning.clone(),
+    };
+    octet_ai::responses::validate_responses_input(
+        model,
+        &ResponsesInput::new(vec![update.to_item()]),
+        reasoning,
+        false,
+    )?;
+    Ok(())
+}
+
+fn persist_reasoning_selection(
+    session: &mut Session,
+    model: &Model,
+    selection: &ReasoningConfig,
+) -> Result<(), AgentError> {
+    let state = session.responses_reasoning(&model.endpoint.id, &model.spec.id)?;
+    if state.is_some() {
+        if state
+            .as_ref()
+            .is_some_and(|(_, effective)| effective == selection)
+        {
+            return Ok(());
+        }
+        let ultra = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
+        if selection == &ultra
+            || state
+                .as_ref()
+                .is_some_and(|(baseline, _)| baseline == &ultra)
+        {
+            return Err(AiError::Config(octet_ai::ConfigError::Parse("Ultra/V2 transitions require a new session; ordinary reasoning updates cannot change delegation mode".into())).into());
+        }
+        validate_reasoning_update(model, selection)?;
+    } else {
+        octet_ai::responses::validate_responses_input(
+            model,
+            &ResponsesInput::default(),
+            selection,
+            false,
+        )?;
+    }
+    let (baseline, update) = match state {
+        Some((_, effective)) if effective == *selection => return Ok(()),
+        Some((baseline, _)) => (
+            baseline,
+            Some(octet_ai::ResponsesConfigurationUpdate {
+                reasoning: selection.clone(),
+            }),
+        ),
+        None => (selection.clone(), None),
+    };
+    session.append(EntryValue::ResponsesReasoning {
+        endpoint: model.endpoint.id.clone(),
+        model: model.spec.id.clone(),
+        baseline,
+        update,
+    })?;
+    Ok(())
+}
+
 fn durable_responses_options(
     session: &Session,
     model: &Model,
@@ -4514,7 +4618,13 @@ fn durable_responses_options(
     requested_service_tier: Option<ServiceTier>,
 ) -> Result<Option<ResponsesOptions>, AgentError> {
     let service_tier = resolve_service_tier(model, requested_service_tier)?;
+    let reasoning_state = session.responses_reasoning(&model.endpoint.id, &model.spec.id)?;
     let replay = exact_responses_replay(session, model, system);
+    if reasoning_state.is_some() && replay.is_none() {
+        return Err(AgentError::InvalidCompactionPolicy(
+            "reasoning update history requires complete route-affine Responses replay".into(),
+        ));
+    }
     match (replay, service_tier) {
         // No route-affine local window and no requested tier: keep the
         // historical `None`, which makes the codec fall back to canonical
@@ -4577,7 +4687,7 @@ fn native_responses_options(
         model,
         (!system.is_empty()).then_some(system),
         &replay,
-    ));
+    )?);
     Ok(match service_tier {
         Some(tier) => options.with_service_tier(tier),
         None => options,
@@ -5040,9 +5150,9 @@ fn forward_tool_progress(
     now: std::time::Instant,
 ) -> Option<ToolProgress> {
     match progress {
-        ToolProgress::Decoration(decoration) => pacer
-            .observe(decoration, now)
-            .map(ToolProgress::Decoration),
+        ToolProgress::Decoration(decoration) => {
+            pacer.observe(decoration, now).map(ToolProgress::Decoration)
+        }
         verbatim => Some(verbatim),
     }
 }
@@ -5803,7 +5913,10 @@ impl ContextCapacityCache {
             return false;
         };
         if !suffix.is_empty() {
-            let input = octet_ai::responses::encode_responses_replay(model, None, suffix);
+            let Ok(input) = octet_ai::responses::encode_responses_replay(model, None, suffix)
+            else {
+                return false;
+            };
             // Standalone framing is a conservative upper bound on appending
             // the same opaque output/user items to the existing wire window.
             let delta = estimate_responses_request_tokens(&input, suffix, &[], None);
@@ -5950,12 +6063,15 @@ impl CompactionContext<'_> {
     ) -> Result<Option<String>, AgentError> {
         // Row 3.5: the summary boundary owns its own provider request, which
         // nests under it. Both settle explicitly on every returned outcome.
-        let summary_guard = self.telemetry.begin_typed::<SummarySpan>(EmptyAttributes {});
-        let summary_request_guard = summary_guard.context().begin_typed::<ProviderRequestSpan>(
-            RequestAttributes {
-                operation: SpanOperation::Summary,
-            },
-        );
+        let summary_guard = self
+            .telemetry
+            .begin_typed::<SummarySpan>(EmptyAttributes {});
+        let summary_request_guard =
+            summary_guard
+                .context()
+                .begin_typed::<ProviderRequestSpan>(RequestAttributes {
+                    operation: SpanOperation::Summary,
+                });
         // Compaction is a normal provider request: retaining the stable session
         // affinity lets compatible providers reuse any common prefix and keeps
         // its accounting visible alongside autonomous turns.
@@ -6230,7 +6346,7 @@ impl CompactionContext<'_> {
                             .to_owned(),
                     )
                 })?;
-            let input = octet_ai::responses::encode_responses_replay(self.model, None, &replay);
+            let input = octet_ai::responses::encode_responses_replay(self.model, None, &replay)?;
             let instructions = (!system.is_empty()).then_some(system);
             let request = ResponsesCompactRequest::for_model(
                 self.model,
@@ -6244,7 +6360,12 @@ impl CompactionContext<'_> {
                 Some(self.session_id),
             )?;
             let input_tokens = estimate_compact_request_tokens(&request, &replay);
-            require_enforceable_output_cap(self.session, None, self.max_session_tokens, self.max_session_cost_microdollars)?;
+            require_enforceable_output_cap(
+                self.session,
+                None,
+                self.max_session_tokens,
+                self.max_session_cost_microdollars,
+            )?;
             reserve_request_tokens(
                 self.session,
                 input_tokens,
@@ -6611,8 +6732,19 @@ impl TerminalGateContext<'_> {
                     budget,
                 });
             }
-            let reserved_output_tokens = reservation_output_tokens(self.session, self.model, 1, self.max_session_tokens, self.max_session_cost_microdollars)?;
-            reserve_request_tokens(self.session, input_tokens, reserved_output_tokens, self.max_session_tokens)?;
+            let reserved_output_tokens = reservation_output_tokens(
+                self.session,
+                self.model,
+                1,
+                self.max_session_tokens,
+                self.max_session_cost_microdollars,
+            )?;
+            reserve_request_tokens(
+                self.session,
+                input_tokens,
+                reserved_output_tokens,
+                self.max_session_tokens,
+            )?;
             reserve_request_cost(
                 self.session,
                 self.model,
@@ -6827,7 +6959,7 @@ impl DeferredPollSource for AiDeferredPollSource {
                 None => {
                     return DeferredPollReply::Failed(
                         "deferred poll stream ended without a terminal response".to_owned(),
-                    )
+                    );
                 }
             }
         }
@@ -6948,6 +7080,14 @@ impl Agent {
             )));
         }
         config.sandbox.workspace = workspace;
+        if config.model.responses_features().reasoning_effort_updates {
+            if let Some((_, effective)) = config
+                .session
+                .responses_reasoning(&config.model.endpoint.id, &config.model.spec.id)?
+            {
+                config.reasoning = effective;
+            }
+        }
         let resource_owner = config.session.resource_owner_key();
         let session_id = config.session_id.unwrap_or_else(|| resource_owner.clone());
         let max_output_tokens = config.model.spec.limits.max_output_tokens;
@@ -7032,18 +7172,36 @@ impl Agent {
         {
             return Ok(None);
         }
+        if self.session.has_unsettled_native_steering() {
+            return Ok(None);
+        }
         let responses = match self.auto_compaction_mode {
-            AgentCompactionMode::NativeResponses => Some(native_responses_options(
+            AgentCompactionMode::NativeResponses
+                if !self.model.responses_features().reasoning_effort_updates =>
+            {
+                Some(native_responses_options(
+                    &self.session,
+                    &self.model,
+                    &self.system,
+                    self.service_tier,
+                )?)
+            }
+            AgentCompactionMode::NativeResponses
+            | AgentCompactionMode::Local
+            | AgentCompactionMode::Disabled => durable_responses_options(
                 &self.session,
                 &self.model,
                 &self.system,
                 self.service_tier,
-            )?),
-            AgentCompactionMode::Local | AgentCompactionMode::Disabled => {
-                durable_responses_options(&self.session, &self.model, &self.system, self.service_tier)?
-            }
+            )?,
         };
-        let tools = self.extensions.tool_definitions();
+        let tools: Vec<_> = self
+            .extensions
+            .tool_snapshot()
+            .1
+            .iter()
+            .map(|tool| advertised_tool_definition(tool.as_ref(), &self.model))
+            .collect();
         require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
         let request = Request {
             system: (!self.system.is_empty()).then(|| self.system.clone()),
@@ -7053,7 +7211,10 @@ impl Agent {
             max_output_tokens: Some(self.max_output_tokens),
             temperature: None,
             stop: Vec::new(),
-            reasoning: self.reasoning.clone(),
+            reasoning: self
+                .session
+                .responses_reasoning(&self.model.endpoint.id, &self.model.spec.id)?
+                .map_or_else(|| self.reasoning.clone(), |(baseline, _)| baseline),
             reasoning_mode: self.reasoning_mode,
             responses,
             output_format: OutputFormat::Text,
@@ -7322,6 +7483,7 @@ impl Agent {
             tool_output: None,
             tool_started_unix_ms: None,
             tool_finished_unix_ms: None,
+            native_steering: None,
             local_synthetic_assistant: false,
             extension_metadata: Default::default(),
         }
@@ -7336,8 +7498,19 @@ impl Agent {
         input_tokens: u64,
         output_tokens: u64,
     ) -> Result<(), AgentError> {
-        let output_tokens = reservation_output_tokens(&self.session, model, output_tokens, self.max_session_tokens, self.max_session_cost_microdollars)?;
-        reserve_request_tokens(&self.session, input_tokens, output_tokens, self.max_session_tokens)?;
+        let output_tokens = reservation_output_tokens(
+            &self.session,
+            model,
+            output_tokens,
+            self.max_session_tokens,
+            self.max_session_cost_microdollars,
+        )?;
+        reserve_request_tokens(
+            &self.session,
+            input_tokens,
+            output_tokens,
+            self.max_session_tokens,
+        )?;
         reserve_request_cost(
             &self.session,
             model,
@@ -7616,11 +7789,14 @@ impl Agent {
             return Ok(None);
         };
         let system = self.system.clone();
-        Ok(Some(octet_ai::responses::encode_responses_replay(
-            &self.model,
-            (!system.is_empty()).then_some(system.as_str()),
-            &replay,
-        )))
+        Ok(Some(
+            octet_ai::responses::encode_responses_replay(
+                &self.model,
+                (!system.is_empty()).then_some(system.as_str()),
+                &replay,
+            )
+            .map_err(|_| SessionError::Limit("invalid durable Responses replay".into()))?,
+        ))
     }
 
     /// Runs a tool-free summary through the same cancellable retry, hard-budget,
@@ -7775,7 +7951,16 @@ impl Agent {
                         .to_owned(),
                 )
             })?;
-        let input = octet_ai::responses::encode_responses_replay(&self.model, None, &replay);
+        if replay
+            .iter()
+            .any(|item| matches!(item, ResponsesReplayItem::ConfigurationUpdate(_)))
+        {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "standalone native compact cannot preserve reasoning updates; use local compaction"
+                    .into(),
+            ));
+        }
+        let input = octet_ai::responses::encode_responses_replay(&self.model, None, &replay)?;
         let active_system = self.system.clone();
         let instructions = (!active_system.is_empty()).then_some(active_system.as_str());
         let tools = self.extensions.tool_definitions();
@@ -7797,7 +7982,12 @@ impl Agent {
             Some(&self.session_id),
         )?;
         let input_tokens = estimate_compact_request_tokens(&request, &replay);
-        require_enforceable_output_cap(&self.session, None, self.max_session_tokens, self.max_session_cost_microdollars)?;
+        require_enforceable_output_cap(
+            &self.session,
+            None,
+            self.max_session_tokens,
+            self.max_session_cost_microdollars,
+        )?;
         reserve_request_tokens(
             &self.session,
             input_tokens,
@@ -8040,13 +8230,22 @@ impl Agent {
         let now_ms = i64::try_from(now_unix_millis()).unwrap_or(i64::MAX);
         let start = store.begin_pass(operation_id, pass_id.clone(), intent, now_ms)?;
         match start {
-            DeferredResumeStart::Unknown => Err(DeferredRunError::UnknownOperation(operation_id.to_owned()).into()),
+            DeferredResumeStart::Unknown => {
+                Err(DeferredRunError::UnknownOperation(operation_id.to_owned()).into())
+            }
             DeferredResumeStart::Finished(record) => Ok(DeferredRunOutcome::Finished {
                 operation_id: record.operation_id.clone(),
                 state: record.state_label(),
             }),
             DeferredResumeStart::Waiting(observation) => {
-                self.observe_deferred_boundary(operation_id, "deferred", "suspended", observation.poll, 0, false);
+                self.observe_deferred_boundary(
+                    operation_id,
+                    "deferred",
+                    "suspended",
+                    observation.poll,
+                    0,
+                    false,
+                );
                 Ok(DeferredRunOutcome::Waiting(observation))
             }
             DeferredResumeStart::Refused(refusal) => {
@@ -8085,7 +8284,14 @@ impl Agent {
         for observer in &self.extensions.observers {
             observer.on_run_resume(&resume);
         }
-        self.observe_deferred_boundary(&operation_id, "deferred", "effect_pending", poll_number, generation, recovery);
+        self.observe_deferred_boundary(
+            &operation_id,
+            "deferred",
+            "effect_pending",
+            poll_number,
+            generation,
+            recovery,
+        );
         // The transport permit is minted for the same unique pass and leaf
         // generation as the durable permit, and is consumed by the provider
         // call before any request is dispatched.
@@ -8116,13 +8322,22 @@ impl Agent {
                     generation,
                     recovery,
                 );
-                return Ok(DeferredRunOutcome::PollRefused(bounded_deferred_label(&message)));
+                return Ok(DeferredRunOutcome::PollRefused(bounded_deferred_label(
+                    &message,
+                )));
             }
         };
         let completion = self.session.deferred_run_store().complete_pass(&poll, outcome)?;
         match completion {
             DeferredPollCompletion::Suspended(observation) => {
-                self.observe_deferred_boundary(&operation_id, "deferred", "suspended", observation.poll, 0, recovery);
+                self.observe_deferred_boundary(
+                    &operation_id,
+                    "deferred",
+                    "suspended",
+                    observation.poll,
+                    0,
+                    recovery,
+                );
                 Ok(DeferredRunOutcome::Suspended(observation))
             }
             DeferredPollCompletion::Settled {
@@ -8135,7 +8350,14 @@ impl Agent {
                     )
                     .into());
                 };
-                self.observe_deferred_boundary(&operation_id, "settled", "settled", poll_number, generation, recovery);
+                self.observe_deferred_boundary(
+                    &operation_id,
+                    "settled",
+                    "settled",
+                    poll_number,
+                    generation,
+                    recovery,
+                );
                 Ok(DeferredRunOutcome::Settled {
                     response,
                     response_id,
@@ -8147,7 +8369,14 @@ impl Agent {
                 // usage is unknown, so record exposure rather than a fabricated
                 // cost or a second poll.
                 self.record_deferred_exposure();
-                self.observe_deferred_boundary(&operation_id, "failed", "failed", poll_number, generation, recovery);
+                self.observe_deferred_boundary(
+                    &operation_id,
+                    "failed",
+                    "failed",
+                    poll_number,
+                    generation,
+                    recovery,
+                );
                 Ok(DeferredRunOutcome::Failed(failure))
             }
         }
@@ -8486,6 +8715,10 @@ impl Agent {
                 // A schema-rejected call was never admitted for execution in
                 // the live path; retain that fact across a restart as well.
                 Err(rejected_argument_tool_error(argument_error))
+            } else if call.async_execution {
+                Err(ToolError::new(
+                    "indeterminate background call after restart; not automatically replayed",
+                ))
             } else if call_index >= MAX_TOOL_CALLS_PER_TURN {
                 Err(ToolError::new(
                     "tool call skipped: per-turn tool-call limit reached",
@@ -8498,7 +8731,9 @@ impl Agent {
                         call.name,
                         synthesize_interruption(partial_output.as_deref()).text
                     ))),
-                    Some(tool) if tool.replay_safety() == ReplaySafety::Safe => {
+                    Some(tool)
+                        if !call.async_execution && tool.replay_safety() == ReplaySafety::Safe =>
+                    {
                         execute_recovery_call(
                             call_index,
                             Arc::clone(tool),
@@ -8541,6 +8776,27 @@ impl Agent {
         Ok(())
     }
 
+    /// Effective host-selected reasoning, distinct from a pinned request baseline.
+    pub fn reasoning(&self) -> &ReasoningConfig {
+        &self.reasoning
+    }
+
+    /// Changes reasoning on an idle agent, preserving qualified Responses caches.
+    pub fn set_reasoning(&mut self, reasoning: ReasoningConfig) -> Result<(), AgentError> {
+        if self.model.responses_features().reasoning_effort_updates {
+            persist_reasoning_selection(&mut self.session, &self.model, &reasoning)?;
+        } else {
+            octet_ai::responses::validate_responses_input(
+                &self.model,
+                &ResponsesInput::default(),
+                &reasoning,
+                false,
+            )?;
+        }
+        self.reasoning = reasoning;
+        Ok(())
+    }
+
     /// Begins a run: appends the user message to the session and returns the
     /// caller-driven event stream plus its control handle.
     ///
@@ -8574,6 +8830,9 @@ impl Agent {
                 "Ultra requires an enabled child-session observation runtime".into(),
             ));
         }
+        if self.session.has_unsettled_native_steering() {
+            return Err(AiError::Config(octet_ai::ConfigError::Parse("unresolved native steering intent; automatic replay is prohibited; use a new session".into())).into());
+        }
         // Direct library callers may not have an explicit construction
         // boundary. Keep this idempotent fallback so their first owning run
         // cannot leave dynamic publishers waiting forever.
@@ -8592,7 +8851,10 @@ impl Agent {
         // leaves a frontend free to revise and retry the same draft.
         let (initial_tool_revision, initial_tools) = self.extensions.tool_snapshot();
         let initial_tool_defs: Vec<ToolDef> = if tools_enabled {
-            initial_tools.iter().map(|tool| tool.definition()).collect()
+            initial_tools
+                .iter()
+                .map(|tool| advertised_tool_definition(tool.as_ref(), &self.model))
+                .collect()
         } else {
             Vec::new()
         };
@@ -8609,6 +8871,9 @@ impl Agent {
             ..prompt_metadata.clone()
         };
         let observer_input = (!self.extensions.observers.is_empty()).then(|| input.clone());
+        if self.model.responses_features().reasoning_effort_updates {
+            persist_reasoning_selection(&mut self.session, &self.model, &self.reasoning)?;
+        }
         let first_entry = self
             .session
             .append_with_metadata(user_message(input), Some(prompt_metadata.clone()))?;
@@ -8634,6 +8899,9 @@ impl Agent {
         let abort = Arc::new(AbortFlag::default());
         let control_admission = Arc::new(std::sync::Mutex::new(true));
         let control = RunControl {
+            reasoning_model: (self.reasoning
+                != ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra))
+            .then(|| self.model.clone()),
             admission: control_admission.clone(),
             tx: control_tx,
             pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
@@ -8668,7 +8936,7 @@ impl Agent {
         let provider_retry_hooks = self.extensions.provider_retry_hooks.clone();
         let persistence_metadata_hooks = self.extensions.persistence_metadata_hooks.clone();
         let max_turns = self.max_turns;
-        let reasoning = self.reasoning.clone();
+        let mut reasoning = self.reasoning.clone();
         let reasoning_mode = self.reasoning_mode;
         let cache_retention = self.cache_retention;
         let session_id = self.session_id.clone();
@@ -8679,10 +8947,17 @@ impl Agent {
         let output_modalities = self.output_modalities.clone();
         let provider_output_ceiling = self.max_output_tokens;
         let compaction_reserve_tokens = self.compaction_reserve_tokens();
+        let effective_reasoning = &mut self.reasoning;
         let max_session_tokens = self.max_session_tokens;
         let max_session_cost_microdollars = self.max_session_cost_microdollars;
         let tool_schema_budget_bytes = self.tool_schema_budget_bytes;
-        let auto_compaction_mode = self.auto_compaction_mode;
+        let auto_compaction_mode = if self.model.responses_features().reasoning_effort_updates
+            && self.auto_compaction_mode == AgentCompactionMode::NativeResponses
+        {
+            AgentCompactionMode::Local
+        } else {
+            self.auto_compaction_mode
+        };
         // The caller-selected provider service tier rides on every Responses
         // request this run builds; the builder re-checks the route capability.
         let service_tier = self.service_tier;
@@ -8772,6 +9047,14 @@ impl Agent {
             let mut announced_tools: std::collections::HashSet<String> =
                 registered_tools.iter().cloned().collect();
 
+            let mut native = native_steering::NativeState::default();
+            let (native_updates_tx, mut native_updates_rx) = mpsc::channel(128);
+            let native_enabled = model.responses_features().steering
+                && model.endpoint.transport == octet_ai::EndpointTransport::WebSocketPreferred
+                && max_session_tokens.is_none() && max_session_cost_microdollars.is_none();
+            let mut background_tools = background_tools::BackgroundTools::default();
+            let background_cancellation = abort.cancellation.clone();
+            let mut pending_reasoning = None;
             let mut pending_steer: Vec<ReservedInput> = Vec::new();
             let mut followups: VecDeque<ReservedInput> = VecDeque::new();
             // Preserve octet's historical defaults; frontends that expose queue
@@ -8943,6 +9226,7 @@ impl Agent {
                                     finish_pending = true;
                                     context_capacity.invalidate();
                                 }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                 Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                 Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                 Some(Control::Abort) => break 'run FinishReason::Aborted,
@@ -8966,6 +9250,7 @@ impl Agent {
                             finish_pending = true;
                             context_capacity.invalidate();
                         }
+                        Ok(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                         Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
                         Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                         Ok(Control::Abort) => break 'run FinishReason::Aborted,
@@ -8977,9 +9262,18 @@ impl Agent {
                     break 'run FinishReason::Aborted;
                 }
 
+                if let Some(selection) = if native.connection.is_none() { pending_reasoning.take() } else { None } {
+                    if let Err(error) = persist_reasoning_selection(session, &model, &selection) {
+                        break 'run FinishReason::Failed(error);
+                    }
+                    reasoning = selection.clone();
+                    *effective_reasoning = selection;
+                    context_capacity.invalidate();
+                }
+
                 // ── Steering enters here, at the model-turn boundary ───────
                 pending_steer.retain(ReservedInput::is_pending);
-                if !pending_steer.is_empty() {
+                if native.connection.is_none() && (!pending_steer.is_empty() || pending_reasoning.is_some()) {
                     let queued = if std::mem::take(&mut finish_pending) {
                         std::mem::take(&mut pending_steer)
                     } else {
@@ -9040,7 +9334,7 @@ impl Agent {
                     if tools_enabled && !answer_only {
                         let next_tool_defs: Vec<ToolDef> = current_tools
                             .iter()
-                            .map(|tool| tool.definition())
+                            .map(|tool| advertised_tool_definition(tool.as_ref(), &model))
                             .collect();
                         if let Err(error) = require_tool_schema_budget(
                             &next_tool_defs,
@@ -9092,7 +9386,7 @@ impl Agent {
                         max_session_tokens,
                         max_session_cost_microdollars,
                         abort: &abort,
-                        mode: auto_compaction_mode,
+                        mode: if background_tools.is_empty() && native.connection.is_none() { auto_compaction_mode } else { AgentCompactionMode::Disabled },
                         threshold_fraction: compaction_threshold_fraction,
                         keep_recent_tokens: compaction_keep_recent_tokens,
                         events: &compaction_event_tx,
@@ -9120,6 +9414,7 @@ impl Agent {
                                     answer_only = true;
                                     finish_pending = true;
                                 }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                 Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                 Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                 Some(Control::Abort) => { abort.set(); }
@@ -9149,7 +9444,7 @@ impl Agent {
                     }
                 };
                 pending_steer.retain(ReservedInput::is_pending);
-                if !pending_steer.is_empty() {
+                if native.connection.is_none() && (!pending_steer.is_empty() || pending_reasoning.is_some()) {
                     context_capacity.invalidate();
                     continue 'run;
                 }
@@ -9195,7 +9490,11 @@ impl Agent {
                     max_output_tokens: Some(request_max_output_tokens),
                     temperature: None,
                     stop: vec![],
-                    reasoning: reasoning.clone(),
+                    reasoning: match session.responses_reasoning(&model.endpoint.id, &model.spec.id) {
+                        Ok(Some((baseline, _))) => baseline,
+                        Ok(None) => reasoning.clone(),
+                        Err(error) => break 'run FinishReason::Failed(error.into()),
+                    },
                     reasoning_mode,
                     responses,
                     output_format: OutputFormat::Text,
@@ -9263,7 +9562,10 @@ impl Agent {
                 let ev = AgentEvent::TurnStarted;
                 notify_observers(&observers, &ev);
                 yield ev;
-                let qualified = qualified_inference_replacement(&model, &request);
+                let qualified = !native_enabled && qualified_inference_replacement(&model, &request);
+                let native_delta = match native_steering::required_input_request(request.clone(), session, &model) {
+                    Ok(request) => request, Err(error) => break 'run FinishReason::Failed(error),
+                };
                 let opening_client = client.track_request_dispatch();
                 let opened = tokio::select! {
                     biased;
@@ -9284,9 +9586,24 @@ impl Agent {
                         }
                         break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown });
                     },
-                    result = open_provider_stream(&opening_client, &model, request, &abort) => result,
+                    result = async {
+                        if let Some(connection) = native.connection.take() {
+                            Ok(Some(native_steering::ProviderStream::Native(connection, native_updates_tx.clone(), None)))
+                        } else if native_enabled {
+                            opening_client.steerable_responses(&model, request).await.map(|connection| Some(native_steering::ProviderStream::Native(connection, native_updates_tx.clone(), None)))
+                        } else {
+                            open_provider_stream(&opening_client, &model, request, &abort).await.map(|stream| stream.map(native_steering::ProviderStream::Ordinary))
+                        }
+                    } => result,
                 };
                 let mut response_stream = match opened {
+                    Err(error) if native_enabled => {
+                        if opening_client.request_may_have_been_sent() {
+                            if let Err(record_error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "native_steering") { break 'run FinishReason::Failed(record_error.into()); }
+                            let event = AgentEvent::ProviderUsageUncertain; notify_observers(&observers, &event); yield event;
+                        }
+                        break 'run FinishReason::Failed(error.into());
+                    }
                     Err(error) if context_retries < MAX_PROVIDER_RETRIES && looks_like_context_error(&error) => {
                         context_retries += 1;
                         let compacted = {
@@ -9310,7 +9627,7 @@ impl Agent {
                                 max_session_tokens,
                                 max_session_cost_microdollars,
                                 abort: &abort,
-                                mode: auto_compaction_mode,
+                                mode: if background_tools.is_empty() && native.connection.is_none() { auto_compaction_mode } else { AgentCompactionMode::Disabled },
                                 threshold_fraction: compaction_threshold_fraction,
                                 keep_recent_tokens: compaction_keep_recent_tokens,
                                 events: &compaction_event_tx,
@@ -9337,6 +9654,7 @@ impl Agent {
                                     answer_only = true;
                                     finish_pending = true;
                                 }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                 Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                 Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                 Some(Control::Abort) => { abort.set(); }
@@ -9378,6 +9696,15 @@ impl Agent {
                         s
                     },
                 };
+                if let Some(control) = response_stream.control() {
+                    if native.control.is_none() { native.begin(format!("{effect_run_id}:{completed_turns}"), control); }
+                }
+                if native.required_input && native_delta.messages.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_))))) {
+                    native.required_input = false;
+                    if let Some(control) = native.control.as_ref() {
+                        if let Err(error) = control.continue_with(native_delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
+                    }
+                }
                 // Parity 1e.2 durability half: encode the in-flight assistant
                 // message into compact frames and journal them beside the
                 // session between deltas, so a killed process can republish the
@@ -9397,6 +9724,7 @@ impl Agent {
                     Event(Option<Result<StreamEvent, AiError>>),
                     Ctl(Option<Control>),
                     Delegation(Option<DelegationTelemetrySnapshot>),
+                    Steering(octet_ai::SteeringUpdate),
                     Abort,
                 }
                 let mut attempt_saw_generation = false;
@@ -9410,6 +9738,7 @@ impl Agent {
                         biased;
                         _ = abort.wait() => Next::Abort,
                         c = control_rx.recv(), if control_open => Next::Ctl(c),
+                        Some(update) = native_updates_rx.recv() => Next::Steering(update),
                         snapshot = async {
                             match &mut delegation_telemetry {
                                 Some(receiver) => next_delegation_snapshot(receiver).await,
@@ -9418,6 +9747,30 @@ impl Agent {
                         }, if delegation_telemetry.is_some() => Next::Delegation(snapshot),
                         ev = response_stream.next() => Next::Event(ev),
                     };
+                    // Apply the selected update before subsequently queued ones;
+                    // both paths must drive required-input continuations.
+                    let next = match next {
+                        Next::Steering(update) => {
+                            if let Err(error) = native.update(update, session, &model) { break 'run FinishReason::Failed(error); }
+                            None
+                        }
+                        next => Some(next),
+                    };
+                    while let Ok(update) = native_updates_rx.try_recv() {
+                        if let Err(error) = native.update(update, session, &model) { break 'run FinishReason::Failed(error); }
+                    }
+                    if native.required_input && native_delta.messages.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_))))) {
+                        native.required_input = false;
+                        if let Some(control) = native.control.as_ref() {
+                            if let Err(error) = control.continue_with(native_delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
+                        }
+                    }
+                    match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
+                        Ok(Some(event)) => { notify_observers(&observers, &event); yield event; },
+                        Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
+                    }
+                    let Some(next) = next else { continue; };
+                    if matches!(next, Next::Event(Some(Ok(StreamEvent::Started { .. })))) { native.started(response_stream.response_id()); }
                     let next = match next {
                         Next::Event(Some(Ok(StreamEvent::Finished(response)))) => {
                             match incomplete_responses_error(&model, &response) {
@@ -9434,7 +9787,13 @@ impl Agent {
                             }
                             break Err(FinishReason::Aborted);
                         }
-                        Next::Ctl(Some(Control::Steer(input))) => input.push_pending(&mut pending_steer),
+                        Next::Ctl(Some(Control::Steer(input))) => {
+                            match native.submit(input, session, &model).await {
+                                Ok(Some(input)) => input.push_pending(&mut pending_steer),
+                                Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
+                            }
+                        },
+                        Next::Steering(_) => unreachable!("handled above"),
                         Next::Ctl(Some(Control::FollowUp(input))) => followups.push_back(input),
                         Next::Ctl(Some(Control::FinishNow(input))) => {
                             input.push_pending(&mut pending_steer);
@@ -9442,6 +9801,7 @@ impl Agent {
                             finish_pending = true;
                             context_capacity.invalidate();
                         }
+                        Next::Ctl(Some(Control::SetReasoning(selection))) => pending_reasoning = Some(selection),
                         Next::Ctl(Some(Control::SetSteeringMode(mode))) => steering_mode = mode,
                         Next::Ctl(Some(Control::SetFollowUpMode(mode))) => follow_up_mode = mode,
                         Next::Ctl(None) => control_open = false,
@@ -9456,6 +9816,12 @@ impl Agent {
                                 Next::Event(Some(Err(error))) => error,
                                 _ => AiError::StreamProtocol(octet_ai::StreamProtocolError::MissingFinish),
                             };
+                            if native_enabled {
+                                native.connection = response_stream.into_native();
+                                if let Err(record_error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "native_steering") { break 'run FinishReason::Failed(record_error.into()); }
+                                let event = AgentEvent::ProviderUsageUncertain; notify_observers(&observers, &event); yield event;
+                                break 'run FinishReason::Failed(error.into());
+                            }
                             // Retire the failed stream before hooks, backoff,
                             // compaction or any replacement can open a transport.
                             drop(response_stream);
@@ -9492,7 +9858,7 @@ impl Agent {
                                         max_session_tokens,
                                         max_session_cost_microdollars,
                                         abort: &abort,
-                                        mode: auto_compaction_mode,
+                                        mode: if background_tools.is_empty() && native.connection.is_none() { auto_compaction_mode } else { AgentCompactionMode::Disabled },
                                         threshold_fraction: compaction_threshold_fraction,
                                         keep_recent_tokens: compaction_keep_recent_tokens,
                                         events: &compaction_event_tx,
@@ -9519,6 +9885,7 @@ impl Agent {
                                     answer_only = true;
                                     finish_pending = true;
                                 }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                 Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                 Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                 Some(Control::Abort) => { abort.set(); }
@@ -9640,7 +10007,12 @@ impl Agent {
                 // and transport recovery happen within the same logical turn
                 // and must not consume the autonomous work budget.
                 completed_turns = completed_turns.saturating_add(1);
-                drop(response_stream);
+                if native.has_pending() {
+                    native.connection = response_stream.into_native();
+                } else {
+                    drop(response_stream);
+                    native.control = None;
+                }
 
                 // ── Persist the completed assistant message ────────────────
                 // StopReason is semantic control data, not parser metadata. It
@@ -9795,7 +10167,7 @@ impl Agent {
                         Err(error) => break 'run FinishReason::Failed(error.into()),
                     }
                 }
-                if let Err(error) = session.append_assistant_turn_with_metadata(
+                let assistant_entry = match session.append_assistant_turn_with_metadata(
                     assistant.clone(),
                     model.endpoint.id.clone(),
                     model.spec.id.clone(),
@@ -9805,7 +10177,14 @@ impl Agent {
                     raw_responses_output,
                     persistence_metadata,
                 ) {
-                    break 'run FinishReason::Failed(error.into());
+                    Ok(entry) => entry,
+                    Err(error) => break 'run FinishReason::Failed(error.into()),
+                };
+                if let Err(error) = native.settle_successor(session, &model, assistant_entry) { break 'run FinishReason::Failed(error); }
+                native.completed_prefix();
+                match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
+                    Ok(Some(event)) => { notify_observers(&observers, &event); yield event; },
+                    Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
                 }
                 context_capacity.observe_assistant_response(session, &model, &turn_usage);
                 add_usage(&mut run_usage, &turn_usage);
@@ -9815,8 +10194,9 @@ impl Agent {
                 let output_truncated = matches!(stop_reason, StopReason::MaxTokens);
                 let needs_continuation = output_truncated
                     || matches!(stop_reason, StopReason::PauseTurn)
+                    || (matches!(stop_reason, StopReason::Steered) && native.has_pending())
                     || matches!(&stop_reason, StopReason::Other(reason) if reason == "tool_output_locked");
-                if normal_end && calls.is_empty() && !assistant_has_terminal_content(&assistant) {
+                if normal_end && calls.is_empty() && background_tools.is_empty() && !assistant_has_terminal_content(&assistant) {
                     // A normal stop without terminal content is not a completed
                     // turn. Persist its message and usage above, then fail without
                     // retrying; the stop alone does not establish the cause.
@@ -9831,6 +10211,7 @@ impl Agent {
                     });
                 }
                 let gated_candidate = completion_policy == CompletionPolicy::TerminalGate
+                    && background_tools.is_empty() && !native.has_pending()
                     && calls.is_empty()
                     && normal_end;
 
@@ -9851,6 +10232,39 @@ impl Agent {
                     yield ev;
                 }
 
+                // Results from the previous response retain their original IDs.
+                // The concurrent assistant is committed first: it was generated
+                // without these results. Sync/effectful work is a strict barrier.
+                let completed_background = !background_tools.is_empty();
+                while !background_tools.is_empty() {
+                    let operation = background_tools.settle_one(session, &model, &sandbox,
+                        &stream_context, &mut run_usage, &mut terminal_gate_evidence);
+                    tokio::pin!(operation);
+                    let settled = loop {
+                        tokio::select! {
+                            biased;
+                            result = &mut operation => break result,
+                            control = control_rx.recv(), if control_open => match control {
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
+                                Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::FinishNow(input)) => {
+                                    input.push_pending(&mut pending_steer); answer_only = true; finish_pending = true;
+                                }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
+                                Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                Some(Control::Abort) => abort.set(),
+                                None => control_open = false,
+                            },
+                        }
+                    };
+                    match settled {
+                        Ok(events) => for event in events { notify_observers(&observers, &event); yield event; },
+                        Err(error) => break 'run FinishReason::Failed(error),
+                    }
+                    context_capacity.invalidate();
+                }
+
                 // Drain control before deciding whether a provisional candidate
                 // is terminal. New user input takes precedence over the gate.
                 {
@@ -9865,6 +10279,7 @@ impl Agent {
                                 finish_pending = true;
                                 context_capacity.invalidate();
                             }
+                            Ok(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                             Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
                             Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                             Ok(Control::Abort) => {
@@ -9876,8 +10291,8 @@ impl Agent {
                         }
                     }
                     pending_steer.retain(ReservedInput::is_pending);
-                    if !gated_candidate && calls.is_empty() && normal_end && !needs_continuation
-                        && pending_steer.is_empty() && followups.is_empty() {
+                    if !gated_candidate && !completed_background && !native.has_pending() && calls.is_empty() && normal_end && !needs_continuation
+                        && pending_steer.is_empty() && pending_reasoning.is_none() && followups.is_empty() {
                         *admission = false;
                     }
                 }
@@ -9895,6 +10310,14 @@ impl Agent {
                     });
                 }
 
+                if native.has_pending() && calls.is_empty() {
+                    if abort.is_set() { break 'run FinishReason::Aborted; }
+                    continue 'run;
+                }
+                if completed_background && calls.is_empty() && normal_end {
+                    if abort.is_set() { break 'run FinishReason::Aborted; }
+                    continue 'run;
+                }
                 if calls.is_empty() {
                     if abort.is_set() {
                         if gated_candidate {
@@ -9923,7 +10346,7 @@ impl Agent {
                     // Steering and follow-ups make this a normal intermediate
                     // turn, so commit it without spending a gate request.
                     pending_steer.retain(ReservedInput::is_pending);
-                if !pending_steer.is_empty() {
+                if native.connection.is_none() && (!pending_steer.is_empty() || pending_reasoning.is_some()) {
                         if gated_candidate {
                             let session_cost = priced_session_subtotal(session, &model);
                             let ev = AgentEvent::TurnFinished {
@@ -10031,6 +10454,7 @@ impl Agent {
                                             answer_only = true;
                                             finish_pending = true;
                                         }
+                                        Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                         Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                         Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                         Some(Control::Abort) => { abort.set(); }
@@ -10078,6 +10502,7 @@ impl Agent {
                                         finish_pending = true;
                                         context_capacity.invalidate();
                                     }
+                                    Ok(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                     Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                     Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                     Ok(Control::Abort) => abort.set(),
@@ -10086,7 +10511,7 @@ impl Agent {
                                 }
                             }
                             pending_steer.retain(ReservedInput::is_pending);
-                            if return_candidate && pending_steer.is_empty() && followups.is_empty() {
+                            if return_candidate && pending_steer.is_empty() && pending_reasoning.is_none() && followups.is_empty() {
                                 *admission = false;
                             }
                         }
@@ -10097,7 +10522,7 @@ impl Agent {
                             // Steering and follow-ups make this a normal intermediate
                             // turn, so commit it without spending a gate request.
                             pending_steer.retain(ReservedInput::is_pending);
-                if !pending_steer.is_empty() {
+                if native.connection.is_none() && (!pending_steer.is_empty() || pending_reasoning.is_some()) {
                                 if gated_candidate && !return_candidate {
                                     let session_cost = priced_session_subtotal(session, &model);
                                     let ev = AgentEvent::TurnFinished {
@@ -10237,6 +10662,33 @@ impl Agent {
                     progress: ToolProgressSink::null(),
                     cancellation: CancellationToken::default(),
                 };
+                // Defer only a complete, bounded batch of independent host
+                // observations. Mixed/sync/effectful batches keep ordinary order.
+                // Hard ceilings serialize tool accounting before another request.
+                if model.responses_features().async_tools
+                    && max_session_tokens.is_none() && max_session_cost_microdollars.is_none()
+                    && calls.len() <= MAX_PARALLEL_READ_WAVE_WIDTH
+                    && !abort.is_set()
+                    && calls.iter().enumerate().all(|(index, call)| {
+                        call.async_execution
+                            && request_tool_defs.iter().any(|definition| definition.name == call.name && definition.async_execution)
+                            && parallel_read_candidate(call, index, answer_only, output_truncated, &tool_map, &classification_context)
+                    }) {
+                    for (index, call) in calls.iter().enumerate() {
+                        let invocation = match session.tool_invocation(index) {
+                            Ok(handle) => handle,
+                            Err(error) => break 'run FinishReason::Failed(error.into()),
+                        };
+                        stream_context.tool_started();
+                        let event = AgentEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args: call.arguments_value().expect("complete admitted arguments") };
+                        notify_observers(&observers, &event); yield event;
+                        background_tools.start(call.clone(), invocation, tool_map[&call.name].clone(),
+                            tool_call_hooks.clone(), effect_broker.clone(), effect_run_id.clone(), tool_revision,
+                            sandbox.clone(), tool_scope.clone(), resource_owner.clone(), parallel_active_skills.clone(),
+                            registered_tools.clone(), background_cancellation.clone());
+                    }
+                    continue 'run;
+                }
                 let mut parallel_results: VecDeque<ParallelReadWaveExecution> = VecDeque::new();
                 // Row 4.10: every finalized result of this assistant batch, in
                 // emitted order, decides the batch's termination request.
@@ -10353,6 +10805,7 @@ impl Agent {
                                             finish_pending = true;
                                             context_capacity.invalidate();
                                         }
+                                        Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                         Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                         Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                         Some(Control::Abort) => {
@@ -10652,6 +11105,7 @@ impl Agent {
                                                 finish_pending = true;
                                                 context_capacity.invalidate();
                                             }
+                                            Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                             Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                             Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                             Some(Control::Abort) => {
@@ -11006,7 +11460,7 @@ impl Agent {
                     break 'run FinishReason::Completed;
                 }
 
-                if needs_continuation {
+                if needs_continuation && !native.has_pending() {
                     let instruction = continuation_instruction(&stop_reason);
                     if let Err(e) = session.append(user_message(UserInput::from(instruction))) {
                         break 'run FinishReason::Failed(e.into());
@@ -11015,6 +11469,23 @@ impl Agent {
                 // Context reconstruction coalesces the consecutive tool-result
                 // entries into the provider-required single user message.
             };
+
+            if session.has_unsettled_native_steering() {
+                if let Err(error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "native_steering") { reason = FinishReason::Failed(error.into()); }
+                let event = AgentEvent::ProviderUsageUncertain; notify_observers(&observers, &event); yield event;
+            }
+            if let Err(error) = native.cancel(session, &model) { reason = FinishReason::Failed(error); }
+
+            // Every driven terminal cancels and pairs accepted background work.
+            // Run drop instead aborts task handles; restart never replays them.
+            background_cancellation.cancel();
+            while !background_tools.is_empty() {
+                match background_tools.settle_one(session, &model, &sandbox,
+                    &stream_context, &mut run_usage, &mut terminal_gate_evidence).await {
+                    Ok(events) => for event in events { notify_observers(&observers, &event); yield event; },
+                    Err(error) => { reason = FinishReason::Failed(error); break; }
+                }
+            }
 
             // Row 3.5: settle the final turn before the run boundary. A turn
             // that never opened a provider attempt is not an error; one that
@@ -11239,6 +11710,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         (
             RunControl {
+                reasoning_model: None,
                 admission: Arc::new(Mutex::new(true)),
                 tx,
                 pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
@@ -11268,6 +11740,7 @@ mod tests {
                     state: None,
                 }),
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: octet_ai::ToolCallId(hostile.clone()),
                     name: hostile.clone(),
                     arguments_json: hostile.clone(),
@@ -11539,6 +12012,7 @@ mod tests {
     fn tool_schema_budget_counts_exact_json_and_refuses_without_tool_rewriting() {
         require_tool_schema_budget(&[], 0).expect("zero budget permits no provider tools");
         let tools = vec![ToolDef {
+            async_execution: false,
             name: "schema-tool".into(),
             description: "private description must not enter the diagnostic".into(),
             parameters: serde_json::json!({"type": "object", "properties": {"payload": {"type": "string"}}}),
@@ -11577,10 +12051,9 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
             expected_tool_count: tool_count,
         });
-        agent.client.register_host_stream_transport(
-            agent.model.endpoint.id.clone(),
-            transport.clone(),
-        );
+        agent
+            .client
+            .register_host_stream_transport(agent.model.endpoint.id.clone(), transport.clone());
 
         agent.set_tool_schema_budget_bytes(budget - 1);
         assert!(matches!(
@@ -11798,6 +12271,7 @@ mod tests {
         let arguments = serde_json::json!({"payload": "x".repeat(16_000)}).to_string();
         let script = Arc::new(Script(Mutex::new(VecDeque::from([
             vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("unknown-call".into()),
                 name: "unregistered".into(),
                 arguments_json: arguments.clone(),
@@ -12265,6 +12739,7 @@ mod tests {
     impl Tool for PromptTool {
         fn definition(&self) -> ToolDef {
             ToolDef {
+                async_execution: false,
                 name: self.name.to_owned(),
                 description: format!("{} tool", self.name),
                 parameters: serde_json::json!({"type": "object"}),
@@ -12457,7 +12932,11 @@ mod tests {
         let requested = resolve_request_max_output_tokens(window, estimated_input, window);
         assert_eq!(requested, 29_586);
         // Provider-side counting differences of this size are covered.
-        for provider_input in [estimated_input + 1, estimated_input + 512, estimated_input + 1_310] {
+        for provider_input in [
+            estimated_input + 1,
+            estimated_input + 512,
+            estimated_input + 1_310,
+        ] {
             assert!(
                 provider_input + requested <= window,
                 "provider input {provider_input} + requested {requested} exceeded {window}"
@@ -12540,6 +13019,7 @@ mod tests {
         let broker = EffectBroker::new(crate::effect::EffectPolicy::Controlled);
         let sensitive_argument = "sensitive-argument-marker";
         let call = ToolCall {
+            async_execution: false,
             id: octet_ai::ToolCallId("call_malformed".into()),
             name: "bash".into(),
             arguments_json: format!(r#"{{"command":"{sensitive_argument}""#),
@@ -13793,7 +14273,10 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
     #[cfg(any(unix, windows))]
     fn checkpoint_config(
         sink: Arc<RecordingCheckpointSink>,
-    ) -> (PartialOutputCheckpointConfig, Arc<PartialOutputCheckpointTotals>) {
+    ) -> (
+        PartialOutputCheckpointConfig,
+        Arc<PartialOutputCheckpointTotals>,
+    ) {
         let totals = Arc::new(PartialOutputCheckpointTotals::default());
         (
             PartialOutputCheckpointConfig {
@@ -14793,6 +15276,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             session
                 .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: octet_ai::ToolCallId(index.into()),
                         name: "read".into(),
                         arguments_json: "{}".into(),
@@ -15111,12 +15595,14 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: octet_ai::ToolCallId("call-alpha".into()),
                         name: "alpha".into(),
                         arguments_json: "{}".into(),
                         argument_error: None,
                     }),
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: octet_ai::ToolCallId("call-beta".into()),
                         name: "beta".into(),
                         arguments_json: "{}".into(),
@@ -15577,6 +16063,7 @@ mod inference_recovery_tests {
                 .mount(&server).await;
             let directory = tempfile::tempdir().unwrap();
             let mut model = model();
+            Arc::make_mut(&mut model.endpoint).transport = octet_ai::EndpointTransport::Http;
             if hard_token_limit {
                 // HTTP uncertainty coverage needs a genuinely capped route;
                 // uncapped Codex hard ceilings now refuse before dispatch.
@@ -15621,7 +16108,16 @@ mod inference_recovery_tests {
                     "{error:?}"
                 );
             }
-            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(
+                requests.len(),
+                1,
+                "hard={hard_token_limit}: {:?}",
+                requests
+                    .iter()
+                    .map(|request| (&request.method, &request.url))
+                    .collect::<Vec<_>>()
+            );
         }
     }
 }
@@ -16212,13 +16708,8 @@ mod sustained_network_recovery_tests {
         .is_ok());
         // A cheap provider echo cannot reduce the reservation: the helper has
         // no echo input and always prices the requested tier.
-        let reserved_again = worst_case_request_cost(
-            &model,
-            input,
-            output,
-            Some(ServiceTier::Priority),
-        )
-        .unwrap();
+        let reserved_again =
+            worst_case_request_cost(&model, input, output, Some(ServiceTier::Priority)).unwrap();
         assert_eq!(reserved_again, priority);
         // Restart does not erase exposure either: an unpriced durable record
         // blocks the same hard budget on a reopened session.

@@ -49,6 +49,7 @@ fn fixture_model(base_url: &str, auth: Auth) -> Model {
             endpoint: EndpointId("mistral-current".to_owned()),
             protocol: Protocol::MistralConversations,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -86,6 +87,7 @@ fn fixture_request(compatibility: CompatibilityMode, with_tools: bool) -> Reques
         })],
         tools: if with_tools {
             vec![ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "lookup".to_owned(),
                 description: "Look up a city.".to_owned(),
@@ -381,6 +383,7 @@ async fn interrupted_native_history_repairs_results_without_changing_call_ids() 
     request.tool_choice = ToolChoice::None;
     request.messages.push(Message::Assistant(AssistantMessage {
         content: vec![AssistantPart::ToolCall(ToolCall {
+            async_execution: false,
             id: ToolCallId("native:call/🦀".into()),
             name: "lookup".into(),
             arguments_json: r#"{ "city": "Paris" }"#.into(),
@@ -785,6 +788,7 @@ async fn unsupported_request_media_and_reasoning_are_explicit_not_replay_placeho
                 state: None,
             })),
             "tool_media" => history.push(AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: ToolCallId("history:call".into()),
                 name: "lookup".into(),
                 arguments_json: "{}".into(),

@@ -1298,6 +1298,7 @@ fn sessions_export_preserves_metadata_visibility_and_requires_explicit_secrets_o
     session
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: call_id.clone(),
                 name: "fixture-export".into(),
                 arguments_json: serde_json::json!({"client_secret": secrets[3]}).to_string(),

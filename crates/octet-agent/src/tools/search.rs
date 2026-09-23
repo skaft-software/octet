@@ -73,6 +73,7 @@ impl Tool for SearchTool {
 
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "search".to_string(),
             description: "Search local file contents. Prefer paths relative to the workspace; \

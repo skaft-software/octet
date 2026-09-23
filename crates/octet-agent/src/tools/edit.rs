@@ -75,6 +75,7 @@ pub struct EditTool;
 impl Tool for EditTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "edit".to_string(),
             description: "Replace unique, non-overlapping regions in one file. Every edits[].oldText \

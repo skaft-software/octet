@@ -693,6 +693,64 @@ mod tests {
     }
 
     #[test]
+    fn builtin_gpt6_controls_and_sol_luna_prices_are_route_qualified() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        for (id, input) in [
+            ("gpt-6-astra", 10_000_000),
+            ("gpt-6-sol", 2_000_000),
+            ("gpt-6-luna", 100_000),
+        ] {
+            let model = catalog.resolve(&ModelId(id.into())).unwrap();
+            assert_eq!(model.spec.api_name, id);
+            assert_eq!(model.spec.limits.context_window, 1_050_000);
+            assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+            assert_eq!(
+                model.endpoint.transport,
+                crate::EndpointTransport::WebSocketPreferred
+            );
+            let features = model.responses_features();
+            assert!(features.async_tools && features.steering && features.reasoning_effort_updates);
+            assert!(!features.compact_reasoning_effort_updates);
+            let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+            assert_eq!(
+                reasoning.supports(&crate::ReasoningConfig::Off),
+                id != "gpt-6-astra"
+            );
+            assert!(!reasoning.supports(&crate::ReasoningConfig::Effort(
+                crate::ReasoningEffort::Ultra
+            )));
+            let pricing = model.spec.pricing.as_ref().unwrap();
+            assert_eq!(pricing.input.0, input);
+            assert_eq!(pricing.output.0, input * 5);
+            assert_eq!(pricing.cache_read.0, input / 10);
+            assert_eq!(pricing.cache_write_5m.0, input * 5 / 4);
+            assert_eq!(pricing.tiers[0].min_input_tokens, 272_001);
+            assert_eq!(pricing.tiers[0].input.unwrap().0, input * 2);
+            assert_eq!(pricing.tiers[0].output.unwrap().0, input * 15 / 2);
+            let mut endpoint = (*model.endpoint).clone();
+            endpoint.runtime.responses_features = Default::default();
+            assert_eq!(
+                crate::Model {
+                    spec: model.spec,
+                    endpoint: Arc::new(endpoint)
+                }
+                .responses_features(),
+                crate::ResponsesFeatures::default()
+            );
+        }
+        assert_eq!(
+            catalog
+                .resolve(&ModelId("gpt-4o-mini".into()))
+                .unwrap()
+                .responses_features(),
+            crate::ResponsesFeatures::default()
+        );
+        assert!(catalog
+            .resolve(&ModelId("gpt-6-unverified".into()))
+            .is_err());
+    }
+
+    #[test]
     fn auxiliary_reasoning_uses_exact_default_when_off_is_not_advertised() {
         let catalog = ModelCatalog::builtin().unwrap();
         let base = catalog.resolve(&ModelId("gpt-6-astra".to_owned())).unwrap();

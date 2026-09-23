@@ -37,6 +37,7 @@ fn test_model(base_url: &str, auth: Auth) -> Model {
         display_name: None,
         protocol: octet_ai::Protocol::OpenAiChat,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities: ModalitySet::none(),
             output_modalities: ModalitySet::none(),
             tools: true,

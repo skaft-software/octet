@@ -48,6 +48,7 @@ fn bedrock_model(base_url: &str, api_name: &str) -> Model {
         display_name: None,
         protocol: Protocol::BedrockConverse,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities: ModalitySet::none(),
             output_modalities: ModalitySet::none(),
             tools: true,

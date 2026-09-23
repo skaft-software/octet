@@ -423,6 +423,7 @@ pub(crate) mod harness {
             display_name: None,
             protocol,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: input,
                 output_modalities: output,
                 tools: true,

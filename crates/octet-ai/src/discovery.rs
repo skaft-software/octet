@@ -166,6 +166,7 @@ impl ModelSelfDescription {
                 max_output_tokens: declaration.max_output_tokens,
             },
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities,
                 output_modalities,
                 tools: declaration.tools,

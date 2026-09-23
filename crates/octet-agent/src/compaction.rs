@@ -711,6 +711,7 @@ mod tests {
         argument_error: Option<ToolCallArgumentError>,
     ) -> AssistantPart {
         AssistantPart::ToolCall(ToolCall {
+            async_execution: false,
             id: ToolCallId(id.into()),
             name: name.into(),
             arguments_json: serde_json::json!({"path": path}).to_string(),
@@ -876,6 +877,7 @@ mod tests {
         let preparation = prepare_branch_handoff(
             vec![
                 assistant(vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("edit".into()),
                     name: "edit".into(),
                     arguments_json: r#"{"path":"src/lib.rs"}"#.into(),
@@ -945,6 +947,7 @@ mod tests {
     fn serialization_labels_calls_and_truncates_tool_results() {
         let messages = vec![
             assistant(vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: ToolCallId("call".into()),
                 name: "read".into(),
                 arguments_json: r#"{"path":"src/lib.rs"}"#.into(),
@@ -1004,12 +1007,14 @@ mod tests {
         extract_file_operations(
             &assistant(vec![
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("read".into()),
                     name: "read".into(),
                     arguments_json: r#"{"path":"a.rs"}"#.into(),
                     argument_error: None,
                 }),
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("edit".into()),
                     name: "edit".into(),
                     arguments_json: r#"{"path":"same.rs","old":"a","new":"b"}"#.into(),
@@ -1054,18 +1059,21 @@ mod tests {
         session
             .append(EntryValue::Message(assistant(vec![
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("read".into()),
                     name: "read".into(),
                     arguments_json: r#"{"path":"a.rs"}"#.into(),
                     argument_error: None,
                 }),
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("edit".into()),
                     name: "edit".into(),
                     arguments_json: r#"{"path":"same.rs"}"#.into(),
                     argument_error: None,
                 }),
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("write".into()),
                     name: "write".into(),
                     arguments_json: r#"{"path":"b.rs"}"#.into(),

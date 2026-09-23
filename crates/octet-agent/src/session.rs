@@ -383,6 +383,10 @@ fn valid_extension_metadata_value(
 /// visually immutable across model and theme changes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryMetadata {
+    /// Atomic provenance for a materialized native steering user message.
+    /// The tuple is (operation identifier, prepared local submission id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_steering: Option<(String, u64)>,
     /// Canonical model that received a user prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_model: Option<ModelId>,
@@ -456,6 +460,14 @@ pub enum SessionRunOutcomeStatus {
 
 impl EntryMetadata {
     fn sanitized(mut self) -> Option<Self> {
+        self.native_steering = self.native_steering.filter(|(operation, id)| {
+            !operation.is_empty()
+                && operation.len() <= 128
+                && *id < 64
+                && operation
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        });
         self.prompt_model = self.prompt_model.filter(|model| {
             !model.0.is_empty() && !model.0.chars().any(|character| character.is_control())
         });
@@ -518,7 +530,8 @@ impl EntryMetadata {
             sanitized_extension_metadata.insert(namespace, entry_metadata);
         }
         self.extension_metadata = sanitized_extension_metadata;
-        (self.prompt_model.is_some()
+        (self.native_steering.is_some()
+            || self.prompt_model.is_some()
             || self.prompt_model_source.is_some()
             || self.prompt_color.is_some()
             || self.display_text.is_some()
@@ -611,6 +624,37 @@ pub enum EntryValue {
         covered_through: EntryId,
         /// Complete, unpruned compact output used as the next replay base.
         output: octet_ai::ResponsesOutput,
+    },
+    /// Durable native steering intent/outcome. Never canonical user input until
+    /// the matching application is appended after its completed response prefix.
+    ResponsesSteering {
+        /// Exact endpoint owning the live connection.
+        endpoint: EndpointId,
+        /// Exact model owning the live connection.
+        model: ModelId,
+        /// Run/response operation identifier; local ids are operation-local.
+        operation: String,
+        /// Transport preparation receipt, durable before dispatch.
+        local_id: u64,
+        /// User input on the initial intent record only.
+        input: Option<UserMessage>,
+        /// Observed transport outcome on subsequent records.
+        state: Option<octet_ai::SteeringUpdate>,
+        /// Assistant whose committed usage settles this materialized input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completed: Option<EntryId>,
+    },
+    /// Host-authoritative, route-affine Responses reasoning cache state.
+    /// Baselines never come from opaque provider output.
+    ResponsesReasoning {
+        /// Exact endpoint owning this cache prefix.
+        endpoint: EndpointId,
+        /// Exact model owning this cache prefix.
+        model: ModelId,
+        /// Pinned request-level reasoning for this replay window.
+        baseline: octet_ai::ReasoningConfig,
+        /// Ordered effective-reasoning change, absent for the initial pin.
+        update: Option<octet_ai::ResponsesConfigurationUpdate>,
     },
     /// A configuration marker (not part of model-visible context).
     Config {
@@ -838,12 +882,16 @@ fn result_invocation_scopes<'a>(
     if results.is_empty() {
         return Vec::new();
     }
+    let mut unmatched = results
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let mut scopes = Vec::new();
     while let Some(id) = cursor {
         let Some(entry) = index.get(id).and_then(|position| entries.get(*position)) else {
             break;
         };
         if let EntryValue::Message(Message::Assistant(assistant)) = &entry.value {
-            return assistant
+            for (position, call) in assistant
                 .content
                 .iter()
                 .filter_map(|part| match part {
@@ -851,15 +899,22 @@ fn result_invocation_scopes<'a>(
                     _ => None,
                 })
                 .enumerate()
-                .filter(|(_, call)| results.contains(&&call.id))
-                .filter_map(|(position, _)| {
-                    InvocationScope::new(entry.id.0.clone(), position.to_string()).ok()
-                })
-                .collect();
+            {
+                if unmatched.remove(&call.id) {
+                    if let Ok(scope) =
+                        InvocationScope::new(entry.id.0.clone(), position.to_string())
+                    {
+                        scopes.push(scope);
+                    }
+                }
+            }
+            if unmatched.is_empty() {
+                break;
+            }
         }
         cursor = entry.parent.as_ref();
     }
-    Vec::new()
+    scopes
 }
 
 /// Build DFS entry/exit times for the parent-linked entry forest in linear
@@ -1312,7 +1367,7 @@ impl Session {
                     return Err(SessionError::Corrupt {
                         line: line_no,
                         message: format!("invalid UTF-8: {error}"),
-                    })
+                    });
                 }
             };
             let record: SessionRecord = match serde_json::from_str(line) {
@@ -1324,7 +1379,7 @@ impl Session {
                     return Err(SessionError::Corrupt {
                         line: line_no,
                         message: error.to_string(),
-                    })
+                    });
                 }
             };
             valid_end = observed_end;
@@ -1363,12 +1418,12 @@ impl Session {
                     }
                 }
                 SessionRecord::DeferredRun { record } => {
-                    restored_deferred_runs
-                        .restore(record)
-                        .map_err(|error| SessionError::Corrupt {
+                    restored_deferred_runs.restore(record).map_err(|error| {
+                        SessionError::Corrupt {
                             line: line_no,
                             message: error.to_string(),
-                        })?;
+                        }
+                    })?;
                 }
                 SessionRecord::Entry(entry) => {
                     if index.contains_key(&entry.id) {
@@ -1920,7 +1975,9 @@ impl Session {
                     append_context_message(messages, message);
                 }
             }
-            EntryValue::Config { .. }
+            EntryValue::ResponsesReasoning { .. }
+            | EntryValue::ResponsesSteering { .. }
+            | EntryValue::Config { .. }
             | EntryValue::PromptTemplateSelected { .. }
             | EntryValue::ResponsesTurn { .. }
             | EntryValue::ResponsesCompaction { .. } => {}
@@ -2058,6 +2115,19 @@ impl Session {
         checkpoint: Option<&EntryId>,
     ) -> Result<Self, SessionError> {
         let path = path.into();
+        // A compacted fork still needs the original host pin and all retained
+        // update positions. Keep ancestry for reasoning-aware branches; context
+        // reconstruction continues to honor the compaction marker.
+        let mut probe = checkpoint;
+        let mut preserve_reasoning_ancestry = false;
+        while let Some(id) = probe {
+            let entry = self
+                .entry(id)
+                .ok_or_else(|| SessionError::UnknownEntry(id.clone()))?;
+            preserve_reasoning_ancestry |=
+                matches!(entry.value, EntryValue::ResponsesReasoning { .. });
+            probe = entry.parent.as_ref();
+        }
         let mut newest_first = Vec::<&Entry>::new();
         let mut stop_at: Option<&EntryId> = None;
         let mut cursor = checkpoint;
@@ -2066,7 +2136,7 @@ impl Session {
                 .entry(id)
                 .ok_or_else(|| SessionError::UnknownEntry(id.clone()))?;
             newest_first.push(entry);
-            if stop_at == Some(id) {
+            if stop_at == Some(id) && !preserve_reasoning_ancestry {
                 break;
             }
             if let EntryValue::Compaction { first_kept, .. } = &entry.value {
@@ -2455,7 +2525,33 @@ impl Session {
     /// Known usage/cost totals are only subtotals while this is true. Hard
     /// cumulative ceilings must fail closed, including after reopening.
     pub fn has_uncertain_usage(&self) -> bool {
-        !self.usage_uncertainty_records.is_empty()
+        !self.usage_uncertainty_records.is_empty() || self.has_unsettled_native_steering()
+    }
+
+    /// A durable native intent without a completed, accounted successor cannot
+    /// be blindly resumed after a process interruption. Preparation may precede
+    /// actual dispatch; uncertainty deliberately fails closed at that gap.
+    pub fn has_unsettled_native_steering(&self) -> bool {
+        let mut pending = std::collections::HashSet::new();
+        for entry in &self.entries {
+            if let EntryValue::ResponsesSteering {
+                operation,
+                local_id,
+                input,
+                completed,
+                ..
+            } = &entry.value
+            {
+                let key = (operation.as_str(), *local_id);
+                if input.is_some() {
+                    pending.insert(key);
+                }
+                if completed.is_some() {
+                    pending.remove(&key);
+                }
+            }
+        }
+        !pending.is_empty()
     }
 
     /// Unknown-usage evidence in append order, independent of the active head.
@@ -2641,6 +2737,12 @@ impl Session {
             .and_then(EntryMetadata::sanitized);
         let output_is_valid = responses_output.as_ref().is_none_or(|output| {
             !output.is_empty()
+                && !output.items().iter().any(|item| {
+                    item.as_json()
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("configuration_update")
+                })
                 && assistant.protocol == octet_ai::Protocol::OpenAiResponses
                 && assistant.model == model
         });
@@ -2898,7 +3000,9 @@ impl Session {
                 ));
                 if matches!(
                     entry.value,
-                    EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. }
+                    EntryValue::Compaction { .. }
+                        | EntryValue::ResponsesCompaction { .. }
+                        | EntryValue::ResponsesReasoning { .. }
                 ) {
                     rebuild = true;
                     break;
@@ -3061,6 +3165,35 @@ impl Session {
 
         for entry in entries {
             match &entry.value {
+                EntryValue::ResponsesReasoning {
+                    endpoint: recorded_endpoint,
+                    model: recorded_model,
+                    update,
+                    ..
+                } => {
+                    if recorded_endpoint != endpoint || recorded_model != model {
+                        return Err(SessionError::ResponsesRouteMismatch {
+                            assistant: entry.id.clone(),
+                            expected_endpoint: endpoint.0.clone(),
+                            expected_model: model.0.clone(),
+                            actual_endpoint: recorded_endpoint.0.clone(),
+                            actual_model: recorded_model.0.clone(),
+                        });
+                    }
+                    if let Some(update) = update {
+                        // Only an undispatched tail can be adjacent: a completed
+                        // response inserts its opaque output between updates.
+                        if matches!(
+                            replay.last(),
+                            Some(octet_ai::ResponsesReplayItem::ConfigurationUpdate(_))
+                        ) {
+                            replay.pop();
+                        }
+                        replay.push(octet_ai::ResponsesReplayItem::ConfigurationUpdate(
+                            update.clone(),
+                        ));
+                    }
+                }
                 EntryValue::Message(Message::User(user)) => {
                     replay.push(octet_ai::responses::ResponsesReplayItem::User(user.clone()));
                 }
@@ -3090,6 +3223,16 @@ impl Session {
                             actual_model: recorded_model.0.clone(),
                         });
                     }
+                    if output.items().iter().any(|item| {
+                        item.as_json()
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("configuration_update")
+                    }) {
+                        return Err(SessionError::InvalidResponsesSidecar(
+                            "provider output cannot authorize configuration updates".into(),
+                        ));
+                    }
                     replay.push(octet_ai::responses::ResponsesReplayItem::Output(
                         output.clone(),
                     ));
@@ -3097,6 +3240,7 @@ impl Session {
                 EntryValue::Compaction { .. }
                 | EntryValue::ResponsesTurn { .. }
                 | EntryValue::ResponsesCompaction { .. }
+                | EntryValue::ResponsesSteering { .. }
                 | EntryValue::Config { .. }
                 | EntryValue::PromptTemplateSelected { .. }
                 | EntryValue::SkillActivated { .. }
@@ -3105,6 +3249,53 @@ impl Session {
             }
         }
         Ok(true)
+    }
+
+    /// Pinned and effective reasoning for the current route-affine replay window.
+    /// Successful local compaction rebases the removed prefix, while retained
+    /// updates keep their original positions. Fork/checkout use the selected branch.
+    pub fn responses_reasoning(
+        &self,
+        endpoint: &EndpointId,
+        model: &ModelId,
+    ) -> Result<Option<(octet_ai::ReasoningConfig, octet_ai::ReasoningConfig)>, SessionError> {
+        let branch = self.active_branch_entries()?;
+        let kept = branch.iter().rev().find_map(|entry| match &entry.value {
+            EntryValue::Compaction { first_kept, .. } => Some(first_kept),
+            _ => None,
+        });
+        let start = kept
+            .and_then(|id| branch.iter().position(|entry| &entry.id == id))
+            .unwrap_or(0);
+        let mut state = None;
+        for (index, entry) in branch.iter().enumerate() {
+            if let EntryValue::ResponsesReasoning {
+                endpoint: recorded_endpoint,
+                model: recorded_model,
+                baseline,
+                update,
+            } = &entry.value
+            {
+                if recorded_endpoint != endpoint || recorded_model != model {
+                    return Err(SessionError::ResponsesRouteMismatch {
+                        assistant: entry.id.clone(),
+                        expected_endpoint: endpoint.0.clone(),
+                        expected_model: model.0.clone(),
+                        actual_endpoint: recorded_endpoint.0.clone(),
+                        actual_model: recorded_model.0.clone(),
+                    });
+                }
+                let (pin, effective) =
+                    state.get_or_insert_with(|| (baseline.clone(), baseline.clone()));
+                if let Some(update) = update {
+                    *effective = update.reasoning.clone();
+                }
+                if index < start {
+                    *pin = effective.clone();
+                }
+            }
+        }
+        Ok(state)
     }
 
     /// Returns the current head entry ID (`None` for an empty session).
@@ -3146,7 +3337,10 @@ impl Session {
         let mut buf = Vec::with_capacity(64 + label.len());
         write_json_line(
             &mut buf,
-            &SessionRecordRef::EntryLabel { entry_id: id, label },
+            &SessionRecordRef::EntryLabel {
+                entry_id: id,
+                label,
+            },
         )?;
         self.persist(&buf)?;
         if label.is_empty() {
@@ -3205,7 +3399,9 @@ impl Session {
                 .ok_or_else(|| SessionError::UnknownEntry(id.clone()))?;
             match &entry.value {
                 EntryValue::Message(m) => newest_first.push(m.clone()),
-                EntryValue::Config { .. }
+                EntryValue::ResponsesReasoning { .. }
+                | EntryValue::ResponsesSteering { .. }
+                | EntryValue::Config { .. }
                 | EntryValue::PromptTemplateSelected { .. }
                 | EntryValue::ResponsesTurn { .. }
                 | EntryValue::ResponsesCompaction { .. } => {}
@@ -3300,7 +3496,9 @@ impl Session {
                         ))],
                     }));
                 }
-                EntryValue::Config { .. }
+                EntryValue::ResponsesReasoning { .. }
+                | EntryValue::ResponsesSteering { .. }
+                | EntryValue::Config { .. }
                 | EntryValue::PromptTemplateSelected { .. }
                 | EntryValue::ResponsesTurn { .. }
                 | EntryValue::ResponsesCompaction { .. }
@@ -3606,7 +3804,7 @@ impl Session {
             Err(crate::secure_fs::SecureFileError::Io(error))
                 if error.kind() == std::io::ErrorKind::NotFound =>
             {
-                return Ok(None)
+                return Ok(None);
             }
             Err(error) => return Err(partial_journal_file_error(error)),
         };
@@ -3887,6 +4085,7 @@ mod tests {
                     tool_output: None,
                     tool_started_unix_ms: None,
                     tool_finished_unix_ms: None,
+                    native_steering: None,
                     local_synthetic_assistant: false,
                     extension_metadata: Default::default(),
                 }),
@@ -3904,6 +4103,7 @@ mod tests {
                     tool_output: None,
                     tool_started_unix_ms: None,
                     tool_finished_unix_ms: None,
+                    native_steering: None,
                     local_synthetic_assistant: false,
                     extension_metadata: Default::default(),
                 }),
@@ -3923,6 +4123,7 @@ mod tests {
                 tool_output: None,
                 tool_started_unix_ms: None,
                 tool_finished_unix_ms: None,
+                native_steering: None,
                 local_synthetic_assistant: false,
                 extension_metadata: Default::default(),
             })
@@ -5506,7 +5707,9 @@ mod tests {
         let reopened = Session::open(&path).unwrap();
         assert!(matches!(
             reopened.entries()[1].value,
-            EntryValue::Config { .. }
+            EntryValue::ResponsesReasoning { .. }
+                | EntryValue::ResponsesSteering { .. }
+                | EntryValue::Config { .. }
         ));
         let ctx = reopened.context().unwrap();
         assert_eq!(ctx.len(), 2, "config entries are not model-visible");
@@ -6205,6 +6408,9 @@ mod tests {
                 }
                 octet_ai::responses::ResponsesReplayItem::Output(output) => {
                     serde_json::to_value(output).unwrap()
+                }
+                octet_ai::responses::ResponsesReplayItem::ConfigurationUpdate(update) => {
+                    serde_json::to_value(update).unwrap()
                 }
                 octet_ai::responses::ResponsesReplayItem::Compacted(output) => {
                     serde_json::to_value(output).unwrap()

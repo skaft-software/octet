@@ -877,6 +877,7 @@ pub(crate) fn decode_stream_event(
                 &mut events,
                 builder,
                 StreamEvent::ToolCallStart {
+                    async_execution: false,
                     index: canonical,
                     id: ToolCallId(id.to_owned()),
                     name: name.to_owned(),
@@ -1047,6 +1048,7 @@ mod tests {
 
     fn tools() -> Vec<ToolDef> {
         vec![ToolDef {
+            async_execution: false,
             name: "lookup".to_owned(),
             description: "Look up a city.".to_owned(),
             parameters: json!({
@@ -1176,6 +1178,7 @@ mod tests {
                     }),
                 }),
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call_1".to_owned()),
                     name: "lookup".to_owned(),
                     arguments_json: r#"{"city":"Paris"}"#.to_owned(),

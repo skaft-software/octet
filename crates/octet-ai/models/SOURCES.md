@@ -64,6 +64,39 @@ and custom metadata keep precedence; Codex account inventory never inherits this
 supplement. A model name does not select a protocol or reasoning encoding, and
 native Messages/budget contracts are not inferred from a generic reasoning boolean.
 
+## GPT-6 contract review (2026-09-23)
+
+The public [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),
+[Sol](https://developers.openai.com/api/docs/models/gpt-6-sol), and
+[Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) pages qualify only
+those exact direct OpenAI IDs: Responses, text/image input, 1,050,000 context and
+128,000 output. Sol/Luna accept `none`, `low`, `medium` (default), `high`, `xhigh`,
+`max`; Astra retains `low` through `max` and its low default. No new alias or
+third-party capability is inferred.
+
+Public standard input/output/cache-read/cache-write rates per million tokens are
+$2/$10/$0.20/$2.50 for Sol and $0.10/$0.50/$0.01/$0.125 for Luna. Above 272K input,
+input and cache rates double and output is 1.5× for the full request. These are
+explicit public API quotes, not Codex subscription quotes, tier multipliers, or
+new generated models.dev data. Subscription Sol/Luna costs remain unknown.
+
+The [async tools](https://developers.openai.com/api/docs/guides/async-tool-calling),
+[steering](https://developers.openai.com/api/docs/guides/steering), and
+[reasoning](https://developers.openai.com/api/docs/guides/reasoning) contracts
+qualify the corresponding model **and** public endpoint feature declarations.
+Standalone compaction with reasoning-update history is not qualified. These
+metadata declarations do not grant tool execution or prove live inference.
+
+Read-only Codex inventory with compatibility version `0.156.1` returned Sol/Luna
+(minimum client `0.155.0`) where `0.153.2` and `0.154.0` filtered them out for the
+same credential. Cache schema 8 invalidates the older inventory. Positive
+`supports_reasoning_effort_updates` is independent of Lite/V2 and is retained
+only in fresh, account-bound online metadata; offline fallback strips it. The
+observed OAuth effort choices do not include public API `none`. Async tools and
+native steering are not enabled on Codex solely by GPT-6 names. See the
+[provider guide](../../../docs/providers.md) and
+[wire foundations](../docs/responses-controls.md).
+
 ## Reasoning contract supplement (2026-09-05)
 
 The Cerebras route fallback for an inventory-returned **`qwen-3.8-27b`** uses

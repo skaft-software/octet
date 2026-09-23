@@ -31,7 +31,7 @@ use crate::app::bootstrap::{
 };
 use crate::app::{
     apply_reconfig, level_from_reasoning, reasoning_label, supported_levels_with_subagents,
-    thinking_to_reasoning_with_subagents, App, Reconfig,
+    requested_thinking_to_reasoning, App, Reconfig,
 };
 use crate::commands::{self, Command};
 use crate::compaction::{
@@ -2040,7 +2040,7 @@ fn open_active_thinking(shell: &mut InteractiveShell, inspection: &ActiveRunInsp
     let (_, current) = shell.selected_identity();
     let selected = levels
         .iter()
-        .position(|level| level.label() == current)
+        .position(|level| level.label() == current.trim_end_matches(" (queued)"))
         .unwrap_or(0);
     if let Some(item) = items.get_mut(selected) {
         item.push_str(" (current)");
@@ -2048,7 +2048,7 @@ fn open_active_thinking(shell: &mut InteractiveShell, inspection: &ActiveRunInsp
     shell.open_panel(Panel::SelectList {
         surface: OrdinarySurfaceMetadata::with_purpose(
             "Select thinking level",
-            "Choose effort for subsequent prompts and the startup default",
+            "Choose effort for the next supported response boundary and startup default",
         ),
         descriptions: vec![None; items.len()],
         items,
@@ -2115,6 +2115,25 @@ where
     match command {
         Command::Status => {
             let mut status = shell.status_detail();
+            if inspection
+                .model
+                .responses_features()
+                .reasoning_effort_updates
+            {
+                let selected = shell.selected_identity().1;
+                status = status
+                    .lines()
+                    .map(|line| {
+                        if line.starts_with("Reasoning      ") {
+                            format!("Reasoning      {selected}")
+                        } else {
+                            line.to_owned()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                status.push_str("\nThinking is host-selected, not provider acknowledgement.");
+            }
             if !queue.is_empty() {
                 status.push_str(&format!("\nQueued idle actions: {}", queue.len()));
                 if queue
@@ -2896,6 +2915,11 @@ where
     let mut clipboard_gesture = None;
     let mut clipboard_revision = 0;
     let mut clipboard_fallback = None;
+    let mut pending_reasoning: Option<ReasoningConfig> = None;
+    // One pending latest choice and one bounded channel admission; never spawn
+    // a control sender that could outlive the caller-driven run.
+    type ReasoningSend = Pin<Box<dyn Future<Output = (ReasoningConfig, Result<(), AgentError>)>>>;
+    let mut reasoning_send: Option<ReasoningSend> = None;
     let mut aborting = false;
     let mut dispatch_queued = false;
     shell.settle_queued_follow_ups(false);
@@ -2955,6 +2979,20 @@ where
             }
         }
 
+        if !aborting && reasoning_send.is_none() {
+            if let Some(reasoning) = pending_reasoning.take() {
+                let control = control.clone();
+                reasoning_send = Some(Box::pin(async move {
+                    let result = control.set_reasoning(reasoning.clone()).await;
+                    (reasoning, result)
+                }));
+            }
+        }
+        if aborting {
+            pending_reasoning = None;
+            reasoning_send = None;
+        }
+
         tokio::select! {
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
@@ -2969,6 +3007,23 @@ where
                 )
                 .await;
                 return Ok(HostRunOutcome::shutdown());
+            }
+            result = futures_util::future::OptionFuture::from(reasoning_send.as_mut().map(|f| f.as_mut())), if reasoning_send.is_some() => {
+                reasoning_send = None;
+                if let Some((reasoning, result)) = result {
+                    match result {
+                        Ok(()) => {
+                            let label = reasoning_label(&reasoning);
+                            shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &format!("{label} (queued)"));
+                            shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
+                            if let Err(error) = persist_configuration(Some(executable_extensions), || crate::cli::persist_reasoning(&label)).await {
+                                shell.error(format!("failed to save thinking preference: {error}"));
+                            }
+                        }
+                        Err(error) => shell.error(format!("thinking unchanged: {error}")),
+                    }
+                }
+                shell.render();
             }
             result = futures_util::future::OptionFuture::from(clipboard.as_mut().map(|f| f.as_mut())), if clipboard.is_some() => {
                 clipboard = None;
@@ -3130,10 +3185,21 @@ where
                             }
                             (PanelResult::Confirm(index), PanelAction::SelectThinking(levels)) => {
                                 if let Some(level) = levels.get(index) {
-                                    let reasoning = thinking_to_reasoning_with_subagents(*level,
-                                        &inspection.model, inspection.subagents_available)?;
-                                    push_pending_action(pending_actions, PendingIdleAction::ChangeThinking(reasoning));
-                                    shell.notice("thinking change queued for the next idle boundary");
+                                    let reasoning = match requested_thinking_to_reasoning(*level,
+                                        &inspection.model, inspection.subagents_available) {
+                                        Ok(reasoning) => reasoning,
+                                        Err(error) => {
+                                            shell.error(format!("thinking unchanged: {error}"));
+                                            shell.render();
+                                            continue;
+                                        }
+                                    };
+                                    if inspection.model.responses_features().reasoning_effort_updates {
+                                        pending_reasoning = Some(reasoning);
+                                    } else {
+                                        push_pending_action(pending_actions, PendingIdleAction::ChangeThinking(reasoning));
+                                        shell.notice("thinking change queued for the next idle boundary");
+                                    }
                                 } else if let Some(surface) = codex_context_surface(&inspection.model) {
                                     open_active_codex_context(shell, &surface);
                                 }
@@ -3347,6 +3413,24 @@ where
                             continue;
                         }
                         let command = commands::parse(&shell.consume_command_text(text));
+                        if let Command::Thinking(Some(level)) = &command {
+                            let requested = ThinkingLevel::parse(level).and_then(|level| requested_thinking_to_reasoning(
+                                level, &inspection.model, inspection.subagents_available,
+                            ));
+                            match requested {
+                                Err(error) => { shell.error(error.to_string()); shell.render(); continue; }
+                                Ok(reasoning) if inspection.model.responses_features().reasoning_effort_updates => {
+                                    if aborting {
+                                        shell.error("thinking unchanged: run is settling".into());
+                                    } else {
+                                        pending_reasoning = Some(reasoning);
+                                    }
+                                    shell.render();
+                                    continue;
+                                }
+                                Ok(_) => {}
+                            }
+                        }
                         let was_quit = matches!(command, Command::Exit);
                         if matches!(command, Command::Update) {
                             if update_check.is_none() { update_check = Some(Box::pin(crate::update::check())); }
@@ -3462,8 +3546,22 @@ where
                         shell.render();
                     }
                     InputAction::CycleThinking => {
-                        push_pending_action(pending_actions, PendingIdleAction::CycleThinking);
-                        shell.notice("thinking change queued for the next idle boundary");
+                        if inspection.model.responses_features().reasoning_effort_updates {
+                            let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
+                            let current = pending_reasoning.as_ref().map(reasoning_label)
+                                .unwrap_or_else(|| shell.selected_identity().1.trim_end_matches(" (queued)").to_owned());
+                            if let Some(index) = levels.iter().position(|level| level.label() == current) {
+                                match requested_thinking_to_reasoning(
+                                    levels[(index + 1) % levels.len()], &inspection.model, inspection.subagents_available,
+                                ) {
+                                    Ok(reasoning) => pending_reasoning = Some(reasoning),
+                                    Err(error) => shell.error(format!("thinking unchanged: {error}")),
+                                }
+                            }
+                        } else {
+                            push_pending_action(pending_actions, PendingIdleAction::CycleThinking);
+                            shell.notice("thinking change queued for the next idle boundary");
+                        }
                         shell.render();
                     }
                     InputAction::Close => {
@@ -3492,6 +3590,13 @@ where
             }
             event = run.next() => match event {
                 Some(event) => {
+                    if matches!(&event, AgentEvent::TurnStarted) && inspection.model.responses_features().reasoning_effort_updates {
+                        if let Ok(session) = inspection.read_only_session() {
+                            if let Ok(Some((_, reasoning))) = session.responses_reasoning(&inspection.model.endpoint.id, &inspection.model.spec.id) {
+                                shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &reasoning_label(&reasoning));
+                            }
+                        }
+                    }
                     if let AgentEvent::ToolStarted { id, name, args } = &event {
                         *made_tool_call = true;
                         tool_calls.insert(id.clone(), (name.clone(), args.clone()));
@@ -5606,8 +5711,64 @@ impl HostNotification {
     }
 }
 
+/// Apply a user thinking selection before saving its startup preference. Qualified
+/// Responses controls can reject stateful Ultra/V2 transitions even when the
+/// model advertises the requested choice.
+async fn select_thinking<S>(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    reasoning: ReasoningConfig,
+    picker: Option<(ReasoningMode, ThinkingLevel)>,
+) -> anyhow::Result<App>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let mode = picker.map(|(mode, _)| mode);
+    // Preserve the portable picker default (e.g. high, not a model-specific
+    // token budget); slash commands retain their effective reasoning label.
+    let preference = picker.map_or_else(
+        || reasoning_label(&reasoning),
+        |(_, level)| level.label().to_owned(),
+    );
+    let qualified = app.model.responses_features().reasoning_effort_updates;
+    if qualified {
+        if let Err(error) = app.agent.set_reasoning(reasoning.clone()) {
+            shell.error(format!("thinking unchanged: {error}"));
+            return Ok(app);
+        }
+        app.reasoning = app.agent.reasoning().clone();
+    }
+    if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+        crate::cli::persist_reasoning(&preference)
+    })
+    .await
+    {
+        shell.error(format!("failed to save thinking preference: {error}"));
+    }
+    if let Some(mode) = mode {
+        if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+            crate::cli::persist_reasoning_mode(mode)
+        })
+        .await
+        {
+            shell.error(format!("failed to save reasoning mode preference: {error}"));
+        }
+    }
+    if qualified && mode.is_none_or(|mode| mode == app.reasoning_mode) {
+        update_status(shell, &app);
+        app.executable_extensions.notify_reasoning_selected_all();
+        return Ok(app);
+    }
+    let reconfig = match mode {
+        Some(mode) => Reconfig::ThinkingMode { mode, reasoning },
+        None => Reconfig::Thinking(reasoning),
+    };
+    transition(app, shell, input, reconfig).await
+}
+
 async fn transition<S>(
-    app: App,
+    mut app: App,
     shell: &mut InteractiveShell,
     input: &mut S,
     reconfig: Reconfig,
@@ -5615,6 +5776,24 @@ async fn transition<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let direct_reasoning = match &reconfig {
+        Reconfig::Thinking(reasoning) => Some(reasoning),
+        Reconfig::ThinkingMode { mode, reasoning } if *mode == app.reasoning_mode => Some(reasoning),
+        _ => None,
+    };
+    if let Some(reasoning) = direct_reasoning {
+        if app.model.responses_features().reasoning_effort_updates {
+            match app.agent.set_reasoning(reasoning.clone()) {
+                Ok(()) => {
+                    app.reasoning = app.agent.reasoning().clone();
+                    update_status(shell, &app);
+                    app.executable_extensions.notify_reasoning_selected_all();
+                }
+                Err(error) => shell.error(format!("thinking unchanged: {error}")),
+            }
+            return Ok(app);
+        }
+    }
     let _diagnostics = crate::output::defer_tui_diagnostics();
     let had_fast = app.agent.service_tier().is_some();
     let host_notification = HostNotification::of(&reconfig);
@@ -5994,45 +6173,24 @@ async fn apply_pending_actions(
                 app = transition(app, shell, input, Reconfig::Model(id)).await?;
             }
             PendingIdleAction::ChangeThinking(reasoning) => {
-                if let Err(e) = persist_configuration(Some(&mut app.executable_extensions), || {
-                    crate::cli::persist_reasoning(&reasoning_label(&reasoning))
-                })
-                .await
-                {
-                    shell.error(format!("failed to save thinking preference: {e}"));
-                }
-                app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
+                app = select_thinking(app, shell, input, reasoning, None).await?;
             }
             PendingIdleAction::ChangeThinkingLevel(level) => {
-                let reasoning = thinking_to_reasoning_with_subagents(
+                let reasoning = requested_thinking_to_reasoning(
                     level,
                     &app.model,
                     app.subagents_available(),
                 )?;
-                if let Err(e) = persist_configuration(Some(&mut app.executable_extensions), || {
-                    crate::cli::persist_reasoning(&reasoning_label(&reasoning))
-                })
-                .await
-                {
-                    shell.error(format!("failed to save thinking preference: {e}"));
-                }
-                app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
+                app = select_thinking(app, shell, input, reasoning, None).await?;
             }
             PendingIdleAction::CycleThinking => {
                 let level = next_thinking_level(&app)?;
-                let reasoning = thinking_to_reasoning_with_subagents(
+                let reasoning = requested_thinking_to_reasoning(
                     level,
                     &app.model,
                     app.subagents_available(),
                 )?;
-                if let Err(e) = persist_configuration(Some(&mut app.executable_extensions), || {
-                    crate::cli::persist_reasoning(&reasoning_label(&reasoning))
-                })
-                .await
-                {
-                    shell.error(format!("failed to save thinking preference: {e}"));
-                }
-                app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
+                app = select_thinking(app, shell, input, reasoning, None).await?;
             }
             PendingIdleAction::NewSession => {
                 app = transition(app, shell, input, Reconfig::NewSession).await?;
@@ -6102,24 +6260,17 @@ async fn apply_pending_actions(
                 if let Some((mode, level)) =
                     thinking_configuration_picker(&app, shell, input).await?
                 {
-                    if let Err(error) =
-                        persist_configuration(Some(&mut app.executable_extensions), || {
-                            crate::cli::persist_reasoning_mode(mode)
-                        })
-                        .await
-                    {
-                        shell.error(format!("failed to save reasoning mode preference: {error}"));
-                    }
-                    let reasoning = thinking_to_reasoning_with_subagents(
+                    let reasoning = requested_thinking_to_reasoning(
                         level,
                         &app.model,
                         app.subagents_available(),
                     )?;
-                    app = transition(
+                    app = select_thinking(
                         app,
                         shell,
                         input,
-                        Reconfig::ThinkingMode { mode, reasoning },
+                        reasoning,
+                        Some((mode, level)),
                     )
                     .await?;
                 }
@@ -7516,15 +7667,8 @@ async fn run_idle_command(
         Command::Thinking(Some(level)) => {
             let level = ThinkingLevel::parse(&level)?;
             let reasoning =
-                thinking_to_reasoning_with_subagents(level, &app.model, app.subagents_available())?;
-            if let Err(e) = persist_configuration(Some(&mut app.executable_extensions), || {
-                crate::cli::persist_reasoning(&reasoning_label(&reasoning))
-            })
-            .await
-            {
-                shell.error(format!("failed to save thinking preference: {e}"));
-            }
-            app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
+                requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
+            app = select_thinking(app, shell, input, reasoning, None).await?;
         }
         Command::Debug => {
             let rendered = shell.dump_rendered_frame().await;
@@ -7541,24 +7685,17 @@ async fn run_idle_command(
         }
         Command::Thinking(None) => {
             if let Some((mode, level)) = thinking_configuration_picker(&app, shell, input).await? {
-                if let Err(error) =
-                    persist_configuration(Some(&mut app.executable_extensions), || {
-                        crate::cli::persist_reasoning_mode(mode)
-                    })
-                    .await
-                {
-                    shell.error(format!("failed to save reasoning mode preference: {error}"));
-                }
-                let reasoning = thinking_to_reasoning_with_subagents(
+                let reasoning = requested_thinking_to_reasoning(
                     level,
                     &app.model,
                     app.subagents_available(),
                 )?;
-                app = transition(
+                app = select_thinking(
                     app,
                     shell,
                     input,
-                    Reconfig::ThinkingMode { mode, reasoning },
+                    reasoning,
+                    Some((mode, level)),
                 )
                 .await?;
             }
@@ -9199,21 +9336,13 @@ async fn run_interactive_once(
             }
             Idle::CycleThinking => {
                 let level = next_thinking_level(&app)?;
-                let reasoning = thinking_to_reasoning_with_subagents(
+                let reasoning = requested_thinking_to_reasoning(
                     level,
                     &app.model,
                     app.subagents_available(),
                 )?;
-                if let Err(error) =
-                    persist_configuration(Some(&mut app.executable_extensions), || {
-                        crate::cli::persist_reasoning(&reasoning_label(&reasoning))
-                    })
-                    .await
-                {
-                    shell.error(format!("failed to save thinking preference: {error}"));
-                }
                 app =
-                    transition(app, &mut shell, &mut input, Reconfig::Thinking(reasoning)).await?;
+                    select_thinking(app, &mut shell, &mut input, reasoning, None).await?;
                 schedule_responses_prewarm(&app);
                 shell.render();
             }
@@ -9500,6 +9629,11 @@ async fn run_interactive_once(
                 )
                 .await?;
                 drop(run);
+                if app.model.responses_features().reasoning_effort_updates {
+                    app.reasoning = app.agent.reasoning().clone();
+                    update_status(&mut shell, &app);
+                    app.executable_extensions.notify_reasoning_selected_all();
+                }
                 app.executable_extensions
                     .settle_turn(extension_turn, &ended)
                     .await;
@@ -10165,6 +10299,7 @@ mod tests {
             .append(EntryValue::Message(octet_ai::Message::Assistant(
                 octet_ai::AssistantMessage {
                     content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        async_execution: false,
                         id: call_id.clone(),
                         name: "write".into(),
                         arguments_json: serde_json::json!({
@@ -11488,6 +11623,7 @@ mod tests {
             .append(octet_agent::EntryValue::Message(
                 octet_ai::Message::Assistant(octet_ai::AssistantMessage {
                     content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call-1".into()),
                         name: "bash".into(),
                         arguments_json: "{\"command\":\"ls\"}".into(),
@@ -12361,7 +12497,7 @@ mod tests {
 
         for level in [ThinkingLevel::High, ThinkingLevel::Low, ThinkingLevel::High] {
             let reasoning =
-                thinking_to_reasoning_with_subagents(level, &app.model, app.subagents_available())
+                requested_thinking_to_reasoning(level, &app.model, app.subagents_available())
                     .unwrap();
             let label = reasoning_label(&reasoning);
             let previous = shell.selected_identity();
@@ -12482,6 +12618,7 @@ mod tests {
                 display_name: None,
                 protocol: Protocol::AnthropicMessages,
                 capabilities: Capabilities {
+                    responses_features: Default::default(),
                     input_modalities: ModalitySet::none().with(Modality::Image),
                     output_modalities: ModalitySet::none(),
                     tools: true,
@@ -13371,6 +13508,339 @@ mod tests {
                 "Run only settled after the renderer watchdog released layout: cancel={cancel}"
             );
         }
+    }
+
+    fn reasoning_control_model(uri: &str) -> Model {
+        let mut model = scripted_model(uri);
+        let spec = Arc::make_mut(&mut model.spec);
+        spec.protocol = octet_ai::Protocol::OpenAiResponses;
+        spec.capabilities
+            .responses_features
+            .reasoning_effort_updates = true;
+        spec.capabilities.reasoning = Some(octet_ai::ReasoningCapability {
+            options: Some(octet_ai::types::ReasoningOptions {
+                values: vec!["none".into(), "low".into(), "high".into()],
+                default: Some("low".into()),
+            }),
+            control: octet_ai::ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: true,
+            effort_budgets: None,
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            min_effort: octet_ai::ReasoningEffort::Low,
+            max_effort: octet_ai::ReasoningEffort::High,
+        });
+        Arc::make_mut(&mut model.endpoint)
+            .runtime
+            .responses_features
+            .reasoning_effort_updates = true;
+        model
+    }
+
+    #[tokio::test]
+    async fn thinking_control_preserves_active_run_and_hands_off_wire_update() {
+        // Exercise real preference persistence without modifying the developer HOME.
+        const CHILD: &str = "OCTET_TEST_REASONING_CONTROL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "modes::interactive::tests::thinking_control_preserves_active_run_and_hands_off_wire_update", "--nocapture"])
+                .env(CHILD, "1").env("HOME", home.path()).output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
+        use crossterm::event::KeyEvent;
+        for (requested, qualified) in [
+            ("high", true),
+            ("medium", true),
+            ("ultra", true),
+            ("high", false),
+        ] {
+            let accepted = requested == "high" && qualified;
+            let (server, started, release) =
+                HeldApi::start_with_repeat(fast_response(), true).await;
+            let mut model = reasoning_control_model(&server.uri);
+            Arc::make_mut(&mut model.endpoint)
+                .runtime
+                .responses_features
+                .reasoning_effort_updates = qualified;
+            let (_workspace, mut agent) =
+                scripted_agent_for_route(model.clone(), octet_ai::AiClient::new());
+            let mut inspection = test_run_inspection().clone();
+            inspection.model = model;
+            inspection.session_path = agent.session().path().to_path_buf();
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_identity("test", "scripted", "off");
+            let events: Vec<_> = format!("/thinking {requested}")
+                .chars()
+                .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+                .chain(std::iter::once(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))))
+                .collect();
+            let (sender, receiver) = tokio::sync::mpsc::channel(32);
+            let (handled_tx, handled) = tokio::sync::oneshot::channel();
+            let mut input = ProbedInput {
+                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+                remaining: events.len(),
+                handled: Some(handled_tx),
+            };
+            let mut pending = VecDeque::new();
+            let mut ticker = tokio::time::interval(Duration::from_millis(1));
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let id = shell.begin_run("test");
+            let mut run = agent.prompt("keep the root alive").await.unwrap();
+            let control = run.control();
+            shell.set_awaiting_provider(id);
+            let mut deadline = None;
+            let mut made_tool_call = false;
+            let driver = drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut deadline,
+            );
+            let stimulus = async move {
+                started.await.unwrap();
+                for event in events {
+                    sender.send(Ok(event)).await.unwrap();
+                }
+                handled.await.unwrap();
+                release.send(true).unwrap();
+                std::future::pending::<()>().await;
+            };
+            tokio::pin!(stimulus);
+            let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! { result = driver => result.unwrap(), _ = &mut stimulus => unreachable!() }
+        }).await.unwrap();
+            assert_eq!(outcome, HostRunOutcome::Completed);
+            drop(run);
+            assert!(!quit);
+            if qualified {
+                assert!(
+                    pending.is_empty(),
+                    "qualified control never rebuilds at idle"
+                );
+            } else {
+                assert_eq!(
+                    pending.front(),
+                    Some(&PendingIdleAction::ChangeThinkingLevel(ThinkingLevel::High))
+                );
+            }
+            assert_eq!(agent.session().checkpoints().len(), 1);
+            assert_eq!(
+                agent.reasoning(),
+                &if accepted {
+                    ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+                } else {
+                    ReasoningConfig::Off
+                }
+            );
+            assert_eq!(
+                shell.selected_identity().1,
+                if accepted { "high" } else { "off" }
+            );
+            let bodies = server.bodies.lock().unwrap();
+            if !accepted {
+                assert_eq!(
+                    bodies.len(),
+                    1,
+                    "rejected effort must not create a model response"
+                );
+                assert!(!agent.session().entries().iter().any(|entry| matches!(
+                    &entry.value,
+                    EntryValue::ResponsesReasoning {
+                        update: Some(_),
+                        ..
+                    }
+                )));
+                if qualified {
+                    assert!(shell.debug_error().unwrap().contains("not supported"));
+                } else {
+                    assert!(shell.debug_error().is_none());
+                    assert!(shell.debug_snapshot().contains("next idle boundary"));
+                }
+                continue;
+            }
+            assert!(shell
+                .debug_snapshot()
+                .contains("not provider acknowledgement"));
+            assert_eq!(bodies.len(), 2);
+            assert_eq!(bodies[0]["reasoning"]["effort"], "none");
+            assert_eq!(
+                bodies[1]["reasoning"]["effort"], "none",
+                "wire baseline stays pinned"
+            );
+            assert!(bodies[1]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == "configuration_update"
+                    && item["reasoning"]["effort"] == "high"));
+            assert!(
+                std::fs::read_to_string(crate::cli::global_config_path().unwrap())
+                    .unwrap()
+                    .contains("high")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_thinking_rejection_preserves_session_and_startup_preference() {
+        const CHILD: &str = "OCTET_TEST_IDLE_THINKING_PREFERENCE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "modes::interactive::tests::idle_thinking_rejection_preserves_session_and_startup_preference", "--nocapture"])
+                .env(CHILD, "1").env("HOME", home.path()).output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
+        let mut model = reasoning_control_model("http://127.0.0.1:1");
+        let capabilities = &mut Arc::make_mut(&mut model.spec).capabilities;
+        capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
+        let capability = capabilities.reasoning.as_mut().unwrap();
+        capability.max_effort = octet_ai::ReasoningEffort::Ultra;
+        capability
+            .options
+            .as_mut()
+            .unwrap()
+            .values
+            .push("ultra".into());
+        // Capability admission succeeds; only the pinned session makes the
+        // requested transition invalid. No live subagent/inference is needed.
+        let ultra = requested_thinking_to_reasoning(ThinkingLevel::Ultra, &model, true).unwrap();
+        let (_workspace, mut app) = fast_test_app(model);
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending();
+        app = select_thinking(
+            app,
+            &mut shell,
+            &mut input,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+            None,
+        )
+        .await
+        .unwrap();
+        let preference = crate::cli::global_config_path().unwrap();
+        let config_before = std::fs::read(&preference).unwrap();
+        assert!(String::from_utf8_lossy(&config_before).contains("high"));
+        let session = app.agent.session().path().to_path_buf();
+        let session_before = std::fs::read(&session).unwrap();
+        let identity = shell.selected_identity();
+        // None is the slash/shortcut path; Some(Standard) is picker selection.
+        for mode in [None, Some((ReasoningMode::Standard, ThinkingLevel::Ultra))] {
+            shell.clear_error();
+            app = select_thinking(app, &mut shell, &mut input, ultra.clone(), mode)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&preference).unwrap(), config_before);
+            assert_eq!(std::fs::read(&session).unwrap(), session_before);
+            assert_eq!(shell.selected_identity(), identity);
+            assert_eq!(
+                app.reasoning,
+                ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+            );
+            assert_eq!(app.agent.reasoning(), &app.reasoning);
+            let error = shell.debug_error().unwrap();
+            assert!(
+                error.contains("thinking unchanged") && error.contains("new session"),
+                "{error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_control_idle_is_durable_and_rejected_effort_leaves_session_unchanged() {
+        let model = reasoning_control_model("http://127.0.0.1:1");
+        let (_workspace, mut app) = fast_test_app(model.clone());
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending();
+        let session = app.agent.session().path().to_path_buf();
+        app = transition(
+            app,
+            &mut shell,
+            &mut input,
+            Reconfig::Thinking(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.agent.session().path(), session);
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+        );
+        assert_eq!(shell.selected_identity().1, "high");
+        let before = std::fs::read(&session).unwrap();
+        for level in [ThinkingLevel::Medium, ThinkingLevel::Ultra] {
+            assert!(requested_thinking_to_reasoning(level, &app.model, false).is_err());
+        }
+        app = transition(
+            app,
+            &mut shell,
+            &mut input,
+            Reconfig::Thinking(ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.model.spec.id, model.spec.id);
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+        );
+        assert_eq!(std::fs::read(&session).unwrap(), before);
+        assert!(shell.debug_error().unwrap().contains("thinking unchanged"));
+        let resumed = Session::open_read_only(&session).unwrap();
+        assert_eq!(
+            resumed
+                .responses_reasoning(&model.endpoint.id, &model.spec.id)
+                .unwrap()
+                .unwrap()
+                .1,
+            app.reasoning
+        );
+        let mut codex = model;
+        Arc::make_mut(&mut codex.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap()
+            .options
+            .as_mut()
+            .unwrap()
+            .values
+            .remove(0);
+        assert!(requested_thinking_to_reasoning(ThinkingLevel::Off, &codex, false).is_err());
+        Arc::make_mut(&mut codex.endpoint)
+            .runtime
+            .responses_features = Default::default();
+        assert!(
+            !codex.responses_features().reasoning_effort_updates,
+            "unknown routes keep selector fallback"
+        );
     }
 
     #[tokio::test]

@@ -371,6 +371,7 @@ mod tests {
                     content: vec![
                         octet_ai::AssistantPart::Text("**A clear answer**".into()),
                         octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                            async_execution: false,
                             id: octet_ai::ToolCallId("call-1".into()),
                             name: "read".into(),
                             arguments_json: "{\"path\":\"README.md\"}".into(),

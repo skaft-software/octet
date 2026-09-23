@@ -788,8 +788,8 @@ fn native_two_runs_retain_telemetry_and_late_settlement_never_repairs_history() 
         for text in [replay.frame(), replay.history()] {
             assert!(!text.contains("Subagents"), "{text}");
             assert!(!text.contains("FIRST-ROOT-WORKER"), "{text}");
-            assert_eq!(text.matches("SECOND-ROOT-WORKER").count(), 1, "{text}");
-            assert_eq!(text.matches("late worker failure").count(), 1, "{text}");
+            assert!(!text.contains("SECOND-ROOT-WORKER"), "{text}");
+            assert!(!text.contains("late worker failure"), "{text}");
             for prompt in ["FIRST-ROOT-PROMPT", "SECOND-ROOT-PROMPT"] {
                 assert_eq!(text.matches(prompt).count(), 1, "{text}");
             }
@@ -806,7 +806,7 @@ fn native_two_runs_retain_telemetry_and_late_settlement_never_repairs_history() 
 }
 
 #[test]
-fn native_concurrent_roster_updates_are_chrome_only_except_one_failure_notice() {
+fn native_concurrent_roster_updates_and_failures_are_chrome_only() {
     let mut replay = NativeReplay::with_size(120, 24);
     let mut children = vec![worker("ROSTER-A"), worker("ROSTER-B")];
     publish_workers(&mut replay, children.clone());
@@ -848,18 +848,9 @@ fn native_concurrent_roster_updates_are_chrome_only_except_one_failure_notice() 
         state.subagent_activity.as_ref().unwrap().telemetry,
         children
     );
-    assert_eq!(state.transcript.len(), revisions.len() + 1);
-    assert_eq!(
-        &state.block_revisions[..revisions.len()],
-        revisions.as_slice()
-    );
-    assert_eq!(
-        &state.rendered_transcript(120)[..transcript.len()],
-        transcript.as_slice()
-    );
-    assert!(
-        matches!(state.transcript.last(), Some(TranscriptBlock::Notice(text)) if text.contains("ROSTER-B") && text.contains("ROSTER-FAILURE") && text.contains("/subagents"))
-    );
+    assert_eq!(state.transcript.len(), revisions.len());
+    assert_eq!(state.block_revisions, revisions);
+    assert_eq!(state.rendered_transcript(120).as_slice(), transcript.as_slice());
     drop(state);
     assert_eq!(replay.shell.tui.as_ref().unwrap().full_redraws(), redraws);
     let physical = replay.history();
@@ -868,13 +859,13 @@ fn native_concurrent_roster_updates_are_chrome_only_except_one_failure_notice() 
         !physical.contains("ROSTER-A"),
         "successful worker chrome leaked into history: {physical}"
     );
-    assert_eq!(physical.matches("ROSTER-B").count(), 1, "{physical}");
-    assert_eq!(physical.matches("ROSTER-FAILURE").count(), 1, "{physical}");
+    assert!(!physical.contains("ROSTER-B"), "{physical}");
+    assert!(!physical.contains("ROSTER-FAILURE"), "{physical}");
     publish_workers(&mut replay, children);
     replay.render(true);
     assert_eq!(
         replay.shell.state.borrow().transcript.len(),
-        revisions.len() + 1
+        revisions.len()
     );
     for index in 0..48 {
         assert_eq!(

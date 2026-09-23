@@ -144,6 +144,33 @@ checks and remaining limits are recorded in [v0.7.4 recovery qualification](qual
 This is a Rust host setter, not a new NDJSON run field, CLI flag, or persisted
 configuration setting. NDJSON applications retain process-group cancellation.
 
+### Qualified Responses reasoning and steering
+
+Rust hosts can call `RunControl::set_reasoning(ReasoningConfig).await` on an
+ordinary-effort run qualified by both model and endpoint metadata. Admission
+coalesces pending choices at the next response boundary; it is not a provider
+acknowledgement. The run stays active, the request baseline stays pinned, and
+chronological typed updates preserve the cache prefix. `Agent::reasoning()`
+returns effective selection, including restored session updates. Use the idle
+`Agent::set_reasoning` setter for an explicit override after reconstruction.
+Fresh, explicitly supported Ultra/V2 uses normal selection validation, not an
+ordinary update; transitions into or out of an existing Ultra pin require a
+new session. Active Ultra runs do not admit ordinary reasoning updates.
+
+Existing steering controls use the native multi-response path only on a
+qualified WebSocket route without hard cumulative ceilings. Unsupported routes
+retain ordinary queued steering. Native delivery persists an intent before
+socket dispatch, then links the canonical input to its operation/local ID only
+after the completed prefix. `Session::has_unsettled_native_steering()` identifies
+operations lacking an accounted successor settlement. Such sessions also report
+`has_uncertain_usage()` even if no explicit uncertainty record could be appended
+before a crash. They reject new prompts rather than replay uncertain input;
+start a new session. Async tool jobs are bounded, never provisionally dispatched,
+and unresolved jobs are not automatically executed after restart.
+
+These Rust controls add no NDJSON protocol-v1 command or field. See the
+[agent durability contract](design/octet-agent.md#qualified-responses-controls).
+
 ### Tool-schema and compaction bounds
 
 Rust embedders can call `Agent::set_tool_schema_budget_bytes(usize)` before a

@@ -210,6 +210,7 @@ impl<E: ErasedTool> Tool for ErasedToolAdapter<E> {
     fn definition(&self) -> ToolDef {
         let def = self.inner.definition();
         ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: def.descriptor.name.clone(),
             description: def.descriptor.description.clone(),

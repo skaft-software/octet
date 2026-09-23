@@ -824,6 +824,7 @@ fn scripted_model(uri: &str) -> Model {
             display_name: None,
             protocol: Protocol::AnthropicMessages,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -3213,6 +3214,7 @@ async fn resumed_agent_reexecutes_only_missing_tool_results() {
         .session_mut()
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("crashed_call".into()),
                 name: "read".into(),
                 arguments_json: serde_json::json!({"path": "recover.txt"}).to_string(),
@@ -3267,6 +3269,7 @@ async fn restart_never_replays_a_mutating_tool_without_an_idempotency_contract()
         .session_mut()
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("possibly_committed".into()),
                 name: "unsafe_recovery".into(),
                 arguments_json: "{}".into(),
@@ -3624,6 +3627,7 @@ struct ParallelOverlapProbe {
 impl Tool for ParallelOverlapProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "parallel_overlap_probe".into(),
             description: "Records whether independent calls overlap".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4477,6 +4481,7 @@ struct ProgressTool {
 impl Tool for ProgressTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "progress_test".to_string(),
             description: "Emits progress and sleeps".to_string(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4517,6 +4522,7 @@ struct QueuedActivationTool {
 impl Tool for QueuedActivationTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "queued_activation".into(),
             description: "Queues a semantic activation event".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4575,6 +4581,7 @@ struct LargeOutputTool;
 impl Tool for LargeOutputTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "large_output".into(),
             description: "Returns a large result".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4605,6 +4612,7 @@ struct RichErrorTool;
 impl Tool for RichErrorTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "rich_error".into(),
             description: "Returns a structured error with supported media".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4647,6 +4655,7 @@ struct RegisteredToolsProbe {
 impl Tool for RegisteredToolsProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "registered_tools_probe".into(),
             description: "Records the final registered tool set".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4742,6 +4751,7 @@ struct UnsafeRecoveryTool {
 impl Tool for UnsafeRecoveryTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "unsafe_recovery".into(),
             description: "Represents an irreversible external mutation".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4771,6 +4781,7 @@ impl Tool for UnsafeRecoveryTool {
 impl Tool for CountingRecoveryTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "count_recovery".into(),
             description: "Counts crash-recovery executions".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -5054,6 +5065,7 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
             content: (0..65)
                 .map(|index| {
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: octet_ai::ToolCallId(format!("recover-{index}")),
                         name: "count_recovery".into(),
                         arguments_json: "{}".into(),
@@ -5147,6 +5159,7 @@ async fn host_classification_overrides_a_safe_replay_claim() {
     session
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("classified-recovery".into()),
                 name: "count_recovery".into(),
                 arguments_json: "{}".into(),
@@ -5926,6 +5939,7 @@ struct ClassifiedEffectProbe {
 impl Tool for ClassifiedEffectProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: self.name.to_owned(),
             description: "effect admission probe".to_owned(),
             parameters: serde_json::json!({
@@ -5968,6 +5982,7 @@ struct SchemaMismatchBashProbe {
 impl Tool for SchemaMismatchBashProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "bash".into(),
             description: "Records schema-rejected Bash calls".into(),
             parameters: serde_json::json!({
@@ -6365,6 +6380,7 @@ async fn resumed_schema_rejection_skips_hooks_effects_and_replay() {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: octet_ai::ToolCallId("persisted_schema_rejection".into()),
                     name: "bash".into(),
                     arguments_json: r#"{"command":"provider-secret-value"}"#.into(),
@@ -10607,6 +10623,7 @@ struct TerminateProbe;
 impl Tool for TerminateProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "terminate_probe".into(),
             description: "Requests run termination when `stop` is true".into(),
             parameters: serde_json::json!({
@@ -10779,6 +10796,7 @@ struct PreviewProbe;
 impl Tool for PreviewProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "preview_probe".into(),
             description: "Publishes a burst of replaceable panel state".into(),
             parameters: serde_json::json!({
@@ -10951,6 +10969,7 @@ struct StreamingProbe;
 impl Tool for StreamingProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "stream_probe".into(),
             description: "Streams bounded partial output".into(),
             parameters: serde_json::json!({
@@ -11203,6 +11222,7 @@ struct DurableMemoProbe {
 impl Tool for DurableMemoProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "durable_memo_probe".into(),
             description: "Records a session-backed memo".into(),
             parameters: serde_json::json!({"type":"object","properties":{}}),
@@ -11767,3 +11787,6 @@ async fn turn_cost_after_retry_excludes_failed_attempt_uncertainty() {
     assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
     assert_eq!(wire_requests(&server).await.len(), 2);
 }
+
+#[path = "agent_run/gpt6.rs"]
+mod gpt6;

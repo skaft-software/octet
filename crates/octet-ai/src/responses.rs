@@ -11,6 +11,129 @@ use crate::{
     ReasoningConfig, ReasoningMode, ToolDef, Usage, UserMessage,
 };
 
+impl Model {
+    /// Effective Responses authority requires both model and endpoint opt-in.
+    /// A matching model name, Lite envelope, or V2 delegation grants nothing.
+    pub fn responses_features(&self) -> crate::ResponsesFeatures {
+        if self.spec.protocol != crate::Protocol::OpenAiResponses {
+            return crate::ResponsesFeatures::default();
+        }
+        self.spec
+            .capabilities
+            .responses_features
+            .intersection(self.endpoint.runtime.responses_features)
+    }
+}
+
+/// A chronological reasoning-effort update. The request baseline stays fixed.
+/// Only Off or an ordinary Effort is valid; the selected model must advertise
+/// that exact effort and both model and endpoint must permit updates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponsesConfigurationUpdate {
+    /// New effective effort until the next update.
+    pub reasoning: ReasoningConfig,
+}
+
+impl ResponsesConfigurationUpdate {
+    /// Converts to its ordered input item. Request validation rejects unsupported
+    /// selections rather than silently dropping or rewriting the update.
+    pub fn to_item(&self) -> ResponsesItem {
+        ResponsesItem(serde_json::json!({
+            "type": "configuration_update",
+            "reasoning": {"effort": self.reasoning.provider_value()},
+        }))
+    }
+}
+
+fn update_reasoning(item: &ResponsesItem) -> Result<Option<ReasoningConfig>, crate::AiError> {
+    let value = item.as_json();
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("configuration_update") {
+        return Ok(None);
+    }
+    let invalid = || {
+        crate::AiError::Config(crate::ConfigError::Parse(
+            "configuration_update requires only a supported reasoning effort".to_owned(),
+        ))
+    };
+    let object = value.as_object().expect("ResponsesItem object invariant");
+    let reasoning = value
+        .get("reasoning")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(invalid)?;
+    if object.len() != 2 || reasoning.len() != 1 {
+        return Err(invalid());
+    }
+    let effort = reasoning
+        .get("effort")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(invalid)?;
+    if !matches!(
+        effort,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    ) {
+        return Err(invalid());
+    }
+    Ok(ReasoningConfig::from_provider_value(effort))
+}
+
+/// Validates chronological update items without changing the request baseline.
+/// Raw input follows the same contract as typed replay. Compact authority is
+/// independently qualified; Lite or V2 alone is never sufficient.
+pub fn validate_responses_input(
+    model: &Model,
+    input: &ResponsesInput,
+    baseline: &ReasoningConfig,
+    compact: bool,
+) -> Result<(), crate::AiError> {
+    let features = model.responses_features();
+    let mut previous_update = false;
+    for item in input.items() {
+        let update = update_reasoning(item)?;
+        if let Some(selection) = &update {
+            if !features.reasoning_effort_updates
+                || (compact && !features.compact_reasoning_effort_updates)
+            {
+                return Err(crate::ConfigError::Parse(
+                    "configuration_update is not qualified for this Responses route".into(),
+                )
+                .into());
+            }
+            if previous_update {
+                return Err(crate::ConfigError::Parse(
+                    "adjacent configuration_update items are not allowed".into(),
+                )
+                .into());
+            }
+            crate::validate::validate_reasoning_selection(
+                selection,
+                &model.spec.capabilities,
+                model.spec.protocol,
+            )?;
+            let wire = item.as_json()["reasoning"]["effort"]
+                .as_str()
+                .expect("validated effort");
+            if model
+                .spec
+                .capabilities
+                .reasoning
+                .as_ref()
+                .and_then(|cap| cap.wire_value(selection))
+                .as_deref()
+                != Some(wire)
+            {
+                return Err(crate::error::UnsupportedError::Reasoning.into());
+            }
+        }
+        previous_update = update.is_some();
+    }
+    // Baseline remains separately valid even when overridden by a later item.
+    crate::validate::validate_reasoning_selection(
+        baseline,
+        &model.spec.capabilities,
+        model.spec.protocol,
+    )
+}
+
 /// An opaque Responses input or output item.
 ///
 /// The value is required to be a JSON object so it can safely be used wherever
@@ -82,6 +205,40 @@ impl<'de> Deserialize<'de> for ResponsesItem {
 pub struct ResponsesInput(Vec<ResponsesItem>);
 
 impl ResponsesInput {
+    /// Computes effective effort from ordered updates without mutating baseline.
+    /// This parses the history; call `validate_responses_input` for route authority.
+    pub fn effective_reasoning(
+        &self,
+        baseline: &ReasoningConfig,
+    ) -> Result<ReasoningConfig, crate::AiError> {
+        let mut effective = baseline.clone();
+        let mut previous_update = false;
+        for item in &self.0 {
+            let update = update_reasoning(item)?;
+            if update.is_some() && previous_update {
+                return Err(crate::ConfigError::Parse(
+                    "adjacent configuration_update items are not allowed".into(),
+                )
+                .into());
+            }
+            previous_update = update.is_some();
+            if let Some(selection) = update {
+                effective = selection;
+            }
+        }
+        Ok(effective)
+    }
+
+    /// Whether this history changes the baseline reasoning effort.
+    pub fn contains_configuration_updates(&self) -> bool {
+        self.0.iter().any(|item| {
+            item.as_json()
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                == Some("configuration_update")
+        })
+    }
+
     /// Creates an input window from opaque items.
     pub fn new(items: Vec<ResponsesItem>) -> Self {
         Self(items)
@@ -159,6 +316,8 @@ impl ResponsesInput {
 /// inserted verbatim.
 #[derive(Clone, Debug)]
 pub enum ResponsesReplayItem {
+    /// Ordered effort change; never folded into the request-level baseline.
+    ConfigurationUpdate(ResponsesConfigurationUpdate),
     /// A canonical user message, including any tool-result parts.
     User(UserMessage),
     /// A deliberately local assistant boundary, such as the marker persisted
@@ -186,12 +345,14 @@ pub enum ResponsesReplayItem {
 ///
 /// Callers must only supply route-affine authoritative output for the selected
 /// model. This low-level encoder cannot prove provenance; durable session
-/// implementations should perform that association before calling it.
+/// implementations should perform that association before calling it. Provider
+/// output containing a host-only configuration update is rejected, never promoted
+/// to host authority or silently dropped.
 pub fn encode_responses_replay(
     model: &Model,
     system: Option<&str>,
     items: &[ResponsesReplayItem],
-) -> ResponsesInput {
+) -> Result<ResponsesInput, crate::AiError> {
     crate::protocol::openai_responses::encode_replay_input(model, system, items)
 }
 
@@ -213,7 +374,7 @@ pub(crate) fn encode_canonical_responses_input(
 }
 
 /// Complete output returned by `POST /responses/compact`.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ResponsesOutput(Vec<ResponsesItem>);
 
@@ -229,8 +390,13 @@ impl ResponsesOutput {
     }
 
     /// Converts compact output to the next input window without pruning it.
-    pub fn into_input(self) -> ResponsesInput {
-        ResponsesInput(self.0)
+    pub fn into_input(self) -> Result<ResponsesInput, crate::AiError> {
+        self.validate_provider_output()?;
+        Ok(ResponsesInput(self.0))
+    }
+
+    pub(crate) fn validate_provider_output(&self) -> Result<(), crate::AiError> {
+        validate_provider_output_items(&self.0)
     }
 
     /// Returns whether native compact output contains exactly one structurally
@@ -247,6 +413,44 @@ impl ResponsesOutput {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+impl<'de> Deserialize<'de> for ResponsesOutput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let output = Self(Vec::<ResponsesItem>::deserialize(deserializer)?);
+        output
+            .validate_provider_output()
+            .map_err(serde::de::Error::custom)?;
+        Ok(output)
+    }
+}
+
+pub(crate) fn validate_provider_output_type(item_type: &str) -> Result<(), crate::AiError> {
+    if item_type == "configuration_update" {
+        return Err(crate::DecodeError::InvalidProviderField(
+            "provider output cannot author configuration_update".to_owned(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_provider_output_items(
+    items: &[ResponsesItem],
+) -> Result<(), crate::AiError> {
+    for item in items {
+        if let Some(item_type) = item
+            .as_json()
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+        {
+            validate_provider_output_type(item_type)?;
+        }
+    }
+    Ok(())
 }
 
 /// Environment a declared Responses computer-use tool controls.
@@ -585,7 +789,7 @@ mod tests {
             2
         );
         let output = ResponsesOutput::new(input.into_items());
-        assert_eq!(output.into_input().items().len(), 3);
+        assert_eq!(output.into_input().unwrap().items().len(), 3);
     }
 
     #[test]

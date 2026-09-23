@@ -1189,7 +1189,7 @@ mod tests {
                 display_name: None,
                 protocol: Protocol::OpenAiChat,
                 capabilities: Capabilities {
-                    input_modalities: ModalitySet::none(),
+                    responses_features: Default::default(),                    input_modalities: ModalitySet::none(),
                     output_modalities: ModalitySet::none(),
                     tools: true,
                     parallel_tool_calls: false,

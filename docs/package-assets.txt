@@ -10,6 +10,7 @@ text LICENSE
 text README.md
 text SECURITY.md
 text THIRD_PARTY_NOTICES.md
+text crates/octet-ai/docs/responses-controls.md
 text crates/octet-ai/models/SOURCES.md
 text crates/octet-ai/src/protocol/openai_responses.rs
 text crates/octet-ai/src/responses_ws.rs

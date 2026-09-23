@@ -175,6 +175,7 @@ fn test_model(uri: &str, protocol: Protocol, audio: bool) -> Model {
             display_name: None,
             protocol,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities,
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -304,6 +305,7 @@ fn signal(sender: &Mutex<Option<oneshot::Sender<()>>>) {
 impl Tool for WaveProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "host_read_probe".into(),
             description: "bounded HostRead wave probe".into(),
             parameters: serde_json::json!({
@@ -480,6 +482,7 @@ struct PhaseRead {
 impl Tool for PhaseRead {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "host_read_probe".into(),
             description: "barrier HostRead probe".into(),
             parameters: serde_json::json!({
@@ -535,6 +538,7 @@ struct BarrierMutation {
 impl Tool for BarrierMutation {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "mutation_probe".into(),
             description: "serialized mutation barrier".into(),
             parameters: serde_json::json!({
@@ -750,6 +754,7 @@ struct CancelRead {
 impl Tool for CancelRead {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "cancel_read_probe".into(),
             description: "cancellable HostRead probe".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
@@ -973,6 +978,7 @@ struct EffectBarrierProbe {
 impl Tool for EffectBarrierProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: self.name.into(),
             description: format!("{} effect barrier probe", self.name),
             parameters: serde_json::json!({

@@ -11,6 +11,7 @@ fn call(session: &mut Session) {
     session
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: ToolCallId("reused-provider-id".into()),
                 name: "read".into(),
                 arguments_json: "{}".into(),

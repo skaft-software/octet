@@ -48,6 +48,12 @@ const COPILOT_ROUTES: &[ProviderRoute] = &[
             responses_profile: ResponsesRuntimeProfile::Default,
             openai_chat_profile: OpenAiChatRuntimeProfile::Default,
             lifecycle_feedback: false,
+            responses_features: octet_ai::ResponsesFeatures {
+                async_tools: false,
+                steering: false,
+                reasoning_effort_updates: false,
+                compact_reasoning_effort_updates: false,
+            },
         },
     },
     ProviderRoute {
@@ -61,6 +67,12 @@ const COPILOT_ROUTES: &[ProviderRoute] = &[
             responses_profile: ResponsesRuntimeProfile::Default,
             openai_chat_profile: OpenAiChatRuntimeProfile::Default,
             lifecycle_feedback: false,
+            responses_features: octet_ai::ResponsesFeatures {
+                async_tools: false,
+                steering: false,
+                reasoning_effort_updates: false,
+                compact_reasoning_effort_updates: false,
+            },
         },
     },
 ];
@@ -1132,6 +1144,7 @@ mod tests {
                 agent_delegation: None,
                 structured_output: protocol != Protocol::OpenAiChat,
                 deferred_tool_loading: false,
+                responses_features: Default::default(),
             },
             ModelLimits {
                 context_window: 128_000,

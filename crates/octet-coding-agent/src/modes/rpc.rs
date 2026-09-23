@@ -1089,6 +1089,8 @@ impl<'a> RpcSessionProjection<'a> {
                     EntryValue::SkillDeactivated { .. } => "octet:legacy-skill-deactivated",
                     EntryValue::ResponsesTurn { .. } => "octet:responses-turn",
                     EntryValue::ResponsesCompaction { .. } => "octet:responses-compaction",
+                    EntryValue::ResponsesReasoning { .. } => "octet:responses-reasoning",
+                    EntryValue::ResponsesSteering { .. } => "octet:responses-steering",
                     EntryValue::Message(_) | EntryValue::Compaction { .. } => {
                         unreachable!("message and compaction entries are handled above")
                     }
@@ -3336,6 +3338,7 @@ mod tests {
             model: app.model.spec.id.clone(),
             protocol: app.model.spec.protocol,
             content: vec![AssistantPart::ToolCall(octet_ai::ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("call-1".into()),
                 name: "read".into(),
                 arguments_json: r#"{"path":"file"}"#.into(),

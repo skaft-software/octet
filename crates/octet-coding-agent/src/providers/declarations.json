@@ -30,10 +30,15 @@
         {
           "endpoint_id": "openai",
           "protocol": "openai_responses",
-          "transport": "http",
+          "transport": "websocket_preferred",
           "body_encoding": "identity",
           "auth_presentation": "bearer",
-          "responses_profile": "default"
+          "responses_profile": "default",
+          "responses_features": {
+            "async_tools": true,
+            "steering": true,
+            "reasoning_effort_updates": true
+          }
         }
       ],
       "route_rules": [
@@ -772,7 +777,10 @@
           "transport": "websocket_preferred",
           "body_encoding": "zstd",
           "auth_presentation": "dynamic",
-          "responses_profile": "codex"
+          "responses_profile": "codex",
+          "responses_features": {
+            "reasoning_effort_updates": true
+          }
         }
       ],
       "route_rules": [

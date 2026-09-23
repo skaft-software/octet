@@ -101,18 +101,7 @@ pub(super) fn append_hydrated_items(
                 duration_ms,
                 images,
             } => {
-                if let Some(name) = state.hidden_hydrated_subagent_calls.get(&id) {
-                    let result = if is_error {
-                        Err(octet_agent::ToolError::new(text.clone()))
-                    } else {
-                        Ok(octet_agent::ToolOutput::new(text.clone()))
-                    };
-                    if let Some(reason) = tool_failure_reason(name, &result) {
-                        state.push_block(TranscriptBlock::Notice(format!(
-                            "Delegation failed: {}",
-                            sanitize_for_terminal(&reason)
-                        )));
-                    }
+                if state.hidden_hydrated_subagent_calls.contains_key(&id) {
                     continue;
                 }
                 // Malformed provider output can reuse one call ID within the

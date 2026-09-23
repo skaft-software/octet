@@ -463,6 +463,7 @@ fn tool_turn_displays_latest_request_and_excludes_tool_wall_time() {
             .accepted
     );
     let first_call = ToolCall {
+        async_execution: false,
         id: ToolCallId("call-1".to_owned()),
         name: "write".to_owned(),
         arguments_json: json!({"path": "src/lib.rs"}).to_string(),

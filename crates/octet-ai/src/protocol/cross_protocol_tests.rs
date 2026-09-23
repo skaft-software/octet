@@ -38,6 +38,7 @@ fn make_model(
         display_name: None,
         protocol,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities: input,
             output_modalities: output,
             tools: true,
@@ -111,6 +112,7 @@ fn test_cross_protocol_canonical_immutability() {
     });
 
     let tool_call = ToolCall {
+        async_execution: false,
         id: ToolCallId("call_1".to_string()),
         name: "test_tool".to_string(),
         arguments_json: "{}".to_string(),
@@ -221,6 +223,7 @@ fn test_lossy_inserts_missing_tool_result_before_next_assistant() {
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call_missing".to_string()),
                         name: "lookup".to_string(),
                         arguments_json: "{}".to_string(),
@@ -373,6 +376,7 @@ fn constrained_sampling_wire_shape_across_codecs() {
     use crate::types::{ConstrainedSampling, ConstrainedSamplingStrict, GrammarVariants, ToolDef};
 
     let strict_tool = |name: &str| ToolDef {
+        async_execution: false,
         name: name.to_string(),
         description: "strict".to_string(),
         parameters: serde_json::json!({
@@ -385,6 +389,7 @@ fn constrained_sampling_wire_shape_across_codecs() {
         }),
     };
     let grammar_tool = ToolDef {
+        async_execution: false,
         name: "grammar_tool".to_string(),
         description: "grammar".to_string(),
         parameters: serde_json::json!({
@@ -528,6 +533,7 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
     use crate::types::{ConstrainedSampling, ConstrainedSamplingStrict, GrammarVariants, ToolDef};
 
     let strict_tool = ToolDef {
+        async_execution: false,
         name: "strict_tool".to_owned(),
         description: "strict".to_owned(),
         parameters: serde_json::json!({
@@ -540,6 +546,7 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
         }),
     };
     let grammar_tool = ToolDef {
+        async_execution: false,
         name: "grammar_tool".to_owned(),
         description: "grammar".to_owned(),
         parameters: serde_json::json!({

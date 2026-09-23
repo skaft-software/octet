@@ -35,6 +35,7 @@ struct UsageProbeTool {
 impl Tool for UsageProbeTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
             name: TOOL_NAME.to_owned(),
             description: "reports provider usage for the tool call itself".to_owned(),
             parameters: serde_json::json!({"type": "object"}),
@@ -101,6 +102,7 @@ fn stream_for(model: &HostStreamModel, turn: &ScriptedTurn) -> ResponseStream {
             for part in &turn.content {
                 if let AssistantPart::ToolCall(call) = part {
                     events.push(Ok(StreamEvent::ToolCallStart {
+                        async_execution: false,
                         index: 0,
                         id: call.id.clone(),
                         name: call.name.clone(),
@@ -155,6 +157,7 @@ fn tool_call_turn(call_id: &str, usage: Usage) -> ScriptedTurn {
     ScriptedTurn {
         stop_reason: StopReason::ToolUse,
         content: vec![AssistantPart::ToolCall(ToolCall {
+            async_execution: false,
             id: ToolCallId(call_id.to_owned()),
             name: TOOL_NAME.to_owned(),
             arguments_json: "{}".to_owned(),

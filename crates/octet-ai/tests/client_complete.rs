@@ -20,6 +20,7 @@ fn make_test_model(base_url_str: &str, protocol: Protocol) -> Model {
         display_name: None,
         protocol,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities: ModalitySet::none(),
             output_modalities: ModalitySet::none(),
             tools: false,

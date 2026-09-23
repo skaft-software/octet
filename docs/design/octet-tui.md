@@ -193,13 +193,15 @@ composer while any retained worker is active. Visibility is independent of the
 root run's activity and `follow_tail`; workers can outlive a root turn. Once all
 workers settle, the strip disappears, but telemetry remains retained for
 inspection and accounting through the existing `/subagents` surface. No synthetic
-`Subagents` `ToolPanel` or roster semantic-copy event is created. Failure or parked
-states remain actionable after the strip hides: each observed failed/stopped-group
-state/reason transition (including `timed_out` and `awaiting_approval`) appends one
-bounded transcript `Notice`, naming the worker, state, available reason, and
-`/subagents` inspection hint. These notices remain in semantic copy; duplicate
-snapshots and metric-only updates append nothing. Successful settlement hides the
-strip without a new transcript notice.
+`Subagents` `ToolPanel` or roster semantic-copy event is created. Failed/stopped
+states (including `timed_out`, `interrupted`, and `awaiting_approval`) and their
+reasons remain inspectable through `/subagents` after the strip hides. State or
+reason transitions, repeated snapshots, and metric-only updates append no
+transcript notices. Raw first-party orchestration calls and results, including
+actual and semantic errors, remain hidden during live execution and hydration.
+This is presentation-only: authoritative outcomes, model-visible tool errors,
+durable results, accounting, ordinary tool/run failures, and approval prompts
+retain their existing owners. Settlement hides the strip without a new notice.
 
 The strip reuses the existing grouped worker rows, counts, and disclosure, with
 task name, lifecycle, full model identity, and width-eligible metrics. Transient

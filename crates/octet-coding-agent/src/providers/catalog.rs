@@ -358,6 +358,7 @@ fn static_model_capabilities(model: &StaticModelPreset) -> Capabilities {
             Protocol::OpenAiChat | Protocol::BedrockConverse
         ),
         deferred_tool_loading: false,
+        responses_features: Default::default(),
     }
 }
 
@@ -671,6 +672,7 @@ mod tests {
             agent_delegation: None,
             structured_output: false,
             deferred_tool_loading: false,
+            responses_features: Default::default(),
         };
         let limits = ModelLimits {
             context_window: 262_144,
@@ -745,6 +747,7 @@ mod tests {
                 agent_delegation: None,
                 structured_output: false,
                 deferred_tool_loading: false,
+                responses_features: Default::default(),
             },
             ModelLimits {
                 context_window: 32_768,
@@ -782,6 +785,7 @@ mod tests {
             agent_delegation: None,
             structured_output: false,
             deferred_tool_loading: false,
+            responses_features: Default::default(),
         };
         // A token-budget Chat contract has no declared budget field here, so the
         // pinned thinking format must not be attached.

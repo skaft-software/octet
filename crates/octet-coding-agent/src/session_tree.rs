@@ -139,6 +139,8 @@ fn entry_kind(entry: &Entry) -> &'static str {
         EntryValue::Compaction { .. } => "compaction",
         EntryValue::ResponsesTurn { .. } => "responses-turn",
         EntryValue::ResponsesCompaction { .. } => "responses-compaction",
+        EntryValue::ResponsesReasoning { .. } => "responses-reasoning",
+        EntryValue::ResponsesSteering { .. } => "responses-steering",
         EntryValue::Config { .. } => "config",
         EntryValue::PromptTemplateSelected { .. } => "prompt-template",
         EntryValue::SkillActivated { .. } => "skill-activated",

@@ -2394,33 +2394,8 @@ impl ShellState {
             view.state_filter = previous.state_filter;
             view.panel_filter = previous.panel_filter.clone();
         }
-        // A disappearing strip must not silently swallow an asynchronous
-        // failure or parked worker. Keep one bounded, actionable notice per
-        // observed state/reason transition, not a synthetic roster tool card.
-        let previous_rows = self
-            .subagent_activity
-            .as_ref()
-            .map(subagent_rows)
-            .unwrap_or_default();
-        for row in subagent_rows(&view) {
-            if matches!(
-                row.group,
-                SubagentStateGroup::Failed | SubagentStateGroup::Stopped
-            ) && !previous_rows.iter().any(|previous| {
-                previous.node_id == row.node_id
-                    && previous.state == row.state
-                    && previous.reason == row.reason
-            })
-            {
-                let detail = row.reason.as_deref().unwrap_or("");
-                let message = format!("Subagent {}: {}. {}", row.worker, row.state, detail);
-                self.push_block(TranscriptBlock::Notice(format!(
-                    "{}{}inspect with /subagents",
-                    outcome_render::bounded_outcome_detail(message.trim()),
-                    semantic_separator(&self.theme)
-                )));
-            }
-        }
+        // State and reason transitions remain in the retained roster for
+        // /subagents inspection, not as automatic transcript notices.
         let is_active = subagent_activity_is_active(&view);
         self.subagent_activity = Some(view);
         self.touch_outcome_for_roster_transition(was_active, is_active);
@@ -4190,14 +4165,6 @@ impl InteractiveShell {
                 result,
                 duration,
             } => {
-                if let Some(name) = state.hidden_subagent_calls.get(id).cloned() {
-                    if let Some(reason) = tool_failure_reason(&name, result) {
-                        state.push_block(TranscriptBlock::Notice(format!(
-                            "Delegation failed: {}",
-                            sanitize_for_terminal(&reason)
-                        )));
-                    }
-                }
                 let index = (!state.hidden_subagent_calls.contains_key(id))
                     .then(|| state.tool_panels.get(id).copied())
                     .flatten();

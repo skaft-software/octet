@@ -378,6 +378,38 @@ pub fn supported_levels_with_subagents(
         .collect()
 }
 
+/// Explicit interactive choices must not silently normalize an unsupported effort.
+/// Startup/configuration normalization intentionally retains its separate policy.
+pub fn requested_thinking_to_reasoning(
+    level: ThinkingLevel,
+    model: &Model,
+    subagents_available: bool,
+) -> anyhow::Result<ReasoningConfig> {
+    anyhow::ensure!(
+        supported_levels_with_subagents(model, subagents_available).contains(&level),
+        "thinking {} is not supported by {} with the current subagent capabilities",
+        level.label(),
+        model.spec.id.0,
+    );
+    let reasoning = thinking_to_reasoning_with_subagents(level, model, subagents_available)?;
+    // Ultra is a qualified initial delegation mode, not a wire update effort.
+    // Agent/RunControl enforce whether the current session can accept it.
+    if model.responses_features().reasoning_effort_updates
+        && reasoning != ReasoningConfig::Effort(ReasoningEffort::Ultra)
+    {
+        let update = octet_ai::ResponsesConfigurationUpdate {
+            reasoning: reasoning.clone(),
+        };
+        octet_ai::responses::validate_responses_input(
+            model,
+            &octet_ai::ResponsesInput::new(vec![update.to_item()]),
+            &reasoning,
+            false,
+        )?;
+    }
+    Ok(reasoning)
+}
+
 /// An Agent-owning runtime transition. These are valid only while idle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reconfig {
@@ -810,6 +842,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reasoning, ReasoningConfig::Effort(ReasoningEffort::Ultra));
+
+        let mut qualified = model;
+        Arc::make_mut(&mut qualified.spec).protocol = octet_ai::Protocol::OpenAiResponses;
+        Arc::make_mut(&mut qualified.spec)
+            .capabilities
+            .responses_features
+            .reasoning_effort_updates = true;
+        Arc::make_mut(&mut qualified.endpoint)
+            .runtime
+            .responses_features
+            .reasoning_effort_updates = true;
+        assert!(qualified.responses_features().reasoning_effort_updates);
+        assert_eq!(
+            requested_thinking_to_reasoning(ThinkingLevel::Ultra, &qualified, true).unwrap(),
+            ReasoningConfig::Effort(ReasoningEffort::Ultra)
+        );
+        assert!(requested_thinking_to_reasoning(ThinkingLevel::Ultra, &qualified, false).is_err());
     }
     #[test]
     fn ultra_floor_cannot_override_the_effective_runtime_ceiling() {

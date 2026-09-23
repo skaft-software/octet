@@ -9282,6 +9282,7 @@ struct ProcessTool {
 impl Tool for ProcessTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: self.definition.name.clone(),
             description: self.definition.description.clone(),
@@ -11188,6 +11189,7 @@ fn decode_provider_stream_event(
             }
             Ok(DecodedProviderStreamEvent::emit(
                 StreamEvent::ToolCallStart {
+                    async_execution: false,
                     index: payload.index,
                     id: ToolCallId(payload.id),
                     name: payload.name,

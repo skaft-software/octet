@@ -176,6 +176,7 @@ mod tests {
         let mut builder =
             ResponseBuilder::new(ModelId("test".to_owned()), Protocol::OpenAiResponses, None);
         builder.tool_definitions = Some(vec![ToolDef {
+            async_execution: false,
             name: "custom".to_owned(),
             description: String::new(),
             parameters: serde_json::json!({"type": "object", "required": ["source"],
@@ -192,6 +193,7 @@ mod tests {
             &mut events,
             &mut builder,
             StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call".to_owned()),
                 name: "custom".to_owned(),

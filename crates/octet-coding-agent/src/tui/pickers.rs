@@ -1129,9 +1129,8 @@ pub async fn thinking_picker(
             }
             return Ok(None);
         };
-        if let Err(e) = crate::cli::persist_reasoning(selected.label()) {
-            shell.error(format!("failed to save thinking preference: {e}"));
-        }
+        // Selection is not acceptance: the owning idle dispatcher validates
+        // session-dependent controls before persisting the preference.
         return Ok(Some(selected));
     }
 }
@@ -2067,6 +2066,7 @@ mod tests {
             display_name: Some("Llama 3.1 8B".into()),
             protocol: octet_ai::Protocol::OpenAiChat,
             capabilities: octet_ai::Capabilities {
+                responses_features: Default::default(),
                 input_modalities: octet_ai::ModalitySet::none(),
                 output_modalities: octet_ai::ModalitySet::none(),
                 tools: true,
@@ -2117,6 +2117,7 @@ mod tests {
             display_name: None,
             protocol: octet_ai::Protocol::OpenAiChat,
             capabilities: octet_ai::Capabilities {
+                responses_features: Default::default(),
                 input_modalities: octet_ai::ModalitySet::none(),
                 output_modalities: octet_ai::ModalitySet::none(),
                 tools: true,

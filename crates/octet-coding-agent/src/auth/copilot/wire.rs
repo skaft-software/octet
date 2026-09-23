@@ -417,6 +417,7 @@ fn parse_models(inventory: Inventory, secrets: [&str; 2]) -> Result<Vec<CopilotM
             model.id,
             protocol,
             Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: supports.tool_calls,

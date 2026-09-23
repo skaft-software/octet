@@ -25,6 +25,7 @@ fn model(base_url: &str, protocol: Protocol) -> Model {
             display_name: None,
             protocol,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: false,
@@ -332,6 +333,7 @@ async fn compact_responses_lite_uses_advertised_transport_contract() {
         }]
     }))]);
     let tools = [ToolDef {
+        async_execution: false,
         constrained_sampling: None,
         name: "read".into(),
         description: "Read a file".into(),

@@ -557,6 +557,7 @@ pub(crate) mod tests {
             session
                 .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId(format!("call-{index}")),
                         name: "read".into(),
                         arguments_json: "{}".into(),
@@ -870,6 +871,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .expect("every retained assistant needs an authoritative sidecar");
             octet_ai::responses::encode_responses_replay(&model, Some("system"), &replay)
+                .unwrap()
         };
         let before_reopen = encode(app.agent.session());
         let input = serde_json::to_value(&before_reopen).unwrap();
@@ -971,6 +973,7 @@ pub(crate) mod tests {
             session
                 .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId(format!("call-{index}")),
                         name: "read".into(),
                         arguments_json: "{}".into(),

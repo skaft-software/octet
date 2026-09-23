@@ -4039,6 +4039,7 @@ fn resumed_session_restores_every_write_as_a_diff_panel() {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId(id.into()),
                     name: "write".into(),
                     arguments_json: serde_json::json!({
@@ -4093,12 +4094,14 @@ fn duplicate_hydrated_tool_call_ids_never_leave_a_running_card() {
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("duplicate".into()),
                     name: "read".into(),
                     arguments_json: r#"{"path":"first"}"#.into(),
                     argument_error: None,
                 }),
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("duplicate".into()),
                     name: "read".into(),
                     arguments_json: r#"{"path":"second"}"#.into(),
@@ -10606,10 +10609,10 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(notices.len(), 1);
-    assert!(notices[0].contains("Audit release surface") && notices[0].contains("failed"));
-    assert!(notices[0].contains("provider request failed: upstream unavailable"));
-    assert!(notices[0].contains("/subagents"));
+    assert!(
+        notices.is_empty(),
+        "worker diagnostics remain inspector-only"
+    );
     drop(state);
     assert!(!shell
         .state
@@ -10644,7 +10647,7 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
 }
 
 #[test]
-fn settled_subagent_attention_is_a_deduplicated_notice_not_a_roster() {
+fn settled_subagent_attention_is_quiet_with_inspector_retention() {
     for terminal in ["failed", "stopped", "awaiting_approval"] {
         let mut shell = InteractiveShell::test_shell();
         let mut view = subagent_transcript_test_view(true);
@@ -10676,11 +10679,10 @@ fn settled_subagent_attention_is_a_deduplicated_notice_not_a_roster() {
             .subagents
             .is_empty());
         let first = notices(&shell);
-        assert_eq!(first.len(), 1);
-        assert!(first[0].contains("Read changelog") && first[0].contains(terminal));
-        assert!(first[0].contains("action required: review worker"));
-        assert!(first[0].contains("/subagents") && !first[0].contains('\x1b'));
-        assert!(!first[0].contains("test-model") && !first[0].contains("tokens"));
+        assert!(
+            first.is_empty(),
+            "settlement does not append worker notices"
+        );
 
         // Repeated state/reason, even with fresh accounting, must not spam history.
         view.telemetry[0].output_tokens += 1;
@@ -10701,9 +10703,20 @@ fn settled_subagent_attention_is_a_deduplicated_notice_not_a_roster() {
         view.telemetry[0].failure_reason = Some("new diagnostic ".repeat(1000));
         shell.state.borrow_mut().set_subagent_activity(view.clone());
         let changed = notices(&shell);
-        assert_eq!(changed.len(), 2, "a new diagnostic is actionable");
-        assert!(changed[1].contains("new diagnostic") && changed[1].contains("/subagents"));
-        assert!(changed[1].len() < view.telemetry[0].failure_reason.as_ref().unwrap().len());
+        assert!(
+            changed.is_empty(),
+            "changed worker diagnostics stay in the inspector"
+        );
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .subagent_activity
+                .as_ref()
+                .unwrap()
+                .telemetry,
+            view.telemetry
+        );
         assert!(!shell
             .state
             .borrow()
@@ -14083,6 +14096,7 @@ async fn actual_read_image_reaches_live_shell_and_reopened_session() {
             display_name: None,
             protocol: Protocol::OpenAiChat,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(octet_ai::Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,

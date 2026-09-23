@@ -1383,6 +1383,7 @@ mod tests {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId(call_id_secret.into()),
                     name: "extension-review".into(),
                     arguments_json: serde_json::json!({
@@ -1491,6 +1492,7 @@ mod tests {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("ordinary-call-id".into()),
                     name: "extension-review".into(),
                     arguments_json: nested_arguments,

@@ -12,8 +12,11 @@ through its normal dispatcher. For example:
 /answer Answer from the evidence already gathered. Do not use more tools.
 ```
 
-Commands run immediately when safe. Model/reasoning/session changes, compaction,
-reload, and checkout queue until active work releases ownership. `/answer`
+Commands run immediately when safe. Model/session changes, compaction, reload,
+and checkout queue until active work releases ownership. `/thinking` uses a
+noninterrupting next-response control on explicitly qualified Responses routes;
+other routes retain the idle-boundary selector. Queued effort is not provider
+acknowledgement. Unsupported explicit efforts are rejected. `/answer`
 persists a steering instruction and makes subsequent requests tool-free at the
 next safe boundary; while idle it starts a tool-free run. It is not an undo for
 already admitted effects. [Run control contract](design/octet-agent.md#commit-and-cancellation-invariants).

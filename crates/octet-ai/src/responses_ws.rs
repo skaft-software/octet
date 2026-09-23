@@ -22,6 +22,10 @@ use url::Url;
 
 use crate::error::{AiError, ConfigError, TransportError, TransportPhase};
 
+#[path = "responses_steering.rs"]
+mod steering_transport;
+pub(crate) use steering_transport::SteeringOperation;
+
 const RESPONSES_WEBSOCKETS_BETA: &str = "responses_websockets=2026-02-06";
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 // Preserve tungstenite's message/frame ceilings, and independently bound queued
@@ -491,6 +495,7 @@ fn update_continuation(full_body: &Value, value: &Value, continuation: &mut Opti
 }
 
 struct RequestCommand {
+    steering: Option<SteeringOperation>,
     body: Value,
     reply: EventSender,
     /// Taken by the actor before the generation loop so the command itself
@@ -681,6 +686,20 @@ impl ResponsesWsPool {
         startup_timeout: Duration,
         resumer: Option<ResponseResumer>,
     ) -> Result<EventReceiver, AiError> {
+        self.request_operation(key, url, headers, body, liveness, startup_timeout, resumer, None).await
+    }
+
+    pub(crate) async fn request_operation(
+        &self,
+        key: Option<&str>,
+        url: Url,
+        headers: http::HeaderMap,
+        body: Value,
+        liveness: ResponsesWsLiveness,
+        startup_timeout: Duration,
+        resumer: Option<ResponseResumer>,
+        steering: Option<SteeringOperation>,
+    ) -> Result<EventReceiver, AiError> {
         let deadline = tokio::time::Instant::now() + startup_timeout;
         // Only this future owns connection establishment; no generation command
         // exists yet. A timeout here is proven safe for HTTP fallback.
@@ -700,7 +719,7 @@ impl ResponsesWsPool {
         // without letting that outer timer misclassify a handshake timeout.
         tokio::time::timeout_at(
             deadline,
-            self.send_request(key, connection, body, liveness, resumer),
+            self.send_request_operation(key, connection, body, liveness, resumer, steering),
         )
         .await
         .map_err(|_| {
@@ -713,17 +732,15 @@ impl ResponsesWsPool {
         })?
     }
 
-    async fn send_request(
-        &self,
-        key: Option<&str>,
-        connection: Connection,
-        body: Value,
-        liveness: ResponsesWsLiveness,
-        resumer: Option<ResponseResumer>,
+    async fn send_request_operation(
+        &self, key: Option<&str>, connection: Connection, body: Value,
+        liveness: ResponsesWsLiveness, resumer: Option<ResponseResumer>,
+        steering: Option<SteeringOperation>,
     ) -> Result<EventReceiver, AiError> {
         let (reply, events) = event_channel(EVENT_CHANNEL_CAPACITY);
         let (started, started_result) = oneshot::channel();
         let command = RequestCommand {
+            steering,
             body,
             reply,
             started: Some(started),
@@ -1498,7 +1515,7 @@ async fn run_connection<S>(
             continue;
         }
         let started = command.started.take();
-        let (wire_body, _) = incremental_body(&command.body, continuation.as_ref());
+        let (wire_body, _) = incremental_body(&command.body, if command.steering.is_some() { None } else { continuation.as_ref() });
         let Value::Object(mut payload) = wire_body else {
             let _ = started
                 .map(|started| started.send(Err("Responses WebSocket body is not an object".to_owned())));
@@ -1554,13 +1571,14 @@ async fn run_connection<S>(
         }
         let _ = started.map(|started| started.send(Ok(())));
 
-        match run_generation(
-            &mut socket,
-            &command,
-            &mut continuation,
-        )
-        .await
-        {
+        let outcome = if let Some(steering) = command.steering.take() {
+            // Steering changes replay lineage; never cache a guessed input prefix.
+            continuation = None;
+            steering_transport::run(&mut socket, &command, steering).await
+        } else {
+            run_generation(&mut socket, &command, &mut continuation).await
+        };
+        match outcome {
             GenerationEnd::Completed => {}
             GenerationEnd::Abandoned => {
                 alive.store(false, Ordering::Release);
@@ -2100,6 +2118,7 @@ mod tests {
         connection
             .sender
             .send(RequestCommand {
+                steering: None,
                 body: serde_json::json!({"model": "gpt", "input": []}),
                 reply,
                 started: Some(started),
@@ -2157,6 +2176,7 @@ mod tests {
         connection
             .sender
             .send(RequestCommand {
+                steering: None,
                 body: serde_json::json!({"model": "gpt", "input": []}),
                 reply,
                 started: Some(started),
@@ -2231,6 +2251,7 @@ mod tests {
             connection
                 .sender
                 .send(RequestCommand {
+                    steering: None,
                     body: serde_json::json!({"model": "gpt", "input": []}),
                     reply,
                     started: Some(started),
@@ -2333,6 +2354,7 @@ mod tests {
                 connection
                     .sender
                     .send(RequestCommand {
+                        steering: None,
                         body: serde_json::json!({"model": "gpt", "input": []}),
                         reply,
                         started: Some(started),
@@ -2554,6 +2576,7 @@ mod tests {
         connection
             .sender
             .send(RequestCommand {
+                steering: None,
                 body: test_generation_request(),
                 reply,
                 started: Some(started),

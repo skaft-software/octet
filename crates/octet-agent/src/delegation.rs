@@ -7899,6 +7899,7 @@ fn target_message_schema() -> Value {
 
 fn tool_def(name: &str, description: &str, input_schema: Value) -> ToolDef {
     ToolDef {
+        async_execution: false,
         constrained_sampling: None,
         name: name.into(),
         description: description.into(),
@@ -8718,6 +8719,7 @@ mod tests {
             let endpoint = Arc::make_mut(&mut model.endpoint);
             endpoint.base_url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
             endpoint.auth = octet_ai::Auth::None;
+            endpoint.transport = octet_ai::EndpointTransport::Http;
             manager_mut
                 .template
                 .runtime
@@ -10640,6 +10642,7 @@ mod tests {
             let endpoint = Arc::make_mut(&mut model.endpoint);
             endpoint.base_url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
             endpoint.auth = octet_ai::Auth::None;
+            endpoint.transport = octet_ai::EndpointTransport::Http;
             manager_mut
                 .template
                 .runtime

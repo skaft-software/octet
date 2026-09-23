@@ -1849,6 +1849,7 @@ fn extension_provider_capabilities(
     capabilities: &octet_agent::extension_api_v03::ProviderModelCapabilities,
 ) -> Capabilities {
     Capabilities {
+        responses_features: Default::default(),
         input_modalities: Default::default(),
         output_modalities: Default::default(),
         tools: capabilities.tools,
@@ -10621,6 +10622,7 @@ context = true
                 }),
                 AssistantPart::Text("final ".into()),
                 AssistantPart::ToolCall(octet_ai::ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call-1".into()),
                     name: "read".into(),
                     arguments_json: "{}".into(),
@@ -11030,6 +11032,7 @@ providers = true
                 display_name: None,
                 protocol: Protocol::OpenAiChat,
                 capabilities: Capabilities {
+                    responses_features: Default::default(),
                     input_modalities: Default::default(),
                     output_modalities: Default::default(),
                     tools: false,

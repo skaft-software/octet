@@ -1503,6 +1503,7 @@ fn decode_response_inner(
             };
 
             content.push(AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: ToolCallId(tc.id.clone()),
                 name: name.clone(),
                 arguments_json,
@@ -1840,6 +1841,7 @@ pub(crate) fn decode_stream_event(
                         &mut events,
                         builder,
                         StreamEvent::ToolCallStart {
+                            async_execution: false,
                             index: idx,
                             id: ToolCallId(id),
                             name,
@@ -2243,6 +2245,7 @@ fn emit_compat_tool_call(
         events,
         builder,
         StreamEvent::ToolCallStart {
+            async_execution: false,
             index,
             id: ToolCallId(format!("qwen_xml_call_{}", call_number + 1)),
             name,
@@ -2889,6 +2892,7 @@ mod tests {
             display_name: None,
             protocol: Protocol::OpenAiChat,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: input,
                 output_modalities: output,
                 tools,
@@ -3298,6 +3302,7 @@ mod tests {
             .deferred_tool_loading = true;
 
         let make_tool = |name: &str| crate::types::ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: name.to_string(),
             description: "test tool".to_string(),
@@ -3308,6 +3313,7 @@ mod tests {
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call-1".into()),
                         name: "read".into(),
                         arguments_json: "{}".to_string(),
@@ -3360,6 +3366,7 @@ mod tests {
             .preset
             .supports_openai_grammar_tools = Some(true);
         let tool = ToolDef {
+            async_execution: false,
             name: "language".to_owned(),
             description: "grammar".to_owned(),
             parameters: serde_json::json!({"type":"object", "properties":{"source":{"type":"string"}},
@@ -3404,6 +3411,7 @@ mod tests {
             })],
             tools: vec![
                 crate::types::ToolDef {
+                    async_execution: false,
                     constrained_sampling: Some(ConstrainedSampling::JsonSchema {
                         strict: ConstrainedSamplingStrict::Prefer,
                     }),
@@ -3416,6 +3424,7 @@ mod tests {
                     }),
                 },
                 crate::types::ToolDef {
+                    async_execution: false,
                     constrained_sampling: Some(ConstrainedSampling::Grammar {
                         variants: GrammarVariants {
                             openai_lark: Some("start: WORD".to_string()),
@@ -3480,6 +3489,7 @@ mod tests {
                 content: vec![UserPart::Text("go".into())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: Some(ConstrainedSampling::JsonSchema {
                     strict: ConstrainedSamplingStrict::Require,
                 }),
@@ -3523,6 +3533,7 @@ mod tests {
             .deferred_tool_loading = false;
 
         let make_tool = |name: &str| crate::types::ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: name.to_string(),
             description: "test tool".to_string(),
@@ -3533,6 +3544,7 @@ mod tests {
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call-1".into()),
                         name: "read".into(),
                         arguments_json: "{}".to_string(),
@@ -3600,6 +3612,7 @@ mod tests {
                 content: vec![UserPart::Text("Read sentinel.txt".into())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "read".into(),
                 description: "Read a file".into(),
@@ -3654,6 +3667,7 @@ mod tests {
                             state: None,
                         }),
                         AssistantPart::ToolCall(ToolCall {
+                            async_execution: false,
                             id: ToolCallId("call_1".to_string()),
                             name: "lookup".to_string(),
                             arguments_json: "{}".to_string(),
@@ -3731,6 +3745,7 @@ mod tests {
                             state: None,
                         }),
                         AssistantPart::ToolCall(ToolCall {
+                            async_execution: false,
                             id: ToolCallId(canonical_tool_id.into()),
                             name: "read".into(),
                             arguments_json: r#"{"path":"README.md"}"#.into(),
@@ -4121,6 +4136,7 @@ mod tests {
                 content: vec![UserPart::Text("latest user turn".to_string())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "read".to_string(),
                 description: "Read a file".to_string(),
@@ -4550,6 +4566,7 @@ mod fixture_tests {
     async fn schema_mismatch_is_marked_before_tool_call_end() {
         let model = harness::model(Protocol::OpenAiChat, None);
         let tools = [ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),

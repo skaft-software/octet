@@ -517,6 +517,7 @@ fn scripted_model(uri: &str) -> Model {
             display_name: None,
             protocol: Protocol::AnthropicMessages,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: true,

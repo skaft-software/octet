@@ -20,6 +20,13 @@ fn discovered_reasoning_supports_chat_and_responses_models() {
     assert!(discovered_model_supports_reasoning(
         openai,
         Protocol::OpenAiResponses,
+        "gpt-6-astra"
+    ));
+    // Discovery receives API IDs, not product catalog IDs. Do not manufacture
+    // a public capability contract for a namespaced or future alias.
+    assert!(!discovered_model_supports_reasoning(
+        openai,
+        Protocol::OpenAiResponses,
         "openai/gpt-6-astra"
     ));
     assert!(!discovered_model_supports_reasoning(
@@ -1418,6 +1425,9 @@ fn codex_fallback_never_infers_ultra_or_delegation_from_oauth_plan() {
 #[test]
 fn codex_spark_and_astra_are_registered_as_image_capable() {
     assert!(codex_supports_image_input("gpt-6-astra"));
+    assert!(codex_supports_image_input("gpt-6-sol"));
+    assert!(codex_supports_image_input("gpt-6-luna"));
+    assert!(!codex_supports_image_input("gpt-6-unadvertised"));
     assert!(codex_supports_image_input("gpt-5.3-codex-spark"));
     assert!(codex_supports_image_input("gpt-5.3-codex"));
     assert!(codex_supports_image_input("gpt-5.4-mini"));
@@ -1434,9 +1444,9 @@ fn codex_spark_and_astra_are_registered_as_image_capable() {
 }
 
 #[test]
-fn codex_catalog_query_uses_astra_compatible_client_and_cache_versions() {
-    assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.153.2");
-    assert_eq!(CODEX_MODEL_CACHE_VERSION, 7);
+fn codex_catalog_query_uses_gpt6_compatible_client_and_cache_versions() {
+    assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.156.1");
+    assert_eq!(CODEX_MODEL_CACHE_VERSION, 8);
     let url = codex_models_url().unwrap();
     assert_eq!(url.path(), "/backend-api/codex/models");
     assert_eq!(
@@ -1671,6 +1681,367 @@ fn codex_observed_sol_luna_inventory_preserves_exact_ids_and_oauth_routes() {
 }
 
 #[test]
+fn codex_gpt6_sol_luna_inventory_registers_exact_oauth_contracts() {
+    // Model-only projection of the account inventory observed on 2026-09-23
+    // with client_version=0.156.1. Both models require at least 0.155.0.
+    // These OAuth choices intentionally differ from public API reasoning=none.
+    let body = serde_json::json!({"models": [
+        {
+            "slug": "gpt-6-sol", "display_name": "GPT-6-Sol",
+            "minimal_client_version": "0.155.0",
+            "context_window": 272_000, "max_context_window": 872_000,
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}
+            ],
+            "multi_agent_version": "v2", "use_responses_lite": true,
+            "supports_reasoning_effort_updates": true,
+            "input_modalities": ["text", "image"]
+        },
+        {
+            "slug": "gpt-6-luna", "display_name": "GPT-6-Luna",
+            "minimal_client_version": "0.155.0",
+            "context_window": 272_000, "max_context_window": 872_000,
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}
+            ],
+            "multi_agent_version": "v2", "use_responses_lite": true,
+            "supports_reasoning_effort_updates": true,
+            "input_modalities": ["text", "image"]
+        }
+    ]});
+    let directory = tempfile::tempdir().unwrap();
+    for plan in ["plus", "pro"] {
+        let path = directory.path().join(format!("{plan}-codex.json"));
+        write_codex_credential(&path, false, plan);
+        let store = crate::auth::codex::CredentialStore::new(path);
+        let claims = crate::auth::codex::usable_subscription_claims(&store)
+            .unwrap()
+            .unwrap();
+        let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+        assert_eq!(models.len(), 2);
+        for model in &models {
+            assert_eq!(model.context_window, 272_000);
+            assert_eq!(model.max_context_window, 872_000);
+            assert_eq!(model.reasoning_options.default.as_deref(), Some("medium"));
+            let mut efforts = vec!["low", "medium", "high", "xhigh", "max"];
+            if model.id == "gpt-6-sol" {
+                efforts.push("ultra");
+            }
+            assert_eq!(model.reasoning_options.values, efforts);
+            assert_eq!(model.agent_delegation, Some(AgentDelegation::V2));
+            assert!(model.responses_lite);
+            assert!(model.reasoning_effort_updates);
+        }
+        save_codex_model_cache(&store, &CodexDiscovery { claims, models }).unwrap();
+        let mut catalog = ModelCatalog::default();
+        register_openai_codex(&mut catalog, store, true).unwrap();
+        for id in ["gpt-6-sol", "gpt-6-luna"] {
+            let model = catalog.resolve(&ModelId(format!("codex/{id}"))).unwrap();
+            assert_eq!(model.spec.api_name, id);
+            assert_eq!(model.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
+            assert_eq!(
+                model.endpoint.base_url.as_str(),
+                crate::providers::CODEX.base_url
+            );
+            assert!(matches!(model.endpoint.auth, Auth::Dynamic(_)));
+            assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+            assert!(model
+                .spec
+                .capabilities
+                .input_modalities
+                .contains(octet_ai::Modality::Image));
+            let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+            assert_eq!(
+                reasoning.options.as_ref().unwrap().values,
+                ["low", "medium", "high", "xhigh", "max"]
+            );
+            assert!(!reasoning.supports(&ReasoningConfig::Off));
+            assert!(!model.spec.capabilities.responses_lite);
+            assert!(!model.responses_features().reasoning_effort_updates);
+            assert!(!model.responses_features().async_tools);
+            assert!(!model.responses_features().steering);
+            assert_eq!(model.spec.capabilities.agent_delegation, None);
+        }
+    }
+}
+
+#[test]
+fn public_gpt6_discovery_uses_exact_contracts_without_cross_route_inference() {
+    let declaration = &crate::providers::OPENAI;
+    let mut catalog = metadata_fixture_catalog(declaration, declaration.base_url);
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data": [
+            {"id":"gpt-6-astra"}, {"id":"gpt-6-sol"}, {"id":"gpt-6-luna"},
+            {"id":"gpt-6-unverified"}
+        ]}),
+    )
+    .unwrap();
+    for leaf in ["astra", "sol", "luna"] {
+        let model = catalog
+            .resolve(&ModelId(format!("openai/gpt-6-{leaf}")))
+            .unwrap();
+        let capability = model.spec.capabilities.reasoning.as_ref().unwrap();
+        let mut efforts = vec!["low", "medium", "high", "xhigh", "max"];
+        if leaf != "astra" {
+            efforts.insert(0, "none");
+        }
+        assert_eq!(capability.options.as_ref().unwrap().values, efforts);
+        assert_eq!(
+            capability.options.as_ref().unwrap().default.as_deref(),
+            Some(if leaf == "astra" { "low" } else { "medium" })
+        );
+        assert_eq!(capability.supports(&ReasoningConfig::Off), leaf != "astra");
+        assert_eq!(model.spec.limits.context_window, 1_050_000);
+        assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+        assert!(model.spec.capabilities.responses_features.async_tools);
+        // Model authority alone never upgrades an unqualified endpoint.
+        assert_eq!(
+            model.responses_features(),
+            octet_ai::ResponsesFeatures::default()
+        );
+        let mut endpoint = (*model.endpoint).clone();
+        endpoint.runtime = declaration.inventory_route().unwrap().runtime;
+        let qualified = Model {
+            spec: model.spec,
+            endpoint: Arc::new(endpoint),
+        };
+        assert!(qualified.responses_features().async_tools);
+        assert!(qualified.responses_features().steering);
+        assert!(qualified.responses_features().reasoning_effort_updates);
+        assert!(
+            !qualified
+                .responses_features()
+                .compact_reasoning_effort_updates
+        );
+    }
+    let unverified = catalog
+        .resolve(&ModelId("openai/gpt-6-unverified".into()))
+        .unwrap();
+    assert!(unverified.spec.capabilities.reasoning.is_none());
+    assert_eq!(unverified.spec.limits.context_window, 128_000);
+    assert_eq!(
+        unverified.spec.capabilities.responses_features,
+        Default::default()
+    );
+    assert_eq!(
+        crate::providers::OPENAI
+            .inventory_route()
+            .unwrap()
+            .transport,
+        EndpointTransport::WebSocketPreferred
+    );
+}
+
+#[test]
+fn codex_reasoning_updates_need_positive_fresh_account_metadata() {
+    for assertion in [
+        serde_json::Value::Null,
+        serde_json::json!(false),
+        serde_json::json!("true"),
+        serde_json::json!(true),
+    ] {
+        let body = serde_json::json!({"models":[{
+            "slug":"gpt-6-sol", "context_window":272_000, "max_context_window":872_000,
+            "supported_reasoning_levels":["low","medium","high","xhigh","max"],
+            "supports_reasoning_effort_updates": assertion,
+            "use_responses_lite":true, "multi_agent_version":"v2"
+        }]});
+        let models = codex_models_from_response(&body, None).unwrap();
+        assert_eq!(models[0].reasoning_effort_updates, assertion == true);
+        assert!(models[0].responses_lite);
+        assert_eq!(models[0].agent_delegation, Some(AgentDelegation::V2));
+        let offline = conservative_offline_codex_models(models);
+        assert!(!offline[0].reasoning_effort_updates);
+    }
+    assert!(fallback_codex_models(None)
+        .iter()
+        .all(|model| !model.reasoning_effort_updates));
+    let endpoint = crate::providers::CODEX
+        .inventory_route()
+        .unwrap()
+        .runtime
+        .responses_features;
+    assert!(endpoint.reasoning_effort_updates);
+    assert!(
+        !endpoint.async_tools && !endpoint.steering && !endpoint.compact_reasoning_effort_updates
+    );
+}
+
+#[test]
+fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
+    for (id, input) in [("gpt-6-sol", 2_000_000), ("gpt-6-luna", 100_000)] {
+        let public = crate::providers::pricing_for(&crate::providers::OPENAI, id).unwrap();
+        assert_eq!(public.input.0, input);
+        assert_eq!(public.output.0, input * 5);
+        assert_eq!(public.cache_read.0, input / 10);
+        assert_eq!(public.cache_write_5m.0, input * 5 / 4);
+        assert_eq!(public.tiers[0].min_input_tokens, 272_001);
+        assert_eq!(public.tiers[0].input.unwrap().0, input * 2);
+        assert_eq!(public.tiers[0].output.unwrap().0, input * 15 / 2);
+        assert!(crate::providers::pricing_for(&crate::providers::CODEX, id).is_none());
+        assert!(crate::providers::pricing_for(
+            &crate::providers::OPENAI,
+            &format!("{id}-unverified")
+        )
+        .is_none());
+    }
+}
+
+#[test]
+fn session_resume_uses_effective_reasoning_update_not_the_pinned_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = Session::create(directory.path().join("reasoning.jsonl")).unwrap();
+    let low = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
+    let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    let model = ModelId("codex/gpt-6-sol".into());
+    append_config_if_changed(&mut session, &model, &low, ReasoningMode::Standard).unwrap();
+    session
+        .append(EntryValue::ResponsesReasoning {
+            endpoint: EndpointId(crate::auth::codex::ENDPOINT_ID.into()),
+            model: model.clone(),
+            baseline: low,
+            update: Some(octet_ai::ResponsesConfigurationUpdate {
+                reasoning: high.clone(),
+            }),
+        })
+        .unwrap();
+    let persisted = persisted_session_config(&session).unwrap();
+    assert_eq!(persisted.model, Some(model));
+    assert_eq!(persisted.reasoning, Some(high));
+    // A later explicit selection wins over an older route's cache marker.
+    append_config_if_changed(
+        &mut session,
+        &ModelId("gpt-4o-mini".into()),
+        &ReasoningConfig::Off,
+        ReasoningMode::Standard,
+    )
+    .unwrap();
+    assert_eq!(
+        persisted_session_config(&session).unwrap().reasoning,
+        Some(ReasoningConfig::Off)
+    );
+}
+
+#[test]
+fn gpt6_resume_and_idle_rebuild_honor_explicit_effort_without_replacing_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let low = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
+    let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    let max = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max);
+    let mut process_config = config(directory.path(), Some("gpt-6-sol"));
+    process_config.resume = ResumeSelector::Continue;
+    process_config.reasoning = Some(max.clone());
+    process_config.reasoning_explicit = true;
+    let boot = bootstrap(process_config).unwrap();
+    let path = boot.sessions.new_path("2026-09-23T00-00-00Z");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut session = Session::create(&path).unwrap();
+    append_config_if_changed(
+        &mut session,
+        &ModelId("gpt-6-sol".into()),
+        &low,
+        ReasoningMode::Standard,
+    )
+    .unwrap();
+    session
+        .append(EntryValue::Message(octet_ai::Message::User(
+            octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("resumable task".into())],
+            },
+        )))
+        .unwrap();
+    session
+        .append(EntryValue::ResponsesReasoning {
+            endpoint: EndpointId("openai".into()),
+            model: ModelId("gpt-6-sol".into()),
+            baseline: low.clone(),
+            update: Some(octet_ai::ResponsesConfigurationUpdate {
+                reasoning: high.clone(),
+            }),
+        })
+        .unwrap();
+    drop(session);
+    let launch = resolve_launch_print(&boot, "unused").unwrap();
+    assert_eq!(launch.reasoning, max);
+    let app = build_app(boot, launch, "system".into()).unwrap();
+    assert_eq!(app.reasoning, max);
+    assert_eq!(app.agent.reasoning(), &max);
+    assert_eq!(
+        app.agent
+            .session()
+            .responses_reasoning(&EndpointId("openai".into()), &ModelId("gpt-6-sol".into()))
+            .unwrap(),
+        Some((low.clone(), max))
+    );
+    let app = rebuild_app(app, None, Some(high.clone()), None, None).unwrap();
+    assert_eq!(app.reasoning, high);
+    assert_eq!(app.agent.reasoning(), &high);
+    assert_eq!(
+        app.agent
+            .session()
+            .responses_reasoning(&EndpointId("openai".into()), &ModelId("gpt-6-sol".into()))
+            .unwrap(),
+        Some((low, high))
+    );
+}
+
+#[test]
+fn codex_fresh_pre_gpt6_cache_refreshes_once_before_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(path);
+    let claims = crate::auth::codex::usable_subscription_claims(&store)
+        .unwrap()
+        .unwrap();
+    let mut body = serde_json::json!({"models": [{
+        "slug": "gpt-5.6-sol", "context_window": 272_000,
+        "max_context_window": 872_000, "default_reasoning_level": "medium",
+        "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max"]
+    }]});
+    let old_cache = CodexModelCache {
+        version: 7,
+        account_id: claims.account_id.clone(),
+        plan: codex_plan_cache_key(&claims).map(str::to_owned),
+        models: codex_models_from_response(&body, claims.plan.as_ref()).unwrap(),
+    };
+    store
+        .save_model_cache(&serde_json::to_vec(&old_cache).unwrap())
+        .unwrap();
+    assert!(load_codex_model_cache(&store, &claims).unwrap().is_none());
+    let (offline, source) = codex_inventory_models(&store, &claims, true, false,
+        |_| panic!("offline must not refresh the old inventory"));
+    assert_eq!(source, CodexInventorySource::ConservativeFallback);
+    assert!(!offline.iter().any(|m| m.id == "gpt-6-sol"));
+
+    body["models"][0]["slug"] = serde_json::json!("gpt-6-sol");
+    let live = CodexDiscovery {
+        claims: claims.clone(),
+        models: codex_models_from_response(&body, claims.plan.as_ref()).unwrap(),
+    };
+    let requests = std::cell::Cell::new(0);
+    let (models, source) = codex_inventory_models(&store, &claims, false, false, |_| {
+        requests.set(requests.get() + 1);
+        Ok(live)
+    });
+    assert_eq!(source, CodexInventorySource::OnlineDiscovery);
+    assert_eq!(requests.get(), 1);
+    assert_eq!(models[0].id, "gpt-6-sol");
+    assert_eq!(load_codex_model_cache(&store, &claims).unwrap(), Some(models.clone()));
+    let (cached, source) = codex_inventory_models(&store, &claims, false, false,
+        |_| panic!("current inventory must not refresh again"));
+    assert_eq!(source, CodexInventorySource::FreshCache);
+    assert_eq!(cached, models);
+}
+
+#[test]
 fn codex_live_inventory_does_not_inject_unadvertised_astra() {
     let models = codex_models_from_response(
         &serde_json::json!({"models": [{"slug": "gpt-5.6-sol"}]}),
@@ -1819,6 +2190,7 @@ fn codex_astra_cache_caps_output_and_honors_lower_metadata() {
             max_output_tokens,
             min_effort: octet_ai::ReasoningEffort::Low,
             max_effort: octet_ai::ReasoningEffort::Max,
+            reasoning_effort_updates: false,
             responses_lite: false,
             agent_delegation: None,
         }],
@@ -3949,6 +4321,7 @@ async fn sparse_cerebras_discovery_selection_stream_and_tool_continuation_loopba
             content: vec![UserPart::Text("Look up".into())],
         })],
         tools: vec![ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "lookup".into(),
             description: "lookup".into(),
@@ -5187,6 +5560,7 @@ async fn pinned_metadata_deepseek_flash_exact_wire_controls_and_required_replay(
             content: vec![UserPart::Text("Look up".into())],
         })],
         tools: vec![ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "lookup".into(),
             description: "lookup".into(),
@@ -5818,6 +6192,7 @@ pub(super) fn codex_discovered_model(
         max_output_tokens,
         min_effort: codex_min_effort(model_id),
         max_effort: codex_max_effort(model_id),
+        reasoning_effort_updates: false,
         responses_lite: false,
         agent_delegation: None,
     }

@@ -785,6 +785,7 @@ fn decode_google_function_call(
             events,
             builder,
             StreamEvent::ToolCallStart {
+                async_execution: false,
                 index,
                 id: ToolCallId(id),
                 name: call.name,
@@ -1077,6 +1078,7 @@ mod tests {
                 endpoint: EndpointId("google".to_owned()),
                 protocol: Protocol::GoogleGenerativeAi,
                 capabilities: Capabilities {
+                    responses_features: Default::default(),
                     input_modalities: ModalitySet::none(),
                     output_modalities: ModalitySet::none(),
                     tools: true,
@@ -1148,6 +1150,7 @@ mod tests {
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call-1".to_owned()),
                         name: "lookup".to_owned(),
                         arguments_json: r#"{"city":"Paris"}"#.to_owned(),

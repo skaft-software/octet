@@ -51,6 +51,7 @@ pub mod responses;
 mod responses_ws;
 pub mod runtime;
 pub mod stream;
+pub mod steering;
 mod transform;
 pub mod types;
 mod validate;
@@ -106,7 +107,8 @@ pub use pricing::{
     responses_cost_of, Cost, Pricing, PricingTier, TokenRate, PICODOLLARS_PER_MICRODOLLAR,
 };
 pub use responses::{
-    ComputerUseEnvironment, ComputerUseTool, ResponsesCompactRequest, ResponsesCompactResponse,
+    validate_responses_input, ComputerUseEnvironment, ComputerUseTool, ResponsesCompactRequest, ResponsesCompactResponse,
+    ResponsesConfigurationUpdate,
     ResponsesInput, ResponsesItem, ResponsesItemError, ResponsesOptions, ResponsesOutput,
     ResponsesReplayItem,
 };
@@ -114,6 +116,7 @@ pub use runtime::{
     HeaderTransform, HookModelContext, HostRequestOptions, PayloadHook, ResponseHook,
     MAX_RUNTIME_METADATA_BYTES, MAX_RUNTIME_METADATA_ENTRIES,
 };
+pub use steering::{SteeringSession, SteeringControl, SteeringEvent, SteeringUpdate, SteeringState};
 pub use stream::{
     CanonicalStreamAssembler, ProviderLifecycle, ProviderLifecycleState, ResponseStream,
     StreamEvent,
@@ -122,7 +125,7 @@ pub use transform::transform_messages;
 pub use types::{
     AgentDelegation, AssistantMessage, AssistantPart, AudioCapabilities, AudioFormat, AudioMedia,
     AudioOutputDelivery, AudioOutputOptions, AudioPayload, AudioVoice, CacheCompatibility,
-    CacheControlFormat, CacheRetention, Capabilities, ConstrainedSampling,
+    CacheControlFormat, CacheRetention, Capabilities, ResponsesFeatures, ConstrainedSampling,
     ConstrainedSamplingStrict, Endpoint, EndpointId, EndpointTransport, GrammarVariants,
     ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message, Modality, ModalitySet,
     ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode, OpenAiChatRuntimeProfile,

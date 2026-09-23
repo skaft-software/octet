@@ -416,6 +416,7 @@ mod tests {
 
     fn tool(name: &str, parameters: Value, sampling: Option<ConstrainedSampling>) -> ToolDef {
         ToolDef {
+            async_execution: false,
             name: name.to_owned(),
             description: String::new(),
             parameters,

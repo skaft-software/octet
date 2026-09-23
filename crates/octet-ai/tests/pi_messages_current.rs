@@ -48,6 +48,7 @@ fn fixture_model(base_url: &str, reasoning: bool) -> Model {
             endpoint: EndpointId("pi-messages".to_owned()),
             protocol: Protocol::PiMessages,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -84,6 +85,7 @@ fn fixture_request(reasoning: ReasoningConfig) -> Request {
             content: vec![UserPart::Text("request-private-input".to_owned())],
         })],
         tools: vec![ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "lookup".to_owned(),
             description: "Look up a city.".to_owned(),

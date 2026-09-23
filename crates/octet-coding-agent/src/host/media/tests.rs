@@ -58,6 +58,7 @@ fn model_with_inputs(protocol: Protocol, input_modalities: ModalitySet) -> Model
         display_name: None,
         protocol,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities,
             output_modalities: ModalitySet::none(),
             tools: true,

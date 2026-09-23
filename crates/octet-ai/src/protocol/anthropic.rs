@@ -1109,6 +1109,7 @@ pub(crate) fn decode_stream_event(
                         &mut events,
                         builder,
                         StreamEvent::ToolCallStart {
+                            async_execution: false,
                             index: canonical_idx,
                             id: ToolCallId(id),
                             name,
@@ -1391,6 +1392,7 @@ mod tests {
             display_name: None,
             protocol: Protocol::AnthropicMessages,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(crate::types::Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -1679,6 +1681,7 @@ mod tests {
                 content: vec![UserPart::Text("stable user".to_string())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "lookup".to_string(),
                 description: "lookup".to_string(),
@@ -1963,6 +1966,7 @@ mod tests {
                 content: vec![UserPart::Text("go".to_string())],
             })],
             tools: vec![ToolDef {
+                async_execution: false,
                 name: "lookup".to_string(),
                 description: "Look up a city.".to_string(),
                 parameters: serde_json::json!({
@@ -2371,6 +2375,7 @@ mod fixture_tests {
     async fn schema_mismatch_is_marked_before_tool_call_end() {
         let model = harness::model(Protocol::AnthropicMessages, None);
         let tools = [ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),

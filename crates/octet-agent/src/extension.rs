@@ -1127,6 +1127,7 @@ mod tests {
     impl Tool for NamedTool {
         fn definition(&self) -> ToolDef {
             ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: self.0.to_string(),
                 description: String::new(),
@@ -1217,6 +1218,7 @@ mod tests {
             fn definition(&self) -> ToolDef {
                 self.definitions.fetch_add(1, Ordering::Relaxed);
                 ToolDef {
+                    async_execution: false,
                     name: self.name.clone(),
                     description: String::new(),
                     parameters: serde_json::json!({"type": "object"}),

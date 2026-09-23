@@ -29,11 +29,35 @@ live-provider availability or acceptance.
   when the exact model contract accepts it; otherwise they use the advertised
   default. Native Responses compaction preserves the active reasoning selection.
 - Ultra requires explicit support and V2 delegation. The coding product also
-  requires its trusted, enabled observing subagents extension. Responses encodes
-  supported Ultra as `max`; offline Codex metadata removes dynamic Ultra/V2
-  authority without inventing a replacement choice.
+  requires its trusted, enabled observing subagents extension. The Responses
+  codec's standalone Ultra effort mapping is `max`; the agent's V2 runtime
+  uses `xhigh` reasoning with delegation rather than that standalone mapping.
+  Offline Codex metadata removes dynamic Ultra/V2 authority without inventing
+  a replacement choice.
 - Genuine provider display names are preserved. A missing label is not persisted
   as a fabricated raw-ID label that overrides the built-in display-name registry.
+
+## Mid-conversation changes (unreleased)
+
+On a Responses route whose **model and endpoint** explicitly qualify reasoning
+updates, `/thinking` queues the exact advertised choice without cancelling the
+root run or rebuilding its active Agent. The latest pending choice takes effect
+at the next response boundary. The UI distinguishes queued from durable
+host-selected effort; neither label claims provider acknowledgement or measured
+cache reuse. The wire baseline stays pinned while ordered `configuration_update`
+items carry subsequent changes. Resume restores the durable effective choice.
+
+Idle changes use the same durable control. Settings persistence failures remain
+visible. Explicit interactive choices reject unsupported efforts (including
+Codex Off when absent, and Ultra without advertised V2 and live observation)
+rather than silently clamping them. Live configuration updates accept ordinary
+effort only; Ultra is not a pure effort update. Changing into or out of Ultra/V2
+in an already-pinned session requires a new session; rejection preserves both
+the current session and the startup preference. Fresh qualified Ultra sessions
+remain supported. Startup/config normalization retains its existing policy.
+Unqualified, public-compatible, and unknown routes keep the ordinary selector and idle-boundary fallback; names alone grant no controls.
+Native async execution and active WebSocket steering are separate capabilities;
+public OpenAI qualification does not establish Codex support.
 
 ## Wire profiles
 

@@ -111,9 +111,18 @@ fn subagent_metrics_update_chrome_without_invalidating_transcript() {
 }
 
 #[test]
-fn late_failed_or_parked_workers_leave_one_bounded_safe_notice_per_transition() {
-    for status in ["failed", "timed_out", "awaiting_approval"] {
+fn late_failed_or_parked_workers_remain_inspectable_without_transcript_notices() {
+    for status in [
+        "failed",
+        "timed_out",
+        "interrupted",
+        "stopped",
+        "shutdown",
+        "detached",
+        "awaiting_approval",
+    ] {
         let mut shell = InteractiveShell::test_shell();
+        shell.notice("UNRELATED-NOTICE");
         let run = shell.begin_run("fixture");
         let mut worker = named_worker("LATE-WORKER", "running");
         publish(&mut shell, &worker);
@@ -127,77 +136,55 @@ fn late_failed_or_parked_workers_leave_one_bounded_safe_notice_per_transition() 
         assert!(!shell.state.borrow().run.is_active());
         assert!(frame_text(&shell, 120).contains("Subagents"));
         let block_count = shell.state.borrow().transcript.len();
-        let reason = format!(
+        worker.state = status.into();
+        worker.failure_reason = Some(format!(
             "REASON-MARKER \x1b[3J\x1b]52;c;SECRET\x07\x00\x07 {}",
             "é".repeat(5000)
-        );
-        worker.state = status.into();
-        worker.failure_reason = Some(reason.clone());
+        ));
         publish(&mut shell, &worker);
-        let notice = {
-            let state = shell.state.borrow();
-            assert_eq!(state.transcript.len(), block_count + 1);
-            let TranscriptBlock::Notice(notice) = state.transcript.last().unwrap() else {
-                panic!("the failure must append a notice, not a roster tool card");
-            };
-            assert!(
-                notice.contains("LATE-WORKER") && notice.contains(status),
-                "{notice}"
-            );
-            assert!(notice.contains("REASON-MARKER"), "{notice}");
-            assert!(notice.ends_with("inspect with /subagents"), "{notice}");
-            assert!(notice.len() <= 4096 + " · inspect with /subagents".len());
-            assert!(
-                notice.contains('…'),
-                "oversized reasons must be visibly bounded"
-            );
-            assert!(!notice.chars().any(char::is_control), "{notice:?}");
-            assert!(
-                !notice.contains("SECRET"),
-                "OSC clipboard payload must not survive: {notice:?}"
-            );
-            assert_eq!(
-                state.subagent_activity.as_ref().unwrap().telemetry[0]
-                    .failure_reason
-                    .as_deref(),
-                Some(reason.as_str())
-            );
-            notice.clone()
-        };
         assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
             .subagents
             .is_empty());
         let _ = shell.state.borrow().rendered_transcript(120);
         let revisions = shell.state.borrow().block_revisions.clone();
         let generation = shell.state.borrow().transcript_cache.borrow().generation;
-        for update_metrics in [false, true, false] {
-            if update_metrics {
+        // Repeats, metric updates, and changed reasons all remain inspector-only.
+        for update in [0, 1, 0, 2, 0] {
+            if update == 1 {
                 worker.tool_use_count += 1;
                 worker.output_tokens += 100;
+            } else if update == 2 {
+                worker.failure_reason = Some("UPDATED-REASON".into());
             }
             publish(&mut shell, &worker);
             let state = shell.state.borrow();
-            assert_eq!(state.transcript.len(), block_count + 1);
-            assert!(
-                matches!(state.transcript.last(), Some(TranscriptBlock::Notice(text)) if text == &notice)
-            );
-            let _ = state.rendered_transcript(120);
+            assert_eq!(state.transcript.len(), block_count);
+            let rendered = state.rendered_transcript(120).join("\n");
+            let copied = state
+                .transcript
+                .iter()
+                .map(block_copy_text)
+                .collect::<String>();
+            for text in [&rendered, &copied] {
+                assert!(text.contains("UNRELATED-NOTICE"), "{text}");
+                for hidden in ["Subagent", "LATE-WORKER", "REASON", "SECRET"] {
+                    assert!(!text.contains(hidden), "{text}");
+                }
+            }
             assert_eq!(state.block_revisions, revisions);
             assert_eq!(state.transcript_cache.borrow().generation, generation);
+            let retained = state.subagent_activity.as_ref().unwrap();
+            assert_eq!(retained.telemetry[0], worker);
+            let rows = subagent_rows(retained);
+            assert_eq!(rows[0].state, status);
+            assert_ne!(rows[0].group, SubagentStateGroup::Completed);
             assert_eq!(
-                state.subagent_activity.as_ref().unwrap().telemetry[0],
-                worker
+                rows[0].reason,
+                worker.failure_reason.as_deref().map(sanitize_for_terminal)
             );
+            assert!(rows[0].reason.as_ref().unwrap().contains("REASON"));
+            assert!(!rows[0].reason.as_ref().unwrap().contains("SECRET"));
         }
-        // A genuinely changed reason is new evidence, unlike repeated snapshots.
-        worker.failure_reason = Some("UPDATED-REASON".into());
-        publish(&mut shell, &worker);
-        assert_eq!(shell.state.borrow().transcript.len(), block_count + 2);
-        assert!(
-            matches!(shell.state.borrow().transcript.last(), Some(TranscriptBlock::Notice(text)) if text.contains("UPDATED-REASON"))
-        );
-        publish(&mut shell, &worker);
-        assert_eq!(shell.state.borrow().transcript.len(), block_count + 2);
     }
 }
 
@@ -807,10 +794,11 @@ fn grid_header_cells_align_with_the_worker_column_on_both_profiles() {
 }
 
 #[test]
-fn all_first_party_subagent_tools_hide_live_cards_and_keep_failures() {
+fn all_first_party_subagent_tools_hide_live_cards_and_errors_without_losing_accounting() {
     for name in crate::presentation::tool_display::SUBAGENT_TOOL_NAMES {
         let mut shell = InteractiveShell::test_shell();
         shell.begin_run("fixture");
+        shell.notice("UNRELATED-NOTICE");
         let id = ToolCallId(name.into());
         assert_eq!(
             summarize_tool_with_workspace(name, &serde_json::json!({}), None).plain_tag,
@@ -825,25 +813,47 @@ fn all_first_party_subagent_tools_hide_live_cards_and_keep_failures() {
             id: id.clone(),
             progress: ToolProgress::Status("SECRET-PROGRESS".into()),
         });
-        shell.on_agent_event(&AgentEvent::ToolFinished {
+        shell.state.borrow_mut().run_context_estimate = Some((0, 100_000));
+        for result in [
+            Ok(octet_agent::ToolOutput::new("SECRET-RESULT")),
+            Err(octet_agent::ToolError::new("SECRET worker quota reached")),
+            Ok(octet_agent::ToolOutput::new("SECRET semantic error").with_is_error(true)),
+        ] {
+            let before = shell.state.borrow().run_context_estimate.unwrap().0;
+            shell.on_agent_event(&AgentEvent::ToolFinished {
+                id: id.clone(),
+                result,
+                duration: Duration::ZERO,
+            });
+            let state = shell.state.borrow();
+            assert!(state.tool_panels.is_empty());
+            assert!(state.run_context_estimate.unwrap().0 > before);
+            assert!(!state
+                .transcript
+                .iter()
+                .any(|block| matches!(block, TranscriptBlock::Tool(_))));
+            let copied = state
+                .transcript
+                .iter()
+                .map(block_copy_text)
+                .collect::<String>();
+            assert!(copied.contains("UNRELATED-NOTICE"));
+            assert!(!copied.contains("SECRET") && !copied.contains("Delegation failed"));
+            drop(state);
+            assert!(!transcript_text(&shell).contains("SECRET"));
+        }
+        // A reused ID must not hide an ordinary failed tool.
+        shell.on_agent_event(&AgentEvent::ToolStarted {
             id: id.clone(),
-            result: Ok(octet_agent::ToolOutput::new("SECRET-RESULT")),
-            duration: Duration::ZERO,
+            name: "read".into(),
+            args: serde_json::json!({"path": "file"}),
         });
-        assert!(shell.state.borrow().tool_panels.is_empty());
-        assert!(!shell
-            .state
-            .borrow()
-            .transcript
-            .iter()
-            .any(|block| matches!(block, TranscriptBlock::Tool(_))));
-        assert!(!transcript_text(&shell).contains("SECRET"));
         shell.on_agent_event(&AgentEvent::ToolFinished {
             id,
-            result: Err(octet_agent::ToolError::new("worker quota reached")),
+            result: Err(octet_agent::ToolError::new("ordinary failure")),
             duration: Duration::ZERO,
         });
-        assert!(transcript_text(&shell).contains("Delegation failed: worker quota reached"));
+        assert!(transcript_text(&shell).contains("ordinary failure"));
     }
 }
 
@@ -861,13 +871,13 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
                 args: serde_json::json!({}),
             }],
         );
-        for _ in 0..2 {
+        for is_error in [false, true, true] {
             append_hydrated_items(
                 &mut state,
                 [TranscriptItem::ToolResult {
                     id: id.clone(),
                     text: "SECRET-RESULT".into(),
-                    is_error: false,
+                    is_error,
                     duration_ms: None,
                     images: Vec::new(),
                 }],
@@ -886,9 +896,7 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
             images: Vec::new(),
         }],
     );
-    assert!(
-        matches!(&state.transcript[0], TranscriptBlock::Notice(text) if text.contains("catalog unavailable"))
-    );
+    assert!(state.transcript.is_empty());
     append_hydrated_items(
         &mut state,
         [
@@ -899,15 +907,15 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
             },
             TranscriptItem::ToolResult {
                 id,
-                text: "ordinary result".into(),
-                is_error: false,
+                text: "ordinary failure".into(),
+                is_error: true,
                 duration_ms: None,
                 images: Vec::new(),
             },
         ],
     );
     assert!(
-        matches!(&state.transcript[1], TranscriptBlock::Tool(panel) if panel.finished && panel.output == "ordinary result")
+        matches!(&state.transcript[0], TranscriptBlock::Tool(panel) if panel.finished && panel.is_error && panel.output == "ordinary failure")
     );
 }
 
@@ -931,6 +939,7 @@ fn subagent_tail_hydration_and_deferred_prepend_hide_boundary_results() {
             .append(EntryValue::Message(octet_ai::Message::Assistant(
                 AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId(name.into()),
                         name: name.into(),
                         arguments_json: "{}".into(),
@@ -946,7 +955,7 @@ fn subagent_tail_hydration_and_deferred_prepend_hide_boundary_results() {
                 content: vec![UserPart::ToolResult(ToolResult {
                     tool_call_id: ToolCallId(name.into()),
                     content: vec![ToolResultPart::Text("SECRET-RESULT".into())],
-                    is_error: false,
+                    is_error: true,
                     added_tool_names: None,
                 })],
             })))
@@ -1140,11 +1149,13 @@ fn every_host_worker_state_has_consistent_group_filter_and_chrome_visibility() {
             group == Running,
             "{label}"
         );
-        assert_eq!(
-            transcript_text(&shell).contains("STATE-WORKER"),
-            matches!(group, Failed | Stopped),
-            "{label}"
-        );
+        assert!(!transcript_text(&shell).contains("STATE-WORKER"), "{label}");
+        assert!(shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .all(|block| !block_copy_text(block).contains("STATE-WORKER")));
         assert!(!transcript_text(&shell).contains("Subagents"));
         assert_eq!(
             shell

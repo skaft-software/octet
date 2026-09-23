@@ -126,6 +126,8 @@ pub(super) fn branch_entry_label(entry: &Entry) -> String {
         | EntryValue::PromptTemplateSelected { .. }
         | EntryValue::SkillActivated { .. }
         | EntryValue::SkillResourceRead { .. }
+        | EntryValue::ResponsesSteering { .. }
+        | EntryValue::ResponsesReasoning { .. }
         | EntryValue::SkillDeactivated { .. } => "Internal session state",
     };
     let first_line = candidate.lines().find(|line| !line.trim().is_empty());

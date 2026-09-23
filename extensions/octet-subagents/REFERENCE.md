@@ -385,14 +385,16 @@ shift on each child tool start or finish. The host returns per-worker
 structured phase/current tool, host-observed tool calls, disjoint provider token
 buckets, turn count, and priced cost. The extension places those values in
 generic activity `metrics`; it never supplies terminal rows or footer text. In
-the TUI, octet renders the complete latest owner-fenced worker roster as a
-persistent transcript event immediately above the composer from native
-`AgentEvent::DelegationUpdated` events; ordinary tool disclosure never truncates
-it. It does not poll `/subagents status` for the composer block. Worker rows are
-indented beneath **Subagents** and show `name  state · ↑input ↓output • $cost`.
-Wide rows may include elapsed time, model, and `tools` (tool-call count, not
-model turns). Terminal groups collapse to counted summaries; Ctrl+O exposes
-every retained worker, including later groups and failure details. Input
+the TUI, octet renders a bounded owner-fenced **Subagents** strip pinned above
+the composer while retained workers are active. It is chrome, not a persistent
+transcript event, and never enters semantic copy. Native
+`AgentEvent::DelegationUpdated` supplies the snapshot; the strip does not poll
+`/subagents status`. Rows show lifecycle, model, metrics, and `tools` (tool-call
+count, not model turns). Terminal groups collapse to counted summaries; Ctrl+O
+expands within the height cap. `/subagents` retains the complete roster and
+failure details after the strip hides. First-party orchestration calls/results
+and worker state/reason transitions do not append transcript notices; ordinary
+tool/run errors and approval prompts remain visible. Input
 includes the three disjoint uncached/cache-read/cache-write buckets, while
 reasoning remains a subset of output.
 

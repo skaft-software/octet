@@ -45,6 +45,14 @@ Structured telemetry is evidence for measurement; it is not a one-row-per-event
 rendering instruction. Presentation code coalesces activity by stable request,
 tool, and worker identity.
 
+Workers occupy a bounded pinned **Subagents** strip above the composer while any
+retained worker is active, not a durable transcript roster. Failed/stopped or
+parked state/reason transitions and hidden first-party orchestration tool errors
+do not append automatic notices or semantic-copy text. `/subagents` exposes the
+retained states, reasons, usage, and read-only child transcripts on demand, even
+after the strip hides. This does not suppress ordinary tool/run failures or
+approval prompts, or alter model-visible errors, durable results, or accounting.
+
 Opt-in provider readiness (`queued`, `loading`, or `ready`) is live activity,
 not a fourth transcript layer. It replaces one mutable request-status row with a
 friendly provider label and bounded sanitized detail; real model output or a
@@ -116,7 +124,7 @@ terminal-sanitized again for presentation, bounded to 4 KiB at a UTF-8 boundary,
 and included in semantic copy. Raw envelopes and headers remain diagnostic
 evidence rather than transcript copy.
 
-Tool failures follow the same rule: collapsed rows retain a bounded actionable
+Visible tool failures follow the same rule: collapsed rows retain a bounded actionable
 summary while complete captured output remains available through disclosure when
 it exists.
 

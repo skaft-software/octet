@@ -35,6 +35,53 @@ still overlap through the effect-checked **post-persistence** parallel path.
 This deliberately gives up unsafe overlap rather than promising equivalent
 latency. See the [performance contract](performance.md).
 
+## Qualified Responses controls
+
+Model and endpoint `ResponsesFeatures` must both authorize each feature; names,
+Lite, and WebSocket availability alone grant nothing. Ordinary routes retain
+synchronous tools and queued steering.
+
+- **Async tools:** only complete, durably committed calls from a wholly eligible
+  batch enter the run-owned registry (at most four). Advertised parallel tools
+  are still checked against exact arguments, the effect broker, and hooks.
+  Independent observations may overlap the next response; their results become
+  durable in original call order **after** that response, which did not consume
+  them. Sync, effectful, mixed, and nonparallel batches remain barriers. Hard
+  cumulative ceilings serialize tool accounting; pending jobs disable compaction.
+  Driven terminals cancel and settle jobs; dropping a run aborts task handles.
+  Unresolved async calls after a crash receive indeterminate paired errors,
+  never automatic redispatch, even for replay-safe observations.
+- **Reasoning:** host controls coalesce at response boundaries. Typed
+  `ResponsesReasoning` records pin the request baseline and retain chronological
+  updates separately from effective host selection. Provider-authored opaque
+  configuration updates are rejected. Resume restores effective selection;
+  explicit idle overrides use `Agent::set_reasoning`. Prewarming uses the same
+  pinned baseline and advertised async tool schemas. Successful local compaction
+  rebases the retained prefix; failed compaction leaves the pin unchanged.
+  Unsupported native compaction never strips updates (autonomous qualified runs
+  use local compaction). Fresh, explicitly qualified Ultra/V2 remains valid;
+  switching an existing pin into **or out of Ultra requires a new session**.
+  Ordinary configuration updates cannot change delegation mode.
+- **Native steering:** qualified WebSocket runs without hard ceilings prepare a
+  local receipt, persist intent, then dispatch. Each completed response retains
+  independent usage. Applied input follows the completed prefix, atomically
+  linked by `EntryMetadata.native_steering` to its operation/local ID, before the
+  successor. Required tool results return on the same socket without repeating
+  steering input. The host update bridge holds at most 128 events and fails
+  closed on overflow. Controls queued between native segments wait until the
+  owned successor settles; FinishNow's tool prohibition remains sticky.
+
+A native intent remains usage-uncertain until its accounted successor has a
+`ResponsesSteering.completed` settlement marker. Thus abrupt drop, disconnect,
+or a crash between intent/application/user materialization/settlement cannot
+silently lose submission identity or imply zero billing. Resume refuses a new
+prompt on any unresolved operation rather than guessing from text or replaying
+input. A crash after accounting but before settlement is conservatively uncertain;
+start a new session instead of automatic reconciliation. Explicit failure usage
+uncertainty remains sticky. `misalignment_policy_violation` is permanent: no
+inference/workflow retry, with pending jobs cancelled/settled and completed
+accounting/effects retained.
+
 ## In-process provider recovery
 
 Recovery surrounds one unfinished provider request, never `Agent::prompt` or
