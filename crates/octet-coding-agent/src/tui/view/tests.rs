@@ -14185,6 +14185,23 @@ async fn actual_read_image_reaches_live_shell_and_reopened_session() {
     }
 }
 
+#[test]
+fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
+    use sexy_tui_rs::{ImageDimensions, ImageLayout, ImageProtocol};
+
+    let kitty = ImageCapabilities::forced(Some(ImageProtocol::Kitty), None);
+    let screenshot = ImageDimensions::new(320, 1280).unwrap();
+    let wide_screenshot = ImageDimensions::new(1600, 900).unwrap();
+    for width in [46, 80] {
+        let viewport = tool_image_viewport(width, kitty);
+        let layout = ImageLayout::fit(screenshot, viewport).unwrap();
+        assert_eq!((layout.columns(), layout.rows()), (8, MAX_TOOL_IMAGE_RENDER_ROWS));
+        let wide = ImageLayout::fit(wide_screenshot, viewport).unwrap();
+        assert!(wide.columns() >= 40 && wide.rows() >= 10);
+        assert!(wide.columns() <= width && wide.rows() <= MAX_TOOL_IMAGE_RENDER_ROWS);
+    }
+}
+
 #[path = "native_history_tests.rs"]
 mod native_history_tests;
 

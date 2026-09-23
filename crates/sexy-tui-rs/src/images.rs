@@ -1008,6 +1008,7 @@ pub struct ImageViewport {
     columns: u16,
     rows: u16,
     cell_pixel_size: Option<CellPixelSize>,
+    estimated_cell_pixel_size: Option<CellPixelSize>,
 }
 
 impl ImageViewport {
@@ -1025,6 +1026,7 @@ impl ImageViewport {
             columns,
             rows,
             cell_pixel_size,
+            estimated_cell_pixel_size: None,
         })
     }
 
@@ -1036,6 +1038,15 @@ impl ImageViewport {
         capabilities: ImageCapabilities,
     ) -> Result<Self, ImageError> {
         Self::new(columns, rows, capabilities.cell_pixel_size())
+    }
+
+    /// Use an approximate cell aspect only when no measured cell size exists.
+    /// The reservation stays bounded in cells, but the displayed image's aspect
+    /// may differ on terminals with unusual fonts. Callers needing exact
+    /// geometry should leave this unset and use the one-cell fallback.
+    pub fn with_estimated_cell_pixels(mut self, size: CellPixelSize) -> Self {
+        self.estimated_cell_pixel_size = Some(size);
+        self
     }
 
     /// Available character-cell columns.
@@ -1077,17 +1088,17 @@ impl ImageLayout {
 
     /// Fit dimensions into a viewport without upscaling.
     ///
-    /// When a cell-pixel report exists, the calculation uses checked wide
-    /// integer arithmetic, preserves aspect ratio, and caps both axes to the
-    /// viewport and semantic reservation limits. Without that report, the
-    /// only non-speculative safe placement is one cell by one cell.
+    /// With a measured cell size (or a caller's explicit approximate fallback),
+    /// the calculation uses checked wide integer arithmetic and caps both axes
+    /// to the viewport and semantic reservation limits. A measurement takes
+    /// precedence over an estimate. With neither, reserve one cell by one cell.
     pub fn fit(dimensions: ImageDimensions, viewport: ImageViewport) -> Result<Self, ImageError> {
         let max_columns = viewport.columns.min(MAX_IMAGE_CELL_COLUMNS);
         let max_rows = viewport.rows.min(MAX_RESERVED_IMAGE_ROWS);
         if max_columns == 0 || max_rows == 0 {
             return Err(ImageError::InvalidLayout);
         }
-        let Some(cell) = viewport.cell_pixel_size else {
+        let Some(cell) = viewport.cell_pixel_size.or(viewport.estimated_cell_pixel_size) else {
             return Self::new(1, 1);
         };
 
@@ -2895,6 +2906,22 @@ mod tests {
         let unknown =
             ImageLayout::fit(dimensions, ImageViewport::new(10, 10, None).unwrap()).unwrap();
         assert_eq!((unknown.columns(), unknown.rows()), (1, 1));
+        let estimated = ImageLayout::fit(
+            dimensions,
+            ImageViewport::new(20, 10, None)
+                .unwrap()
+                .with_estimated_cell_pixels(cell),
+        )
+        .unwrap();
+        assert_eq!((estimated.columns(), estimated.rows()), (20, 5));
+        let measured = ImageLayout::fit(
+            dimensions,
+            ImageViewport::new(20, 10, Some(CellPixelSize::new(16, 16).unwrap()))
+                .unwrap()
+                .with_estimated_cell_pixels(cell),
+        )
+        .unwrap();
+        assert_eq!((measured.columns(), measured.rows()), (20, 10));
         assert!(ImageLayout::new(1, MAX_RESERVED_IMAGE_ROWS + 1).is_err());
     }
 

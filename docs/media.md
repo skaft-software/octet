@@ -48,6 +48,13 @@ payload identity and order.
 | Native `octet-host` `media` | Same per-file limits; at most **8 images / 20 MiB total**, **4 audio clips / 40 MiB total**, and **12 items per request**. [Run request contract](sdk.md#run-requests). |
 | Serve web composer | PNG/JPEG/GIF/WebP and bounded document context. Audio attachments are **not implemented**. [Serve](experimental/octet-serve/README.md). |
 
+Inline tool-result images are visual-only TUI previews, not additional model
+input. On Kitty-compatible terminals they reserve at most 16 rows per image.
+When the terminal supplies no cell-pixel measurement, the preview uses an
+approximate 1:2 cell aspect instead of shrinking a screenshot to one cell;
+fonts with unusual cell proportions may display a slightly different aspect.
+Other terminals retain a text fallback.
+
 Attachments remain ordered with text. Unsupported modalities/formats, unreadable
 files, and oversized files fail diagnostically. Video paths are never native
 media: an explicit video attachment is refused with a diagnostic and remains

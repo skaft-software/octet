@@ -18,8 +18,9 @@ use octet_agent::{
 };
 use octet_ai::{ModalitySet, Model, ModelId, ToolCallId, Usage};
 use sexy_tui_rs::{
-    parse_markdown, strip_terminal_sequences, visible_width, wrap_text_with_ansi, ImageAnchor,
-    ImageCapabilities, ImagePlanner, ImageRegistry, ImageViewport, RichRenderer, TextEditor, TUI,
+    parse_markdown, strip_terminal_sequences, visible_width, wrap_text_with_ansi, CellPixelSize,
+    ImageAnchor, ImageCapabilities, ImagePlanner, ImageRegistry, ImageViewport, RichRenderer,
+    TextEditor, TUI,
 };
 
 use crate::config::Config;
@@ -116,6 +117,17 @@ use crate::presentation::tool_display::is_subagent_tool;
 const COMPACT_EXEC_OUTPUT_ROWS: usize = 5;
 /// Maximum physical rows one inline tool image can reserve inside its tool card.
 const MAX_TOOL_IMAGE_RENDER_ROWS: u16 = 16;
+
+fn tool_image_viewport(width: u16, capabilities: ImageCapabilities) -> ImageViewport {
+    // The interactive Kitty path currently has no cell-pixel query. Without
+    // one, ImageLayout::fit would reserve just one cell for a whole screenshot.
+    // Use a typical 1:2 cell aspect as an explicit approximation; a measured
+    // cell size still takes precedence, and the 16-row bound remains intact.
+    ImageViewport::with_capabilities(width.max(1), MAX_TOOL_IMAGE_RENDER_ROWS, capabilities)
+        .expect("fixed nonzero tool image viewport is valid")
+        .with_estimated_cell_pixels(CellPixelSize::new(8, 16).expect("valid cell aspect"))
+}
+
 /// Bounded wait for one renderer-thread suspension acknowledgement. The join
 /// that follows is the hard fence, so this only keeps a wedged frame from
 /// blocking the terminal handoff for longer than a couple of frames.
@@ -298,12 +310,7 @@ impl ToolPanel {
                 let Some(terminal_image) = image.terminal_image() else {
                     return vec![image.fallback_text(false)];
                 };
-                let viewport = ImageViewport::with_capabilities(
-                    width.max(1),
-                    MAX_TOOL_IMAGE_RENDER_ROWS,
-                    self.image_rendering.capabilities,
-                )
-                .expect("fixed nonzero tool image viewport is valid");
+                let viewport = tool_image_viewport(width, self.image_rendering.capabilities);
                 let plan =
                     ImagePlanner::new(self.image_rendering.capabilities, tool_image_limits())
                         .plan_place(id, &terminal_image, viewport);
