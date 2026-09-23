@@ -37,7 +37,7 @@ use crate::commands::{self, Command};
 use crate::compaction::{
     attempt_compaction, context_window, estimate_next_request_tokens, CompactionOutcome,
 };
-use crate::config::{CompactionMode, Config, SandboxPolicy, ThinkingLevel};
+use crate::config::{CompactionMode, Config, ResumeSelector, SandboxPolicy, ThinkingLevel};
 use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
 use crate::prompts::{render_and_record, RenderedPrompt};

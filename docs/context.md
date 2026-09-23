@@ -110,6 +110,10 @@ set.
 `native-responses` instead uses provider-native opaque compaction without showing
 the payload in the transcript. It requires the active OpenAI Responses endpoint
 and model and never falls back to a Chat/Anthropic summary. Native route-affine
-replay is distinct from a process-local WebSocket response ID.
+replay is distinct from a process-local WebSocket response ID. Ordinary
+Responses model switches retain the canonical conversation but cannot replay
+opaque output or reasoning updates from the previous route. `native-responses`
+mode still requires complete same-route replay and refuses such a switch until
+a valid local replay boundary is established.
 [Transport caveats](providers.md#protocols-and-transport) and
 [maintainer compaction contract](design/octet-agent.md#sessions).

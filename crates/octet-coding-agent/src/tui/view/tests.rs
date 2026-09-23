@@ -271,6 +271,7 @@ fn emulated_shell_with_mode(
             render_thread: None,
             capture_mouse: application_viewport,
             terminal_ceded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            herdr: crate::herdr::PaneReporter::disabled(),
         },
         bytes,
     )

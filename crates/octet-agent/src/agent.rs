@@ -7783,9 +7783,9 @@ impl Agent {
 
     /// Complete route-affine Responses replay input for the active branch.
     ///
-    /// `None` means the active route is not Responses or a legacy/crash gap
-    /// makes exact opaque replay unavailable. Route-mismatched sidecars are
-    /// returned as an explicit session error.
+    /// `None` means the active route is not Responses or a legacy/crash gap or
+    /// different route makes exact opaque replay unavailable. Ordinary requests
+    /// use canonical context in that case; native mode remains fail-closed.
     pub fn responses_replay_input(&self) -> Result<Option<ResponsesInput>, SessionError> {
         if self.model.spec.protocol != Protocol::OpenAiResponses {
             return Ok(None);
@@ -14745,6 +14745,58 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             long.structural_tokens > short.structural_tokens.saturating_add(30_000),
             "top-level instructions must participate in capacity checks: short={short:?}, long={long:?}"
         );
+    }
+
+    #[test]
+    fn switched_responses_route_uses_canonical_options_but_rejects_native_replay() {
+        use octet_ai::{
+            AssistantMessage, AssistantPart, Message, ModelCatalog, ModelId, Protocol,
+            ResponsesItem, ResponsesOutput,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("switch.jsonl")).unwrap();
+        let astra = ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let mut luna = astra.clone();
+        Arc::make_mut(&mut luna.spec).id = ModelId("gpt-6-luna".into());
+        session
+            .append(user_message(UserInput::from("first prompt")))
+            .unwrap();
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("astra answer".into())],
+                model: astra.spec.id.clone(),
+                protocol: Protocol::OpenAiResponses,
+            })))
+            .unwrap();
+        session
+            .append_responses_turn(
+                assistant,
+                astra.endpoint.id.clone(),
+                astra.spec.id.clone(),
+                ResponsesOutput::new(vec![ResponsesItem::new(serde_json::json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "astra answer"}]
+                }))
+                .unwrap()]),
+            )
+            .unwrap();
+        session
+            .append(user_message(UserInput::from("second prompt")))
+            .unwrap();
+
+        assert!(durable_responses_options(&session, &luna, "system", None)
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            native_responses_options(&session, &luna, "system", None),
+            Err(AgentError::InvalidCompactionPolicy(_))
+        ));
+        assert_eq!(session.context().unwrap().len(), 3);
     }
 
     #[test]

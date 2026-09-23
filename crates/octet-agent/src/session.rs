@@ -2958,8 +2958,8 @@ impl Session {
     ///
     /// `Some` means every assistant in the selected model-visible window has a
     /// route-affine authoritative sidecar. `None` is the safe legacy/crash
-    /// fallback when any assistant lacks one. A sidecar that exists but belongs
-    /// to another route is rejected explicitly rather than silently replayed.
+    /// fallback when any assistant lacks one or belongs to another route.
+    /// Opaque output is never replayed on a different endpoint/model.
     /// The nearest matching native compaction checkpoint after the latest local
     /// compaction becomes the opaque base for subsequent user/assistant turns.
     pub fn responses_replay_items(
@@ -3172,13 +3172,7 @@ impl Session {
                     ..
                 } => {
                     if recorded_endpoint != endpoint || recorded_model != model {
-                        return Err(SessionError::ResponsesRouteMismatch {
-                            assistant: entry.id.clone(),
-                            expected_endpoint: endpoint.0.clone(),
-                            expected_model: model.0.clone(),
-                            actual_endpoint: recorded_endpoint.0.clone(),
-                            actual_model: recorded_model.0.clone(),
-                        });
+                        return Ok(false);
                     }
                     if let Some(update) = update {
                         // Only an undispatched tail can be adjacent: a completed
@@ -3215,13 +3209,7 @@ impl Session {
                         return Ok(false);
                     };
                     if recorded_endpoint != endpoint || recorded_model != model {
-                        return Err(SessionError::ResponsesRouteMismatch {
-                            assistant: entry.id.clone(),
-                            expected_endpoint: endpoint.0.clone(),
-                            expected_model: model.0.clone(),
-                            actual_endpoint: recorded_endpoint.0.clone(),
-                            actual_model: recorded_model.0.clone(),
-                        });
+                        return Ok(false);
                     }
                     if output.items().iter().any(|item| {
                         item.as_json()
@@ -3253,7 +3241,8 @@ impl Session {
 
     /// Pinned and effective reasoning for the current route-affine replay window.
     /// Successful local compaction rebases the removed prefix, while retained
-    /// updates keep their original positions. Fork/checkout use the selected branch.
+    /// updates keep their original positions. A different route ends the prior
+    /// reasoning segment; fork/checkout use the selected branch.
     pub fn responses_reasoning(
         &self,
         endpoint: &EndpointId,
@@ -3269,6 +3258,15 @@ impl Session {
             .unwrap_or(0);
         let mut state = None;
         for (index, entry) in branch.iter().enumerate() {
+            if let EntryValue::Config {
+                model: Some(selected),
+                ..
+            } = &entry.value
+            {
+                if selected != &model.0 {
+                    state = None;
+                }
+            }
             if let EntryValue::ResponsesReasoning {
                 endpoint: recorded_endpoint,
                 model: recorded_model,
@@ -3277,13 +3275,8 @@ impl Session {
             } = &entry.value
             {
                 if recorded_endpoint != endpoint || recorded_model != model {
-                    return Err(SessionError::ResponsesRouteMismatch {
-                        assistant: entry.id.clone(),
-                        expected_endpoint: endpoint.0.clone(),
-                        expected_model: model.0.clone(),
-                        actual_endpoint: recorded_endpoint.0.clone(),
-                        actual_model: recorded_model.0.clone(),
-                    });
+                    state = None;
+                    continue;
                 }
                 let (pin, effective) =
                     state.get_or_insert_with(|| (baseline.clone(), baseline.clone()));
@@ -6112,10 +6105,10 @@ mod tests {
                 .len(),
             2
         );
-        assert!(matches!(
-            session.responses_replay_snapshot(&EndpointId("other".into()), &model),
-            Err(SessionError::ResponsesRouteMismatch { .. })
-        ));
+        assert!(session
+            .responses_replay_snapshot(&EndpointId("other".into()), &model)
+            .unwrap()
+            .is_none());
         session
             .append_responses_compaction(
                 endpoint.clone(),
@@ -6255,7 +6248,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_replay_rejects_route_mismatch_and_legacy_gaps() {
+    fn responses_replay_falls_back_on_route_mismatch_and_legacy_gaps() {
         let dir = tempfile::tempdir().unwrap();
         let mut legacy = Session::create(dir.path().join("legacy.jsonl")).unwrap();
         legacy.append(user("prompt")).unwrap();
@@ -6282,10 +6275,112 @@ mod tests {
                 responses_output("raw"),
             )
             .unwrap();
-        let error = mismatch
+        assert!(mismatch
             .responses_replay_items(&EndpointId("responses".into()), &ModelId("m".into()))
-            .unwrap_err();
-        assert!(matches!(error, SessionError::ResponsesRouteMismatch { .. }));
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn responses_model_switch_uses_canonical_history_and_fresh_reasoning() {
+        use octet_ai::{ReasoningConfig, ReasoningEffort};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("switch.jsonl");
+        let endpoint = EndpointId("codex".into());
+        let astra = ModelId("gpt-6-astra".into());
+        let luna = ModelId("gpt-6-luna".into());
+        let low = ReasoningConfig::Effort(ReasoningEffort::Low);
+        let high = ReasoningConfig::Effort(ReasoningEffort::High);
+        let mut session = Session::create(&path).unwrap();
+        session.append(user("first prompt")).unwrap();
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("astra answer".into())],
+                model: astra.clone(),
+                protocol: Protocol::OpenAiResponses,
+            })))
+            .unwrap();
+        session
+            .append_responses_turn(
+                assistant,
+                endpoint.clone(),
+                astra.clone(),
+                responses_output("astra opaque"),
+            )
+            .unwrap();
+        session
+            .append(EntryValue::ResponsesReasoning {
+                endpoint: endpoint.clone(),
+                model: astra.clone(),
+                baseline: low.clone(),
+                update: Some(octet_ai::ResponsesConfigurationUpdate {
+                    reasoning: high.clone(),
+                }),
+            })
+            .unwrap();
+        session
+            .append(EntryValue::Config {
+                model: Some(luna.0.clone()),
+                reasoning: None,
+                reasoning_mode: None,
+            })
+            .unwrap();
+        session.append(user("second prompt")).unwrap();
+
+        for session in [&session, &Session::open(&path).unwrap()] {
+            assert!(session
+                .responses_replay_snapshot(&endpoint, &luna)
+                .unwrap()
+                .is_none());
+            assert_eq!(session.responses_reasoning(&endpoint, &luna).unwrap(), None);
+            assert_eq!(
+                session
+                    .context()
+                    .unwrap()
+                    .iter()
+                    .map(text_of)
+                    .collect::<Vec<_>>(),
+                ["first prompt", "astra answer", "second prompt"]
+            );
+        }
+        // Returning to Astra after Luna has responded must not revive Astra's
+        // prior reasoning pin or replay either route's opaque output.
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("luna answer".into())],
+                model: luna.clone(),
+                protocol: Protocol::OpenAiResponses,
+            })))
+            .unwrap();
+        session
+            .append_responses_turn(
+                assistant,
+                endpoint.clone(),
+                luna.clone(),
+                responses_output("luna opaque"),
+            )
+            .unwrap();
+        session
+            .append(EntryValue::ResponsesReasoning {
+                endpoint: endpoint.clone(),
+                model: luna.clone(),
+                baseline: low.clone(),
+                update: None,
+            })
+            .unwrap();
+        assert_eq!(
+            session.responses_reasoning(&endpoint, &luna).unwrap(),
+            Some((low, ReasoningConfig::Effort(ReasoningEffort::Low)))
+        );
+        assert_eq!(
+            session.responses_reasoning(&endpoint, &astra).unwrap(),
+            None
+        );
+        assert!(session
+            .responses_replay_snapshot(&endpoint, &astra)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -896,10 +896,10 @@ pub(crate) mod tests {
             ),
             (model.endpoint.id.clone(), ModelId("other-model".into())),
         ] {
-            assert!(matches!(
-                reopened.responses_replay_items(&endpoint, &model_id),
-                Err(octet_agent::SessionError::ResponsesRouteMismatch { .. })
-            ));
+            assert!(reopened
+                .responses_replay_items(&endpoint, &model_id)
+                .unwrap()
+                .is_none());
         }
         let mut resumed = agent_for_session(reopened);
         assert_eq!(
