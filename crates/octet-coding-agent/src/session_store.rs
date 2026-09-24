@@ -1648,6 +1648,11 @@ struct EphemeralRun {
 /// `--no-session` run at a time.
 static EPHEMERAL_RUN: Mutex<Option<EphemeralRun>> = Mutex::new(None);
 
+// Unit tests share the process-wide invocation slot even when the test runner
+// executes unrelated cases concurrently. Keep their separate fixtures serialized.
+#[cfg(test)]
+pub(crate) static EPHEMERAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Register an ephemeral run: its transcript lives under `transcript_root` and
 /// is deleted afterwards, while accounting is persisted into
 /// `SessionStore::new(accounting_session_dir, workspace)`.
@@ -3208,6 +3213,9 @@ mod tests {
 
     #[test]
     fn ephemeral_append_failure_keeps_private_accounting_only_and_retries_once() {
+        let _exclusive_ephemeral = EPHEMERAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("workspace");
         let transcript_root = root.path().join("transcripts");

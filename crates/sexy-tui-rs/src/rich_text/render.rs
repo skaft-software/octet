@@ -63,6 +63,9 @@ pub struct RenderOptions {
     /// Size code surfaces and table columns from the viewport, not growing
     /// payloads. Earlier rows then keep their geometry as a stream appends.
     pub stable_block_geometry: bool,
+    /// Optional reading lane for prose; code, diffs, diagrams and tables keep
+    /// the viewport width. Indentation is included in this measure.
+    pub prose_width: Option<u16>,
     pub unordered_list_marker: UnorderedListMarker,
 }
 
@@ -75,6 +78,7 @@ impl Default for RenderOptions {
             syntax_highlighting: cfg!(feature = "syntax-highlighting"),
             tables: true,
             stable_block_geometry: false,
+            prose_width: None,
             unordered_list_marker: UnorderedListMarker::Bullet,
         }
     }
@@ -205,6 +209,27 @@ impl RichRenderer {
         language: &str,
         width: u16,
     ) -> RenderedDocument {
+        self.render_inline_syntax_with_wrap(source, language, width, false)
+    }
+
+    /// Syntax-preserving, whitespace-preferred preview wrapping. The original
+    /// sanitized source remains the semantic copy, including wrap whitespace.
+    pub fn render_inline_syntax_wrapped(
+        &self,
+        source: &str,
+        language: &str,
+        width: u16,
+    ) -> RenderedDocument {
+        self.render_inline_syntax_with_wrap(source, language, width, true)
+    }
+
+    fn render_inline_syntax_with_wrap(
+        &self,
+        source: &str,
+        language: &str,
+        width: u16,
+        soft_wrap: bool,
+    ) -> RenderedDocument {
         let source = self.sanitize(source);
         let code = CodeBlock::with_language(language, source.clone());
         let base_style = self.theme.style(TextRole::Code);
@@ -237,11 +262,14 @@ impl RichRenderer {
             runs = restyle_ranges(runs, &shell_program_ranges(&source), program_style);
         }
         let width = usize::from(width).max(1);
-        let lines = self
-            .hard_wrap_runs(&runs, width)
-            .into_iter()
-            .map(|line| self.encode_line(line, width))
-            .collect();
+        let lines = (if soft_wrap {
+            self.wrap_runs(&runs, width)
+        } else {
+            self.hard_wrap_runs(&runs, width)
+        })
+        .into_iter()
+        .map(|line| self.encode_line(line, width))
+        .collect();
         RenderedDocument {
             lines,
             copy_text: source,
@@ -492,16 +520,36 @@ impl RichRenderer {
         output
     }
 
+    fn prose_width(&self, width: usize) -> usize {
+        self.prose_width_indented(width, 0)
+    }
+
+    fn prose_width_indented(&self, width: usize, indent: usize) -> usize {
+        self.options.prose_width.map_or(width, |limit| {
+            width.min(usize::from(limit).saturating_sub(indent))
+        })
+    }
+
     fn render_block(
         &self,
         block: &Block,
         width: usize,
         syntax_highlighting: bool,
     ) -> Vec<RichLine> {
+        self.render_block_indented(block, width, syntax_highlighting, 0)
+    }
+
+    fn render_block_indented(
+        &self,
+        block: &Block,
+        width: usize,
+        syntax_highlighting: bool,
+        indent: usize,
+    ) -> Vec<RichLine> {
         match block {
             Block::Paragraph(content) => {
                 let runs = self.inline_runs(content, self.theme.style(TextRole::Text));
-                self.wrap_runs(&runs, width)
+                self.wrap_runs(&runs, self.prose_width_indented(width, indent))
             }
             Block::Heading { level, content } => {
                 let mut base = self.theme.style(TextRole::Heading);
@@ -509,7 +557,7 @@ impl RichRenderer {
                     base.attributes.bold = true;
                 }
                 let runs = self.inline_runs(content, base);
-                self.wrap_runs(&runs, width)
+                self.wrap_runs(&runs, self.prose_width_indented(width, indent))
             }
             Block::CodeBlock(code)
                 if code.language.as_deref().is_some_and(|lang| {
@@ -550,8 +598,12 @@ impl RichRenderer {
                     )
                 }
             }
-            Block::List(list) => self.render_list(list, width, syntax_highlighting),
-            Block::BlockQuote(blocks) => self.render_quote(blocks, width, syntax_highlighting),
+            Block::List(list) => {
+                self.render_list_indented(list, width, syntax_highlighting, indent)
+            }
+            Block::BlockQuote(blocks) => {
+                self.render_quote_indented(blocks, width, syntax_highlighting, indent)
+            }
             Block::Divider => {
                 if width == 0 {
                     vec![RichLine::default()]
@@ -577,15 +629,21 @@ impl RichRenderer {
                     .flat_map(|line| {
                         let run =
                             RichRun::new(line.to_owned(), self.theme.style(TextRole::Text), None);
-                        self.wrap_runs(&[run], width)
+                        self.wrap_runs(&[run], self.prose_width_indented(width, indent))
                     })
                     .collect()
             }
         }
     }
 
-    fn render_list(&self, list: &List, width: usize, syntax_highlighting: bool) -> Vec<RichLine> {
-        self.render_list_with_commit_ends(list, width, syntax_highlighting)
+    fn render_list_indented(
+        &self,
+        list: &List,
+        width: usize,
+        syntax_highlighting: bool,
+        indent: usize,
+    ) -> Vec<RichLine> {
+        self.render_list_with_commit_ends_indented(list, width, syntax_highlighting, indent)
             .0
     }
 
@@ -594,6 +652,16 @@ impl RichRenderer {
         list: &List,
         width: usize,
         syntax_highlighting: bool,
+    ) -> (Vec<RichLine>, Vec<usize>) {
+        self.render_list_with_commit_ends_indented(list, width, syntax_highlighting, 0)
+    }
+
+    fn render_list_with_commit_ends_indented(
+        &self,
+        list: &List,
+        width: usize,
+        syntax_highlighting: bool,
+        indent: usize,
     ) -> (Vec<RichLine>, Vec<usize>) {
         let mut output = Vec::new();
         let mut ends = Vec::with_capacity(list.items.len());
@@ -613,7 +681,14 @@ impl RichRenderer {
                 Some(false) => format!("{marker}[ ] "),
                 None => marker,
             };
-            self.render_list_item(item, &marker, width, syntax_highlighting, &mut output);
+            self.render_list_item(
+                item,
+                &marker,
+                width,
+                syntax_highlighting,
+                indent,
+                &mut output,
+            );
             ends.push(output.len());
         }
         (output, ends)
@@ -625,15 +700,21 @@ impl RichRenderer {
         marker: &str,
         width: usize,
         syntax_highlighting: bool,
+        indent: usize,
         output: &mut Vec<RichLine>,
     ) {
         let marker_style = self.theme.style(TextRole::ListMarker);
         let marker_width = self.options.width.line_width(marker);
-        let content_width = width.saturating_sub(marker_width);
         let mut blocks = item.blocks.as_slice();
         if let Some(Block::Paragraph(content)) = blocks.first() {
             let runs = self.inline_runs(content, self.theme.style(TextRole::Text));
-            let rows = self.wrap_runs(&runs, content_width);
+            let rows = self.wrap_runs(
+                &runs,
+                self.prose_width_indented(
+                    width.saturating_sub(marker_width),
+                    indent.saturating_add(marker_width),
+                ),
+            );
             if rows.is_empty() {
                 let mut line = RichLine::default();
                 line.push(marker.to_owned(), marker_style, None);
@@ -659,7 +740,12 @@ impl RichRenderer {
 
         for block in blocks {
             let nested_width = width.saturating_sub(marker_width);
-            for row in self.render_block(block, nested_width, syntax_highlighting) {
+            for row in self.render_block_indented(
+                block,
+                nested_width,
+                syntax_highlighting,
+                indent.saturating_add(marker_width),
+            ) {
                 let mut line = RichLine::from_plain(" ".repeat(marker_width));
                 line.extend(row);
                 output.push(line);
@@ -667,21 +753,35 @@ impl RichRenderer {
         }
     }
 
-    fn render_quote(
+    fn render_quote_indented(
         &self,
         blocks: &[Block],
         width: usize,
         syntax_highlighting: bool,
+        indent: usize,
     ) -> Vec<RichLine> {
         let glyphs = GlyphSet::for_capabilities(self.capabilities);
         let prefix = format!("{} ", glyphs.vertical);
         let prefix_width = self.options.width.line_width(&prefix);
-        let inner = self.render_blocks(
-            blocks,
-            width.saturating_sub(prefix_width),
-            false,
-            syntax_highlighting,
-        );
+        let inner_width = width.saturating_sub(prefix_width);
+        let mut inner = Vec::new();
+        for (index, block) in blocks.iter().enumerate() {
+            // Indentation participates in the prose lane, while technical
+            // content inside quotes retains the full remaining viewport.
+            let mut rows = self.render_block_indented(
+                block,
+                inner_width,
+                syntax_highlighting,
+                indent.saturating_add(prefix_width),
+            );
+            inner.append(&mut rows);
+            if index + 1 < blocks.len() {
+                push_blank(&mut inner);
+            }
+        }
+        while inner.last().is_some_and(RichLine::is_empty) {
+            inner.pop();
+        }
         let block_style = self.theme.block_style(BlockRole::Quote);
         let mut output = Vec::new();
         for mut row in inner {
@@ -2319,7 +2419,8 @@ impl AppendOnlyTail {
                         // semantic replacement, width/options/theme changes. Never
                         // hash, clone, or compare the growing paragraph here.
                         stats.checked_bytes += inline_source_bytes(prefix) as u64;
-                        let runs = renderer.inline_runs(prefix, renderer.theme.style(TextRole::Text));
+                        let runs =
+                            renderer.inline_runs(prefix, renderer.theme.style(TextRole::Text));
                         stats.copied_bytes += run_bytes(&runs) as u64;
                         let runs = renderer.expand_run_tabs(&runs);
                         stats.copied_bytes += run_bytes(&runs) as u64;
@@ -2361,7 +2462,11 @@ impl AppendOnlyTail {
             self.disabled = true;
             return None;
         }
-        let width = usize::from(width);
+        let width = if code.is_some() {
+            usize::from(width)
+        } else {
+            renderer.prose_width(usize::from(width))
+        };
         // Prose at width zero has exactly one empty physical row regardless of
         // logical newlines. Do not replay a growing invisible frontier.
         if width == 0 && code.is_none() {
@@ -3342,6 +3447,61 @@ mod tests {
             assert!(plain.contains("Session recovery"));
             assert!(rendered.copy_text.contains("docs (https://example.com)"));
         }
+    }
+
+    #[test]
+    fn prose_lane_accounts_for_nested_indents_but_not_code_and_diff() {
+        use crate::rich_text::stream::{StreamingMarkdown, StreamingRenderCache};
+
+        let source = format!(
+            "{}\n\n- {}\n  - {}\n\n> {}\n\n```text\n{}\n```\n\n```diff\n@@ -1 +1 @@\n+{}\n```",
+            "paragraph word ".repeat(14),
+            "list word ".repeat(14),
+            "nested word ".repeat(14),
+            "quote word ".repeat(14),
+            "a".repeat(110),
+            "b".repeat(110),
+        );
+        let mut limited = renderer(ColorDepth::TrueColor, true);
+        let mut options = limited.options();
+        options.prose_width = Some(92);
+        limited.set_options(options);
+        let document = markdown::parse(&source);
+        let rendered = limited.render(&document, 160);
+        let width = WidthPolicy::default();
+        assert!(rendered
+            .lines
+            .iter()
+            .any(|line| width.line_width(&line.plain) > 92));
+        for line in &rendered.lines {
+            let cells = width.line_width(&line.plain);
+            assert!(cells <= 160, "viewport overflow: {:?}", line.plain);
+            if line.plain.contains("word") {
+                assert!(cells <= 92, "indented prose overflow: {:?}", line.plain);
+            }
+        }
+        let ordinary = renderer(ColorDepth::TrueColor, true).render(&document, 160);
+        assert_eq!(rendered.copy_text, ordinary.copy_text);
+
+        let mut stream = StreamingMarkdown::new();
+        let mut cache = StreamingRenderCache::default();
+        let mut frame = Vec::new();
+        for chunk in source.as_bytes().chunks(27) {
+            stream.push_str(std::str::from_utf8(chunk).unwrap());
+            let update = cache.render_line_update(&stream, &limited, 160, true);
+            frame.truncate(update.stable_prefix);
+            frame.extend(update.replacement);
+            assert_eq!(frame, cache.render_lines(&stream, &limited, 160, true));
+        }
+        stream.finish();
+        let update = cache.render_line_update(&stream, &limited, 160, true);
+        frame.truncate(update.stable_prefix);
+        frame.extend(update.replacement);
+        assert_eq!(frame, rendered.styled_lines());
+        assert_eq!(
+            cache.render(&stream, &limited, 160).copy_text,
+            rendered.copy_text
+        );
     }
 
     #[test]

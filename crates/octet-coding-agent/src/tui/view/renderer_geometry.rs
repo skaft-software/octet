@@ -12,6 +12,7 @@ pub(super) struct GeometryFence {
     tool_input: u64,
     panel: u64,
     size: (u16, u16),
+    content_width: u16,
     verbose: bool,
     overlay: bool,
     scroll: usize,
@@ -28,6 +29,7 @@ impl GeometryFence {
             tool_input: state.tool_input_revision,
             panel: state.panel_epoch,
             size: state.size,
+            content_width: state.transcript_content_width(state.size.0),
             verbose: state.verbose_tools,
             overlay: state.overlay.is_some(),
             scroll: state.scroll_from_bottom.get(),
@@ -198,6 +200,7 @@ pub(super) struct RenderedGeometry {
     pub(super) visible_start: usize,
     pub(super) visible_lines: Vec<String>,
     pub(super) viewport_rows: usize,
+    pub(super) viewport_available: usize,
     pub(super) blocks: Vec<VisibleBlockGeometry>,
 }
 impl RenderedGeometry {
@@ -239,14 +242,35 @@ impl RenderedGeometry {
             visible_start: start,
             visible_lines: cache.lines[start..end].to_vec(),
             viewport_rows,
+            viewport_available: chrome.transcript_rows,
             blocks,
         })
     }
     pub(super) fn is_current(&self, state: &ShellState) -> bool {
         self.fence == GeometryFence::capture(state)
     }
+
+    /// A completed frame may still describe the transcript after typing or
+    /// navigation has changed the draft, chrome, or scroll offset. Reuse only
+    /// its *row layout* for keyboard navigation; pointer hit tests and paint
+    /// receipts still require the exact full fence above.
+    pub(super) fn is_navigation_compatible(&self, state: &ShellState) -> bool {
+        self.fence.transcript == state.transcript_epoch
+            && self.fence.semantic == state.transcript_semantic_revision
+            && self.fence.theme == state.theme_epoch
+            && self.fence.size == state.size
+            && self.fence.verbose == state.verbose_tools
+            && !self.fence.overlay
+            && state.overlay.is_none()
+            && self.fence.content_width == state.transcript_content_width(state.size.0)
+    }
 }
 impl ShellState {
+    pub(super) fn retained_navigation_geometry(&self) -> Option<&RenderedGeometry> {
+        self.render_geometry
+            .as_deref()
+            .filter(|geometry| geometry.is_navigation_compatible(self))
+    }
     /// `None` means no matching emitted frame; ignore pointer input and request
     /// a new paint, rather than guessing coordinates or laying out on input.
     pub(super) fn retained_render_geometry(&self) -> Option<&RenderedGeometry> {

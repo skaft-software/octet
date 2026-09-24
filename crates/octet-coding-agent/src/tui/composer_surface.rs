@@ -744,11 +744,30 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
         &state.reasoning
     }
     .trim();
+    let footer_model = if state.theme.is_compiled_default() {
+        crate::presentation::model::footer_model_name(
+            &full_model,
+            if active {
+                state.run_model.as_deref().unwrap_or(&state.model)
+            } else {
+                &state.model
+            },
+        )
+    } else {
+        &full_model
+    };
+    // Configured names may contain meaningful family/version words. Only the
+    // compiled footer suppresses the legacy first-word fitting fallback.
+    let footer_names = if state.theme.is_compiled_default() {
+        vec![footer_model.to_owned()]
+    } else {
+        model_names
+    };
     let mut segments = vec![StatusFooterSegment::new(
         FooterKind::Identity,
         identity_variants(
-            &full_model,
-            &model_names,
+            footer_model,
+            &footer_names,
             effort,
             super::view::semantic_separator(&state.theme),
         ),
@@ -1064,6 +1083,33 @@ mod tests {
         assert_eq!(composer_content_rows(12, 10), 3);
         // 20-row terminal → max 5 rows
         assert_eq!(composer_content_rows(20, 7), 5); // capped at 5
+    }
+
+    #[test]
+    fn compiled_footer_never_falls_back_to_a_first_word_model_name() {
+        let name = "Claude Sonnet 4.6";
+        for custom in [false, true] {
+            let mut state = crate::tui::view::ShellState::default();
+            state.theme = if custom {
+                crate::tui::theme::test_theme_from_source("[layout]\nprompt_padding = true")
+            } else {
+                crate::tui::theme::test_theme()
+            };
+            state.model_display = name.to_owned();
+            state.model_compact_names = crate::presentation::model_display_name_variants(name);
+            let wide = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+                &state,
+                80,
+                Instant::now(),
+            ));
+            assert!(wide.contains(name), "{wide:?}");
+            let narrow = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+                &state,
+                16,
+                Instant::now(),
+            ));
+            assert_eq!(narrow.contains("Claude"), custom, "{narrow:?}");
+        }
     }
 
     #[test]

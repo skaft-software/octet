@@ -14,46 +14,48 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use octet_ai::{
     AiClient, AiError, AssistantMessage, AssistantPart, AudioPayload, CacheRetention,
-    CompatibilityMode, Cost, DecodeError, ImageSource, Media, Message, Model, OutputFormat,
-    OutputModalities, Protocol, ReasoningConfig, ReasoningMode, Request, ResponsesCompactRequest,
-    ResponsesInput, ResponsesOptions, ResponsesReplayItem, ServiceTier, StopReason, StreamEvent,
-    ToolCall, ToolCallArgumentError, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage,
-    UserMessage, UserPart, PICODOLLARS_PER_MICRODOLLAR,
+    CompatibilityMode, Cost, DecodeError, ImageInputError, ImageInputLimits, ImageSource, Media,
+    Message, Modality, Model, OutputFormat, OutputModalities, Protocol, ReasoningConfig,
+    ReasoningMode, Request, ResponsesCompactRequest, ResponsesInput, ResponsesOptions,
+    ResponsesReplayItem, ServiceTier, StopReason, StreamEvent, ToolCall, ToolCallArgumentError,
+    ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
+    PICODOLLARS_PER_MICRODOLLAR,
 };
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 
 use crate::compaction::{
     build_handoff_message, build_turn_prefix_handoff_message, choose_first_kept_by_tokens,
-    finish_handoff_bounded, prepare_handoff, HandoffPreparation, DEFAULT_KEEP_RECENT_TOKENS,
-    MAX_COMPACTION_HANDOFF_BYTES, SUMMARIZATION_SYSTEM_PROMPT, SUMMARY_OUTPUT_TOKENS,
-    TURN_PREFIX_OUTPUT_TOKENS,
+    finish_handoff_bounded, prepare_handoff, serialize_conversation, HandoffPreparation,
+    DEFAULT_KEEP_RECENT_TOKENS, MAX_COMPACTION_HANDOFF_BYTES, SUMMARIZATION_SYSTEM_PROMPT,
+    SUMMARY_OUTPUT_TOKENS, TURN_PREFIX_OUTPUT_TOKENS,
 };
 use crate::context::{ContextBreakdown, ContextSnapshot, ContextTracker};
 use crate::delegation::{
     enable_root_delegation, DelegationBinding, DelegationConfig, DelegationError,
-    SessionDelegationHandle,
-    DelegationRuntimeSettings, DelegationTemplate,
+    DelegationRuntimeSettings, DelegationTemplate, SessionDelegationHandle,
 };
 use crate::effect::{
     EffectBroker, EffectIntent, EffectReservation, ToolEffect, ToolPolicyDenialCode,
 };
 use crate::events::{
     AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control as UnreservedControl,
-    DelegationTelemetrySnapshot, DeferredRunResumed, DeferredRunSuspended, FinishReason,
+    DeferredRunResumed, DeferredRunSuspended, DelegationTelemetrySnapshot, FinishReason,
     OutputChannel, QueueDeliveryMode, ToolPolicyDecision,
 };
 use crate::extension::{
-    AssistantPersistenceContext, EventObserver, ExtensionHost, ProviderRetryAdvice,
-    ProviderRetryContext, ProviderRetryHook, ProviderRetryKind, RegisteredPersistenceMetadataHook,
-    ToolCallHook, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY, MAX_REFUSED_ACTIVE_TOOL_NAMES,
+    AssistantPersistenceContext, CompactionStrategy, EventObserver, ExtensionHost,
+    ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook, ProviderRetryKind,
+    RegisteredPersistenceMetadataHook, ToolCallHook, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+    MAX_REFUSED_ACTIVE_TOOL_NAMES,
 };
 use crate::extension_process::{ExtensionProcess, EXTENSION_FEATURE_AGENT_SESSIONS};
 use crate::input::{InputPart, UserInput};
 use crate::sandbox::SandboxConfig;
 use crate::session::{
     now_unix_millis, DelegatedUsage, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
-    ExtensionMetadataProvenance, Session, SessionError, SessionRunOutcome, UsageRecordKind,
+    ExtensionMetadataProvenance, Session, SessionError, SessionRunOutcome, SnapcompactCheckpoint,
+    UsageRecordKind,
 };
 use crate::telemetry::{
     schema::{
@@ -99,6 +101,15 @@ pub enum AgentError {
     /// Session persistence failed.
     #[error("session error: {0}")]
     Session(#[from] SessionError),
+    /// Inline user image could not be safely prepared before persistence.
+    #[error("image input: {0}")]
+    ImageInput(#[from] ImageInputError),
+    /// Aggregate image preparation exceeded the bounded per-input budget.
+    #[error("image input exceeds 8 images or 20 MiB of encoded image data")]
+    ImageInputBatchLimit,
+    /// The blocking image preparation worker could not complete.
+    #[error("image input preparation worker failed")]
+    ImagePreparationFailed,
     /// The inference layer failed.
     #[error("ai error: {0}")]
     Ai(#[from] AiError),
@@ -632,6 +643,9 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
         AgentError::DeferredSuspensionRefused { .. } => Some("deferred suspension"),
         AgentError::DeferredSuspended { .. } => None,
         AgentError::Session(_)
+        | AgentError::ImageInput(_)
+        | AgentError::ImageInputBatchLimit
+        | AgentError::ImagePreparationFailed
         | AgentError::DuplicateTool(_)
         | AgentError::ExtensionMetadataNamespace(_)
         | AgentError::Delegation(_)
@@ -1084,16 +1098,24 @@ impl ReservedInput {
     fn is_pending(&self) -> bool {
         match self {
             Self::Ready(_) => true,
-            Self::Retractable(prepared) => prepared.receipt.payload.lock()
-                .unwrap_or_else(|error| error.into_inner()).is_some(),
+            Self::Retractable(prepared) => prepared
+                .receipt
+                .payload
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some(),
         }
     }
 
     fn claim(self) -> Option<ReservedPayload> {
         match self {
             Self::Ready(payload) => Some(payload),
-            Self::Retractable(prepared) => prepared.receipt.payload.lock()
-                .unwrap_or_else(|error| error.into_inner()).take(),
+            Self::Retractable(prepared) => prepared
+                .receipt
+                .payload
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
         }
     }
 }
@@ -1132,8 +1154,11 @@ impl PreparedSteering {
 
 impl Drop for PreparedSteering {
     fn drop(&mut self) {
-        self.receipt.payload.lock()
-            .unwrap_or_else(|error| error.into_inner()).take();
+        self.receipt
+            .payload
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
     }
 }
 
@@ -1157,7 +1182,10 @@ impl SteeringReceipt {
     /// Whether this input is still eligible for recall. This is a snapshot;
     /// only [`Self::try_retract`] establishes that recall actually won.
     pub fn is_pending(&self) -> bool {
-        self.payload.lock().unwrap_or_else(|error| error.into_inner()).is_some()
+        self.payload
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
     }
 
     /// Removes this input before its persistence claim, returning true only
@@ -1169,8 +1197,11 @@ impl SteeringReceipt {
     /// recall or after the submission is dropped. Receipt clones share this
     /// same one-shot authority. No lock is held during filesystem persistence.
     pub fn try_retract(&self) -> bool {
-        let payload = self.payload.lock()
-            .unwrap_or_else(|error| error.into_inner()).take();
+        let payload = self
+            .payload
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         if payload.is_none() {
             return false;
         }
@@ -1366,15 +1397,24 @@ impl RunControl {
         &self,
         input: impl Into<UserInput>,
     ) -> Result<(PreparedSteering, SteeringReceipt), AgentError> {
-        let admission = self.admission.lock().unwrap_or_else(|error| error.into_inner());
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if !*admission || self.tx.is_closed() {
             return Err(AgentError::RunEnded);
         }
         let input = input.into();
         let reservation = self.reserve_input_capacity(&input)?;
         let (mut prepared, receipt) = PreparedSteering::new(input);
-        prepared.receipt.payload.lock().unwrap_or_else(|error| error.into_inner())
-            .as_mut().expect("new prepared input").reservation = Some(reservation);
+        prepared
+            .receipt
+            .payload
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .expect("new prepared input")
+            .reservation = Some(reservation);
         prepared.owner = Some(self.pending_count.clone());
         Ok((prepared, receipt))
     }
@@ -1388,18 +1428,29 @@ impl RunControl {
     /// admission drops its input and releases its reservations. Submitting an
     /// input reserved by a different run returns [`AgentError::RunEnded`].
     pub async fn steer_retractable(&self, prepared: PreparedSteering) -> Result<(), AgentError> {
-        if prepared.owner.as_ref().is_some_and(|owner| !Arc::ptr_eq(owner, &self.pending_count)) {
+        if prepared
+            .owner
+            .as_ref()
+            .is_some_and(|owner| !Arc::ptr_eq(owner, &self.pending_count))
+        {
             return Err(AgentError::RunEnded);
         }
         if !prepared.receipt.is_pending() {
             return Ok(());
         }
-        if self.tx.is_closed() || !*self.admission.lock()
-            .unwrap_or_else(|error| error.into_inner()) {
+        if self.tx.is_closed()
+            || !*self
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        {
             return Err(AgentError::RunEnded);
         }
         {
-            let mut payload = prepared.receipt.payload.lock()
+            let mut payload = prepared
+                .receipt
+                .payload
+                .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let Some(payload) = payload.as_mut() else {
                 return Ok(());
@@ -1413,7 +1464,9 @@ impl RunControl {
             _ = prepared.receipt.recalled.cancelled() => return Ok(()),
             permit = self.tx.reserve() => permit.map_err(|_| AgentError::RunEnded)?,
         };
-        let admission = self.admission.lock()
+        let admission = self
+            .admission
+            .lock()
             .unwrap_or_else(|error| error.into_inner());
         if !*admission {
             return Err(AgentError::RunEnded);
@@ -1500,6 +1553,99 @@ impl AbortFlag {
             }
         }
     }
+}
+
+/// Fallback when the model has no declared image bounds. This is a host safety
+/// ceiling, not a claim about what any particular provider accepts.
+const FALLBACK_IMAGE_LIMITS: ImageInputLimits = ImageInputLimits {
+    max_width: 4_000,
+    max_height: 4_000,
+    max_bytes: octet_ai::MAX_USER_IMAGE_BYTES,
+};
+
+// Also bounds aggregate decode work: each of at most eight images is subject
+// to octet-ai's 16-million-pixel and bounded-resize limits.
+const MAX_IMAGES_PER_INPUT: usize = 8;
+const MAX_IMAGE_INPUT_BYTES: usize = 20 * 1024 * 1024;
+
+/// Stop a detached blocking decoder at the next image when its async owner ends.
+struct CancelBlockingImages(Arc<AtomicBool>);
+
+impl Drop for CancelBlockingImages {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Check the entire batch before spawning any decode work or appending history.
+fn image_preparation_limits(input: &UserInput, model: &Model) -> Result<ImageInputLimits, AgentError> {
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for part in &input.parts {
+        if let InputPart::Media(Media::Image(image)) = part {
+            count += 1;
+            if let ImageSource::Inline(data) = &image.source {
+                if data.len() > octet_ai::MAX_USER_IMAGE_BYTES {
+                    return Err(ImageInputError::InputTooLarge.into());
+                }
+                bytes = bytes.saturating_add(data.len());
+            }
+            if count > MAX_IMAGES_PER_INPUT || bytes > MAX_IMAGE_INPUT_BYTES {
+                return Err(AgentError::ImageInputBatchLimit);
+            }
+        }
+    }
+    if count > 0 && !model.spec.effective_input_modalities().contains(Modality::Image) {
+        return Err(AiError::Unsupported(octet_ai::UnsupportedError::Image).into());
+    }
+    let limits = model.spec.preset.image_input_limits.unwrap_or(FALLBACK_IMAGE_LIMITS);
+    if count > 0 {
+        limits.validate()?;
+    }
+    Ok(limits)
+}
+
+/// Transform canonical input off the async worker, atomically before history
+/// append. Cancellation stops between images and never commits a partial batch.
+async fn prepare_user_images(
+    mut input: UserInput,
+    model: &Model,
+    abort: Option<&AbortFlag>,
+) -> Result<UserInput, AgentError> {
+    let limits = image_preparation_limits(&input, model)?;
+    if abort.is_some_and(AbortFlag::is_set) {
+        return Err(AgentError::Cancelled);
+    }
+    if !input.parts.iter().any(|part| matches!(part,
+        InputPart::Media(Media::Image(image)) if matches!(image.source, ImageSource::Inline(_))
+    )) {
+        return Ok(input);
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = CancelBlockingImages(Arc::clone(&cancelled));
+    let worker = tokio::task::spawn_blocking(move || {
+        for part in &mut input.parts {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(AgentError::Cancelled);
+            }
+            if let InputPart::Media(Media::Image(image)) = part {
+                *image = octet_ai::prepare_user_image(image, limits)?;
+            }
+        }
+        Ok(input)
+    });
+    let result = if let Some(abort) = abort {
+        tokio::select! {
+            biased;
+            _ = abort.wait() => Err(AgentError::Cancelled),
+            result = worker => result.map_err(|_| AgentError::ImagePreparationFailed)?,
+        }
+    } else {
+        worker.await.map_err(|_| AgentError::ImagePreparationFailed)?
+    };
+    drop(guard);
+    if abort.is_some_and(AbortFlag::is_set) { return Err(AgentError::Cancelled); }
+    result
 }
 
 fn user_message(input: UserInput) -> EntryValue {
@@ -4669,7 +4815,11 @@ fn resolve_service_tier(
         return Ok(None);
     };
     if model.spec.protocol != Protocol::OpenAiResponses
-        || !model.endpoint.runtime.responses_profile.accepts_service_tier()
+        || !model
+            .endpoint
+            .runtime
+            .responses_profile
+            .accepts_service_tier()
     {
         return Err(AiError::Unsupported(octet_ai::UnsupportedError::ServiceTier).into());
     }
@@ -5098,8 +5248,7 @@ impl LivePreviewPacer {
         decoration: ToolProgressDecoration,
         now: std::time::Instant,
     ) -> Option<ToolProgressDecoration> {
-        let encoded_bytes =
-            decoration.label().len() + decoration.detail().map_or(0, str::len);
+        let encoded_bytes = decoration.label().len() + decoration.detail().map_or(0, str::len);
         match self.coalescer.record(encoded_bytes, now) {
             PreviewPublication::Immediate => {
                 self.pending = None;
@@ -5359,7 +5508,8 @@ impl LivePartialOutput {
             self.totals.paced.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        let snapshot = BashCheckpointPublisher::bound_snapshot(&render_partial_output(&self.streams));
+        let snapshot =
+            BashCheckpointPublisher::bound_snapshot(&render_partial_output(&self.streams));
         let Some(published) = self.publisher.observe(&snapshot, now) else {
             self.totals.paced.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -5438,13 +5588,14 @@ fn settle_tool_progress(
 /// its append is attempted. Frontend delivery summaries remain complete.
 /// On append failure the context tracker is still observed (its error ignored)
 /// so observers see the partial delivery before the run ends.
-fn deliver_control_inputs(
+async fn deliver_control_inputs(
     queued: Vec<ReservedInput>,
     kind: ControlDeliveryKind,
     session: &mut Session,
     metadata: &EntryMetadata,
     terminal_gate_evidence: &mut Option<TerminalGateEvidence>,
     observation: &ContextObservation<'_>,
+    abort: Option<&AbortFlag>,
 ) -> ControlDelivery {
     let mut delivered = Vec::with_capacity(queued.len());
     for queued in queued {
@@ -5453,6 +5604,21 @@ fn deliver_control_inputs(
         // recall cannot succeed after this claim, including during fsync.
         let Some(ReservedPayload { input, reservation }) = queued.claim() else {
             continue;
+        };
+        let input = match prepare_user_images(input, observation.model, abort).await {
+            Ok(input) => input,
+            Err(error) => {
+                let event = (!delivered.is_empty())
+                    .then(|| kind.delivered_event(std::mem::take(&mut delivered)));
+                return ControlDelivery::Interrupted {
+                    event,
+                    finish: if matches!(error, AgentError::Cancelled) {
+                        FinishReason::Aborted
+                    } else {
+                        FinishReason::Failed(error)
+                    },
+                };
+            }
         };
         let summary = input.text_summary();
         if let Some(evidence) = terminal_gate_evidence {
@@ -5507,6 +5673,27 @@ fn worst_case_request_cost(
         .output
         .0
         .max(pricing.reasoning.map(|rate| rate.0).unwrap_or_default());
+    if model.spec.protocol == Protocol::AnthropicMessages {
+        for fallback in model
+            .spec
+            .preset
+            .anthropic_compat
+            .as_ref()
+            .into_iter()
+            .flat_map(|compat| &compat.allowed_fallback_models)
+        {
+            // The server may select any declared fallback, including one more
+            // expensive than the requested model. An unpriced target cannot be
+            // admitted under a hard cost ceiling.
+            let pricing = fallback.cost?.pricing()?;
+            input_rate = input_rate
+                .max(pricing.input.0)
+                .max(pricing.cache_read.0)
+                .max(pricing.cache_write_5m.0)
+                .max(pricing.input.0.checked_mul(2)?);
+            output_rate = output_rate.max(pricing.output.0);
+        }
+    }
     for tier in &pricing.tiers {
         // The implicit one-hour write price follows the active input tier,
         // not the base catalog input rate. Never reserve below that bucket.
@@ -5715,8 +5902,17 @@ fn reserve_request_cost(
     input_tokens: u64,
     output_tokens: u64,
     limit: Option<u64>,
+    retention: CacheRetention,
 ) -> Result<(), AgentError> {
-    reserve_request_cost_with_tier(session, model, input_tokens, output_tokens, limit, None)
+    reserve_request_cost_with_tier(
+        session,
+        model,
+        input_tokens,
+        output_tokens,
+        limit,
+        None,
+        retention,
+    )
 }
 
 fn reserve_request_cost_with_tier(
@@ -5726,6 +5922,7 @@ fn reserve_request_cost_with_tier(
     output_tokens: u64,
     limit: Option<u64>,
     service_tier: Option<ServiceTier>,
+    retention: CacheRetention,
 ) -> Result<(), AgentError> {
     let Some(limit) = limit else {
         return Ok(());
@@ -5735,6 +5932,21 @@ fn reserve_request_cost_with_tier(
     }
     let current = session.total_cost_microdollars();
     if session.has_unpriced_usage() {
+        return Err(AgentError::CostUnavailable { limit });
+    }
+    // Fallback quotes have no one-hour cache-write tariff. A route that can
+    // request one-hour writes cannot enforce a hard ceiling if the server
+    // chooses a fallback; do not invent a price for that bucket.
+    if retention == CacheRetention::Long
+        && model.spec.protocol == Protocol::AnthropicMessages
+        && model.spec.cache.supports_long_retention
+        && model
+            .spec
+            .preset
+            .anthropic_compat
+            .as_ref()
+            .is_some_and(|compat| !compat.allowed_fallback_models.is_empty())
+    {
         return Err(AgentError::CostUnavailable { limit });
     }
     let reserved = worst_case_request_cost(model, input_tokens, output_tokens, service_tier)
@@ -5762,10 +5974,30 @@ fn assistant_text(response: &octet_ai::Response) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+/// Preserve the prior bitmap source verbatim, separating it from each newly
+/// serialized transcript section (including a split-turn prefix).
+fn snapcompact_source(preparation: &HandoffPreparation) -> String {
+    let mut source = String::new();
+    for section in [
+        preparation.previous_summary.clone().unwrap_or_default(),
+        serialize_conversation(&preparation.messages),
+        serialize_conversation(&preparation.turn_prefix_messages),
+    ] {
+        if !section.is_empty() {
+            if !source.is_empty() {
+                source.push_str("\n\n");
+            }
+            source.push_str(&section);
+        }
+    }
+    source
+}
+
 struct CompactionContext<'a> {
     run_id: &'a str,
     resource_owner: &'a str,
     retry_hooks: &'a [Arc<dyn ProviderRetryHook>],
+    compaction_strategy: Option<&'a Arc<dyn CompactionStrategy>>,
     max_network_wait: Option<Duration>,
     provider_retries_enabled: bool,
     client: &'a AiClient,
@@ -6124,9 +6356,11 @@ impl CompactionContext<'_> {
             });
         }
         let reserved_output_tokens = reservation_output_tokens(
-            self.session, self.compaction_model,
+            self.session,
+            self.compaction_model,
             request.max_output_tokens.unwrap_or(output_tokens),
-            self.max_session_tokens, self.max_session_cost_microdollars,
+            self.max_session_tokens,
+            self.max_session_cost_microdollars,
         )?;
         reserve_request_tokens(
             self.session,
@@ -6140,6 +6374,7 @@ impl CompactionContext<'_> {
             input_tokens,
             reserved_output_tokens,
             self.max_session_cost_microdollars,
+            request.cache_retention,
         )?;
         let response = recover_auxiliary(
             AuxiliaryRecovery {
@@ -6250,6 +6485,108 @@ impl CompactionContext<'_> {
         }
 
         Ok(Some(summary))
+    }
+
+    /// Render every source character, including an earlier bitmap checkpoint.
+    /// One deadline covers all sequential chunks and their image validation;
+    /// neither timeout nor cancellation can commit a partial checkpoint.
+    async fn render_snapcompact(
+        &mut self,
+        preparation: &HandoffPreparation,
+    ) -> Result<SnapcompactCheckpoint, AgentError> {
+        const RENDER_DEADLINE: Duration = Duration::from_secs(120);
+        let deadline = tokio::time::Instant::now() + RENDER_DEADLINE;
+        let expired = || AgentError::InvalidCompactionPolicy(
+            "snapcompact rendering exceeded the 120-second deadline; history was not discarded".into(),
+        );
+        let strategy = self.compaction_strategy.expect("selected strategy exists");
+        let source = snapcompact_source(preparation);
+        if source.trim().is_empty() || source.len() > 256 * 1024 {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "snapcompact source is empty or exceeds 256 KiB; history was not discarded".into(),
+            ));
+        }
+        let mut frames = Vec::new();
+        let mut total_bytes = 0usize;
+        let limits = self.model.spec.preset.image_input_limits.unwrap_or(FALLBACK_IMAGE_LIMITS);
+        let chars: Vec<char> = source.chars().collect();
+        for chunk in chars.chunks(2048) {
+            let text: String = chunk.iter().collect();
+            let rendered = tokio::select! {
+                biased;
+                _ = self.abort.wait() => return Err(AgentError::Cancelled),
+                _ = tokio::time::sleep_until(deadline) => return Err(expired()),
+                result = strategy.render(&self.model.spec.id.0, &text, self.resource_owner) => result
+                    .map_err(|error| AgentError::InvalidCompactionPolicy(format!(
+                        "snapcompact extension failed: {error}"
+                    )))?,
+            };
+            if rendered.is_empty() {
+                return Err(AgentError::InvalidCompactionPolicy(
+                    "snapcompact returned no frames for a transcript slice".into(),
+                ));
+            }
+            // Decoding and validating up to 32 extension frames is CPU work;
+            // keep it off the async worker and within the same operation deadline.
+            let existing_frames = frames.len();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let guard = CancelBlockingImages(Arc::clone(&cancelled));
+            let worker = tokio::task::spawn_blocking(move || {
+                let mut images = Vec::with_capacity(rendered.len().min(256));
+                let mut bytes = total_bytes;
+                for frame in rendered {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(AgentError::Cancelled);
+                    }
+                    if !frame.starts_with(b"\x89PNG\r\n\x1a\n") || frame.len() > 384 * 1024 {
+                        return Err(AgentError::InvalidCompactionPolicy(
+                            "snapcompact returned an empty, invalid, or oversized PNG".into(),
+                        ));
+                    }
+                    bytes = bytes.saturating_add(frame.len());
+                    if existing_frames + images.len() >= 256 || bytes > 8 * 1024 * 1024 {
+                        return Err(AgentError::InvalidCompactionPolicy(
+                            "snapcompact exceeded 256 frames or 8 MiB; history was not discarded".into(),
+                        ));
+                    }
+                    let image = Media::image_bytes(
+                        bytes::Bytes::from(frame),
+                        "image/png".parse().expect("static MIME"),
+                    );
+                    let Media::Image(image_data) = &image else {
+                        unreachable!("image_bytes creates image media")
+                    };
+                    let validated = octet_ai::prepare_user_image(image_data, limits)?;
+                    if !matches!((&validated.source, &image_data.source),
+                        (ImageSource::Inline(a), ImageSource::Inline(b)) if a == b)
+                    {
+                        return Err(AgentError::InvalidCompactionPolicy(
+                            "snapcompact frame exceeds model image dimensions; history was not discarded".into(),
+                        ));
+                    }
+                    images.push(image);
+                }
+                Ok((images, bytes))
+            });
+            let (images, bytes) = tokio::select! {
+                biased;
+                _ = self.abort.wait() => return Err(AgentError::Cancelled),
+                _ = tokio::time::sleep_until(deadline) => return Err(expired()),
+                result = worker => result.map_err(|_| AgentError::InvalidCompactionPolicy(
+                    "snapcompact frame validation worker failed; history was not discarded".into()
+                ))??,
+            };
+            drop(guard);
+            frames.extend(images);
+            total_bytes = bytes;
+        }
+        if self.abort.is_set() {
+            return Err(AgentError::Cancelled);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(expired());
+        }
+        Ok(SnapcompactCheckpoint { source_text: source, frames })
     }
 
     fn preferred_boundary(&self) -> Result<Option<EntryId>, AgentError> {
@@ -6386,6 +6723,7 @@ impl CompactionContext<'_> {
                 input_tokens,
                 self.model.spec.limits.max_output_tokens,
                 self.max_session_cost_microdollars,
+                self.cache_retention,
             )?;
             let covered_through = self.session.head().ok_or(SessionError::EmptySession)?;
             let response = recover_auxiliary(
@@ -6520,6 +6858,30 @@ impl CompactionContext<'_> {
                         .saturating_sub(self.model.spec.limits.max_output_tokens),
                 });
             }
+            if self.compaction_strategy.is_some()
+                && self.model.spec.effective_input_modalities().contains(Modality::Image)
+            {
+                let checkpoint = self.render_snapcompact(&preparation).await?;
+                let summary = finish_validated_compaction_handoff(
+                    "Earlier conversation is encoded in the attached bitmap frames. Read each frame in order before continuing.".into(),
+                    &preparation.details,
+                )?;
+                let preview = self.session.preview_compaction_context(&first_kept, &summary, &checkpoint)?;
+                let estimate = estimate_request_tokens(system, &preview, tools);
+                let budget = self.model.spec.limits.context_window
+                    .saturating_sub(agent_compaction_reserve_tokens(self.model, self.reasoning));
+                if estimate > budget {
+                    return Err(AgentError::ContextExceeded { estimate, budget });
+                }
+                if self.abort.is_set() { return Err(AgentError::Cancelled); }
+                self.session.compact_snapcompact(summary.clone(), first_kept.clone(),
+                    preparation.details, checkpoint)?;
+                return Ok(CompactionInfo {
+                    kind: CompactionKind::Snapcompact, summary, first_kept,
+                    usage: Usage::default(), elapsed: Duration::ZERO,
+                    cost_microdollars: None,
+                });
+            }
             let summary = match self.summarize(&preparation).await? {
                 Some(summary) => {
                     finish_validated_compaction_handoff(summary, &preparation.details)?
@@ -6573,6 +6935,17 @@ impl CompactionContext<'_> {
         compaction_reserve_tokens: u64,
         provider_output_ceiling: u64,
     ) -> Result<CapacityEstimate, AgentError> {
+        if !self
+            .model
+            .spec
+            .effective_input_modalities()
+            .contains(Modality::Image)
+            && self.session.has_snapcompact_context()?
+        {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "active history contains bitmap frames; switch to a vision-capable model before continuing".into(),
+            ));
+        }
         let context_window = self.model.spec.limits.context_window;
         let budget = context_window.saturating_sub(compaction_reserve_tokens);
         let threshold = ((context_window as f64) * self.threshold_fraction).floor() as u64;
@@ -6650,6 +7023,17 @@ impl CompactionContext<'_> {
         tools: &[ToolDef],
         compaction_reserve_tokens: u64,
     ) -> Result<(), AgentError> {
+        if !self
+            .model
+            .spec
+            .effective_input_modalities()
+            .contains(Modality::Image)
+            && self.session.has_snapcompact_context()?
+        {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "active history contains bitmap frames; switch to a vision-capable model before continuing".into(),
+            ));
+        }
         if self.mode == AgentCompactionMode::NativeResponses {
             let active_system = system.to_owned();
             self.compact_native_responses(&active_system, tools, CompactionReason::Overflow)
@@ -6759,6 +7143,7 @@ impl TerminalGateContext<'_> {
                 input_tokens,
                 reserved_output_tokens,
                 self.max_session_cost_microdollars,
+                request.cache_retention,
             )?;
             let response = recover_auxiliary(
                 AuxiliaryRecovery {
@@ -6794,7 +7179,8 @@ impl TerminalGateContext<'_> {
                         self.model.spec.id.clone(),
                         response.usage,
                         response.cost,
-                        parse_terminal_gate(response).map(|decision| decision == TerminalGateDecision::Return),
+                        parse_terminal_gate(response)
+                            .map(|decision| decision == TerminalGateDecision::Return),
                     )?;
                     add_usage(self.usage, &response.usage);
                     self.run_cost.add(response.cost);
@@ -7072,6 +7458,11 @@ impl Agent {
     /// Creates a new agent: canonicalizes the sandbox workspace and validates
     /// the registered extensions (duplicate tool names are rejected).
     pub fn new(mut config: AgentConfig) -> Result<Self, AgentError> {
+        if config.extensions.duplicate_compaction_strategy {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "multiple enabled extensions declared compaction_strategy".into(),
+            ));
+        }
         if let Some(duplicate) = config.extensions.duplicate_tools.first() {
             return Err(AgentError::DuplicateTool(duplicate.clone()));
         }
@@ -7232,6 +7623,87 @@ impl Agent {
             session_id: Some(self.session_id.clone()),
         };
         Ok(Some((self.client.clone(), self.model.clone(), request)))
+    }
+
+    /// Attempt one opt-in, cost-reserved Anthropic prompt-cache keepalive at a
+    /// settled idle boundary. No model output or synthetic prompt is persisted.
+    /// `Off` and unsupported/early/over-budget requests make no network call.
+    /// This API is an unscheduled library building block, not an idle timer;
+    /// the coding-agent host must opt in at an actual idle boundary.
+    pub async fn warm_prompt_cache(
+        &mut self,
+        mode: crate::cache_warmer::CacheWarmMode,
+        policy: crate::cache_warmer::CacheWarmPolicy,
+    ) -> Result<crate::cache_warmer::CacheWarmOutcome, AgentError> {
+        use crate::cache_warmer::{reservation, CacheWarmOutcome};
+        if mode != crate::cache_warmer::CacheWarmMode::Idle
+            || !crate::cache_warmer::is_direct_anthropic(&self.model)
+            || self.cache_retention != CacheRetention::Short
+            || self.reasoning != ReasoningConfig::Off
+        {
+            return Ok(CacheWarmOutcome::Skipped);
+        }
+        // Existing context estimates include system/tool schema framing and
+        // provider-reconciled prefix usage. Reserve room for the synthetic
+        // suffix independently; the suffix never enters the session.
+        let input_tokens = self
+            .request_context_estimate()?
+            .input_tokens
+            .saturating_add(256);
+        let reserved = worst_case_request_cost(&self.model, input_tokens, 1, None);
+        if reservation(
+            &self.model,
+            &self.session,
+            self.cache_retention,
+            mode,
+            policy,
+            input_tokens,
+            now_unix_millis(),
+            reserved,
+        )
+        .is_none()
+        {
+            return Ok(CacheWarmOutcome::Skipped);
+        }
+        self.ensure_request_cost_capacity(&self.model, input_tokens, 1)?;
+        reserve_request_tokens(&self.session, input_tokens, 1, self.max_session_tokens)?;
+        let (_, tools) = self.extensions.tool_snapshot();
+        let tools: Vec<_> = tools
+            .iter()
+            .map(|tool| advertised_tool_definition(tool.as_ref(), &self.model))
+            .collect();
+        require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
+        let mut messages = self.session.context()?;
+        messages.push(Message::User(UserMessage {
+            content: vec![UserPart::Text("Reply with a single period.".into())],
+        }));
+        let system = self.model_visible_system(true);
+        let request = Request {
+            system: (!system.is_empty()).then_some(system),
+            messages,
+            tools,
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: Some(1),
+            temperature: None,
+            stop: Vec::new(),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: self.reasoning_mode,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: CacheRetention::WarmShort,
+            session_id: Some(self.session_id.clone()),
+        };
+        crate::cache_warmer::dispatch(
+            &self.client,
+            &self.model,
+            &mut self.session,
+            request,
+            policy.deadline,
+        )
+        .await
+        .map_err(AgentError::from)
     }
 
     /// Read-only access to the agent's session (its entries and head).
@@ -7525,6 +7997,7 @@ impl Agent {
             input_tokens,
             output_tokens,
             self.max_session_cost_microdollars,
+            self.cache_retention,
         )
     }
 
@@ -7892,6 +8365,7 @@ impl Agent {
             run_id: &self.session_id,
             resource_owner: &self.resource_owner,
             retry_hooks: &self.extensions.provider_retry_hooks,
+            compaction_strategy: self.extensions.compaction_strategy.as_ref(),
             max_network_wait: self.max_network_wait,
             provider_retries_enabled: self.provider_retries_enabled,
             client: &self.client,
@@ -8008,6 +8482,7 @@ impl Agent {
             input_tokens,
             self.model.spec.limits.max_output_tokens,
             self.max_session_cost_microdollars,
+            self.cache_retention,
         )?;
         let covered_through = self.session.head().ok_or(SessionError::EmptySession)?;
         let operation_started = std::time::Instant::now();
@@ -8059,9 +8534,10 @@ impl Agent {
                 )
             },
             |session, response| {
-                cost = self.model.spec.pricing.as_ref().and_then(|pricing| {
-                    octet_ai::pricing::cost_of(pricing, &response.usage).ok()
-                });
+                cost =
+                    self.model.spec.pricing.as_ref().and_then(|pricing| {
+                        octet_ai::pricing::cost_of(pricing, &response.usage).ok()
+                    });
                 session.record_compaction_usage(
                     self.model.endpoint.id.clone(),
                     self.model.spec.id.clone(),
@@ -8262,7 +8738,8 @@ impl Agent {
                 Ok(DeferredRunOutcome::Refused(refusal))
             }
             DeferredResumeStart::Admitted(poll) => {
-                self.drive_admitted_deferred_poll(pass_id, *poll, source).await
+                self.drive_admitted_deferred_poll(pass_id, *poll, source)
+                    .await
             }
         }
     }
@@ -8335,7 +8812,10 @@ impl Agent {
                 )));
             }
         };
-        let completion = self.session.deferred_run_store().complete_pass(&poll, outcome)?;
+        let completion = self
+            .session
+            .deferred_run_store()
+            .complete_pass(&poll, outcome)?;
         match completion {
             DeferredPollCompletion::Suspended(observation) => {
                 self.observe_deferred_boundary(
@@ -8427,15 +8907,17 @@ impl Agent {
         generation: u64,
         recovery: bool,
     ) {
-        let _guard = self.telemetry.begin_typed::<DeferredRunSpan>(DeferredRunAttributes {
-            operation_id: bounded_deferred_label(operation_id),
-            stop_reason: stop_reason.to_owned(),
-            phase: phase.to_owned(),
-            poll,
-            generation,
-            recovery,
-            diagnostics: 0,
-        });
+        let _guard = self
+            .telemetry
+            .begin_typed::<DeferredRunSpan>(DeferredRunAttributes {
+                operation_id: bounded_deferred_label(operation_id),
+                stop_reason: stop_reason.to_owned(),
+                phase: phase.to_owned(),
+                poll,
+                generation,
+                recovery,
+                diagnostics: 0,
+            });
     }
 
     /// Enables durable partial-output checkpoints for live calls of `tool`.
@@ -8870,6 +9352,7 @@ impl Agent {
         let completion_policy = self.completion_policy;
         let mut terminal_gate_evidence =
             TerminalGateEvidence::for_run(completion_policy, &self.session, &input)?;
+        let input = prepare_user_images(input, &self.model, None).await?;
         let prompt_metadata = self.prompt_entry_metadata();
         // `display_text` belongs only to the draft that started this run.
         // Steering and follow-up inputs are independent user submissions and
@@ -9308,7 +9791,8 @@ impl Agent {
                         &control_prompt_metadata,
                         &mut terminal_gate_evidence,
                         &observation,
-                    ) {
+                        Some(&abort),
+                    ).await {
                         ControlDelivery::Completed { event } => {
                             if let Some(ev) = event {
                                 notify_observers(&observers, &ev);
@@ -9378,6 +9862,7 @@ impl Agent {
                         run_id: &effect_run_id,
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
+                        compaction_strategy: extension_host.compaction_strategy.as_ref(),
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -9549,6 +10034,7 @@ impl Agent {
                     reserved_output_tokens,
                     max_session_cost_microdollars,
                     request.responses.as_ref().and_then(|options| options.service_tier),
+                    request.cache_retention,
                 ) {
                     break 'run FinishReason::Failed(error);
                 }
@@ -9619,6 +10105,7 @@ impl Agent {
                         run_id: &effect_run_id,
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
+                        compaction_strategy: extension_host.compaction_strategy.as_ref(),
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -9850,6 +10337,7 @@ impl Agent {
                         run_id: &effect_run_id,
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
+                        compaction_strategy: extension_host.compaction_strategy.as_ref(),
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -10410,7 +10898,8 @@ impl Agent {
                             &control_prompt_metadata,
                             &mut terminal_gate_evidence,
                             &observation,
-                        ) {
+                            Some(&abort),
+                        ).await {
                             ControlDelivery::Completed { event } => {
                                 if let Some(ev) = event {
                                     notify_observers(&observers, &ev);
@@ -10586,7 +11075,8 @@ impl Agent {
                                     &control_prompt_metadata,
                                     &mut terminal_gate_evidence,
                                     &observation,
-                                ) {
+                                    Some(&abort),
+                                ).await {
                                     ControlDelivery::Completed { event } => {
                                         if let Some(ev) = event {
                                             notify_observers(&observers, &ev);
@@ -11713,6 +12203,173 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
+    use base64::Engine as _;
+
+    fn image_input_fixture(large: bool) -> InputPart {
+        let encoded = if large {
+            // Valid opaque 4002x2 PNG: the fallback resizes it to <=4000px.
+            "iVBORw0KGgoAAAANSUhEUgAAD6IAAAACCAYAAABIFvMzAAAAPUlEQVR4nO3OoQEAAAgDoP3/9EzeoIFAJ00KAAAAAAAAAAAAAAAAAAAAK9cBAAAAAAAAAAAAAAAAAAAAfhkmlU0biXxThgAAAABJRU5ErkJggg=="
+        } else {
+            "iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC"
+        };
+        InputPart::Media(Media::image_bytes(
+            bytes::Bytes::from(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+            ),
+            "image/png".parse().unwrap(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn explicit_model_image_limits_override_host_fallback() {
+        let mut model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        Arc::make_mut(&mut model.spec).preset.image_input_limits = Some(ImageInputLimits {
+            max_width: 2,
+            max_height: 2,
+            max_bytes: 1_000,
+        });
+        let prepared =
+            prepare_user_images(UserInput::from(vec![image_input_fixture(false)]), &model, None).await.unwrap();
+        let InputPart::Media(Media::Image(image)) = &prepared.parts[0] else {
+            panic!("image expected")
+        };
+        let ImageSource::Inline(bytes) = &image.source else {
+            panic!("inline image expected")
+        };
+        assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 2);
+    }
+
+    #[tokio::test]
+    async fn user_images_are_prepared_before_history_and_invalid_batches_are_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            Session::create(directory.path().join("images.jsonl")).unwrap(),
+            ExtensionHost::new(),
+        );
+        let invalid = UserInput::from(vec![
+            image_input_fixture(false),
+            InputPart::Media(Media::image_bytes(
+                bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\ntruncated"),
+                "image/png".parse().unwrap(),
+            )),
+        ]);
+        assert!(matches!(
+            agent.prompt(invalid).await,
+            Err(AgentError::ImageInput(ImageInputError::InvalidImage))
+        ));
+        assert!(agent.session().entries().is_empty());
+        let run = agent
+            .prompt(UserInput::from(vec![
+                InputPart::Text("describe".into()),
+                image_input_fixture(true),
+            ]))
+            .await
+            .unwrap();
+        drop(run);
+        let context = agent.session().context().unwrap();
+        let Message::User(user) = &context[0] else {
+            panic!("user history expected")
+        };
+        assert!(matches!(&user.content[0], UserPart::Text(text) if text == "describe"));
+        let UserPart::Media(Media::Image(image)) = &user.content[1] else {
+            panic!("image history expected")
+        };
+        let ImageSource::Inline(bytes) = &image.source else {
+            panic!("inline image expected")
+        };
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        assert!(width <= FALLBACK_IMAGE_LIMITS.max_width);
+        assert_eq!(
+            image.media_type.as_ref().map(octet_ai::Mime::essence_str),
+            Some("image/png")
+        );
+    }
+
+    #[tokio::test]
+    async fn image_batches_are_bounded_before_decode_and_abort_before_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            Session::create(directory.path().join("bounded-images.jsonl")).unwrap(),
+            ExtensionHost::new(),
+        );
+        let many = UserInput::from((0..9).map(|_| image_input_fixture(false)).collect::<Vec<_>>());
+        assert!(matches!(agent.prompt(many).await, Err(AgentError::ImageInputBatchLimit)));
+        assert!(agent.session().entries().is_empty());
+        let bytes = UserInput::from((0..5).map(|_| InputPart::Media(Media::image_bytes(
+            bytes::Bytes::from(vec![0; 4 * 1024 * 1024 + 1]), "image/png".parse().unwrap()
+        ))).collect::<Vec<_>>());
+        assert!(matches!(agent.prompt(bytes).await, Err(AgentError::ImageInputBatchLimit)));
+        assert!(agent.session().entries().is_empty());
+
+        let abort = AbortFlag::default();
+        abort.set();
+        let bounded = UserInput::from((0..8).map(|_| image_input_fixture(true)).collect::<Vec<_>>());
+        assert!(matches!(prepare_user_images(bounded, &agent.model, Some(&abort)).await,
+            Err(AgentError::Cancelled)));
+        assert!(agent.session().entries().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_queued_image_never_enters_history_and_releases_reservation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("queued-images.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let tracker = ContextTracker::default();
+        let observation = ContextObservation {
+            tracker: &tracker,
+            model: &model,
+            system: "",
+            tools: &[],
+        };
+        let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        control
+            .try_steer(UserInput::from(vec![
+                image_input_fixture(false),
+                InputPart::Media(Media::image_bytes(
+                    bytes::Bytes::from_static(b"invalid"),
+                    "image/png".parse().unwrap(),
+                )),
+            ]))
+            .unwrap();
+        let Control::Steer(input) = rx.recv().await.unwrap() else {
+            panic!("steering expected")
+        };
+        let result = deliver_control_inputs(
+            vec![input],
+            ControlDeliveryKind::Steering,
+            &mut session,
+            &EntryMetadata::default(),
+            &mut None,
+            &observation,
+            None,
+        ).await;
+        assert!(matches!(
+            result,
+            ControlDelivery::Interrupted {
+                event: None,
+                finish: FinishReason::Failed(AgentError::ImageInput(ImageInputError::InvalidImage))
+            }
+        ));
+        assert!(session.entries().is_empty());
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+        assert_eq!(
+            control.pending_bytes.available_permits(),
+            MAX_PENDING_CONTROL_BYTES
+        );
+    }
 
     fn test_run_control(byte_limit: usize) -> (RunControl, mpsc::Receiver<Control>) {
         let (tx, rx) = mpsc::channel(8);
@@ -11927,6 +12584,224 @@ mod tests {
         agent
     }
 
+    struct ScriptedBitmapRenderer {
+        calls: std::sync::atomic::AtomicUsize,
+        frames: Vec<Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CompactionStrategy for Arc<ScriptedBitmapRenderer> {
+        async fn render(&self, _: &str, text: &str, _: &str) -> Result<Vec<Vec<u8>>, String> {
+            assert!(text.contains("original user context"));
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.frames.clone())
+        }
+    }
+
+    fn bitmap_compaction_test_agent(
+        directory: &std::path::Path,
+        strategy: impl CompactionStrategy + 'static,
+        script: Arc<CompactionSummaryScript>,
+    ) -> Agent {
+        let mut session = Session::create(directory.join("bitmap-compaction.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("original user context".into())],
+            })))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("original assistant context".into())],
+                model: octet_ai::ModelId("test".into()),
+                protocol: Protocol::OpenAiChat,
+            })))
+            .unwrap();
+        let mut extensions = ExtensionHost::new();
+        extensions.compaction_strategy(strategy);
+        let mut agent = active_tool_test_agent(directory, session, extensions);
+        agent
+            .client
+            .register_host_stream_transport(agent.model.endpoint.id.clone(), script);
+        agent
+            .set_compaction_token_policy(true, 0.000_01, 1)
+            .unwrap();
+        agent
+    }
+
+    #[tokio::test]
+    async fn vision_compaction_bypasses_parent_summary_and_bad_frames_keep_history() {
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC")
+            .unwrap();
+        for frames in [
+            vec![png],
+            vec![b"\x89PNG\r\n\x1a\ntruncated".to_vec()],
+            vec![],
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let valid = frames.first().is_some_and(|frame| frame.len() > 30);
+            let renderer = Arc::new(ScriptedBitmapRenderer {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                frames,
+            });
+            let script = Arc::new(CompactionSummaryScript {
+                responses: Mutex::new(VecDeque::from(["normal answer".into()])),
+                requests: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut agent = bitmap_compaction_test_agent(
+                directory.path(),
+                Arc::clone(&renderer),
+                Arc::clone(&script),
+            );
+            let result = agent.complete("new task").await;
+            assert_eq!(renderer.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                script.requests.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(valid),
+                "the parent model must not receive a compaction summary request"
+            );
+            assert_eq!(result.is_ok(), valid);
+            assert_eq!(agent.session().has_snapcompact_context().unwrap(), valid);
+            if valid {
+                assert!(agent.session().context().unwrap().iter().any(|message| matches!(message,
+                    Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::Media(Media::Image(_))))
+                )));
+                Arc::make_mut(&mut agent.model.spec)
+                    .capabilities
+                    .input_modalities = octet_ai::ModalitySet::none();
+                assert!(matches!(
+                    agent.complete("text-only follow-up").await,
+                    Err(AgentError::InvalidCompactionPolicy(_))
+                ));
+                assert_eq!(script.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+            } else {
+                assert!(agent
+                    .session()
+                    .entries()
+                    .iter()
+                    .all(|entry| !matches!(entry.value, EntryValue::Compaction { .. })));
+                let original = format!("{:?}", agent.session().context().unwrap());
+                assert!(original.contains("original user context"));
+                assert!(original.contains("original assistant context"));
+            }
+        }
+    }
+
+    struct SlowBitmapRenderer(watch::Sender<usize>);
+
+    #[async_trait::async_trait]
+    impl CompactionStrategy for SlowBitmapRenderer {
+        async fn render(&self, _: &str, _: &str, _: &str) -> Result<Vec<Vec<u8>>, String> {
+            self.0.send_modify(|calls| *calls += 1);
+            tokio::time::sleep(Duration::from_secs(70)).await;
+            Ok(vec![base64::engine::general_purpose::STANDARD
+                .decode("iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC")
+                .unwrap()])
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_sequential_bitmap_chunks_share_one_deadline_and_leave_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let (tx, mut calls) = watch::channel(0usize);
+        let script = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::new()),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = bitmap_compaction_test_agent(directory.path(), SlowBitmapRenderer(tx), script);
+        agent.session.append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("x".repeat(3_000))],
+        }))).unwrap();
+        let task = tokio::spawn(async move {
+            let result = agent.complete("new task").await;
+            (agent, result)
+        });
+        calls.changed().await.unwrap();
+        tokio::time::advance(Duration::from_secs(70)).await;
+        for _ in 0..10_000 {
+            if *calls.borrow() >= 2 { break; }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*calls.borrow(), 2, "source must span at least two chunks");
+        tokio::time::advance(Duration::from_secs(50)).await;
+        let (agent, result) = task.await.unwrap();
+        assert!(matches!(result, Err(AgentError::InvalidCompactionPolicy(ref error)) if error.contains("deadline")));
+        assert!(!agent.session().has_snapcompact_context().unwrap());
+        assert!(agent.session().entries().iter().all(|entry| !matches!(entry.value, EntryValue::Compaction { .. })));
+        assert!(format!("{:?}", agent.session().context().unwrap()).contains("original user context"));
+    }
+
+    #[tokio::test]
+    async fn two_bitmap_compactions_preserve_source_and_separate_transcript_sections() {
+        let directory = tempfile::tempdir().unwrap();
+        let renderer = Arc::new(ScriptedBitmapRenderer {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            frames: vec![base64::engine::general_purpose::STANDARD
+                .decode("iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC")
+                .unwrap()],
+        });
+        let script = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from(["first answer".into(), "second answer".into()])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = bitmap_compaction_test_agent(directory.path(), Arc::clone(&renderer), script);
+        agent.complete("first new task").await.unwrap();
+        let first = agent.session().entries().iter().find_map(|entry| match &entry.value {
+            EntryValue::Compaction { snapcompact: Some(checkpoint), .. } => Some(checkpoint.source_text.clone()),
+            _ => None,
+        }).expect("first bitmap checkpoint");
+        agent.complete("second new task").await.unwrap();
+        let sources = agent.session().entries().iter().filter_map(|entry| match &entry.value {
+            EntryValue::Compaction { snapcompact: Some(checkpoint), .. } => Some(&checkpoint.source_text),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(sources.len(), 2);
+        assert!(sources[1].starts_with(&first));
+        assert!(sources[1].contains("\n\n[User]: first new task"), "{}", sources[1]);
+        assert_eq!(renderer.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn bitmap_source_separates_previous_full_turn_and_split_turn_prefix() {
+        let user = |text: &str| Message::User(UserMessage { content: vec![UserPart::Text(text.into())] });
+        let preparation = HandoffPreparation {
+            previous_summary: Some("[User]: previous".into()),
+            messages: vec![user("new full turn")],
+            turn_prefix_messages: vec![user("split prefix")],
+            details: Default::default(),
+        };
+        assert_eq!(snapcompact_source(&preparation),
+            "[User]: previous\n\n[User]: new full turn\n\n[User]: split prefix");
+    }
+
+    #[tokio::test]
+    async fn text_only_compaction_keeps_parent_summary_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let renderer = Arc::new(ScriptedBitmapRenderer {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            frames: Vec::new(),
+        });
+        let script = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from([
+                "## Goal\nvalid checkpoint".into(),
+                "normal answer".into(),
+            ])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = bitmap_compaction_test_agent(
+            directory.path(),
+            Arc::clone(&renderer),
+            Arc::clone(&script),
+        );
+        Arc::make_mut(&mut agent.model.spec)
+            .capabilities
+            .input_modalities = octet_ai::ModalitySet::none();
+        assert!(agent.complete("new task").await.is_ok());
+        assert_eq!(renderer.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(script.requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(!agent.session().has_snapcompact_context().unwrap());
+    }
+
     #[tokio::test]
     async fn provider_compaction_refuses_invalid_summary_without_discarding_context() {
         for invalid in [
@@ -11943,13 +12818,11 @@ mod tests {
             let error = agent.complete("new task").await.unwrap_err();
             assert!(matches!(error, AgentError::IncompleteResponse { .. }));
             assert_eq!(script.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
-            assert!(
-                agent
-                    .session()
-                    .entries()
-                    .iter()
-                    .all(|entry| !matches!(entry.value, EntryValue::Compaction { .. }))
-            );
+            assert!(agent
+                .session()
+                .entries()
+                .iter()
+                .all(|entry| !matches!(entry.value, EntryValue::Compaction { .. })));
             let retained = format!("{:?}", agent.session().context().unwrap());
             assert!(retained.contains("original user context"));
             assert!(retained.contains("original assistant context"));
@@ -11972,13 +12845,11 @@ mod tests {
             "one summary request then one normal turn"
         );
         assert!(format!("{:?}", agent.session().context().unwrap()).contains("normal answer"));
-        assert!(
-            agent
-                .session()
-                .entries()
-                .iter()
-                .any(|entry| matches!(entry.value, EntryValue::Compaction { .. }))
-        );
+        assert!(agent
+            .session()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
     }
 
     struct ToolBudgetTransport {
@@ -12044,8 +12915,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_schema_budget_preflight_refuses_without_persisting_the_prompt_or_calling_provider()
-    {
+    async fn tool_schema_budget_preflight_refuses_without_persisting_the_prompt_or_calling_provider(
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let extensions = active_tool_test_extensions(&["schema"]);
         let mut agent = active_tool_test_agent(
@@ -12397,7 +13268,8 @@ mod tests {
                     &EntryMetadata::default(),
                     &mut evidence,
                     &observation,
-                );
+                    None,
+                ).await;
                 let ControlDelivery::Completed { event: Some(event) } = delivered else {
                     panic!("durable delivery must succeed")
                 };
@@ -12543,7 +13415,8 @@ mod tests {
             &EntryMetadata::default(),
             &mut gate,
             &observation,
-        );
+            None,
+        ).await;
         let ControlDelivery::Completed {
             event: Some(AgentEvent::FollowUpDelivered { messages }),
         } = delivered
@@ -12653,7 +13526,8 @@ mod tests {
             &EntryMetadata::default(),
             &mut None,
             &observation,
-        );
+            None,
+        ).await;
         assert!(matches!(
             result,
             ControlDelivery::Interrupted {
@@ -12809,7 +13683,11 @@ mod tests {
             "the section must respect its byte budget: {}",
             section.len()
         );
-        assert!(section.ends_with('…'), "truncation is marked: {:?}", &section[section.len().saturating_sub(8)..]);
+        assert!(
+            section.ends_with('…'),
+            "truncation is marked: {:?}",
+            &section[section.len().saturating_sub(8)..]
+        );
         assert!(
             section.is_char_boundary(section.len()),
             "a truncated section stays valid UTF-8"
@@ -12953,7 +13831,10 @@ mod tests {
         // A prompt that already fills or exceeds the window reserves nothing and
         // cannot fabricate a negative cap.
         assert_eq!(resolve_request_max_output_tokens(window, window, window), 0);
-        assert_eq!(resolve_request_max_output_tokens(window, window + 5_000, window), 0);
+        assert_eq!(
+            resolve_request_max_output_tokens(window, window + 5_000, window),
+            0
+        );
         // Small windows keep a proportionate reserve rather than a fixed bite.
         assert_eq!(request_output_headroom(8_192), 256);
         assert_eq!(request_output_headroom(131_072), 1_310);
@@ -13183,7 +14064,9 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
                 request_id: None,
                 retry_after: None,
                 provider_code: None,
-                body_snippet: Some(format!(r#"{{"object":"error","message":"{VLLM}","type":"BadRequestError","code":400}}"#)),
+                body_snippet: Some(format!(
+                    r#"{{"object":"error","message":"{VLLM}","type":"BadRequestError","code":400}}"#
+                )),
                 retryable: false,
             }),
             // Body carried a numeric machine-readable code.
@@ -14243,9 +15126,10 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         // A requested tier still rides on the request when there is no replay
         // window: the codec then replays canonically exactly as it would with no
         // options, so `/fast` cannot be silently inert.
-        let options = durable_responses_options(&session, &model, "system", Some(ServiceTier::Flex))
-            .unwrap()
-            .expect("a requested tier always produces options");
+        let options =
+            durable_responses_options(&session, &model, "system", Some(ServiceTier::Flex))
+                .unwrap()
+                .expect("a requested tier always produces options");
         // A baseline pin is request metadata, not an ordered input update.
         // Legacy sessions without opaque sidecars must keep canonical replay.
         Arc::make_mut(&mut model.endpoint)
@@ -14359,14 +15243,13 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         assert!(first.contains("alpha"), "{first}");
 
         // Before the interval: paced away, counted, never published.
-        assert!(
-            live.observe_output(
+        assert!(live
+            .observe_output(
                 OutputStream::Stdout,
                 b"beta\n",
                 start + Duration::from_millis(1)
             )
-            .is_none()
-        );
+            .is_none());
         assert_eq!(sink.snapshots().len(), 1, "one publication so far");
         assert_eq!(totals.stats().paced, 1);
 
@@ -14400,7 +15283,9 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         // its header, and stays a checkpoint: no publication may claim the
         // command finished.
         let burst_bytes = 4 * BASH_CHECKPOINT_MAX_BYTES;
-        let mut burst = std::iter::repeat(b'x').take(burst_bytes).collect::<Vec<u8>>();
+        let mut burst = std::iter::repeat(b'x')
+            .take(burst_bytes)
+            .collect::<Vec<u8>>();
         burst.extend_from_slice(b"NEWEST-MARKER");
         let bounded = live
             .observe_output(
@@ -14527,11 +15412,18 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             matches!(chunk, Some(ToolProgress::Output { bytes, .. }) if bytes.as_ref() == b"verbatim\n"),
             "a stdout chunk is never collapsed"
         );
-        assert_eq!(pacer.stats().0, 1, "verbatim forwarding is not a publication");
+        assert_eq!(
+            pacer.stats().0,
+            1,
+            "verbatim forwarding is not a publication"
+        );
 
         // Nothing is published before the deadline, and the deadline publishes
         // the *latest* state rather than one that was paced away.
-        assert!(pacer.take_due(start).is_none(), "the held state is not due yet");
+        assert!(
+            pacer.take_due(start).is_none(),
+            "the held state is not due yet"
+        );
         let deadline = pacer
             .flush_deadline(start)
             .expect("the held state has one trailing timer");
@@ -14849,7 +15741,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         std::sync::Arc::make_mut(&mut model.spec).pricing = None;
 
         assert!(matches!(
-            reserve_request_cost(&session, &model, 1, 1, Some(10)),
+            reserve_request_cost(&session, &model, 1, 1, Some(10), CacheRetention::Short),
             Err(AgentError::CostUnavailable { limit: 10 })
         ));
     }
@@ -16069,11 +16961,11 @@ mod inference_recovery_tests {
             Err(AgentError::UsageUncertain)
         ));
         assert!(matches!(
-            reserve_request_cost(&session, &model, 1, 1, Some(u64::MAX)),
+            reserve_request_cost(&session, &model, 1, 1, Some(u64::MAX), CacheRetention::Short),
             Err(AgentError::UsageUncertain)
         ));
         assert!(reserve_request_tokens(&session, 1, 1, None).is_ok());
-        assert!(reserve_request_cost(&session, &model, 1, 1, None).is_ok());
+        assert!(reserve_request_cost(&session, &model, 1, 1, None, CacheRetention::Short).is_ok());
         for code in [
             "usage_not_included",
             "insufficient_quota",
@@ -16170,7 +17062,8 @@ mod inference_recovery_tests {
             if hard_token_limit {
                 // HTTP uncertainty coverage needs a genuinely capped route;
                 // uncapped Codex hard ceilings now refuse before dispatch.
-                Arc::make_mut(&mut model.endpoint).runtime.responses_profile = octet_ai::ResponsesRuntimeProfile::Default;
+                Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+                    octet_ai::ResponsesRuntimeProfile::Default;
             }
             Arc::make_mut(&mut model.endpoint).base_url =
                 url::Url::parse(&format!("{}/", server.uri())).unwrap();
@@ -16301,7 +17194,10 @@ mod sustained_network_recovery_tests {
         })
         .unwrap();
         agent.set_max_session_tokens(Some(u64::MAX));
-        assert!(matches!(agent.complete("bounded uncapped route").await, Err(AgentError::OutputLimitUnavailable)));
+        assert!(matches!(
+            agent.complete("bounded uncapped route").await,
+            Err(AgentError::OutputLimitUnavailable)
+        ));
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
         // The original long-outage behavior remains available only without a
         // hard ceiling on this cap-omitting Codex route.
@@ -16557,6 +17453,75 @@ mod sustained_network_recovery_tests {
         assert_eq!(retry_after(&error, 0), Duration::from_millis(11054));
     }
     #[test]
+    fn hard_cost_reservation_covers_pricier_anthropic_server_fallbacks() {
+        use octet_ai::declarations::{
+            AnthropicCompatPreset, AnthropicFallbackCost, AnthropicFallbackModel,
+        };
+        use octet_ai::{Pricing, TokenRate};
+
+        let mut model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("claude-sonnet-4-5".into()))
+            .unwrap();
+        Arc::make_mut(&mut model.spec).pricing = Some(Pricing {
+            input: TokenRate(1_000_000),
+            output: TokenRate(1_000_000),
+            cache_read: TokenRate(1_000_000),
+            cache_write_5m: TokenRate(1_000_000),
+            cache_write_1h: None,
+            reasoning: None,
+            tiers: vec![],
+        });
+        let base = worst_case_request_cost(&model, 1_000_000, 1_000_000, None).unwrap();
+        assert_eq!(base, 3_000_000);
+        Arc::make_mut(&mut model.spec).preset.anthropic_compat = Some(AnthropicCompatPreset {
+            allowed_fallback_models: vec![AnthropicFallbackModel {
+                provider: "anthropic".into(),
+                model: "dearer".into(),
+                cost: Some(AnthropicFallbackCost {
+                    input: 5.0,
+                    output: 20.0,
+                    cache_read: 0.5,
+                    cache_write: 6.0,
+                }),
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            worst_case_request_cost(&model, 1_000_000, 1_000_000, None),
+            Some(30_000_000)
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("cost.jsonl")).unwrap();
+        assert!(matches!(
+            reserve_request_cost(&session, &model, 1_000_000, 1_000_000, Some(base + 1), CacheRetention::Short),
+            Err(AgentError::CostLimit { .. })
+        ));
+        assert!(model.spec.cache.supports_long_retention);
+        assert!(reserve_request_cost(
+            &session, &model, 1, 1, Some(u64::MAX), CacheRetention::Short,
+        ).is_ok());
+        assert!(matches!(
+            reserve_request_cost(&session, &model, 1, 1, Some(u64::MAX), CacheRetention::Long),
+            Err(AgentError::CostUnavailable { .. })
+        ));
+        assert!(reserve_request_cost(
+            &session, &model, 1, 1, None, CacheRetention::Long,
+        ).is_ok());
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .anthropic_compat
+            .as_mut()
+            .unwrap()
+            .allowed_fallback_models[0]
+            .cost = None;
+        assert!(matches!(
+            reserve_request_cost(&session, &model, 1, 1, Some(u64::MAX), CacheRetention::Short),
+            Err(AgentError::CostUnavailable { .. })
+        ));
+    }
+
+    #[test]
     fn tier_reservation_uses_the_declared_tariff_and_blocks_unpriced_history() {
         let mut model = octet_ai::ModelCatalog::builtin()
             .unwrap()
@@ -16581,7 +17546,8 @@ mod sustained_network_recovery_tests {
                 1_000_000,
                 1_000_000,
                 Some(base + 1),
-                Some(ServiceTier::Priority)
+                Some(ServiceTier::Priority),
+                CacheRetention::Short,
             ),
             Err(AgentError::CostLimit { .. })
         ));
@@ -16599,10 +17565,10 @@ mod sustained_network_recovery_tests {
         drop(session);
         let reopened = Session::open(path).unwrap();
         assert!(matches!(
-            reserve_request_cost(&reopened, &model, 1, 1, Some(u64::MAX)),
+            reserve_request_cost(&reopened, &model, 1, 1, Some(u64::MAX), CacheRetention::Short),
             Err(AgentError::CostUnavailable { .. })
         ));
-        assert!(reserve_request_cost(&reopened, &model, 1, 1, None).is_ok());
+        assert!(reserve_request_cost(&reopened, &model, 1, 1, None, CacheRetention::Short).is_ok());
     }
 
     #[test]
@@ -16672,9 +17638,11 @@ mod sustained_network_recovery_tests {
                                         _ => {
                                             usage.input_tokens = input / 3;
                                             usage.cache_read_tokens = input / 3;
-                                            usage.cache_write_tokens =
-                                                input - usage.input_tokens - usage.cache_read_tokens;
-                                            usage.cache_write_1h_tokens = usage.cache_write_tokens / 2;
+                                            usage.cache_write_tokens = input
+                                                - usage.input_tokens
+                                                - usage.cache_read_tokens;
+                                            usage.cache_write_1h_tokens =
+                                                usage.cache_write_tokens / 2;
                                         }
                                     }
                                     for reasoning in [0, output / 2, output] {
@@ -16695,10 +17663,13 @@ mod sustained_network_recovery_tests {
                             }
                         }
                     }
-                    assert!(
-                        worst_case_request_cost(&model, 200_001, 8192, Some(ServiceTier::Auto))
-                            .is_none()
-                    );
+                    assert!(worst_case_request_cost(
+                        &model,
+                        200_001,
+                        8192,
+                        Some(ServiceTier::Auto)
+                    )
+                    .is_none());
                 }
             }
         }
@@ -16780,6 +17751,7 @@ mod sustained_network_recovery_tests {
             output,
             Some(1_000 + priority),
             Some(ServiceTier::Priority),
+            CacheRetention::Short,
         )
         .is_ok());
         // One microdollar tighter is refused with the same reservation.
@@ -16791,6 +17763,7 @@ mod sustained_network_recovery_tests {
                 output,
                 Some(1_000 + priority - 1),
                 Some(ServiceTier::Priority),
+                CacheRetention::Short,
             ),
             Err(AgentError::CostLimit {
                 current: 1_000,
@@ -16801,14 +17774,10 @@ mod sustained_network_recovery_tests {
         // The selected tier is load-bearing: the same budget admits the
         // untiered reservation used by auxiliary operations, which is exactly
         // why a priority main request must reserve the tier-aware amount.
-        assert!(reserve_request_cost(
-            &reopened,
-            &model,
-            input,
-            output,
-            Some(1_000 + priority - 1),
-        )
-        .is_ok());
+        assert!(
+            reserve_request_cost(&reopened, &model, input, output, Some(1_000 + priority - 1), CacheRetention::Short)
+                .is_ok()
+        );
         // A cheap provider echo cannot reduce the reservation: the helper has
         // no echo input and always prices the requested tier.
         let reserved_again =
@@ -16840,6 +17809,7 @@ mod sustained_network_recovery_tests {
                 output,
                 Some(u64::MAX),
                 Some(ServiceTier::Priority),
+                CacheRetention::Short,
             ),
             Err(AgentError::CostUnavailable { .. })
         ));

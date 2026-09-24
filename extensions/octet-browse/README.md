@@ -56,7 +56,10 @@ stale identities fail closed.
 
 Connector-backed browsing is mutually exclusive with the isolated browser. The
 same owner fencing, stale-target checks, capability checks, manual-auth boundary,
-navigation/download policy, bounded results, and cleanup rules still apply.
+bounded results, and cleanup rules still apply. External actions default off and
+require a connector that installs and verifies a preventive navigation/popup/
+download boundary; selected-page URL checks after an action are not prevention.
+The isolated Chromium route policy is not inherited by external targets.
 Connector integrations must not expose credentials, cookies, storage, profile
 paths, or ambient browser discovery. See [connector registration](CONNECTORS.md)
 for the host contract and [the reference](REFERENCE.md#explicit-connectors) for

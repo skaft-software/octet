@@ -247,6 +247,91 @@ fn actual_thread_blocked_terminal_write_does_not_own_input() {
 }
 
 #[test]
+fn rapid_page_and_wheel_navigation_reuse_painted_history_after_draft_edits() {
+    for page in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 16);
+        for index in 0..120 {
+            shell.notice(format!("reader-history-{index:03}"));
+        }
+        shell.state.borrow_mut().render_threaded = true;
+        let component = ShellComponent::isolated(shell.state.clone(), false);
+        component.render(80);
+        shell.state.frame_written();
+        let maximum = {
+            let state = shell.state.borrow();
+            let geometry = state.retained_render_geometry().expect("painted history");
+            super::super::max_scroll_for_available(
+                geometry.total_rows,
+                geometry.viewport_available,
+            )
+        };
+        assert!(maximum > 50);
+
+        // The draft changes after the paint, then many navigation events arrive
+        // before another frame. Neither action changes transcript row geometry.
+        shell.apply_edit(EditAction::Paste("typed while reading".into()));
+        for _ in 0..maximum.saturating_add(1) {
+            if page {
+                shell.scroll(-1);
+            } else {
+                shell.scroll_lines(-1);
+            }
+        }
+        let state = shell.state.borrow();
+        assert_eq!(state.scroll_from_bottom.get(), maximum);
+        assert!(
+            state.viewport_anchor.get().is_some(),
+            "history must be anchored before the next paint"
+        );
+        assert!(!state.follow_tail);
+    }
+}
+
+#[test]
+fn page_up_before_next_paint_anchors_an_offscreen_reader_through_new_output() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 16);
+    for index in 0..120 {
+        shell.notice(format!("reader-history-{index:03}"));
+    }
+    shell.state.borrow_mut().render_threaded = true;
+    let component = ShellComponent::isolated(shell.state.clone(), false);
+    component.render(80);
+    shell.state.frame_written();
+
+    shell.scroll(-1);
+    let (row, expected) = {
+        let state = shell.state.borrow();
+        let anchor = state
+            .viewport_anchor
+            .get()
+            .expect("page navigation has an anchor");
+        assert_eq!(
+            anchor.block_hint,
+            usize::MAX,
+            "the first page is outside the painted window"
+        );
+        let row = anchor.fallback_visual_row;
+        let expected = state.rendered_transcript(80)[row].clone();
+        (row, expected)
+    };
+    shell.notice("new output before the next frame");
+    let update = component.render_update(80).unwrap();
+    assert_eq!(
+        sexy_tui_rs::strip_terminal_sequences(&update.replacement[0]),
+        sexy_tui_rs::strip_terminal_sequences(&expected),
+        "unpainted PageUp must not snap to the tail when output arrives at row {row}"
+    );
+    shell.state.frame_written();
+    assert_ne!(
+        shell.state.borrow().viewport_anchor.get().unwrap().block_hint,
+        usize::MAX,
+        "the first rendered viewport upgrades its visual fallback to a semantic anchor"
+    );
+}
+
+#[test]
 fn stale_layout_cannot_overwrite_new_viewport_intent() {
     let state = SharedState::new(ShellState {
         theme: crate::tui::theme::test_theme(),

@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionDraftStore } from "../drafts";
 import { fixtureBootstrap, fixtureSessions } from "../fixtures";
+import { registerGlobalShortcuts } from "../shortcuts";
 import type {
   CommandDiscovery,
   CompletionReview,
@@ -2169,6 +2170,59 @@ describe("conversation composer", () => {
       screen.queryByRole("dialog", { name: "Preview photo.png" }),
     ).toBeNull();
     await waitFor(() => expect(thumbnail).toHaveFocus());
+  });
+
+  it("dismisses an image with Escape without also interrupting the active run", async () => {
+    const user = userEvent.setup();
+    const session = structuredClone(fixtureSessions["session-live"]!);
+    session.items.push({
+      id: "image-message",
+      turnId: "image-turn",
+      kind: "user_message",
+      content: "Use this image.",
+      attachments: [{
+        id: "image-ref",
+        handle: "image-handle",
+        name: "photo.png",
+        mediaType: "image/png",
+        size: 4,
+      }],
+      state: "committed",
+      createdAt: new Date().toISOString(),
+    });
+    const onInterrupt = vi.fn().mockResolvedValue(undefined);
+    const unregister = registerGlobalShortcuts({
+      onAction: (action) => {
+        if (action === "close-overlay") void onInterrupt();
+      },
+    });
+    try {
+      render(
+        <Conversation
+          session={session}
+          bootstrap={structuredClone(fixtureBootstrap)}
+          onSubmit={noOp}
+          onInterrupt={onInterrupt}
+          onConfigure={noOp}
+          onResolveApproval={noOp}
+          onResolveUserInput={noOp}
+          onOpenOutput={() => {}}
+          onOpenSource={() => {}}
+          attachmentContentUrl={() => "/photo.png"}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "View attached image 1" }));
+      expect(screen.getByRole("dialog", { name: "Preview photo.png" })).toBeVisible();
+      await user.keyboard("{Escape}");
+      expect(screen.queryByRole("dialog", { name: "Preview photo.png" })).toBeNull();
+      expect(onInterrupt).not.toHaveBeenCalled();
+
+      // Once the viewer is gone, the same global Escape binding remains usable.
+      await user.keyboard("{Escape}");
+      expect(onInterrupt).toHaveBeenCalledOnce();
+    } finally {
+      unregister();
+    }
   });
 
   it("renders transcript file metadata for common file types", () => {

@@ -36,10 +36,38 @@ EXPECTED_NORMALIZED="$(printf '%s' "$EXPECTED" | tr '[:upper:]' '[:lower:]')"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ARTIFACT/Contents/Info.plist")"
 CURRENT="0"
-if [[ -f "$TARGET/Contents/Info.plist" ]]; then
-  CURRENT="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$TARGET/Contents/Info.plist" 2>/dev/null || echo 0)"
+if [[ -e "$TARGET" ]]; then
+  [[ -f "$TARGET/Contents/Info.plist" ]] || { echo "installed app has no Info.plist" >&2; exit 65; }
+  CURRENT="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$TARGET/Contents/Info.plist")"
 fi
-[[ "$VERSION" != "$CURRENT" ]] || { echo "artifact version is already installed" >&2; exit 75; }
+# CFBundleVersion consists of up to three numeric components. Compare their
+# decimal strings, not machine integers (build timestamps can exceed shell limits).
+VERSION_PATTERN='^[0-9]+(\.[0-9]+){0,2}$'
+[[ "$VERSION" =~ $VERSION_PATTERN && "$CURRENT" =~ $VERSION_PATTERN ]] || {
+  echo "invalid artifact or installed app version" >&2
+  exit 65
+}
+IFS=. read -r -a nextParts <<< "$VERSION"
+IFS=. read -r -a currentParts <<< "$CURRENT"
+comparison=0
+for index in 0 1 2; do
+  next="${nextParts[index]:-0}"
+  installed="${currentParts[index]:-0}"
+  next="${next#"${next%%[!0]*}"}"
+  installed="${installed#"${installed%%[!0]*}"}"
+  next="${next:-0}"
+  installed="${installed:-0}"
+  if (( ${#next} > ${#installed} )) || { [[ ${#next} -eq ${#installed} ]] && [[ "$next" > "$installed" ]]; }; then
+    comparison=1
+    break
+  fi
+  if [[ "$next" != "$installed" ]]; then
+    comparison=-1
+    break
+  fi
+done
+[[ "$comparison" -ne 0 ]] || { echo "artifact version is already installed" >&2; exit 75; }
+[[ "$comparison" -gt 0 ]] || { echo "refusing to downgrade from $CURRENT to $VERSION" >&2; exit 75; }
 
 PARENT="$(dirname "$TARGET")"
 STAGING="$(mktemp -d "$PARENT/.octet-update.XXXXXX")"

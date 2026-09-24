@@ -57,16 +57,21 @@ identity. Setup/selection panels and actionable errors keep their normal owners;
 quiet startup does not suppress cancellation or shutdown diagnostics.
 
 The working directory appears only in the footer, not again in the splash.
-The splash keeps its byte-aligned spacing, model identity, permissions, and
-release hints.
+The splash keeps its byte-aligned spacing, version, changelog/update hints,
+permissions, and exit help. Its normal compiled-default mark occupies 16×4
+cells with eight contiguous columns and the `01101111` silhouette. The footer,
+not the splash, owns the current model/reasoning row. Full access is a
+warning-class permission mode, not an ordinary failure.
 
 The eight-bar byte mark retains its model-blended gradient and finite colour
 sweep on true-colour terminals. ANSI256 and ANSI16 instead use one
 background-balanced model accent uniformly across all bars, without brightening
 animation. With no model accent, the theme's model accent is used. Explicit
 custom splash colours keep precedence; no-colour output uses terminal-default
-foreground. Geometry and the terminal background are unchanged. User-customized
-ANSI16 palettes can still affect actual contrast.
+foreground. Custom-theme fallback geometry remains unchanged; short compiled
+cards prioritize update and permission state over the changelog hint. The
+terminal background remains unchanged. User-customized ANSI16 palettes can
+still affect actual contrast.
 
 Interactive startup performs one best-effort newer-stable-release check outside
 the input and renderer loops, skipped in offline mode and cancelled on exit.
@@ -186,39 +191,26 @@ same title/purpose/status/footer vocabulary as ordinary pickers. They occupy a
 temporary viewport surface rather than transcript history, start at their first
 semantic body row, and support Up/Down, PageUp/PageDown, Home, and End scrolling;
 Escape or Left returns to the composer.
-Generic presentation snapshots do not create persistent chrome. The first-party
-`octet-subagents` observation surface is the bounded exception: the host renders
-its owner-fenced `subagent` roster as a pinned bottom-chrome strip above the
-composer while any retained worker is active. Visibility is independent of the
-root run's activity and `follow_tail`; workers can outlive a root turn. Once all
-workers settle, the strip disappears, but telemetry remains retained for
-inspection and accounting through the existing `/subagents` surface. No synthetic
-`Subagents` `ToolPanel` or roster semantic-copy event is created. Failed/stopped
-states (including `timed_out`, `interrupted`, and `awaiting_approval`) and their
-reasons remain inspectable through `/subagents` after the strip hides. State or
-reason transitions, repeated snapshots, and metric-only updates append no
-transcript notices. Raw first-party orchestration calls and results, including
-actual and semantic errors, remain hidden during live execution and hydration.
-This is presentation-only: authoritative outcomes, model-visible tool errors,
-durable results, accounting, ordinary tool/run failures, and approval prompts
-retain their existing owners. Settlement hides the strip without a new notice.
-
-The strip reuses the existing grouped worker rows, counts, and disclosure, with
-task name, lifecycle, full model identity, and width-eligible metrics. Transient
-child-tool names stay in the inspector. Host telemetry, including tool-call
-counts, remains current without dirtying transcript rows; wide grids label that
-metric `tools`, never `turns`. Native `DelegationUpdated` events feed this view
-directly; it does not poll the extension's slash command.
-
-The strip occupies at most `floor(terminal height / 3)` rows, further bounded by
-available space after other chrome with one history row reserved. This cap also
-applies under expanded disclosure; an omission row points to `/subagents` for the
-complete retained roster. Focused panels may suppress the strip. App-owned
-PageUp/history navigation keeps it visible above the composer even away from the
-live tail. Native terminal scrollback cannot overlay application chrome: octet
-cannot pin the strip over terminal-owned saved lines or observe the native scroll
-offset. Historical aggregate outcome transitions may still require replay; live
-roster metrics alone do not.
+Generic presentation snapshots do not create persistent chrome. First-party
+subagent orchestration is projected as one tool-like transcript block while a
+worker is active: a bold count heading and at most four indented live child
+lines (task, phase/current tool, latest provider-reported tokens), plus a
+bounded overflow count. Its marker blinks on the ordinary event cadence;
+parent messages and results arriving later appear above this mutable tail.
+Tool/phase and reported-token updates change only the live block; cost-only
+updates do not. Usage is reported at turn boundaries, not token-by-token.
+When the roster settles, child lines disappear and the heading remains at its
+completion position: all success is green, all failure is red, mixed results
+are yellow. A later prompt does not replay the old roster. The
+`/subagents` panel retains full worker identities, states, reasons, usage,
+ordering and read-only child transcripts on demand. Raw first-party
+orchestration calls/results and their arguments stay hidden during execution
+and session hydration; restored call/result pairs yield a neutral “activity
+recorded” row rather than claiming a child completed without worker telemetry.
+Only a proven failed orchestration result gets failure colouring. Child costs
+remain in host accounting, not semantic copy. No pinned composer strip or
+duplicate per-worker transcript notices are created. Ordinary tool/run failures,
+durable provider-visible results, and approvals keep their existing owners.
 
 Live child cost is added to the host-owned cumulative footer only until root
 settlement persists matching `delegated_agent` usage records; idle rendering
@@ -258,16 +250,21 @@ or changing draft content never recolours or animates them. Content rows carry
 no side borders, so copied prompt text cannot include frame characters. Composer
 height starts at one row and scales proportionally within a terminal-height cap.
 
-Each submitted prompt persists its model-lab colour and paints both its marker
-and full card background with that provenance. Switching models cannot recolour
-historical prompts; it only recolours the composer and prompts submitted after
-the switch. Wrapped and explicit continuation rows keep the same card background
-with a blank primary-text gutter instead of a vertical rail. Fenced Markdown
+Each submitted prompt persists its model-lab colour. The compiled default
+uses it for the marker and content-hugging highlights on each wrapped text line,
+including attachment labels; inline Markdown emphasis, code and links retain
+their own styling within the highlight. The gutter, blank spacing, and
+trailing cells keep the terminal canvas. Switching models cannot recolour historical prompts: it
+only recolours the composer and future prompts. Custom cards/rails retain their
+configured full-cell treatment. Fenced Markdown
 code is borderless and uses the compiled default's terminal-adaptive shading.
 Default tool/shell surfaces reserve a two-cell right gutter, reduced in tiny
 panes, before wrapping headers and nested output. Their source and copy text are
 unchanged; custom surfaces retain their configured geometry.
-The unknown-profile fallback remains unpainted.
+The unknown-profile fallback remains unpainted. Assistant prose and submitted
+prompts use the available width after the gutter, including list/quote
+indentation; technical blocks retain viewport width. Static and streaming
+layouts share the same policy.
 
 ## Streaming presentation stability
 
@@ -305,9 +302,10 @@ arbitrary text cannot alter the decision set.
 
 Every accepted run opens a `Working` row immediately. After the provider emits
 an actual reasoning delta, collapsed reasoning uses a fixed bold `Thinking`
-header with the same model-adaptive shimmer as `Working`. The aligned detail row
-contains the latest semantic ATX or standalone-bold heading followed by a plain,
-subdued `Ctrl+O` hint; when no heading exists it contains only the hint. Ordinary
+header with the same model-adaptive shimmer as `Working`. A real semantic ATX
+or standalone-bold heading occupies the aligned detail row with a subdued
+`Ctrl+O` hint. Without a heading, the compiled default puts the hint on the
+activity row when it fits, retaining a detail row on narrow terminals. Ordinary
 body prose is never inferred as a label, and provider text is sanitized before
 display. The shimmer uses a monotonic 80 ms clock on the renderer thread,
 independent of semantic-event frequency. Late frames select the current phase
@@ -364,8 +362,9 @@ and failed tools use red. Raw protocol arguments and envelopes, unsanitized
 failure evidence, and extension-rendered payloads remain internal
 accountability/provenance data
 and are excluded from transcript copy. For operational feedback, the TUI renders
-bounded sanitized projections: search results and Bash/local-shell output use a
-muted tail, while edit/write results use a bounded unified diff. A collapsed
+bounded sanitized projections: search results use a muted tail, while retained
+Bash/local-shell output uses a secondary readable foreground and edit/write
+results use a bounded unified diff. A collapsed
 failure retains one bounded actionable reason or explicit hidden-output count;
 complete captured failure output stays available through global disclosure.
 Omission metadata distinguishes a collapsible UI tail from bytes already
@@ -377,9 +376,12 @@ value column fixed. A muted vertical `│` joins
 each wrapped header row to the single `└` that begins its nested output, making
 the output's ownership visible without adding another indentation level.
 
-Terse Bash tool headers retain the first three rendered command lines and then
-show an exact hidden-command-line count. Wrapping and explicit newlines share
-that visual budget; the stored and executed command is not truncated. The
+Terse compiled-default Bash headers retain two command-preview rows, wrapping
+at whitespace where possible and hard-wrapping oversized graphemes by terminal
+cell width; file themes retain their prior three-row limit. An exact hidden-row
+count follows. The full command remains available through disclosure and semantic
+copy. Retained output uses concise UI-collapse counts distinct from irrecoverable
+capture-byte loss. The
 command preview is independent of the output-tail budget.
 
 Ctrl+O toggles the global disclosure mode for retained reasoning, compaction,

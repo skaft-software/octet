@@ -35,6 +35,8 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 const MAX_CONNECT_ATTEMPTS_FOR_TEST: usize = 6;
+const ONE_PIXEL_PNG: &[u8] =
+    include_bytes!("../../octet-coding-agent/tests/fixtures/export_html/one-pixel.png");
 
 // ── Scripted SSE bodies (Anthropic Messages wire shapes) ───────────────────
 
@@ -2891,7 +2893,7 @@ async fn openai_compatible_agent_sends_inline_image_end_to_end() {
     let input = UserInput::from(vec![
         InputPart::Text("describe this image".into()),
         InputPart::Media(Media::image_bytes(
-            bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\n"),
+            bytes::Bytes::from_static(ONE_PIXEL_PNG),
             "image/png".parse().unwrap(),
         )),
     ]);
@@ -2911,7 +2913,7 @@ async fn openai_compatible_agent_sends_inline_image_end_to_end() {
     assert_eq!(content[1]["type"], "image_url");
     assert_eq!(
         content[1]["image_url"]["url"],
-        "data:image/png;base64,iVBORw0KGgo="
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
     );
     assert!(matches!(
         &agent.session().context().unwrap()[0],
@@ -3433,7 +3435,7 @@ async fn prompt_with_media_persists_media_user_part() {
     let input = UserInput::from(vec![
         InputPart::Text("what is in this image?".into()),
         InputPart::Media(Media::image_bytes(
-            bytes::Bytes::from_static(&[0x89, 0x50, 0x4e, 0x47]),
+            bytes::Bytes::from_static(ONE_PIXEL_PNG),
             "image/png".parse().unwrap(),
         )),
     ]);

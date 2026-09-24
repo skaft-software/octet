@@ -1212,13 +1212,15 @@ pub(crate) fn build_request(
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "chat/completions")?;
 
     let mut headers = http::HeaderMap::new();
-    let affinity_format = model.spec.cache.send_session_affinity_headers.then_some(
-        model
-            .spec
-            .cache
-            .session_affinity_format
-            .unwrap_or(crate::types::SessionAffinityFormat::OpenAi),
-    );
+    let affinity_format = (model.spec.cache.send_session_affinity_headers
+        && !crate::protocol::is_opencode_session_route(model))
+        .then_some(
+            model
+                .spec
+                .cache
+                .session_affinity_format
+                .unwrap_or(crate::types::SessionAffinityFormat::OpenAi),
+        );
     if let (Some(format), Some(session_id)) = (affinity_format, cache_session_id(&req)) {
         let value = http::HeaderValue::from_str(session_id)
             .map_err(|_| ConfigError::InvalidHeader("session affinity".into()))?;
@@ -1250,6 +1252,7 @@ pub(crate) fn build_request(
             crate::types::SessionAffinityFormat::Codex => {}
         }
     }
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -4290,6 +4293,77 @@ mod tests {
             serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
         assert!(body.get("prompt_cache_key").is_none());
         assert!(body.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn opencode_chat_session_header_is_independent_of_cache_retention() {
+        let mut model = make_test_model(false, false, false, false, false, false);
+        Arc::make_mut(&mut model.spec)
+            .cache
+            .send_session_affinity_headers = true;
+        Arc::make_mut(&mut model.endpoint).id = EndpointId("opencode-go".into());
+        let mut req = Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("hello".into())],
+            })],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::None,
+            session_id: Some("zen-session".into()),
+        };
+        for retention in [
+            crate::types::CacheRetention::None,
+            crate::types::CacheRetention::Short,
+        ] {
+            req.cache_retention = retention;
+            let parts = build_request(&model, &req).unwrap();
+            assert_eq!(parts.headers["x-opencode-session"], "zen-session");
+            assert!(parts.headers.get("session_id").is_none());
+            assert!(parts.headers.get("x-session-affinity").is_none());
+        }
+        req.session_id = None;
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+
+        req.session_id = Some("zen-session".into());
+        Arc::make_mut(&mut model.endpoint).id = EndpointId("opencode".into());
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(parts.headers["x-opencode-session"], "zen-session");
+        Arc::make_mut(&mut model.endpoint)
+            .default_headers
+            .insert("x-opencode-session", "caller-session".parse().unwrap());
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+        Arc::make_mut(&mut model.endpoint)
+            .default_headers
+            .remove("x-opencode-session");
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .headers
+            .insert("X-OpenCode-Session".into(), "preset-session".into());
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .headers
+            .remove("X-OpenCode-Session");
+        Arc::make_mut(&mut model.endpoint).id = EndpointId("baseten".into());
+        req.cache_retention = crate::types::CacheRetention::Short;
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(parts.headers["session_id"], "zen-session");
+        assert_eq!(parts.headers["x-session-affinity"], "zen-session");
+        assert!(parts.headers.get("x-opencode-session").is_none());
     }
 
     #[test]

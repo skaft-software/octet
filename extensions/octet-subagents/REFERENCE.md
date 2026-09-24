@@ -295,7 +295,10 @@ cross-process ownership transfer.
 
 ## Lifecycle and restart behavior
 
-Worker states are authoritative projections of `agent/list`/`agent/wait`:
+Worker states are authoritative projections of `agent/list`/`agent/wait`.
+Host list/wait observations and their reconciliation are serialized per parent
+owner; a delayed older response cannot overwrite a newer terminal snapshot.
+Other owners can still refresh independently:
 
 - `pending` → `queued`;
 - `running` → `running` (temporarily `waiting` during a wait call);

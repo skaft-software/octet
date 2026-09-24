@@ -45,6 +45,7 @@ pub mod error;
 pub mod faux;
 pub mod host_transport;mod json_repair;
 pub mod images;
+pub mod media;
 pub mod model_metadata;
 pub mod pricing;
 pub mod responses;
@@ -102,6 +103,7 @@ pub use images::{
     MAX_GENERATED_IMAGE_BYTES, MAX_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUTS, MAX_IMAGE_PROMPT_BYTES,
     OPENROUTER_API_KEY_VAR, OPENROUTER_IMAGES_API,
 };
+pub use media::{prepare_user_image, ImageInputError, ImageInputLimits, MAX_USER_IMAGE_BYTES, MAX_USER_IMAGE_PIXELS};
 pub use mime::Mime;
 pub use pricing::{
     responses_cost_of, Cost, Pricing, PricingTier, TokenRate, PICODOLLARS_PER_MICRODOLLAR,

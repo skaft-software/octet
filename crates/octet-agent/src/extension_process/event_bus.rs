@@ -490,8 +490,32 @@ impl ExtensionEventBus {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn dispatch(
         &self,
+        reader: &ProtocolReadState,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, api_v03::ContractError> {
+        let mut state = lock_std_mutex(&self.inner);
+        Self::dispatch_locked(&mut state, reader, method, params)
+    }
+
+    /// Keep a subscription mutation and its ACK in the same writer order as
+    /// concurrent publications. Otherwise an event can precede the active ACK.
+    pub(super) fn dispatch_and_reply(
+        &self,
+        reader: &ProtocolReadState,
+        method: &str,
+        params: serde_json::Value,
+        reply: impl FnOnce(Result<serde_json::Value, api_v03::ContractError>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut state = lock_std_mutex(&self.inner);
+        reply(Self::dispatch_locked(&mut state, reader, method, params))
+    }
+
+    fn dispatch_locked(
+        state: &mut BusState,
         reader: &ProtocolReadState,
         method: &str,
         params: serde_json::Value,
@@ -499,7 +523,6 @@ impl ExtensionEventBus {
         if reader.closed.load(Ordering::Acquire) || reader.draining.load(Ordering::Acquire) {
             return Err(denied());
         }
-        let mut state = lock_std_mutex(&self.inner);
         let key = (reader.instance_id.clone(), reader.generation);
         // Validate the child-captured incarnation under the mutation lock. Even
         // bytes buffered before reset but read after a new declaration refuse.
@@ -847,6 +870,50 @@ mod tests {
             json!({"binding_id":binding,"topic":"bus.alpha.status"}),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn subscribe_ack_precedes_concurrent_event_on_the_same_writer() {
+        let bus = ExtensionEventBus::default();
+        let alpha = attached(&bus, "alpha", 8);
+        let mut beta = attached(&bus, "beta", 8);
+        declare(&bus, &alpha.reader);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let subscriber_bus = &bus;
+            let reader = &beta.reader;
+            scope.spawn(move || {
+                subscriber_bus.dispatch_and_reply(
+                    reader,
+                    "bus/subscribe",
+                    json!({"binding_id":binding(subscriber_bus),"topic":"bus.alpha.status"}),
+                    |result| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                        queue_writer_value(
+                            &reader.writer,
+                            &reader.frame_limit,
+                            json!({"jsonrpc":"2.0","id":"subscription","result":result.unwrap()}),
+                        )
+                    },
+                )
+                .unwrap();
+            });
+            entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let publisher = scope.spawn(|| publish(&bus, &alpha.reader).unwrap());
+            assert!(beta.frames.try_recv().is_err(), "no event can pass the unqueued ACK");
+            release_tx.send(()).unwrap();
+            publisher.join().unwrap();
+        });
+        let ack = beta.frames.try_recv().expect("queued subscription ACK");
+        let ack: serde_json::Value = serde_json::from_slice(&ack.line).unwrap();
+        assert_eq!(ack["id"], "subscription");
+        assert_eq!(ack["result"]["state"], "active");
+        let event = beta.expect_data();
+        let event: serde_json::Value = serde_json::from_slice(&event.line).unwrap();
+        assert_eq!(event["method"], "bus/event");
+        assert_eq!(event["params"]["sequence"], 1);
     }
 
     #[test]

@@ -454,8 +454,116 @@ pub(crate) fn declared_endpoint_ids(declaration: &ProviderDeclaration) -> HashSe
 mod tests {
     use super::*;
     use crate::providers::contract::{
-        CLOUDFLARE_AI_GATEWAY, CLOUDFLARE_WORKERS_AI, MINIMAX, MISTRAL, OPENCODE, OPENCODE_GO,
+        CLOUDFLARE_AI_GATEWAY, CLOUDFLARE_WORKERS_AI, META, MINIMAX, MISTRAL, OPENAI, OPENCODE,
+        OPENCODE_GO,
     };
+
+    #[test]
+    fn discovered_gpt6_cache_mode_is_qualified_by_exact_public_route() {
+        let mut catalog = ModelCatalog::default();
+        let credential = EnvironmentCredential::for_test("OPENAI_API_KEY", "fixture-key");
+        for provider in [&OPENAI, &OPENCODE] {
+            register_environment_endpoints(
+                &mut catalog,
+                provider,
+                &credential,
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6-unverified"] {
+                register_discovered_model(
+                    &mut catalog,
+                    provider,
+                    id,
+                    None,
+                    Capabilities {
+                        input_modalities: ModalitySet::none(),
+                        output_modalities: ModalitySet::none(),
+                        tools: false,
+                        parallel_tool_calls: false,
+                        reasoning: None,
+                        responses_lite: false,
+                        agent_delegation: None,
+                        structured_output: false,
+                        deferred_tool_loading: false,
+                        responses_features: Default::default(),
+                    },
+                    ModelLimits {
+                        context_window: 128_000,
+                        max_output_tokens: 16_000,
+                    },
+                    None,
+                )
+                .unwrap();
+                let model = catalog
+                    .resolve(&ModelId(format!("{}/{id}", provider.id)))
+                    .unwrap();
+                assert_eq!(
+                    model.spec.cache.supports_explicit_prompt_cache_mode,
+                    provider.id == "openai" && id != "gpt-6-unverified",
+                    "{}/{id}",
+                    provider.id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn meta_registers_only_discovered_bounded_metadata_without_borrowed_pricing() {
+        let mut catalog = ModelCatalog::default();
+        let credential = EnvironmentCredential::for_test("META_API_KEY", "fixture-meta-key");
+        register_environment_endpoints(&mut catalog, &META, &credential, Duration::from_secs(1))
+            .unwrap();
+        register_static_models(&mut catalog, &META).unwrap();
+        assert_eq!(
+            catalog.models().count(),
+            0,
+            "no static subscription inventory"
+        );
+
+        let conservative = Capabilities {
+            input_modalities: ModalitySet::none(),
+            output_modalities: ModalitySet::none(),
+            tools: false,
+            parallel_tool_calls: false,
+            reasoning: None,
+            responses_lite: false,
+            agent_delegation: None,
+            structured_output: false,
+            deferred_tool_loading: false,
+            responses_features: Default::default(),
+        };
+        register_discovered_model(
+            &mut catalog,
+            &META,
+            "muse-spark-1.3",
+            Some("Muse Spark 1.3".into()),
+            conservative,
+            ModelLimits {
+                context_window: 128_000,
+                max_output_tokens: 32_768,
+            },
+            None,
+        )
+        .unwrap();
+        let model = catalog
+            .resolve(&ModelId("meta/muse-spark-1.3".into()))
+            .unwrap();
+        assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+        assert_eq!(model.spec.api_name, "muse-spark-1.3");
+        assert_eq!(model.endpoint.id.0, "meta");
+        assert_eq!(model.spec.limits.context_window, 128_000);
+        assert_eq!(model.spec.limits.max_output_tokens, 32_768);
+        assert!(!model.spec.capabilities.tools);
+        assert!(!model.spec.capabilities.structured_output);
+        assert!(model.spec.capabilities.reasoning.is_none());
+        assert!(!model
+            .spec
+            .capabilities
+            .input_modalities
+            .contains(octet_ai::Modality::Image));
+        assert!(model.spec.pricing.is_none());
+    }
 
     #[test]
     fn static_models_use_only_generated_route_endpoints() {

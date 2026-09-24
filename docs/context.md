@@ -107,6 +107,17 @@ schema set over that limit is refused before provider I/O rather than having
 individual tools omitted or rewritten. A zero budget permits only an empty tool
 set.
 
+The local [octet-snap-compact extension](../extensions/octet-snap-compact/README.md)
+can replace the parent-model summary call with deterministic PNG frames when
+explicitly enabled and the active model accepts images. Its checkpoint retains
+the source text for later re-compaction, but vision-model context receives the
+frames rather than that text. Text-only routes use the normal summarizer until
+a bitmap checkpoint exists; such a checkpoint requires switching back to a
+vision route before continuing. Rendering is capped at 120 seconds across all
+source chunks and frame validation; timeout, cancellation, and image context
+limits fail closed without discarding history. Successive source sections retain
+explicit boundaries. This does not change `native-responses` mode.
+
 `native-responses` instead uses provider-native opaque compaction without showing
 the payload in the transcript. It requires the active OpenAI Responses endpoint
 and model and never falls back to a Chat/Anthropic summary. Native route-affine

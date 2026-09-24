@@ -83,6 +83,7 @@ pub(crate) fn build_request(
         http::header::ACCEPT,
         http::HeaderValue::from_static("text/event-stream"),
     );
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -1110,7 +1111,7 @@ mod tests {
 
     #[test]
     fn maps_structured_output_to_native_json_schema() {
-        let request = Request {
+        let mut request = Request {
             messages: Vec::new(),
             system: None,
             tools: Vec::new(),
@@ -1142,6 +1143,21 @@ mod tests {
             body["generationConfig"]["responseJsonSchema"]["type"],
             "object"
         );
+
+        let mut zen = model();
+        std::sync::Arc::make_mut(&mut zen.spec)
+            .cache
+            .send_session_affinity_headers = true;
+        std::sync::Arc::make_mut(&mut zen.endpoint).id = EndpointId("opencode-google".into());
+        request.cache_retention = crate::types::CacheRetention::None;
+        request.session_id = Some("zen-session".into());
+        assert_eq!(
+            build_request(&zen, &request).unwrap().headers["x-opencode-session"],
+            "zen-session"
+        );
+        request.session_id = None;
+        let parts = build_request(&zen, &request).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
     }
 
     #[test]

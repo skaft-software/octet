@@ -751,17 +751,27 @@ fn selected_route_trace_brackets_inventory_after_the_cheap_base_phase() {
             .env("OCTET_STARTUP_TRACE", "1")
             .env("AWS_EC2_METADATA_DISABLED", "true");
         let output = capture_command(command);
-        assert!(!output.status.success(), "an unconfigured route must not run");
-        let phases: Vec<_> = output.stderr.lines()
+        assert!(
+            !output.status.success(),
+            "an unconfigured route must not run"
+        );
+        let phases: Vec<_> = output
+            .stderr
+            .lines()
             .filter_map(|line| line.strip_prefix("octet-startup: "))
             .filter_map(|line| line.split_whitespace().next())
             .take_while(|phase| *phase != "catalog.fallback")
             .collect();
-        let expected = if selected_inventory {
-            vec!["catalog.base", "catalog.selected", "catalog.codex", "catalog.copilot"]
-        } else {
-            vec!["catalog.base", "catalog.codex", "catalog.copilot"]
-        };
+        let mut expected = vec![
+            "process.enter",
+            "cli.configured",
+            "selection.resolved",
+            "catalog.base",
+        ];
+        if selected_inventory {
+            expected.push("catalog.selected");
+        }
+        expected.extend(["catalog.codex", "catalog.copilot"]);
         assert_eq!(phases, expected, "{}", output.stderr);
         assert_no_prompt(&output);
         assert_secret_free(&output);

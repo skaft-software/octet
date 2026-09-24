@@ -199,12 +199,15 @@ fn ignored_config_path(path: &serde_ignored::Path<'_>, segments: &mut Vec<String
     }
 }
 
-fn config_key_location(source: &str, segments: &[String]) -> (usize, usize) {
-    let offset = toml_edit::ImDocument::parse(source.to_owned())
-        .ok()
-        .and_then(|document| {
+fn config_key_location(
+    source: &str,
+    table: Option<&toml_edit::Table>,
+    segments: &[String],
+) -> (usize, usize) {
+    let offset = table
+        .and_then(|table| {
             let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
-            table_key_offset(document.as_table(), &segments)
+            table_key_offset(table, &segments)
         })
         .unwrap_or(0);
     let prefix = &source[..offset.min(source.len())];
@@ -284,10 +287,20 @@ pub(super) fn read_layer(
     });
     unknown_keys.sort();
     unknown_keys.dedup();
+    // Preserve the existing (1, 1) fallback when the location parser cannot
+    // represent a key, without reparsing the whole file for every unknown key.
+    let location_document = if unknown_keys.is_empty() {
+        None
+    } else {
+        toml_edit::ImDocument::parse(source.as_str()).ok()
+    };
+    let location_table = location_document
+        .as_ref()
+        .map(|document| document.as_table());
     let diagnostics = unknown_keys
         .into_iter()
         .map(|segments| {
-            let (line, column) = config_key_location(&source, &segments);
+            let (line, column) = config_key_location(&source, location_table, &segments);
             let key = segments.join(".");
             ConfigDiagnostic {
                 source_kind,
@@ -463,6 +476,34 @@ mod tests {
         std::fs::write(&target, "model = 'known'\n").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(read_layer(&link, ConfigSourceKind::Global).is_err());
+    }
+
+    #[test]
+    fn many_unknown_keys_keep_their_individual_locations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("global.toml");
+        let mut source = "# café\nmodel = 'known'\n".to_owned();
+        for index in 0..160 {
+            source.push_str(&format!("  unknown_{index:03} = {index}\n"));
+        }
+        source.push_str("compaction = { mode = 'local', keep_recent_turn = 2 }\n");
+        std::fs::write(&path, source).unwrap();
+
+        let loaded = read_layer(&path, ConfigSourceKind::Global).unwrap();
+        assert_eq!(loaded.values.model.as_deref(), Some("known"));
+        assert_eq!(loaded.diagnostics.len(), 161);
+        for index in 0..160 {
+            let diagnostic = &loaded.diagnostics[index + 1];
+            assert_eq!(diagnostic.key, format!("unknown_{index:03}"));
+            assert_eq!((diagnostic.line, diagnostic.column), (index + 3, 3));
+        }
+        let inline = &loaded.diagnostics[0];
+        assert_eq!(inline.key, "compaction.keep_recent_turn");
+        assert_eq!((inline.line, inline.column), (163, 32));
+        assert_eq!(
+            config_key_location("missing = 1", None, &["missing".into()]),
+            (1, 1)
+        );
     }
 
     #[test]

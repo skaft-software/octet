@@ -53,6 +53,14 @@ def release_exact(target, owner):
 def stop_exact(target, owner):
     owned_bridge.stop_exact(target.selection, owner)
 
+
+def enforce_boundary(target, owner):
+    # The host bridge must install/verify preventive interception for the exact
+    # target BEFORE actions: scripted redirects, popups (including about:blank
+    # and window.open), and downloads. This is not a post-action URL check.
+    return owned_bridge.enforce_boundary(target.selection, target.page, owner)
+
+
 connector = PlaywrightConnector(
     "owned-bridge",
     browser="chromium",
@@ -61,6 +69,7 @@ connector = PlaywrightConnector(
     verify_target=verify_exact,
     release=release_exact,
     stop=stop_exact,
+    enforce_boundary=enforce_boundary,
     capabilities={
         "snapshot": True,
         "click": True,
@@ -104,6 +113,21 @@ happen before confirmation and before the browser call:
   `tab_close` gate their corresponding operations.
 - `window_resize`, `cookies`, and `storage` are recognized as unsupported
   Browse surfaces and must not be enabled as a way around policy.
+
+Only `snapshot` and `screenshot` default on for supported external targets.
+`click`, `type`, `press`, `scroll`, `wait`, `navigation`, `tab_close`, `new_tab`,
+and `popup` are action capabilities and default **off**. Even an explicit `true`
+is disabled unless the connector supplies `enforce_boundary(target, owner)`. It
+must return exactly `True` only while a preventive guard is active for this
+selected target. Browse calls it on selection and before each action; a failure
+rejects the operation. The integration must intercept each top-level navigation,
+scripted redirect and popup creation (including blank/script-created popups),
+and cancel downloads before they start, without routing or changing unrelated
+tabs. Page URL checks after a click, popup events after creation, and a download
+listener after the download starts are **not** substitutes. If the bridge cannot
+provide this boundary, leave actions disabled; the callback cannot make an
+unsafe bridge safe by merely claiming success. The default isolated Chromium
+context retains its own route and download policy and is unaffected.
 
 The `type` capability does not permit automated authentication. Browse still
 refuses credential-like fields and never returns the supplied value. Click and
@@ -164,9 +188,10 @@ A safe complete native connector first needs all of the following:
    pre-navigation/redirect/popup HTTP(S) enforcement; download cancellation; and
    conservative viewport screenshot refusal around possible sensitive values.
    Native APIs that cannot enforce a boundary must leave that capability disabled.
-   The existing external selection path only installs a download listener; the
-   isolated context's route interception is not automatically transferred to a
-   native connector. Post-navigation URL inspection alone is not prevention.
+      External selection requires a connector-enforced preventive boundary for
+   every action capability; the isolated context's route interception is not
+   automatically transferred to a native connector. Post-navigation URL
+   inspection alone is not prevention.
 5. Exact-target release/stop, owner-change cleanup and takeover behavior that
    never closes or operates unrelated windows/tabs. Test denied/revoked grants,
    stale identities, wrong owners, tab replacement, transport loss and timeout,

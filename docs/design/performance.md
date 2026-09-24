@@ -219,6 +219,32 @@ supply these timings. Missing timings remain missing. These clocks include work
 before the observer sees a delta and do not expose exact provider headers or
 terminal paint. See [benchmark methods](../benchmarks/README.md).
 
+## Startup attribution (opt-in)
+
+`OCTET_STARTUP_TRACE=1` emits monotonic phase boundaries to stderr without
+putting timing text on the TUI. `process.enter` is after Tokio runtime creation;
+`cli.configured` includes CLI/config loading; `selection.resolved` includes
+`--models` scope and resume selector resolution. Catalog phases separate base,
+selected-route, Codex credential/inventory, and deferred fleet work;
+`session.resolve`, `session.replay`, `app.build`, `history.hydrate`, and
+`frame.ready` cover later readiness. Differences between adjacent phase times
+attribute *in-process* work, not process spawn, a physical keypress, or terminal
+paint. Measure spawn-to-first-editable-frame and input-to-PTY separately with a
+PTY; record cold/warm caches, selected route, resumed route, custom inventory,
+terminal, extensions, and executable hash for each run. No latency target is
+established by the presence of these traces alone.
+
+A valid positive custom-model cache is now used for the current catalog even
+when stale; an online refresh updates the private cache in the background for a
+later catalog build and cannot overwrite a newer cache snapshot. Missing or
+negative inventories retain their existing discovery behavior. A narrowed
+interactive launch opens `/model` using its current routes and loads deferred
+fleet inventories while the picker accepts input. A successful refresh keeps the
+typed filter and highlighted `ModelId`; cancellation or a failed fetch retains
+the current app catalog. Neither step changes the active model without explicit
+selection. Provider/route readiness and actual latency still require a matched
+startup campaign.
+
 ## Work budgets before wall-clock budgets
 
 Deterministic regression tests run in ordinary CI. Assert the work that should

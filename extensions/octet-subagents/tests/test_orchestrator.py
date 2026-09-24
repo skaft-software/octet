@@ -277,6 +277,62 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(results[0]["workers"][0]["state"], "cancelled")
         self.assertGreater(self.snapshots[-1]["revision"], terminal["revision"])
 
+    def test_refresh_serializes_host_observation_and_reconcile_per_owner(self):
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        captured = threading.Event()
+        release = threading.Event()
+        second_started = threading.Event()
+        second_listed = threading.Event()
+        results = []
+        errors = []
+        delegate = self.client
+
+        class DelayedClient:
+            def list_agents(self):
+                if threading.current_thread().name == "old-observation":
+                    snapshot = delegate.list_agents()
+                    captured.set()
+                    if not release.wait(timeout=3):
+                        raise AssertionError("test did not release the old observation")
+                    return snapshot
+                second_listed.set()
+                return delegate.list_agents()
+
+        def status(client):
+            try:
+                result = self.orchestrator.status(client, self.owner, {"target": agent_id})
+                results.append((threading.current_thread().name, result["worker"]["state"]))
+            except BaseException as error:
+                errors.append(error)
+
+        old = threading.Thread(target=status, args=(DelayedClient(),), name="old-observation", daemon=True)
+        def second_status():
+            second_started.set()
+            status(DelayedClient())
+        newer = threading.Thread(target=second_status, name="new-observation", daemon=True)
+        old.start()
+        try:
+            self.assertTrue(captured.wait(timeout=3))
+            self.host.complete(agent_id, "Finished.")
+            newer.start()
+            self.assertTrue(second_started.wait(timeout=3))
+            # A newer host list must not overtake a list already captured for
+            # this owner, then have the older result overwrite terminal state.
+            self.assertFalse(second_listed.wait(timeout=0.2))
+        finally:
+            release.set()
+            old.join(timeout=3)
+            if newer.ident is not None:
+                newer.join(timeout=3)
+        self.assertFalse(old.is_alive())
+        self.assertFalse(newer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(second_listed.is_set())
+        self.assertEqual(len(results), 2)
+        self.assertIn(("new-observation", "done"), results)
+        self.assertEqual(self.orchestrator.status(self.client, self.owner, {"target": agent_id})["worker"]["state"], "done")
+
     def test_concurrency_is_enforced_and_children_inherit_no_token_ceiling(self):
         for number in range(1, 9):
             self.spawn("worker-%02d" % number)

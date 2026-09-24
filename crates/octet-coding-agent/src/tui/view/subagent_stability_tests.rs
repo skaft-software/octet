@@ -1,4 +1,4 @@
-//! Compact subagent presentation stability regressions.
+//! Transcript subagent projection and inspector telemetry stability regressions.
 use super::*;
 
 fn child() -> octet_agent::DelegationTelemetryChild {
@@ -45,7 +45,7 @@ fn publish(shell: &mut InteractiveShell, child: &octet_agent::DelegationTelemetr
 }
 
 #[test]
-fn subagent_metrics_update_chrome_without_invalidating_transcript() {
+fn subagent_live_lines_update_without_invalidating_earlier_history() {
     for width in [20, 46, 80, 120, 240] {
         for verbose in [false, true] {
             let mut shell = InteractiveShell::test_shell();
@@ -54,46 +54,45 @@ fn subagent_metrics_update_chrome_without_invalidating_transcript() {
             shell.notice("HISTORY");
             let mut child = child();
             publish(&mut shell, &child);
-            let rows = shell.state.borrow().rendered_transcript(width).clone();
+            let history = shell.state.borrow().rendered_transcript(width)[0].clone();
             let revisions = shell.state.borrow().block_revisions.clone();
-            let generation = shell.state.borrow().transcript_cache.borrow().generation;
             for tool in [Some("read"), None, Some("bash"), None] {
                 child.current_tool = tool.map(str::to_owned);
                 child.phase = tool.unwrap_or("thinking").into();
+                child.total_tokens += 1_000;
                 child.elapsed_ms += 250;
                 child.tool_use_count += 1;
                 publish(&mut shell, &child);
-                assert_eq!(*shell.state.borrow().rendered_transcript(width), rows);
                 let state = shell.state.borrow();
-                assert_eq!(state.block_revisions, revisions);
-                assert_eq!(state.transcript_cache.borrow().generation, generation);
+                let first_row = state.rendered_transcript(width)[0].clone();
+                assert_eq!(first_row, history);
+                assert_eq!(
+                    &state.block_revisions[..revisions.len() - 1],
+                    &revisions[..revisions.len() - 1]
+                );
                 assert_eq!(
                     state.subagent_activity.as_ref().unwrap().telemetry[0],
                     child
                 );
                 drop(state);
                 let frame = frame_text(&shell, width);
-                assert!(frame.contains("Subagents"), "{width}: {frame}");
-                if width == 240 {
-                    let worker_row = frame
-                        .lines()
-                        .find(|row| row.contains("inspect-markdown"))
-                        .unwrap();
+                assert!(frame.contains("/subagents"), "{width}: {frame}");
+                if width >= 46 {
+                    assert!(frame.contains("inspect-markdown"), "{frame}");
                     assert!(
-                        worker_row
-                            .split_whitespace()
-                            .any(|cell| cell == child.tool_use_count.to_string()),
-                        "{worker_row}"
+                        frame.contains(&format!("{}K tok", child.total_tokens / 1_000)),
+                        "{frame}"
                     );
                 }
             }
             for status in ["completed", "running", "completed"] {
                 child.state = status.into();
                 publish(&mut shell, &child);
-                assert_eq!(*shell.state.borrow().rendered_transcript(width), rows);
-                assert_eq!(
-                    frame_text(&shell, width).contains("Subagents"),
-                    status == "running"
+                let updated = shell.state.borrow().rendered_transcript(width).join("\n");
+                assert!(updated.contains("/subagents"));
+                assert!(
+                    matches!(shell.state.borrow().transcript.last(), Some(TranscriptBlock::Subagents(summary)) if if status == "running" { summary.running == 1 } else { summary.succeeded == 1 }),
+                    "{updated}"
                 );
                 assert_eq!(
                     shell
@@ -167,7 +166,8 @@ fn late_failed_or_parked_workers_remain_inspectable_without_transcript_notices()
                 .collect::<String>();
             for text in [&rendered, &copied] {
                 assert!(text.contains("UNRELATED-NOTICE"), "{text}");
-                for hidden in ["Subagent", "LATE-WORKER", "REASON", "SECRET"] {
+                assert!(text.contains("Subagents"), "{text}");
+                for hidden in ["LATE-WORKER", "REASON", "SECRET"] {
                     assert!(!text.contains(hidden), "{text}");
                 }
             }
@@ -175,15 +175,13 @@ fn late_failed_or_parked_workers_remain_inspectable_without_transcript_notices()
             assert_eq!(state.transcript_cache.borrow().generation, generation);
             let retained = state.subagent_activity.as_ref().unwrap();
             assert_eq!(retained.telemetry[0], worker);
-            let rows = subagent_rows(retained);
-            assert_eq!(rows[0].state, status);
-            assert_ne!(rows[0].group, SubagentStateGroup::Completed);
-            assert_eq!(
-                rows[0].reason,
-                worker.failure_reason.as_deref().map(sanitize_for_terminal)
+            assert_ne!(
+                SubagentStateGroup::of_declared_state(status),
+                SubagentStateGroup::Completed
             );
-            assert!(rows[0].reason.as_ref().unwrap().contains("REASON"));
-            assert!(!rows[0].reason.as_ref().unwrap().contains("SECRET"));
+            let reason = sanitize_for_terminal(worker.failure_reason.as_deref().unwrap());
+            assert!(reason.contains("REASON"));
+            assert!(!reason.contains("SECRET"));
         }
     }
 }
@@ -200,20 +198,21 @@ fn subagent_animation_never_invalidates_transcript_history() {
     let generation = shell.state.borrow().transcript_cache.borrow().generation;
     for _ in 0..12 {
         shell.state.borrow_mut().advance_event_dot_animation();
-        assert_eq!(*shell.state.borrow().rendered_transcript(80), baseline);
-        assert_eq!(shell.state.borrow().block_revisions, revisions);
+        let rows = shell.state.borrow().rendered_transcript(80).clone();
+        assert_eq!(&rows[..baseline.len() - 2], &baseline[..baseline.len() - 2]);
         assert_eq!(
-            shell.state.borrow().transcript_cache.borrow().generation,
-            generation
+            &shell.state.borrow().block_revisions[..revisions.len() - 1],
+            &revisions[..revisions.len() - 1]
         );
+        assert!(shell.state.borrow().transcript_cache.borrow().generation >= generation);
         assert!(frame_text(&shell, 80).contains("Subagents"));
     }
     let mut settled = child();
     settled.state = "completed".into();
     publish(&mut shell, &settled);
     shell.state.borrow_mut().advance_event_dot_animation();
-    assert_eq!(*shell.state.borrow().rendered_transcript(80), baseline);
-    assert!(!frame_text(&shell, 80).contains("Subagents"));
+    assert_eq!(shell.state.borrow().transcript.len(), revisions.len());
+    assert!(transcript_text(&shell).contains("Subagents · 1 completed"));
 }
 
 #[test]
@@ -290,12 +289,19 @@ fn fallback_subagent_call_counts_are_retained_without_invalidating_rows() {
         activity
     );
     let calls_updated = frame_text(&shell, 240);
-    assert!(
-        calls_updated
-            .lines()
-            .any(|row| row.contains("inspect-markdown")
-                && row.split_whitespace().any(|cell| cell == "99")),
-        "{calls_updated}"
+    assert_eq!(calls_updated, before, "usage changes stay in the inspector");
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .activities[0]
+            .metrics
+            .unwrap()
+            .tool_calls,
+        99
     );
     activity.metrics.as_mut().unwrap().output_tokens += 100;
     shell
@@ -305,11 +311,19 @@ fn fallback_subagent_call_counts_are_retained_without_invalidating_rows() {
     assert_eq!(shell.state.borrow().block_revisions, revisions);
     assert_eq!(*shell.state.borrow().rendered_transcript(80), rows);
     let after = frame_text(&shell, 240);
-    assert_ne!(before, after);
-    assert!(
-        after.lines().any(|row| row.contains("inspect-markdown")
-            && row.split_whitespace().any(|cell| cell == "99")),
-        "{after}"
+    assert_eq!(
+        before, after,
+        "usage changes must not reflow the pinned preview"
+    );
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .activities[0],
+        activity
     );
 }
 
@@ -366,19 +380,6 @@ fn transcript_text(shell: &InteractiveShell) -> String {
     strip_terminal_sequences(&shell.state.borrow().rendered_transcript(120).join("\n"))
 }
 
-/// Render the full semantic roster used by the explicit disclosure surface.
-fn roster_rows(
-    view: &SubagentActivityView,
-    theme: &crate::tui::theme::OctetTheme,
-    width: u16,
-    verbose: bool,
-) -> Vec<String> {
-    subagent_activity_render_rows(view, theme, width, verbose)
-        .iter()
-        .map(|line| strip_terminal_sequences(line))
-        .collect()
-}
-
 #[test]
 fn mixed_session_rosters_stay_out_of_transcript_and_account_only_new_spend() {
     for native in [false, true] {
@@ -400,7 +401,7 @@ fn mixed_session_rosters_stay_out_of_transcript_and_account_only_new_spend() {
         shell.state.borrow_mut().session_cost_microdollars = Some(100_000);
         let unseen = named_worker("UNSEEN-OLD-WORKER", "completed");
         publish_roster(&mut shell, native, &[old.clone(), unseen.clone()]);
-        assert!(!frame_text(&shell, 120).contains("Subagents"));
+        assert_eq!(transcript_text(&shell).matches("Subagents").count(), 1);
         // The outcome's aggregate running hint may change, but no worker
         // roster becomes transcript material.
         let baseline = shell.state.borrow().transcript.len();
@@ -410,9 +411,9 @@ fn mixed_session_rosters_stay_out_of_transcript_and_account_only_new_spend() {
             native,
             &[old.clone(), unseen.clone(), fresh.clone()],
         );
-        assert_eq!(shell.state.borrow().transcript.len(), baseline);
-        assert!(!transcript_text(&shell).contains("WORKER"));
-        assert!(frame_text(&shell, 120).contains("FRESH-WORKER"));
+        assert_eq!(shell.state.borrow().transcript.len(), baseline + 1);
+        assert_eq!(transcript_text(&shell).contains("FRESH-WORKER"), native);
+        assert_eq!(transcript_text(&shell).matches("Subagents").count(), 2);
         assert_eq!(
             shell.state.borrow().displayed_session_cost_microdollars(),
             Some(107_200)
@@ -424,9 +425,9 @@ fn mixed_session_rosters_stay_out_of_transcript_and_account_only_new_spend() {
                 native,
                 &[old.clone(), unseen.clone(), settled.clone()],
             );
-            assert_eq!(shell.state.borrow().transcript.len(), baseline);
+            assert_eq!(shell.state.borrow().transcript.len(), baseline + 1);
             assert!(!transcript_text(&shell).contains("WORKER"));
-            assert!(!frame_text(&shell, 120).contains("Subagents"));
+            assert_eq!(transcript_text(&shell).matches("Subagents").count(), 2);
         }
         let run = shell.current_run_id().unwrap();
         shell.on_run_event(
@@ -439,10 +440,9 @@ fn mixed_session_rosters_stay_out_of_transcript_and_account_only_new_spend() {
         shell.begin_run("fixture");
         shell.on_prompt_submitted("third prompt");
         publish_roster(&mut shell, native, &[old, unseen, settled]);
-        assert!(!frame_text(&shell, 120).contains("Subagents"));
+        assert_eq!(transcript_text(&shell).matches("Subagents").count(), 2);
         publish_roster(&mut shell, native, &[fresh]);
-        assert!(frame_text(&shell, 120).contains("FRESH-WORKER"));
-        assert!(!transcript_text(&shell).contains("Subagents"));
+        assert_eq!(transcript_text(&shell).matches("Subagents").count(), 3);
         assert_eq!(
             shell.state.borrow().displayed_session_cost_microdollars(),
             Some(100_000)
@@ -479,7 +479,7 @@ fn visible_rows(shell: &InteractiveShell, width: u16) -> Vec<String> {
 }
 
 #[test]
-fn active_roster_is_pinned_once_independent_of_parent_run_and_follow_tail() {
+fn active_roster_stays_one_transcript_row_independent_of_parent_run() {
     for native in [false, true] {
         let mut shell = InteractiveShell::test_shell();
         shell.set_size(120, 24);
@@ -506,9 +506,14 @@ fn active_roster_is_pinned_once_independent_of_parent_run_and_follow_tail() {
             for follow_tail in [true, false] {
                 shell.state.borrow_mut().follow_tail = follow_tail;
                 let frame = frame_text(&shell, 120);
-                for label in ["Subagents", "LIVE-WORKER", "OTHER-WORKER"] {
-                    assert_eq!(frame.matches(label).count(), 1, "{frame}");
-                    assert!(!transcript_text(&shell).contains(label));
+                assert!(transcript_text(&shell).contains("Subagents · 2 running"));
+                assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+                    .subagents
+                    .is_empty());
+                assert_eq!(transcript_text(&shell).contains("LIVE-WORKER"), native);
+                assert_eq!(transcript_text(&shell).contains("OTHER-WORKER"), native);
+                if !follow_tail {
+                    assert!(frame.contains("HISTORY-"));
                 }
             }
         }
@@ -517,7 +522,7 @@ fn active_roster_is_pinned_once_independent_of_parent_run_and_follow_tail() {
         assert!(frame_text(&shell, 120).contains("Subagents"));
         workers[1].state = "completed".into();
         publish_roster(&mut shell, native, &workers);
-        assert!(!frame_text(&shell, 120).contains("Subagents"));
+        assert!(transcript_text(&shell).contains("Subagents · 1 completed · 1 failed"));
     }
 }
 
@@ -599,7 +604,7 @@ fn live_roster_updates_leave_the_application_history_viewport_anchored() {
         publish_roster(&mut shell, native, &[live.clone()]);
         assert_eq!(visible_rows(&shell, 120), before);
         assert_eq!(shell.state.borrow().scroll_from_bottom.get(), scroll_before);
-        assert!(frame_text(&shell, 120).contains("LIVE-WORKER"));
+        assert!(transcript_text(&shell).contains("Subagents · 1 running"));
         publish_roster(
             &mut shell,
             native,
@@ -610,12 +615,12 @@ fn live_roster_updates_leave_the_application_history_viewport_anchored() {
         // Changing chrome height may expose fewer history rows, but preserves
         // the same anchored first row instead of jumping to live output.
         assert_eq!(grown.first(), before.first(), "{before:?}\n{grown:?}");
-        assert!(frame_text(&shell, 120).contains("NEW-WORKER"));
+        assert!(transcript_text(&shell).contains("Subagents · 2 running"));
     }
 }
 
 #[test]
-fn pinned_roster_is_bounded_and_preserves_the_composer() {
+fn transcript_roster_is_bounded_and_preserves_the_composer() {
     for width in [24, 80, 120] {
         for height in [8, 12, 24] {
             let mut shell = InteractiveShell::test_shell();
@@ -644,14 +649,9 @@ fn pinned_roster_is_bounded_and_preserves_the_composer() {
                 .lines()
                 .position(|row| row.contains("DRAFT-MARKER"))
                 .unwrap();
-            let heading_row = frame
-                .lines()
-                .position(|row| row.contains("Subagents"))
-                .unwrap();
-            assert!(
-                heading_row < draft_row,
-                "the roster belongs above the composer: {frame}"
-            );
+            assert!(draft_row > 0);
+            assert!(transcript_text(&shell).contains("/subagents"));
+            assert!(chrome.subagents.is_empty());
             assert!(
                 chrome.transcript_rows > 0,
                 "the roster must leave history space"
@@ -662,134 +662,8 @@ fn pinned_roster_is_bounded_and_preserves_the_composer() {
                     .all(|line| visible_width(line) <= usize::from(width)),
                 "{frame}"
             );
-            assert!(!transcript_text(&shell).contains("WORKER-"));
+            assert_eq!(transcript_text(&shell).matches("WORKER-").count(), 4);
         }
-    }
-}
-
-/// A roster made of one state still prints the state column on every row, and
-/// its heading stays a plain tool-call name: the state lives on the rows and
-/// the margin dot, and the count lives on nothing at all.
-#[test]
-fn a_uniform_roster_keeps_the_state_column_and_a_plain_heading() {
-    let theme = crate::tui::theme::test_theme();
-    let uniform = SubagentActivityView {
-        telemetry: vec![
-            named_worker("worker-a", "running"),
-            named_worker("worker-b", "running"),
-        ],
-        ..SubagentActivityView::default()
-    };
-    let rows = roster_rows(&uniform, &theme, 120, false);
-    let plain = rows.join("\n");
-    assert!(
-        rows[0].trim_end().ends_with("Subagents"),
-        "the heading is a plain tool-call name: {plain}"
-    );
-    assert!(
-        plain.contains("state"),
-        "the state column survives a uniform roster: {plain}"
-    );
-    assert!(
-        plain.contains("running"),
-        "every row names its own state: {plain}"
-    );
-    assert!(
-        rows.iter().all(|row| !row.contains("running · ")),
-        "no per-group sub-heading is printed: {plain}"
-    );
-
-    let mixed = SubagentActivityView {
-        telemetry: vec![
-            named_worker("worker-a", "running"),
-            named_worker("worker-b", "completed"),
-        ],
-        ..SubagentActivityView::default()
-    };
-    let rows = roster_rows(&mixed, &theme, 120, false);
-    let plain = rows.join("\n");
-    assert!(
-        plain.contains("running"),
-        "mixed rosters keep every state word: {plain}"
-    );
-    assert!(plain.contains("completed"), "{plain}");
-    assert!(plain.contains("state"), "{plain}");
-    assert!(
-        rows.iter().all(|row| !row.contains("running · ")),
-        "mixed rosters print no per-group sub-heading either: {plain}"
-    );
-}
-
-#[test]
-fn the_model_identifier_is_printed_in_full_and_never_ellipsized() {
-    // Native telemetry is the source that carries a model identifier; the
-    // extension presentation has no model field to print.
-    let mut worker = named_worker("deepseek-worker", "running");
-    worker.model = "deepseek/deepseek-flash".into();
-    let view = SubagentActivityView {
-        telemetry: vec![worker],
-        ..SubagentActivityView::default()
-    };
-    let theme = crate::tui::theme::test_theme();
-    for width in [120u16, 80, 60] {
-        let rows = roster_rows(&view, &theme, width, false);
-        let plain = rows.join("\n");
-        assert!(
-            plain.contains("deepseek/deepseek-flash"),
-            "the model id is never ellipsized at {width}: {plain}"
-        );
-        assert!(rows
-            .iter()
-            .all(|row| visible_width(row) <= usize::from(width)));
-    }
-    // The narrow fallback keeps the whole identifier readable: it wraps rather
-    // than being replaced by an ellipsis.
-    let rows = roster_rows(&view, &theme, 24, false);
-    let compact = rows
-        .join("\n")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(
-        compact
-            .split_whitespace()
-            .collect::<String>()
-            .contains("deepseek/deepseek-flash"),
-        "{compact}"
-    );
-}
-
-#[test]
-fn grid_header_cells_align_with_the_worker_column_on_both_profiles() {
-    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
-    for unicode in [false, true] {
-        let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
-            true,
-            unicode,
-            ColorDepth::None,
-        ));
-        let view = SubagentActivityView {
-            telemetry: vec![
-                named_worker("審査-worker", "running"),
-                named_worker("done-worker", "completed"),
-            ],
-            ..SubagentActivityView::default()
-        };
-        let rows = roster_rows(&view, &theme, 120, false);
-        let header = rows
-            .iter()
-            .find(|row| row.contains("worker") && row.contains("state"))
-            .unwrap_or_else(|| panic!("no grid header: {rows:?}"));
-        let live = rows
-            .iter()
-            .find(|row| row.contains("審査-worker"))
-            .unwrap_or_else(|| panic!("no live row: {rows:?}"));
-        let header_column = visible_width(&header[..header.find("worker").unwrap()]);
-        let live_column = visible_width(&live[..live.find("審査-worker").unwrap()]);
-        assert_eq!(
-            header_column, live_column,
-            "header and worker rows pay the same prefix: {rows:?}"
-        );
     }
 }
 
@@ -884,7 +758,18 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
             );
         }
     }
-    assert!(state.transcript.is_empty());
+    assert_eq!(
+        state
+            .transcript
+            .iter()
+            .filter(|block| matches!(block, TranscriptBlock::Subagents(_)))
+            .count(),
+        4
+    );
+    assert!(!state
+        .rendered_transcript(120)
+        .join("\n")
+        .contains("SECRET-RESULT"));
     let id = ToolCallId("subagent_models".into());
     append_hydrated_items(
         &mut state,
@@ -896,7 +781,18 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
             images: Vec::new(),
         }],
     );
-    assert!(state.transcript.is_empty());
+    assert_eq!(
+        state
+            .transcript
+            .iter()
+            .filter(|block| matches!(block, TranscriptBlock::Subagents(_)))
+            .count(),
+        4
+    );
+    assert!(!state
+        .rendered_transcript(120)
+        .join("\n")
+        .contains("SECRET-RESULT"));
     append_hydrated_items(
         &mut state,
         [
@@ -915,7 +811,7 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
         ],
     );
     assert!(
-        matches!(&state.transcript[0], TranscriptBlock::Tool(panel) if panel.finished && panel.is_error && panel.output == "ordinary failure")
+        matches!(&state.transcript[4], TranscriptBlock::Tool(panel) if panel.finished && panel.is_error && panel.output == "ordinary failure")
     );
 }
 
@@ -966,6 +862,7 @@ fn subagent_tail_hydration_and_deferred_prepend_hide_boundary_results() {
     assert!(truncated);
     let mut state = ShellState::default();
     append_hydrated_items(&mut state, items);
+    // The last boundary belongs to a discovery call, not an orchestration wave.
     assert!(state.transcript.is_empty());
 
     let mut shell = InteractiveShell::test_shell();
@@ -1015,8 +912,8 @@ fn subagent_tail_hydration_and_deferred_prepend_hide_boundary_results() {
     shell.hydrate(&session).unwrap();
     assert!(shell.state.borrow().subagent_activity.is_none());
     publish(&mut shell, &child());
-    assert!(!transcript_text(&shell).contains("Subagents"));
-    assert!(frame_text(&shell, 120).contains("Subagents"));
+    assert!(transcript_text(&shell).contains("Subagents"));
+    assert!(!transcript_text(&shell).contains("SECRET-RESULT"));
 }
 #[test]
 fn subagent_restart_and_durable_refresh_subtract_committed_worker_spend() {
@@ -1113,7 +1010,7 @@ fn every_host_worker_state_has_consistent_group_filter_and_chrome_visibility() {
         let wire = serde_json::to_value(status).unwrap();
         let label = wire["state"].as_str().unwrap();
         let worker = named_worker("STATE-WORKER", label);
-        let mut view = SubagentActivityView {
+        let view = SubagentActivityView {
             telemetry: vec![worker.clone()],
             ..Default::default()
         };
@@ -1127,36 +1024,28 @@ fn every_host_worker_state_has_consistent_group_filter_and_chrome_visibility() {
             group == Running,
             "{label}"
         );
-        assert_eq!(subagent_rows(&view)[0].group, group, "{label}");
-        let theme = crate::tui::theme::test_theme();
-        for filter in SubagentStateGroup::ORDER {
-            view.state_filter = Some(filter);
-            let text = roster_rows(&view, &theme, 120, false).join("\n");
-            assert_eq!(
-                text.contains("STATE-WORKER"),
-                filter == group,
-                "{label}: {text}"
-            );
-            if filter == group {
-                assert!(text.contains(label), "{label}: {text}");
-            }
-        }
         let mut shell = InteractiveShell::test_shell();
         publish(&mut shell, &named_worker("STATE-WORKER", "running"));
         publish(&mut shell, &worker);
+        assert!(transcript_text(&shell).contains("Subagents"), "{label}");
         assert_eq!(
-            frame_text(&shell, 120).contains("Subagents"),
-            group == Running,
+            transcript_text(&shell).contains("STATE-WORKER"),
+            matches!(label, "pending" | "running"),
             "{label}"
         );
-        assert!(!transcript_text(&shell).contains("STATE-WORKER"), "{label}");
         assert!(shell
             .state
             .borrow()
             .transcript
             .iter()
             .all(|block| !block_copy_text(block).contains("STATE-WORKER")));
-        assert!(!transcript_text(&shell).contains("Subagents"));
+        assert!(transcript_text(&shell).contains("Subagents"));
+        assert!(transcript_text(&shell).contains(match group {
+            Running => "running",
+            Completed => "completed",
+            Failed => "failed",
+            Stopped => "stopped",
+        }));
         assert_eq!(
             shell
                 .state
@@ -1171,234 +1060,120 @@ fn every_host_worker_state_has_consistent_group_filter_and_chrome_visibility() {
 }
 
 #[test]
-fn expanded_full_retained_roster_exposes_all_workers_across_groups() {
-    let theme = crate::tui::theme::test_theme();
-    let mut view = SubagentActivityView {
-        telemetry: (0..32)
-            .map(|index| {
-                let state = ["running", "completed", "failed", "shutdown"][index / 8];
-                let mut worker = named_worker(&format!("W{index:02}"), state);
-                worker.failure_reason = (state == "failed").then(|| "fixture failure".into());
-                worker
-            })
-            .collect(),
-        ..Default::default()
-    };
-    let collapsed = roster_rows(&view, &theme, 240, false).join("\n");
-    for group in ["completed", "failed", "stopped"] {
-        assert!(collapsed.contains(&format!("{group} · 8")), "{collapsed}");
-    }
-    assert_eq!(
-        collapsed.matches("ctrl+o shows all").count(),
-        3,
-        "{collapsed}"
-    );
-    for width in [24, 80, 240] {
-        let expanded = roster_rows(&view, &theme, width, true).join("\n");
-        for worker in &view.telemetry {
-            assert_eq!(
-                expanded.matches(&worker.task_name).count(),
-                1,
-                "{width}: {expanded}"
-            );
-        }
-        assert!(!expanded.contains("ctrl+o shows all"), "{expanded}");
-        assert!(!expanded.contains(" more"), "{expanded}");
-    }
-    for group in SubagentStateGroup::ORDER {
-        view.state_filter = Some(group);
-        let filtered = roster_rows(&view, &theme, 120, false).join("\n");
-        for worker in &view.telemetry {
-            assert_eq!(
-                filtered.contains(&worker.task_name),
-                SubagentStateGroup::of_declared_state(&worker.state) == group,
-                "{filtered}"
-            );
-        }
-        assert!(!filtered.contains("ctrl+o shows all"), "{filtered}");
-    }
-}
-
-#[test]
-fn roster_tool_count_column_names_the_reported_metric() {
-    let theme = crate::tui::theme::test_theme();
-    let view = SubagentActivityView {
-        telemetry: vec![child()],
-        ..Default::default()
-    };
-    let text = roster_rows(&view, &theme, 240, true).join("\n");
-    assert!(text.contains("tools"), "{text}");
-    assert!(!text.contains("turns"), "{text}");
-    let rows = subagent_rows(&view);
-    assert_eq!(
-        subagent_cell_text(&rows[0], SubagentColumn::Tools, true),
-        "4"
-    );
-    let activity = serde_json::from_value(serde_json::json!({
-        "id": "fallback", "kind": "subagent", "state": "running", "summary": "fallback",
-        "metrics": {"tool_calls": 17}
-    }))
-    .unwrap();
-    let fallback = SubagentActivityView {
-        activities: vec![activity],
-        ..Default::default()
-    };
-    let rows = subagent_rows(&fallback);
-    assert_eq!(
-        subagent_cell_text(&rows[0], SubagentColumn::Tools, true),
-        "17"
-    );
-}
-
-#[test]
-fn generic_panel_filter_mirrors_worker_membership_not_lossy_state_labels() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+fn orchestration_is_one_blinking_tail_row_then_settles_in_place() {
     let mut shell = InteractiveShell::test_shell();
-    let mut workers = vec![
-        named_worker("LIMIT", "running"),
-        named_worker("DETACHED", "running"),
-        named_worker("APPROVAL", "running"),
-        named_worker("PENDING", "running"),
-    ];
-    publish_roster(&mut shell, true, &workers);
-    for (worker, state) in
-        workers
-            .iter_mut()
-            .zip(["limit_reached", "detached", "awaiting_approval", "pending"])
+    shell.notice("parent before");
+    let first = named_worker("worker-a", "running");
+    publish_roster(&mut shell, true, &[first.clone()]);
     {
-        worker.state = state.into();
-    }
-    publish_roster(&mut shell, true, &workers);
-    let items: Vec<_> = workers
-        .iter()
-        .map(|worker| worker.task_name.clone())
-        .collect();
-    let panel = SubagentPanel {
-        node_ids: workers
-            .iter()
-            .map(|worker| format!("worker:{}", worker.child_id))
-            .collect(),
-        groups: vec![
-            SubagentGroup {
-                label: "Blocked".into(),
-                indices: vec![0, 1],
-                collapsible: false,
-            },
-            SubagentGroup {
-                label: "Queued".into(),
-                indices: vec![2, 3],
-                collapsible: false,
-            },
-        ],
-        collapsed: true,
-        revealed_node: None,
-        state_filter: None,
-    };
-    shell.open_panel(Panel::SelectList {
-        surface: OrdinarySurfaceMetadata::new("Subagents"),
-        items: items.clone(),
-        descriptions: vec![None; 4],
-        selected: 0,
-        filter: String::new(),
-        action: PanelAction::SelectSubagent(panel.clone()),
-    });
-    let press = |shell: &mut InteractiveShell| {
-        shell.panel_input(&crossterm::event::Event::Key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
-        )));
-    };
-    let assert_members = |shell: &InteractiveShell, expected: &[&str]| {
         let state = shell.state.borrow();
-        let text = roster_rows(
-            state.subagent_activity.as_ref().unwrap(),
-            &state.theme,
-            120,
-            true,
-        )
-        .join("\n");
-        for worker in &workers {
-            assert_eq!(
-                text.contains(&worker.task_name),
-                expected.contains(&worker.task_name.as_str()),
-                "{text}"
-            );
-        }
-    };
-    press(&mut shell);
-    assert_members(&shell, &["LIMIT", "DETACHED"]);
-    assert_eq!(
-        shell
-            .state
-            .borrow()
-            .subagent_activity
-            .as_ref()
-            .unwrap()
-            .panel_filter
-            .as_ref()
-            .unwrap()
-            .label,
-        "Blocked"
+        assert!(
+            matches!(state.transcript.last(), Some(TranscriptBlock::Subagents(summary)) if summary.running == 1)
+        );
+        assert_eq!(
+            state
+                .transcript
+                .iter()
+                .filter(|block| matches!(block, TranscriptBlock::Subagents(_)))
+                .count(),
+            1
+        );
+        assert!(state.has_active_event_dot());
+        assert!(shell_chrome(&state, 120, Instant::now())
+            .subagents
+            .is_empty());
+        assert!(block_copy_text(state.transcript.last().unwrap()).contains("1 running"));
+        assert!(!block_copy_text(state.transcript.last().unwrap()).contains("worker-a"));
+    }
+    let before = shell
+        .state
+        .borrow()
+        .rendered_transcript(120)
+        .iter()
+        .find(|row| row.contains("Subagents"))
+        .cloned()
+        .unwrap();
+    shell.state.borrow_mut().advance_event_dot_animation();
+    let after = shell
+        .state
+        .borrow()
+        .rendered_transcript(120)
+        .iter()
+        .find(|row| row.contains("Subagents"))
+        .cloned()
+        .unwrap();
+    assert_ne!(before, after, "active marker must blink");
+    shell.notice("parent after");
+    {
+        let state = shell.state.borrow();
+        assert!(matches!(
+            state.transcript[state.transcript.len() - 2],
+            TranscriptBlock::Notice(_)
+        ));
+        assert!(matches!(
+            state.transcript.last(),
+            Some(TranscriptBlock::Subagents(_))
+        ));
+        assert!(state
+            .transcript_commit_ids
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+        let frame = strip_terminal_sequences(&state.rendered_transcript(120).join("\n"));
+        assert!(frame.find("parent after").unwrap() < frame.find("Subagents").unwrap());
+    }
+    let settled = named_worker("worker-a", "completed");
+    publish_roster(&mut shell, true, &[settled]);
+    let index = shell.state.borrow().transcript.len() - 1;
+    assert!(
+        matches!(&shell.state.borrow().transcript[index], TranscriptBlock::Subagents(summary) if summary.settled_role() == "success")
     );
-    // Republishing telemetry must retain the exact selected membership in
-    // the retained view, even though Blocked spans Failed and Stopped groups.
-    publish_roster(&mut shell, true, &workers);
-    assert_members(&shell, &["LIMIT", "DETACHED"]);
+    assert!(!shell.state.borrow().has_active_event_dot());
+    shell.notice("later prompt");
     let state = shell.state.borrow();
+    assert!(matches!(
+        state.transcript[index],
+        TranscriptBlock::Subagents(_)
+    ));
+    assert!(matches!(
+        state.transcript.last(),
+        Some(TranscriptBlock::Notice(_))
+    ));
     assert_eq!(
         state
-            .subagent_activity
-            .as_ref()
-            .unwrap()
-            .panel_filter
-            .as_ref()
-            .unwrap()
-            .node_ids,
-        vec!["worker:LIMIT", "worker:DETACHED"]
+            .transcript
+            .iter()
+            .filter(|block| matches!(block, TranscriptBlock::Subagents(_)))
+            .count(),
+        1
     );
-    drop(state);
-    press(&mut shell);
-    assert_members(&shell, &["APPROVAL", "PENDING"]);
-    assert_eq!(
-        shell
-            .state
-            .borrow()
-            .subagent_activity
-            .as_ref()
-            .unwrap()
-            .panel_filter
-            .as_ref()
-            .unwrap()
-            .label,
-        "Queued"
-    );
-    // Membership is refreshed by stable ID when the selected group changes.
-    let mut next = panel.clone();
-    next.groups[0].indices = vec![0, 1, 3];
-    next.groups[1].indices = vec![2];
-    shell.refresh_subagent_panel("Subagents".into(), items.clone(), vec![None; 4], next);
-    assert_members(&shell, &["APPROVAL"]);
-    // Removing the selected group restores All rather than leaving stale IDs.
-    let mut next = panel;
-    next.groups.remove(1);
-    next.groups[0].indices = vec![0, 1, 2, 3];
-    shell.refresh_subagent_panel("Subagents".into(), items, vec![None; 4], next);
-    assert_members(&shell, &["LIMIT", "DETACHED", "APPROVAL", "PENDING"]);
+}
 
-    // The fallback projection uses activity:{id}, while collection nodes use
-    // worker:{id}; both refer to the same semantic worker.
-    let activity = serde_json::from_value(serde_json::json!({
-        "id": "activity:DETACHED", "kind": "subagent", "state": "degraded", "summary": "DETACHED"
-    }))
-    .unwrap();
-    let fallback = SubagentActivityView {
-        activities: vec![activity],
-        panel_filter: Some(SubagentPanelFilter {
-            label: "Blocked".into(),
-            node_ids: vec!["worker:DETACHED".into()],
-        }),
-        ..Default::default()
-    };
-    let text = roster_rows(&fallback, &crate::tui::theme::test_theme(), 120, false).join("\n");
-    assert!(text.contains("DETACHED"), "{text}");
+#[test]
+fn orchestration_settlement_marker_classifies_failed_and_mixed_rosters() {
+    for (statuses, expected) in [
+        (["failed", "failed"], "error"),
+        (["completed", "failed"], "warning"),
+    ] {
+        let mut shell = InteractiveShell::test_shell();
+        let a = named_worker("a", "running");
+        let b = named_worker("b", "running");
+        publish_roster(&mut shell, true, &[a, b]);
+        publish_roster(
+            &mut shell,
+            true,
+            &[
+                named_worker("a", statuses[0]),
+                named_worker("b", statuses[1]),
+            ],
+        );
+        let state = shell.state.borrow();
+        let row = state.transcript.last().unwrap();
+        assert!(
+            matches!(row, TranscriptBlock::Subagents(summary) if summary.settled_role() == expected)
+        );
+        assert!(!block_copy_text(row).contains("worker"));
+        assert!(shell_chrome(&state, 120, Instant::now())
+            .subagents
+            .is_empty());
+    }
 }

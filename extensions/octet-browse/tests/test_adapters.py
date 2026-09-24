@@ -19,7 +19,32 @@ from octet_browse.adapters import (
 from octet_browse.paths import BrowsePaths
 from octet_browse.safety import BrowseError, ResourceOwner
 from octet_browse.worker import BrowserEngine, OperationContext
-from tests.helpers import FakePage
+from tests.helpers import FakeElement, FakePage
+
+
+class ScriptedAction(FakeElement):
+    """An otherwise innocuous button whose handler navigates or opens a popup."""
+
+    def __init__(self, page, effect, guard):
+        super().__init__("Inspect", attrs={"aria-label": "Inspect"})
+        self.page = page
+        self.effect = effect
+        self.guard = guard
+        self.attempts = 0
+        self.effects = 0
+
+    def click(self, timeout=None):
+        self.attempts += 1
+        # A real bridge must block at the request/target/download boundary,
+        # before the script can navigate or create a new target.
+        if self.guard():
+            raise BrowseError("navigation_blocked", "The preventive boundary blocked the scripted action.")
+        self.effects += 1
+        if self.effect == "redirect":
+            self.page.url = "file:///sensitive"
+        else:
+            self.page.popup_created = True
+
 
 
 class ExplicitConnectorTests(unittest.TestCase):
@@ -70,6 +95,158 @@ class ExplicitConnectorTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(BrowseError) as raised:
                 connector.select(selected, self.owner)
             self.assertEqual(raised.exception.code, code)
+
+    def test_unqualified_external_actions_are_off_even_when_declared(self):
+        page = FakePage()
+        action = ScriptedAction(page, "redirect", lambda: False)
+        page.role_elements["button"] = [action]
+        connector = PlaywrightConnector(
+            "bridge",
+            selector=lambda *_: {"selection": self.selection.as_dict(), "page": page},
+            capabilities={name: True for name in (
+                "click", "type", "press", "scroll", "wait", "navigation",
+                "tab_close", "new_tab", "popup",
+            )},
+        )
+        self.assertTrue(connector.capabilities["snapshot"]["supported"])
+        self.assertTrue(connector.capabilities["screenshot"]["supported"])
+        for name in ("click", "type", "press", "scroll", "wait", "navigation", "tab_close", "new_tab", "popup"):
+            self.assertFalse(connector.capabilities[name]["supported"], name)
+        with tempfile.TemporaryDirectory() as home:
+            engine = BrowserEngine(BrowsePaths.for_home(Path(home)), None, None, adapters=AdapterRegistry([connector]))
+            operation = lambda: OperationContext(time.monotonic() + 2)
+            try:
+                tab_id = engine.backend_select(operation(), self.owner, self.selection)["affected_tab_id"]
+                engine.snapshot(operation(), self.owner, tab_id)
+                with self.assertRaises(BrowseError) as raised:
+                    engine.click(operation(), self.owner, tab_id, 'role=button[name="Inspect"]', None, lambda *_: True)
+                self.assertEqual(raised.exception.code, "unsupported_capability")
+                self.assertEqual(action.attempts, 0)
+                self.assertEqual(page.url, "https://example.test/")
+            finally:
+                engine.shutdown()
+
+    def test_guarded_connector_blocks_scripted_redirect_and_popup_before_effect(self):
+        for effect in ("redirect", "popup"):
+            with self.subTest(effect=effect), tempfile.TemporaryDirectory() as home:
+                page = FakePage()
+                active = {"guard": False}
+                action = ScriptedAction(page, effect, lambda: active["guard"])
+                page.role_elements["button"] = [action]
+                checks = []
+
+                def enforce(target, owner):
+                    self.assertIs(target.page, page)
+                    self.assertEqual(owner, self.owner)
+                    checks.append(True)
+                    active["guard"] = True
+                    return True
+
+                connector = PlaywrightConnector(
+                    "bridge",
+                    selector=lambda *_: {"selection": self.selection.as_dict(), "page": page},
+                    enforce_boundary=enforce,
+                    capabilities={"click": True, "popup": True},
+                )
+                engine = BrowserEngine(BrowsePaths.for_home(Path(home)), None, None, adapters=AdapterRegistry([connector]))
+                operation = lambda: OperationContext(time.monotonic() + 2)
+                try:
+                    tab_id = engine.backend_select(operation(), self.owner, self.selection)["affected_tab_id"]
+                    # No href/form metadata advertises this scripted behavior.
+                    with self.assertRaises(BrowseError) as raised:
+                        engine.click(operation(), self.owner, tab_id, 'role=button[name="Inspect"]', None, lambda *_: True)
+                    self.assertEqual(raised.exception.code, "navigation_blocked")
+                    self.assertEqual(action.attempts, 1)
+                    self.assertEqual(action.effects, 0)
+                    self.assertEqual(page.url, "https://example.test/")
+                    self.assertFalse(getattr(page, "popup_created", False))
+                    self.assertGreaterEqual(len(checks), 2)  # selection and action-time guard
+                finally:
+                    engine.shutdown()
+
+    def test_boundary_loss_fails_before_external_click(self):
+        page = FakePage()
+        action = ScriptedAction(page, "popup", lambda: False)
+        page.role_elements["button"] = [action]
+        active = {"guard": True}
+        connector = PlaywrightConnector(
+            "bridge",
+            selector=lambda *_: {"selection": self.selection.as_dict(), "page": page},
+            enforce_boundary=lambda *_: active["guard"],
+            capabilities={"click": True},
+        )
+        with tempfile.TemporaryDirectory() as home:
+            engine = BrowserEngine(BrowsePaths.for_home(Path(home)), None, None, adapters=AdapterRegistry([connector]))
+            operation = lambda: OperationContext(time.monotonic() + 2)
+            try:
+                tab_id = engine.backend_select(operation(), self.owner, self.selection)["affected_tab_id"]
+                active["guard"] = False
+                with self.assertRaises(BrowseError) as raised:
+                    engine.click(operation(), self.owner, tab_id, 'role=button[name="Inspect"]', None, lambda *_: True)
+                self.assertEqual(raised.exception.code, "backend_boundary_failed")
+                self.assertEqual(action.attempts, 0)
+            finally:
+                engine.shutdown()
+
+    def test_confirmation_rechecks_external_boundary_before_click_or_press(self):
+        for action in ("click", "press"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as home:
+                form = FakeElement("Publish post", attrs={"method": "post", "action": "/publish"})
+                button = FakeElement("Publish", attrs={"type": "submit", "aria-label": "Publish"}, form=form)
+                page = FakePage()
+                page.role_elements["button"] = [button]
+                active = {"guard": True}
+                connector = PlaywrightConnector(
+                    "bridge",
+                    selector=lambda *_: {"selection": self.selection.as_dict(), "page": page},
+                    enforce_boundary=lambda *_: active["guard"],
+                    capabilities={"click": True, "press": True},
+                )
+                engine = BrowserEngine(BrowsePaths.for_home(Path(home)), None, None, adapters=AdapterRegistry([connector]))
+                operation = lambda: OperationContext(time.monotonic() + 2)
+
+                def confirm(*_):
+                    active["guard"] = False
+                    return True
+
+                try:
+                    tab_id = engine.backend_select(operation(), self.owner, self.selection)["affected_tab_id"]
+                    args = (operation(), self.owner, tab_id, 'role=button[name="Publish"]', None)
+                    with self.assertRaises(BrowseError) as raised:
+                        if action == "click":
+                            engine.click(*args, confirm)
+                        else:
+                            engine.press(*args, "Enter", confirm)
+                    self.assertEqual(raised.exception.code, "backend_boundary_failed")
+                    self.assertEqual(button.clicked, 0)
+                    self.assertEqual(button.pressed, [])
+                finally:
+                    engine.shutdown()
+
+    def test_boundary_failure_releases_selected_target(self):
+        page = FakePage()
+        release = Mock()
+        connector = PlaywrightConnector(
+            "bridge",
+            selector=lambda *_: {"selection": self.selection.as_dict(), "page": page},
+            enforce_boundary=lambda *_: False,
+            release=release,
+            capabilities={"click": True},
+        )
+        with tempfile.TemporaryDirectory() as home:
+            registry = AdapterRegistry([connector])
+            engine = BrowserEngine(BrowsePaths.for_home(Path(home)), None, None, adapters=registry)
+            try:
+                with self.assertRaises(BrowseError) as raised:
+                    engine.backend_select(OperationContext(time.monotonic() + 2), self.owner, self.selection)
+                self.assertEqual(raised.exception.code, "backend_boundary_failed")
+                release.assert_called_once()
+                self.assertIsNone(engine._attached)
+                other = ResourceOwner("other", "instance", 1)
+                registry.claim(self.selection, other)
+                registry.release(self.selection, other)
+            finally:
+                engine.shutdown()
 
     def test_other_owner_cannot_query_or_operate_selected_target(self):
         with tempfile.TemporaryDirectory() as home:

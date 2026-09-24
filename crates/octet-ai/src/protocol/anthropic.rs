@@ -9,9 +9,9 @@ use crate::protocol::{
 };
 use crate::stream::{ResponseBuilder, StreamEvent};
 use crate::types::{
-    AssistantPart, ImageSource, Media, Message, Protocol, ReasoningConfig, ReasoningState,
-    ReasoningStateKind, Request, StopReason, ToolCallId, ToolChoice, ToolResultPart, Usage,
-    UserPart,
+    AssistantPart, CacheRetention, ImageSource, Media, Message, Protocol, ReasoningConfig,
+    ReasoningState, ReasoningStateKind, Request, StopReason, ToolCallId, ToolChoice,
+    ToolResultPart, Usage, UserPart,
 };
 use crate::validate::{normalize_request_reasoning, validate_request};
 
@@ -218,7 +218,8 @@ const ANTHROPIC_FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-stre
 /// permitted fallback model.
 const ANTHROPIC_SERVER_SIDE_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// Mid-conversation effort and its thinking binding control.
-const ANTHROPIC_MID_CONVERSATION_OUTPUT_CONFIG_BETA: &str = "mid-conversation-output-config-2026-07-01";
+const ANTHROPIC_MID_CONVERSATION_OUTPUT_CONFIG_BETA: &str =
+    "mid-conversation-output-config-2026-07-01";
 const ANTHROPIC_THINKING_BINDING_CONTROLS_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 /// Resolved Anthropic compat for one model: Pi's route defaults with the
@@ -367,6 +368,8 @@ enum AnthropicSseData {
 #[derive(Deserialize)]
 struct AnthropicResponseMessage {
     id: String,
+    #[serde(default)]
+    model: Option<String>,
     usage: AnthropicResponseUsage,
 }
 
@@ -652,8 +655,7 @@ pub(crate) fn build_request(
                                     match &state.kind {
                                         ReasoningStateKind::AnthropicSignature { signature } => {
                                             if let Some(text) = &reasoning.text {
-                                                let has_signature =
-                                                    !signature.trim().is_empty();
+                                                let has_signature = !signature.trim().is_empty();
                                                 if !has_signature && text.trim().is_empty() {
                                                     // Nothing to replay; an empty
                                                     // thinking block is never sent.
@@ -664,10 +666,12 @@ pub(crate) fn build_request(
                                                     // that declares it accepts one;
                                                     // otherwise it becomes text.
                                                     if compat.allow_empty_signature {
-                                                        blocks.push(AnthropicContentBlock::Thinking {
-                                                            thinking: text.clone(),
-                                                            signature: String::new(),
-                                                        });
+                                                        blocks.push(
+                                                            AnthropicContentBlock::Thinking {
+                                                                thinking: text.clone(),
+                                                                signature: String::new(),
+                                                            },
+                                                        );
                                                     } else {
                                                         blocks.push(AnthropicContentBlock::Text {
                                                             text: text.clone(),
@@ -718,14 +722,23 @@ pub(crate) fn build_request(
         );
     }
 
-    // Anthropic caches the prefix ending at the final user block. Keep the
-    // marker on the final user turn so every subsequent request can reuse the
-    // preceding conversation prefix without changing the canonical history.
+    // A normal request marks its final user block. A one-off cache warm has a
+    // synthetic final user turn: mark the preceding canonical message instead,
+    // so a subsequent real prompt can reuse the warmed conversation prefix.
     if let Some(marker) = cache_marker {
-        if let Some(AnthropicMessage::User { content }) = messages.last_mut() {
-            if let Some(block) = content.last_mut() {
-                set_content_cache_control(block, marker);
+        let target = if req.cache_retention == CacheRetention::WarmShort {
+            messages.iter_mut().rev().nth(1)
+        } else {
+            messages.last_mut()
+        };
+        let content = match target {
+            Some(AnthropicMessage::User { content } | AnthropicMessage::Assistant { content }) => {
+                Some(content)
             }
+            Some(AnthropicMessage::System { .. }) | None => None,
+        };
+        if let Some(block) = content.and_then(|content| content.last_mut()) {
+            set_content_cache_control(block, marker);
         }
     }
 
@@ -962,13 +975,16 @@ pub(crate) fn build_request(
             );
         }
     }
-    if model.spec.cache.send_session_affinity_headers {
+    if model.spec.cache.send_session_affinity_headers
+        && !crate::protocol::is_opencode_session_route(model)
+    {
         if let Some(session_id) = crate::protocol::cache_session_id(&req) {
             let value = http::HeaderValue::from_str(session_id)
                 .map_err(|_| ConfigError::InvalidHeader("x-session-affinity".into()))?;
             headers.insert(http::HeaderName::from_static("x-session-affinity"), value);
         }
     }
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -1028,7 +1044,7 @@ fn push_synthetic_tool_results(
 
 /// Decodes a streaming SSE event from Anthropic, emitting StreamEvents.
 pub(crate) fn decode_stream_event(
-    _model: &crate::catalog::Model,
+    model: &crate::catalog::Model,
     sse_event: &SseEvent,
     builder: &mut ResponseBuilder,
 ) -> Result<Vec<StreamEvent>, AiError> {
@@ -1045,6 +1061,36 @@ pub(crate) fn decode_stream_event(
 
     match data {
         AnthropicSseData::MessageStart { message } => {
+            // A relay's model label is not authority to rebind an ordinary
+            // response. Only a route that declared server-side fallbacks may
+            // attribute a different terminal model. Match its price by exact
+            // declared target, never by the requested model's tariff or a
+            // similarly named catalog entry.
+            if let (Some(terminal), Some(compat)) = (
+                message.model.as_deref(),
+                model.spec.preset.anthropic_compat.as_ref(),
+            ) {
+                if terminal != model.spec.api_name && !compat.allowed_fallback_models.is_empty() {
+                    // The echoed id has no separate catalog validation. Keep
+                    // it within the same bound as a declared fallback target.
+                    if terminal.trim().is_empty() || terminal.len() > 256 {
+                        return Err(AiError::Decode(DecodeError::Json(
+                            "invalid terminal fallback model".into(),
+                        )));
+                    }
+                    let mut matches = compat
+                        .allowed_fallback_models
+                        .iter()
+                        .filter(|fallback| fallback.model == terminal);
+                    builder.pricing = match (matches.next(), matches.next()) {
+                        (Some(fallback), None) => {
+                            fallback.cost.as_ref().and_then(|cost| cost.pricing())
+                        }
+                        _ => None,
+                    };
+                    builder.model = crate::types::ModelId(terminal.to_owned());
+                }
+            }
             builder.response_id = Some(message.id.clone());
             emit_event(
                 &mut events,
@@ -1124,6 +1170,11 @@ pub(crate) fn decode_stream_event(
                     // assistant turn, so fail closed instead of corrupting it.
                     if !builder.observed_indices.is_empty() {
                         return Err(UnsupportedError::MidOutputModelFallback.into());
+                    }
+                    // Without a distinct terminal model in message_start, the
+                    // marker cannot identify which tariff to apply.
+                    if builder.model == model.spec.id {
+                        builder.pricing = None;
                     }
                 }
             }
@@ -1283,6 +1334,13 @@ pub(crate) fn decode_stream_event(
             }
         }
         AnthropicSseData::MessageStop => {
+            if builder.model != model.spec.id
+                && builder
+                    .usage
+                    .is_some_and(|usage| usage.cache_write_1h_tokens > 0)
+            {
+                builder.pricing = None;
+            }
             // Send final usage if we have one
             if let Some(u) = builder.usage {
                 emit_event(&mut events, builder, StreamEvent::Usage(u))?;
@@ -1499,7 +1557,8 @@ mod tests {
     #[test]
     fn caller_anthropic_beta_list_is_authoritative_and_deduplicated() {
         let mut model = make_test_model(false);
-        {            let endpoint = Arc::make_mut(&mut model.endpoint);
+        {
+            let endpoint = Arc::make_mut(&mut model.endpoint);
             // Repeated headers and comma-joined values both occur in practice;
             // the caller's list replaces inferred defaults and is deduplicated.
             endpoint.default_headers.append(
@@ -1595,8 +1654,10 @@ mod tests {
         // An ordinary API-key route infers nothing: the beta header is absent
         // rather than carrying an empty value.
         let mut model = make_test_model(false);
-        Arc::make_mut(&mut model.endpoint).auth =
-            crate::auth::Auth::header_env(http::HeaderName::from_static("x-api-key"), "ANTHROPIC_API_KEY");
+        Arc::make_mut(&mut model.endpoint).auth = crate::auth::Auth::header_env(
+            http::HeaderName::from_static("x-api-key"),
+            "ANTHROPIC_API_KEY",
+        );
         let parts = build_request(&model, &beta_test_request(ReasoningConfig::Off)).unwrap();
         assert_eq!(beta_header(&parts), None);
     }
@@ -1674,7 +1735,7 @@ mod tests {
 
     #[test]
     fn cache_retention_controls_anthropic_wire_markers() {
-        let model = make_test_model(false);
+        let mut model = make_test_model(false);
         let mut req = Request {
             system: Some("stable system".to_string()),
             messages: vec![Message::User(UserMessage {
@@ -1725,6 +1786,89 @@ mod tests {
             .is_none());
         assert!(body["tools"][0].get("cache_control").is_none());
         assert!(parts.headers.get("x-session-affinity").is_none());
+
+        Arc::make_mut(&mut model.spec)
+            .cache
+            .send_session_affinity_headers = true;
+        Arc::make_mut(&mut model.endpoint).id = EndpointId("opencode-anthropic".into());
+        req.session_id = Some("zen-session".into());
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(parts.headers["x-opencode-session"], "zen-session");
+        assert!(parts.headers.get("x-session-affinity").is_none());
+        req.session_id = None;
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+    }
+
+    #[test]
+    fn warm_breakpoint_covers_reusable_canonical_prefix_not_synthetic_suffix() {
+        let model = make_test_model(false);
+        let mut req = Request {
+            system: Some("stable system".into()),
+            messages: vec![
+                Message::User(UserMessage {
+                    content: vec![UserPart::Text("prior user".into())],
+                }),
+                Message::Assistant(crate::types::AssistantMessage {
+                    content: vec![AssistantPart::Text("prior answer".into())],
+                    model: model.spec.id.clone(),
+                    protocol: Protocol::AnthropicMessages,
+                }),
+            ],
+            tools: vec![ToolDef {
+                async_execution: false,
+                constrained_sampling: None,
+                name: "lookup".into(),
+                description: "lookup".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: Some(1),
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: CacheRetention::WarmShort,
+            session_id: Some("same-session".into()),
+        };
+        req.messages.push(Message::User(UserMessage {
+            content: vec![UserPart::Text("Reply with a single period.".into())],
+        }));
+        let warm = build_request(&model, &req).unwrap();
+        let warm_body: serde_json::Value = serde_json::from_slice(&warm.body).unwrap();
+        req.cache_retention = CacheRetention::Short;
+        req.max_output_tokens = Some(100);
+        req.messages.pop();
+        req.messages.push(Message::User(UserMessage {
+            content: vec![UserPart::Text("real follow-up".into())],
+        }));
+        let follow_up = build_request(&model, &req).unwrap();
+        let follow_up_body: serde_json::Value = serde_json::from_slice(&follow_up.body).unwrap();
+
+        assert_eq!(warm_body["system"], follow_up_body["system"]);
+        assert_eq!(warm_body["tools"], follow_up_body["tools"]);
+        let mut warm_prefix = warm_body["messages"].as_array().unwrap()[..2].to_vec();
+        let follow_up_prefix = &follow_up_body["messages"].as_array().unwrap()[..2];
+        assert_eq!(
+            warm_prefix[1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        warm_prefix[1]["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_control");
+        assert_eq!(&warm_prefix, follow_up_prefix);
+        assert!(warm_body["messages"][2]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            follow_up_body["messages"][2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
@@ -1993,10 +2137,7 @@ mod tests {
 
     fn compat_build(model: &Model, req: &Request) -> (serde_json::Value, http::HeaderMap) {
         let parts = build_request(model, req).unwrap();
-        (
-            serde_json::from_slice(&parts.body).unwrap(),
-            parts.headers,
-        )
+        (serde_json::from_slice(&parts.body).unwrap(), parts.headers)
     }
 
     fn compat_beta_header(headers: &http::HeaderMap) -> String {
@@ -2038,25 +2179,27 @@ mod tests {
         let mut fallback = make_test_model(false);
         Arc::make_mut(&mut fallback.spec).preset.anthropic_compat =
             Some(crate::declarations::AnthropicCompatPreset {
-                allowed_fallback_models: vec![
-                    crate::declarations::AnthropicFallbackModel {
-                        provider: "anthropic".to_string(),
-                        model: "claude-haiku-4-5".to_string(),
-                        cost: Some(crate::declarations::AnthropicFallbackCost {
-                            input: 1.0,
-                            output: 5.0,
-                            cache_read: 0.1,
-                            cache_write: 1.25,
-                        }),
-                    },
-                ],
+                allowed_fallback_models: vec![crate::declarations::AnthropicFallbackModel {
+                    provider: "anthropic".to_string(),
+                    model: "claude-haiku-4-5".to_string(),
+                    cost: Some(crate::declarations::AnthropicFallbackCost {
+                        input: 1.0,
+                        output: 5.0,
+                        cache_read: 0.1,
+                        cache_write: 1.25,
+                    }),
+                }],
                 ..Default::default()
             });
         let (body, headers) = compat_build(&fallback, &compat_request(ToolChoice::Auto));
-        assert_eq!(body["fallbacks"], serde_json::json!([{"model": "claude-haiku-4-5"}]));
+        assert_eq!(
+            body["fallbacks"],
+            serde_json::json!([{"model": "claude-haiku-4-5"}])
+        );
         assert!(compat_beta_header(&headers).contains("server-side-fallback-2026-07-01"));
         // Never an empty array: Anthropic rejects the field with no target.
-        let (body, _headers) = compat_build(&make_test_model(false), &compat_request(ToolChoice::Auto));
+        let (body, _headers) =
+            compat_build(&make_test_model(false), &compat_request(ToolChoice::Auto));
         assert!(body.get("fallbacks").is_none());
     }
 
@@ -2196,21 +2339,25 @@ mod tests {
         let (body, _headers) = compat_build(&model, &silent);
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
     }
-
 }
 
 /// Offline fixture matrix for the Anthropic Messages stream decoder
 /// (design §19; plan Task 10.2).
 #[cfg(test)]
 mod fixture_tests {
-    use super::{bounded_refusal_explanation, decode_stream_event};
     use super::MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES;
+    use super::{bounded_refusal_explanation, decode_stream_event};
+    use crate::declarations::{
+        AnthropicCompatPreset, AnthropicFallbackCost, AnthropicFallbackModel,
+    };
     use crate::error::{AiError, StreamProtocolError};
+    use crate::pricing::{Pricing, TokenRate};
     use crate::protocol::harness;
     use crate::stream::StreamEvent;
     use crate::types::{
         AssistantPart, Protocol, ReasoningStateKind, StopReason, ToolCallArgumentError, ToolDef,
     };
+    use std::sync::Arc;
 
     macro_rules! fx {
         ($name:literal) => {
@@ -2256,6 +2403,99 @@ mod fixture_tests {
         assert_eq!(text_of(&events), "Hi");
         let resp = harness::finished(&events);
         assert_eq!(resp.stop_reason, StopReason::EndTurn);
+    }
+
+    fn fallback_model() -> crate::Model {
+        let mut model = harness::model(
+            Protocol::AnthropicMessages,
+            Some(Pricing {
+                input: TokenRate(9_000_000),
+                output: TokenRate(9_000_000),
+                cache_read: TokenRate(9_000_000),
+                cache_write_5m: TokenRate(9_000_000),
+                cache_write_1h: None,
+                reasoning: None,
+                tiers: vec![],
+            }),
+        );
+        Arc::make_mut(&mut model.spec).preset.anthropic_compat = Some(AnthropicCompatPreset {
+            allowed_fallback_models: vec![AnthropicFallbackModel {
+                provider: "anthropic".into(),
+                model: "claude-haiku-4-5".into(),
+                cost: Some(AnthropicFallbackCost {
+                    input: 1.0,
+                    output: 5.0,
+                    cache_read: 0.1,
+                    cache_write: 1.25,
+                }),
+            }],
+            ..Default::default()
+        });
+        model
+    }
+
+    #[tokio::test]
+    async fn declared_fallback_uses_terminal_model_and_exact_declared_price() {
+        let model = fallback_model();
+        for chunk in [0, 1] {
+            let events = harness::drive(
+                &model,
+                decode_stream_event,
+                fx!("fallback_priced.sse"),
+                chunk,
+            )
+            .await
+            .unwrap();
+            let response = harness::finished(&events);
+            assert_eq!(response.message.model.0, "claude-haiku-4-5");
+            assert_eq!(response.usage.total_tokens, 2320);
+            assert_eq!(response.cost.unwrap().total, 3035);
+            assert_eq!(text_of(&events), "Done.");
+            let state = response
+                .message
+                .content
+                .iter()
+                .find_map(|part| match part {
+                    AssistantPart::Reasoning(reasoning) => reasoning.state.as_ref(),
+                    _ => None,
+                })
+                .expect("signed fallback reasoning");
+            assert_eq!(state.model.0, "claude-haiku-4-5");
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_with_unmatched_or_incomplete_pricing_never_uses_requested_tariff() {
+        let mut model = fallback_model();
+        let fixture = std::str::from_utf8(fx!("fallback_priced.sse")).unwrap();
+        for data in [
+            fixture.replace("claude-haiku-4-5", "claude-haiku-unknown"),
+            fixture.replace("\"model\":\"claude-haiku-4-5\",", ""),
+            fixture.replace(
+                "\"cache_creation_input_tokens\":20",
+                "\"cache_creation_input_tokens\":20,\"cache_creation\":{\"ephemeral_1h_input_tokens\":20}",
+            ),
+        ] {
+            let events = harness::drive(&model, decode_stream_event, data.as_bytes(), 0)
+                .await
+                .unwrap();
+            assert!(harness::finished(&events).cost.is_none());
+        }
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .anthropic_compat
+            .as_mut()
+            .unwrap()
+            .allowed_fallback_models[0]
+            .cost = None;
+        let events = harness::drive(&model, decode_stream_event, fx!("fallback_priced.sse"), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            harness::finished(&events).message.model.0,
+            "claude-haiku-4-5"
+        );
+        assert!(harness::finished(&events).cost.is_none());
     }
 
     #[tokio::test]
@@ -2321,6 +2561,67 @@ mod fixture_tests {
             other => panic!("expected AnthropicSignature, got {other:?}"),
         }
         assert_eq!(text_of(&events), "Final answer.");
+    }
+
+    #[tokio::test]
+    async fn relay_model_mismatch_keeps_signed_thinking_bound_to_requested_model() {
+        // A relay can report its upstream model in message_start. Its unsigned
+        // label must not replace the requested model attached to opaque state.
+        let data = br#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_relay","model":"relay-upstream-model","usage":{"input_tokens":15,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Consider the options."}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"c2lnbmF0dXJl"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Final answer."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+        for chunk in [0, 1] {
+            let events = run(data, chunk).await.unwrap();
+            let response = harness::finished(&events);
+            assert_eq!(response.message.model.0, "fixture-model");
+            let reasoning = response
+                .message
+                .content
+                .iter()
+                .find_map(|part| match part {
+                    AssistantPart::Reasoning(reasoning) => Some(reasoning),
+                    _ => None,
+                })
+                .expect("signed thinking block");
+            assert_eq!(reasoning.text.as_deref(), Some("Consider the options."));
+            let state = reasoning.state.as_ref().expect("signature state");
+            assert_eq!(state.model.0, "fixture-model");
+            assert_eq!(state.protocol, Protocol::AnthropicMessages);
+            assert!(matches!(
+                &state.kind,
+                ReasoningStateKind::AnthropicSignature { signature }
+                    if signature == "c2lnbmF0dXJl"
+            ));
+            assert_eq!(text_of(&events), "Final answer.");
+        }
     }
 
     #[tokio::test]

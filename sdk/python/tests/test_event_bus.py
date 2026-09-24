@@ -11,6 +11,7 @@ separate; their execution is parent-owned and is not implied by SDK checks.
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -239,13 +240,19 @@ class KernelTests(unittest.TestCase):
         with self.assertRaises(BusError):
             self.kernel.deliver("alpha", self.status.topic)
 
-    def test_sequence_is_monotonic_per_publisher_and_topic(self) -> None:
+    def test_sequence_is_monotonic_across_publisher_topics(self) -> None:
+        other = self.kernel.declare(TopicSpec("alpha", "other", (FieldSpec.boolean("ready"),)))
         self.kernel.subscribe("beta", self.status.topic)
+        self.kernel.subscribe("beta", other.topic)
         first = self.publish(sequence=1)
-        second = self.publish(sequence=2)
-        self.assertEqual((1, 2), (first.sequence, second.sequence))
-        drained = self.kernel.deliver("beta", self.status.topic)
-        self.assertEqual([1, 2], [item.sequence for item in drained])
+        second = self.kernel.publish("alpha", other.topic, {"ready": True}, published_at_ms=2_000)
+        third = self.publish(sequence=3)
+        self.assertEqual((1, 2, 3), (first.sequence, second.sequence, third.sequence))
+        self.assertEqual([1, 3], [item.sequence for item in self.kernel.deliver("beta", self.status.topic)])
+        self.assertEqual([2], [item.sequence for item in self.kernel.deliver("beta", other.topic)])
+        # A different publisher begins its own process-scoped counter.
+        beta = self.kernel.declare(TopicSpec("beta", "other", (FieldSpec.boolean("ready"),)))
+        self.assertEqual(1, self.kernel.publish("beta", beta.topic, {"ready": True}, published_at_ms=4_000).sequence)
 
     def test_full_queue_raises_instead_of_dropping(self) -> None:
         kernel = EventBusKernel(BusLimits(max_queue_messages=1))
@@ -461,6 +468,99 @@ class HostEventBusClientTests(unittest.TestCase):
             )
         self.assertEqual("stale_sequence", caught.exception.reason)
 
+    def test_pending_ack_overtaken_by_availability_retries_without_losing_interest(self) -> None:
+        topic = "bus.alpha.status"
+        calls = []
+
+        def responder(method, params, cancelled):
+            calls.append(method)
+            if len(calls) == 1:
+                self.assertTrue(bus.accept_lifecycle({
+                    "kind": "topic_available", "binding_id": BINDING_ID, "topic": topic,
+                    "topic_revision": 1, "publisher_instance_id": "instance-alpha", "process_generation": 1,
+                }))
+                return {"state": "pending", "binding_id": BINDING_ID, "topic_revision": 0}
+            return {"state": "active", "binding_id": BINDING_ID, "topic_revision": 1,
+                    "publisher_instance_id": "instance-alpha", "process_generation": 1}
+
+        bus = self.make_bus("beta", responder)
+        try:
+            bus.subscribe(topic)
+            self.assertTrue(bus.wait_rebound(2))
+            self.assertEqual(["bus/subscribe", "bus/subscribe"], calls)
+            self.assertEqual([topic], bus.snapshot()["subscribed"])
+            self.assertEqual([], bus.snapshot()["pending"])
+        finally:
+            bus.close()
+
+    def test_stale_active_ack_never_resurrects_replaced_publisher(self) -> None:
+        topic = "bus.alpha.status"
+        calls = []
+
+        def responder(method, params, cancelled):
+            calls.append(method)
+            if len(calls) == 1:
+                for kind, revision, instance in (
+                    ("topic_unavailable", 2, "old-instance"),
+                    ("topic_available", 3, "new-instance"),
+                ):
+                    bus.accept_lifecycle({
+                        "kind": kind, "binding_id": BINDING_ID, "topic": topic,
+                        "topic_revision": revision, "publisher_instance_id": instance, "process_generation": 1,
+                    })
+                return {"state": "active", "binding_id": BINDING_ID, "topic_revision": 1,
+                        "publisher_instance_id": "old-instance", "process_generation": 1}
+            return {"state": "active", "binding_id": BINDING_ID, "topic_revision": 3,
+                    "publisher_instance_id": "new-instance", "process_generation": 1}
+
+        bus = self.make_bus("beta", responder)
+        try:
+            bus.subscribe(topic)
+            self.assertTrue(bus.wait_rebound(2))
+            self.assertEqual(2, len(calls))
+            self.assertEqual(("new-instance", 1), bus._subscribed[topic])
+        finally:
+            bus.close()
+
+    def test_event_after_active_ack_frame_waits_for_sdk_ack_commit(self) -> None:
+        topic = "bus.alpha.status"
+        waiting = threading.Event()
+        completed = threading.Event()
+        accepted = []
+        reader = []
+        params = {"topic": topic, "publisher": "alpha", "sequence": 1,
+                  "published_at_ms": 5_000, "binding_id": BINDING_ID,
+                  "publisher_instance_id": "instance-alpha", "process_generation": 1,
+                  "payload": {"summary": "safe", "count": 1, "phase": "ready"}}
+
+        def responder(method, request, cancelled):
+            def receive():
+                try:
+                    accepted.append(bus.accept_event(params))
+                finally:
+                    completed.set()
+            reader.append(threading.Thread(target=receive, name="bus-event-reader"))
+            reader[0].start()
+            self.assertTrue(waiting.wait(2), "event reader should reach the uncommitted ACK")
+            return {"state": "active", "binding_id": BINDING_ID, "topic_revision": 1,
+                    "publisher_instance_id": "instance-alpha", "process_generation": 1}
+
+        bus = self.make_bus("beta", responder)
+        original_wait = bus._condition.wait_for
+        def mark_wait(predicate, timeout=None):
+            if threading.current_thread().name == "bus-event-reader":
+                waiting.set()
+            return original_wait(predicate, timeout)
+        bus._condition.wait_for = mark_wait
+        try:
+            bus.subscribe(topic)
+            self.assertTrue(completed.wait(2))
+            self.assertEqual([1], [event.sequence for event in accepted])
+        finally:
+            bus.close()
+            for thread in reader:
+                thread.join(timeout=2)
+
     def test_declare_is_namespaced_to_the_extension(self) -> None:
         bus = self.make_bus("alpha")
         spec = bus.declare(name="progress", fields=(FieldSpec.integer("percent", minimum=0, maximum=100),))
@@ -527,7 +627,7 @@ class HostMediationRegressions(unittest.TestCase):
                 self.assertEqual(reason, caught.exception.reason)
                 self.assertEqual([], kernel.deliver("gamma", "bus.alpha.second"))
                 self.assertEqual([first], kernel.deliver("beta", "bus.alpha.first"))
-                self.assertEqual(1, kernel.publish("alpha", "bus.alpha.second", {"ready": True}, published_at_ms=3).sequence)
+                self.assertEqual(2, kernel.publish("alpha", "bus.alpha.second", {"ready": True}, published_at_ms=3).sequence)
 
     def test_declaration_is_sent_to_host_and_failed_ack_never_installs_locally(self):
         registry = TopicRegistry()

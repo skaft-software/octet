@@ -1576,6 +1576,7 @@ pub fn cost_text(session: &Session, model: &Model) -> String {
                 format!("sub:{}", agent_id.trim_start_matches("agent-"))
             }
             UsageRecordKind::Compaction => "cmp".to_owned(),
+            UsageRecordKind::CacheWarm => "warm".to_owned(),
             UsageRecordKind::RejectedResponsesTurn => "rejected".to_owned(),
             UsageRecordKind::TerminalGate { returned } => match returned {
                 Some(true) => "gate:R".to_owned(),

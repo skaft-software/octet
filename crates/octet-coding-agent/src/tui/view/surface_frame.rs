@@ -87,6 +87,16 @@ fn render_surface_content_line(
     let content = fit_line(line, plan.geometry.content_width);
     let left_padding = " ".repeat(usize::from(plan.padding));
     let right_padding = " ".repeat(usize::from(plan.padding));
+    // The compiled prompt was highlighted at its wrapped-text boundary.
+    // Padding, blank spacing, and trailing canvas must not inherit its colour.
+    // Explicit custom surfaces keep the existing full-cell/card treatment.
+    if plan.kind == "user" && theme.is_compiled_default() && prompt_color.is_some() {
+        return if content.is_empty() {
+            String::new()
+        } else {
+            format!("{left_padding}{content}{right_padding}")
+        };
+    }
     let paint_prompt = |text: String, width: u16| {
         let text = padded_to_width(&strip_terminal_sequences(&text), width);
         theme.prompt_color_cell(prompt_color, &text)
@@ -219,6 +229,12 @@ pub(super) fn event_margin_marker_with_frame(
         }
         TranscriptBlock::Reasoning(_) => None,
         TranscriptBlock::Assistant(_) if markers_enabled => Some(theme.fg("foreground", event_dot)),
+        TranscriptBlock::Subagents(summary) if markers_enabled && summary.running > 0 => {
+            Some(active_phase_dot())
+        }
+        TranscriptBlock::Subagents(summary) if markers_enabled => {
+            Some(theme.settled_event_dot(summary.settled_role(), event_dot))
+        }
         TranscriptBlock::Tool(panel) if markers_enabled && !panel.finished => {
             Some(active_phase_dot())
         }
@@ -248,6 +264,7 @@ pub(super) fn event_margin_marker_with_frame(
             ))
         }
         TranscriptBlock::User { .. }
+        | TranscriptBlock::Subagents(_)
         | TranscriptBlock::Outcome(_)
         | TranscriptBlock::Compaction(_)
         | TranscriptBlock::Tool(_)

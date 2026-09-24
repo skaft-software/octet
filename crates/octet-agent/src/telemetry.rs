@@ -1060,6 +1060,7 @@ fn compaction_reason_label(reason: CompactionReason) -> &'static str {
 fn compaction_kind_label(kind: &CompactionKind) -> &'static str {
     match kind {
         CompactionKind::Local => "local",
+        CompactionKind::Snapcompact => "snapcompact",
         CompactionKind::NativeResponses { .. } => "native_responses",
     }
 }
@@ -1189,7 +1190,8 @@ mod tests {
                 display_name: None,
                 protocol: Protocol::OpenAiChat,
                 capabilities: Capabilities {
-                    responses_features: Default::default(),                    input_modalities: ModalitySet::none(),
+                    responses_features: Default::default(),
+                    input_modalities: ModalitySet::none(),
                     output_modalities: ModalitySet::none(),
                     tools: true,
                     parallel_tool_calls: false,

@@ -54,6 +54,15 @@ remain live contract implementations, not complete process runtimes.
 [Earlier examples](../examples/README.md#legacy-extension-examples) retain their
 exact API versions.
 
+For a host-owned replacement of local compaction (not a model-callable tool),
+see the source [octet-snap-compact extension](../extensions/octet-snap-compact/README.md).
+API `0.4` offers its `compaction_strategy` feature only to manifests declaring
+`hooks = ["compaction_strategy"]`. The hook receives `{model_id, text}` in
+`hook/run` batches and returns `{compaction_frames: [base64_png, ...]}`. The host
+selects it only for vision models, retains the checkpoint and refuses malformed,
+partial, oversized or over-budget renderings before committing. No other API
+version negotiates this replacement hook.
+
 The selected #253 release gate is a working bounded authoring smoke: discovery
 and explicit enablement, exact negotiation, one real tool call, cooperative
 cancellation, and clean shutdown. Keep the existing generated, SDK, and

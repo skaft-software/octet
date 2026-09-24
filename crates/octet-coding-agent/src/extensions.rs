@@ -1750,6 +1750,7 @@ impl ExtensionProviderRuntime {
                     preset: Default::default(),
                     cache: CacheCompatibility {
                         supports_long_retention: false,
+                        supports_explicit_prompt_cache_mode: false,
                         send_session_id_header: false,
                         send_session_affinity_headers: false,
                         session_affinity_format: None,
@@ -11051,6 +11052,7 @@ providers = true
                 preset: Default::default(),
                 cache: CacheCompatibility {
                     supports_long_retention: false,
+                    supports_explicit_prompt_cache_mode: false,
                     send_session_id_header: false,
                     send_session_affinity_headers: false,
                     session_affinity_format: None,

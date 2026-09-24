@@ -72,8 +72,7 @@ Validation rules (`crates/octet-coding-agent/src/extension_package.rs:901`):
 ## Source extensions vs. executable bundles
 
 Import adapters such as
-[`octet-import-aider`](../extensions/octet-import-aider/README.md),
-[`octet-import-cline`](../extensions/octet-import-cline/README.md), and
+[`octet-import-aider`](../extensions/octet-import-aider/README.md) and
 [`octet-import-pi`](../extensions/octet-import-pi/README.md) are **source
 packages**: a manifest plus a script or module, discovered through the normal
 resource roots and enabled/trusted explicitly. They are not installed by

@@ -101,6 +101,8 @@ pub enum UsageRecordKind {
     },
     /// A tool-free call used to produce a context-compaction summary.
     Compaction,
+    /// Isolated Anthropic prompt-cache keepalive; never an assistant turn.
+    CacheWarm,
     /// A bounded one-token decision about whether a candidate response may
     /// return control to the user. `None` records a billable malformed answer.
     TerminalGate {
@@ -156,6 +158,36 @@ impl UsageUncertaintyRecord {
         }
         Ok(())
     }
+}
+
+/// Durable, payload-free status of an Anthropic prompt-cache keepalive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheWarmState {
+    /// Written before the provider request; an unsettled attempt is uncertain.
+    Started,
+    /// A complete terminal response with separately recorded usage.
+    Completed,
+    /// Deadline expired after possible dispatch; usage is unknown.
+    TimedOut,
+    /// Provider failed after possible dispatch; usage is unknown.
+    Failed,
+}
+
+/// One bounded status record, separate from provider usage and model context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheWarmRecord {
+    /// Monotonic attempt number within this session.
+    pub attempt: u64,
+    /// Host-selected route identifier (never URL or credentials).
+    pub endpoint: EndpointId,
+    /// Host-selected model identifier.
+    pub model: ModelId,
+    /// Attempt lifecycle.
+    pub state: CacheWarmState,
+    /// Wall-clock observation time.
+    pub at_unix_ms: u64,
 }
 
 /// Provider usage and cost recorded for one durable operation.
@@ -573,6 +605,16 @@ pub struct Entry {
     pub value: EntryValue,
 }
 
+/// Durable bitmap checkpoint; source text is retained for later re-compaction.
+/// The lead-in and frames enter vision-model context, not this source text.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SnapcompactCheckpoint {
+    /// Source of the frames, including any earlier bitmap checkpoint.
+    pub source_text: String,
+    /// Inline PNGs using the existing base64 media codec.
+    pub frames: Vec<octet_ai::Media>,
+}
+
 /// Payload of a session entry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -585,6 +627,9 @@ pub enum EntryValue {
     Compaction {
         /// Caller-provided summary of the replaced history.
         summary: String,
+        /// Optional deterministic bitmap replacement for this summary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapcompact: Option<SnapcompactCheckpoint>,
         /// The oldest entry still kept in full-fidelity context.
         first_kept: EntryId,
         /// Snapshots of active skills at the compaction boundary.
@@ -795,6 +840,11 @@ pub enum SessionRecord {
         /// Bounded host-selected identifiers only; no invented usage or cost.
         record: UsageUncertaintyRecord,
     },
+    /// Cache-warm lifecycle; independent from provider usage and context.
+    CacheWarm {
+        /// Sanitized status record.
+        record: CacheWarmRecord,
+    },
     /// Usage for one assistant turn or compaction operation. This does not
     /// alter the active head or model-visible context.
     Usage {
@@ -846,6 +896,9 @@ enum SessionRecordRef<'a> {
     },
     Usage {
         record: &'a UsageRecord,
+    },
+    CacheWarm {
+        record: &'a CacheWarmRecord,
     },
     EntryLabel {
         entry_id: &'a EntryId,
@@ -1085,6 +1138,8 @@ pub struct Session {
     usage_records: Vec<UsageRecord>,
     /// Session-global exposure; checkout and compaction never clear it.
     usage_uncertainty_records: Vec<UsageUncertaintyRecord>,
+    /// Separate cache-warm lifecycle, session-global and never model-visible.
+    cache_warm_records: Vec<CacheWarmRecord>,
     /// Replaceable parked deferred-run leaves, keyed by operation id. The
     /// store owns its own descriptor-bound append line so a durable change is
     /// one synced record.
@@ -1175,6 +1230,7 @@ impl Session {
             checkpoints: Vec::new(),
             usage_records: Vec::new(),
             usage_uncertainty_records: Vec::new(),
+            cache_warm_records: Vec::new(),
             entry_labels: BTreeMap::new(),
         })
     }
@@ -1311,6 +1367,7 @@ impl Session {
         let mut checkpoint_lines: Vec<usize> = Vec::new();
         let mut usage_records: Vec<UsageRecord> = Vec::new();
         let mut usage_uncertainty_records = Vec::new();
+        let mut cache_warm_records: Vec<CacheWarmRecord> = Vec::new();
         let restored_invocations = DurableInvocationStore::new();
         let restored_deferred_runs = DeferredRunStore::new();
         let mut entry_labels: BTreeMap<EntryId, String> = BTreeMap::new();
@@ -1570,6 +1627,39 @@ impl Session {
                         run_cost_microdollars,
                     });
                 }
+                SessionRecord::CacheWarm { record } => {
+                    let valid = record.attempt > 0
+                        && UsageUncertaintyRecord {
+                            endpoint: record.endpoint.clone(),
+                            model: record.model.clone(),
+                            operation: "cache_warm".into(),
+                        }
+                        .validate()
+                        .is_ok()
+                        && match record.state {
+                            CacheWarmState::Started => {
+                                cache_warm_records
+                                    .last()
+                                    .map_or(record.attempt == 1, |last| {
+                                        last.attempt.checked_add(1) == Some(record.attempt)
+                                            && last.state != CacheWarmState::Started
+                                    })
+                            }
+                            _ => cache_warm_records.last().is_some_and(|last| {
+                                last.attempt == record.attempt
+                                    && last.state == CacheWarmState::Started
+                                    && last.endpoint == record.endpoint
+                                    && last.model == record.model
+                            }),
+                        };
+                    if !valid {
+                        return Err(SessionError::Corrupt {
+                            line: line_no,
+                            message: "invalid cache-warm lifecycle".into(),
+                        });
+                    }
+                    cache_warm_records.push(record);
+                }
                 SessionRecord::UsageUncertainty { record } => {
                     record.validate().map_err(|_| SessionError::Corrupt {
                         line: line_no,
@@ -1691,6 +1781,7 @@ impl Session {
             checkpoints,
             usage_records,
             usage_uncertainty_records,
+            cache_warm_records,
             entry_labels,
         })
     }
@@ -2369,6 +2460,77 @@ impl Session {
         })
     }
 
+    /// Persist provider-reported usage for one completed cache-warm call.
+    /// It is charged to the session but never enters the assistant-turn cache
+    /// hit-rate denominator or the model-visible conversation.
+    pub(crate) fn record_cache_warm_usage(
+        &mut self,
+        endpoint: EndpointId,
+        model: ModelId,
+        usage: Usage,
+        cost: Option<Cost>,
+    ) -> Result<(), SessionError> {
+        self.record_usage(UsageRecord {
+            kind: UsageRecordKind::CacheWarm,
+            usage,
+            stop_reason: None,
+            endpoint: Some(endpoint),
+            model: Some(model),
+            completed_at_unix_ms: Some(now_unix_millis()),
+            cost,
+            cost_microdollars: cost.map(|cost| cost.total),
+            session_cost_microdollars: None,
+            session_cost_picodollars_remainder: None,
+        })
+    }
+
+    /// Append a sanitized cache-warm lifecycle transition. A started attempt
+    /// without a terminal transition is conservatively usage-uncertain on resume.
+    pub(crate) fn record_cache_warm_status(
+        &mut self,
+        record: CacheWarmRecord,
+    ) -> Result<(), SessionError> {
+        let identifiers = UsageUncertaintyRecord {
+            endpoint: record.endpoint.clone(),
+            model: record.model.clone(),
+            operation: "cache_warm".into(),
+        };
+        identifiers.validate()?;
+        let valid = record.attempt > 0
+            && match record.state {
+                CacheWarmState::Started => {
+                    self.cache_warm_records
+                        .last()
+                        .map_or(record.attempt == 1, |last| {
+                            last.attempt.checked_add(1) == Some(record.attempt)
+                                && last.state != CacheWarmState::Started
+                        })
+                }
+                _ => self.cache_warm_records.last().is_some_and(|last| {
+                    last.attempt == record.attempt
+                        && last.state == CacheWarmState::Started
+                        && last.endpoint == record.endpoint
+                        && last.model == record.model
+                }),
+            };
+        if !valid {
+            return Err(SessionError::Limit("invalid cache-warm lifecycle".into()));
+        }
+        let mut buffer = Vec::with_capacity(180);
+        write_json_line(
+            &mut buffer,
+            &SessionRecordRef::CacheWarm { record: &record },
+        )?;
+        self.persist(&buffer)?;
+        self.cache_warm_records.push(record);
+        Ok(())
+    }
+
+    /// Session-global cache-warm statuses, including abandoned branches.
+    pub fn cache_warm_records(&self) -> &[CacheWarmRecord] {
+        &self.cache_warm_records
+    }
+
     /// Persist usage for a context-compaction provider call.
     pub fn record_compaction_usage(
         &mut self,
@@ -2525,7 +2687,12 @@ impl Session {
     /// Known usage/cost totals are only subtotals while this is true. Hard
     /// cumulative ceilings must fail closed, including after reopening.
     pub fn has_uncertain_usage(&self) -> bool {
-        !self.usage_uncertainty_records.is_empty() || self.has_unsettled_native_steering()
+        !self.usage_uncertainty_records.is_empty()
+            || self.has_unsettled_native_steering()
+            || self
+                .cache_warm_records
+                .last()
+                .is_some_and(|record| record.state == CacheWarmState::Started)
     }
 
     /// A durable native intent without a completed, accounted successor cannot
@@ -2647,6 +2814,27 @@ impl Session {
         first_kept: EntryId,
         details: crate::compaction::CompactionDetails,
     ) -> Result<EntryId, SessionError> {
+        self.compact_with_checkpoint(summary.into(), first_kept, details, None)
+    }
+
+    /// Atomically append a validated vision checkpoint in place of a model summary.
+    pub fn compact_snapcompact(
+        &mut self,
+        summary: String,
+        first_kept: EntryId,
+        details: crate::compaction::CompactionDetails,
+        snapcompact: SnapcompactCheckpoint,
+    ) -> Result<EntryId, SessionError> {
+        self.compact_with_checkpoint(summary, first_kept, details, Some(snapcompact))
+    }
+
+    fn compact_with_checkpoint(
+        &mut self,
+        summary: String,
+        first_kept: EntryId,
+        details: crate::compaction::CompactionDetails,
+        snapcompact: Option<SnapcompactCheckpoint>,
+    ) -> Result<EntryId, SessionError> {
         if !self.is_ancestor_of_head(&first_kept) {
             return Err(SessionError::NotAncestor(first_kept));
         }
@@ -2664,7 +2852,8 @@ impl Session {
         };
 
         self.append(EntryValue::Compaction {
-            summary: summary.into(),
+            summary,
+            snapcompact,
             first_kept,
             active_skills,
             skill_resources,
@@ -3087,12 +3276,13 @@ impl Session {
                 .find_map(|(index, entry)| match &entry.value {
                     EntryValue::Compaction {
                         summary,
+                        snapcompact,
                         first_kept,
                         ..
-                    } => Some((index, summary, first_kept)),
+                    } => Some((index, summary, snapcompact, first_kept)),
                     _ => None,
                 });
-        let local_marker_index = local_compaction.map(|(index, _, _)| index);
+        let local_marker_index = local_compaction.map(|(index, _, _, _)| index);
         let native_search_start = local_marker_index.map_or(0, |index| index.saturating_add(1));
         let native_compaction = branch
             .iter()
@@ -3117,16 +3307,14 @@ impl Session {
                 output.clone(),
             ));
             index.saturating_add(1)
-        } else if let Some((_marker_index, summary, first_kept)) = local_compaction {
+        } else if let Some((_marker_index, summary, snapcompact, first_kept)) = local_compaction {
             let first_kept_index = branch
                 .iter()
                 .position(|entry| &entry.id == first_kept)
                 .ok_or_else(|| SessionError::UnknownEntry(first_kept.clone()))?;
             replay.push(octet_ai::responses::ResponsesReplayItem::User(
                 UserMessage {
-                    content: vec![UserPart::Text(format!(
-                        "[summary of earlier conversation]\n{summary}"
-                    ))],
+                    content: compaction_parts(summary, snapcompact.as_ref()),
                 },
             ));
             first_kept_index
@@ -3382,7 +3570,7 @@ impl Session {
     /// the active branch semantics.
     fn reconstruct_context(&self) -> Result<Vec<Message>, SessionError> {
         let mut newest_first: Vec<Message> = Vec::new();
-        let mut summary: Option<String> = None;
+        let mut summary: Option<(String, Option<SnapcompactCheckpoint>)> = None;
         let mut boundary: Option<EntryId> = None;
 
         let mut cursor = self.head.as_ref();
@@ -3400,6 +3588,7 @@ impl Session {
                 | EntryValue::ResponsesCompaction { .. } => {}
                 EntryValue::Compaction {
                     summary: compaction_summary,
+                    snapcompact,
                     first_kept,
                     ..
                 } => {
@@ -3408,7 +3597,7 @@ impl Session {
                     // the marker nearest the head is model-visible; injecting
                     // older summaries again duplicates overlapping history.
                     if boundary.is_none() {
-                        summary = Some(compaction_summary.clone());
+                        summary = Some((compaction_summary.clone(), snapcompact.clone()));
                         boundary = Some(first_kept.clone());
                     }
                 }
@@ -3424,16 +3613,54 @@ impl Session {
 
         let mut messages: Vec<Message> = summary
             .into_iter()
-            .map(|summary| {
+            .map(|(summary, snapcompact)| {
                 Message::User(UserMessage {
-                    content: vec![UserPart::Text(format!(
-                        "[summary of earlier conversation]\n{summary}"
-                    ))],
+                    content: compaction_parts(&summary, snapcompact.as_ref()),
                 })
             })
             .collect();
         messages.extend(newest_first.into_iter().rev());
         Ok(coalesce_tool_results(messages))
+    }
+
+    /// Preview the proposed checkpoint without touching the durable branch.
+    /// Used to refuse a bitmap checkpoint that cannot fit the active model.
+    pub fn preview_compaction_context(
+        &self,
+        first_kept: &EntryId,
+        summary: &str,
+        checkpoint: &SnapcompactCheckpoint,
+    ) -> Result<Vec<Message>, SessionError> {
+        let branch = self.active_branch_entries()?;
+        let start = branch
+            .iter()
+            .position(|entry| &entry.id == first_kept)
+            .ok_or_else(|| SessionError::UnknownEntry(first_kept.clone()))?;
+        let mut messages = vec![Message::User(UserMessage {
+            content: compaction_parts(summary, Some(checkpoint)),
+        })];
+        messages.extend(
+            branch[start..]
+                .iter()
+                .filter_map(|entry| match &entry.value {
+                    EntryValue::Message(message) => Some(message.clone()),
+                    _ => None,
+                }),
+        );
+        Ok(coalesce_tool_results(messages))
+    }
+
+    /// The active checkpoint is bitmap-only and cannot be replayed on a text model.
+    pub fn has_snapcompact_context(&self) -> Result<bool, SessionError> {
+        Ok(self
+            .active_branch_entries()?
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.value {
+                EntryValue::Compaction { snapcompact, .. } => Some(snapcompact.is_some()),
+                _ => None,
+            })
+            .unwrap_or(false))
     }
 
     /// Borrows the cached model-visible context without deep-cloning message
@@ -3481,11 +3708,18 @@ impl Session {
         for entry in reverse {
             match &entry.value {
                 EntryValue::Message(message) => messages.push(message.clone()),
-                EntryValue::Compaction { summary, .. } => {
+                EntryValue::Compaction {
+                    summary,
+                    snapcompact,
+                    ..
+                } => {
                     messages.clear();
+                    let text = snapcompact
+                        .as_ref()
+                        .map_or(summary.as_str(), |image| image.source_text.as_str());
                     messages.push(Message::User(UserMessage {
                         content: vec![UserPart::Text(format!(
-                            "[summary of earlier conversation]\n{summary}"
+                            "[summary of earlier conversation]\n{text}"
                         ))],
                     }));
                 }
@@ -3675,8 +3909,8 @@ impl AssistantFrameJournal {
         if self.settled || self.bounded {
             return Ok(());
         }
-        let mut line = serde_json::to_vec(frame)
-            .map_err(|error| SessionError::Serde(error.to_string()))?;
+        let mut line =
+            serde_json::to_vec(frame).map_err(|error| SessionError::Serde(error.to_string()))?;
         line.push(b'\n');
         if self.frames >= MAX_PARTIAL_FRAME_JOURNAL_FRAMES
             || self.bytes.saturating_add(line.len()) > MAX_PARTIAL_FRAME_JOURNAL_BYTES
@@ -3928,6 +4162,16 @@ fn append_context_message(messages: &mut Vec<Message>, message: &Message) {
 /// message before the next `role:user` media message. Individual tool results
 /// stay individual *entries* on disk; coalescing happens only during context
 /// reconstruction.
+fn compaction_parts(summary: &str, checkpoint: Option<&SnapcompactCheckpoint>) -> Vec<UserPart> {
+    let mut parts = vec![UserPart::Text(format!(
+        "[summary of earlier conversation]\n{summary}"
+    ))];
+    if let Some(checkpoint) = checkpoint {
+        parts.extend(checkpoint.frames.iter().cloned().map(UserPart::Media));
+    }
+    parts
+}
+
 fn coalesce_tool_results(messages: Vec<Message>) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(messages.len());
     for message in messages {
@@ -6899,7 +7143,10 @@ mod tests {
         let id = session
             .append_extension_entry("octet.todo", None, "note", accepted.clone())
             .unwrap();
-        assert_eq!(session.extension_entry(&id, "octet.todo").unwrap().data, accepted);
+        assert_eq!(
+            session.extension_entry(&id, "octet.todo").unwrap().data,
+            accepted
+        );
     }
 
     #[test]

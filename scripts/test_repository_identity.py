@@ -15,6 +15,8 @@ from octet_release_identity import CANONICAL_REPOSITORY, LEGACY_RELEASE_COMMIT, 
 
 SCRIPTS = Path(__file__).resolve().parent
 LEGACY_REPOSITORY = "skaft-software/ygg"
+# Keep publication independent of the workspace's local release candidate.
+PUBLISHED_NATIVE_VERSION = "0.7.6"
 
 
 def load_script(name):
@@ -125,7 +127,7 @@ class SourceDistributionVersionTests(unittest.TestCase):
         self.version = re.search(r'^version = "([^"]+)"$',
                                  (self.root / "Cargo.toml").read_text(), re.MULTILINE).group(1)
 
-    def test_first_party_manifests_locks_and_installer_match_workspace(self):
+    def test_first_party_source_manifests_and_published_package_pins(self):
         for name in ("Cargo.lock", "extensions/octet-serve/Cargo.lock"):
             entries = re.findall(r'name = "(octet-[^"]+)"\nversion = "([^"]+)"',
                                  (self.root / name).read_text())
@@ -139,17 +141,19 @@ class SourceDistributionVersionTests(unittest.TestCase):
                                   (self.root / name).read_text(), re.MULTILINE)
             self.assertTrue(versions, name)
             self.assertEqual(set(versions), {self.version}, name)
-        for name in ("extensions/octet-serve/Cargo.toml", "sdk/python/pyproject.toml"):
-            self.assertIn(f'\nversion = "{self.version}"\n', (self.root / name).read_text())
+        self.assertIn(f'\nversion = "{self.version}"\n',
+                      (self.root / "extensions/octet-serve/Cargo.toml").read_text())
+        self.assertIn(f'\nversion = "{PUBLISHED_NATIVE_VERSION}"\n',
+                      (self.root / "sdk/python/pyproject.toml").read_text())
         self.assertEqual(json.loads((self.root / "sdk/typescript/package.json").read_text())["version"],
-                         self.version)
-        self.assertIn(f'\nversion="{self.version}"\n', (SCRIPTS / "install.sh").read_text())
+                         PUBLISHED_NATIVE_VERSION)
+        self.assertIn(f'\nversion="{PUBLISHED_NATIVE_VERSION}"\n', (SCRIPTS / "install.sh").read_text())
         for package in ("octet-browse", "octet-mcp", "octet-subagents", "octet-web-search"):
             manifest = (self.root / "extensions" / package / "extension.toml").read_text()
             with self.subTest(package=package):
-                self.assertIn(f'\nversion = "{self.version}"\n', manifest)
+                self.assertIn(f'\nversion = "{PUBLISHED_NATIVE_VERSION}"\n', manifest)
                 self.assertIn(f'\nrequires_octet = "={self.version}"\n', manifest)
-                self.assertIn('\napi_version = "0.2"\n', manifest)
+                self.assertIn('\napi_version = "0.4"\n', manifest)
 
     def test_current_notes_are_identical_and_in_the_finite_documentation_inventory(self):
         name = f"docs/releases/v{self.version}.md"
@@ -160,43 +164,37 @@ class SourceDistributionVersionTests(unittest.TestCase):
 
 
 class ReleaseDocumentationTests(unittest.TestCase):
-    """Bundled user docs must not describe the release as an unavailable candidate.
+    """Source docs must distinguish the local candidate from published assets."""
 
-    These checks validate source prose, not publication, signatures or physical
-    acceptance. Those remain release-workflow and maintainer evidence.
-    """
-
-    def test_current_version_has_release_only_notes(self):
+    def test_current_notes_are_explicitly_unpublished(self):
         root = SCRIPTS.parent
         version = re.search(r'^version = "([^"]+)"$',
                             (root / "Cargo.toml").read_text(), re.MULTILINE).group(1)
         notes = (root / "docs/releases" / f"v{version}.md").read_text()
         self.assertEqual(notes.splitlines()[0], f"# octet {version}")
-        normalized = " ".join(notes.lower().split())
-        # Registry publication is a separate gate from native/Serve publication.
-        # Permit only this explicit channel disclaimer, not an unpublished-product claim.
-        normalized = normalized.replace(
-            "npm, homebrew, crates.io and sdk registries are separate, unpublished channels.",
-            "",
-        )
-        for stale in ("unpublished", "source candidate", "publication remains blocked",
-                      "release gate — open", "acceptance is unrun"):
-            self.assertNotIn(stale, normalized)
+        self.assertIn("local release candidate — not published", notes.lower())
         self.assertRegex(notes, r"(?m)^## (Fixed|Added|Changed|Highlights)$")
+
+    def test_installation_guides_pin_last_published_native_release(self):
+        root = SCRIPTS.parent
+        candidate = re.search(r'^version = "([^"]+)"$',
+                              (root / "Cargo.toml").read_text(), re.MULTILINE).group(1)
+        published_url = f"/releases/download/v{PUBLISHED_NATIVE_VERSION}/install-octet.sh"
+        candidate_url = f"/releases/download/v{candidate}/install-octet.sh"
         for name in ("README.md", "docs/installation.md"):
             with self.subTest(path=name):
-                self.assertIn(f"/releases/download/v{version}/install-octet.sh",
-                              (root / name).read_text())
+                text = (root / name).read_text()
+                self.assertIn(published_url, text)
+                if candidate != PUBLISHED_NATIVE_VERSION:
+                    self.assertNotIn(candidate_url, text)
+        self.assertIn(f"{candidate} release candidate", (root / "README.md").read_text())
+        self.assertIn(f"{candidate} RC", (root / "docs/installation.md").read_text())
 
-    def test_current_installation_guides_do_not_keep_candidate_gate_text(self):
-        for name in ("README.md", "docs/README.md", "docs/installation.md",
-                     "docs/distribution.md"):
-            normalized = " ".join((SCRIPTS.parent / name).read_text().lower().split())
-            with self.subTest(path=name):
-                self.assertNotIn("unpublished candidate", normalized)
-                self.assertNotIn("unpublished source candidate", normalized)
-                self.assertNotIn("physical acceptance is unrun", normalized)
-                self.assertNotIn("physical acceptance remains unrun", normalized)
+    def test_distribution_notes_keep_candidate_and_publication_distinct(self):
+        text = (SCRIPTS.parent / "docs/distribution.md").read_text()
+        self.assertIn("Last published native", text)
+        self.assertIn("Local source candidate", text)
+        self.assertIn(f"`{PUBLISHED_NATIVE_VERSION}`", text)
 
 
 if __name__ == "__main__":

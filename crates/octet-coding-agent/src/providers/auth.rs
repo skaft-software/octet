@@ -1424,8 +1424,56 @@ pub(crate) fn missing_environment_diagnostic(
 mod tests {
     use super::*;
     use crate::providers::contract::{
-        ProviderAuthentication, ANTHROPIC, CLOUDFLARE_AI_GATEWAY, GEMINI, OPENAI,
+        ProviderAuthentication, ANTHROPIC, CLOUDFLARE_AI_GATEWAY, GEMINI, META, OPENAI,
     };
+
+    #[test]
+    fn meta_api_key_is_private_bearer_auth_not_a_subscription_login() {
+        let mut store_reads = 0;
+        let credential = resolve_environment_with(
+            &META,
+            |variable| {
+                assert_eq!(variable, "META_API_KEY");
+                Ok(Some("meta-fixture-key".into()))
+            },
+            |_| {
+                store_reads += 1;
+                Ok(Some("stored-fixture-key".into()))
+            },
+        )
+        .unwrap()
+        .expect("environment key");
+        assert_eq!(store_reads, 0);
+        assert_eq!(credential.source, CredentialSource::Environment);
+        let headers = environment_discovery_headers(&META.routes[0], &credential).unwrap();
+        assert_eq!(
+            headers[http::header::AUTHORIZATION].to_str().unwrap(),
+            "Bearer meta-fixture-key"
+        );
+        assert!(headers[http::header::AUTHORIZATION].is_sensitive());
+        assert!(matches!(
+            environment_auth(&META.routes[0], &credential).unwrap(),
+            Auth::BearerEnv { .. }
+        ));
+        assert!(!format!("{credential:?}").contains("meta-fixture-key"));
+
+        let stored = resolve_environment_with(
+            &META,
+            |_| Ok(None),
+            |provider_id| {
+                assert_eq!(provider_id, "meta");
+                Ok(Some("stored-fixture-key".into()))
+            },
+        )
+        .unwrap()
+        .expect("stored key");
+        assert_eq!(stored.source, CredentialSource::Stored);
+        assert!(matches!(
+            environment_auth(&META.routes[0], &stored).unwrap(),
+            Auth::Bearer(_)
+        ));
+        assert!(!format!("{stored:?}").contains("stored-fixture-key"));
+    }
 
     #[test]
     fn configured_environment_wins_without_reading_stored_keys() {

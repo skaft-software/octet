@@ -181,6 +181,17 @@ pub trait ProviderRetryHook: Send + Sync {
     async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice;
 }
 
+/// Optional API 0.4 replacement for local parent-model summarization.
+/// The host selects this only for a vision-capable active model and owns the
+/// history boundary, validation, checkpoint and subsequent replay.
+#[async_trait::async_trait]
+pub trait CompactionStrategy: Send + Sync {
+    /// Render the complete supplied transcript slice as PNG frames. A failed
+    /// slice aborts compaction; partial frames must never become a checkpoint.
+    async fn render(&self, model_id: &str, text: &str, owner: &str)
+        -> Result<Vec<Vec<u8>>, String>;
+}
+
 /// Stable semantic summary of a completed assistant turn before it becomes a
 /// durable session entry.
 ///
@@ -734,6 +745,8 @@ pub struct ExtensionHost {
     pub(crate) observers: Vec<Arc<dyn EventObserver>>,
     pub(crate) tool_call_hooks: Vec<Arc<dyn ToolCallHook>>,
     pub(crate) provider_retry_hooks: Vec<Arc<dyn ProviderRetryHook>>,
+    pub(crate) compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
+    pub(crate) duplicate_compaction_strategy: bool,
     pub(crate) persistence_metadata_hooks: Vec<RegisteredPersistenceMetadataHook>,
     pub(crate) duplicate_tools: Vec<String>,
     pub(crate) invalid_metadata_namespaces: Vec<String>,
@@ -747,6 +760,8 @@ impl Default for ExtensionHost {
             observers: Vec::new(),
             tool_call_hooks: Vec::new(),
             provider_retry_hooks: Vec::new(),
+            compaction_strategy: None,
+            duplicate_compaction_strategy: false,
             persistence_metadata_hooks: Vec::new(),
             duplicate_tools: Vec::new(),
             invalid_metadata_namespaces: Vec::new(),
@@ -859,6 +874,16 @@ impl ExtensionHost {
         self.provider_retry_hooks.push(Arc::new(hook));
     }
 
+    /// Register the one active local-compaction strategy. Competing providers
+    /// are rejected when the Agent is constructed instead of depending on load order.
+    pub fn compaction_strategy(&mut self, strategy: impl CompactionStrategy + 'static) {
+        if self.compaction_strategy.is_some() {
+            self.duplicate_compaction_strategy = true;
+        } else {
+            self.compaction_strategy = Some(Arc::new(strategy));
+        }
+    }
+
     /// Register a typed pre-persistence metadata hook under one extension-owned
     /// namespace.
     ///
@@ -951,6 +976,8 @@ impl ExtensionHost {
         scoped.observers = self.observers.clone();
         scoped.tool_call_hooks = self.tool_call_hooks.clone();
         scoped.provider_retry_hooks = self.provider_retry_hooks.clone();
+        scoped.compaction_strategy = self.compaction_strategy.clone();
+        scoped.duplicate_compaction_strategy = self.duplicate_compaction_strategy;
         scoped.persistence_metadata_hooks = self.persistence_metadata_hooks.clone();
         scoped.invalid_metadata_namespaces = self.invalid_metadata_namespaces.clone();
         let mut effective = Vec::new();

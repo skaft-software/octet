@@ -2141,6 +2141,75 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn meta_api_key_route_uses_responses_without_claiming_subscription_access() {
+        let declaration = &META;
+        assert_eq!(declaration.base_url, "https://api.meta.ai/v1/");
+        assert_eq!(
+            declaration.authentication,
+            ProviderAuthentication::Environment {
+                variables: &["META_API_KEY"]
+            }
+        );
+        assert!(matches!(
+            declaration.model_discovery,
+            ModelDiscovery::OpenAiModels {
+                filter: ModelFilter::Prefix(&["muse-spark-"])
+            }
+        ));
+        assert_eq!(declaration.inventory_cache, InventoryCacheMode::Required);
+        assert_eq!(declaration.static_models, StaticModelSet::None);
+        assert!(declaration.route_for_model("muse-spark-1.3").is_some());
+        let route = declaration.inventory_route().expect("Meta inventory route");
+        assert_eq!(route.protocol, Protocol::OpenAiResponses);
+        assert_eq!(route.auth_presentation, EndpointAuthPresentation::Bearer);
+        assert_eq!(route.transport, EndpointTransport::Http);
+        assert_eq!(route.runtime.responses_features, Default::default());
+        assert_eq!(declaration.pricing, PricingProfile::Reference);
+        assert!(crate::providers::pricing_for(declaration, "muse-spark-1.3").is_none());
+
+        let fixture = PiRouteFixture {
+            registration: "discovered".into(),
+            model_id: "muse-spark-1.3".into(),
+            protocol: "openai_responses".into(),
+            endpoint_id: "meta".into(),
+            auth_presentation: "bearer".into(),
+            auth_header: None,
+            base_url: declaration.base_url.into(),
+            configured_base_url: None,
+            environment_variable: "META_API_KEY".into(),
+        };
+        let server = MockServer::start().await;
+        let base_url =
+            fixture_base_at_server(&server, &url::Url::parse(declaration.base_url).unwrap());
+        let request_url = fixture_request_url(&base_url, route, "meta", &fixture);
+        let response = fixture_stream_response(&fixture.protocol);
+        Mock::given(method("POST"))
+            .and(path(request_url.path().to_owned()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", response.content_type)
+                    .set_body_bytes(response.body),
+            )
+            .mount(&server)
+            .await;
+        let mut model = register_fixture_model(declaration, "meta", &fixture, &base_url);
+        Arc::make_mut(&mut model.endpoint).auth = fixture_auth(&fixture);
+        let result = AiClient::new()
+            .complete(&model, fixture_request())
+            .await
+            .unwrap();
+        assert_eq!(
+            result.response_id.as_deref(),
+            Some("fixture-openai-responses")
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/v1/responses");
+        assert_fixture_authentication(&requests[0], "meta", &fixture);
+        assert_fixture_request_body(&requests[0], "meta", &fixture);
+    }
+
     // Current additive Pi reference 8a7b0c03 providers/xai.ts, independent of
     // the historical inventory/package admission baseline above.
     #[tokio::test]

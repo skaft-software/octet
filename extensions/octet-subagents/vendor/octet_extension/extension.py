@@ -61,6 +61,7 @@ API_V02_FEATURES = (
     "delegation_telemetry_v1",
     "approvals",
     "secrets",
+    "compaction_strategy",
 )
 LIFECYCLE_METHODS = (
     "session/started",
@@ -614,6 +615,8 @@ class Extension:
 
     def hook(self, name: str) -> Callable[[Handler], Handler]:
         self._validate_name("hook", name)
+        if name == "compaction_strategy" and self.api_version != "0.4":
+            raise ValueError("compaction_strategy requires API 0.4")
         if name in _TYPED_MUTATION_HOOKS and self.api_version not in ("0.2", "0.4"):
             raise ValueError(f"{name} requires extension API 0.2")
 
@@ -2316,6 +2319,15 @@ class Extension:
             result["post_mutation"] = self._validate_post_mutation_disposition(
                 value["post_mutation"]
             )
+        elif hook == "compaction_strategy":
+            if "compaction_strategy" not in self._features:
+                raise RpcError(-32603, "compaction_strategy was not negotiated")
+            frames = value.get("compaction_frames")
+            if (not isinstance(frames, list) or not 1 <= len(frames) <= 32
+                    or any(not isinstance(frame, str) or len(frame) > 512 * 1024
+                           for frame in frames)):
+                raise RpcError(-32603, "invalid compaction frames")
+            result["compaction_frames"] = frames
         return result
 
     @staticmethod

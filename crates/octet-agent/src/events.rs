@@ -509,6 +509,8 @@ pub struct CompactionInfo {
 pub enum CompactionKind {
     /// A local canonical summary and retained full-fidelity tail.
     Local,
+    /// A deterministic bitmap checkpoint and retained full-fidelity tail.
+    Snapcompact,
     /// A route-affine opaque Responses checkpoint.
     NativeResponses {
         /// Session entry containing the opaque compact output.

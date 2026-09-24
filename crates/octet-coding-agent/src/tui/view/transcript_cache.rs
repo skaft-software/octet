@@ -209,11 +209,9 @@ impl ShellState {
             let previous_line_count = cache.lines.len();
             let rainbow_strength = self.status_rainbow_strength();
             let overlay_active = self.overlay.is_some();
-            // Delegated workers that are still alive belong to the turn that
-            // most recently settled, so only the newest outcome block reports
-            // them. This is derived from the live roster here, at render time,
-            // and never baked into `RunOutcome`.
-            let running_outcome = self.subagents_running_for_outcome();
+            // The orchestration row itself owns worker liveness; aggregate
+            // outcomes must not add a second subagent notice.
+            let running_outcome = None;
             let mut first_changed = cache.lines.len();
             let rebuild =
                 cache.width != Some(width) || cache.block_revisions.len() > self.transcript.len();

@@ -143,7 +143,8 @@
       },
       "cache": {
         "send_session_affinity_headers": true,
-        "session_affinity_format": "open_ai"
+        "session_affinity_format": "open_ai",
+        "supports_explicit_prompt_cache_mode": true
       }
     },
     {
@@ -209,7 +210,8 @@
       },
       "cache": {
         "send_session_affinity_headers": true,
-        "session_affinity_format": "open_ai"
+        "session_affinity_format": "open_ai",
+        "supports_explicit_prompt_cache_mode": true
       }
     },
     {
@@ -275,7 +277,8 @@
       },
       "cache": {
         "send_session_affinity_headers": true,
-        "session_affinity_format": "open_ai"
+        "session_affinity_format": "open_ai",
+        "supports_explicit_prompt_cache_mode": true
       }
     },
     {
@@ -460,6 +463,45 @@
         "cache_read": 500000,
         "cache_write_5m": 6250000,
         "cache_write_1h": 10000000,
+        "reasoning": null,
+        "tiers": []
+      }
+    },
+    {
+      "id": "claude-opus-5-5",
+      "endpoint": "anthropic",
+      "api_name": "claude-opus-5-5",
+      "display_name": "Claude Opus 5.5",
+      "protocol": "anthropic_messages",
+      "capabilities": {
+        "input_modalities": {"bits": 1},
+        "output_modalities": {"bits": 0},
+        "tools": true,
+        "parallel_tool_calls": true,
+        "reasoning": {
+          "control": "effort",
+          "exposes_text": true,
+          "preserves_state": true,
+          "effort_budgets": null,
+          "max_effort": "max",
+          "min_effort": "low",
+          "options": {
+            "values": ["low", "medium", "high", "xhigh", "max"],
+            "default": "medium"
+          }
+        },
+        "structured_output": true
+      },
+      "limits": {
+        "context_window": 1000000,
+        "max_output_tokens": 128000
+      },
+      "pricing": {
+        "input": 4000000,
+        "output": 20000000,
+        "cache_read": 200000,
+        "cache_write_5m": 5000000,
+        "cache_write_1h": 8000000,
         "reasoning": null,
         "tiers": []
       }

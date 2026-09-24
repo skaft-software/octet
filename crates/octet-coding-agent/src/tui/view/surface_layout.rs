@@ -27,7 +27,7 @@ fn transcript_surface_kind(block: &TranscriptBlock) -> &'static str {
         TranscriptBlock::User { .. } => "user",
         TranscriptBlock::Assistant(_) => "assistant",
         TranscriptBlock::Reasoning(_) => "reasoning",
-        TranscriptBlock::Tool(_) => "tool",
+        TranscriptBlock::Tool(_) | TranscriptBlock::Subagents(_) => "tool",
         TranscriptBlock::Shell(_) => "shell",
         TranscriptBlock::Outcome(_) => "outcome",
         TranscriptBlock::UpdateAvailable(_)
@@ -47,6 +47,7 @@ fn uses_event_marker_gutter(block: &TranscriptBlock) -> bool {
         TranscriptBlock::Assistant(_)
             | TranscriptBlock::Reasoning(_)
             | TranscriptBlock::Tool(_)
+            | TranscriptBlock::Subagents(_)
             | TranscriptBlock::Shell(_)
             | TranscriptBlock::UpdateAvailable(_)
             | TranscriptBlock::Notice(_)
@@ -106,6 +107,7 @@ fn natural_surface_width(block: &TranscriptBlock, theme: &OctetTheme) -> u16 {
     let inner_prefix = match block {
         TranscriptBlock::User { .. } => 2,
         TranscriptBlock::Tool(_) => 8,
+        TranscriptBlock::Subagents(_) => 0,
         TranscriptBlock::UpdateAvailable(_)
         | TranscriptBlock::Notice(_)
         | TranscriptBlock::NoticeStatus { .. } => 0,
@@ -143,7 +145,7 @@ pub(super) fn compile_surface_plan<'a>(
     // Reserve this before wrapping rather than padding source text or moving
     // the shared left baseline. Custom surfaces retain their own geometry.
     let right_inset = if theme.is_compiled_default()
-        && matches!(block, TranscriptBlock::Tool(_) | TranscriptBlock::Shell(_))
+        && matches!(block, TranscriptBlock::Tool(_) | TranscriptBlock::Subagents(_) | TranscriptBlock::Shell(_))
     {
         2.min(available.saturating_sub(1))
     } else {

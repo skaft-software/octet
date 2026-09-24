@@ -620,15 +620,10 @@ impl App {
     /// plan deferred at startup.
     ///
     /// Enrichment is never readiness: readiness already initialized the active
-    /// model's own route, so a surface that enumerates every route (the `/model`
-    /// picker, provider setup, a status page) calls this first and shows the
-    /// same provider list a fleet launch would have shown. Idempotent: a launch
-    /// whose plan was already the fleet returns immediately, and a second call
-    /// performs nothing.
-    ///
-    /// The live extension-provided routes are re-projected onto the fresh fleet
-    /// catalog, so enrichment cannot drop them. The agent, the session, and the
-    /// active model are untouched.
+    /// model's own route. Fleet surfaces may call this synchronously; the idle
+    /// `/model` picker instead builds the fleet on a worker and applies its
+    /// result through `apply_picker_catalog` while the panel remains interactive.
+    /// Both paths keep the agent, session, and active model untouched.
     /// Complete the catalog for one surface that is about to enumerate routes,
     /// reporting a failure instead of hiding a partial provider list.
     ///
@@ -655,6 +650,39 @@ impl App {
         self.readiness = CatalogReadiness::Fleet;
         self.synchronize_extension_provider_catalog();
         Ok(())
+    }
+
+    /// Admit one deferred picker inventory only for the model that launched it.
+    /// A failed or obsolete build leaves the current catalog and selection in
+    /// place; extension declarations are reprojected at the idle owner boundary.
+    pub(crate) fn apply_picker_catalog(
+        &mut self,
+        expected_model: &ModelId,
+        mut catalog: ModelCatalog,
+        notes: crate::app::bootstrap::CodexContextNotes,
+    ) -> anyhow::Result<bool> {
+        if self.readiness.is_fleet() || self.model.spec.id != *expected_model {
+            return Ok(false);
+        }
+        self.executable_extensions
+            .rescan_post_mutation_resources(&self.config);
+        self.executable_extensions
+            .synchronize_provider_catalog(&mut catalog, &self.client);
+        if !catalog_route_matches_active_model(&catalog, &self.model) {
+            anyhow::bail!(
+                "the active model {} route changed during catalog discovery; keeping the current routes",
+                self.model.spec.id.0
+            );
+        }
+        self.catalog = catalog;
+        self.codex_context_notes.merge(notes);
+        self.readiness = crate::app::bootstrap::CatalogReadiness::Fleet;
+        if self.executable_extensions.has_agent_session_service() {
+            self.agent.set_delegation_model_resolver(Arc::new(
+                delegation_models::CodingAgentModelResolver::new(self.catalog.clone()),
+            ));
+        }
+        Ok(true)
     }
 
     /// Current provider-visible tool schema reserve, including live extension

@@ -789,6 +789,59 @@ impl OctetTheme {
         )
     }
 
+    /// Only the compiled prompt body opts into compact, provenance-coloured
+    /// highlights. Unknown backgrounds use an unpainted, readable foreground;
+    /// limited palettes use the existing contrast-tested surface treatment.
+    pub(crate) fn prompt_text_highlight(&self, color: Option<&str>, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        let Some(source) = color.and_then(parse_hex_color) else {
+            return text.to_owned();
+        };
+        if self.capabilities.color == ColorDepth::None
+            || self.background == TerminalBackground::Unknown
+        {
+            return text.to_owned();
+        }
+        if self.capabilities.color != ColorDepth::TrueColor {
+            return self.prompt_color_cell(color, text);
+        }
+        let (background, foreground) = match self.background {
+            TerminalBackground::Dark => (
+                balance_to_luminance(source, 0.10),
+                Rgb {
+                    red: 0xe6,
+                    green: 0xe6,
+                    blue: 0xeb,
+                },
+            ),
+            TerminalBackground::Light => (
+                balance_to_luminance(source, 0.88),
+                Rgb {
+                    red: 0x20,
+                    green: 0x23,
+                    blue: 0x27,
+                },
+            ),
+            TerminalBackground::Unknown => unreachable!("handled above"),
+        };
+        self.inner.apply_style(
+            TextStyle::plain()
+                .foreground(Color::Rgb(
+                    foreground.red,
+                    foreground.green,
+                    foreground.blue,
+                ))
+                .background(Color::Rgb(
+                    background.red,
+                    background.green,
+                    background.blue,
+                )),
+            text,
+        )
+    }
+
     pub(crate) fn role_rgb(&self, token: &str) -> Option<(u8, u8, u8)> {
         self.resolve_rgb(token)
             .map(|color| (color.red, color.green, color.blue))
@@ -986,6 +1039,7 @@ impl OctetTheme {
                 syntax_highlighting: true,
                 tables: true,
                 stable_block_geometry: true,
+                prose_width: None,
                 unordered_list_marker: UnorderedListMarker::Dash,
                 ..RenderOptions::default()
             },
@@ -1436,9 +1490,13 @@ pub(crate) fn balance_background(source: &str, background: TerminalBackground) -
         TerminalBackground::Light => 0.95,
         TerminalBackground::Unknown => UNIVERSAL_TARGET_LUMINANCE,
     };
+    hex_color(balance_to_luminance(source, target_luminance))
+}
+
+fn balance_to_luminance(source: Rgb, target_luminance: f64) -> Rgb {
     let source_luminance = relative_luminance(source);
     if (source_luminance - target_luminance).abs() <= 0.002 {
-        return hex_color(source);
+        return source;
     }
     let lighten = source_luminance < target_luminance;
     let destination = if lighten {
@@ -1470,7 +1528,7 @@ pub(crate) fn balance_background(source: &str, background: TerminalBackground) -
             low = amount;
         }
     }
-    hex_color(blend(source, destination, high))
+    blend(source, destination, high)
 }
 
 fn balance_foreground(source: &str, background: TerminalBackground) -> String {
@@ -1611,6 +1669,14 @@ fn default_theme_for(
         &standard_surface("#202630", "#f1f5f4", background),
     );
     theme.override_token("md_code_inline_bg", "default");
+    theme.override_token(
+        "tool_output",
+        match background {
+            TerminalBackground::Dark => "#bec2c6",
+            TerminalBackground::Light => "#50585c",
+            TerminalBackground::Unknown => "default",
+        },
+    );
     apply_required_surfaces(&mut theme, background);
     apply_standard_technical_palette(&mut theme, background);
     // There is no model before the startup picker. Use octet green until the

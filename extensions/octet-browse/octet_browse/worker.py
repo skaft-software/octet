@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
-from .adapters import AdapterRegistry, BrowserConnector, PlaywrightTarget, TargetSelection
+from .adapters import AdapterRegistry, BrowserConnector, PlaywrightTarget, TargetSelection, _ACTION_CAPABILITIES
 from .paths import BrowsePaths
 from .profile import ProfileLease, ProfileManager
 from .safety import (
@@ -678,6 +678,12 @@ class BrowserEngine:
                     "confirmation_denied",
                     "The consequential browser action was denied or no interactive confirmation was available.",
                 )
+            # Confirmation can outlive an external connector's preventive guard.
+            # Verify the selected target and guard again before any browser effect.
+            self._require_open(owner)
+            self._require_capability(owner, "click")
+            if resolved.metadata.opens_popup:
+                self._require_capability(owner, "popup")
         before_ids = set(self._tabs)
         before_downloads = self._download_events
         self._blocked_navigation = False
@@ -811,6 +817,10 @@ class BrowserEngine:
                     "The consequential key action was denied or no interactive confirmation was available.",
                 )
             operation.check()
+            self._require_open(owner)
+            self._require_capability(owner, "press")
+            if resolved.metadata.opens_popup:
+                self._require_capability(owner, "popup")
         before_downloads = self._download_events
         self._blocked_navigation = False
         try:
@@ -1559,6 +1569,8 @@ class BrowserEngine:
             )
         declaration = attached.connector.capabilities.get(capability)
         if isinstance(declaration, dict) and declaration.get("supported", False):
+            if capability in _ACTION_CAPABILITIES:
+                attached.connector.require_boundary(attached.target, owner)
             return
         reason = declaration.get("reason") if isinstance(declaration, dict) else None
         detail = reason if isinstance(reason, str) and reason.strip() else (

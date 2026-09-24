@@ -99,11 +99,9 @@ fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<Stri
         .map(|line| render_extension_line(state, &line.text, line.style_role.as_deref(), width))
         .collect::<Vec<_>>();
     above.extend(
-        state
-            .extension_ui
-            .above_editor
-            .iter()
-            .map(|line| render_extension_line(state, &line.text, line.style_role.as_deref(), width)),
+        state.extension_ui.above_editor.iter().map(|line| {
+            render_extension_line(state, &line.text, line.style_role.as_deref(), width)
+        }),
     );
     above.extend(
         state.extension_ui.statuses.iter().map(|line| {
@@ -145,42 +143,11 @@ fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<Stri
         .map(|line| render_extension_line(state, &line.text, line.style_role.as_deref(), width))
         .collect::<Vec<_>>();
     below.extend(
-        state
-            .extension_ui
-            .footer
-            .iter()
-            .map(|line| render_extension_line(state, &line.text, line.style_role.as_deref(), width)),
+        state.extension_ui.footer.iter().map(|line| {
+            render_extension_line(state, &line.text, line.style_role.as_deref(), width)
+        }),
     );
     (above, below)
-}
-
-/// Live workers belong to the addressable chrome, not terminal history. Keep
-/// this independent of the parent's run and reader's follow-tail state: workers
-/// can outlive a turn and must remain observable while reading older messages.
-fn render_subagents(state: &ShellState, width: u16, limit: usize) -> Vec<String> {
-    let Some(view) = state.subagent_activity.as_ref() else {
-        return Vec::new();
-    };
-    if limit == 0 || !super::subagent_activity_is_active(view) {
-        return Vec::new();
-    }
-    let mut lines =
-        super::subagent_activity_render_rows(view, &state.theme, width, state.verbose_tools);
-    if lines.len() > limit {
-        let omitted = lines.len() - limit + 1;
-        lines.truncate(limit - 1);
-        lines.push(fit_line(
-            &state.theme.fg(
-                "muted",
-                &format!(
-                    "/subagents{}+{omitted} more rows",
-                    semantic_separator(&state.theme)
-                ),
-            ),
-            width,
-        ));
-    }
-    lines
 }
 
 pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> ShellChrome {
@@ -327,16 +294,9 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
     let pending = render_pending_steering(state, width, pending_limit);
     remaining = remaining.saturating_sub(pending.len());
 
-    // Reserve room for the composer, focused surfaces, and at least one
-    // transcript row. A large fleet is inspectable through /subagents rather
-    // than taking over the viewport, including under global disclosure.
-    let subagent_limit = (usize::from(state.size.1) / 3).min(remaining.saturating_sub(1));
-    let subagents = if state.panel.is_none() {
-        render_subagents(state, width, subagent_limit)
-    } else {
-        Vec::new()
-    };
-    remaining = remaining.saturating_sub(subagents.len());
+    // The one orchestration lifecycle is part of the semantic transcript,
+    // never duplicated in pinned composer-adjacent chrome.
+    let subagents = Vec::new();
 
     ShellChrome {
         header,

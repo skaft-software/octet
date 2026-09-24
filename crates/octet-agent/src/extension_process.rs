@@ -58,10 +58,10 @@ use crate::delegation::{
 use crate::effect::{EffectPolicy, ToolEffect};
 use crate::events::AgentEvent;
 use crate::extension::{
-    AssistantPersistenceContext, DynamicToolRegistration, EventObserver, Extension, ExtensionHost,
-    PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
-    PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
-    ToolCallHook,
+    AssistantPersistenceContext, CompactionStrategy, DynamicToolRegistration, EventObserver,
+    Extension, ExtensionHost, PersistenceMetadataHook, PersistenceMetadataProposal,
+    PostMutationContext, PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext,
+    ProviderRetryHook, ToolCallHook,
 };
 use crate::extension_api_v03 as api_v03;
 use crate::extension_policy::{
@@ -190,6 +190,8 @@ pub const EXTENSION_FEATURE_SYSTEM_PROMPT_READ: &str = "system_prompt_read";
 /// Credentials, authorization headers, and provider endpoints are never part of
 /// this surface: octet owns provider transport.
 pub const EXTENSION_FEATURE_MODEL_CATALOG: &str = "model_catalog";
+/// API 0.4 host-owned local compaction replacement (vision models only).
+pub const EXTENSION_FEATURE_COMPACTION_STRATEGY: &str = "compaction_strategy";
 
 const API_0_2_REQUIRED_FEATURES: &[&str] = &[
     EXTENSION_FEATURE_REQUEST_CANCELLATION,
@@ -2057,7 +2059,8 @@ impl ExtensionManifest {
             && self.api_version == EXTENSION_API_VERSION_0_1
         {
             return Err(ExtensionRuntimeError::InvalidManifest(
-                "workspace sharing requires extension API 0.2 or later resource-owner fences".into(),
+                "workspace sharing requires extension API 0.2 or later resource-owner fences"
+                    .into(),
             ));
         }
         if let Some(requires_octet) = &self.requires_octet {
@@ -2105,6 +2108,16 @@ impl ExtensionManifest {
             return Err(ExtensionRuntimeError::InvalidManifest(
                 "provider_retry, before_persistence, and post_mutation hooks require extension API 0.2"
                     .into(),
+            ));
+        }
+        if self
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::CompactionStrategy)
+            && self.api_version != EXTENSION_API_VERSION_0_4
+        {
+            return Err(ExtensionRuntimeError::InvalidManifest(
+                "compaction_strategy requires extension API 0.4".into(),
             ));
         }
         if self.api_version == EXTENSION_API_VERSION_0_1 && self.contributes.providers {
@@ -2327,6 +2340,8 @@ pub enum ExtensionHook {
     /// Advises on a host-admitted provider retry without changing retry safety
     /// or the host retry budget.
     ProviderRetry,
+    /// Replaces the parent-model local compaction call on vision routes.
+    CompactionStrategy,
     /// Proposes one namespaced metadata value for a completed assistant turn
     /// before its atomic durable persistence boundary.
     BeforePersistence,
@@ -3598,6 +3613,9 @@ pub struct ExtensionHookOutput {
     /// Advice accepted only for a typed `provider_retry` hook response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_retry: Option<ExtensionProviderRetryAdvice>,
+    /// Base64 PNG frames returned only from the API 0.4 compaction hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_frames: Option<Vec<String>>,
     /// Metadata accepted only for a typed `before_persistence` hook response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence_metadata: Option<ExtensionPersistenceMetadata>,
@@ -3917,9 +3935,8 @@ impl ExtensionSessionEntryOperation {
                 if entry_type.is_empty() {
                     return Err("session entry type must not be empty".into());
                 }
-                let bytes = serde_json::to_vec(data).map_err(|error| {
-                    format!("session entry data is not serializable: {error}")
-                })?;
+                let bytes = serde_json::to_vec(data)
+                    .map_err(|error| format!("session entry data is not serializable: {error}"))?;
                 if bytes.len() > MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES {
                     return Err(format!(
                         "session entry data is {} JSON bytes; limit is {MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES}",
@@ -3937,7 +3954,11 @@ impl ExtensionSessionEntryOperation {
                     entry_id,
                     MAX_CONFIRMATION_REQUEST_ID_BYTES,
                 )?;
-                validate_bounded_bytes("session entry label", label, MAX_EXTENSION_SESSION_LABEL_BYTES)
+                validate_bounded_bytes(
+                    "session entry label",
+                    label,
+                    MAX_EXTENSION_SESSION_LABEL_BYTES,
+                )
             }
         }
     }
@@ -4423,7 +4444,8 @@ fn truncated_notification_text(value: &str, limit: usize) -> String {
 
 fn validate_plain_text(kind: &str, value: &str) -> Result<(), String> {
     if value.chars().any(|character| {
-        character == '\u{1b}' || (character.is_control() && !matches!(character, '\n' | '\t' | '\r'))
+        character == '\u{1b}'
+            || (character.is_control() && !matches!(character, '\n' | '\t' | '\r'))
     }) {
         return Err(format!("{kind} contains a terminal control character"));
     }
@@ -7346,11 +7368,8 @@ impl ExtensionProcess {
 
     /// Opens one observable assistant message boundary.
     pub fn notify_message_started(&self, message_id: &str) -> Result<(), ExtensionRuntimeError> {
-        let message_id = bounded_notification_text(
-            "message id",
-            message_id,
-            MAX_EXTENSION_UI_KEY_BYTES,
-        )?;
+        let message_id =
+            bounded_notification_text("message id", message_id, MAX_EXTENSION_UI_KEY_BYTES)?;
         let connection = read_std_lock(&self.inner.connection).clone();
         lock_std_mutex(&connection.message_deltas).begin_message(&message_id);
         self.queue_lifecycle_notification(
@@ -7364,11 +7383,8 @@ impl ExtensionProcess {
 
     /// Closes one observable assistant message, flushing coalesced deltas first.
     pub fn notify_message_settled(&self, message_id: &str) -> Result<(), ExtensionRuntimeError> {
-        let message_id = bounded_notification_text(
-            "message id",
-            message_id,
-            MAX_EXTENSION_UI_KEY_BYTES,
-        )?;
+        let message_id =
+            bounded_notification_text("message id", message_id, MAX_EXTENSION_UI_KEY_BYTES)?;
         self.flush_message_deltas()?;
         let connection = read_std_lock(&self.inner.connection).clone();
         lock_std_mutex(&connection.message_deltas).end_message();
@@ -7539,11 +7555,8 @@ impl ExtensionProcess {
 
     /// Fires one runtime-registered shortcut back to its owning extension.
     pub fn notify_shortcut_trigger(&self, shortcut_id: &str) -> Result<(), ExtensionRuntimeError> {
-        let id = bounded_notification_text(
-            "shortcut id",
-            shortcut_id,
-            MAX_EXTENSION_SHORTCUT_ID_BYTES,
-        )?;
+        let id =
+            bounded_notification_text("shortcut id", shortcut_id, MAX_EXTENSION_SHORTCUT_ID_BYTES)?;
         self.queue_lifecycle_notification(
             EXTENSION_FEATURE_SHORTCUTS,
             methods::SHORTCUT_TRIGGER,
@@ -8600,10 +8613,72 @@ impl PersistenceMetadataHook for ExtensionProcess {
     }
 }
 
+#[async_trait::async_trait]
+impl CompactionStrategy for ExtensionProcess {
+    async fn render(
+        &self,
+        model_id: &str,
+        text: &str,
+        owner: &str,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if self.api_version() != EXTENSION_API_VERSION_0_4
+            || !self.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY)
+        {
+            return Err("compaction_strategy was not negotiated".into());
+        }
+        let generation = read_std_lock(&self.inner.connection).generation;
+        let mut context = self.execution_context();
+        context.resource_owner = Some(ExtensionResourceOwner {
+            session_id: owner.to_owned(),
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: generation,
+        });
+        let output = self
+            .run_hook(
+                ExtensionHook::CompactionStrategy,
+                serde_json::json!({ "model_id": model_id, "text": text }),
+                context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if read_std_lock(&self.inner.connection).generation != generation {
+            return Err("compaction strategy changed generation during render".into());
+        }
+        let encoded = output
+            .compaction_frames
+            .ok_or("compaction strategy returned no frames")?;
+        if encoded.is_empty() || encoded.len() > 32 {
+            return Err("compaction strategy returned an invalid frame count".into());
+        }
+        let mut frames = Vec::with_capacity(encoded.len());
+        for item in encoded {
+            if item.len() > 512 * 1024 {
+                return Err("compaction frame exceeds 512 KiB".into());
+            }
+            frames.push(
+                base64::engine::general_purpose::STANDARD
+                    .decode(item)
+                    .map_err(|_| "compaction frame is not base64")?,
+            );
+        }
+        Ok(frames)
+    }
+}
+
 impl Extension for ExtensionProcess {
     fn register(&self, host: &mut ExtensionHost) {
         self.register_dynamic_tool_catalog(host);
         host.observe(self.clone());
+        if self.api_version() == EXTENSION_API_VERSION_0_4
+            && self.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY)
+            && self
+                .inner
+                .contributions
+                .hooks
+                .contains(&ExtensionHook::CompactionStrategy)
+        {
+            host.compaction_strategy(self.clone());
+        }
         if self.inner.contributions.hooks.iter().any(|hook| {
             matches!(
                 hook,
@@ -9865,7 +9940,9 @@ impl MessageDeltaCoalescer {
         if self.pending.is_empty() {
             return false;
         }
-        if self.pending.len() >= MESSAGE_DELTA_FLUSH_BYTES || self.deltas >= MESSAGE_DELTA_FLUSH_DELTAS {
+        if self.pending.len() >= MESSAGE_DELTA_FLUSH_BYTES
+            || self.deltas >= MESSAGE_DELTA_FLUSH_DELTAS
+        {
             return true;
         }
         self.first_pending_at
@@ -9997,7 +10074,11 @@ async fn run_protocol_writer(
     frame_limit: Arc<ProtocolFrameLimit>,
 ) {
     while let Some(mut frame) = frames.recv().await {
-        if frame.bus_delivery.as_ref().is_some_and(|delivery| !delivery.is_current() && !delivery.control_expired()) {
+        if frame
+            .bus_delivery
+            .as_ref()
+            .is_some_and(|delivery| !delivery.is_current() && !delivery.control_expired())
+        {
             continue;
         }
         if frame
@@ -10678,10 +10759,7 @@ impl ProcessConnection {
         code: i64,
         message: String,
     ) -> Result<(), ExtensionRuntimeError> {
-        self.send_child_envelope_admitted(
-            id,
-            ChildEnvelope::<()>::Error { code, message },
-        )
+        self.send_child_envelope_admitted(id, ChildEnvelope::<()>::Error { code, message })
             .await
             .map(|_| ())
     }
@@ -10692,22 +10770,18 @@ impl ProcessConnection {
         envelope: ChildEnvelope<'_, T>,
     ) -> Result<ChildResponseAdmission, ExtensionRuntimeError> {
         let response = match envelope {
-            ChildEnvelope::Success(result) => {
-                serde_json::to_value(ChildSuccessResponse {
-                    jsonrpc: "2.0",
-                    id: &id,
-                    result,
-                })
-                .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?
-            }
-            ChildEnvelope::Error { code, message } => {
-                serde_json::to_value(ChildErrorResponse {
-                    jsonrpc: "2.0",
-                    id: &id,
-                    error: ChildErrorObject { code, message },
-                })
-                .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?
-            }
+            ChildEnvelope::Success(result) => serde_json::to_value(ChildSuccessResponse {
+                jsonrpc: "2.0",
+                id: &id,
+                result,
+            })
+            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?,
+            ChildEnvelope::Error { code, message } => serde_json::to_value(ChildErrorResponse {
+                jsonrpc: "2.0",
+                id: &id,
+                error: ChildErrorObject { code, message },
+            })
+            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?,
         };
         let mut line = if is_canonical_api(&read_std_lock(&self.protocol).version) {
             api_v03::parse_json_rpc_envelope(response.clone()).map_err(api_v03_protocol_error)?;
@@ -11847,6 +11921,15 @@ async fn spawn_connection(
         .iter()
         .map(|feature| (*feature).to_owned())
         .collect::<Vec<_>>();
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::CompactionStrategy)
+    {
+        optional_features.push(EXTENSION_FEATURE_COMPACTION_STRATEGY.to_owned());
+    }
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());
         optional_features.push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.to_owned());
@@ -11924,7 +12007,7 @@ async fn spawn_connection(
             flag_values,
             protocol: (uses_api_0_2_capabilities(&descriptor.manifest.api_version)).then(|| {
                 ExtensionProtocolRequest {
-                    version: EXTENSION_API_VERSION_0_2.to_owned(),
+                    version: descriptor.manifest.api_version.clone(),
                     required_features,
                     optional_features,
                     limits: ExtensionProtocolLimits {
@@ -12150,7 +12233,9 @@ fn api_v03_host_offer_for_services(
         });
     }
     if !event_bus {
-        offer.optional_capabilities.retain(|capability| capability != "event_bus");
+        offer
+            .optional_capabilities
+            .retain(|capability| capability != "event_bus");
         offer.optional_methods.retain(|method| {
             api_v03::method_spec(method).is_none_or(|spec| spec.capability != "event_bus")
         });
@@ -12449,6 +12534,14 @@ fn negotiate_contributions_with_host_services(
                 .chain(API_0_2_OPTIONAL_FEATURES)
                 .copied()
                 .collect::<BTreeSet<_>>();
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::CompactionStrategy)
+            {
+                allowed.insert(EXTENSION_FEATURE_COMPACTION_STRATEGY);
+            }
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
                 allowed.insert(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1);
@@ -12480,6 +12573,17 @@ fn negotiate_contributions_with_host_services(
                 return Err(ExtensionRuntimeError::Protocol(format!(
                     "extension is missing required feature `{feature}`"
                 )));
+            }
+            if manifest
+                .contributes
+                .hooks
+                .contains(&ExtensionHook::CompactionStrategy)
+                && !features.contains(EXTENSION_FEATURE_COMPACTION_STRATEGY)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "compaction_strategy hook requires negotiated compaction_strategy feature"
+                        .into(),
+                ));
             }
             if offered_host_services.agent_sessions
                 && manifest.name == "octet-subagents"
@@ -12735,9 +12839,7 @@ fn validate_tool_definitions(
         if let Some(schema) = &tool.output_schema {
             if !matches!(
                 api_version,
-                EXTENSION_API_VERSION_0_2
-                    | EXTENSION_API_VERSION_0_3
-                    | EXTENSION_API_VERSION_0_4
+                EXTENSION_API_VERSION_0_2 | EXTENSION_API_VERSION_0_3 | EXTENSION_API_VERSION_0_4
             ) {
                 return Err(ExtensionRuntimeError::Protocol(format!(
                     "API 0.1 tool `{}` cannot declare output_schema",
@@ -14367,7 +14469,9 @@ async fn read_protocol_stdout<R>(
                 }
                 if !bus_attached {
                     if let Some(bus) = &state.event_bus {
-                        if let Err(error) = bus.attach(&state) { break 'stream Err(error.to_string()); }
+                        if let Err(error) = bus.attach(&state) {
+                            break 'stream Err(error.to_string());
+                        }
                     }
                     bus_attached = true;
                 }
@@ -14635,14 +14739,25 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
             "bus/declare" | "bus/subscribe" | "bus/unsubscribe" | "bus/publish" if is_api_v03 => {
                 let id = parse_child_request_id(object, method)?;
                 insert_child_request(state, id.clone(), None, None)?;
-                let result = state.event_bus.as_ref()
-                    .ok_or(ProviderHostResponseError::Unavailable)
-                    .and_then(|bus| bus.dispatch(state, method, params).map_err(|error| match error.code {
-                        -32012 => ProviderHostResponseError::ResourceExhausted,
-                        -32011 => ProviderHostResponseError::Unavailable,
-                        _ => ProviderHostResponseError::Invalid,
-                    }));
-                queue_provider_host_response(state, &id, result)?;
+                if let Some(bus) = &state.event_bus {
+                    bus.dispatch_and_reply(state, method, params, |result| {
+                        queue_provider_host_response(
+                            state,
+                            &id,
+                            result.map_err(|error| match error.code {
+                                -32012 => ProviderHostResponseError::ResourceExhausted,
+                                -32011 => ProviderHostResponseError::Unavailable,
+                                _ => ProviderHostResponseError::Invalid,
+                            }),
+                        )
+                    })?;
+                } else {
+                    queue_provider_host_response(
+                        state,
+                        &id,
+                        Err(ProviderHostResponseError::Unavailable),
+                    )?;
+                }
             }
             methods::NOTIFICATION => {
                 require_declared(state.declared.notifications, "notifications")?;
@@ -15392,14 +15507,13 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                 })?;
             }
             methods::SESSION_APPEND_ENTRY => {
-                let Some((request, admitted)) =
-                    admit_host_request::<SessionAppendEntryRequest>(
-                        state,
-                        object,
-                        methods::SESSION_APPEND_ENTRY,
-                        EXTENSION_FEATURE_SESSION_ENTRIES,
-                        params,
-                    )?
+                let Some((request, admitted)) = admit_host_request::<SessionAppendEntryRequest>(
+                    state,
+                    object,
+                    methods::SESSION_APPEND_ENTRY,
+                    EXTENSION_FEATURE_SESSION_ENTRIES,
+                    params,
+                )?
                 else {
                     return Ok(());
                 };
@@ -15550,14 +15664,13 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                 })?;
             }
             methods::SESSION_SEND_MESSAGE => {
-                let Some((request, admitted)) =
-                    admit_host_request::<SessionSendMessageRequest>(
-                        state,
-                        object,
-                        methods::SESSION_SEND_MESSAGE,
-                        EXTENSION_FEATURE_MESSAGE_INJECTION,
-                        params,
-                    )?
+                let Some((request, admitted)) = admit_host_request::<SessionSendMessageRequest>(
+                    state,
+                    object,
+                    methods::SESSION_SEND_MESSAGE,
+                    EXTENSION_FEATURE_MESSAGE_INJECTION,
+                    params,
+                )?
                 else {
                     return Ok(());
                 };
@@ -15598,14 +15711,13 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                 })?;
             }
             methods::SESSION_SEND_USER_MESSAGE => {
-                let Some((request, admitted)) =
-                    admit_host_request::<SessionSendUserMessageRequest>(
-                        state,
-                        object,
-                        methods::SESSION_SEND_USER_MESSAGE,
-                        EXTENSION_FEATURE_MESSAGE_INJECTION,
-                        params,
-                    )?
+                let Some((request, admitted)) = admit_host_request::<SessionSendUserMessageRequest>(
+                    state,
+                    object,
+                    methods::SESSION_SEND_USER_MESSAGE,
+                    EXTENSION_FEATURE_MESSAGE_INJECTION,
+                    params,
+                )?
                 else {
                     return Ok(());
                 };
@@ -16525,8 +16637,8 @@ fn reject_typed_child_request(
     if !lock_std_mutex(&state.child_requests).contains_key(&request_id) {
         let _registered = insert_child_request(state, request_id.clone(), None, None)?;
     }
-    let response = ExtensionRequestOutcome::Failed(failure, detail.into())
-        .into_response(request_id.clone());
+    let response =
+        ExtensionRequestOutcome::Failed(failure, detail.into()).into_response(request_id.clone());
     let delivery = try_queue_child_response(
         &state.child_requests,
         &request_id,
@@ -17669,9 +17781,7 @@ confirmations = true
         let value: serde_json::Value =
             serde_json::from_slice(&frame.line).expect("error JSON response");
         let code = value["error"]["code"].as_i64().expect("numeric error code");
-        let message = value["error"]["message"]
-            .as_str()
-            .expect("error message");
+        let message = value["error"]["message"].as_str().expect("error message");
         let name = message
             .split(':')
             .next()
@@ -17798,7 +17908,10 @@ confirmations = true
             }
             other => panic!("expected composer request, got {other:?}"),
         }
-        assert!(frames.try_recv().is_err(), "admitted requests are not answered locally");
+        assert!(
+            frames.try_recv().is_err(),
+            "admitted requests are not answered locally"
+        );
         assert_eq!(lock_std_mutex(&state.child_requests).len(), 1);
     }
 
@@ -18068,7 +18181,10 @@ confirmations = true
             }
             other => panic!("expected context snapshot, got {other:?}"),
         }
-        assert!(frames.try_recv().is_err(), "admitted requests are not answered locally");
+        assert!(
+            frames.try_recv().is_err(),
+            "admitted requests are not answered locally"
+        );
         assert_eq!(lock_std_mutex(&state.child_requests).len(), 1);
 
         // Pending messages shares the feature but stays a distinct arm.
@@ -18157,9 +18273,7 @@ confirmations = true
         .expect("reader loop stays alive");
         match received.try_recv().expect("model view event") {
             ExtensionEvent::ModelViewRequested {
-                operation,
-                owner,
-                ..
+                operation, owner, ..
             } => {
                 assert_eq!(operation, ExtensionModelOperation::Current);
                 assert_eq!(owner.expect("owner").session_id, "session-a");
@@ -18212,7 +18326,11 @@ confirmations = true
         view.validate().expect("bounded view");
         let encoded = serde_json::to_value(&view).expect("encode");
         assert_eq!(encoded["provider"], serde_json::json!("anthropic"));
-        assert_eq!(encoded["reasoning"], serde_json::json!(true), "capability, not level");
+        assert_eq!(
+            encoded["reasoning"],
+            serde_json::json!(true),
+            "capability, not level"
+        );
         assert!(encoded.get("base_url").is_none(), "endpoints stay withheld");
         assert_eq!(
             serde_json::from_value::<ExtensionModelView>(encoded.clone()).unwrap(),
@@ -18310,10 +18428,7 @@ system_prompt = {system_prompt}
             no_services,
         )
         .expect_err("an undeclared disclosure must not negotiate");
-        assert!(
-            refused.to_string().contains("unknown feature"),
-            "{refused}"
-        );
+        assert!(refused.to_string().contains("unknown feature"), "{refused}");
 
         // Declared: the feature is allowed and lands in the negotiated set.
         let (_, negotiated) = negotiate_contributions_with_host_services(
@@ -18410,7 +18525,10 @@ system_prompt = {system_prompt}
             }
             other => panic!("expected context snapshot, got {other:?}"),
         }
-        assert!(frames.try_recv().is_err(), "admitted requests are not answered locally");
+        assert!(
+            frames.try_recv().is_err(),
+            "admitted requests are not answered locally"
+        );
         assert_eq!(lock_std_mutex(&state.child_requests).len(), 1);
     }
 
@@ -18899,8 +19017,16 @@ done
                 -32002,
                 "not_foreground_owner",
             ),
-            (ExtensionRequestFailure::InvalidRequest, -32602, "invalid_request"),
-            (ExtensionRequestFailure::BoundsExceeded, -32602, "bounds_exceeded"),
+            (
+                ExtensionRequestFailure::InvalidRequest,
+                -32602,
+                "invalid_request",
+            ),
+            (
+                ExtensionRequestFailure::BoundsExceeded,
+                -32602,
+                "bounds_exceeded",
+            ),
         ] {
             assert_eq!(failure.code(), code);
             assert_eq!(failure.name(), name);
@@ -18936,66 +19062,103 @@ done
             );
         }
 
-        assert_round_trip(ComposerGetRequest {
-            parent_request_id: 7,
-            resource_owner: None,
-        }, serde_json::json!({"parent_request_id": 7}));
-        assert_round_trip(ComposerTextRequest {
-            parent_request_id: 7,
-            text: "draft".into(),
-            resource_owner: None,
-        }, serde_json::json!({"parent_request_id": 7, "text": "draft"}));
-        assert_round_trip(ComposerTextResult { text: "draft".into() }, serde_json::json!({"text": "draft"}));
-        assert_round_trip(ShortcutRegisterRequest {
-            parent_request_id: 7,
-            id: "draw".into(),
-            key: "ctrl+shift+c".into(),
-            description: "Describe".into(),
-            resource_owner: None,
-        }, serde_json::json!({
-            "parent_request_id": 7,
-            "id": "draw",
-            "key": "ctrl+shift+c",
-            "description": "Describe"
-        }));
-        assert_round_trip(SessionAppendEntryRequest {
-            parent_request_id: 7,
-            entry_type: "todo".into(),
-            data: serde_json::json!({"items": ["one"]}),
-            resource_owner: None,
-        }, serde_json::json!({
-            "parent_request_id": 7,
-            "entry_type": "todo",
-            "data": {"items": ["one"]}
-        }));
-        assert_round_trip(SessionAppendEntryResult { entry_id: "e-1".into() }, serde_json::json!({"entry_id": "e-1"}));
-        assert_round_trip(SessionSetNameRequest {
-            parent_request_id: 7,
-            name: "planning".into(),
-            resource_owner: None,
-        }, serde_json::json!({"parent_request_id": 7, "name": "planning"}));
-        assert_round_trip(SessionSetLabelRequest {
-            parent_request_id: 7,
-            entry_id: "e-1".into(),
-            label: "done".into(),
-            resource_owner: None,
-        }, serde_json::json!({"parent_request_id": 7, "entry_id": "e-1", "label": "done"}));
-        assert_round_trip(SessionSendMessageRequest {
-            parent_request_id: 7,
-            role: "assistant".into(),
-            text: "hello".into(),
-            resource_owner: None,
-        }, serde_json::json!({"parent_request_id": 7, "role": "assistant", "text": "hello"}));
-        assert_round_trip(SessionSendUserMessageRequest {
-            parent_request_id: 7,
-            text: "hello".into(),
-            resource_owner: None,
-        }, serde_json::json!({"parent_request_id": 7, "text": "hello"}));
-        assert_round_trip(ToolsSetActiveRequest {
-            parent_request_id: 7,
-            names: vec!["read".into()],
-            resource_owner: None,
-        }, serde_json::json!({"parent_request_id": 7, "names": ["read"]}));
+        assert_round_trip(
+            ComposerGetRequest {
+                parent_request_id: 7,
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7}),
+        );
+        assert_round_trip(
+            ComposerTextRequest {
+                parent_request_id: 7,
+                text: "draft".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "text": "draft"}),
+        );
+        assert_round_trip(
+            ComposerTextResult {
+                text: "draft".into(),
+            },
+            serde_json::json!({"text": "draft"}),
+        );
+        assert_round_trip(
+            ShortcutRegisterRequest {
+                parent_request_id: 7,
+                id: "draw".into(),
+                key: "ctrl+shift+c".into(),
+                description: "Describe".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({
+                "parent_request_id": 7,
+                "id": "draw",
+                "key": "ctrl+shift+c",
+                "description": "Describe"
+            }),
+        );
+        assert_round_trip(
+            SessionAppendEntryRequest {
+                parent_request_id: 7,
+                entry_type: "todo".into(),
+                data: serde_json::json!({"items": ["one"]}),
+                resource_owner: None,
+            },
+            serde_json::json!({
+                "parent_request_id": 7,
+                "entry_type": "todo",
+                "data": {"items": ["one"]}
+            }),
+        );
+        assert_round_trip(
+            SessionAppendEntryResult {
+                entry_id: "e-1".into(),
+            },
+            serde_json::json!({"entry_id": "e-1"}),
+        );
+        assert_round_trip(
+            SessionSetNameRequest {
+                parent_request_id: 7,
+                name: "planning".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "name": "planning"}),
+        );
+        assert_round_trip(
+            SessionSetLabelRequest {
+                parent_request_id: 7,
+                entry_id: "e-1".into(),
+                label: "done".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "entry_id": "e-1", "label": "done"}),
+        );
+        assert_round_trip(
+            SessionSendMessageRequest {
+                parent_request_id: 7,
+                role: "assistant".into(),
+                text: "hello".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "role": "assistant", "text": "hello"}),
+        );
+        assert_round_trip(
+            SessionSendUserMessageRequest {
+                parent_request_id: 7,
+                text: "hello".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "text": "hello"}),
+        );
+        assert_round_trip(
+            ToolsSetActiveRequest {
+                parent_request_id: 7,
+                names: vec!["read".into()],
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "names": ["read"]}),
+        );
     }
 
     #[test]
@@ -19015,14 +19178,19 @@ done
         assert_eq!(flushed[0].deltas, 32);
         assert_eq!(flushed[0].delta, "tok ".repeat(32));
         assert_eq!(
-            flushed[0].clone().into_updated(coalescer.active_message_id()),
+            flushed[0]
+                .clone()
+                .into_updated(coalescer.active_message_id()),
             ExtensionMessageUpdated {
                 message_id: Some("m-1".to_owned()),
                 delta: "tok ".repeat(32),
                 deltas: 32,
             }
         );
-        assert!(coalescer.flush(now).is_empty(), "a flush never repeats a batch");
+        assert!(
+            coalescer.flush(now).is_empty(),
+            "a flush never repeats a batch"
+        );
 
         // The byte bound flushes the pending batch before it could overflow,
         // and every emitted batch stays inside the per-notification cap.
@@ -19030,7 +19198,11 @@ done
         coalescer.begin_message("m-2");
         assert!(coalescer.push(&"a".repeat(4000), now).is_empty());
         let overflow = coalescer.push(&"b".repeat(5000), now);
-        assert_eq!(overflow.len(), 2, "the pending batch flushes before overflow");
+        assert_eq!(
+            overflow.len(),
+            2,
+            "the pending batch flushes before overflow"
+        );
         assert_eq!(overflow[0].delta.len(), 4000);
         assert_eq!(overflow[0].deltas, 1);
         assert_eq!(overflow[1].delta.len(), 5000);
@@ -20402,6 +20574,91 @@ done
     }
 
     #[test]
+    fn compaction_strategy_manifest_is_api_v04_only() {
+        let source = include_str!("../../../extensions/octet-snap-compact/extension.toml");
+        let manifest = ExtensionManifest::parse(source).expect("source extension manifest");
+        assert_eq!(manifest.api_version, EXTENSION_API_VERSION_0_4);
+        assert_eq!(
+            manifest.contributes.hooks,
+            vec![ExtensionHook::CompactionStrategy]
+        );
+        let legacy = source.replace("api_version = \"0.4\"", "api_version = \"0.3\"");
+        assert!(matches!(
+            ExtensionManifest::parse(&legacy),
+            Err(ExtensionRuntimeError::InvalidManifest(message))
+                if message.contains("compaction_strategy requires extension API 0.4")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_strategy_negotiates_and_renders_through_host() {
+        let temp = TempDir::new().expect("tempdir");
+        write_executable_script(
+            &temp.path().join("extension.py"),
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+
+def receive():
+    return json.loads(sys.stdin.readline())
+
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+init = receive()
+assert init["params"]["api_version"] == "0.4"
+assert init["params"]["contributes"]["hooks"] == ["compaction_strategy"]
+protocol = init["params"]["protocol"]
+assert protocol["version"] == "0.4", protocol
+assert "compaction_strategy" in protocol["optional_features"]
+send({"jsonrpc": "2.0", "id": init["id"], "result": {
+    "api_version": "0.4", "tools": [], "commands": [],
+    "protocol": {"version": "0.4", "features":
+        protocol["required_features"] + ["compaction_strategy"],
+        "limits": {"max_concurrent_requests": 1}},
+}})
+request = receive()
+assert request["method"] == "hook/run"
+assert request["params"]["hook"] == "compaction_strategy"
+assert request["params"]["payload"] == {"model_id": "vision-model", "text": "history"}
+send({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "disposition": {"action": "continue"}, "context": [], "notifications": [],
+    "compaction_frames": ["iVBORw0KGgo="],
+}})
+shutdown = receive()
+assert shutdown["method"] == "shutdown"
+send({"jsonrpc": "2.0", "id": shutdown["id"], "result": {"terminal": "shutdown"}})
+"#,
+        );
+        let manifest = ExtensionManifest::parse(include_str!(
+            "../../../extensions/octet-snap-compact/extension.toml"
+        ))
+        .expect("source extension manifest");
+        let process = ExtensionProcess::start(
+            trusted_descriptor(temp.path(), manifest),
+            ExtensionRuntimeConfig::new(temp.path()),
+        )
+        .await
+        .expect("start API 0.4 compaction process");
+        assert!(process.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY));
+        let mut host = ExtensionHost::new();
+        process.register(&mut host);
+        assert!(host.compaction_strategy.is_some());
+        let frames = host
+            .compaction_strategy
+            .unwrap()
+            .render("vision-model", "history", "session-owner")
+            .await
+            .expect("render through host");
+        assert_eq!(frames, vec![b"\x89PNG\r\n\x1a\n".to_vec()]);
+        assert!(process.shutdown().await);
+    }
+
+    #[test]
     fn manifest_runtime_profiles_require_explicit_safe_sharing() {
         let workspace_service = VALID_MANIFEST
             .replace("api_version = \"0.1\"", "api_version = \"0.2\"")
@@ -20483,7 +20740,8 @@ hooks = ["session_start", "session_end"]
             "hooks = [\"session_start\", \"session_end\"]",
             "hooks = [\"session_start\"]",
         );
-        ExtensionManifest::parse(&missing_end).expect("a single session hook is a valid declaration");
+        ExtensionManifest::parse(&missing_end)
+            .expect("a single session hook is a valid declaration");
         let legacy = base.replace("api_version = \"0.3\"", "api_version = \"0.2\"");
         ExtensionManifest::parse(&legacy).expect("API 0.2 validates the contribution union");
         let newest = base.replace("api_version = \"0.3\"", "api_version = \"0.4\"");
@@ -21116,10 +21374,7 @@ command = "shortcut-test"
 shortcuts = [{ key = "ctrl+shift+p", name = "open_panel", description = "Open the panel" }]
 "#;
         let manifest = ExtensionManifest::parse(manifest_source).unwrap();
-        let unsupported = manifest_source.replace(
-            "api_version = \"0.2\"",
-            "api_version = \"0.1\"",
-        );
+        let unsupported = manifest_source.replace("api_version = \"0.2\"", "api_version = \"0.1\"");
         assert!(matches!(
             ExtensionManifest::parse(&unsupported),
             Err(ExtensionRuntimeError::InvalidManifest(message))
@@ -24092,6 +24347,7 @@ def send(value):
 
 
 initialize = receive()
+assert initialize["params"]["protocol"]["version"] == "0.2", initialize
 assert "runtime_commands" in initialize["params"]["protocol"]["optional_features"], initialize
 send({
     "jsonrpc": "2.0",

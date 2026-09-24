@@ -1381,7 +1381,7 @@
         }
       ],
       "extra_headers": [],
-      "compatibility": "default",
+      "compatibility": "openai",
       "pricing": "reference",
       "discovery_capabilities": "default"
     },
@@ -1488,6 +1488,49 @@
         {
           "endpoint_id": "qwen-token-plan-individual",
           "protocol": "openai_chat",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "bearer",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "default",
+      "pricing": "reference",
+      "discovery_capabilities": "default"
+    },
+    {
+      "const_name": "META",
+      "id": "meta",
+      "name": "Meta",
+      "base_url": "https://api.meta.ai/v1/",
+      "authentication": {
+        "kind": "environment",
+        "variables": [
+          "META_API_KEY"
+        ]
+      },
+      "model_discovery": {
+        "kind": "openai_models",
+        "filter": {
+          "kind": "prefix",
+          "values": [
+            "muse-spark-"
+          ]
+        }
+      },
+      "static_models": "none",
+      "inventory_cache": "required",
+      "routes": [
+        {
+          "endpoint_id": "meta",
+          "protocol": "openai_responses",
           "transport": "http",
           "body_encoding": "identity",
           "auth_presentation": "bearer",

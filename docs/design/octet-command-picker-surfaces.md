@@ -219,3 +219,11 @@ no-colour projections; and the intentional blank metadata rhythm. They do not
 decide stale-startup-row replacement, terminal replay, cursor byte streams, or
 PTY behavior. Those are separate concerns owned by the renderer and its
 dedicated regressions.
+
+### Subagent inspector
+
+`/subagents` reuses ordinary label/detail rows: stacked at narrow and regular
+widths when height permits, side by side on wide terminals. It has no synthetic
+column legend over its variable metadata. Enter is labelled `inspect`; the
+finished-group toggle names its current action (`show all` or `hide finished`).
+The bounded pinned roster retains its existing live-chrome layout and lifecycle.

@@ -5,8 +5,8 @@ use octet_ai::{CacheCompatibility, CacheControlFormat, Protocol, SessionAffinity
 use super::contract::CompatibilityProfile;
 
 /// Return the tested prompt-cache compatibility for a declaration-selected
-/// provider route. Existing codecs receive only this data-derived policy; they
-/// do not branch on a provider identifier.
+/// provider route. The OpenCode header helper also checks the declared route
+/// identity because this one routing header spans three different codecs.
 pub(crate) fn cache_compatibility(
     profile: CompatibilityProfile,
     model_id: &str,
@@ -18,6 +18,10 @@ pub(crate) fn cache_compatibility(
         CompatibilityProfile::OpenAi => {
             cache.send_session_affinity_headers = true;
             cache.session_affinity_format = Some(SessionAffinityFormat::OpenAi);
+            // Discovery and static registration share this exact public-API
+            // contract. A copied name on another provider is not sufficient.
+            cache.supports_explicit_prompt_cache_mode = protocol == Protocol::OpenAiResponses
+                && matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna");
         }
         // OpenRouter forwards Anthropic's explicit cache-control blocks only
         // for its Anthropic routes. These markers are required for prompt
@@ -42,9 +46,10 @@ pub(crate) fn cache_compatibility(
             cache.send_session_affinity_headers = true;
             cache.supports_cache_control_on_tools = false;
         }
-        // Only these known OpenCode Chat routes reject long cache retention;
-        // do not disable caching for the provider's unrelated models.
-        CompatibilityProfile::OpenCode
+        CompatibilityProfile::OpenCode => {
+            // Routing affinity applies to every OpenCode route independently of
+            // the smaller set of models that reject long cache retention.
+            cache.send_session_affinity_headers = true;
             if matches!(
                 model_id,
                 "deepseek-v4-flash"
@@ -52,9 +57,9 @@ pub(crate) fn cache_compatibility(
                     | "kimi-k2.5"
                     | "kimi-k2.6"
                     | "minimax-m2.7"
-            ) =>
-        {
-            cache.supports_long_retention = false;
+            ) {
+                cache.supports_long_retention = false;
+            }
         }
         CompatibilityProfile::Codex => {
             cache.supports_long_retention = false;
@@ -74,7 +79,6 @@ pub(crate) fn cache_compatibility(
         CompatibilityProfile::Default
         | CompatibilityProfile::Cloudflare
         | CompatibilityProfile::Fireworks
-        | CompatibilityProfile::OpenCode
         | CompatibilityProfile::Custom => {}
     }
 
@@ -94,7 +98,37 @@ pub(crate) fn cache_compatibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::contract::{FIREWORKS, MISTRAL, OPENAI, OPENCODE, OPENROUTER};
+    use crate::providers::contract::{
+        BASETEN, FIREWORKS, MISTRAL, OPENAI, OPENCODE, OPENCODE_GO, OPENROUTER,
+    };
+
+    #[test]
+    fn explicit_cache_mode_requires_verified_public_openai_responses_model() {
+        for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+            assert!(
+                cache_compatibility(OPENAI.compatibility, id, Protocol::OpenAiResponses)
+                    .supports_explicit_prompt_cache_mode
+            );
+            assert!(
+                !cache_compatibility(OPENCODE.compatibility, id, Protocol::OpenAiResponses)
+                    .supports_explicit_prompt_cache_mode
+            );
+            assert!(
+                !cache_compatibility(OPENROUTER.compatibility, id, Protocol::OpenAiResponses)
+                    .supports_explicit_prompt_cache_mode
+            );
+            assert!(
+                !cache_compatibility(OPENAI.compatibility, id, Protocol::OpenAiChat)
+                    .supports_explicit_prompt_cache_mode
+            );
+        }
+        for id in ["gpt-6-unverified", "openai/gpt-6-astra", "gpt-5.4"] {
+            assert!(
+                !cache_compatibility(OPENAI.compatibility, id, Protocol::OpenAiResponses)
+                    .supports_explicit_prompt_cache_mode
+            );
+        }
+    }
 
     #[test]
     fn generated_profiles_preserve_known_route_behavior() {
@@ -132,8 +166,28 @@ mod tests {
             Some(SessionAffinityFormat::Mistral)
         );
 
+        let baseten = cache_compatibility(BASETEN.compatibility, "model", Protocol::OpenAiChat);
+        assert!(baseten.send_session_affinity_headers);
+        assert_eq!(
+            baseten.session_affinity_format,
+            Some(SessionAffinityFormat::OpenAi)
+        );
+
         let opencode =
             cache_compatibility(OPENCODE.compatibility, "gpt-5.4", Protocol::OpenAiResponses);
         assert!(!opencode.send_session_id_header);
+        assert!(opencode.send_session_affinity_headers);
+        for protocol in [
+            Protocol::OpenAiChat,
+            Protocol::AnthropicMessages,
+            Protocol::GoogleGenerativeAi,
+        ] {
+            let affinity = cache_compatibility(OPENCODE.compatibility, "any-model", protocol);
+            assert!(affinity.send_session_affinity_headers);
+            assert!(affinity.supports_long_retention);
+        }
+        let go = cache_compatibility(OPENCODE_GO.compatibility, "kimi-k2.5", Protocol::OpenAiChat);
+        assert!(go.send_session_affinity_headers);
+        assert!(!go.supports_long_retention);
     }
 }

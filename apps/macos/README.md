@@ -44,10 +44,10 @@ The scripts under `scripts/` are authored but intentionally not run in this sour
 
 - `build-app.sh` assembles a versioned unsigned `.app` from a release SwiftPM build and requires `CONFIRM_BUILD=OCTET_BUILD` before replacing an existing output.
 - `sign-app.sh` signs with an explicitly supplied Developer ID identity and entitlements; it refuses an absent identity.
-- `make-dmg.sh` verifies the app signature and creates a distributable DMG; replacing an existing DMG requires `CONFIRM_DMG=OCTET_DMG`.
 - `notarize-app.sh` submits a Developer ID-signed app through an explicit notarytool keychain profile, staples and validates it, and replaces it only with `CONFIRM_NOTARIZE=OCTET_NOTARIZE`.
+- `make-dmg.sh` requires a Developer ID signature, valid stapled notarization ticket, and passing Gatekeeper assessment **before** copying the app into a distributable DMG. Run `notarize-app.sh` before `make-dmg.sh`; replacing an existing DMG requires `CONFIRM_DMG=OCTET_DMG`.
 - `install.sh` verifies the bundle identity/signature and installs a locally supplied, already signed app with `CONFIRM_INSTALL=OCTET_INSTALL`.
-- `update.sh` verifies a local artifact's SHA-256, signature, bundle identity, and version, then replaces the app only with `CONFIRM_UPDATE=OCTET_UPDATE`.
+- `update.sh` verifies a local artifact's SHA-256, signature, bundle identity, and numeric `CFBundleVersion`, and installs it only if newer than the installed app with `CONFIRM_UPDATE=OCTET_UPDATE`. Equal versions and downgrades are refused; there is no downgrade operation.
 - `remove.sh` requires an explicit confirmation before deleting only the installed app; shared pairing credentials remain owned by the shared Serve client package.
 
 Replacement operations stage beside the installed app and retain a rollback copy until the new app has been moved into place. No script removes quarantine metadata.

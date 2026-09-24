@@ -10,6 +10,7 @@ import hashlib
 import json
 import struct
 import tempfile
+import threading
 import unittest
 import zlib
 from dataclasses import replace
@@ -500,10 +501,62 @@ class ScreenshotStoreTests(unittest.TestCase):
             self.assertEqual(failure.exception.code, "artifact_publish_failed")
             self.assertEqual(list(stage_directory.iterdir()), [])
 
-            interrupted = stage_directory / "screen-stage-interrupted.bin"
+            interrupted = stage_directory / (staged._owned_prefix + "interrupted.bin")
+            foreign = stage_directory / "screen-stage-foreign.bin"
             interrupted.write_bytes(FRAME_A)
+            foreign.write_bytes(FRAME_B)
             staged.cleanup()
             self.assertFalse(interrupted.exists())
+            self.assertTrue(foreign.exists())
+
+    def test_one_transport_cleanup_preserves_another_in_flight_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged = threading.Event()
+            release = threading.Event()
+            errors: list[BaseException] = []
+
+            class PausedPublisher(RecordingPublisher):
+                def publish_artifact(self, **arguments: Any) -> str:
+                    staged.set()
+                    if not release.wait(timeout=3):
+                        raise AssertionError("test did not release the staged publication")
+                    return super().publish_artifact(**arguments)
+
+            first = HostArtifactTransport(RecordingPublisher(root), scratch_directory=root, inline_limit=1)
+            second_publisher = PausedPublisher(root)
+            second = HostArtifactTransport(second_publisher, scratch_directory=root, inline_limit=1)
+
+            def publish_second() -> None:
+                try:
+                    second.publish(mime_type="image/png", data=FRAME_A,
+                                   size=len(FRAME_A), sha256=hashlib.sha256(FRAME_A).hexdigest())
+                except BaseException as error:
+                    errors.append(error)
+
+            thread = threading.Thread(target=publish_second, daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(staged.wait(timeout=3))
+                directory = root / HostArtifactTransport._STAGE_DIRECTORY
+                # The publisher is paused before reading the path; inspect the
+                # generated file directly, not a guessed filename.
+                files = list(directory.iterdir())
+                self.assertEqual(len(files), 1)
+                live = files[0]
+                stale = directory / (first._owned_prefix + "interrupted.bin")
+                stale.write_bytes(FRAME_B)
+                first.cleanup()
+                second.cleanup()  # Same transport must not disrupt its own active publish.
+                self.assertFalse(stale.exists())
+                self.assertEqual(live.read_bytes(), FRAME_A)
+            finally:
+                release.set()
+                thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(second_publisher.path_bytes, [FRAME_A])
+            self.assertEqual(list(directory.iterdir()), [])
 
     def test_host_artifact_adapter_fails_closed_for_negotiation_and_unsafe_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

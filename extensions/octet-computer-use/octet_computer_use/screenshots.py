@@ -865,6 +865,11 @@ class HostArtifactTransport:
         if not isinstance(inline_limit, int) or isinstance(inline_limit, bool) or inline_limit <= 0:
             raise ScreenshotError("invalid_transport", "The artifact inline bound is invalid.")
         self.inline_limit = inline_limit
+        # Staging is shared by transports in one host scratch root. An instance
+        # owns only its unpredictable prefix, never every file in that root.
+        self._owned_prefix = self._STAGE_PREFIX + uuid.uuid4().hex + "-"
+        self._stage_lock = threading.Lock()
+        self._active_stages: set[str] = set()
 
     @property
     def negotiated_features(self) -> Collection[str]:
@@ -909,6 +914,9 @@ class HostArtifactTransport:
         except FileNotFoundError:
             try:
                 directory.mkdir(mode=0o700)
+            except FileExistsError:
+                # Another transport may have created the shared directory.
+                pass
             except OSError as error:
                 raise ArtifactTransportError("artifact_stage_failed", "The screenshot staging directory is unavailable.") from error
             metadata = directory.lstat()
@@ -932,6 +940,7 @@ class HostArtifactTransport:
             fd = os.open(str(path), flags, 0o600)
         except OSError as error:
             raise ArtifactTransportError("artifact_stage_failed", "The screenshot could not be staged safely.") from error
+        failed = False
         try:
             metadata = os.fstat(fd)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
@@ -944,14 +953,18 @@ class HostArtifactTransport:
                 view = view[written:]
             os.fsync(fd)
         except ArtifactTransportError:
+            failed = True
             raise
         except OSError as error:
+            failed = True
             raise ArtifactTransportError("artifact_stage_failed", "The screenshot could not be staged safely.") from error
         finally:
             try:
                 os.close(fd)
             except OSError:
                 pass
+            if failed:
+                HostArtifactTransport._unlink(path)
 
     @staticmethod
     def _unlink(path: Path) -> None:
@@ -987,10 +1000,14 @@ class HostArtifactTransport:
 
         root = self._scratch_root()
         directory = self._stage_directory(root)
-        filename = self._STAGE_PREFIX + uuid.uuid4().hex + ".bin"
+        filename = self._owned_prefix + uuid.uuid4().hex + ".bin"
         destination = directory / filename
+        with self._stage_lock:
+            self._active_stages.add(filename)
+        staged = False
         try:
             self._write_private(destination, data)
+            staged = True
             relative = (Path(self._STAGE_DIRECTORY) / filename).as_posix()
             arguments["path"] = relative
             try:
@@ -999,33 +1016,38 @@ class HostArtifactTransport:
                 raise ArtifactTransportError("artifact_publish_failed", "The host did not publish the screenshot.") from error
             return _validate_artifact_id(artifact_id)
         finally:
-            self._unlink(destination)
+            if staged:
+                self._unlink(destination)
+            with self._stage_lock:
+                self._active_stages.discard(filename)
 
     def cleanup(self) -> None:
         """Remove only this adapter's bounded, generated staging files."""
 
-        try:
-            root = self._scratch_root()
-            directory = root / self._STAGE_DIRECTORY
-            metadata = directory.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-                return
-            children = list(directory.iterdir())
-        except (ArtifactTransportError, OSError):
-            return
-        for child in children:
+        with self._stage_lock:
             try:
-                child_metadata = child.lstat()
-            except OSError:
-                continue
-            if (
-                child.name.startswith(self._STAGE_PREFIX)
-                and child.name.endswith(".bin")
-                and stat.S_ISREG(child_metadata.st_mode)
-                and not stat.S_ISLNK(child_metadata.st_mode)
-                and child_metadata.st_nlink == 1
-            ):
-                self._unlink(child)
+                root = self._scratch_root()
+                directory = root / self._STAGE_DIRECTORY
+                metadata = directory.lstat()
+                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                    return
+                children = list(directory.iterdir())
+            except (ArtifactTransportError, OSError):
+                return
+            for child in children:
+                try:
+                    child_metadata = child.lstat()
+                except OSError:
+                    continue
+                if (
+                    child.name.startswith(self._owned_prefix)
+                    and child.name not in self._active_stages
+                    and child.name.endswith(".bin")
+                    and stat.S_ISREG(child_metadata.st_mode)
+                    and not stat.S_ISLNK(child_metadata.st_mode)
+                    and child_metadata.st_nlink == 1
+                ):
+                    self._unlink(child)
 
 
 

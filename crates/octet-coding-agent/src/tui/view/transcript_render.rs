@@ -197,6 +197,76 @@ pub(super) fn render_block_planned_with_rainbow(
             theme,
             width,
         ),
+        TranscriptBlock::Subagents(summary) => {
+            let full = summary.label();
+            let label = if visible_width(&full) <= usize::from(width) {
+                full
+            } else if usize::from(width) >= visible_width("Subagents · /subagents") {
+                "Subagents · /subagents".to_owned()
+            } else {
+                "/subagents".to_owned()
+            };
+            let label = sanitize_for_terminal(&label);
+            let role = if summary.running > 0 {
+                "foreground"
+            } else {
+                summary.settled_role()
+            };
+            let label = if let Some(rest) = label.strip_prefix("Subagents") {
+                format!(
+                    "{}{}",
+                    theme.bold(&theme.fg(role, "Subagents")),
+                    theme.fg(role, rest)
+                )
+            } else {
+                theme.fg(role, &label)
+            };
+            let mut lines = vec![fit_line(&label, width)];
+            let hidden = summary.running.saturating_sub(summary.live_workers.len());
+            for (index, worker) in summary.live_workers.iter().enumerate() {
+                let last = index + 1 == summary.live_workers.len() && hidden == 0;
+                let branch = if theme.unicode() {
+                    if last {
+                        "└─"
+                    } else {
+                        "├─"
+                    }
+                } else if last {
+                    "`-"
+                } else {
+                    "|-"
+                };
+                let name = sanitize_for_terminal(&worker.name);
+                let activity = sanitize_for_terminal(&worker.activity);
+                let tokens = if worker.tokens < 10_000 {
+                    worker.tokens.to_string()
+                } else if worker.tokens < 1_000_000 {
+                    format!("{}K", worker.tokens / 1_000)
+                } else {
+                    format!("{:.1}M", worker.tokens as f64 / 1_000_000.0)
+                };
+                let detail = format!("{name} · {activity} · {tokens} tok");
+                let compact = format!("{name} · {tokens} tok");
+                let text =
+                    if visible_width(&detail) + 3 + visible_width(branch) <= usize::from(width) {
+                        detail
+                    } else {
+                        compact
+                    };
+                lines.push(fit_line(
+                    &theme.fg("muted", &format!("  {branch} {text}")),
+                    width,
+                ));
+            }
+            if hidden > 0 && !summary.live_workers.is_empty() {
+                let branch = if theme.unicode() { "└─" } else { "`-" };
+                lines.push(fit_line(
+                    &theme.fg("muted", &format!("  {branch} +{hidden} more")),
+                    width,
+                ));
+            }
+            finish_transcript_block(lines)
+        }
         TranscriptBlock::Assistant(assistant) => finish_transcript_block(
             assistant.render_on_surface(rich_renderer, theme, width, content_background),
         ),

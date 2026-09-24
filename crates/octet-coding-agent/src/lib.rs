@@ -81,6 +81,7 @@ async fn run() -> anyhow::Result<()> {
         let _ = std::io::stdout().flush();
         return Ok(());
     }
+    app::bootstrap::startup_phase("process.enter");
     let (mut cli, extension_flag_values, parsed_cwd) =
         if cli::uses_runtime_extension_flag_parser(&args) {
             let cwd = std::env::current_dir()?;
@@ -163,6 +164,7 @@ async fn run() -> anyhow::Result<()> {
         Default::default()
     };
     let mut config = cli::build_config(cli, &cwd)?;
+    app::bootstrap::startup_phase("cli.configured");
     config.extension_flag_values = extension_flag_values;
     if let Some(search) = parity.list_models.as_deref() {
         return cli::parity::list_models(&config, search);
@@ -210,34 +212,51 @@ async fn run() -> anyhow::Result<()> {
     }
     parity.resolve_models(&mut config)?;
     parity.select_session(&mut config)?;
+    app::bootstrap::startup_phase("selection.resolved");
     let mode = config.mode.clone();
     let initial_prompt = config.initial_prompt.clone();
     let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
-    let result = match mode {
-        config::Mode::Interactive if capabilities.interactive => {
-            modes::interactive::run_interactive_with_model_scope(config, parity.models.clone())
+    let result = async {
+        match mode {
+            config::Mode::Interactive if capabilities.interactive => {
+                modes::interactive::run_interactive_with_model_scope(config, parity.models.clone())
+                    .await
+            }
+            config::Mode::Interactive => {
+                modes::plain::run_plain(app::bootstrap::bootstrap(config)?, initial_prompt).await
+            }
+            config::Mode::Print { prompt } => {
+                modes::print::run_invocation(
+                    app::bootstrap::bootstrap(config)?,
+                    prompt,
+                    invocation.remaining,
+                    invocation.media,
+                    invocation.json,
+                )
                 .await
+            }
+            config::Mode::Rpc => modes::rpc::run_rpc(app::bootstrap::bootstrap(config)?).await,
         }
-        config::Mode::Interactive => {
-            modes::plain::run_plain(app::bootstrap::bootstrap(config)?, initial_prompt).await
-        }
-        config::Mode::Print { prompt } => {
-            modes::print::run_invocation(
-                app::bootstrap::bootstrap(config)?,
-                prompt,
-                invocation.remaining,
-                invocation.media,
-                invocation.json,
-            )
-            .await
-        }
-        config::Mode::Rpc => modes::rpc::run_rpc(app::bootstrap::bootstrap(config)?).await,
-    };
+    }
+    .await;
+    // Bootstrap and early print/RPC validation can fail after --no-session has
+    // created its private store, before a mode's normal accounting finalizer.
+    // An already finalized run makes this a no-op.
+    let accounting = modes::print::finish_ephemeral_accounting();
     // Mode owners have now aborted active work and shut down their children.
     // Preserve the conventional signal status even when cleanup itself found
     // an error, rather than surfacing an unrelated anyhow exit code.
     tui::terminal::exit_if_signaled();
-    result
+    match (result, accounting) {
+        (Ok(()), accounting) => accounting,
+        (Err(error), Err(accounting_error)) => {
+            output::stderr_line(format!(
+                "warning: ephemeral accounting failed: {accounting_error:#}"
+            ));
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+    }
 }
 
 enum AuthCommand {

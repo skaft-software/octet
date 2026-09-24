@@ -10,11 +10,12 @@ import threading
 import time
 from typing import Any, Callable, Optional
 import unittest
+from unittest import mock
 
 from octet_mcp.config import BridgeConfig, HttpAuthConfig, ServerConfig
 from octet_mcp.manager import BridgeManager
 from octet_mcp.ownership import ResourceOwner
-from octet_mcp.protocol import McpCancelled, McpError, McpTransportError
+from octet_mcp.protocol import McpCancelled, McpError, McpTimeout, McpTransportError
 from octet_mcp.streamable_http import (
     McpAuthenticationError,
     McpStreamableHttpClient,
@@ -893,6 +894,80 @@ class StreamableHttpTests(unittest.TestCase):
             finally:
                 client.close()
         self.assertEqual(fixture.requests, ())
+
+    def test_healthy_stream_renews_more_than_64_times_without_using_failure_budget(self) -> None:
+        client = McpStreamableHttpClient(
+            _remote_config("http://127.0.0.1:1/mcp", max_restarts=1),
+            limits(backoff_initial_ms=1, backoff_max_ms=1),
+            resource_owner=OWNER,
+        )
+        exchanges = []
+
+        def renew(_deadline):
+            exchanges.append(True)
+            client._set_stream_state("open")
+            if len(exchanges) % 2:
+                raise McpTimeout("request_timeout", "Idle stream renewal")
+
+        with mock.patch.object(client, "_stream_should_stop", side_effect=lambda: len(exchanges) >= 70), \
+             mock.patch.object(client._stream_stop, "wait", return_value=False), \
+             mock.patch.object(client, "_stream_exchange", side_effect=renew):
+            client._notification_stream_loop()
+        self.assertEqual(len(exchanges), 70)
+        self.assertEqual(client.notification_stream, "open")
+
+    def test_failed_stream_connections_back_off_and_success_resets_streak(self) -> None:
+        client = McpStreamableHttpClient(
+            _remote_config("http://127.0.0.1:1/mcp", max_restarts=2),
+            limits(backoff_initial_ms=10, backoff_max_ms=40),
+            resource_owner=OWNER,
+        )
+        calls = []
+        delays = []
+
+        def exchange(_deadline):
+            calls.append(True)
+            if len(calls) == 1:
+                raise McpTransportError("http_transport_lost", "MCP transport lost")
+            if len(calls) == 2:
+                # A timeout before SSE headers is a failed connection.
+                raise McpTimeout("request_timeout", "MCP stream opening timed out")
+            if len(calls) == 3:
+                client._set_stream_state("open")
+            if len(calls) == 4:
+                raise McpTransportError("http_transport_lost", "MCP transport lost")
+
+        def wait(delay):
+            delays.append(round(delay * 1000))
+            return False
+
+        with mock.patch.object(client, "_stream_should_stop", side_effect=lambda: len(calls) >= 4), \
+             mock.patch.object(client._stream_stop, "wait", side_effect=wait), \
+             mock.patch.object(client, "_stream_exchange", side_effect=exchange):
+            client._notification_stream_loop()
+        self.assertEqual(delays, [10, 10, 20, 10])
+
+    def test_interleaved_failures_still_exhaust_lifetime_budget(self) -> None:
+        client = McpStreamableHttpClient(
+            _remote_config("http://127.0.0.1:1/mcp", max_restarts=1),
+            limits(backoff_initial_ms=1, backoff_max_ms=1),
+            resource_owner=OWNER,
+        )
+        calls = []
+
+        def exchange(_deadline):
+            calls.append(True)
+            if len(calls) % 2:
+                raise McpTransportError("http_transport_lost", "MCP transport lost")
+            client._set_stream_state("open")
+
+        with mock.patch("octet_mcp.streamable_http.MAX_HTTP_STREAM_FAILURES", 3), \
+             mock.patch.object(client._stream_stop, "wait", return_value=False), \
+             mock.patch.object(client, "_stream_exchange", side_effect=exchange):
+            with self.assertRaises(McpTransportError) as raised:
+                client._notification_stream_loop()
+        self.assertEqual(raised.exception.code, "notification_stream_exhausted")
+        self.assertEqual(len(calls), 5)
 
     def test_permanent_get_stream_reconnects_with_the_committed_cursor(self) -> None:
         session = "stream-session"

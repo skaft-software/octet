@@ -53,6 +53,8 @@ struct ResponsesRequest {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: Option<ResponsesPromptCacheOptions>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     include: Vec<String>,
     store: bool,
@@ -62,6 +64,51 @@ struct ResponsesRequest {
     // This codec is always-streamed (there is no non-streaming Responses decode
     // path — see `decode_stream_event`), so it is unconditionally true.
     stream: bool,
+}
+
+/// The explicit cache-mode contract is distinct from legacy 24h retention.
+#[derive(Serialize)]
+struct ResponsesPromptCacheOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
+}
+
+fn supports_explicit_prompt_cache_mode(model: &crate::catalog::Model) -> bool {
+    let url = &model.endpoint.base_url;
+    // A copied model record must not assert this public-API contract for a
+    // compatible gateway, Azure, or the subscription route.
+    model.spec.cache.supports_explicit_prompt_cache_mode
+        && model.endpoint.runtime.responses_profile
+            == crate::types::ResponsesRuntimeProfile::Default
+        && url.scheme() == "https"
+        && url.host_str() == Some("api.openai.com")
+        && url.path() == "/v1/"
+}
+
+fn prompt_cache_options(
+    model: &crate::catalog::Model,
+    retention: CacheRetention,
+) -> Option<ResponsesPromptCacheOptions> {
+    if !supports_explicit_prompt_cache_mode(model) {
+        return None;
+    }
+    match retention {
+        CacheRetention::None => Some(ResponsesPromptCacheOptions {
+            // No explicit breakpoints are emitted by this route, so this
+            // disables prompt caching instead of merely omitting affinity.
+            mode: Some("explicit"),
+            ttl: None,
+        }),
+        CacheRetention::Long if model.spec.cache.supports_long_retention => {
+            Some(ResponsesPromptCacheOptions {
+                mode: None,
+                ttl: Some("30m"),
+            })
+        }
+        CacheRetention::Short | CacheRetention::WarmShort | CacheRetention::Long => None,
+    }
 }
 
 impl ResponsesRequest {
@@ -1432,6 +1479,7 @@ pub(crate) fn build_request(
             super::grammar_tools_for(model),
         )?;
     }
+    let explicit_cache_mode = supports_explicit_prompt_cache_mode(model);
     let responses_req = ResponsesRequest {
         model: model.spec.api_name.clone(),
         input: wire_input,
@@ -1456,9 +1504,11 @@ pub(crate) fn build_request(
         text: text_opt,
         service_tier,
         prompt_cache_key: prompt_cache_key(&req),
-        prompt_cache_retention: (req.cache_retention == crate::types::CacheRetention::Long
-            && model.spec.cache.supports_long_retention)
+        prompt_cache_retention: (req.cache_retention == CacheRetention::Long
+            && model.spec.cache.supports_long_retention
+            && !explicit_cache_mode)
             .then_some("24h"),
+        prompt_cache_options: prompt_cache_options(model, req.cache_retention),
         include,
         store: responses_options.is_some_and(|options| options.store),
         stream: true,
@@ -1471,7 +1521,8 @@ pub(crate) fn build_request(
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "responses")?;
 
-    let headers = responses_affinity_headers(model, cache_session_id(&req))?;
+    let mut headers = responses_affinity_headers(model, cache_session_id(&req))?;
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -3168,6 +3219,7 @@ mod tests {
                 text: None,
                 prompt_cache_key: None,
                 prompt_cache_retention: None,
+                prompt_cache_options: None,
                 include: vec![],
                 store: false,
                 stream: true,
@@ -3595,6 +3647,33 @@ mod tests {
         let parts = build_request(&model, &request).unwrap();
         assert_eq!(parts.headers["x-session-id"], "stable-session");
         assert!(parts.headers.get("x-client-request-id").is_none());
+    }
+
+    #[test]
+    fn opencode_responses_session_header_is_independent_of_cache_retention() {
+        let mut model = make_test_model(false);
+        Arc::make_mut(&mut model.endpoint).id = crate::EndpointId("opencode".into());
+        Arc::make_mut(&mut model.spec).cache.send_session_affinity_headers = true;
+        let mut req = user_req(
+            vec![UserPart::Text("hello".into())],
+            CompatibilityMode::Strict,
+        );
+        req.session_id = Some("stable-session".into());
+        req.cache_retention = CacheRetention::None;
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(parts.headers["x-opencode-session"], "stable-session");
+        assert!(parts.headers.get("x-client-request-id").is_none());
+
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .headers
+            .insert("X-OpenCode-Session".into(), "caller-value".into());
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+        req.session_id = None;
+        Arc::make_mut(&mut model.spec).preset.headers.clear();
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
     }
 
     #[test]

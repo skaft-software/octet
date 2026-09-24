@@ -1524,25 +1524,6 @@ fn render_provider_heading(state: &ShellState, provider: &str, width: u16) -> St
     fit_line(&format!("{prefix}{}", state.theme.bold(&provider)), width)
 }
 
-/// Minimum remaining body rows before the `/subagents` column header is worth a
-/// row. A short terminal keeps worker rows instead of chrome.
-const SUBAGENT_HEADER_MIN_BODY: usize = 5;
-
-/// Names the fields every `/subagents` row carries, in the order the extension
-/// emits them. It is chrome: never selectable, never an item index.
-fn render_subagent_column_header(state: &ShellState, width: u16) -> String {
-    let plan = PresentationLayout::new(&state.theme, width);
-    let prefix = format!("{}  ", " ".repeat(usize::from(plan.inset)));
-    let header = "state · elapsed · model · calls · turns · tokens · cost";
-    fit_line(
-        &format!(
-            "{prefix}{}",
-            subdued_text(&state.theme, &panel_cell(header, state.theme.unicode()))
-        ),
-        width,
-    )
-}
-
 /// State-group heading with its displayed count, e.g. `Running · 8`.
 fn render_subagent_heading(state: &ShellState, label: &str, count: usize, width: u16) -> String {
     let plan = PresentationLayout::new(&state.theme, width);
@@ -1599,8 +1580,10 @@ fn select_list_uses_stacked_rows(
     width: u16,
     available_rows: usize,
 ) -> bool {
-    action.is_model_picker()
+    (action.is_model_picker()
         && PresentationLayout::new(&state.theme, width).picker == PickerLayout::Stacked
+        || action.subagent_panel().is_some()
+            && PresentationLayout::new(&state.theme, width).picker != PickerLayout::Columns)
         && available_rows
             >= if action.model_provider_groups().is_some() {
                 3
@@ -1845,9 +1828,9 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
                 0..filtered.len(),
             );
             // Grouped subagent chrome is budgeted here as well: one heading per
-            // visible state group, one summary row for the collapsed terminal
-            // groups, and the column header. Budgeting the body alone made the
-            // panel claim a height it then could not honour, so the collapse
+            // visible state group and one summary row for collapsed groups.
+            // Budgeting the body alone made the panel claim a height it then
+            // could not honour, so the collapse
             // summaries were sliced off the bottom and every live worker was
             // pushed out of the window.
             let subagent_chrome = action
@@ -1868,7 +1851,7 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
                             .iter()
                             .any(|index| searched.contains(index) && panel.hides(*index))
                     }));
-                    visible + hidden + usize::from(!filtered.is_empty())
+                    visible + hidden
                 })
                 .unwrap_or(0);
             (body * row_height + headings + subagent_chrome + chrome_rows + border_rows)
@@ -2043,7 +2026,7 @@ fn render_panel_output_with_limit(
             let max_body = max_rows
                 .saturating_sub(lines.len() + usize::from(show_borders) + usize::from(show_footer));
             // `/subagents` chrome: one heading per visible state group, a
-            // column header, and a single summary line for collapsed groups.
+            // single summary line for collapsed groups.
             // Chrome is budgeted out of the body so a bounded panel can never
             // render past the row allowance it was given.
             let subagents = action.subagent_panel();
@@ -2074,11 +2057,8 @@ fn render_panel_output_with_limit(
                     .filter(|group| group.indices.iter().any(|index| filtered.contains(index)))
                     .count()
             });
-            // A column header is chrome, so it yields before any worker row.
-            let show_subagent_header = subagents.is_some() && max_body >= SUBAGENT_HEADER_MIN_BODY;
-            let requested_chrome = visible_groups
-                .saturating_add(usize::from(!hidden_groups.is_empty()))
-                .saturating_add(usize::from(show_subagent_header));
+            let requested_chrome =
+                visible_groups.saturating_add(usize::from(!hidden_groups.is_empty()));
             // Chrome yields entirely rather than pushing the panel past the row
             // allowance it was given: a short terminal keeps worker rows.
             let chrome_rows = if requested_chrome < max_body {
@@ -2092,7 +2072,6 @@ fn render_panel_output_with_limit(
             } else {
                 Vec::new()
             };
-            let show_subagent_header = show_subagent_header && chrome_fits;
             let hidden_groups_empty = hidden_groups.is_empty();
             let max_body = max_body.saturating_sub(chrome_rows);
             if filtered.is_empty() && !hidden_groups_empty && max_body > 0 {
@@ -2134,9 +2113,6 @@ fn render_panel_output_with_limit(
                 let label_width = (!confirmation && !stacked)
                     .then(|| panel_label_width(state, items, descriptions, &filtered, width))
                     .flatten();
-                if show_subagent_header {
-                    lines.push(render_subagent_column_header(state, width));
-                }
                 let mut previous_provider: Option<&str> = None;
                 let mut previous_group: Option<usize> = None;
                 for position in window {
@@ -2205,8 +2181,15 @@ fn render_panel_output_with_limit(
                 let subagent_scope = subagents
                     .and_then(|panel| panel.state_filter_label())
                     .map(|label| format!("state: {label}"));
-                if subagents.is_some() {
-                    hints.push(("ctrl+t", "show all"));
+                if let Some(panel) = subagents {
+                    hints.push((
+                        "ctrl+t",
+                        if panel.collapsed {
+                            "show all"
+                        } else {
+                            "hide finished"
+                        },
+                    ));
                     hints.push(("ctrl+f", "state filter"));
                 }
                 hints.push(("esc", "close"));
@@ -2215,7 +2198,14 @@ fn render_panel_output_with_limit(
                     width,
                     &content_inset,
                     subagent_scope.as_deref(),
-                    ("enter", "select"),
+                    (
+                        "enter",
+                        if subagents.is_some() {
+                            "inspect"
+                        } else {
+                            "select"
+                        },
+                    ),
                     &hints,
                 ));
             }
@@ -2553,5 +2543,112 @@ pub mod panel_render_test_hook {
     pub fn document_lines(text: &str, width: u16, styled: bool) -> Vec<String> {
         let theme = crate::tui::theme::test_theme();
         super::document_visual_lines_styled(text, &theme, width, styled)
+    }
+}
+
+#[cfg(test)]
+mod subagent_surface_tests {
+    use super::super::{InteractiveShell, SubagentGroup, SubagentPanel};
+    use super::*;
+
+    #[test]
+    fn subagent_menu_uses_shared_rows_and_honest_actions() {
+        for width in [40, 80, 120] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, 24);
+            shell.open_panel(Panel::SelectList {
+                surface: OrdinarySurfaceMetadata::new("Subagents"),
+                items: vec!["audit-auth".into()],
+                descriptions: vec![Some("running · 42s · test-model".into())],
+                selected: 0,
+                filter: String::new(),
+                action: PanelAction::SelectSubagent(SubagentPanel {
+                    node_ids: vec!["worker:audit".into()],
+                    groups: vec![SubagentGroup {
+                        label: "Running".into(),
+                        indices: vec![0],
+                        collapsible: false,
+                    }],
+                    collapsed: true,
+                    revealed_node: None,
+                    state_filter: None,
+                }),
+            });
+            let state = shell.state.borrow();
+            let rows = render_panel_with_limit(&state, width, 20);
+            let plain = super::super::strip_terminal_sequences(&rows.join("\n"));
+            assert!(plain.contains("audit-auth"), "{plain}");
+            assert!(plain.contains("running"), "{plain}");
+            assert!(plain.contains("enter inspect"), "{plain}");
+            assert!(!plain.contains("state · elapsed"), "{plain}");
+            assert!(rows.len() <= 20);
+            assert!(rows
+                .iter()
+                .all(|row| visible_width(row) <= usize::from(width)));
+            let worker = rows
+                .iter()
+                .position(|row| row.contains("audit-auth"))
+                .unwrap();
+            if width < 112 {
+                assert!(rows[worker + 1].contains("running"));
+                assert!(!rows[worker].contains("running"));
+            } else {
+                assert!(rows[worker].contains("running"));
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_model_subagent_menu_keeps_models_on_worker_rows() {
+        for width in [80, 120] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, 24);
+            shell.open_panel(Panel::SelectList {
+                surface: OrdinarySurfaceMetadata::new("Subagents"),
+                items: vec!["audit".into(), "search".into()],
+                descriptions: vec![
+                    Some("running · 42s · claude-sonnet-test".into()),
+                    Some("running · 4s · gpt-test".into()),
+                ],
+                selected: 0,
+                filter: String::new(),
+                action: PanelAction::SelectSubagent(SubagentPanel {
+                    node_ids: vec!["worker:audit".into(), "worker:search".into()],
+                    groups: vec![SubagentGroup {
+                        label: "Running".into(),
+                        indices: vec![0, 1],
+                        collapsible: false,
+                    }],
+                    collapsed: true,
+                    revealed_node: None,
+                    state_filter: None,
+                }),
+            });
+            let state = shell.state.borrow();
+            let rows = render_panel_with_limit(&state, width, 20);
+            let plain = super::super::strip_terminal_sequences(&rows.join("\n"));
+            assert!(plain.contains("claude-sonnet-test"), "{plain}");
+            assert!(plain.contains("gpt-test"), "{plain}");
+            let heading = plain
+                .lines()
+                .find(|line| line.contains("Subagents"))
+                .unwrap();
+            assert!(!heading.contains("test"), "{plain}");
+            for (name, model, other) in [
+                ("audit", "claude-sonnet-test", "gpt-test"),
+                ("search", "gpt-test", "claude-sonnet-test"),
+            ] {
+                let index = rows.iter().position(|row| row.contains(name)).unwrap();
+                let model_row = if width < 112 {
+                    &rows[index + 1]
+                } else {
+                    &rows[index]
+                };
+                let model_row = super::super::strip_terminal_sequences(model_row);
+                assert!(model_row.contains(model), "{name}: {plain}");
+                assert!(!model_row.contains(other), "{name}: {plain}");
+            }
+            assert!(rows.len() <= 20);
+        }
     }
 }

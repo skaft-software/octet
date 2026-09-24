@@ -635,6 +635,40 @@ fn no_session_fails_closed_for_an_interactive_frontend_and_records_nothing() {
     );
 }
 
+/// Errors before a frontend builds its App must still release --no-session's
+/// private store; they cannot rely on the frontend's normal run finalizer.
+#[test]
+fn no_session_early_print_error_removes_private_store() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    let temporary = fixture._root.path().join("temporary");
+    std::fs::create_dir(&temporary).unwrap();
+    let result = fixture
+        .command()
+        .env("TMPDIR", &temporary)
+        .args([
+            "--model",
+            "custom/probe",
+            "--no-session",
+            "--print",
+            "/changelog",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        stderr_of(&result).contains("/changelog"),
+        "{}",
+        stderr_of(&result)
+    );
+    assert!(
+        std::fs::read_dir(&temporary).unwrap().next().is_none(),
+        "early errors must remove their temporary transcript root"
+    );
+    assert!(session_transcripts(&fixture).is_empty());
+}
+
 /// The Codex context note never fires for a non-Codex session, even when the
 /// catalog is full of Codex models, and it is not re-emitted per turn.
 #[test]
@@ -787,7 +821,7 @@ fn sparse_provider_inventory_inherits_documented_image_input_for_the_real_cli() 
     let fixture = Fixture::new(None);
     std::fs::write(
         fixture.workspace.join("pixel.png"),
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
+        include_bytes!("fixtures/export_html/one-pixel.png"),
     )
     .unwrap();
     let mut command = fixture.command_online();
@@ -1178,7 +1212,7 @@ fn file_media_is_admitted_only_for_recognized_images_and_vision_models() {
     let fixture = Fixture::new(Some(&api.url));
     std::fs::write(
         fixture.workspace.join("pixel.png"),
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
+        include_bytes!("fixtures/export_html/one-pixel.png"),
     )
     .unwrap();
     let output = fixture.run(&[

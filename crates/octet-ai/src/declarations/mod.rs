@@ -377,6 +377,10 @@ pub struct ModelPreset {
         skip_serializing_if = "Option::is_none"
     )]
     pub anthropic_compat: Option<AnthropicCompatPreset>,
+    /// Explicit per-model inline user-image limits; absent metadata uses the
+    /// host's bounded fallback, not a provider-name inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input_limits: Option<crate::media::ImageInputLimits>,
 }
 
 /// Mistral Chat reasoning controls, selected by model data rather than its name.
@@ -474,6 +478,29 @@ pub struct AnthropicFallbackCost {
     pub cache_write: f64,
 }
 
+impl AnthropicFallbackCost {
+    /// Convert declared dollars per million tokens to a local price, rounding
+    /// up fractional microdollars. Unrepresentable rates remain unpriced.
+    pub fn pricing(self) -> Option<crate::pricing::Pricing> {
+        fn rate(value: f64) -> Option<crate::pricing::TokenRate> {
+            let microdollars = (value * 1_000_000.0).ceil();
+            (value >= 0.0 && microdollars.is_finite() && microdollars < u64::MAX as f64)
+                .then_some(crate::pricing::TokenRate(microdollars as u64))
+        }
+        Some(crate::pricing::Pricing {
+            input: rate(self.input)?,
+            output: rate(self.output)?,
+            cache_read: rate(self.cache_read)?,
+            cache_write_5m: rate(self.cache_write)?,
+            // No declared one-hour rate: a response reporting such writes
+            // remains unpriced (checked by the Anthropic stream decoder).
+            cache_write_1h: None,
+            reasoning: None,
+            tiers: vec![],
+        })
+    }
+}
+
 impl AnthropicCompatPreset {
     fn validate(&self) -> Result<(), DeclarationError> {
         for fallback in &self.allowed_fallback_models {
@@ -546,6 +573,9 @@ impl ModelPreset {
     /// Reject malformed preset metadata fail-closed.
     pub fn validate(&self) -> Result<(), DeclarationError> {
         check_object_size(self)?;
+        if let Some(limits) = self.image_input_limits {
+            limits.validate().map_err(|_| DeclarationError::Invalid("invalid image input limits".into()))?;
+        }
         check_headers(&self.headers)?;
         check_sampling(&self.sampling_params)?;
         if let Some(anthropic) = &self.anthropic_compat {
@@ -801,6 +831,18 @@ mod tests {
                 name: "x".to_owned()
             })
         );
+    }
+
+    #[test]
+    fn declared_image_limits_are_model_specific_and_checked() {
+        let limits = crate::media::ImageInputLimits { max_width: 2_000, max_height: 1_500, max_bytes: 2_000_000 };
+        let declared = ModelPreset { image_input_limits: Some(limits), ..Default::default() };
+        declared.validate().unwrap();
+        let roundtrip: ModelPreset = serde_json::from_value(serde_json::to_value(&declared).unwrap()).unwrap();
+        assert_eq!(roundtrip.image_input_limits, Some(limits));
+        assert_eq!(ModelPreset::default().image_input_limits, None);
+        let invalid = ModelPreset { image_input_limits: Some(crate::media::ImageInputLimits { max_width: 0, ..limits }), ..Default::default() };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

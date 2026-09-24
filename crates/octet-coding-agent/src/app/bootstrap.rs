@@ -2177,6 +2177,26 @@ fn sparse_route_reasoning(
             _ => return None,
         });
     }
+    if declaration.id == "anthropic"
+        && protocol == Protocol::AnthropicMessages
+        && id == "claude-opus-5-5"
+    {
+        // https://platform.claude.com/docs/en/models/opus-5-5/overview
+        // Adaptive thinking is always on; omitting effort defaults to medium.
+        return Some(effort_capability(
+            Mode::Standard,
+            &["low", "medium", "high", "xhigh", "max"],
+            Some("medium"),
+        ));
+    }
+    if declaration.id == "xai" && protocol == Protocol::OpenAiResponses && id == "grok-4.7" {
+        // https://docs.x.ai/developers/grok-4-7
+        return Some(effort_capability(
+            Mode::Standard,
+            &["low", "medium", "high", "xhigh"],
+            Some("high"),
+        ));
+    }
     if declaration.id == "deepseek" && protocol == Protocol::OpenAiChat {
         return Some(match id {
             "deepseek-flash" => effort_capability(
@@ -2362,6 +2382,44 @@ fn discovered_preset_binding<'a>(
     declaration.route_for_model(model_id)
 }
 
+/// Official public-API quotes for inventory-returned models missing from the
+/// older models.dev snapshot. Never share these rates with subscription or
+/// third-party routes, and never turn pricing into an availability assertion.
+fn current_direct_model_pricing(provider: &str, id: &str) -> Option<Pricing> {
+    match (provider, id) {
+        ("anthropic", "claude-opus-5-5") => Some(Pricing {
+            // https://platform.claude.com/docs/en/models/opus-5-5/overview
+            input: TokenRate(4_000_000),
+            output: TokenRate(20_000_000),
+            cache_read: TokenRate(200_000),
+            cache_write_5m: TokenRate(5_000_000),
+            cache_write_1h: Some(TokenRate(8_000_000)),
+            reasoning: None,
+            tiers: vec![],
+        }),
+        ("xai", "grok-4.7") => Some(Pricing {
+            // https://docs.x.ai/developers/pricing (global, standard tier).
+            input: TokenRate(2_000_000),
+            output: TokenRate(6_000_000),
+            cache_read: TokenRate(500_000),
+            // xAI quotes no separate write rate; new prompt tokens use input.
+            cache_write_5m: TokenRate(2_000_000),
+            cache_write_1h: None,
+            reasoning: None,
+            tiers: vec![PricingTier {
+                min_input_tokens: 200_000,
+                input: Some(TokenRate(4_000_000)),
+                output: Some(TokenRate(12_000_000)),
+                cache_read: Some(TokenRate(1_000_000)),
+                cache_write_5m: Some(TokenRate(4_000_000)),
+                cache_write_1h: None,
+                reasoning: None,
+            }],
+        }),
+        _ => None,
+    }
+}
+
 fn register_openai_compatible_models(
     catalog: &mut ModelCatalog,
     declaration: &ProviderDeclaration,
@@ -2413,10 +2471,16 @@ fn register_openai_compatible_models_from_response(
         let protocol = route.protocol;
         let public_gpt_6 = protocol == Protocol::OpenAiResponses
             && public_openai_gpt_6_model(declaration, api_name);
-        let context_window =
-            model
-                .context_window
-                .unwrap_or(if public_gpt_6 { 1_050_000 } else { 128_000 });
+        let direct_grok_4_7 = declaration.id == "xai"
+            && protocol == Protocol::OpenAiResponses
+            && api_name == "grok-4.7";
+        let context_window = model.context_window.unwrap_or(if public_gpt_6 {
+            1_050_000
+        } else if direct_grok_4_7 {
+            500_000
+        } else {
+            128_000
+        });
         let max_output_tokens = model
             .max_output_tokens
             .unwrap_or(if public_gpt_6 { 128_000 } else { 32_768 })
@@ -2441,12 +2505,13 @@ fn register_openai_compatible_models_from_response(
             .discovery_capabilities
             .gpt_vision_fallback(api_name)
             && (!gpt_6_family_model(api_name) || public_openai_gpt_6_model(declaration, api_name));
-        let mut input_modalities =
-            if model.vision || (!model.modalities_asserted && gpt_vision_fallback) {
-                ModalitySet::none().with(octet_ai::Modality::Image)
-            } else {
-                ModalitySet::none()
-            };
+        let mut input_modalities = if model.vision
+            || (!model.modalities_asserted && (gpt_vision_fallback || direct_grok_4_7))
+        {
+            ModalitySet::none().with(octet_ai::Modality::Image)
+        } else {
+            ModalitySet::none()
+        };
         // Audio inventory metadata is only actionable on the Chat codec; the
         // Responses and Anthropic codecs intentionally have no audio mapping.
         if model.audio && protocol == Protocol::OpenAiChat {
@@ -2456,7 +2521,10 @@ fn register_openai_compatible_models_from_response(
             catalog,
             declaration,
             api_name,
-            model.display_name.clone(),
+            model
+                .display_name
+                .clone()
+                .or_else(|| direct_grok_4_7.then(|| "Grok 4.7".into())),
             Capabilities {
                 input_modalities,
                 output_modalities: ModalitySet::none(),
@@ -2483,7 +2551,7 @@ fn register_openai_compatible_models_from_response(
                 context_window,
                 max_output_tokens,
             },
-            None,
+            current_direct_model_pricing(declaration.id, api_name),
         )?;
     }
     Ok(())
@@ -2531,16 +2599,23 @@ fn register_anthropic_compatible_models_from_response(
         {
             continue;
         }
-        let context_window = model.context_window.unwrap_or(200_000);
+        let direct_opus_5_5 = declaration.id == "anthropic" && api_name == "claude-opus-5-5";
+        let context_window =
+            model
+                .context_window
+                .unwrap_or(if direct_opus_5_5 { 1_000_000 } else { 200_000 });
         let max_output_tokens = model
             .max_output_tokens
-            .unwrap_or(64_000)
+            .unwrap_or(if direct_opus_5_5 { 128_000 } else { 64_000 })
             .min(context_window);
         crate::providers::register_discovered_model(
             catalog,
             declaration,
             api_name,
-            model.display_name.clone(),
+            model
+                .display_name
+                .clone()
+                .or_else(|| direct_opus_5_5.then(|| "Claude Opus 5.5".into())),
             Capabilities {
                 input_modalities: if model.vision
                     || (!model.modalities_asserted
@@ -2578,7 +2653,7 @@ fn register_anthropic_compatible_models_from_response(
                 context_window,
                 max_output_tokens,
             },
-            None,
+            current_direct_model_pricing(declaration.id, api_name),
         )?;
     }
     Ok(())
@@ -3908,13 +3983,11 @@ fn load_custom_model_cache(
     )
 }
 
-fn save_custom_model_cache_for(
-    store: &crate::auth::custom::CredentialStore,
-    provider_id: &str,
+fn custom_model_cache_bytes(
     base_url: &str,
     credential_fingerprint: &str,
     models: &[crate::auth::custom::CustomModel],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<u8>> {
     // Cache a redacted copy, never mutate the credential registry's configured
     // model: those private headers must remain available to actual requests.
     let mut models = models.to_vec();
@@ -3927,7 +4000,20 @@ fn save_custom_model_cache_for(
         credential_fingerprint: credential_fingerprint.to_owned(),
         models,
     };
-    store.save_model_cache_for(provider_id, &serde_json::to_vec_pretty(&cache)?)
+    serde_json::to_vec_pretty(&cache).map_err(Into::into)
+}
+
+fn save_custom_model_cache_for(
+    store: &crate::auth::custom::CredentialStore,
+    provider_id: &str,
+    base_url: &str,
+    credential_fingerprint: &str,
+    models: &[crate::auth::custom::CustomModel],
+) -> anyhow::Result<()> {
+    store.save_model_cache_for(
+        provider_id,
+        &custom_model_cache_bytes(base_url, credential_fingerprint, models)?,
+    )
 }
 
 #[cfg(test)]
@@ -3962,6 +4048,10 @@ fn schedule_custom_model_cache_refresh_for(
     }
     let configured = configured_custom_models(&cred);
     let cache_fingerprint = custom_model_cache_fingerprint(&credential_fingerprint, &configured);
+    let expected = match store.load_model_cache_for(&provider_id) {
+        Ok(Some(bytes)) => bytes,
+        _ => return,
+    };
     let _ = std::thread::Builder::new()
         .name(format!("octet-custom-{provider_id}-catalog-refresh"))
         .spawn(move || {
@@ -3973,73 +4063,14 @@ fn schedule_custom_model_cache_refresh_for(
                 &configured,
             );
             if !discovered.is_empty() {
-                let _ = save_custom_model_cache_for(
-                    &store,
-                    &provider_id,
-                    &cred.base_url,
-                    &cache_fingerprint,
-                    &discovered,
-                );
+                if let Ok(bytes) =
+                    custom_model_cache_bytes(&cred.base_url, &cache_fingerprint, &discovered)
+                {
+                    let _ =
+                        store.save_model_cache_if_unchanged_for(&provider_id, &expected, &bytes);
+                }
             }
         });
-}
-
-fn refresh_stale_custom_models_with_for<F>(
-    store: &crate::auth::custom::CredentialStore,
-    provider_id: &str,
-    cred: &crate::auth::custom::CustomCredential,
-    credential_fingerprint: &str,
-    cached: Vec<crate::auth::custom::CustomModel>,
-    refresh_interval: Duration,
-    discover: F,
-) -> Vec<crate::auth::custom::CustomModel>
-where
-    F: FnOnce(&crate::auth::custom::CustomCredential) -> Vec<crate::auth::custom::CustomModel>,
-{
-    if !store
-        .model_cache_is_stale_for(provider_id, refresh_interval)
-        .unwrap_or(true)
-    {
-        return cached;
-    }
-
-    let discovered = discover_and_cache_custom_models_with_for(
-        store,
-        provider_id,
-        cred,
-        credential_fingerprint,
-        false,
-        discover,
-    );
-    if discovered.is_empty() {
-        // A transient discovery failure must not discard a last-good catalog.
-        cached
-    } else {
-        discovered
-    }
-}
-
-#[cfg(test)]
-fn refresh_stale_custom_models_with<F>(
-    store: &crate::auth::custom::CredentialStore,
-    cred: &crate::auth::custom::CustomCredential,
-    credential_fingerprint: &str,
-    cached: Vec<crate::auth::custom::CustomModel>,
-    refresh_interval: Duration,
-    discover: F,
-) -> Vec<crate::auth::custom::CustomModel>
-where
-    F: FnOnce(&crate::auth::custom::CustomCredential) -> Vec<crate::auth::custom::CustomModel>,
-{
-    refresh_stale_custom_models_with_for(
-        store,
-        crate::auth::custom::ENDPOINT_ID,
-        cred,
-        credential_fingerprint,
-        cached,
-        refresh_interval,
-        discover,
-    )
 }
 
 fn discover_and_cache_custom_models_with_for<F>(
@@ -4719,19 +4750,19 @@ fn register_custom_openai_provider(
     };
     let models: Vec<CustomModel> = match cached {
         Some(CachedCustomInventory::Available(models)) => {
-            if offline {
-                models
-            } else {
-                refresh_stale_custom_models_with_for(
-                    store,
-                    provider_id,
-                    &cred,
-                    &cache_fingerprint,
-                    models,
+            // A positive, identity-matched cache is usable immediately. Refresh
+            // stale metadata off the startup path; a later catalog build reads
+            // the completed cache, while this launch retains its last good list.
+            if !offline {
+                schedule_custom_model_cache_refresh_for(
+                    store.clone(),
+                    provider_id.to_owned(),
+                    cred.clone(),
+                    custom_credential_fingerprint.clone(),
                     PROVIDER_INVENTORY_REFRESH_INTERVAL,
-                    |cred| discover_models(cred, provider_id),
-                )
+                );
             }
+            models
         }
         Some(CachedCustomInventory::Unavailable)
             if cred.auto_discover && !offline && configured.is_empty() =>
@@ -6585,14 +6616,17 @@ fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
 ///
 /// This trace is the off-screen timing signal every frontend shares; nothing in
 /// it is ever rendered on the startup screen. Stable phase names:
-/// `catalog.base`, `catalog.selected`, `catalog.codex`, `catalog.copilot`,
+/// `process.enter`, `cli.configured`, `selection.resolved`, `catalog.base`,
+/// `catalog.selected`, `catalog.codex`, `catalog.copilot`,
 /// `catalog.fallback`, `catalog.enrich`, `codex.credentials`, `codex.inventory`,
 /// `bootstrap.ready`, `session.resolve`, `session.replay`,
 /// `extensions.provider-preflight`, `extensions.prestart`, `extensions.activate`,
-/// `app.build`, `history.hydrate`, `frame.ready`. The last two are emitted by the
-/// interactive frontend; `codex.credentials` and `codex.inventory` separate
-/// credential refresh from the inventory request inside one selected-route wait,
-/// and `catalog.selected` bounds the selected-route inventory wait itself (the
+/// `app.build`, `history.hydrate`, `frame.ready`. `process.enter` starts after
+/// the Tokio runtime has initialized; spawn-to-first-editable-frame latency must
+/// be measured outside the process on a PTY, not inferred from this trace.
+/// `codex.credentials` and `codex.inventory` separate credential refresh from
+/// the inventory request inside one selected-route wait, and
+/// `catalog.selected` bounds the selected-route inventory wait itself (the
 /// delta after `catalog.base`) so a configured but unselected provider's
 /// discovery is never attributed to readiness.
 pub(crate) fn startup_phase(phase: &str) {

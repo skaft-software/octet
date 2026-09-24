@@ -137,7 +137,15 @@ fn render_wake_requires_frame(
     semantic_command || resized || welcome || animation_due
 }
 
-fn frame_coalesce_delay(last_render: Option<Instant>, now: Instant) -> Duration {
+fn frame_coalesce_delay(
+    last_render: Option<Instant>,
+    now: Instant,
+    input_changed: bool,
+) -> Duration {
+    // The semantic stream can wait for the next slot; a key press cannot.
+    if input_changed {
+        return Duration::ZERO;
+    }
     last_render
         .map(|last| (last + RENDER_INTERVAL).saturating_duration_since(now))
         .unwrap_or_default()
@@ -254,11 +262,21 @@ fn coalesce_render_commands(
     last_render: Option<Instant>,
     tui: &TUI<'_>,
     suspended: &mut Option<mpsc::Sender<()>>,
+    input_changed: impl Fn() -> bool,
+    animation_deadline: Duration,
 ) -> bool {
     let now = Instant::now();
-    let deadline = now + frame_coalesce_delay(last_render, now);
+    // The stream throttle never pushes a due dot/shimmer phase into a later
+    // slot. Timed frames and input remain independent of semantic traffic.
+    let deadline = now
+        + frame_coalesce_delay(last_render, now, input_changed()).min(animation_deadline);
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        // A key admitted during coalescing must also preempt the deadline.
+        let remaining = if input_changed() {
+            Duration::ZERO
+        } else {
+            deadline.saturating_duration_since(Instant::now())
+        };
         if remaining.is_zero() {
             // The frame deadline already passed: inspect exactly one slot so a
             // producer that keeps refilling it cannot starve painting.
@@ -422,6 +440,9 @@ pub(super) fn render_loop_with_terminal(
     state.frame_written();
 
     let mut last_render: Option<Instant> = None;
+    // Capture before each paint: an edit admitted during a slow terminal write
+    // still differs on the next wake, even when that write was not current.
+    let mut last_editor_revision = state.borrow().editor.revision();
     let mut animations = AnimationSchedule::new();
     // A suspend is decided by the coalescer but finalized here, where the
     // final frame and the terminal handback belong.
@@ -480,7 +501,14 @@ pub(super) fn render_loop_with_terminal(
             continue;
         }
 
-        if !coalesce_render_commands(&rx, last_render, &tui, &mut suspended) {
+        if !coalesce_render_commands(
+            &rx,
+            last_render,
+            &tui,
+            &mut suspended,
+            || state.borrow().editor.revision() != last_editor_revision,
+            animations.remaining(Instant::now()),
+        ) {
             if let Some(reply) = suspended.take() {
                 suspend_terminal(&mut tui, reply);
                 return;
@@ -498,6 +526,7 @@ pub(super) fn render_loop_with_terminal(
             animations.advance(&mut shell, now);
             shell.expire_transcript_scrollbar(now);
         }
+        last_editor_revision = state.borrow().editor.revision();
         tui.request_render();
         state.frame_written();
         last_render = Some(Instant::now());
@@ -815,6 +844,8 @@ mod scheduler_tests {
             Some(Instant::now()),
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
         let frame = receive
             .recv_timeout(Duration::from_millis(50))
@@ -837,6 +868,8 @@ mod scheduler_tests {
             None,
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
         assert_eq!(rx.try_iter().count(), 999);
         tx.send(RenderCommand::Stop).unwrap();
@@ -845,6 +878,8 @@ mod scheduler_tests {
             Some(Instant::now()),
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
         assert!(suspended.is_none());
         drop(tx);
@@ -853,6 +888,8 @@ mod scheduler_tests {
             None,
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
     }
 
@@ -869,6 +906,8 @@ mod scheduler_tests {
             None,
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
         let reply = suspended.take().expect("suspend is handed to the owner");
         suspend_terminal(&mut renderer, reply);
@@ -881,17 +920,69 @@ mod scheduler_tests {
     }
 
     #[test]
+    fn edit_admitted_while_coalescing_preempts_the_stream_deadline() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(RenderCommand::Render).unwrap();
+        let renderer = test_renderer();
+        let mut suspended = None;
+        let calls = std::cell::Cell::new(0);
+        // The edit occurs after the deadline was computed, before waiting.
+        assert!(coalesce_render_commands(
+            &rx,
+            Some(Instant::now()),
+            &renderer,
+            &mut suspended,
+            || {
+                calls.set(calls.get() + 1);
+                calls.get() > 1
+            },
+            RESIZE_POLL_INTERVAL,
+        ));
+        assert_eq!(calls.get(), 2, "edit must bypass the waiting branch");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn due_animation_preempts_semantic_burst_coalescing() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(RenderCommand::Render).unwrap();
+        let renderer = test_renderer();
+        let mut suspended = None;
+        assert!(coalesce_render_commands(
+            &rx,
+            Some(Instant::now()),
+            &renderer,
+            &mut suspended,
+            || false,
+            Duration::ZERO,
+        ));
+        assert!(rx.try_recv().is_err(), "due animation paints rather than waits");
+    }
+
+    #[test]
+    fn editor_revision_tracks_text_and_cursor_during_a_render() {
+        let state = SharedState::new(ShellState::default());
+        let before = state.borrow().editor.revision();
+        state.borrow_mut().editor.set_text("key");
+        let painted = state.borrow().editor.revision();
+        assert_ne!(painted, before);
+        state.borrow_mut().editor.set_cursor(0);
+        assert_ne!(state.borrow().editor.revision(), painted);
+    }
+
+    #[test]
     fn semantic_bursts_coalesce_for_at_most_one_terminal_frame() {
         let last = Instant::now();
         assert_eq!(
-            frame_coalesce_delay(Some(last), last + Duration::from_millis(1)),
+            frame_coalesce_delay(Some(last), last + Duration::from_millis(1), false),
             Duration::from_millis(15)
         );
         assert_eq!(
-            frame_coalesce_delay(Some(last), last + Duration::from_millis(16)),
+            frame_coalesce_delay(Some(last), last + Duration::from_millis(16), false),
             Duration::ZERO
         );
-        assert_eq!(frame_coalesce_delay(None, last), Duration::ZERO);
+        assert_eq!(frame_coalesce_delay(None, last, false), Duration::ZERO);
+        assert_eq!(frame_coalesce_delay(Some(last), last, true), Duration::ZERO);
     }
 }
 

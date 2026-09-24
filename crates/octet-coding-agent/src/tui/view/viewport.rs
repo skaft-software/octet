@@ -48,14 +48,13 @@ pub(super) fn max_scroll_from_bottom(state: &ShellState, width: u16) -> usize {
         return 0;
     }
     if state.render_threaded {
-        // A stale frame cannot supply a clamp. Keep the requested keyboard
-        // delta pending; the renderer clamps it against the next exact layout.
+        // A draft edit or prior scroll invalidates painted pointer positions,
+        // but not the transcript's row count. Keep rapid navigation bounded
+        // while the renderer catches up; changed layout still waits for paint.
         return state
-            .retained_render_geometry()
+            .retained_navigation_geometry()
             .map_or(usize::MAX, |geometry| {
-                geometry
-                    .total_rows
-                    .saturating_sub(geometry.viewport_rows.max(1))
+                max_scroll_for_available(geometry.total_rows, geometry.viewport_available)
             });
     }
     let chrome = shell_chrome(state, width, Instant::now());
@@ -358,7 +357,12 @@ fn viewport_anchor_for_visual_row(
 }
 
 fn capture_viewport_anchor(state: &ShellState, start: usize, end: usize) {
-    if state.viewport_anchor.get().is_some() || start >= end {
+    if state
+        .viewport_anchor
+        .get()
+        .is_some_and(|anchor| anchor.block_hint != usize::MAX)
+        || start >= end
+    {
         return;
     }
     let mut fallback = None;
@@ -388,13 +392,13 @@ pub(super) fn retain_viewport_anchor(state: &ShellState) {
         if state.viewport_anchor.get().is_some() {
             return;
         }
-        let Some(geometry) = state.retained_render_geometry() else {
+        let Some(geometry) = state.retained_navigation_geometry() else {
             return;
         };
         let row = geometry
             .total_rows
             .saturating_sub(state.scroll_from_bottom.get())
-            .saturating_sub(geometry.viewport_rows);
+            .saturating_sub(transcript_viewport_capacity(geometry.viewport_available, true));
         if let Some(block) = geometry
             .blocks
             .iter()
@@ -408,6 +412,22 @@ pub(super) fn retain_viewport_anchor(state: &ShellState) {
                 visual_width: state.size.0,
                 semantic_row_correction: 0,
                 fallback_block_row: row - block.start,
+                fallback_visual_row: row,
+                desired_screen_row: 0,
+                semantic: false,
+            }));
+        } else {
+            // The receipt only keeps visible block identities. A fast PageUp
+            // may leave that window before the next paint; pin its absolute
+            // visual row until the renderer can resolve a semantic identity.
+            state.viewport_anchor.set(Some(ViewportAnchor {
+                commit_id: 0,
+                block_hint: usize::MAX,
+                text_offset: 0,
+                trailing_affinity: false,
+                visual_width: state.size.0,
+                semantic_row_correction: 0,
+                fallback_block_row: 0,
                 fallback_visual_row: row,
                 desired_screen_row: 0,
                 semantic: false,
@@ -426,6 +446,9 @@ pub(super) fn retain_viewport_anchor(state: &ShellState) {
 }
 
 fn resolve_viewport_anchor(state: &ShellState, mut anchor: ViewportAnchor) -> usize {
+    if anchor.block_hint == usize::MAX {
+        return anchor.fallback_visual_row;
+    }
     let block = if state.transcript_commit_ids.get(anchor.block_hint) == Some(&anchor.commit_id) {
         Some(anchor.block_hint)
     } else {

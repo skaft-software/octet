@@ -283,10 +283,17 @@ pub fn prepare_handoff(
     let previous = branch.iter().rev().find_map(|entry| match &entry.value {
         EntryValue::Compaction {
             summary,
+            snapcompact,
             first_kept,
             details,
             ..
-        } => Some((summary.clone(), first_kept.clone(), details.clone())),
+        } => Some((
+            snapcompact
+                .as_ref()
+                .map_or_else(|| summary.clone(), |image| image.source_text.clone()),
+            first_kept.clone(),
+            details.clone(),
+        )),
         _ => None,
     });
 
@@ -1104,6 +1111,7 @@ mod tests {
     fn compaction_details_use_pi_field_names_and_default_for_legacy_entries() {
         let value = EntryValue::Compaction {
             summary: "summary".into(),
+            snapcompact: None,
             first_kept: EntryId("1".into()),
             active_skills: Vec::new(),
             skill_resources: Vec::new(),

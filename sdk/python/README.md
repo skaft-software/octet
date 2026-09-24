@@ -91,6 +91,18 @@ The host authoring smoke must also exercise cancellation during bounded work
 and clean shutdown, not just load or inspect generated types. Longer handlers
 must poll cancellation between effects; cancellation never means rollback.
 
+## Vision compaction strategy (API 0.4)
+
+A manifest may declare `hooks = ["compaction_strategy"]` without declaring a
+tool. The host offers the matching `compaction_strategy` feature only on API
+`0.4`; select it in `supported_features` along with required
+`request_cancellation` and `content_parts`. `@ext.hook("compaction_strategy")`
+receives a bounded `{model_id, text}` payload and returns
+`{"compaction_frames": [base64_png, ...]}`. Octet selects the hook only for
+local compaction on vision routes and validates all frames before persisting a
+checkpoint. See [octet-snap-compact](../../extensions/octet-snap-compact/README.md)
+for a full renderer using the source SDK.
+
 ## Bounded event bus
 
 `octet_extension.event_bus` carries the bounded, extension-scoped bus contract:

@@ -52,6 +52,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/export [path]` | Export the current session with redaction. |
 | `/prompt [name] [arguments]` | List/expand named templates; Pi-compatible `/<name> ...` invocation is also supported. |
 | `/skills ...` | List, search, inspect, load, unload, or reload skills; [activation](instructions.md#skills). |
+| `/skill:NAME [arguments]` | Expand an explicit skill as a user prompt at admission, not a local slash command. During a run, Enter or Ctrl+S queues a follow-up so expansion occurs at the next idle prompt boundary. |
 | `/extensions [status\|reload]` | Open installed-bundle enable/disable menu or inspect/reload state. |
 | `/settings [theme\|images on/off\|default model/reasoning\|transport\|padding]` | Show or change user-level display/default preferences. Defaults, theme, and images persist through the shared config writer; transport and editor padding are reported route/theme facts, and project trust is deliberately not a persisted setting. |
 | `/scoped-models [all\|clear\|enable\|disable\|toggle\|move]` | Manage the ordered model cycling scope. Mutations apply to Ctrl+P immediately and persist as an exact ordered pattern list (`models` in the user config); `move <id> <up\|down\|top\|bottom>` reorders it. |

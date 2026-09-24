@@ -428,10 +428,12 @@ a failure; a connection ends with a committed SSE event ID, the next connection
 sends that exact `Last-Event-ID`, and a peer that replays the acknowledged
 identity fails closed with `sse_event_replayed` (an empty `id:` clears the
 cursor). Its committed cursor is memory-only, exactly like the session identity.
-At most `backoffInitialMs`→`backoffMaxMs` consecutive failed connections (bounded
-by `maxRestarts`) and at most 64 total connections are attempted; exceeding
-either ends the stream through the normal bounded lifecycle failure path instead
-of looping forever. The retired standalone/legacy SSE transport is still not
+Failed connections use `backoffInitialMs`→`backoffMaxMs` and are bounded by
+`maxRestarts` consecutive failures and 64 lifetime failures. Healthy completed
+streams and renewals after an established SSE response do not consume either
+failure budget. A timeout before establishing the SSE response counts as a
+failure. Exceeding either bound ends the stream through the normal bounded
+lifecycle failure path. The retired standalone/legacy SSE transport is still not
 implemented.
 
 HTTP response bodies, event streams, request slots, timeouts, and shutdown use
@@ -479,7 +481,9 @@ active host-derived session owner and process generation.
 Servers transition through configured, connecting, ready, refreshing,
 degraded, backoff, parked, and stopped states. Transient crashes reconnect with
 bounded full-jitter exponential backoff. Permanent configuration/protocol
-failures and exhausted retry budgets park. Refresh reads a catalog without
+failures and exhausted retry budgets park. A successful connection and catalog
+publish resets the restart failure counter, so healthy sessions do not deplete
+it. Refresh reads a catalog without
 relaunching; restart explicitly replaces a connection; stop removes its current
 tools and closes it. Shutdown closes all roots in bounded parallel workers, and
 octet's extension process-group cleanup is the final descendant fence.

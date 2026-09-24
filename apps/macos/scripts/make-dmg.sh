@@ -22,6 +22,14 @@ BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Conten
   echo "unexpected bundle identifier: $BUNDLE_ID" >&2
   exit 65
 }
+/usr/bin/xcrun stapler validate "$APP" || {
+  echo "app must have a valid stapled notarization ticket" >&2
+  exit 65
+}
+/usr/sbin/spctl --assess --type execute --verbose=2 "$APP" || {
+  echo "app must pass Gatekeeper assessment" >&2
+  exit 65
+}
 if [[ -e "$DMG" ]]; then
   [[ "${CONFIRM_DMG:-}" == "OCTET_DMG" ]] || {
     echo "Set CONFIRM_DMG=OCTET_DMG to replace $DMG." >&2

@@ -1,7 +1,17 @@
 # octet themes
 
 octet's compiled default theme retains model-family accents,
-terminal-background adaptation, and semantic status colours.
+terminal-background adaptation, and semantic status colours. Auto, Dark, and
+Light share the same default geometry: 16×4 model-blended startup mark, compact
+per-line historical prompt highlights preserving inline Markdown styles,
+model-coloured composer rules, one blinking tool-like subagent transcript row
+while workers run, two-row command previews, and full available prose width
+without narrowing code or tables. The footer may
+omit a redundant catalogue-owned provider prefix, never a configured model
+name. These are compiled presentation policies, not new theme-file fields:
+custom surfaces, composer frames, and loaded theme colours/geometry keep their
+own styling.
+Unknown-background and no-colour terminals retain an unpainted readable prompt.
 
 The built-in theme picker offers:
 

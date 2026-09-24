@@ -64,6 +64,26 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("Model/profile: claude-sonnet-test (inherited) / explore",
                       detail_body(inherited, inherited.created_at_ms))
 
+    def test_mixed_model_fleet_labels_each_worker_not_the_collection(self):
+        inherited = self.worker(agent_id="agent-a", name="audit", effective_model="claude-sonnet-test")
+        explicit = self.worker(
+            agent_id="agent-b", agent_path="/root/search", name="search",
+            requested_provider="openai", requested_model="gpt-test",
+            effective_provider="openai", effective_model="gpt-test",
+            model_policy_applied=True,
+        )
+        snapshot = build_snapshot(
+            [inherited, explicit], selected_agent_id=inherited.agent_id,
+            now_ms=1_700_000_004_000,
+        )
+        collection = snapshot["collection"]
+        self.assertEqual(collection["title"], "Subagents")
+        rows = {node["label"]: node["secondary"] for node in collection["nodes"]}
+        self.assertIn("claude-sonnet-test", rows["audit"])
+        self.assertNotIn("gpt-test", rows["audit"])
+        self.assertIn("gpt-test", rows["search"])
+        self.assertNotIn("claude-sonnet-test", rows["search"])
+
     def test_tree_is_content_free_while_detail_carries_terminal_summary(self):
         worker = self.worker(
             "done",

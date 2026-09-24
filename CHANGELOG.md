@@ -12,6 +12,11 @@ ledger separates tested behavior, partial implementations and blocked contracts.
 
 ### Interaction
 
+- Unify `/subagents` with ordinary responsive picker rows, remove its misleading
+  metadata column legend, and label inspection and group disclosure accurately.
+  Render a bounded live worker tree inline under the bold transcript heading;
+  keep full worker detail in the picker and compact settled history.
+
 - Offer first-run setup in the order API key, supported OAuth subscription,
   then local/self-hosted models. API keys use masked input and explicit review,
   with recoverable owner-private storage rather than hashes or an encryption

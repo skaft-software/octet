@@ -478,6 +478,7 @@ class BridgeManager:
                     client.close()
                     return False
                 state.state = "ready"
+                state.restart_attempt = 0
                 state.last_error = None
                 state.next_retry_at_ms = None
             self._presentation_changed()

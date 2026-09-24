@@ -1,4 +1,4 @@
-use sexy_tui_rs::{strip_terminal_sequences, Color, RichRenderer};
+use sexy_tui_rs::{strip_terminal_sequences, visible_width, Color, RichRenderer};
 use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -1170,6 +1170,16 @@ fn collapsed_reasoning_lines_at(
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> Vec<String> {
+    collapsed_reasoning_lines_sized(theme, reasoning, shimmer_frame, rainbow_strength, u16::MAX)
+}
+
+fn collapsed_reasoning_lines_sized(
+    theme: &OctetTheme,
+    reasoning: &AssistantBlock,
+    shimmer_frame: usize,
+    rainbow_strength: u16,
+    width: u16,
+) -> Vec<String> {
     if reasoning.finished {
         return Vec::new();
     }
@@ -1211,7 +1221,19 @@ fn collapsed_reasoning_lines_at(
         0,
     )];
     if reasoning.show_reasoning_hint {
-        lines.push(reasoning_detail_line(theme, reasoning));
+        let inline_hint = if theme.unicode() {
+            " · Ctrl+O expand"
+        } else {
+            " - Ctrl+O expand"
+        };
+        if theme.is_compiled_default()
+            && reasoning.reasoning_heading.is_none()
+            && visible_width(&lines[0]) + visible_width(inline_hint) <= usize::from(width)
+        {
+            lines[0].push_str(&subdued_text(theme, inline_hint));
+        } else {
+            lines.push(reasoning_detail_line(theme, reasoning));
+        }
     }
     lines
 }
@@ -1261,17 +1283,23 @@ pub(super) fn render_reasoning_on_surface_with_rainbow(
         // The transcript now holds status rows, not this Markdown prefix.
         // Re-expansion must establish a full body before applying tail updates.
         reasoning.invalidate_layout();
-        return collapsed_reasoning_lines_at(theme, reasoning, shimmer_frame, rainbow_strength)
-            .into_iter()
-            .map(|line| {
-                let line = fit_line(&line, width);
-                if theme.capabilities().color == ColorDepth::None {
-                    strip_terminal_sequences(&line)
-                } else {
-                    line
-                }
-            })
-            .collect();
+        return collapsed_reasoning_lines_sized(
+            theme,
+            reasoning,
+            shimmer_frame,
+            rainbow_strength,
+            width,
+        )
+        .into_iter()
+        .map(|line| {
+            let line = fit_line(&line, width);
+            if theme.capabilities().color == ColorDepth::None {
+                strip_terminal_sequences(&line)
+            } else {
+                line
+            }
+        })
+        .collect();
     }
 
     // Expanded reasoning already owns a distinct transcript inset and muted
@@ -3099,17 +3127,23 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_reasoning_without_a_heading_keeps_the_hint_on_the_detail_row() {
+    fn collapsed_reasoning_without_a_heading_has_one_inline_hint_in_the_compiled_theme() {
         let theme = theme::test_theme();
         let renderer = theme.reasoning_renderer();
         let mut reasoning =
             AssistantBlock::streaming_reasoning("private").with_model_lab(Some(ModelLab::Alibaba));
         let live = render_reasoning(&reasoning, &renderer, &theme, 80, false);
-        assert_eq!(live.len(), 2, "{live:?}");
-        assert_eq!(strip_terminal_sequences(&live[0]), "Thinking");
-        assert_eq!(strip_terminal_sequences(&live[1]), "└ (ctrl+o to expand)");
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(
+            strip_terminal_sequences(&live[0]),
+            "Thinking · Ctrl+O expand"
+        );
         assert!(live[0].contains("\x1b[1m"), "{live:?}");
-        assert!(!live[1].contains("\x1b[3m"), "{live:?}");
+
+        let custom = theme::test_theme_from_source("");
+        let legacy = render_reasoning(&reasoning, &custom.reasoning_renderer(), &custom, 80, false);
+        assert_eq!(legacy.len(), 2, "{legacy:?}");
+        assert_eq!(strip_terminal_sequences(&legacy[1]), "└ (ctrl+o to expand)");
 
         reasoning.reasoning_elapsed = Some(Duration::from_millis(13_700));
         reasoning.finish_reasoning();

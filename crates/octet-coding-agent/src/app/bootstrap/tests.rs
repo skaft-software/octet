@@ -2994,95 +2994,79 @@ fn version_four_custom_cache_is_invalid_after_hlid_tool_fallback_change() {
     );
 }
 
-#[test]
-fn stale_positive_custom_cache_refreshes_the_current_catalog() {
+#[tokio::test]
+async fn stale_positive_custom_cache_is_available_without_waiting_for_discovery() {
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
     let directory = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "currently-served-model"}]
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let provider: crate::auth::custom::CustomProvider = serde_json::from_value(serde_json::json!({
+        "base_url": format!("{}/v1/", server.uri()),
+        "auth": {"kind": "none"},
+        "auto_discover": true
+    }))
+    .unwrap();
     let store =
         crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
-    let cred = crate::auth::custom::CustomCredential {
-        base_url: "http://custom.test/v1/".to_string(),
-        api_key: "key".to_string(),
-        api_name: String::new(),
-        headers: Vec::new(),
-        models: Vec::new(),
-        auto_discover: true,
-    };
-    let fingerprint = custom_credential_fingerprint(&cred.api_key, &http::HeaderMap::new());
+    let credential = custom_credential_fingerprint("", &http::HeaderMap::new());
+    let fingerprint = custom_model_cache_fingerprint(&credential, &[]);
     let previous = crate::auth::custom::CustomModel {
-        api_name: "previous-model".to_string(),
+        api_name: "last-good-model".into(),
         ..Default::default()
     };
-    save_custom_model_cache(
+    save_custom_model_cache_for(
         &store,
-        &cred.base_url,
+        "fixture",
+        &provider.credential.base_url,
         &fingerprint,
         std::slice::from_ref(&previous),
     )
     .unwrap();
+    let cache_path = std::fs::read_dir(directory.path().join("credentials"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .next()
+        .unwrap();
+    std::fs::File::open(&cache_path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    assert!(store
+        .model_cache_is_stale_for("fixture", PROVIDER_INVENTORY_REFRESH_INTERVAL)
+        .unwrap());
 
-    let fresh = refresh_stale_custom_models_with(
-        &store,
-        &cred,
-        &fingerprint,
-        vec![previous],
-        Duration::ZERO,
-        |_| {
-            vec![crate::auth::custom::CustomModel {
-                api_name: "currently-served-model".to_string(),
-                ..Default::default()
-            }]
-        },
-    );
-
-    assert_eq!(fresh[0].api_name, "currently-served-model");
-    assert!(matches!(
-        load_custom_model_cache(&store, &cred.base_url, &fingerprint).unwrap(),
-        Some(CachedCustomInventory::Available(models))
-            if models[0].api_name == "currently-served-model"
-    ));
-}
-
-#[test]
-fn failed_stale_custom_refresh_retains_the_last_good_catalog() {
-    let directory = tempfile::tempdir().unwrap();
-    let store =
-        crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
-    let cred = crate::auth::custom::CustomCredential {
-        base_url: "http://custom.test/v1/".to_string(),
-        api_key: "key".to_string(),
-        api_name: String::new(),
-        headers: Vec::new(),
-        models: Vec::new(),
-        auto_discover: true,
-    };
-    let fingerprint = custom_credential_fingerprint(&cred.api_key, &http::HeaderMap::new());
-    let previous = crate::auth::custom::CustomModel {
-        api_name: "last-good-model".to_string(),
-        ..Default::default()
-    };
-    save_custom_model_cache(
-        &store,
-        &cred.base_url,
-        &fingerprint,
-        std::slice::from_ref(&previous),
-    )
+    let [online, offline] = tokio::task::spawn_blocking(move || {
+        [false, true].map(|offline| {
+            let mut catalog = ModelCatalog::default();
+            register_custom_openai_provider(
+                &mut catalog,
+                &store,
+                "fixture",
+                &provider,
+                false,
+                offline,
+            )
+            .unwrap();
+            catalog
+        })
+    })
+    .await
     .unwrap();
-
-    let retained = refresh_stale_custom_models_with(
-        &store,
-        &cred,
-        &fingerprint,
-        vec![previous],
-        Duration::ZERO,
-        |_| Vec::new(),
-    );
-
-    assert_eq!(retained[0].api_name, "last-good-model");
-    assert!(matches!(
-        load_custom_model_cache(&store, &cred.base_url, &fingerprint).unwrap(),
-        Some(CachedCustomInventory::Available(models))
-            if models[0].api_name == "last-good-model"
-    ));
+    let id = ModelId("custom/fixture/last-good-model".into());
+    assert!(online.resolve(&id).is_ok());
+    assert!(offline.resolve(&id).is_ok());
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[test]
@@ -4733,6 +4717,153 @@ fn metadata_fixture_catalog(declaration: &ProviderDeclaration, base_url: &str) -
         })
         .unwrap();
     catalog
+}
+
+#[test]
+fn direct_opus_5_5_has_official_defaults_and_prices_without_off() {
+    let builtin = ModelCatalog::builtin().unwrap();
+    let model = builtin.resolve(&ModelId("claude-opus-5-5".into())).unwrap();
+    assert_eq!(model.spec.protocol, Protocol::AnthropicMessages);
+    assert_eq!(model.spec.limits.context_window, 1_000_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+    let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().values,
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        default_reasoning_for_model(&model),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)
+    );
+    assert!(!reasoning.supports(&ReasoningConfig::Off));
+    let price = model.spec.pricing.as_ref().unwrap();
+    assert_eq!(price.input, TokenRate(4_000_000));
+    assert_eq!(price.output, TokenRate(20_000_000));
+    assert_eq!(price.cache_read, TokenRate(200_000));
+    assert_eq!(price.cache_write_5m, TokenRate(5_000_000));
+    assert_eq!(price.cache_write_1h, Some(TokenRate(8_000_000)));
+    assert!(current_direct_model_pricing("opencode", "claude-opus-5-5").is_none());
+    assert!(current_direct_model_pricing("github-copilot", "claude-opus-5-5").is_none());
+
+    // The native provider's sparse inventory retains the same model contract;
+    // an explicit negative assertion never gets overwritten by the fallback.
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == "anthropic")
+        .expect("Anthropic declaration");
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_anthropic_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"claude-opus-5-5"}]}),
+    )
+    .unwrap();
+    let discovered = catalog
+        .resolve(&ModelId("anthropic/claude-opus-5-5".into()))
+        .unwrap();
+    assert_eq!(discovered.spec.limits, model.spec.limits);
+    assert_eq!(discovered.spec.pricing, model.spec.pricing);
+    assert_eq!(
+        default_reasoning_for_model(&discovered),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)
+    );
+    let mut asserted = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_anthropic_compatible_models_from_response(
+        &mut asserted,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"claude-opus-5-5","reasoning":false,
+            "context_window":16_384,"max_output_tokens":4_096,"input_modalities":["text"]}]}),
+    )
+    .unwrap();
+    let asserted = asserted
+        .resolve(&ModelId("anthropic/claude-opus-5-5".into()))
+        .unwrap();
+    assert!(asserted.spec.capabilities.reasoning.is_none());
+    assert_eq!(asserted.spec.limits.context_window, 16_384);
+    assert!(!asserted
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+}
+
+#[test]
+fn direct_grok_4_7_uses_its_own_inventory_route_and_long_context_tariff() {
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == "xai")
+        .expect("xAI declaration");
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[
+            {"id":"grok-4.7","tools":true},
+            {"id":"grok-4.7-unverified"}
+        ]}),
+    )
+    .unwrap();
+    let model = catalog.resolve(&ModelId("xai/grok-4.7".into())).unwrap();
+    assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+    assert_eq!(model.spec.limits.context_window, 500_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 32_768); // no official output ceiling
+    assert!(model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    assert!(model.spec.capabilities.tools);
+    let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().values,
+        ["low", "medium", "high", "xhigh"]
+    );
+    assert_eq!(
+        default_reasoning_for_model(&model),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+    );
+    assert!(!reasoning.supports(&ReasoningConfig::Off));
+    let price = model.spec.pricing.as_ref().unwrap();
+    assert_eq!(price.input, TokenRate(2_000_000));
+    assert_eq!(price.output, TokenRate(6_000_000));
+    assert_eq!(price.cache_read, TokenRate(500_000));
+    assert_eq!(price.tiers.len(), 1);
+    assert_eq!(price.tiers[0].min_input_tokens, 200_000);
+    assert_eq!(price.tiers[0].input, Some(TokenRate(4_000_000)));
+    assert_eq!(price.tiers[0].output, Some(TokenRate(12_000_000)));
+    assert_eq!(price.tiers[0].cache_read, Some(TokenRate(1_000_000)));
+    assert!(current_direct_model_pricing("opencode", "grok-4.7").is_none());
+    assert!(current_direct_model_pricing("github-copilot", "grok-4.7").is_none());
+    let unverified = catalog
+        .resolve(&ModelId("xai/grok-4.7-unverified".into()))
+        .unwrap();
+    assert_eq!(unverified.spec.limits.context_window, 128_000);
+    assert!(unverified.spec.capabilities.reasoning.is_none());
+    assert!(unverified.spec.pricing.is_none());
+
+    let mut asserted = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openai_compatible_models_from_response(
+        &mut asserted,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"grok-4.7","reasoning":false,
+            "context_window":65_536,"max_output_tokens":4_096,
+            "input_modalities":["text"],"tools":false}]}),
+    )
+    .unwrap();
+    let asserted = asserted.resolve(&ModelId("xai/grok-4.7".into())).unwrap();
+    assert_eq!(asserted.spec.limits.context_window, 65_536);
+    assert_eq!(asserted.spec.limits.max_output_tokens, 4_096);
+    assert!(!asserted
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    assert!(!asserted.spec.capabilities.tools);
+    assert!(asserted.spec.capabilities.reasoning.is_none());
 }
 
 #[test]

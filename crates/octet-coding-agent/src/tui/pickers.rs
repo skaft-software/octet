@@ -12,6 +12,7 @@ use octet_agent::extension_process::{ConfirmationRequest, ExtensionInputRequest}
 use octet_agent::tool::{ToolConfirmation, ToolInputRequest};
 use octet_ai::{ModelCatalog, ModelId};
 
+use crate::app::{bootstrap::CodexContextNotes, App};
 use crate::config::ThinkingLevel;
 use crate::modes::interactive::run_blocking_lifecycle;
 use crate::presentation::{
@@ -20,8 +21,8 @@ use crate::presentation::{
 use crate::session_store::{SessionMeta, SessionStorageLifecycle, SessionStore};
 use crate::tui::view::{
     ForkMessage, InteractiveShell, MessagePicker, OrdinarySurfaceLifecycle,
-    OrdinarySurfaceMetadata, Panel, PanelAction, PanelRequest, PanelResult, PickerState,
-    SubagentGroup, SubagentPanel,
+    OrdinarySurfaceMetadata, OrdinarySurfaceStatus, Panel, PanelAction, PanelRequest, PanelResult,
+    PickerState, SubagentGroup, SubagentPanel,
 };
 
 const MAX_SECRET_INPUT_BYTES: usize = 4096;
@@ -1487,6 +1488,149 @@ fn mark_current_choice(labels: &mut [String], current: Option<usize>) -> usize {
     }
 }
 
+/// A deferred full inventory belongs to the idle picker owner. Dropping the
+/// handle on cancel never applies its result to a later app or selection.
+pub(crate) type DeferredModelCatalog =
+    tokio::task::JoinHandle<anyhow::Result<(ModelCatalog, CodexContextNotes)>>;
+
+/// Open the launch catalog immediately, then refresh the same panel if the
+/// deferred fleet inventory succeeds. Terminal input owns confirmation and
+/// cancellation even while provider discovery is still running.
+pub(crate) async fn optional_model_picker_live<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    app: &mut App,
+    mut pending: Option<DeferredModelCatalog>,
+) -> anyhow::Result<Option<ModelId>>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let expected_model = app.model.spec.id.clone();
+    let mut presentation = model_picker_presentation(&app.catalog);
+    if presentation.ids.is_empty() {
+        shell.error("nothing is available to select".into());
+        shell.render();
+        return Ok(None);
+    }
+    mark_current_choice(
+        &mut presentation.labels,
+        presentation.ids.iter().position(|id| *id == expected_model),
+    );
+    let mut surface = OrdinarySurfaceMetadata::with_purpose(
+        "Select model",
+        "Choose the model for subsequent prompts and the startup default",
+    );
+    if pending.is_some() {
+        surface.lifecycle = OrdinarySurfaceLifecycle::Loading(OrdinarySurfaceStatus::persistent(
+            "loading other providers",
+        ));
+    }
+    shell.open_panel(Panel::SelectList {
+        surface,
+        items: presentation.labels,
+        descriptions: presentation.descriptions,
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectGroupedModel {
+            models: presentation.ids,
+            providers: presentation.providers,
+        },
+    });
+    shell.render();
+
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                shell.close_panel();
+                return Ok(None);
+            }
+            next = input.next() => next,
+            result = async { pending.as_mut().expect("pending catalog").await }, if pending.is_some() => {
+                pending = None;
+                match result {
+                    Ok(Ok((catalog, notes))) => match app.apply_picker_catalog(&expected_model, catalog, notes) {
+                        Ok(true) => {
+                            shell.set_model_cycle(app.model_cycle());
+                            let mut presentation = model_picker_presentation(&app.catalog);
+                            mark_current_choice(
+                                &mut presentation.labels,
+                                presentation.ids.iter().position(|id| *id == expected_model),
+                            );
+                            shell.refresh_panel_models(
+                                presentation.labels,
+                                presentation.descriptions,
+                                presentation.ids,
+                                presentation.providers,
+                            );
+                        }
+                        Ok(false) => {} // The launch identity is no longer current.
+                        Err(error) => shell.set_model_picker_lifecycle(
+                            OrdinarySurfaceLifecycle::RecoverableError(
+                                OrdinarySurfaceStatus::persistent(format!(
+                                    "could not load every provider: {error}"
+                                )),
+                            ),
+                        ),
+                    },
+                    Ok(Err(error)) => shell.set_model_picker_lifecycle(
+                        OrdinarySurfaceLifecycle::RecoverableError(
+                            OrdinarySurfaceStatus::persistent(format!(
+                                "could not load every provider: {error}; showing current routes"
+                            )),
+                        ),
+                    ),
+                    Err(error) => shell.set_model_picker_lifecycle(
+                        OrdinarySurfaceLifecycle::RecoverableError(
+                            OrdinarySurfaceStatus::persistent(format!(
+                                "provider discovery stopped: {error}; showing current routes"
+                            )),
+                        ),
+                    ),
+                }
+                shell.render();
+                continue;
+            }
+        };
+        let event = match next {
+            Some(Ok(event)) => event,
+            Some(Err(error)) => {
+                shell.close_panel();
+                return Err(error.into());
+            }
+            None => {
+                shell.close_panel();
+                return Ok(None);
+            }
+        };
+        if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
+            shell.close_panel();
+            shell.request_close();
+            shell.render();
+            return Ok(None);
+        }
+        if matches!(event, Event::Mouse(_)) {
+            continue;
+        }
+        if let Some((result, action)) = shell.panel_input(&event) {
+            shell.render();
+            let selected = match (result, action) {
+                (PanelResult::Confirm(index), PanelAction::SelectGroupedModel { models, .. }) => {
+                    models.get(index).cloned()
+                }
+                _ => None,
+            };
+            if let Some(id) = &selected {
+                if let Err(error) = crate::cli::persist_model(&id.0) {
+                    shell.error(format!("failed to save model preference: {error}"));
+                }
+            }
+            return Ok(selected);
+        }
+        shell.render();
+    }
+}
+
 /// Ask the user to select one model, preserving cancellation for workflows
 /// such as `/logout` that must not mutate credentials until a replacement model
 /// has been chosen.
@@ -2294,5 +2438,129 @@ mod parity_session_search_tests {
             Some(("two".into(), expected))
         );
         assert!(search_picker_entries(&store, &"x".repeat(1025), &paths).is_err());
+    }
+}
+
+#[cfg(test)]
+mod deferred_model_picker_tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use tokio_stream::wrappers::ReceiverStream;
+
+    #[tokio::test]
+    async fn deferred_model_picker_applies_ready_catalog_before_later_input() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let active = app.model.spec.id.clone();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let (catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
+            app.config.offline,
+            &crate::app::bootstrap::CatalogReadiness::Fleet,
+        )
+        .unwrap();
+        let pending = tokio::spawn(async move { Ok((catalog, notes)) });
+        while !pending.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let mut input = ReceiverStream::new(receiver);
+        let mut shell = InteractiveShell::test_shell();
+        {
+            let future =
+                optional_model_picker_live(&mut shell, &mut input, &mut app, Some(pending));
+            tokio::pin!(future);
+            assert!(matches!(
+                futures_util::poll!(future.as_mut()),
+                std::task::Poll::Pending
+            ));
+            sender
+                .send(Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                ))))
+                .await
+                .unwrap();
+            assert!(future.await.unwrap().is_none());
+        }
+        assert!(app.readiness.is_fleet());
+        assert_eq!(app.model.spec.id, active);
+        assert!(!shell.has_panel());
+    }
+
+    #[tokio::test]
+    async fn deferred_model_picker_accepts_input_and_escape_before_inventory_finishes() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let initial = app.catalog.models().count();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let (release, waiting) = tokio::sync::oneshot::channel::<()>();
+        let pending = tokio::spawn(async move {
+            waiting.await.unwrap();
+            crate::app::bootstrap::model_catalog_for_readiness(
+                true,
+                &crate::app::bootstrap::CatalogReadiness::Fleet,
+            )
+        });
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let mut input = ReceiverStream::new(receiver);
+        let mut shell = InteractiveShell::test_shell();
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('g'),
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            optional_model_picker_live(&mut shell, &mut input, &mut app, Some(pending)),
+        )
+        .await
+        .expect("picker input must not wait for discovery")
+        .unwrap()
+        .is_none());
+        assert!(!app.readiness.is_fleet());
+        assert_eq!(app.catalog.models().count(), initial);
+        assert!(!shell.has_panel());
+        release.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deferred_model_picker_failure_keeps_current_routes_and_stays_cancellable() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let initial = app.catalog.models().count();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let pending = tokio::spawn(async { anyhow::bail!("inventory unavailable") });
+        while !pending.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let mut input = ReceiverStream::new(receiver);
+        let mut shell = InteractiveShell::test_shell();
+        {
+            let future =
+                optional_model_picker_live(&mut shell, &mut input, &mut app, Some(pending));
+            tokio::pin!(future);
+            assert!(matches!(
+                futures_util::poll!(future.as_mut()),
+                std::task::Poll::Pending
+            ));
+            sender
+                .send(Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                ))))
+                .await
+                .unwrap();
+            assert!(future.await.unwrap().is_none());
+        }
+        assert!(!app.readiness.is_fleet());
+        assert_eq!(app.catalog.models().count(), initial);
+        assert!(!shell.has_panel());
     }
 }

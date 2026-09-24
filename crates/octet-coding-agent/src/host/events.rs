@@ -364,6 +364,7 @@ fn compaction_reason_label(reason: octet_agent::CompactionReason) -> &'static st
 fn compaction_kind_payload(kind: &octet_agent::CompactionKind) -> serde_json::Value {
     match kind {
         octet_agent::CompactionKind::Local => serde_json::json!({"type": "local"}),
+        octet_agent::CompactionKind::Snapcompact => serde_json::json!({"type": "snapcompact"}),
         octet_agent::CompactionKind::NativeResponses {
             checkpoint,
             covered_through,

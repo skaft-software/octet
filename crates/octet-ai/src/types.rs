@@ -29,6 +29,9 @@ pub enum CacheRetention {
     /// Provider default short-lived cache retention.
     #[default]
     Short,
+    /// Short retention for a one-off Anthropic cache warm: place the message
+    /// breakpoint before the synthetic final user turn, not on that turn.
+    WarmShort,
     /// Request the provider's long-lived retention where supported.
     Long,
 }
@@ -52,6 +55,9 @@ pub struct CacheCompatibility {
     /// Optional Anthropic-style cache-control convention on Chat payloads.
     #[serde(default)]
     pub cache_control_format: Option<CacheControlFormat>,
+    /// Whether this Responses route accepts an explicit prompt-cache mode.
+    #[serde(default)]
+    pub supports_explicit_prompt_cache_mode: bool,
     /// Whether Anthropic-style cache markers are accepted on tool definitions.
     #[serde(default = "default_true")]
     pub supports_cache_control_on_tools: bool,
@@ -73,6 +79,7 @@ impl Default for CacheCompatibility {
             send_session_affinity_headers: false,
             session_affinity_format: None,
             cache_control_format: None,
+            supports_explicit_prompt_cache_mode: false,
             supports_cache_control_on_tools: true,
         }
     }
@@ -1798,6 +1805,15 @@ mod tests {
             "serialized inline image is {} bytes for 102400 raw bytes",
             json.len()
         );
+    }
+
+    #[test]
+    fn explicit_prompt_cache_mode_is_opt_in_and_backwards_compatible() {
+        let mut serialized = serde_json::to_value(CacheCompatibility::default()).unwrap();
+        assert!(!serialized["supports_explicit_prompt_cache_mode"].as_bool().unwrap());
+        serialized.as_object_mut().unwrap().remove("supports_explicit_prompt_cache_mode");
+        let parsed: CacheCompatibility = serde_json::from_value(serialized).unwrap();
+        assert!(!parsed.supports_explicit_prompt_cache_mode);
     }
 
     #[test]

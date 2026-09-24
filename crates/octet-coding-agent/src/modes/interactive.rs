@@ -1949,9 +1949,8 @@ pub struct ActiveRunInspection {
     model_scope: Option<Vec<crate::cli::parity::ScopedModel>>,
     /// Whether the catalog holds only the routes this launch proved it needs.
     ///
-    /// A surface that enumerates every provider must complete the plan first
-    /// (`App::enrich_catalog_for_surface`); an active run cannot borrow the app
-    /// mutably, so it defers that surface to the idle boundary.
+    /// A narrowed picker waits for idle ownership of the app, then opens from
+    /// the current catalog while deferred fleet discovery runs independently.
     catalog_is_narrowed: bool,
 }
 
@@ -3406,6 +3405,17 @@ where
                         shell.render();
                     }
 
+                    InputAction::Command(text) if text.starts_with("/skill:") => {
+                        // Selecting a skill from the slash popup emits Command
+                        // even though its invocation is an ordinary prompt.
+                        // Keep the same follow-up path as typed Enter while a
+                        // run owns the agent; expansion happens at admission.
+                        if !aborting {
+                            let composed = shell.drain_composed();
+                            shell.queue_follow_up(composed);
+                        }
+                        shell.render();
+                    }
                     InputAction::Command(text) => {
                         if aborting && matches!(commands::parse(&text), Command::Answer(_)) {
                             shell.notice("run is settling · answer request kept in the draft");
@@ -6298,8 +6308,7 @@ async fn apply_pending_actions(
                 }
             }
             PendingIdleAction::PickModel => {
-                prepare_model_picker_surface(&mut app, shell);
-                if let Some(model) = optional_model_picker(shell, input, &app.catalog).await? {
+                if let Some(model) = open_model_picker(&mut app, shell, input).await? {
                     app = transition(app, shell, input, Reconfig::Model(model)).await?;
                 }
             }
@@ -6682,12 +6691,27 @@ async fn write_debug_report_at(
     shell.notice(format!("debug log written: {}", path.display()));
 }
 
-fn prepare_model_picker_surface(app: &mut App, shell: &mut InteractiveShell) {
-    if let Some(notice) = app.enrich_catalog_for_surface() {
-        shell.notice(notice);
-    }
-    // Keep scoped-model cycling aligned with the completed catalog.
-    shell.set_model_cycle(app.model_cycle());
+async fn open_model_picker<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+) -> anyhow::Result<Option<ModelId>>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    // The launch catalog is already usable. Only the deferred fleet inventory
+    // belongs on a worker; App, its extension projection, and the terminal
+    // remain owned by this idle event loop.
+    let pending = (!app.readiness.is_fleet()).then(|| {
+        let offline = app.config.offline;
+        tokio::task::spawn_blocking(move || {
+            crate::app::bootstrap::model_catalog_for_readiness(
+                offline,
+                &crate::app::bootstrap::CatalogReadiness::Fleet,
+            )
+        })
+    });
+    pickers::optional_model_picker_live(shell, input, app, pending).await
 }
 
 /// Whether the active branch ends in an assistant tool call that has no
@@ -7722,11 +7746,7 @@ async fn run_idle_command(
             write_debug_report(shell, app.agent.session(), None, rendered).await;
         }
         Command::Model(None) => {
-            // The picker enumerates every provider. A narrowed launch deferred
-            // configured providers at startup for latency, so complete the plan
-            // here, where the user has actually asked to see them.
-            prepare_model_picker_surface(&mut app, shell);
-            if let Some(model) = optional_model_picker(shell, input, &app.catalog).await? {
+            if let Some(model) = open_model_picker(&mut app, shell, input).await? {
                 app = transition(app, shell, input, Reconfig::Model(model)).await?;
             }
         }
@@ -12018,47 +12038,85 @@ mod tests {
         assert_eq!(std::fs::read(&inspection.session_path).unwrap(), before);
     }
 
-    /// Regression: a launch that narrowed its catalog to the selected route
-    /// (startup-latency readiness) must still offer every configured provider in
-    /// the `/model` picker, exactly as a model-less launch does. Before this
-    /// wiring the picker rendered the narrowed catalog, so a DeepSeek launch
-    /// listed only DeepSeek models even with other provider credentials present.
+    /// A narrowed launch opens `/model` without waiting for fleet discovery.
+    /// Cancelling before completion cannot apply a late catalog to the app.
     #[tokio::test]
-    async fn model_picker_surface_completes_a_narrowed_launch_catalog() {
+    async fn model_picker_cancel_keeps_the_narrowed_launch_catalog() {
         let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
         let active = app.model.spec.id.clone();
         let narrowed = app.catalog.models().count();
-        // The plan a proven startup selection leaves behind.
-        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex".into()]);
-        assert!(
-            ActiveRunInspection::capture(&app).is_narrowed(),
-            "an active run must detect the partial catalog and defer the picker"
-        );
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        assert!(ActiveRunInspection::capture(&app).is_narrowed());
         let mut shell = InteractiveShell::test_shell();
-        prepare_model_picker_surface(&mut app, &mut shell);
-        assert!(
-            app.readiness.is_fleet(),
-            "opening the picker completes the deferred provider inventories"
-        );
-        assert!(
-            app.catalog.models().count() >= narrowed,
-            "completion never drops a model"
-        );
-        assert!(
-            app.catalog.resolve(&active).is_ok(),
-            "the active model stays resolvable after completion"
-        );
-        assert!(
-            !ActiveRunInspection::capture(&app).is_narrowed(),
-            "a completed catalog no longer defers the picker"
-        );
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+        let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+        assert!(open_model_picker(&mut app, &mut shell, &mut input)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!shell.has_panel());
+        assert!(!app.readiness.is_fleet());
+        assert_eq!(app.catalog.models().count(), narrowed);
+        assert_eq!(app.model.spec.id, active);
+    }
+
+    #[test]
+    fn picker_catalog_completion_keeps_the_active_route() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let active = app.model.spec.id.clone();
+        let narrowed = app.catalog.models().count();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let (catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
+            app.config.offline,
+            &crate::app::bootstrap::CatalogReadiness::Fleet,
+        )
+        .unwrap();
+        assert!(app.apply_picker_catalog(&active, catalog, notes).unwrap());
+        assert!(app.readiness.is_fleet());
+        assert!(app.catalog.models().count() >= narrowed);
+        assert!(app.catalog.resolve(&active).is_ok());
+        assert!(!ActiveRunInspection::capture(&app).is_narrowed());
+    }
+
+    #[test]
+    fn picker_catalog_rejects_an_obsolete_selection() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
         let before = app.catalog.models().count();
-        prepare_model_picker_surface(&mut app, &mut shell);
-        assert_eq!(
-            app.catalog.models().count(),
-            before,
-            "every picker entry point may call this freely"
-        );
+        let (catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
+            app.config.offline,
+            &crate::app::bootstrap::CatalogReadiness::Fleet,
+        )
+        .unwrap();
+        assert!(!app
+            .apply_picker_catalog(&ModelId("obsolete".into()), catalog, notes)
+            .unwrap());
+        assert!(!app.readiness.is_fleet());
+        assert_eq!(app.catalog.models().count(), before);
+    }
+
+    #[test]
+    fn picker_catalog_rejects_a_withdrawn_active_route() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let active = app.model.spec.id.clone();
+        let endpoint = app.model.endpoint.id.clone();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let (mut catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
+            app.config.offline,
+            &crate::app::bootstrap::CatalogReadiness::Fleet,
+        )
+        .unwrap();
+        assert!(catalog.remove_model_if_endpoint(&active, &endpoint));
+        assert!(app.apply_picker_catalog(&active, catalog, notes).is_err());
+        assert!(!app.readiness.is_fleet());
+        assert!(app.catalog.resolve(&active).is_ok());
     }
 
     fn fast_test_app(model: Model) -> (tempfile::TempDir, App) {
@@ -14519,13 +14577,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_skill_invocations_queue_as_prompts_instead_of_unknown_commands() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let (_server, _workspace, mut agent) = scripted_agent().await;
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_skill_commands(Arc::from([("skill:review".into(), "Review".into())]));
+        let (sender, receiver) = tokio::sync::mpsc::channel(64);
+        for invocation in ["/skill:review inspect", "/skill:rev"] {
+            for character in invocation.chars() {
+                sender
+                    .send(Ok(Event::Key(KeyEvent::new(
+                        KeyCode::Char(character),
+                        KeyModifiers::NONE,
+                    ))))
+                    .await
+                    .unwrap();
+            }
+            sender
+                .send(Ok(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))))
+                .await
+                .unwrap();
+        }
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let mut goal_deadline = None;
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut false,
+                test_run_inspection(),
+                &mut goal_deadline,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(run);
+        assert_eq!(ended, HostRunOutcome::Completed);
+        assert!(!quit);
+        assert!(pending.is_empty());
+        assert_eq!(shell.queued_follow_up_len(), 2);
+        assert_eq!(
+            shell.take_ready_follow_up().unwrap().transcript_text,
+            "/skill:review inspect"
+        );
+        shell.settle_queued_follow_ups(true);
+        assert_eq!(
+            shell.take_ready_follow_up().unwrap().transcript_text,
+            "/skill:review "
+        );
+        assert!(!format!("{:?}", agent.session().context().unwrap()).contains("/skill:"));
+    }
+
+    #[tokio::test]
     async fn scripted_active_loop_queues_controls_and_never_forwards_active_model_command() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use tokio_stream::wrappers::ReceiverStream;
 
         let (_server, workspace, mut agent) = scripted_agent().await;
         let image = workspace.path().join("shot.png");
-        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(
+            &image,
+            include_bytes!("../../tests/fixtures/export_html/one-pixel.png"),
+        )
+        .unwrap();
 
         let mut shell = InteractiveShell::test_shell();
         shell.set_input_modalities(octet_ai::ModalitySet::none().with(octet_ai::Modality::Image));

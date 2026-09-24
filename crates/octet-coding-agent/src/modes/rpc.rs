@@ -2787,11 +2787,43 @@ async fn handle_idle_command(
 
 /// Run the strict LF-delimited JSONL RPC frontend until stdin closes.
 pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
-    let launch = resolve_launch_print(&boot, &crate::modes::timestamp())?;
-    let system = compose_instructions(&boot.config)?;
-    let mut app = build_app(boot, launch, system)?;
-    let mut input = spawn_input_reader();
-    let mut output = RpcOutput::new();
+    let app = (|| {
+        let launch = resolve_launch_print(&boot, &crate::modes::timestamp())?;
+        let system = compose_instructions(&boot.config)?;
+        build_app(boot, launch, system)
+    })();
+    match app {
+        Ok(app) => {
+            let result = run_rpc_loop(app, spawn_input_reader(), RpcOutput::new()).await;
+            finish_rpc_accounting(result)
+        }
+        Err(error) => finish_rpc_accounting(Err(error)),
+    }
+}
+
+fn finish_rpc_accounting(result: anyhow::Result<()>) -> anyhow::Result<()> {
+    // This boundary is also reached for startup, RPC framing, command and
+    // stdout errors. The loop owns App; on an early exit its extension runtime
+    // shuts down through ExecutableExtensions::drop before accounting is read.
+    let accounting = crate::modes::print::finish_ephemeral_accounting();
+    match result {
+        Ok(()) => accounting,
+        Err(error) => {
+            if let Err(accounting_error) = accounting {
+                crate::output::stderr_line(format!(
+                    "warning: ephemeral accounting failed: {accounting_error:#}"
+                ));
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn run_rpc_loop(
+    mut app: App,
+    mut input: mpsc::Receiver<RpcInput>,
+    mut output: RpcOutput,
+) -> anyhow::Result<()> {
     let mut deferred = VecDeque::new();
     let mut settings = RpcSettings {
         registered_tools: app.agent.registered_tool_names(),
@@ -3010,7 +3042,7 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
                 "presentations": extension_presentations,
             }))?;
             app.executable_extensions.shutdown().await;
-            return crate::modes::print::finish_ephemeral_accounting();
+            return Ok(());
         }
         deferred.extend(queued);
         eof = input_eof;
@@ -3042,7 +3074,7 @@ pub async fn run_rpc(boot: Bootstrap) -> anyhow::Result<()> {
     }
 
     app.executable_extensions.shutdown().await;
-    crate::modes::print::finish_ephemeral_accounting()
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3077,7 +3109,21 @@ mod tests {
     }
 
     fn rpc_loopback_app(uri: &str) -> (tempfile::TempDir, App) {
+        rpc_loopback_app_with_session(uri, false)
+    }
+
+    fn rpc_loopback_app_with_session(uri: &str, ephemeral: bool) -> (tempfile::TempDir, App) {
         let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let session_path = if ephemeral {
+            let store = crate::session_store::SessionStore::new(
+                &directory.path().join("rpc-ephemeral"),
+                directory.path(),
+            );
+            store.write_workspace_marker().unwrap();
+            store.new_path("rpc-live")
+        } else {
+            directory.path().join("rpc-live.jsonl")
+        };
         let mut model = app.model.clone();
         Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiChat;
         let endpoint = Arc::make_mut(&mut model.endpoint);
@@ -3089,7 +3135,7 @@ mod tests {
         app.agent = octet_agent::Agent::new(octet_agent::AgentConfig {
             client: app.client.clone(),
             model: model.clone(),
-            session: octet_agent::Session::create(directory.path().join("rpc-live.jsonl")).unwrap(),
+            session: octet_agent::Session::create(session_path).unwrap(),
             system: "test".into(),
             sandbox: SandboxConfig::new(directory.path()),
             effect_broker: octet_agent::EffectBroker::new(octet_agent::EffectPolicy::Controlled),
@@ -3103,6 +3149,152 @@ mod tests {
         .unwrap();
         app.model = model;
         (directory, app)
+    }
+
+    struct BrokenPipe;
+
+    impl std::io::Write for BrokenPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_output_failure_accounts_and_discards_each_ephemeral_run() {
+        let _exclusive_ephemeral = crate::session_store::EPHEMERAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let accounting_root = tempfile::tempdir().unwrap();
+        for index in 0..2 {
+            let (directory, mut app) = rpc_loopback_app_with_session("http://127.0.0.1:9", true);
+            let workspace = app.config.workspace.clone();
+            let transcript_root = directory.path().join("rpc-ephemeral");
+            let transcript = app.agent.session().path().to_path_buf();
+            app.agent
+                .session_mut()
+                .record_terminal_gate_usage(
+                    octet_ai::EndpointId("custom".into()),
+                    ModelId("probe".into()),
+                    Usage {
+                        input_tokens: 10 + index,
+                        output_tokens: 2,
+                        total_tokens: 12 + index,
+                        ..Usage::default()
+                    },
+                    Some(Cost {
+                        total: 7 + index,
+                        ..Cost::default()
+                    }),
+                    Some(true),
+                )
+                .unwrap();
+            crate::session_store::begin_ephemeral_run(
+                transcript_root.clone(),
+                accounting_root.path().to_path_buf(),
+                workspace.clone(),
+            );
+            let (tx, input) = mpsc::channel(1);
+            tx.send(RpcInput::Value(json!({"type": "get_state"})))
+                .await
+                .unwrap();
+            drop(tx);
+
+            let result = if index == 0 {
+                finish_rpc_accounting(
+                    run_rpc_loop(
+                        app,
+                        input,
+                        RpcOutput {
+                            stdout: Box::new(BrokenPipe),
+                            delta_only: false,
+                        },
+                    )
+                    .await,
+                )
+            } else {
+                let capture = RpcCapture::default();
+                let result =
+                    finish_rpc_accounting(run_rpc_loop(app, input, capture.output(false)).await);
+                assert_eq!(capture.frames()[0]["success"], true);
+                result
+            };
+            if index == 0 {
+                let error = result.unwrap_err();
+                assert!(
+                    error.chain().any(|cause| {
+                        cause
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+                            || cause
+                                .downcast_ref::<serde_json::Error>()
+                                .is_some_and(|json| {
+                                    json.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe)
+                                })
+                    }),
+                    "unexpected RPC error: {error:#}"
+                );
+            } else {
+                result.unwrap();
+            }
+            assert!(!transcript.exists(), "ephemeral transcript must be removed");
+            assert!(!transcript_root.exists(), "temporary root must be removed");
+            assert!(crate::session_store::finish_ephemeral_run()
+                .unwrap()
+                .is_none());
+            let store = crate::session_store::SessionStore::new(accounting_root.path(), &workspace);
+            let summary = store.ephemeral_accounting_summary().unwrap();
+            assert_eq!(summary.runs, 1);
+            assert_eq!(summary.usage_records, 1);
+            assert_eq!(summary.input_tokens, 10 + index);
+            assert_eq!(summary.total_cost_microdollars, 7 + index);
+        }
+    }
+
+    #[test]
+    fn rpc_startup_failure_still_discards_ephemeral_transcript_and_accounts() {
+        let _exclusive_ephemeral = crate::session_store::EPHEMERAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = tempfile::tempdir().unwrap();
+        let accounting_root = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let transcript_root = directory.path().join("rpc-ephemeral");
+        let store = crate::session_store::SessionStore::new(&transcript_root, &workspace);
+        store.write_workspace_marker().unwrap();
+        let transcript = store.new_path("startup");
+        let mut session = octet_agent::Session::create(&transcript).unwrap();
+        session
+            .record_usage_uncertainty(
+                octet_ai::EndpointId("custom".into()),
+                ModelId("probe".into()),
+                "startup-test",
+            )
+            .unwrap();
+        drop(session);
+        crate::session_store::begin_ephemeral_run(
+            transcript_root.clone(),
+            accounting_root.path().to_path_buf(),
+            workspace.clone(),
+        );
+
+        let error = finish_rpc_accounting(Err(anyhow::anyhow!("startup failed"))).unwrap_err();
+        assert_eq!(error.to_string(), "startup failed");
+        assert!(!transcript.exists());
+        assert!(!transcript_root.exists());
+        assert!(crate::session_store::finish_ephemeral_run()
+            .unwrap()
+            .is_none());
+        let summary = crate::session_store::SessionStore::new(accounting_root.path(), &workspace)
+            .ephemeral_accounting_summary()
+            .unwrap();
+        assert_eq!(summary.runs, 1);
+        assert_eq!(summary.uncertainty_records, 1);
+        assert!(summary.has_uncertain_usage);
     }
 
     fn rpc_test_queued(text: String) -> QueuedInput {

@@ -478,7 +478,7 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
     }
     match req.cache_retention {
         CacheRetention::None => {}
-        CacheRetention::Short => {
+        CacheRetention::Short | CacheRetention::WarmShort => {
             options.insert("cacheRetention".to_owned(), json!("short"));
         }
         CacheRetention::Long => {

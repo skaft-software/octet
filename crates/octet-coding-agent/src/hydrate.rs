@@ -952,6 +952,7 @@ mod tests {
                 active_skills: Vec::new(),
                 skill_resources: Vec::new(),
                 details: Default::default(),
+                snapcompact: None,
             })
             .unwrap();
         drop(session);

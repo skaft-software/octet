@@ -49,6 +49,67 @@ fn request() -> Request {
     }
 }
 
+#[test]
+fn public_gpt6_cache_options_encode_documented_mode_and_ttl() {
+    for name in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+        let model = crate::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId(name.into()))
+            .unwrap();
+        let mut req = request();
+        req.reasoning = if name == "gpt-6-astra" {
+            ReasoningConfig::Effort(crate::ReasoningEffort::Low)
+        } else {
+            ReasoningConfig::Off
+        };
+        req.session_id = Some("cache-key".into());
+        for (retention, expected_options) in [
+            (CacheRetention::Short, None),
+            (CacheRetention::Long, Some(serde_json::json!({"ttl":"30m"}))),
+            (CacheRetention::None, Some(serde_json::json!({"mode":"explicit"}))),
+        ] {
+            req.cache_retention = retention;
+            let body: serde_json::Value =
+                serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
+            assert_eq!(body.get("prompt_cache_options").cloned(), expected_options, "{name}");
+            assert!(body.get("prompt_cache_retention").is_none(), "{name}");
+            assert_eq!(
+                body.get("prompt_cache_key")
+                    .and_then(serde_json::Value::as_str),
+                (retention != CacheRetention::None).then_some("cache-key"),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cache_options_are_not_assumed_for_compatible_or_subscription_routes() {
+    let mut model = model();
+    let req = request();
+    Arc::make_mut(&mut model.endpoint).base_url =
+        url::Url::parse("https://gateway.example/v1/").unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
+    assert!(body.get("prompt_cache_options").is_none());
+
+    Arc::make_mut(&mut model.endpoint).base_url =
+        url::Url::parse("https://api.openai.com/v1/").unwrap();
+    Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+        crate::ResponsesRuntimeProfile::Codex;
+    let body: serde_json::Value =
+        serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
+    assert!(body.get("prompt_cache_options").is_none());
+
+    Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+        crate::ResponsesRuntimeProfile::Default;
+    Arc::make_mut(&mut model.spec).api_name = "gpt-5.4".into();
+    Arc::make_mut(&mut model.spec).cache.supports_explicit_prompt_cache_mode = false;
+    let body: serde_json::Value =
+        serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
+    assert!(body.get("prompt_cache_options").is_none());
+}
+
 fn tool() -> ToolDef {
     ToolDef {
         async_execution: true,

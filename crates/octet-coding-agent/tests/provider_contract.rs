@@ -7,8 +7,8 @@ use octet_sdk::provider::{
 #[test]
 fn generated_builtin_definitions_are_credential_free() {
     let definitions = builtin_provider_definitions();
-    // Additive presets: Baseten, three Qwen token plans, and Z.ai Coding CN.
-    assert_eq!(definitions.len(), 36);
+    // Additive presets: Baseten, three Qwen token plans, Meta, and Z.ai Coding CN.
+    assert_eq!(definitions.len(), 37);
     // Host-owned Copilot remains deliberately absent until an embedding host
     // completes discovery; it is not a generated CLI/configuration preset.
     assert!(!definitions

@@ -120,12 +120,13 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
-The four executable bundles in the working tree declare API 0.4. Their exact
-`requires_octet` pins still control admission: a current API number does not
-make a 0.7.6-pinned bundle usable on a 0.8.0 RC. No matching RC catalog
-publication is claimed. See [current authoring](extensions.md) for the Python
-API 0.4 process recipe and retained API 0.3 conformance example; generated
-contract bindings alone are not a process runtime.
+The four executable bundles in the working tree declare API 0.4 and require
+octet 0.8.0, despite retaining a 0.7.6 package version during this local RC.
+Published 0.7.6 bundles require the matching 0.7.6 host; a current API number
+does not override either compatibility pin. No RC catalog publication is claimed.
+See [current authoring](extensions.md) for the Python API 0.4 process recipe
+and retained API 0.3 conformance example; generated contract bindings alone
+are not a process runtime.
 
 ## Container
 

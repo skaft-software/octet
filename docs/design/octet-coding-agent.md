@@ -37,6 +37,13 @@ without a provisional model footer; branded readiness and prompt submission
 still wait for launch resolution, extension startup, and history hydration.
 Plain, print, and RPC retain their non-TUI bootstrap path. This is a responsiveness
 boundary, not a reduction in provider latency or native-history replay work.
+A launch with a proven built-in selection initializes only its required route;
+a resume without an explicit selection remains fleet-ready because its model
+provenance is not known until the session is opened. A valid positive custom
+inventory uses its cache immediately, refreshing stale metadata for a later
+catalog build. Once idle, `/model` opens from current routes and enriches the
+fleet in the background; filtering and highlighted model identity survive the
+refresh, while cancellation/failure leaves the active selection untouched.
 
 Startup resolves the persistent session before final model selection:
 

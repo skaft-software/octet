@@ -25,16 +25,17 @@ version-matched assets and channel boundaries.
 | Product library | `octet_sdk` |
 | Python distribution / import | `octet-extension-sdk` / `octet_extension` |
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
-| First-party extensions | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search`, `octet-pi-compat`, `octet-serve` |
+| First-party executable bundles and Serve | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search`, `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK, Serve and four executable-bundle distribution versions | `0.7.6`; installed compatibility `requires_octet = "=0.7.6"` |
-| Independent contracts | extension APIs `0.1` / `0.2` / `0.3`; native-host protocol `1`; schema revisions remain independent |
+| Last published native, Serve and four executable-bundle release | `0.7.6`; published bundles require octet `=0.7.6` |
+| Local source candidate | Core/Serve `0.8.0`; SDK and executable-bundle package versions remain `0.7.6`, while working-tree bundle manifests require octet `=0.8.0`. This does not publish an RC. |
+| Independent contracts | extension APIs `0.1` / `0.2` / `0.3` / `0.4`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
-Current extension authoring targets API 0.3. The four bundled executable-extension
-manifests still declare 0.2; the Python `Extension` runtime remains a legacy
-0.1/0.2 implementation. Generated 0.3 types are not a complete 0.3 runtime.
+Current Python extension authoring targets API 0.4. The four working-tree
+executable-extension manifests declare 0.4; published bundles are version-pinned
+to their released host. Generated 0.3 types alone are not a process runtime.
 Renaming first-party wire fields such as `octet_version` does not renumber APIs
 or preserve old-name aliases. Historical releases, measurements, upstream
 copyrights, Pi pins, independent example versions and mismatch fixtures retain

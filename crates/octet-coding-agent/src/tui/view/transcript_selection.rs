@@ -30,6 +30,7 @@ pub(super) struct TranscriptSelection {
 /// composer text, or footer text.
 pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
     match block {
+        TranscriptBlock::Subagents(summary) => summary.label(),
         TranscriptBlock::User { text, .. } | TranscriptBlock::Notice(text) => {
             sanitize_for_terminal(text)
         }
@@ -215,7 +216,9 @@ fn visual_cell_to_copy_offset(
         | TranscriptBlock::Compaction(_) => {
             wrapped_line_col_offset(copy_text, local_row, col, usize::from(width).max(1))
         }
-        TranscriptBlock::Outcome(_) => visual_col_to_offset(copy_text, usize::from(col)),
+        TranscriptBlock::Outcome(_) | TranscriptBlock::Subagents(_) => {
+            visual_col_to_offset(copy_text, usize::from(col))
+        }
         TranscriptBlock::Tool(_) => {
             let indent = if width < 60 { 7 } else { 8 };
             let col_in_text = col.saturating_sub(indent);
@@ -281,7 +284,7 @@ fn copy_offset_to_visual_row(
             usize::from(width.saturating_sub(2)).max(1),
             trailing_affinity,
         ),
-        TranscriptBlock::Outcome(_) => 0,
+        TranscriptBlock::Outcome(_) | TranscriptBlock::Subagents(_) => 0,
         TranscriptBlock::Tool(_) => newline_offset_to_line(copy_text, offset, trailing_affinity),
     }
 }
