@@ -5722,8 +5722,8 @@ impl HostNotification {
 }
 
 /// Apply a user thinking selection before saving its startup preference. Qualified
-/// Responses controls can reject stateful Ultra/V2 transitions even when the
-/// model advertises the requested choice.
+/// Responses controls validate both the advertised choice and the host's
+/// observation runtime before committing a durable selection.
 async fn select_thinking<S>(
     mut app: App,
     shell: &mut InteractiveShell,
@@ -13859,9 +13859,9 @@ mod tests {
             .as_mut()
             .unwrap()
             .values
-            .push("ultra".into());
-        // Capability admission succeeds; only the pinned session makes the
-        // requested transition invalid. No live subagent/inference is needed.
+            .extend(["max".into(), "ultra".into()]);
+        // Metadata alone cannot authorize Ultra: the observation runtime must
+        // be installed before a selection is committed.
         let ultra = requested_thinking_to_reasoning(ThinkingLevel::Ultra, &model, true).unwrap();
         let (_workspace, mut app) = fast_test_app(model);
         let mut shell = InteractiveShell::test_shell();
@@ -13897,9 +13897,38 @@ mod tests {
             assert_eq!(app.agent.reasoning(), &app.reasoning);
             let error = shell.debug_error().unwrap();
             assert!(
-                error.contains("thinking unchanged") && error.contains("new session"),
+                error.contains("thinking unchanged") && error.contains("observation runtime"),
                 "{error}"
             );
+        }
+        app.agent
+            .enable_v2_delegation_extension_only(octet_agent::DelegationConfig::new(
+                _workspace.path().join("delegation"),
+            ))
+            .unwrap();
+        let team = app.agent.delegation_team_directory().unwrap().to_path_buf();
+        for level in [
+            ThinkingLevel::Max,
+            ThinkingLevel::Ultra,
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Max,
+            ThinkingLevel::Ultra,
+            ThinkingLevel::Low,
+        ] {
+            let reasoning = requested_thinking_to_reasoning(level, &app.model, true).unwrap();
+            shell.clear_error();
+            app = select_thinking(app, &mut shell, &mut input, reasoning.clone(), None)
+                .await
+                .unwrap();
+            assert!(shell.debug_error().is_none(), "{:?}", shell.debug_error());
+            assert_eq!(app.reasoning, reasoning);
+            assert_eq!(app.agent.reasoning(), &reasoning);
+            assert_eq!(app.agent.session().path(), session);
+            assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
+            assert!(std::fs::read_to_string(&preference)
+                .unwrap()
+                .contains(level.label()));
         }
     }
 

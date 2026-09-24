@@ -229,7 +229,7 @@ pub(super) fn event_margin_marker_with_frame(
         }
         TranscriptBlock::Reasoning(_) => None,
         TranscriptBlock::Assistant(_) if markers_enabled => Some(theme.fg("foreground", event_dot)),
-        TranscriptBlock::Subagents(summary) if markers_enabled && summary.running > 0 => {
+        TranscriptBlock::Subagents(summary) if markers_enabled && summary.active_count() > 0 => {
             Some(active_phase_dot())
         }
         TranscriptBlock::Subagents(summary) if markers_enabled => {

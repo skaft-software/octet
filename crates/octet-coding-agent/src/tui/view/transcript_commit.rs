@@ -25,7 +25,7 @@ fn transcript_block_is_final(block: &TranscriptBlock) -> bool {
     match block {
         TranscriptBlock::Assistant(block) | TranscriptBlock::Reasoning(block) => block.finished,
         TranscriptBlock::Tool(panel) => panel.finished,
-        TranscriptBlock::Subagents(summary) => summary.running == 0,
+        TranscriptBlock::Subagents(summary) => summary.active_count() == 0,
         TranscriptBlock::Shell(shell) => !shell.running,
         TranscriptBlock::Compaction(_)
         | TranscriptBlock::User { .. }

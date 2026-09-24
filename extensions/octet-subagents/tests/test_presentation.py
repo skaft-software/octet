@@ -376,6 +376,40 @@ class PresentationTests(unittest.TestCase):
         )
         self.assertNotIn("Host reattachment", snapshot["collection"]["detail"]["body"])
 
+    def test_settled_worker_retains_bounded_host_recovery_guidance(self):
+        from octet_subagents.model import MAX_ERROR_BYTES, sanitize_document
+
+        hint = "Interrupted after restart; use subagent_continue to resume explicitly."
+        for state in ("cancelled", "stopped", "failed"):
+            with self.subTest(state=state):
+                worker = self.worker(
+                    state,
+                    host_diagnostic=sanitize_document(
+                        hint + "\x1b[31m\x00\n" + "é" * 5000, MAX_ERROR_BYTES
+                    ),
+                    summary="PRIVATE-CHILD-PROSE",
+                    phase="PRIVATE-RUNNING-PHASE",
+                )
+                snapshot = build_snapshot(
+                    [worker], selected_agent_id=worker.agent_id,
+                    now_ms=1_700_000_007_000,
+                )
+                node = snapshot["collection"]["nodes"][0]
+                detail = snapshot["collection"]["detail"]["body"]
+                self.assertIn(hint, node["secondary"])
+                self.assertIn("Host reattachment: " + hint, detail)
+                self.assertLessEqual(len(node["secondary"].encode("utf-8")), 1024)
+                diagnostic = detail.split("Host reattachment: ", 1)[1].split(
+                    "\n\nHost-observed final summary", 1
+                )[0]
+                self.assertLessEqual(len(diagnostic.encode("utf-8")), MAX_ERROR_BYTES)
+                for text in (node["secondary"], detail):
+                    self.assertNotIn("\x1b", text)
+                    self.assertNotIn("\x00", text)
+                compact = json.dumps(node) + json.dumps(snapshot["activities"])
+                self.assertNotIn(worker.summary, compact)
+                self.assertNotIn(worker.phase, compact)
+
     def test_worker_rows_omit_absence_and_human_format_bounded_values(self):
         # Every ceiling is inherited and no counter is exposed: absence must be
         # omitted, never rendered as `no ceiling` or a `?` placeholder.

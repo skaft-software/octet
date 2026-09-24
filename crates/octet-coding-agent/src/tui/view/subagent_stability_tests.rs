@@ -1042,6 +1042,7 @@ fn every_host_worker_state_has_consistent_group_filter_and_chrome_visibility() {
             .all(|block| !block_copy_text(block).contains("STATE-WORKER")));
         assert!(transcript_text(&shell).contains("Subagents"));
         assert!(transcript_text(&shell).contains(match group {
+            Running if label == "pending" => "queued",
             Running => "running",
             Completed => "completed",
             Failed => "failed",
@@ -1177,4 +1178,134 @@ fn orchestration_settlement_marker_classifies_failed_and_mixed_rosters() {
             .subagents
             .is_empty());
     }
+}
+
+#[test]
+fn queued_subagent_remains_a_mutable_tail_until_settlement() {
+    for native in [true, false] {
+        for outcome in ["completed", "failed"] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.notice("parent before");
+            for status in ["pending", "running", "pending"] {
+                publish_roster(&mut shell, native, &[named_worker("queued-worker", status)]);
+                let state = shell.state.borrow();
+                let index = state.transcript.len() - 1;
+                let TranscriptBlock::Subagents(summary) = &state.transcript[index] else {
+                    panic!("missing active subagent row");
+                };
+                assert_eq!(summary.queued, usize::from(status == "pending"));
+                assert_eq!(summary.running, usize::from(status == "running"));
+                assert_eq!(summary.total(), 1);
+                let expected = if status == "pending" {
+                    "queued"
+                } else {
+                    "running"
+                };
+                assert_eq!(
+                    summary.label(),
+                    format!("Subagents · 1 {expected} · /subagents")
+                );
+                assert!(state.has_active_event_dot());
+                let _ = state.rendered_transcript(120);
+                let cursor = transcript_commit::transcript_commit_cursor(
+                    &state,
+                    index,
+                    transcript_commit::FINAL_COMMIT_SEGMENT,
+                );
+                assert!(transcript_commit::transcript_commit_position(&state, cursor).is_none());
+                if native {
+                    assert!(state
+                        .rendered_transcript(120)
+                        .join("\n")
+                        .contains("queued-worker"));
+                }
+                let row = state.transcript.last().unwrap();
+                assert_ne!(
+                    surface_frame::event_margin_marker(row, &state.theme, true, false),
+                    surface_frame::event_margin_marker(row, &state.theme, false, false),
+                );
+            }
+            shell.notice("parent during queue");
+            let index = shell.state.borrow().transcript.len() - 1;
+            assert!(matches!(
+                shell.state.borrow().transcript.last(),
+                Some(TranscriptBlock::Subagents(_))
+            ));
+            publish_roster(
+                &mut shell,
+                native,
+                &[named_worker("queued-worker", outcome)],
+            );
+            shell.notice("parent after settlement");
+            let state = shell.state.borrow();
+            assert_eq!(
+                state
+                    .transcript
+                    .iter()
+                    .filter(|block| matches!(block, TranscriptBlock::Subagents(_)))
+                    .count(),
+                1
+            );
+            assert!(!state.has_active_event_dot());
+            let TranscriptBlock::Subagents(summary) = &state.transcript[index] else {
+                panic!("settlement moved the row");
+            };
+            assert_eq!(summary.active_count(), 0);
+            assert_eq!(summary.total(), 1);
+            assert_eq!(
+                summary.label(),
+                format!("Subagents · 1 {outcome} · /subagents")
+            );
+            assert!(summary.live_workers.is_empty());
+            let _ = state.rendered_transcript(120);
+            let cursor = transcript_commit::transcript_commit_cursor(
+                &state,
+                index,
+                transcript_commit::FINAL_COMMIT_SEGMENT,
+            );
+            assert!(transcript_commit::transcript_commit_position(&state, cursor).is_some());
+        }
+    }
+}
+
+#[test]
+fn queued_and_running_subagents_have_distinct_counts_and_shared_overflow() {
+    let mut shell = InteractiveShell::test_shell();
+    let mut workers: Vec<_> = (0..6)
+        .map(|index| named_worker(&format!("worker-{index}"), "pending"))
+        .collect();
+    for running in [false, true] {
+        if running {
+            workers[0].state = "running".into();
+        }
+        publish_roster(&mut shell, true, &workers);
+        let state = shell.state.borrow();
+        let TranscriptBlock::Subagents(summary) = state.transcript.last().unwrap() else {
+            panic!("missing subagent row");
+        };
+        assert_eq!(summary.queued, if running { 5 } else { 6 });
+        assert_eq!(summary.running, usize::from(running));
+        assert_eq!(summary.active_count(), 6);
+        assert_eq!(summary.live_workers.len(), 4);
+        let text = strip_terminal_sequences(&state.rendered_transcript(120).join("\n"));
+        assert!(
+            text.contains(if running {
+                "5 queued · 1 running"
+            } else {
+                "6 queued"
+            }),
+            "{text}"
+        );
+        assert!(text.contains("2 more"), "{text}");
+    }
+    workers[0].state = "completed".into();
+    publish_roster(&mut shell, true, &workers);
+    assert!(transcript_text(&shell).contains("5 queued · 1 completed"));
+    assert!(shell.state.borrow().has_active_event_dot());
+    for worker in &mut workers {
+        worker.state = "completed".into();
+    }
+    publish_roster(&mut shell, true, &workers);
+    assert!(transcript_text(&shell).contains("6 completed"));
+    assert!(!shell.state.borrow().has_active_event_dot());
 }

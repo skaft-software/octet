@@ -55,7 +55,16 @@ An explicitly read-only tool may run without an additional prompt. Every
 or the host denies the intent, the bridge fails closed. It uses a one-use
 approval retry only when the host actually negotiates `approvals`; octet `0.7.6`'s
 coding product does not currently enable approval issuance, so those calls are
-denied with an explanatory tool error. An MCP tool call is never automatically
+denied with an explanatory tool error. The working-tree coding host now supplies
+a scoped `mcp.tool.call` adapter: `unsafe_host` permits unknown/destructive calls
+only for the admitted `octet-mcp` process and its exact active, owner-scoped tool
+call. The exact published tool identity, arguments, and generation must match; hints
+never authorize a different call. Controlled policies deny external calls and
+still prevent process startup. Generic operations remain denied and approval-token
+issuance remains off; this does not add a new per-server permission configuration.
+The bridge owns configured-server provenance; the target server label is only
+namespace-checked, not an independent host permission key.
+An MCP tool call is never automatically
 replayed after timeout, cancellation, crash, or an ambiguous disconnect.
 
 Server descriptions, schemas, logs, errors, and results are untrusted data.

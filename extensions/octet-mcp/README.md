@@ -72,8 +72,13 @@ same semantic state used by the TUI and Serve.
 A local server runs with your OS authority. Neither configuration nor tool
 approval is a sandbox. Server trust does not approve every tool: only an exact,
 uncontradicted JSON `readOnlyHint: true` gets read-only classification. Unknown
-or destructive calls require host policy. The octet `0.7.6` coding product does
-not issue approvals for those calls, so they fail closed with a tool error.
+or destructive calls require host policy. The working-tree coding host binds
+`mcp.tool.call` to the active owner, process generation, published tool identity,
+and exact arguments: full access (`unsafe_host`) permits these calls, including
+mutations. Controlled policies deny them and still block extension startup;
+enabling an extension alone is not authorization. Unrecognized policy operations
+remain denied. This adapter is a source change, not a claim about the published
+`0.7.6` host, which denies these calls.
 Calls are never automatically replayed after an ambiguous failure; cancellation
 does not promise rollback.
 

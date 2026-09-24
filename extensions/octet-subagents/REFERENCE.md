@@ -305,6 +305,9 @@ Other owners can still refresh independently:
 - `completed` → `done`, with bounded exact host output in detail/results;
 - `failed` → `failed`, with a bounded error;
 - `interrupted` → `cancelled`, or `stopped`/`timed_out` when the extension issued that reason;
+  reattachment with no undelivered task also settles as `interrupted`, with a host
+  diagnostic directing the caller to `subagent_continue`. The retained session
+  is not replayed automatically or presented as successfully completed;
 - `shutdown`/missing active record → `orphaned` (**detached**: still owned by this session, currently not attached to any run, reattachable);
 - an `awaiting_approval` park reported by the host → `awaiting_approval` (rendered explicitly, never resumed unattended).
 

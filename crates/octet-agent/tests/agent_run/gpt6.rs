@@ -1138,59 +1138,197 @@ async fn async_drop_and_restart_never_redispatches_committed_job() {
     );
 }
 
-#[test]
-fn ultra_baseline_is_valid_but_cross_mode_idle_updates_do_not_rewrite_history() {
-    let mut route = octet_ai::ModelCatalog::builtin()
-        .unwrap()
-        .resolve(&ModelId("gpt-6-astra".into()))
-        .unwrap();
+fn ultra_model(uri: &str) -> Model {
+    let mut route = model(uri);
     let spec = Arc::make_mut(&mut route.spec);
     spec.capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
-    spec.capabilities.reasoning.as_mut().unwrap().max_effort = ReasoningEffort::Ultra;
-    spec.capabilities
-        .reasoning
-        .as_mut()
-        .unwrap()
+    let reasoning = spec.capabilities.reasoning.as_mut().unwrap();
+    reasoning.max_effort = ReasoningEffort::Ultra;
+    reasoning
         .options
         .as_mut()
         .unwrap()
         .values
-        .push("ultra".into());
-    let endpoint = Arc::make_mut(&mut route.endpoint);
-    endpoint.auth = Auth::None;
-    endpoint.base_url = url::Url::parse("http://127.0.0.1:1/").unwrap();
-    endpoint.transport = octet_ai::EndpointTransport::Http;
+        .extend(["max".into(), "ultra".into()]);
+    route
+}
+
+#[tokio::test]
+async fn ultra_cycle_rebases_replay_preserves_history_and_resumes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses_text_turn(
+                    "answer",
+                    "done",
+                    "response.completed",
+                    "answer",
+                )),
+        )
+        .mount(&server)
+        .await;
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
+    let path = sessions.path().join("cycle.jsonl");
+    let model = ultra_model(&server.uri());
+    let mut agent = build_agent_with_reasoning(
+        model.clone(),
+        &path,
+        workspace.path(),
+        ReasoningConfig::Off,
+        Some(4),
+    );
     let ultra = ReasoningConfig::Effort(ReasoningEffort::Ultra);
-    let high = ReasoningConfig::Effort(ReasoningEffort::High);
-    for (initial, replacement) in [(ultra.clone(), high.clone()), (high, ultra)] {
-        let path = sessions.path().join(format!("{:?}.jsonl", initial));
+    let before = std::fs::read(&path).unwrap();
+    assert!(agent.set_reasoning(ultra.clone()).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    agent
+        .enable_v2_delegation_extension_only(octet_agent::DelegationConfig::new(
+            sessions.path().join("delegation"),
+        ))
+        .unwrap();
+    let team = agent.delegation_team_directory().unwrap().to_path_buf();
+    let choices = [
+        ReasoningConfig::Effort(ReasoningEffort::Max),
+        ultra.clone(),
+        ReasoningConfig::Off,
+        ReasoningConfig::Effort(ReasoningEffort::Low),
+        ultra.clone(),
+        ReasoningConfig::Effort(ReasoningEffort::Low),
+    ];
+    agent.set_reasoning(ReasoningConfig::Off).unwrap();
+    for (index, choice) in choices.iter().enumerate() {
+        agent.set_reasoning(choice.clone()).unwrap();
+        let mut run = agent.prompt(format!("turn {index}")).await.unwrap();
+        let events = collect(&mut run).await;
+        assert!(
+            matches!(assert_single_run_finished(&events), FinishReason::Completed),
+            "{events:?}"
+        );
+        drop(run);
+        assert_eq!(agent.reasoning(), choice);
+        assert_eq!(agent.delegation_team_directory(), Some(team.as_path()));
+        let restored = Session::open(&path).unwrap();
+        assert_eq!(
+            restored
+                .responses_reasoning(&model.endpoint.id, &model.spec.id)
+                .unwrap()
+                .unwrap()
+                .1,
+            *choice
+        );
+    }
+    let bodies = wire_requests(&server).await;
+    assert_eq!(bodies.len(), choices.len());
+    assert_eq!(bodies[1]["reasoning"]["effort"], "max");
+    assert_eq!(bodies[2]["reasoning"]["effort"], "none");
+    assert_eq!(bodies[4]["reasoning"]["effort"], "max");
+    assert_eq!(bodies[5]["reasoning"]["effort"], "low");
+    for index in [1, 2, 4, 5] {
+        assert!(!bodies[index]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "configuration_update"));
+        assert!(bodies[index]["input"].to_string().contains("turn 0"));
+    }
+    assert!(
+        bodies[3]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "configuration_update"
+                && item["reasoning"]["effort"] == "low")
+    );
+    drop(agent);
+    let resumed = build_responses_agent_from_session(
+        model.clone(),
+        Session::open(&path).unwrap(),
+        workspace.path(),
+        Some(4),
+        "test",
+        ReasoningConfig::Off,
+    );
+    assert_eq!(resumed.reasoning(), choices.last().unwrap());
+}
+
+#[tokio::test]
+async fn ultra_active_controls_apply_at_response_boundaries() {
+    for (initial, replacement) in [
+        (
+            ReasoningConfig::Effort(ReasoningEffort::Max),
+            ReasoningConfig::Effort(ReasoningEffort::Ultra),
+        ),
+        (
+            ReasoningConfig::Effort(ReasoningEffort::Ultra),
+            ReasoningConfig::Off,
+        ),
+        (
+            ReasoningConfig::Effort(ReasoningEffort::Ultra),
+            ReasoningConfig::Effort(ReasoningEffort::Low),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(responses_text_turn(
+                        "answer",
+                        "done",
+                        "response.completed",
+                        "answer",
+                    )),
+            )
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let model = ultra_model(&server.uri());
         let mut agent = build_agent_with_reasoning(
-            route.clone(),
-            &path,
+            model,
+            &sessions.path().join("active.jsonl"),
             workspace.path(),
-            initial.clone(),
+            initial,
             Some(4),
         );
         agent
-            .set_reasoning(initial.clone())
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{initial:?}: {error}; {:?}",
-                    route.spec.capabilities.reasoning
-                )
-            });
-        let entries = agent.session().entries().len();
-        assert!(agent.set_reasoning(replacement).is_err());
-        assert_eq!(agent.reasoning(), &initial);
-        assert_eq!(agent.session().entries().len(), entries);
+            .enable_v2_delegation_extension_only(octet_agent::DelegationConfig::new(
+                sessions.path().join("delegation"),
+            ))
+            .unwrap();
+        let mut run = agent.prompt("answer").await.unwrap();
+        let control = run.control();
+        let mut changed = false;
+        while let Some(event) = run.next().await {
+            if matches!(event, AgentEvent::TurnStarted) && !changed {
+                control.set_reasoning(replacement.clone()).await.unwrap();
+                changed = true;
+            }
+            if let AgentEvent::RunFinished { reason, .. } = event {
+                assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+            }
+        }
+        drop(run);
+        assert_eq!(agent.reasoning(), &replacement);
+        let bodies = wire_requests(&server).await;
+        assert_eq!(bodies.len(), 2);
         assert_eq!(
-            agent
-                .session()
-                .responses_reasoning(&route.endpoint.id, &route.spec.id)
-                .unwrap(),
-            Some((initial.clone(), initial))
+            bodies[1]["reasoning"]["effort"],
+            match replacement {
+                ReasoningConfig::Off => "none",
+                ReasoningConfig::Effort(ReasoningEffort::Low) => "low",
+                _ => "max",
+            }
         );
+        assert!(!bodies[1]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "configuration_update"));
     }
 }

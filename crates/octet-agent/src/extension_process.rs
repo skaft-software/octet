@@ -7677,6 +7677,30 @@ impl ExtensionProcess {
         lock_std_mutex(&self.inner.answered_confirmations).contains(generation, request_id)
     }
 
+    /// Checks an adapter's target against the exact host-issued, owner-scoped
+    /// tool call. Commands, settled requests, and other generations cannot lend
+    /// their authority to a tool policy request. The digest never retains raw
+    /// tool arguments beyond the existing request frame.
+    pub fn policy_matches_tool_call(
+        &self,
+        generation: u64,
+        parent_request_id: u64,
+        tool: &str,
+        arguments: &serde_json::Value,
+    ) -> bool {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if generation != connection.generation {
+            return false;
+        }
+        let expected = tool_call_policy_digest(tool, arguments);
+        let pending = lock_std_mutex(&connection.pending);
+        pending.get(&parent_request_id).is_some_and(|parent| {
+            parent.resource_owner.is_some()
+                && parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
+                && parent.tool_call_policy_digest == Some(expected)
+        })
+    }
+
     /// Answers an extension-originated API `0.2` policy evaluation request.
     /// Classification and approval issuance remain host-owned; this method
     /// only sends the already-decided typed result to the matching generation.
@@ -9672,6 +9696,12 @@ struct PendingRequest {
     child_interaction_progress: Option<ToolProgressSink>,
     resource_owner: Option<ExtensionResourceOwner>,
     last_progress_sequence: Option<u64>,
+    tool_call_policy_digest: Option<[u8; 32]>,
+}
+
+fn tool_call_policy_digest(tool: &str, arguments: &serde_json::Value) -> [u8; 32] {
+    // JSON Values serialize deterministically (object keys are ordered).
+    Sha256::digest(serde_json::to_vec(&(tool, arguments)).expect("JSON values serialize")).into()
 }
 
 type PendingRequests = Arc<StdMutex<HashMap<u64, PendingRequest>>>;
@@ -10485,6 +10515,14 @@ impl ProcessConnection {
                     child_interaction_progress,
                     resource_owner,
                     last_progress_sequence: None,
+                    tool_call_policy_digest: (method == methods::TOOL_CALL)
+                        .then(|| {
+                            Some(tool_call_policy_digest(
+                                message["params"]["name"].as_str()?,
+                                message["params"].get("arguments")?,
+                            ))
+                        })
+                        .flatten(),
                 },
             );
             if let Some(request_started) = request_started {
@@ -17751,6 +17789,7 @@ confirmations = true
                 child_interaction_progress: None,
                 resource_owner,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
     }
@@ -20249,6 +20288,7 @@ done
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         lock_std_mutex(&state.pending).remove(&7);
@@ -20294,6 +20334,7 @@ done
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         let state = Arc::new(state);
@@ -20372,6 +20413,7 @@ done
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         handle_protocol_line(
@@ -20420,6 +20462,7 @@ done
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         handle_protocol_line(

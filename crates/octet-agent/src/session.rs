@@ -698,7 +698,8 @@ pub enum EntryValue {
         model: ModelId,
         /// Pinned request-level reasoning for this replay window.
         baseline: octet_ai::ReasoningConfig,
-        /// Ordered effective-reasoning change, absent for the initial pin.
+        /// Ordered effective-reasoning change; None establishes a new baseline
+        /// and supersedes earlier updates without discarding conversation items.
         update: Option<octet_ai::ResponsesConfigurationUpdate>,
     },
     /// A configuration marker (not part of model-visible context).
@@ -3362,6 +3363,13 @@ impl Session {
                     if recorded_endpoint != endpoint || recorded_model != model {
                         return Ok(false);
                     }
+                    if update.is_none() {
+                        // A host baseline reset supersedes prior effort updates,
+                        // while retaining every conversation/opaque output item.
+                        replay.retain(|item| {
+                            !matches!(item, octet_ai::ResponsesReplayItem::ConfigurationUpdate(_))
+                        });
+                    }
                     if let Some(update) = update {
                         // Only an undispatched tail can be adjacent: a completed
                         // response inserts its opaque output between updates.
@@ -3465,6 +3473,9 @@ impl Session {
                 if recorded_endpoint != endpoint || recorded_model != model {
                     state = None;
                     continue;
+                }
+                if update.is_none() {
+                    state = Some((baseline.clone(), baseline.clone()));
                 }
                 let (pin, effective) =
                     state.get_or_insert_with(|| (baseline.clone(), baseline.clone()));

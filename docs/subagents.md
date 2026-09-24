@@ -183,6 +183,11 @@ retry and dead-lettered after three failed attempts, with durable diagnostics.
 Unreadable child-session authority retains accepted payloads and retry counts
 without executing them. After repair, both automatic reattachment and explicit
 resume reconcile delivery identities before replaying only undelivered inputs.
+If reattachment finds no undelivered task, the worker settles as `interrupted`
+with an explicit continuation hint rather than waiting forever as `pending`.
+Its session, usage, and buffered messages remain available to `subagent_continue`.
+A delivered prompt or checkpoint alone is not proof of successful completion;
+reattachment neither invents success nor automatically replays delivered work.
 Worker panics are supervised and wake parent waiters; neither an old supervisor
 nor an old worker's cleanup can settle a newer worker incarnation. The standard
 release build retains panic unwinding so this isolation also works in installed

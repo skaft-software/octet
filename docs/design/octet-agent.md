@@ -62,10 +62,16 @@ synchronous tools and queued steering.
   requests replay canonical conversation with effective reasoning as their
   request baseline instead of emitting incomplete chronological updates; native
   mode still requires complete opaque replay. Unsupported native compaction
-  never strips updates (autonomous qualified runs use local compaction). Fresh,
-  explicitly qualified Ultra/V2 remains valid; switching an existing pin into
-  **or out of Ultra requires a new session**. Ordinary configuration updates
-  cannot change delegation mode.
+  never strips updates (autonomous qualified runs use local compaction).
+  Qualified Ultra/V2 transitions use a host baseline reset, not an ordinary
+  configuration update: prior effort updates are superseded in replay while
+  canonical messages and opaque outputs remain intact. This may invalidate the
+  reasoning cache prefix, but does not require a new session. Entering Ultra
+  requires an installed child-session observation runtime. Idle setters apply
+  immediately; active controls apply at the next safe response boundary (after
+  any owned native successor). The existing delegation manager stays installed
+  at lower efforts, new workers inherit the effective selection, and existing
+  workers retain their pinned model and reasoning.
 - **Native steering:** qualified WebSocket runs without hard ceilings prepare a
   local receipt, persist intent, then dispatch. Each completed response retains
   independent usage. Applied input follows the completed prefix, atomically

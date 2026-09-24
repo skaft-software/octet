@@ -480,22 +480,22 @@ async fn a_restarted_session_reattaches_and_continues_its_worker() {
     let restored = &agents[0];
     assert_eq!(restored["agent_id"], "agent-1");
     assert_eq!(restored["agent_path"], "/root/survivor");
-    // The restarted session reattached the same worker: it is live, owned, and
-    // no longer detached, with its turn accounting preserved.
+    // Reattachment retains the identity and accounting without claiming that
+    // an idle worker is running. An explicit continuation starts its next run.
     assert_eq!(restored["detached"], false, "{listed}");
-    assert_eq!(restored["live_task"], true, "{listed}");
+    assert_eq!(restored["live_task"], false, "{listed}");
     assert_eq!(restored["turn_count"], 1, "{listed}");
-    assert_ne!(restored["status"]["state"], "detached", "{listed}");
+    assert_eq!(restored["status"]["state"], "interrupted", "{listed}");
+    assert!(restored["diagnostic"]
+        .as_str()
+        .unwrap()
+        .contains("subagent_continue"));
 
     let steered = parse_result(&results, "steer-reattached");
     assert_eq!(steered["agent_id"], "agent-1");
-    // `delivery` names the accepted task's path through the worker's queue, not
-    // a fresh identity: the reattached worker is live (status `pending`) with an
-    // empty task queue, so an accepted task joins it as a queued
-    // `<followup_task>` continuation of the same child session. `new_run` is the
-    // other path — a settled worker (`completed`/`limit_reached`/parked) that the
-    // accepted task reopens, re-journaling `pending` with no accounting reset.
-    assert_eq!(steered["delivery"], "follow_up", "{steered}");
+    // The accepted follow-up starts a new run of the same retained child
+    // session, rather than joining a fictitious active task.
+    assert_eq!(steered["delivery"], "new_run", "{steered}");
     let waited = parse_result(&results, "wait-reattached");
     assert!(
         waited.to_string().contains("survivor continued after restart"),

@@ -52,8 +52,9 @@ rendering instruction. Presentation code coalesces activity by stable request,
 tool, and worker identity.
 
 Subagent orchestration occupies one tool-like transcript block. Its bold
-heading shows state counts and `/subagents`; while workers run, up to four
-indented child lines show task and `↑input ↓output` token counts, with an
+heading shows state counts (queued separately from running) and `/subagents`;
+while workers are queued or running, up to four indented child lines show task
+and `↑input ↓output` token counts, with an
 overflow count for the rest. Input includes uncached, cache-read, and
 cache-write tokens and advances when the provider reports usage. Output
 advances from settled provider usage, plus a `~`-marked, throttled estimate

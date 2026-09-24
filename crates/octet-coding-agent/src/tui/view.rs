@@ -189,6 +189,8 @@ struct SubagentWorkerLine {
 /// in the retained inspector/ledger, never in this transcript projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SubagentTranscript {
+    /// Pending workers remain active but have not started running.
+    queued: usize,
     running: usize,
     succeeded: usize,
     failed: usize,
@@ -203,6 +205,7 @@ struct SubagentTranscript {
 impl SubagentTranscript {
     fn from_view(view: &SubagentActivityView, previous: Option<&Self>, known: &[String]) -> Self {
         let mut summary = Self {
+            queued: 0,
             running: 0,
             succeeded: 0,
             failed: 0,
@@ -218,6 +221,7 @@ impl SubagentTranscript {
                     (
                         child.child_id.clone(),
                         SubagentStateGroup::of_declared_state(&child.state),
+                        child.state == "pending",
                     )
                 })
                 .collect()
@@ -228,11 +232,12 @@ impl SubagentTranscript {
                     (
                         activity.id.clone(),
                         SubagentStateGroup::of_activity(activity.state),
+                        activity.state == octet_agent::ExtensionPresentationState::Pending,
                     )
                 })
                 .collect()
         };
-        for (id, group) in groups {
+        for (id, group, queued) in groups {
             if group == SubagentStateGroup::Running || (previous.is_some() && !known.contains(&id))
             {
                 if !summary.worker_ids.contains(&id) {
@@ -243,6 +248,7 @@ impl SubagentTranscript {
                 continue;
             }
             match group {
+                SubagentStateGroup::Running if queued => summary.queued += 1,
                 SubagentStateGroup::Running => summary.running += 1,
                 SubagentStateGroup::Completed => summary.succeeded += 1,
                 SubagentStateGroup::Failed => summary.failed += 1,
@@ -273,15 +279,19 @@ impl SubagentTranscript {
         summary
     }
 
+    fn active_count(&self) -> usize {
+        self.queued + self.running
+    }
+
     fn total(&self) -> usize {
-        self.running + self.succeeded + self.failed + self.stopped
+        self.active_count() + self.succeeded + self.failed + self.stopped
     }
 
     fn label(&self) -> String {
         if self.hydrated {
             // A saved tool result proves only how its orchestration call
             // ended; it cannot re-create absent worker telemetry or costs.
-            let outcome = if self.running > 0 {
+            let outcome = if self.active_count() > 0 {
                 "activity in progress"
             } else if self.failed == 0 {
                 "activity recorded"
@@ -294,6 +304,7 @@ impl SubagentTranscript {
         }
         let mut parts = Vec::new();
         for (count, name) in [
+            (self.queued, "queued"),
             (self.running, "running"),
             (self.succeeded, "completed"),
             (self.failed, "failed"),
@@ -1697,7 +1708,7 @@ impl ShellState {
         // identity after inserting the parent block so native commit cursors
         // remain monotonic and the old row cannot enter saved scrollback.
         let live_tail = !matches!(block, TranscriptBlock::Subagents(_))
-            && matches!(self.transcript.last(), Some(TranscriptBlock::Subagents(summary)) if summary.running > 0);
+            && matches!(self.transcript.last(), Some(TranscriptBlock::Subagents(summary)) if summary.active_count() > 0);
         let tail = if live_tail {
             let index = self.transcript.len() - 1;
             let _ = self
@@ -1840,7 +1851,7 @@ impl ShellState {
         // a previously active row may settle (or a fresh failed spawn with no
         // worker to have emitted an earlier running snapshot).
         let live_index = self.transcript.iter().rposition(|block| {
-            matches!(block, TranscriptBlock::Subagents(previous) if !previous.hydrated && previous.running > 0)
+            matches!(block, TranscriptBlock::Subagents(previous) if !previous.hydrated && previous.active_count() > 0)
         });
         let previous = live_index.and_then(|index| match &self.transcript[index] {
             TranscriptBlock::Subagents(previous) => Some(previous),
@@ -2398,7 +2409,9 @@ impl ShellState {
             .any(|index| match self.transcript.get(*index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
                 Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
-                Some(TranscriptBlock::Subagents(summary)) => markers_enabled && summary.running > 0,
+                Some(TranscriptBlock::Subagents(summary)) => {
+                    markers_enabled && summary.active_count() > 0
+                }
                 Some(TranscriptBlock::Shell(shell)) => markers_enabled && shell.running,
                 _ => false,
             })
@@ -2570,7 +2583,9 @@ impl ShellState {
             let visible = match self.transcript.get(index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
                 Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
-                Some(TranscriptBlock::Subagents(summary)) => markers_enabled && summary.running > 0,
+                Some(TranscriptBlock::Subagents(summary)) => {
+                    markers_enabled && summary.active_count() > 0
+                }
                 Some(TranscriptBlock::Shell(shell)) => markers_enabled && shell.running,
                 _ => false,
             };

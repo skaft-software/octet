@@ -1271,6 +1271,7 @@ fn control_input_bytes(input: &UserInput) -> usize {
 #[derive(Clone)]
 pub struct RunControl {
     reasoning_model: Option<Model>,
+    ultra_observed: bool,
     admission: Arc<std::sync::Mutex<bool>>,
     tx: mpsc::Sender<Control>,
     pending_count: Arc<tokio::sync::Semaphore>,
@@ -1291,7 +1292,17 @@ impl RunControl {
                 .into(),
             )
         })?;
-        validate_reasoning_update(model, &reasoning)?;
+        if reasoning == ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra) {
+            require_ultra_observation(&reasoning, self.ultra_observed)?;
+            octet_ai::responses::validate_responses_input(
+                model,
+                &ResponsesInput::default(),
+                &reasoning,
+                false,
+            )?;
+        } else {
+            validate_reasoning_update(model, &reasoning)?;
+        }
         let permit = self.tx.reserve().await.map_err(|_| AgentError::RunEnded)?;
         let admission = self
             .admission
@@ -4708,45 +4719,57 @@ fn validate_reasoning_update(model: &Model, reasoning: &ReasoningConfig) -> Resu
     Ok(())
 }
 
+fn require_ultra_observation(
+    reasoning: &ReasoningConfig,
+    observed: bool,
+) -> Result<(), AgentError> {
+    if *reasoning == ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra) && !observed {
+        return Err(AgentError::Delegation(
+            "Ultra requires an enabled child-session observation runtime".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn persist_reasoning_selection(
     session: &mut Session,
     model: &Model,
     selection: &ReasoningConfig,
 ) -> Result<(), AgentError> {
     let state = session.responses_reasoning(&model.endpoint.id, &model.spec.id)?;
-    if state.is_some() {
-        if state
-            .as_ref()
-            .is_some_and(|(_, effective)| effective == selection)
-        {
-            return Ok(());
-        }
-        let ultra = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
-        if selection == &ultra
-            || state
-                .as_ref()
-                .is_some_and(|(baseline, _)| baseline == &ultra)
-        {
-            return Err(AiError::Config(octet_ai::ConfigError::Parse("Ultra/V2 transitions require a new session; ordinary reasoning updates cannot change delegation mode".into())).into());
-        }
-        validate_reasoning_update(model, selection)?;
-    } else {
-        octet_ai::responses::validate_responses_input(
-            model,
-            &ResponsesInput::default(),
-            selection,
-            false,
-        )?;
+    if state
+        .as_ref()
+        .is_some_and(|(_, effective)| effective == selection)
+    {
+        return Ok(());
     }
+    let ultra = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
+    // Ultra is host orchestration, never a provider configuration_update.
+    // Crossing this boundary starts a new baseline in the same conversation;
+    // replay drops superseded effort updates, not messages or opaque outputs.
+    let rebase = selection == &ultra
+        || state
+            .as_ref()
+            .is_some_and(|(_, effective)| effective == &ultra);
     let (baseline, update) = match state {
-        Some((_, effective)) if effective == *selection => return Ok(()),
-        Some((baseline, _)) => (
-            baseline,
-            Some(octet_ai::ResponsesConfigurationUpdate {
-                reasoning: selection.clone(),
-            }),
-        ),
-        None => (selection.clone(), None),
+        Some((baseline, _)) if !rebase => {
+            validate_reasoning_update(model, selection)?;
+            (
+                baseline,
+                Some(octet_ai::ResponsesConfigurationUpdate {
+                    reasoning: selection.clone(),
+                }),
+            )
+        }
+        _ => {
+            octet_ai::responses::validate_responses_input(
+                model,
+                &ResponsesInput::default(),
+                selection,
+                false,
+            )?;
+            (selection.clone(), None)
+        }
     };
     session.append(EntryValue::ResponsesReasoning {
         endpoint: model.endpoint.id.clone(),
@@ -7831,7 +7854,7 @@ impl Agent {
             effect_broker: self.effect_broker.clone(),
             extensions: self.extensions.clone(),
             max_turns: self.max_turns,
-            reasoning: self.reasoning.clone(),
+            reasoning: std::sync::RwLock::new(self.reasoning.clone()),
             reasoning_mode: self.reasoning_mode,
             cache_retention: self.cache_retention,
             runtime: std::sync::RwLock::new(self.delegation_runtime_settings()),
@@ -9282,6 +9305,10 @@ impl Agent {
 
     /// Changes reasoning on an idle agent, preserving qualified Responses caches.
     pub fn set_reasoning(&mut self, reasoning: ReasoningConfig) -> Result<(), AgentError> {
+        require_ultra_observation(
+            &reasoning,
+            self.delegation.is_some() || self.ultra_observation_managed,
+        )?;
         if self.model.responses_features().reasoning_effort_updates {
             persist_reasoning_selection(&mut self.session, &self.model, &reasoning)?;
         } else {
@@ -9293,6 +9320,9 @@ impl Agent {
             )?;
         }
         self.reasoning = reasoning;
+        if let Some(binding) = &self.delegation {
+            binding.update_reasoning(self.reasoning.clone());
+        }
         Ok(())
     }
 
@@ -9399,9 +9429,12 @@ impl Agent {
         let abort = Arc::new(AbortFlag::default());
         let control_admission = Arc::new(std::sync::Mutex::new(true));
         let control = RunControl {
-            reasoning_model: (self.reasoning
-                != ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra))
-            .then(|| self.model.clone()),
+            reasoning_model: self
+                .model
+                .responses_features()
+                .reasoning_effort_updates
+                .then(|| self.model.clone()),
+            ultra_observed: self.delegation.is_some() || self.ultra_observation_managed,
             admission: control_admission.clone(),
             tx: control_tx,
             pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
@@ -9767,6 +9800,9 @@ impl Agent {
                         break 'run FinishReason::Failed(error);
                     }
                     reasoning = selection.clone();
+                    if let Some(binding) = &stream_delegation {
+                        binding.update_reasoning(selection.clone());
+                    }
                     *effective_reasoning = selection;
                     context_capacity.invalidate();
                 }
@@ -12389,6 +12425,7 @@ mod tests {
         (
             RunControl {
                 reasoning_model: None,
+                ultra_observed: false,
                 admission: Arc::new(Mutex::new(true)),
                 tx,
                 pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),

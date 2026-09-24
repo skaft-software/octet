@@ -195,11 +195,53 @@ fn after_response_hook_payload(response: &str) -> serde_json::Value {
     serde_json::json!(AfterResponseHookPayload { response })
 }
 
-fn denied_policy_response() -> ExtensionPolicyEvaluationResponse {
+/// The MCP bridge owns server configuration; the host owns permission for the
+/// exact call it dispatched. Full access permits external mutations too, while
+/// controlled modes never gain external authority from an annotation or hint.
+fn mcp_policy_response(
+    effect_policy: octet_agent::EffectPolicy,
+    process: &ExtensionProcess,
+    generation: u64,
+    parent_request_id: u64,
+    intent: &octet_agent::ExtensionActionIntent,
+) -> ExtensionPolicyEvaluationResponse {
+    let allowed = effect_policy == octet_agent::EffectPolicy::UnsafeHost
+        && process.descriptor().manifest.name == MCP_EXTENSION_NAME
+        && intent.kind == "external_side_effect"
+        && intent.operation == "mcp.tool.call"
+        && mcp_policy_target(&intent.target).is_some_and(|(tool, arguments)| {
+            process.policy_matches_tool_call(generation, parent_request_id, tool, arguments)
+        });
     ExtensionPolicyEvaluationResponse {
-        decision: ExtensionPolicyDecision::Deny,
+        decision: if allowed {
+            ExtensionPolicyDecision::Allow
+        } else {
+            ExtensionPolicyDecision::Deny
+        },
         approval_token: None,
     }
+}
+
+fn mcp_policy_target(target: &Value) -> Option<(&str, &Value)> {
+    let server = target.get("server")?.as_str()?;
+    if server.is_empty()
+        || server.len() > 32
+        || !server.as_bytes()[0].is_ascii_lowercase()
+        || !server
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        return None;
+    }
+    let tool = target.get("tool")?.as_str()?;
+    // This is only a namespace sanity check: server IDs may have overlapping
+    // prefixes. Authority is the exact host-dispatched published tool (whose
+    // bridge-generated identity includes the server), never this display field.
+    if !tool.starts_with(&format!("mcp_{}_", server.replace('-', "_"))) {
+        return None;
+    }
+    let arguments = target.get("arguments")?;
+    arguments.is_object().then_some((tool, arguments))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1907,6 +1949,7 @@ pub struct ExecutableExtensions {
     input_cancellations: VecDeque<PendingInputCancellation>,
     input_tasks: Vec<JoinHandle<()>>,
     policy_supervisors: Vec<JoinHandle<()>>,
+    effect_policy: octet_agent::EffectPolicy,
     event_bus: Option<Arc<ExtensionEventBus>>,
     session_lifecycle_service: Option<ExtensionSessionLifecycleService>,
     session_lifecycle_receiver: Option<ExtensionSessionLifecycleReceiver>,
@@ -2380,6 +2423,7 @@ impl Default for ExecutableExtensions {
             input_cancellations: VecDeque::new(),
             input_tasks: Vec::new(),
             policy_supervisors: Vec::new(),
+            effect_policy: octet_agent::EffectPolicy::Controlled,
             event_bus: None,
             session_lifecycle_service: None,
             session_lifecycle_receiver: None,
@@ -2901,6 +2945,7 @@ impl ExecutableExtensions {
         extensions.resource_owner = Some(session.resource_owner_key());
         extensions.rescan_config = Some(config.clone());
         extensions.rescan_global_config = crate::cli::global_config_path();
+        extensions.effect_policy = config.effect_policy;
         extensions.start_policy_supervisors();
         extensions.start_session_lifecycle();
         extensions
@@ -3112,6 +3157,12 @@ impl ExecutableExtensions {
             }
             return;
         };
+        // A reload replaces the subscriptions, not the policy authority. Never
+        // leave duplicate responders attached to a retained process.
+        for task in self.policy_supervisors.drain(..) {
+            task.abort();
+        }
+        let effect_policy = self.effect_policy;
         self.policy_supervisors
             .extend(self.processes.iter().cloned().map(|process| {
                 let mut events = process.subscribe();
@@ -3121,14 +3172,18 @@ impl ExecutableExtensions {
                             Ok(ExtensionEvent::PolicyEvaluationRequested {
                                 request_id,
                                 generation,
-                                ..
+                                parent_request_id,
+                                intent,
                             }) => {
+                                let response = mcp_policy_response(
+                                    effect_policy,
+                                    &process,
+                                    generation,
+                                    parent_request_id,
+                                    &intent,
+                                );
                                 let _ = process
-                                    .respond_to_policy_evaluation(
-                                        request_id,
-                                        generation,
-                                        denied_policy_response(),
-                                    )
+                                    .respond_to_policy_evaluation(request_id, generation, response)
                                     .await;
                             }
                             Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -6757,12 +6812,9 @@ impl ExecutableExtensions {
                             ));
                         }
                     }
-                    Ok(ExtensionEvent::PolicyEvaluationRequested { intent, .. }) => {
-                        messages.push(format!(
-                            "[{name}] policy intent denied (no host-managed adapter): {}",
-                            intent.operation
-                        ));
-                    }
+                    // The policy supervisor answers independently of frontend
+                    // event drains; observing an intent is not a denial.
+                    Ok(ExtensionEvent::PolicyEvaluationRequested { .. }) => {}
                     Ok(ExtensionEvent::InputRequested {
                         request_id,
                         generation,
@@ -8892,6 +8944,275 @@ command = "launch-probe.sh"
             assert!(!temp.path().join("config.toml").exists());
             safe.shutdown().await;
             started.shutdown().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_policy_real_bridge_obeys_host_access_without_replaying_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../extensions/octet-mcp")
+            .canonicalize()
+            .unwrap();
+        let server_path = temp.path().join("server.py");
+        // Instrument a conforming server, not a mock of policy/evaluate: this
+        // exercises Rust host -> bundled Python bridge -> upstream MCP stdio.
+        let server = std::fs::read_to_string(package.join("fixtures/real_mcp_server.py"))
+            .unwrap()
+            .replace(
+                "        name = params.get(\"name\")",
+                "        with open('calls.jsonl', 'a') as log:\n            log.write(json.dumps(params) + '\\n')\n        name = params.get(\"name\")",
+            );
+        std::fs::write(&server_path, server).unwrap();
+        let config_path = temp.path().join("mcp.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "servers": {"ableton": {
+                    "transport": "stdio", "command": "python3",
+                    "args": [server_path], "cwd": temp.path(), "enabled": true
+                }}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut manifest = ExtensionManifest::parse(
+            &std::fs::read_to_string(package.join("extension.toml")).unwrap(),
+        )
+        .unwrap();
+        manifest.entrypoint.args = vec![
+            "--config".into(),
+            config_path.to_string_lossy().into_owned(),
+        ];
+        let mut runtime = ExtensionRuntimeConfig::new(temp.path());
+        runtime.request_timeout = Duration::from_secs(5);
+        let process = ExtensionProcess::start(
+            DiscoveredExtension {
+                manifest,
+                manifest_path: package.join("extension.toml"),
+                source: ExtensionSource::Explicit,
+                activation: octet_agent::extension_process::ExtensionActivation {
+                    enabled: true,
+                    trust: ExtensionTrust::Trusted,
+                },
+            },
+            runtime,
+        )
+        .await
+        .unwrap();
+        let mut host = ExtensionHost::new();
+        host.load(&process);
+        host.finalize_tool_surface();
+        let mut extensions = ExecutableExtensions::default();
+        extensions.receivers.push(process.subscribe());
+        extensions.processes.push(process.clone());
+        extensions.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        extensions.start_policy_supervisors();
+        let tools = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let tools = process.tool_definitions();
+                if tools.len() == 3 {
+                    break tools;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if tools.is_err() {
+            let status = process
+                .execute_command("mcp", vec!["status".into()], process.current_context())
+                .await;
+            panic!(
+                "MCP catalog should register: {status:?}; {:?}",
+                extensions.drain_events()
+            );
+        }
+        let tools = tools.unwrap();
+        let unknown = tools
+            .iter()
+            .find(|tool| tool.name.contains("unknown_effect"))
+            .unwrap();
+        let echo = tools
+            .iter()
+            .find(|tool| tool.name.contains("fixture_echo"))
+            .unwrap();
+        let owner = || process.current_context_for_resource_owner("mcp-test");
+        let count_calls = || {
+            std::fs::read_to_string(temp.path().join("calls.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+
+        // Inspect the live host-correlated policy request before giving the
+        // supervisor ownership. No changed target may borrow this call.
+        for task in extensions.policy_supervisors.drain(..) {
+            task.abort();
+        }
+        let mut events = process.subscribe();
+        let probe = process.call_tool(&unknown.name, serde_json::json!({}), owner());
+        tokio::pin!(probe);
+        let (request_id, generation, parent, intent) = loop {
+            tokio::select! {
+                result = &mut probe => panic!("call settled before policy: {result:?}"),
+                event = events.recv() => if let ExtensionEvent::PolicyEvaluationRequested {
+                    request_id, generation, parent_request_id, intent,
+                } = event.unwrap() {
+                    break (request_id, generation, parent_request_id, intent);
+                }
+            }
+        };
+        let decide = |generation, parent, intent: &octet_agent::ExtensionActionIntent| {
+            mcp_policy_response(
+                octet_agent::EffectPolicy::UnsafeHost,
+                &process,
+                generation,
+                parent,
+                intent,
+            )
+            .decision
+        };
+        assert_eq!(
+            decide(generation, parent, &intent),
+            ExtensionPolicyDecision::Allow
+        );
+        assert_eq!(
+            decide(generation + 1, parent, &intent),
+            ExtensionPolicyDecision::Deny
+        );
+        assert_eq!(
+            decide(generation, parent + 1, &intent),
+            ExtensionPolicyDecision::Deny
+        );
+        for (key, value) in [
+            ("server", serde_json::json!("other")),
+            ("tool", serde_json::json!("mcp_ableton_other_tool")),
+            ("arguments", serde_json::json!({"changed": true})),
+        ] {
+            let mut changed = intent.clone();
+            changed.target[key] = value;
+            assert_eq!(
+                decide(generation, parent, &changed),
+                ExtensionPolicyDecision::Deny
+            );
+        }
+        let mut changed = intent.clone();
+        changed.operation = "other.operation".into();
+        assert_eq!(
+            decide(generation, parent, &changed),
+            ExtensionPolicyDecision::Deny
+        );
+        changed = intent.clone();
+        changed.kind = "read_only".into();
+        assert_eq!(
+            decide(generation, parent, &changed),
+            ExtensionPolicyDecision::Deny
+        );
+        changed = intent.clone();
+        changed.adapter_hints.destructive = Some(true);
+        assert_eq!(
+            decide(generation, parent, &changed),
+            ExtensionPolicyDecision::Allow,
+            "full access authorizes mutations, not just guessed reads"
+        );
+        for policy in [
+            octet_agent::EffectPolicy::Controlled,
+            octet_agent::EffectPolicy::ControlledBashApproval,
+        ] {
+            assert_eq!(
+                mcp_policy_response(policy, &process, generation, parent, &intent).decision,
+                ExtensionPolicyDecision::Deny
+            );
+        }
+        process
+            .respond_to_policy_evaluation(
+                request_id,
+                generation,
+                ExtensionPolicyEvaluationResponse {
+                    decision: ExtensionPolicyDecision::Deny,
+                    approval_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(probe.await.unwrap().is_error);
+        assert_eq!(count_calls(), 0);
+        assert_eq!(
+            decide(generation, parent, &intent),
+            ExtensionPolicyDecision::Deny,
+            "settled parent cannot authorize another operation"
+        );
+        extensions.start_policy_supervisors();
+
+        let result = process
+            .call_tool(&unknown.name, serde_json::json!({}), owner())
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            count_calls(),
+            1,
+            "authorized missing-annotation call executes once"
+        );
+        assert!(!extensions
+            .drain_events()
+            .iter()
+            .any(|line| line.contains("policy intent denied")));
+
+        // Changing the supervisor's policy models denial independently of the
+        // startup floor (controlled mode never starts this process in product).
+        extensions.effect_policy = octet_agent::EffectPolicy::Controlled;
+        extensions.start_policy_supervisors();
+        let denied = process
+            .call_tool(&unknown.name, serde_json::json!({}), owner())
+            .await
+            .unwrap();
+        assert!(denied.is_error);
+        assert_eq!(count_calls(), 1, "denied call never reaches MCP server");
+        let read = process
+            .call_tool(&echo.name, serde_json::json!({"value": "hello"}), owner())
+            .await
+            .unwrap();
+        assert!(!read.is_error, "{}", read.content);
+        assert_eq!(count_calls(), 2, "read-only calls remain usable");
+
+        extensions.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        extensions.start_policy_supervisors();
+        let ownerless = process
+            .call_tool(
+                &unknown.name,
+                serde_json::json!({}),
+                process.current_context(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            ownerless.is_error,
+            "ownerless policy calls must fail closed"
+        );
+        assert_eq!(count_calls(), 2);
+        extensions.shutdown().await;
+    }
+
+    #[test]
+    fn mcp_policy_target_requires_server_scoped_tool_and_object_arguments() {
+        let valid = serde_json::json!({"server":"my-server", "tool":"mcp_my_server_mutate_0123456789", "arguments":{}});
+        assert!(mcp_policy_target(&valid).is_some());
+        // A short server label can share a namespace prefix. It is deliberately
+        // not a per-server permission grant: the full published tool and exact
+        // arguments must still match the host's active call digest.
+        let overlapping = serde_json::json!({"server":"my", "tool":"mcp_my_server_mutate_0123456789", "arguments":{}});
+        assert_eq!(mcp_policy_target(&valid), mcp_policy_target(&overlapping));
+        for invalid in [
+            serde_json::json!({"server":"other", "tool":"mcp_my_server_mutate_0123456789", "arguments":{}}),
+            serde_json::json!({"server":"../server", "tool":"mcp_server_mutate", "arguments":{}}),
+            serde_json::json!({"server":"", "tool":"mcp__mutate", "arguments":{}}),
+            serde_json::json!({"server":"my-server", "tool":"bash", "arguments":{}}),
+            serde_json::json!({"server":"my-server", "tool":"mcp_my_server_mutate", "arguments":[]}),
+        ] {
+            assert!(mcp_policy_target(&invalid).is_none(), "{invalid}");
         }
     }
 

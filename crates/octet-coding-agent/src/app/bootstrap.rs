@@ -7743,11 +7743,6 @@ pub(crate) fn build_app_with_runtime_manager(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
-    if agent.reasoning() != &reasoning {
-        // Agent resumes the durable effective effort. Apply an explicit launch
-        // override without overwriting the request's cached reasoning baseline.
-        agent.set_reasoning(reasoning.clone())?;
-    }
     #[cfg(any(unix, windows))]
     agent.enable_session_partial_output_checkpoints(
         "bash",
@@ -7769,6 +7764,12 @@ pub(crate) fn build_app_with_runtime_manager(
     }
     configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
     executable_extensions.bind_agent_sessions(&agent)?;
+    if agent.reasoning() != &reasoning {
+        // Construction restores durable effort. Install and bind observation
+        // before applying an explicit override that may enter Ultra; the setter
+        // also synchronizes the delegation template for future workers.
+        agent.set_reasoning(reasoning.clone())?;
+    }
     agent.finalize_tool_surface();
     let system_tokens = estimate_text_tokens(agent.system_prompt());
 
@@ -8059,9 +8060,6 @@ pub fn rebuild_app(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
-    if agent.reasoning() != &reasoning {
-        agent.set_reasoning(reasoning.clone())?;
-    }
     agent.set_service_tier(service_tier)?;
     #[cfg(any(unix, windows))]
     agent.enable_session_partial_output_checkpoints(
@@ -8084,6 +8082,12 @@ pub fn rebuild_app(
     }
     configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
     executable_extensions.bind_agent_sessions(&agent)?;
+    if agent.reasoning() != &reasoning {
+        // Construction restores durable effort. Install and bind observation
+        // before applying an explicit override that may enter Ultra; the setter
+        // also synchronizes the delegation template for future workers.
+        agent.set_reasoning(reasoning.clone())?;
+    }
     agent.finalize_tool_surface();
     let system_tokens = estimate_text_tokens(agent.system_prompt());
 

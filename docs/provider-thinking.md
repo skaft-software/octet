@@ -50,11 +50,14 @@ items carry subsequent changes. Resume restores the durable effective choice.
 Idle changes use the same durable control. Settings persistence failures remain
 visible. Explicit interactive choices reject unsupported efforts (including
 Codex Off when absent, and Ultra without advertised V2 and live observation)
-rather than silently clamping them. Live configuration updates accept ordinary
-effort only; Ultra is not a pure effort update. Changing into or out of Ultra/V2
-in an already-pinned session requires a new session; rejection preserves both
-the current session and the startup preference. Fresh qualified Ultra sessions
-remain supported. Startup/config normalization retains its existing policy.
+rather than silently clamping them. Provider configuration updates accept ordinary
+effort only; Ultra is not a pure effort update. Qualified transitions into or out
+of Ultra/V2 instead establish a new host baseline at the safe response boundary,
+superseding earlier effort updates without losing conversation or opaque outputs.
+No new session is required. The observing delegation runtime remains installed;
+future workers inherit the selected effort while existing workers retain their
+pinned choices. Rejected selections preserve the session and startup preference.
+Startup/config normalization retains its existing policy.
 Unqualified, public-compatible, and unknown routes keep the ordinary selector and idle-boundary fallback; names alone grant no controls.
 Native async execution and active WebSocket steering are separate capabilities;
 public OpenAI qualification does not establish Codex support.

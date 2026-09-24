@@ -392,8 +392,8 @@ pub fn requested_thinking_to_reasoning(
         model.spec.id.0,
     );
     let reasoning = thinking_to_reasoning_with_subagents(level, model, subagents_available)?;
-    // Ultra is a qualified initial delegation mode, not a wire update effort.
-    // Agent/RunControl enforce whether the current session can accept it.
+    // Ultra is a host delegation tier, not a wire update effort. Agent/RunControl
+    // check the observation runtime and rebase reasoning at a safe boundary.
     if model.responses_features().reasoning_effort_updates
         && reasoning != ReasoningConfig::Effort(ReasoningEffort::Ultra)
     {

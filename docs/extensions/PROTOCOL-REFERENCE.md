@@ -262,9 +262,10 @@ enabled, and appends `secrets` only when a secret broker is configured and the
 manifest's exact `[capabilities].secrets` allowlist is non-empty. Negotiating
 `approvals` also requires `policy_intents`; neither conditional service may be
 returned when it was not offered. The coding product currently leaves
-approvals disabled, configures no secret broker, and supervises generic
-`policy/evaluate` requests with `deny`, so it offers neither conditional
-feature.
+approvals disabled and configures no secret broker, so it offers neither
+conditional feature. Generic `policy/evaluate` requests return `deny`; the
+working-tree `mcp.tool.call` adapter permits exact active owner-scoped MCP calls
+under full access only, as described below.
 
 Secret names are duplicate-free identifiers of at most 64 ASCII bytes. The
 first character is a letter or underscore; subsequent characters may also use
@@ -1240,8 +1241,13 @@ generation before its bounded expiry (at most five minutes). Expiry, reuse, or
 intent/parent/generation mismatch returns `deny`; a recognized mismatched token
 is consumed as well. Supplying a token without negotiated `approvals` is
 rejected with `-32602`. Approval capability state is invalidated on generation
-replacement. The coding product currently has approvals off and no domain
-policy adapter, so its policy supervisor returns `deny` without a token.
+replacement. The coding product leaves approval-token issuance off. Its
+working-tree `mcp.tool.call` adapter permits the admitted `octet-mcp` process's
+exact active, owner-scoped tool call under `unsafe_host`, including mutations.
+It verifies the generation, exact published tool identity, and arguments against
+the host-issued call; commands, ownerless/settled parents, changed targets, and
+controlled policies cannot authorize it. Generic operations still return `deny`.
+This is not an annotation-based read-only exemption or an automatic replay grant.
 
 An extension may send `$/cancelRequest` for one of its own outstanding child
 request IDs. The host also sends it automatically when the owning parent

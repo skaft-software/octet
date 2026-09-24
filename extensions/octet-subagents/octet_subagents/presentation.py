@@ -259,9 +259,9 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
             )
     if worker.recovered:
         pieces.append("restarted")
-    if worker.host_diagnostic and (worker.detached or worker.awaiting_approval):
-        # The host named why this worker is parked or was refused; a detached
-        # row without its reason is useless, and the reason is host-observed.
+    if worker.host_diagnostic:
+        # Keep host recovery guidance visible even after interrupted work settles;
+        # this is a bounded host diagnostic, never child prose or tool content.
         reason = bounded_text(safe_label(worker.host_diagnostic), 160).strip()
         if reason:
             pieces.append(reason)
@@ -401,7 +401,7 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         "Session: %s" % (worker.session or "not yet exposed by agent_sessions"),
         "Session ownership: %s" % ownership,
     ]
-    if worker.host_diagnostic and (worker.detached or worker.awaiting_approval):
+    if worker.host_diagnostic:
         lines.append("Host reattachment: %s" % worker.host_diagnostic)
     if worker.reattach_count:
         lines.append(

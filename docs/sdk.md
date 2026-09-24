@@ -146,16 +146,19 @@ configuration setting. NDJSON applications retain process-group cancellation.
 
 ### Qualified Responses reasoning and steering
 
-Rust hosts can call `RunControl::set_reasoning(ReasoningConfig).await` on an
-ordinary-effort run qualified by both model and endpoint metadata. Admission
-coalesces pending choices at the next response boundary; it is not a provider
-acknowledgement. The run stays active, the request baseline stays pinned, and
-chronological typed updates preserve the cache prefix. `Agent::reasoning()`
+Rust hosts can call `RunControl::set_reasoning(ReasoningConfig).await` on a run
+qualified by both model and endpoint metadata. Admission coalesces pending
+choices at the next safe response boundary; it is not a provider acknowledgement.
+The run stays active. Ordinary effort changes keep the request baseline pinned
+and chronological typed updates preserve the cache prefix. `Agent::reasoning()`
 returns effective selection, including restored session updates. Use the idle
 `Agent::set_reasoning` setter for an explicit override after reconstruction.
-Fresh, explicitly supported Ultra/V2 uses normal selection validation, not an
-ordinary update; transitions into or out of an existing Ultra pin require a
-new session. Active Ultra runs do not admit ordinary reasoning updates.
+Explicitly supported Ultra/V2 transitions establish a new host baseline rather
+than sending an ordinary update: they supersede earlier effort updates without
+losing conversation or opaque provider outputs, and do not require a new session.
+Install the observation runtime before selecting Ultra through either setter.
+The delegation manager remains installed when leaving Ultra; future workers
+inherit the effective effort while existing workers retain their pinned choices.
 
 Existing steering controls use the native multi-response path only on a
 qualified WebSocket route without hard cumulative ceilings. Unsupported routes

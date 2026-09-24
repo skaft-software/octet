@@ -207,7 +207,7 @@ pub(super) fn render_block_planned_with_rainbow(
                 "/subagents".to_owned()
             };
             let label = sanitize_for_terminal(&label);
-            let role = if summary.running > 0 {
+            let role = if summary.active_count() > 0 {
                 "foreground"
             } else {
                 summary.settled_role()
@@ -222,7 +222,9 @@ pub(super) fn render_block_planned_with_rainbow(
                 theme.fg(role, &label)
             };
             let mut lines = vec![fit_line(&label, width)];
-            let hidden = summary.running.saturating_sub(summary.live_workers.len());
+            let hidden = summary
+                .active_count()
+                .saturating_sub(summary.live_workers.len());
             for (index, worker) in summary.live_workers.iter().enumerate() {
                 let last = index + 1 == summary.live_workers.len() && hidden == 0;
                 let branch = if theme.unicode() {

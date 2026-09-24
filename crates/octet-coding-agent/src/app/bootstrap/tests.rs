@@ -3406,6 +3406,125 @@ fn print_resume_restores_session_model_and_reasoning_unless_cli_overrides() {
     assert_eq!(launch.reasoning, ReasoningConfig::Off);
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumed_ultra_override_binds_observation_before_selection() {
+    use octet_ai::{ReasoningEffort, ResponsesFeatures};
+
+    let directory = tempfile::tempdir().unwrap();
+    let model_id = "fixture-ultra-resume";
+    let ultra = ReasoningConfig::Effort(ReasoningEffort::Ultra);
+    let low = ReasoningConfig::Effort(ReasoningEffort::Low);
+    let mut process_config = config(directory.path(), Some(model_id));
+    process_config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+    process_config.extension_paths = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions/octet-subagents")
+        .canonicalize()
+        .unwrap()];
+    process_config.enabled_extensions = vec!["octet-subagents".into()];
+    process_config.invocation_trusted_extensions = vec!["octet-subagents".into()];
+    process_config.resume = ResumeSelector::Continue;
+    process_config.reasoning = Some(ultra.clone());
+    process_config.reasoning_explicit = true;
+    let mut boot = bootstrap(process_config).unwrap();
+    let mut model = boot
+        .catalog
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    let features = ResponsesFeatures {
+        reasoning_effort_updates: true,
+        ..Default::default()
+    };
+    let endpoint = Arc::make_mut(&mut model.endpoint);
+    endpoint.id = octet_ai::EndpointId("fixture-ultra-resume".into());
+    endpoint.runtime.responses_features = features;
+    boot.catalog.register_endpoint(endpoint.clone()).unwrap();
+    let spec = Arc::make_mut(&mut model.spec);
+    spec.id = ModelId(model_id.into());
+    spec.endpoint = model.endpoint.id.clone();
+    spec.capabilities.responses_features = features;
+    spec.capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
+    let capability = spec.capabilities.reasoning.as_mut().unwrap();
+    capability.max_effort = ReasoningEffort::Ultra;
+    capability.options = Some(octet_ai::types::ReasoningOptions {
+        values: vec!["none".into(), "low".into(), "max".into(), "ultra".into()],
+        default: Some("low".into()),
+    });
+    boot.catalog.register_model(spec.clone()).unwrap();
+    let path = boot.sessions.new_path("ultra-resume");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut session = Session::create(&path).unwrap();
+    session
+        .append(EntryValue::Config {
+            model: Some(model_id.into()),
+            reasoning: Some("low".into()),
+            reasoning_mode: None,
+        })
+        .unwrap();
+    let history = session
+        .append(EntryValue::Message(octet_ai::Message::User(
+            octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("preserve history".into())],
+            },
+        )))
+        .unwrap();
+    session
+        .append(EntryValue::ResponsesReasoning {
+            endpoint: model.endpoint.id.clone(),
+            model: model.spec.id.clone(),
+            baseline: low.clone(),
+            update: None,
+        })
+        .unwrap();
+    drop(session);
+
+    let launch = resolve_launch_print(&boot, "unused").unwrap();
+    assert_eq!(launch.reasoning, ultra);
+    let mut app = build_app(boot, launch, "system".into()).unwrap();
+    assert!(
+        app.executable_extensions.has_agent_session_service(),
+        "{}",
+        app.executable_extensions.inspect_text()
+    );
+    assert!(app.agent.delegation_team_directory().is_some());
+    assert_eq!(app.agent.reasoning(), &ultra);
+    assert_eq!(app.reasoning, ultra);
+    assert_eq!(app.agent.session().path(), path);
+    assert!(app.agent.session().entry(&history).is_some());
+    assert_eq!(
+        app.agent
+            .session()
+            .responses_reasoning(&model.endpoint.id, &model.spec.id)
+            .unwrap(),
+        Some((ultra.clone(), ultra.clone()))
+    );
+
+    // Exercise the consuming rebuild path independently of launch restoration.
+    // Its existing durable pin is lower than the explicit requested override.
+    app.agent.set_reasoning(low.clone()).unwrap();
+    app.reasoning = low.clone();
+    app.config.reasoning = Some(low);
+    let mut app = rebuild_app(app, None, Some(ultra.clone()), None, None).unwrap();
+    assert!(
+        app.executable_extensions.has_agent_session_service(),
+        "{}",
+        app.executable_extensions.inspect_text()
+    );
+    assert!(app.agent.delegation_team_directory().is_some());
+    assert_eq!(app.agent.reasoning(), &ultra);
+    assert_eq!(app.reasoning, ultra);
+    assert_eq!(app.agent.session().path(), path);
+    assert!(app.agent.session().entry(&history).is_some());
+    assert_eq!(
+        app.agent
+            .session()
+            .responses_reasoning(&model.endpoint.id, &model.spec.id)
+            .unwrap(),
+        Some((ultra.clone(), ultra))
+    );
+    app.executable_extensions.shutdown_blocking();
+}
+
 #[test]
 fn explicit_reasoning_clears_a_persisted_legacy_pro_mode() {
     let directory = tempfile::tempdir().unwrap();

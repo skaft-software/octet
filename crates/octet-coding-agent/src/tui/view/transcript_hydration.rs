@@ -93,6 +93,7 @@ pub(super) fn append_hydrated_items(
                             state.touch_block(index);
                         } else {
                             state.push_block(TranscriptBlock::Subagents(SubagentTranscript {
+                                queued: 0,
                                 running: 1,
                                 succeeded: 0,
                                 failed: 0,
