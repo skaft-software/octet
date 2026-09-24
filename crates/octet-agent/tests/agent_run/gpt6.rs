@@ -32,6 +32,115 @@ fn model(uri: &str) -> Model {
 }
 
 #[tokio::test]
+async fn missing_responses_sidecar_replays_canonically_with_effective_reasoning() {
+    let server = MockServer::start().await;
+    let call_id = "call_missing_output";
+    let arguments = r#"{"path":"lifecycle.txt"}"#;
+    let first = [
+        serde_json::json!({"type": "response.created", "response": {"id": "first"}}),
+        serde_json::json!({
+            "type": "response.output_item.added", "output_index": 0,
+            "item": {"id": "fc_first", "type": "function_call", "call_id": call_id, "name": "read"}
+        }),
+        serde_json::json!({
+            "type": "response.function_call_arguments.done", "output_index": 0,
+            "arguments": arguments
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 9, "output_tokens": 3, "total_tokens": 12}}
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect();
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(Script {
+            bodies: vec![
+                first,
+                responses_text_turn("second", "done", "response.completed", "second"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("lifecycle.txt"), "readable").unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let model = model(&server.uri());
+    let mut agent = build_agent_with_reasoning(
+        model.clone(),
+        &sessions.path().join("session.jsonl"),
+        workspace.path(),
+        ReasoningConfig::Effort(ReasoningEffort::Low),
+        Some(4),
+    );
+    agent
+        .set_reasoning(ReasoningConfig::Effort(ReasoningEffort::Low))
+        .unwrap();
+    agent
+        .set_reasoning(ReasoningConfig::Effort(ReasoningEffort::High))
+        .unwrap();
+    let mut run = agent.prompt("read the file").await.unwrap();
+    let events = collect(&mut run).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::RunFinished {
+                reason: FinishReason::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    drop(run);
+    assert!(agent
+        .session()
+        .responses_replay_items(&model.endpoint.id, &model.spec.id)
+        .unwrap()
+        .is_none());
+
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["reasoning"]["effort"], "low");
+    assert!(requests[0]["input"].as_array().unwrap().iter().any(|item| {
+        item["type"] == "configuration_update" && item["reasoning"]["effort"] == "high"
+    }));
+    assert_eq!(requests[1]["reasoning"]["effort"], "high");
+    let input = requests[1]["input"].as_array().unwrap();
+    assert!(!input
+        .iter()
+        .any(|item| item["type"] == "configuration_update"));
+    assert!(input.iter().any(|item| item["type"] == "function_call"));
+    assert!(input
+        .iter()
+        .any(|item| item["type"] == "function_call_output"));
+
+    drop(agent);
+    let mut warm_model = model;
+    Arc::make_mut(&mut warm_model.endpoint).transport =
+        octet_ai::EndpointTransport::WebSocketPreferred;
+    let resumed = build_agent_from_session_with_model(
+        warm_model,
+        workspace.path(),
+        Session::open(sessions.path().join("session.jsonl")).unwrap(),
+        ReasoningConfig::Off,
+        Some(4),
+    );
+    let (_, _, warm) = resumed.responses_prewarm_request().unwrap().unwrap();
+    assert_eq!(
+        warm.reasoning,
+        ReasoningConfig::Effort(ReasoningEffort::High)
+    );
+    assert!(warm
+        .responses
+        .as_ref()
+        .is_none_or(|options| options.input.is_none()));
+}
+
+#[tokio::test]
 async fn reasoning_control_pins_baseline_coalesces_and_resumes() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

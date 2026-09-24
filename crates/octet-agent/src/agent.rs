@@ -4764,21 +4764,10 @@ fn durable_responses_options(
     requested_service_tier: Option<ServiceTier>,
 ) -> Result<Option<ResponsesOptions>, AgentError> {
     let service_tier = resolve_service_tier(model, requested_service_tier)?;
-    let reasoning_state = session.responses_reasoning(&model.endpoint.id, &model.spec.id)?;
     let replay = exact_responses_replay(session, model, system);
-    // A baseline pin is represented by `Request.reasoning`; only an ordered
-    // update item must occupy its chronological position in opaque replay.
-    // Existing Codex sessions predate route-affine sidecars and remain valid
-    // through canonical replay when no update has been recorded.
-    if reasoning_state
-        .as_ref()
-        .is_some_and(|(baseline, effective)| baseline != effective)
-        && replay.is_none()
-    {
-        return Err(AgentError::InvalidCompactionPolicy(
-            "reasoning update history requires complete route-affine Responses replay".into(),
-        ));
-    }
+    // A complete opaque replay carries ordered reasoning updates. Without one,
+    // the codec re-encodes canonical history and request_reasoning_for_replay
+    // selects the effective effort instead of replaying a stale baseline.
     match (replay, service_tier) {
         // No route-affine local window and no requested tier: keep the
         // historical `None`, which makes the codec fall back to canonical
@@ -4797,6 +4786,24 @@ fn durable_responses_options(
             }))
         }
     }
+}
+
+fn request_reasoning_for_replay(
+    session: &Session,
+    model: &Model,
+    responses: Option<&ResponsesOptions>,
+    selection: &ReasoningConfig,
+) -> Result<ReasoningConfig, AgentError> {
+    // Only complete route-affine replay retains the chronological updates
+    // that override the pinned baseline. Canonical fallback has no updates,
+    // so put the effective selection on the request itself.
+    let state = session.responses_reasoning(&model.endpoint.id, &model.spec.id)?;
+    let exact = responses.is_some_and(|options| options.input.is_some());
+    Ok(match state {
+        Some((baseline, _)) if exact => baseline,
+        Some((_, effective)) => effective,
+        None => selection.clone(),
+    })
 }
 
 /// Validates a requested service tier against the route that will carry it.
@@ -7610,10 +7617,12 @@ impl Agent {
             max_output_tokens: Some(self.max_output_tokens),
             temperature: None,
             stop: Vec::new(),
-            reasoning: self
-                .session
-                .responses_reasoning(&self.model.endpoint.id, &self.model.spec.id)?
-                .map_or_else(|| self.reasoning.clone(), |(baseline, _)| baseline),
+            reasoning: request_reasoning_for_replay(
+                &self.session,
+                &self.model,
+                responses.as_ref(),
+                &self.reasoning,
+            )?,
             reasoning_mode: self.reasoning_mode,
             responses,
             output_format: OutputFormat::Text,
@@ -9983,10 +9992,14 @@ impl Agent {
                     max_output_tokens: Some(request_max_output_tokens),
                     temperature: None,
                     stop: vec![],
-                    reasoning: match session.responses_reasoning(&model.endpoint.id, &model.spec.id) {
-                        Ok(Some((baseline, _))) => baseline,
-                        Ok(None) => reasoning.clone(),
-                        Err(error) => break 'run FinishReason::Failed(error.into()),
+                    reasoning: match request_reasoning_for_replay(
+                        session,
+                        &model,
+                        responses.as_ref(),
+                        &reasoning,
+                    ) {
+                        Ok(selection) => selection,
+                        Err(error) => break 'run FinishReason::Failed(error),
                     },
                     reasoning_mode,
                     responses,
@@ -15165,15 +15178,20 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
                 }),
             })
             .unwrap();
-        let error = durable_responses_options(&session, &model, "system", None).unwrap_err();
-        assert!(
-            error.to_string().contains(
-                "reasoning update history requires complete route-affine Responses replay"
-            ),
-            "{error}"
+        assert!(durable_responses_options(&session, &model, "system", None)
+            .unwrap()
+            .is_none());
+        let effective = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+        assert_eq!(
+            request_reasoning_for_replay(&session, &model, None, &baseline).unwrap(),
+            effective
         );
 
         assert_eq!(options.service_tier, Some(ServiceTier::Flex));
+        assert_eq!(
+            request_reasoning_for_replay(&session, &model, Some(&options), &baseline).unwrap(),
+            effective
+        );
         assert!(options.input.is_none());
         assert_eq!(options.previous_response_id, None);
         assert!(!options.store);

@@ -56,12 +56,16 @@ synchronous tools and queued steering.
   updates separately from effective host selection. Provider-authored opaque
   configuration updates are rejected. Resume restores effective selection;
   explicit idle overrides use `Agent::set_reasoning`. Prewarming uses the same
-  pinned baseline and advertised async tool schemas. Successful local compaction
-  rebases the retained prefix; failed compaction leaves the pin unchanged.
-  Unsupported native compaction never strips updates (autonomous qualified runs
-  use local compaction). Fresh, explicitly qualified Ultra/V2 remains valid;
-  switching an existing pin into **or out of Ultra requires a new session**.
-  Ordinary configuration updates cannot change delegation mode.
+  replay-dependent reasoning and advertised async tool schemas. Successful local
+  compaction rebases the retained prefix; failed compaction leaves the pin
+  unchanged. Without complete same-route output sidecars, normal Responses
+  requests replay canonical conversation with effective reasoning as their
+  request baseline instead of emitting incomplete chronological updates; native
+  mode still requires complete opaque replay. Unsupported native compaction
+  never strips updates (autonomous qualified runs use local compaction). Fresh,
+  explicitly qualified Ultra/V2 remains valid; switching an existing pin into
+  **or out of Ultra requires a new session**. Ordinary configuration updates
+  cannot change delegation mode.
 - **Native steering:** qualified WebSocket runs without hard ceilings prepare a
   local receipt, persist intent, then dispatch. Each completed response retains
   independent usage. Applied input follows the completed prefix, atomically
