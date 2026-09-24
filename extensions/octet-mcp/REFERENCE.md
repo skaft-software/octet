@@ -455,6 +455,12 @@ eight committed octet schema/handler snapshots, so an older in-flight model turn
 uses the handler and validation schema from the `catalog_revision` it saw.
 Removed/restarted servers never alias an old epoch to a new connection.
 
+The bridge filters unsupported schema keywords at every schema node, including
+schema-valued `additionalProperties`. Recursive MCP `$defs`/`$ref` constraints
+cannot be enforced by octet's tool bus; omitting them may make a catch-all
+schema permissive, not grant approval for a tool call. The read-only annotation
+and host policy gates remain separate.
+
 Calls use bounded concurrency and timeout, forward octet cancellation as MCP
 `notifications/cancelled`, and retain safe server/tool provenance and terminal
 activity. Cancellation requests cooperation and never claims rollback.

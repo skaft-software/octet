@@ -248,6 +248,8 @@ def _schema_node(value: Any, depth: int, budget: list[int]) -> Any:
                 if not isinstance(item, list) or not item:
                     raise CatalogError(f"schema {key} must be a non-empty array")
                 result[key] = [_schema_node(child, depth + 1, budget) for child in item]
+            elif key == "additionalProperties" and isinstance(item, Mapping):
+                result[key] = _schema_node(item, depth + 1, budget)
             elif key == "items":
                 result[key] = _schema_node(item, depth + 1, budget)
             elif key in {"description", "title"}:
