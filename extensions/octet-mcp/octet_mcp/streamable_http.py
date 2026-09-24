@@ -44,10 +44,9 @@ MAX_HTTP_EVENT_ID_BYTES = 1024
 MAX_HTTP_EVENTS = 256
 MAX_CREDENTIAL_BYTES = 64 * 1024
 MAX_HTTP_CONTROLS = 16
-# The optional permanent GET notification stream is one long-lived connection
-# renewed inside the configured request timeout; total connections are bounded
-# so a hostile peer can never turn it into an unbounded reconnect loop.
-MAX_HTTP_STREAM_CONNECTIONS = 64
+# Only failed GET connections consume the stream's lifetime reconnect budget.
+# Healthy renewals are bounded individually by the request timeout.
+MAX_HTTP_STREAM_FAILURES = 64
 
 
 class CredentialProvider(Protocol):
@@ -586,7 +585,7 @@ class McpStreamableHttpClient:
     # request path ever depends on it. The stream is bounded per connection by
     # the shared frame/event/control budgets, renewed inside the configured
     # request timeout, reconnected with ``Last-Event-ID`` only after a committed
-    # event identity, and capped by ``MAX_HTTP_STREAM_CONNECTIONS``.
+    # event identity, and capped by ``MAX_HTTP_STREAM_FAILURES`` failed connections.
 
     def _set_stream_state(self, state: str) -> None:
         with self._stream_lock:
@@ -634,12 +633,12 @@ class McpStreamableHttpClient:
 
     def _notification_stream_loop(self) -> None:
         failures = 0
-        connections = 0
+        failed_connections = 0
         while not self._stream_should_stop():
-            if connections >= MAX_HTTP_STREAM_CONNECTIONS:
+            if failed_connections >= MAX_HTTP_STREAM_FAILURES:
                 raise McpTransportError(
                     "notification_stream_exhausted",
-                    "MCP notification stream exceeded its bounded reconnect limit",
+                    "MCP notification stream exceeded its bounded failure reconnect limit",
                     ambiguous=True,
                 )
             delay_ms = (
@@ -654,20 +653,27 @@ class McpStreamableHttpClient:
                 return
             if self._stream_should_stop():
                 return
-            connections += 1
             deadline = time.monotonic() + self.config.request_timeout_ms / 1000
+            self._set_stream_state("opening")
             try:
                 self._stream_exchange(deadline)
-            except McpTimeout:
-                # An idle permanent stream that renews inside the configured
-                # request timeout is healthy; it is not a failed request.
-                failures = 0
+            except McpTimeout as error:
+                # Only a GET that reached a validated SSE response is an idle
+                # renewal. A timeout before headers is a failed connection.
+                if self.notification_stream == "open":
+                    failures = 0
+                    continue
+                failures += 1
+                failed_connections += 1
+                if failures > self.config.max_restarts:
+                    raise error
             except McpTransportError as error:
                 if error.code == "notification_stream_unsupported":
                     self._set_stream_state("unsupported")
                     self.logs.append(b"MCP notification stream was not offered by the server")
                     return
                 failures += 1
+                failed_connections += 1
                 if failures > self.config.max_restarts:
                     raise
             else:

@@ -357,3 +357,21 @@ pub fn model_display_name_variants(name: &str) -> Vec<String> {
     }
     variants
 }
+
+/// Only a catalogue-owned provider prefix may be omitted in quiet chrome.
+/// Configured names and unfamiliar aliases remain verbatim, even if they
+/// contain a colon or happen to begin with a known provider's name.
+pub fn footer_model_name<'a>(name: &'a str, canonical_id: &str) -> &'a str {
+    if octet_ai::model_metadata::model_display_name(canonical_id) != Some(name) {
+        return name;
+    }
+    let derived = derive_model_display_name(canonical_id);
+    for prefix in ["Anthropic: ", "OpenAI: ", "Google: ", "DeepSeek: "] {
+        if let Some(short) = name.strip_prefix(prefix) {
+            if short == derived {
+                return short;
+            }
+        }
+    }
+    name
+}

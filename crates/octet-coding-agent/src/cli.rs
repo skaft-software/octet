@@ -99,6 +99,11 @@ pub enum TopLevelCommand {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// Integrate with the Herdr terminal workspace manager.
+    Herdr {
+        #[command(subcommand)]
+        command: crate::herdr::HerdrCommand,
+    },
     /// Install and manage extension packages.
     Extension {
         #[command(subcommand)]
@@ -232,9 +237,8 @@ pub struct Cli {
     /// Workspace root override.
     #[arg(long)]
     pub workspace: Option<PathBuf>,
-    /// Terminal appearance selector: auto, light, or dark. Arbitrary theme
-    /// names remain compatibility inputs and never load filesystem themes.
-    #[arg(long, value_name = "NAME", hide = true)]
+    /// Terminal theme: auto, light, or dark.
+    #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,
     /// Legacy theme directory option; the current runtime does not load custom themes.
     #[arg(long = "theme-dir", value_name = "DIR", hide = true)]
@@ -3679,17 +3683,25 @@ max_output_bytes = 4096
         )
         .unwrap();
 
-        persist_theme_to_path("light", &path).unwrap();
+        for choice in ["light", "dark", "auto"] {
+            persist_theme_to_path(choice, &path).unwrap();
 
-        let content = std::fs::read_to_string(&path).unwrap();
-        let parsed: toml::Value = toml::from_str(&content).unwrap();
-        assert_eq!(parsed["theme"].as_str(), Some("light"));
-        assert_eq!(parsed["model"].as_str(), Some("gpt-4o-mini"));
-        assert_eq!(
-            parsed["compaction"]["keep_recent_tokens"].as_integer(),
-            Some(8)
-        );
-        assert!(content.contains("# keep this comment"), "{content}");
+            let content = std::fs::read_to_string(&path).unwrap();
+            let parsed: toml::Value = toml::from_str(&content).unwrap();
+            assert_eq!(parsed["theme"].as_str(), Some(choice));
+            assert_eq!(parsed["model"].as_str(), Some("gpt-4o-mini"));
+            assert_eq!(
+                parsed["compaction"]["keep_recent_tokens"].as_integer(),
+                Some(8)
+            );
+            assert!(content.contains("# keep this comment"), "{content}");
+        }
+    }
+
+    #[test]
+    fn removed_cutline_theme_cannot_be_persisted() {
+        let error = persist_theme_choice("compact").unwrap_err();
+        assert!(error.to_string().contains("use auto, light, or dark"));
     }
 
     #[test]

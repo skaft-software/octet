@@ -69,6 +69,7 @@
 pub mod agent;
 pub mod artifact;
 pub mod cache;
+pub mod cache_warmer;
 pub mod compaction;
 pub mod context;
 pub mod delegation;
@@ -99,7 +100,7 @@ pub mod tools;
 
 pub use agent::{
     public_error_diagnostic, Agent, AgentCompactionMode, AgentConfig, AgentError, CompletionPolicy,
-    RequestContextEstimate, Run, RunControl, RunOutput,
+    PreparedSteering, RequestContextEstimate, Run, RunControl, RunOutput, SteeringReceipt,
 };
 pub use artifact::{
     ArtifactError, ArtifactGenerationSettlement, ArtifactId, ArtifactPublication, ArtifactSource,
@@ -112,6 +113,7 @@ pub use cache::{
     analyze_session_cache, analyze_session_cache_stats, CacheMiss, CacheStats,
     CACHE_MISS_NOISE_TOKENS,
 };
+pub use cache_warmer::{CacheWarmMode, CacheWarmOutcome, CacheWarmPolicy};
 pub use compaction::{
     build_branch_handoff_message, build_handoff_message, build_turn_prefix_handoff_message,
     choose_first_kept_by_tokens, finish_branch_handoff, finish_handoff, format_file_operations,
@@ -140,12 +142,12 @@ pub use events::{
     ToolPolicyDecision,
 };
 pub use extension::{
-    AssistantPersistenceContext, EventObserver, Extension, ExtensionHost, PersistenceMetadataHook,
-    PersistenceMetadataProposal, PostMutationContext, PostMutationDisposition, PostMutationKind,
-    PostMutationRescan, PostMutationState, ProviderRetryAdvice, ProviderRetryContext,
-    ProviderRetryHook, ProviderRetryKind, ToolCallHook, MAX_POST_MUTATION_AFFECTED_RESOURCES,
-    MAX_POST_MUTATION_ID_BYTES, MAX_POST_MUTATION_RESOURCE_ID_BYTES,
-    MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+    AssistantPersistenceContext, CompactionStrategy, EventObserver, Extension, ExtensionHost,
+    PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
+    PostMutationDisposition, PostMutationKind, PostMutationRescan, PostMutationState,
+    ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook, ProviderRetryKind, ToolCallHook,
+    MAX_POST_MUTATION_AFFECTED_RESOURCES, MAX_POST_MUTATION_ID_BYTES,
+    MAX_POST_MUTATION_RESOURCE_ID_BYTES, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
 };
 pub use extension_policy::{
     ExtensionActionIntent, ExtensionAdapterHints, ExtensionApprovalStore, ExtensionApprovalToken,
@@ -187,8 +189,9 @@ pub use extension_process::{
     ToolCallOutput as ExtensionToolCallOutput, ToolCatalogUpdateResponse,
     ToolDefinition as ExtensionToolDefinition, ToolRegistrationRequest, ToolRenderSegment,
     DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION, EXTENSION_API_VERSION_0_1,
-    EXTENSION_API_VERSION_0_2, EXTENSION_API_VERSION_0_3, EXTENSION_FEATURE_AGENT_SESSIONS,
-    EXTENSION_FEATURE_APPROVALS, EXTENSION_FEATURE_ARTIFACTS, EXTENSION_FEATURE_CONTENT_PARTS,
+    EXTENSION_API_VERSION_0_2, EXTENSION_API_VERSION_0_3, EXTENSION_API_VERSION_0_4,
+    EXTENSION_FEATURE_AGENT_SESSIONS, EXTENSION_FEATURE_APPROVALS, EXTENSION_FEATURE_ARTIFACTS,
+    EXTENSION_FEATURE_COMPACTION_STRATEGY, EXTENSION_FEATURE_CONTENT_PARTS,
     EXTENSION_FEATURE_DELEGATION_TELEMETRY, EXTENSION_FEATURE_DYNAMIC_TOOLS,
     EXTENSION_FEATURE_LIFECYCLE_EVENTS, EXTENSION_FEATURE_POLICY_INTENTS,
     EXTENSION_FEATURE_PROGRESS_DECORATION, EXTENSION_FEATURE_REQUEST_CANCELLATION,
@@ -222,11 +225,11 @@ pub use sandbox::{
     ShellSelection, ToolPolicyProvenance, DEFAULT_MAX_OUTPUT_BYTES,
 };
 pub use session::{
-    Checkpoint, Entry, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
-    ExtensionMetadataProvenance, Session, SessionError, SessionRecord, SessionRunOutcome,
-    SessionRunOutcomeStatus, UsageRecord, UsageRecordKind, UsageUncertaintyRecord,
-    MAX_EXTENSION_ENTRY_METADATA_BYTES, MAX_EXTENSION_ENTRY_METADATA_NAMESPACES,
-    MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
+    CacheWarmRecord, CacheWarmState, Checkpoint, Entry, EntryId, EntryMetadata, EntryValue,
+    ExtensionEntryMetadata, ExtensionMetadataProvenance, Session, SessionError, SessionRecord,
+    SessionRunOutcome, SessionRunOutcomeStatus, UsageRecord, UsageRecordKind,
+    UsageUncertaintyRecord, MAX_EXTENSION_ENTRY_METADATA_BYTES,
+    MAX_EXTENSION_ENTRY_METADATA_NAMESPACES, MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
 };
 pub use skills::{
     ContentHash, LoadedSkill, SkillActivationId, SkillDescriptor, SkillId, SkillLoadError,

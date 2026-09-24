@@ -467,6 +467,7 @@ CONTRIBUTING.md
 LICENSE
 SECURITY.md
 THIRD_PARTY_NOTICES.md
+crates/octet-ai/docs/responses-controls.md
 crates/octet-ai/models/SOURCES.md
 crates/octet-ai/src/protocol/openai_responses.rs
 crates/octet-ai/src/responses_ws.rs
@@ -489,14 +490,15 @@ extensions/octet-mcp/README.md
 extensions/octet-mcp/REFERENCE.md
 extensions/octet-mcp/fixtures/tls/README.md
 extensions/octet-import-aider/README.md
-extensions/octet-import-cline/README.md
 extensions/octet-import-pi/README.md
 extensions/octet-serve/README.md
+extensions/octet-snap-compact/README.md
 extensions/octet-subagents/README.md
 extensions/octet-subagents/REFERENCE.md
 extensions/octet-web-search/README.md
 extensions/octet-web-search/REFERENCE.md
 scripts/bench-systems.py
+third_party/licenses/GROK-MERMAID-APACHE-2.0.txt
 third_party/licenses/PI-MIT.txt
 third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt
 OCTET_DOCUMENTATION_EXTRAS

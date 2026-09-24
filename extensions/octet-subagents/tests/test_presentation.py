@@ -42,6 +42,48 @@ class PresentationTests(unittest.TestCase):
         defaults.update(values)
         return Worker(**defaults)
 
+    def test_explicit_model_labels_do_not_duplicate_canonical_provider(self):
+        from octet_subagents.presentation import detail_body, worker_secondary
+        for model in ("alternate", "custom/fixture/alternate"):
+            with self.subTest(model=model):
+                worker = self.worker(
+                    requested_provider="custom/fixture", requested_model=model,
+                    effective_provider="custom/fixture", effective_model=model,
+                    requested_reasoning="off", effective_reasoning="off",
+                    model_policy_applied=True,
+                )
+                detail = detail_body(worker, worker.created_at_ms)
+                row = worker_secondary(worker, worker.created_at_ms)
+                self.assertIn("Model/profile: custom/fixture/alternate / explore", detail)
+                self.assertIn("provider/model custom/fixture/alternate", detail)
+                self.assertIn("effective custom/fixture/alternate / reasoning off", detail)
+                self.assertIn("model custom/fixture/alternate", row)
+                self.assertNotIn("custom/fixture/custom/fixture", detail + row)
+                self.assertNotIn("(inherited)", detail)
+        inherited = self.worker()
+        self.assertIn("Model/profile: claude-sonnet-test (inherited) / explore",
+                      detail_body(inherited, inherited.created_at_ms))
+
+    def test_mixed_model_fleet_labels_each_worker_not_the_collection(self):
+        inherited = self.worker(agent_id="agent-a", name="audit", effective_model="claude-sonnet-test")
+        explicit = self.worker(
+            agent_id="agent-b", agent_path="/root/search", name="search",
+            requested_provider="openai", requested_model="gpt-test",
+            effective_provider="openai", effective_model="gpt-test",
+            model_policy_applied=True,
+        )
+        snapshot = build_snapshot(
+            [inherited, explicit], selected_agent_id=inherited.agent_id,
+            now_ms=1_700_000_004_000,
+        )
+        collection = snapshot["collection"]
+        self.assertEqual(collection["title"], "Subagents")
+        rows = {node["label"]: node["secondary"] for node in collection["nodes"]}
+        self.assertIn("claude-sonnet-test", rows["audit"])
+        self.assertNotIn("gpt-test", rows["audit"])
+        self.assertIn("gpt-test", rows["search"])
+        self.assertNotIn("claude-sonnet-test", rows["search"])
+
     def test_tree_is_content_free_while_detail_carries_terminal_summary(self):
         worker = self.worker(
             "done",
@@ -353,6 +395,40 @@ class PresentationTests(unittest.TestCase):
             [running], selected_agent_id=running.agent_id, now_ms=1_700_000_007_000
         )
         self.assertNotIn("Host reattachment", snapshot["collection"]["detail"]["body"])
+
+    def test_settled_worker_retains_bounded_host_recovery_guidance(self):
+        from octet_subagents.model import MAX_ERROR_BYTES, sanitize_document
+
+        hint = "Interrupted after restart; use subagent_continue to resume explicitly."
+        for state in ("cancelled", "stopped", "failed"):
+            with self.subTest(state=state):
+                worker = self.worker(
+                    state,
+                    host_diagnostic=sanitize_document(
+                        hint + "\x1b[31m\x00\n" + "é" * 5000, MAX_ERROR_BYTES
+                    ),
+                    summary="PRIVATE-CHILD-PROSE",
+                    phase="PRIVATE-RUNNING-PHASE",
+                )
+                snapshot = build_snapshot(
+                    [worker], selected_agent_id=worker.agent_id,
+                    now_ms=1_700_000_007_000,
+                )
+                node = snapshot["collection"]["nodes"][0]
+                detail = snapshot["collection"]["detail"]["body"]
+                self.assertIn(hint, node["secondary"])
+                self.assertIn("Host reattachment: " + hint, detail)
+                self.assertLessEqual(len(node["secondary"].encode("utf-8")), 1024)
+                diagnostic = detail.split("Host reattachment: ", 1)[1].split(
+                    "\n\nHost-observed final summary", 1
+                )[0]
+                self.assertLessEqual(len(diagnostic.encode("utf-8")), MAX_ERROR_BYTES)
+                for text in (node["secondary"], detail):
+                    self.assertNotIn("\x1b", text)
+                    self.assertNotIn("\x00", text)
+                compact = json.dumps(node) + json.dumps(snapshot["activities"])
+                self.assertNotIn(worker.summary, compact)
+                self.assertNotIn(worker.phase, compact)
 
     def test_worker_rows_omit_absence_and_human_format_bounded_values(self):
         # Every ceiling is inherited and no counter is exposed: absence must be

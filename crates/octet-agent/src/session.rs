@@ -101,6 +101,8 @@ pub enum UsageRecordKind {
     },
     /// A tool-free call used to produce a context-compaction summary.
     Compaction,
+    /// Isolated Anthropic prompt-cache keepalive; never an assistant turn.
+    CacheWarm,
     /// A bounded one-token decision about whether a candidate response may
     /// return control to the user. `None` records a billable malformed answer.
     TerminalGate {
@@ -156,6 +158,36 @@ impl UsageUncertaintyRecord {
         }
         Ok(())
     }
+}
+
+/// Durable, payload-free status of an Anthropic prompt-cache keepalive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheWarmState {
+    /// Written before the provider request; an unsettled attempt is uncertain.
+    Started,
+    /// A complete terminal response with separately recorded usage.
+    Completed,
+    /// Deadline expired after possible dispatch; usage is unknown.
+    TimedOut,
+    /// Provider failed after possible dispatch; usage is unknown.
+    Failed,
+}
+
+/// One bounded status record, separate from provider usage and model context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheWarmRecord {
+    /// Monotonic attempt number within this session.
+    pub attempt: u64,
+    /// Host-selected route identifier (never URL or credentials).
+    pub endpoint: EndpointId,
+    /// Host-selected model identifier.
+    pub model: ModelId,
+    /// Attempt lifecycle.
+    pub state: CacheWarmState,
+    /// Wall-clock observation time.
+    pub at_unix_ms: u64,
 }
 
 /// Provider usage and cost recorded for one durable operation.
@@ -384,6 +416,10 @@ fn valid_extension_metadata_value(
 /// visually immutable across model and theme changes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryMetadata {
+    /// Atomic provenance for a materialized native steering user message.
+    /// The tuple is (operation identifier, prepared local submission id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_steering: Option<(String, u64)>,
     /// Canonical model that received a user prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_model: Option<ModelId>,
@@ -457,6 +493,14 @@ pub enum SessionRunOutcomeStatus {
 
 impl EntryMetadata {
     fn sanitized(mut self) -> Option<Self> {
+        self.native_steering = self.native_steering.filter(|(operation, id)| {
+            !operation.is_empty()
+                && operation.len() <= 128
+                && *id < 64
+                && operation
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        });
         self.prompt_model = self.prompt_model.filter(|model| {
             !model.0.is_empty() && !model.0.chars().any(|character| character.is_control())
         });
@@ -519,7 +563,8 @@ impl EntryMetadata {
             sanitized_extension_metadata.insert(namespace, entry_metadata);
         }
         self.extension_metadata = sanitized_extension_metadata;
-        (self.prompt_model.is_some()
+        (self.native_steering.is_some()
+            || self.prompt_model.is_some()
             || self.prompt_model_source.is_some()
             || self.prompt_color.is_some()
             || self.display_text.is_some()
@@ -561,6 +606,16 @@ pub struct Entry {
     pub value: EntryValue,
 }
 
+/// Durable bitmap checkpoint; source text is retained for later re-compaction.
+/// The lead-in and frames enter vision-model context, not this source text.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SnapcompactCheckpoint {
+    /// Source of the frames, including any earlier bitmap checkpoint.
+    pub source_text: String,
+    /// Inline PNGs using the existing base64 media codec.
+    pub frames: Vec<octet_ai::Media>,
+}
+
 /// Payload of a session entry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -573,6 +628,9 @@ pub enum EntryValue {
     Compaction {
         /// Caller-provided summary of the replaced history.
         summary: String,
+        /// Optional deterministic bitmap replacement for this summary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapcompact: Option<SnapcompactCheckpoint>,
         /// The oldest entry still kept in full-fidelity context.
         first_kept: EntryId,
         /// Snapshots of active skills at the compaction boundary.
@@ -612,6 +670,38 @@ pub enum EntryValue {
         covered_through: EntryId,
         /// Complete, unpruned compact output used as the next replay base.
         output: octet_ai::ResponsesOutput,
+    },
+    /// Durable native steering intent/outcome. Never canonical user input until
+    /// the matching application is appended after its completed response prefix.
+    ResponsesSteering {
+        /// Exact endpoint owning the live connection.
+        endpoint: EndpointId,
+        /// Exact model owning the live connection.
+        model: ModelId,
+        /// Run/response operation identifier; local ids are operation-local.
+        operation: String,
+        /// Transport preparation receipt, durable before dispatch.
+        local_id: u64,
+        /// User input on the initial intent record only.
+        input: Option<UserMessage>,
+        /// Observed transport outcome on subsequent records.
+        state: Option<octet_ai::SteeringUpdate>,
+        /// Assistant whose committed usage settles this materialized input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completed: Option<EntryId>,
+    },
+    /// Host-authoritative, route-affine Responses reasoning cache state.
+    /// Baselines never come from opaque provider output.
+    ResponsesReasoning {
+        /// Exact endpoint owning this cache prefix.
+        endpoint: EndpointId,
+        /// Exact model owning this cache prefix.
+        model: ModelId,
+        /// Pinned request-level reasoning for this replay window.
+        baseline: octet_ai::ReasoningConfig,
+        /// Ordered effective-reasoning change; None establishes a new baseline
+        /// and supersedes earlier updates without discarding conversation items.
+        update: Option<octet_ai::ResponsesConfigurationUpdate>,
     },
     /// A configuration marker (not part of model-visible context).
     Config {
@@ -752,6 +842,11 @@ pub enum SessionRecord {
         /// Bounded host-selected identifiers only; no invented usage or cost.
         record: UsageUncertaintyRecord,
     },
+    /// Cache-warm lifecycle; independent from provider usage and context.
+    CacheWarm {
+        /// Sanitized status record.
+        record: CacheWarmRecord,
+    },
     /// Usage for one assistant turn or compaction operation. This does not
     /// alter the active head or model-visible context.
     Usage {
@@ -803,6 +898,9 @@ enum SessionRecordRef<'a> {
     },
     Usage {
         record: &'a UsageRecord,
+    },
+    CacheWarm {
+        record: &'a CacheWarmRecord,
     },
     EntryLabel {
         entry_id: &'a EntryId,
@@ -1025,6 +1123,15 @@ pub enum SessionError {
     InvalidResponsesSidecar(String),
 }
 
+/// One route's immutable replay projection. Ordinary appends inspect only the
+/// suffix below `head`; checkout, compaction and route changes rebuild it.
+struct ResponsesReplayCache {
+    endpoint: EndpointId,
+    model: ModelId,
+    head: Option<EntryId>,
+    items: Option<Arc<Vec<octet_ai::responses::ResponsesReplayItem>>>,
+}
+
 /// An append-only JSONL session file.
 ///
 /// Entries form a tree via parent links; the durable head selects the active
@@ -1053,6 +1160,9 @@ pub struct Session {
     /// checkout and compaction invalidate it because they can change the
     /// active branch or summary boundary.
     context_cache: RefCell<Option<Vec<Message>>>,
+    responses_replay_cache: RefCell<Option<ResponsesReplayCache>>,
+    #[cfg(test)]
+    responses_replay_work: std::cell::Cell<(usize, usize)>,
     /// Cumulative whole-microdollar session cost.
     /// Persisted in Head/Usage records and restored on open.
     total_cost_microdollars: u64,
@@ -1064,6 +1174,8 @@ pub struct Session {
     usage_records: Vec<UsageRecord>,
     /// Session-global exposure; checkout and compaction never clear it.
     usage_uncertainty_records: Vec<UsageUncertaintyRecord>,
+    /// Separate cache-warm lifecycle, session-global and never model-visible.
+    cache_warm_records: Vec<CacheWarmRecord>,
     /// Replaceable parked deferred-run leaves, keyed by operation id. The
     /// store owns its own descriptor-bound append line so a durable change is
     /// one synced record.
@@ -1147,11 +1259,15 @@ impl Session {
             head: None,
             next_id: 1,
             context_cache: RefCell::new(None),
+            responses_replay_cache: RefCell::new(None),
+            #[cfg(test)]
+            responses_replay_work: std::cell::Cell::new((0, 0)),
             total_cost_microdollars: 0,
             total_cost_picodollars_remainder: 0,
             checkpoints: Vec::new(),
             usage_records: Vec::new(),
             usage_uncertainty_records: Vec::new(),
+            cache_warm_records: Vec::new(),
             entry_labels: BTreeMap::new(),
         })
     }
@@ -1288,6 +1404,7 @@ impl Session {
         let mut checkpoint_lines: Vec<usize> = Vec::new();
         let mut usage_records: Vec<UsageRecord> = Vec::new();
         let mut usage_uncertainty_records = Vec::new();
+        let mut cache_warm_records: Vec<CacheWarmRecord> = Vec::new();
         let restored_invocations = DurableInvocationStore::new();
         let mut invocation_entries = InvocationEntryIndex::default();
         let restored_deferred_runs = DeferredRunStore::new();
@@ -1345,7 +1462,7 @@ impl Session {
                     return Err(SessionError::Corrupt {
                         line: line_no,
                         message: format!("invalid UTF-8: {error}"),
-                    })
+                    });
                 }
             };
             let record: SessionRecord = match serde_json::from_str(line) {
@@ -1357,7 +1474,7 @@ impl Session {
                     return Err(SessionError::Corrupt {
                         line: line_no,
                         message: error.to_string(),
-                    })
+                    });
                 }
             };
             valid_end = observed_end;
@@ -1545,6 +1662,39 @@ impl Session {
                         run_cost_microdollars,
                     });
                 }
+                SessionRecord::CacheWarm { record } => {
+                    let valid = record.attempt > 0
+                        && UsageUncertaintyRecord {
+                            endpoint: record.endpoint.clone(),
+                            model: record.model.clone(),
+                            operation: "cache_warm".into(),
+                        }
+                        .validate()
+                        .is_ok()
+                        && match record.state {
+                            CacheWarmState::Started => {
+                                cache_warm_records
+                                    .last()
+                                    .map_or(record.attempt == 1, |last| {
+                                        last.attempt.checked_add(1) == Some(record.attempt)
+                                            && last.state != CacheWarmState::Started
+                                    })
+                            }
+                            _ => cache_warm_records.last().is_some_and(|last| {
+                                last.attempt == record.attempt
+                                    && last.state == CacheWarmState::Started
+                                    && last.endpoint == record.endpoint
+                                    && last.model == record.model
+                            }),
+                        };
+                    if !valid {
+                        return Err(SessionError::Corrupt {
+                            line: line_no,
+                            message: "invalid cache-warm lifecycle".into(),
+                        });
+                    }
+                    cache_warm_records.push(record);
+                }
                 SessionRecord::UsageUncertainty { record } => {
                     record.validate().map_err(|_| SessionError::Corrupt {
                         line: line_no,
@@ -1659,11 +1809,15 @@ impl Session {
             index,
             head,
             context_cache: RefCell::new(None),
+            responses_replay_cache: RefCell::new(None),
+            #[cfg(test)]
+            responses_replay_work: std::cell::Cell::new((0, 0)),
             total_cost_microdollars,
             total_cost_picodollars_remainder,
             checkpoints,
             usage_records,
             usage_uncertainty_records,
+            cache_warm_records,
             entry_labels,
         })
     }
@@ -1974,7 +2128,9 @@ impl Session {
                     append_context_message(messages, message);
                 }
             }
-            EntryValue::Config { .. }
+            EntryValue::ResponsesReasoning { .. }
+            | EntryValue::ResponsesSteering { .. }
+            | EntryValue::Config { .. }
             | EntryValue::PromptTemplateSelected { .. }
             | EntryValue::ResponsesTurn { .. }
             | EntryValue::ResponsesCompaction { .. } => {}
@@ -2068,6 +2224,7 @@ impl Session {
         self.persist(&buf)?;
         self.head = Some(id);
         *self.context_cache.get_mut() = None;
+        *self.responses_replay_cache.get_mut() = None;
         Ok(())
     }
 
@@ -2085,6 +2242,7 @@ impl Session {
         self.persist(&buf)?;
         self.head = None;
         *self.context_cache.get_mut() = None;
+        *self.responses_replay_cache.get_mut() = None;
         Ok(())
     }
 
@@ -2110,6 +2268,19 @@ impl Session {
         checkpoint: Option<&EntryId>,
     ) -> Result<Self, SessionError> {
         let path = path.into();
+        // A compacted fork still needs the original host pin and all retained
+        // update positions. Keep ancestry for reasoning-aware branches; context
+        // reconstruction continues to honor the compaction marker.
+        let mut probe = checkpoint;
+        let mut preserve_reasoning_ancestry = false;
+        while let Some(id) = probe {
+            let entry = self
+                .entry(id)
+                .ok_or_else(|| SessionError::UnknownEntry(id.clone()))?;
+            preserve_reasoning_ancestry |=
+                matches!(entry.value, EntryValue::ResponsesReasoning { .. });
+            probe = entry.parent.as_ref();
+        }
         let mut newest_first = Vec::<&Entry>::new();
         let mut stop_at: Option<&EntryId> = None;
         let mut cursor = checkpoint;
@@ -2118,7 +2289,7 @@ impl Session {
                 .entry(id)
                 .ok_or_else(|| SessionError::UnknownEntry(id.clone()))?;
             newest_first.push(entry);
-            if stop_at == Some(id) {
+            if stop_at == Some(id) && !preserve_reasoning_ancestry {
                 break;
             }
             if let EntryValue::Compaction { first_kept, .. } = &entry.value {
@@ -2351,6 +2522,77 @@ impl Session {
         })
     }
 
+    /// Persist provider-reported usage for one completed cache-warm call.
+    /// It is charged to the session but never enters the assistant-turn cache
+    /// hit-rate denominator or the model-visible conversation.
+    pub(crate) fn record_cache_warm_usage(
+        &mut self,
+        endpoint: EndpointId,
+        model: ModelId,
+        usage: Usage,
+        cost: Option<Cost>,
+    ) -> Result<(), SessionError> {
+        self.record_usage(UsageRecord {
+            kind: UsageRecordKind::CacheWarm,
+            usage,
+            stop_reason: None,
+            endpoint: Some(endpoint),
+            model: Some(model),
+            completed_at_unix_ms: Some(now_unix_millis()),
+            cost,
+            cost_microdollars: cost.map(|cost| cost.total),
+            session_cost_microdollars: None,
+            session_cost_picodollars_remainder: None,
+        })
+    }
+
+    /// Append a sanitized cache-warm lifecycle transition. A started attempt
+    /// without a terminal transition is conservatively usage-uncertain on resume.
+    pub(crate) fn record_cache_warm_status(
+        &mut self,
+        record: CacheWarmRecord,
+    ) -> Result<(), SessionError> {
+        let identifiers = UsageUncertaintyRecord {
+            endpoint: record.endpoint.clone(),
+            model: record.model.clone(),
+            operation: "cache_warm".into(),
+        };
+        identifiers.validate()?;
+        let valid = record.attempt > 0
+            && match record.state {
+                CacheWarmState::Started => {
+                    self.cache_warm_records
+                        .last()
+                        .map_or(record.attempt == 1, |last| {
+                            last.attempt.checked_add(1) == Some(record.attempt)
+                                && last.state != CacheWarmState::Started
+                        })
+                }
+                _ => self.cache_warm_records.last().is_some_and(|last| {
+                    last.attempt == record.attempt
+                        && last.state == CacheWarmState::Started
+                        && last.endpoint == record.endpoint
+                        && last.model == record.model
+                }),
+            };
+        if !valid {
+            return Err(SessionError::Limit("invalid cache-warm lifecycle".into()));
+        }
+        let mut buffer = Vec::with_capacity(180);
+        write_json_line(
+            &mut buffer,
+            &SessionRecordRef::CacheWarm { record: &record },
+        )?;
+        self.persist(&buffer)?;
+        self.cache_warm_records.push(record);
+        Ok(())
+    }
+
+    /// Session-global cache-warm statuses, including abandoned branches.
+    pub fn cache_warm_records(&self) -> &[CacheWarmRecord] {
+        &self.cache_warm_records
+    }
+
     /// Persist usage for a context-compaction provider call.
     pub fn record_compaction_usage(
         &mut self,
@@ -2508,6 +2750,37 @@ impl Session {
     /// cumulative ceilings must fail closed, including after reopening.
     pub fn has_uncertain_usage(&self) -> bool {
         !self.usage_uncertainty_records.is_empty()
+            || self.has_unsettled_native_steering()
+            || self
+                .cache_warm_records
+                .last()
+                .is_some_and(|record| record.state == CacheWarmState::Started)
+    }
+
+    /// A durable native intent without a completed, accounted successor cannot
+    /// be blindly resumed after a process interruption. Preparation may precede
+    /// actual dispatch; uncertainty deliberately fails closed at that gap.
+    pub fn has_unsettled_native_steering(&self) -> bool {
+        let mut pending = std::collections::HashSet::new();
+        for entry in &self.entries {
+            if let EntryValue::ResponsesSteering {
+                operation,
+                local_id,
+                input,
+                completed,
+                ..
+            } = &entry.value
+            {
+                let key = (operation.as_str(), *local_id);
+                if input.is_some() {
+                    pending.insert(key);
+                }
+                if completed.is_some() {
+                    pending.remove(&key);
+                }
+            }
+        }
+        !pending.is_empty()
     }
 
     /// Unknown-usage evidence in append order, independent of the active head.
@@ -2603,6 +2876,27 @@ impl Session {
         first_kept: EntryId,
         details: crate::compaction::CompactionDetails,
     ) -> Result<EntryId, SessionError> {
+        self.compact_with_checkpoint(summary.into(), first_kept, details, None)
+    }
+
+    /// Atomically append a validated vision checkpoint in place of a model summary.
+    pub fn compact_snapcompact(
+        &mut self,
+        summary: String,
+        first_kept: EntryId,
+        details: crate::compaction::CompactionDetails,
+        snapcompact: SnapcompactCheckpoint,
+    ) -> Result<EntryId, SessionError> {
+        self.compact_with_checkpoint(summary, first_kept, details, Some(snapcompact))
+    }
+
+    fn compact_with_checkpoint(
+        &mut self,
+        summary: String,
+        first_kept: EntryId,
+        details: crate::compaction::CompactionDetails,
+        snapcompact: Option<SnapcompactCheckpoint>,
+    ) -> Result<EntryId, SessionError> {
         if !self.is_ancestor_of_head(&first_kept) {
             return Err(SessionError::NotAncestor(first_kept));
         }
@@ -2620,7 +2914,8 @@ impl Session {
         };
 
         self.append(EntryValue::Compaction {
-            summary: summary.into(),
+            summary,
+            snapcompact,
             first_kept,
             active_skills,
             skill_resources,
@@ -2693,6 +2988,12 @@ impl Session {
             .and_then(EntryMetadata::sanitized);
         let output_is_valid = responses_output.as_ref().is_none_or(|output| {
             !output.is_empty()
+                && !output.items().iter().any(|item| {
+                    item.as_json()
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("configuration_update")
+                })
                 && assistant.protocol == octet_ai::Protocol::OpenAiResponses
                 && assistant.model == model
         });
@@ -2912,11 +3213,118 @@ impl Session {
     ///
     /// `Some` means every assistant in the selected model-visible window has a
     /// route-affine authoritative sidecar. `None` is the safe legacy/crash
-    /// fallback when any assistant lacks one. A sidecar that exists but belongs
-    /// to another route is rejected explicitly rather than silently replayed.
+    /// fallback when any assistant lacks one or belongs to another route.
+    /// Opaque output is never replayed on a different endpoint/model.
     /// The nearest matching native compaction checkpoint after the latest local
     /// compaction becomes the opaque base for subsequent user/assistant turns.
     pub fn responses_replay_items(
+        &self,
+        endpoint: &EndpointId,
+        model: &ModelId,
+    ) -> Result<Option<Vec<octet_ai::responses::ResponsesReplayItem>>, SessionError> {
+        Ok(self
+            .responses_replay_snapshot(endpoint, model)?
+            .map(|items| (*items).clone()))
+    }
+
+    /// Shares the route-affine active replay window without cloning its prefix.
+    /// A retained snapshot stays immutable when the session advances. Encoding
+    /// a complete provider request still necessarily visits the complete input.
+    pub fn responses_replay_snapshot(
+        &self,
+        endpoint: &EndpointId,
+        model: &ModelId,
+    ) -> Result<Option<Arc<Vec<octet_ai::responses::ResponsesReplayItem>>>, SessionError> {
+        let mut cache = self.responses_replay_cache.borrow_mut();
+        if let Some(current) = cache
+            .as_mut()
+            .filter(|current| &current.endpoint == endpoint && &current.model == model)
+        {
+            let mut cursor = self.head_ref();
+            let mut appended = Vec::new();
+            let mut rebuild = false;
+            while cursor != current.head.as_ref() {
+                let Some(entry) = cursor.and_then(|id| self.entry(id)) else {
+                    rebuild = true;
+                    break;
+                };
+                #[cfg(test)]
+                self.responses_replay_work.set((
+                    self.responses_replay_work.get().0,
+                    self.responses_replay_work.get().1 + 1,
+                ));
+                if matches!(
+                    entry.value,
+                    EntryValue::Compaction { .. }
+                        | EntryValue::ResponsesCompaction { .. }
+                        | EntryValue::ResponsesReasoning { .. }
+                ) {
+                    rebuild = true;
+                    break;
+                }
+                // A late sidecar can repair a previously queried legacy/crash
+                // gap. New turns cannot repair a missing older assistant.
+                if current.items.is_none() {
+                    if let EntryValue::ResponsesTurn { assistant, .. } = &entry.value {
+                        if current
+                            .head
+                            .as_ref()
+                            .is_some_and(|head| self.index[assistant] <= self.index[head])
+                        {
+                            rebuild = true;
+                            break;
+                        }
+                    }
+                }
+                appended.push(entry);
+                cursor = entry.parent.as_ref();
+            }
+            if !rebuild {
+                if let Some(items) = &mut current.items {
+                    appended.reverse();
+                    // Validate the suffix before changing the cached prefix.
+                    let mut suffix = Vec::new();
+                    if self.append_responses_replay(
+                        &appended,
+                        &appended,
+                        endpoint,
+                        model,
+                        &mut suffix,
+                    )? {
+                        if !suffix.is_empty() {
+                            Arc::make_mut(items).extend(suffix);
+                        }
+                    } else {
+                        // Cache the fallback too: a permanent legacy gap must
+                        // not rescan an ever-growing suffix on every turn. A
+                        // late sidecar repairs it through the rebuild path.
+                        current.items = None;
+                        current.head = self.head();
+                        return Ok(None);
+                    }
+                }
+                current.head = self.head();
+                return Ok(current.items.clone());
+            }
+        }
+        #[cfg(test)]
+        self.responses_replay_work.set((
+            self.responses_replay_work.get().0 + 1,
+            self.responses_replay_work.get().1,
+        ));
+        let items = self
+            .rebuild_responses_replay(endpoint, model)?
+            .map(Arc::new);
+        *cache = Some(ResponsesReplayCache {
+            endpoint: endpoint.clone(),
+            model: model.clone(),
+            head: self.head(),
+            items: items.clone(),
+        });
+        Ok(items)
+    }
+
+    fn rebuild_responses_replay(
         &self,
         endpoint: &EndpointId,
         model: &ModelId,
@@ -2934,12 +3342,13 @@ impl Session {
                 .find_map(|(index, entry)| match &entry.value {
                     EntryValue::Compaction {
                         summary,
+                        snapcompact,
                         first_kept,
                         ..
-                    } => Some((index, summary, first_kept)),
+                    } => Some((index, summary, snapcompact, first_kept)),
                     _ => None,
                 });
-        let local_marker_index = local_compaction.map(|(index, _, _)| index);
+        let local_marker_index = local_compaction.map(|(index, _, _, _)| index);
         let native_search_start = local_marker_index.map_or(0, |index| index.saturating_add(1));
         let native_compaction = branch
             .iter()
@@ -2964,16 +3373,14 @@ impl Session {
                 output.clone(),
             ));
             index.saturating_add(1)
-        } else if let Some((_marker_index, summary, first_kept)) = local_compaction {
+        } else if let Some((_marker_index, summary, snapcompact, first_kept)) = local_compaction {
             let first_kept_index = branch
                 .iter()
                 .position(|entry| &entry.id == first_kept)
                 .ok_or_else(|| SessionError::UnknownEntry(first_kept.clone()))?;
             replay.push(octet_ai::responses::ResponsesReplayItem::User(
                 UserMessage {
-                    content: vec![UserPart::Text(format!(
-                        "[summary of earlier conversation]\n{summary}"
-                    ))],
+                    content: compaction_parts(summary, snapcompact.as_ref()),
                 },
             ));
             first_kept_index
@@ -2981,9 +3388,24 @@ impl Session {
             0
         };
 
+        if self.append_responses_replay(&branch[start..], &branch, endpoint, model, &mut replay)? {
+            Ok(Some(replay))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn append_responses_replay(
+        &self,
+        entries: &[&Entry],
+        sidecar_entries: &[&Entry],
+        endpoint: &EndpointId,
+        model: &ModelId,
+        replay: &mut Vec<octet_ai::responses::ResponsesReplayItem>,
+    ) -> Result<bool, SessionError> {
         let mut sidecars =
             HashMap::<&EntryId, (&EndpointId, &ModelId, &octet_ai::ResponsesOutput)>::new();
-        for entry in &branch {
+        for entry in sidecar_entries {
             if let EntryValue::ResponsesTurn {
                 assistant,
                 endpoint,
@@ -2995,8 +3417,38 @@ impl Session {
             }
         }
 
-        for entry in branch.into_iter().skip(start) {
+        for entry in entries {
             match &entry.value {
+                EntryValue::ResponsesReasoning {
+                    endpoint: recorded_endpoint,
+                    model: recorded_model,
+                    update,
+                    ..
+                } => {
+                    if recorded_endpoint != endpoint || recorded_model != model {
+                        return Ok(false);
+                    }
+                    if update.is_none() {
+                        // A host baseline reset supersedes prior effort updates,
+                        // while retaining every conversation/opaque output item.
+                        replay.retain(|item| {
+                            !matches!(item, octet_ai::ResponsesReplayItem::ConfigurationUpdate(_))
+                        });
+                    }
+                    if let Some(update) = update {
+                        // Only an undispatched tail can be adjacent: a completed
+                        // response inserts its opaque output between updates.
+                        if matches!(
+                            replay.last(),
+                            Some(octet_ai::ResponsesReplayItem::ConfigurationUpdate(_))
+                        ) {
+                            replay.pop();
+                        }
+                        replay.push(octet_ai::ResponsesReplayItem::ConfigurationUpdate(
+                            update.clone(),
+                        ));
+                    }
+                }
                 EntryValue::Message(Message::User(user)) => {
                     replay.push(octet_ai::responses::ResponsesReplayItem::User(user.clone()));
                 }
@@ -3015,16 +3467,20 @@ impl Session {
                     let Some((recorded_endpoint, recorded_model, output)) =
                         sidecars.get(&entry.id).copied()
                     else {
-                        return Ok(None);
+                        return Ok(false);
                     };
                     if recorded_endpoint != endpoint || recorded_model != model {
-                        return Err(SessionError::ResponsesRouteMismatch {
-                            assistant: entry.id.clone(),
-                            expected_endpoint: endpoint.0.clone(),
-                            expected_model: model.0.clone(),
-                            actual_endpoint: recorded_endpoint.0.clone(),
-                            actual_model: recorded_model.0.clone(),
-                        });
+                        return Ok(false);
+                    }
+                    if output.items().iter().any(|item| {
+                        item.as_json()
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("configuration_update")
+                    }) {
+                        return Err(SessionError::InvalidResponsesSidecar(
+                            "provider output cannot authorize configuration updates".into(),
+                        ));
                     }
                     replay.push(octet_ai::responses::ResponsesReplayItem::Output(
                         output.clone(),
@@ -3033,6 +3489,7 @@ impl Session {
                 EntryValue::Compaction { .. }
                 | EntryValue::ResponsesTurn { .. }
                 | EntryValue::ResponsesCompaction { .. }
+                | EntryValue::ResponsesSteering { .. }
                 | EntryValue::Config { .. }
                 | EntryValue::PromptTemplateSelected { .. }
                 | EntryValue::SkillActivated { .. }
@@ -3040,7 +3497,62 @@ impl Session {
                 | EntryValue::SkillDeactivated { .. } => {}
             }
         }
-        Ok(Some(replay))
+        Ok(true)
+    }
+
+    /// Pinned and effective reasoning for the current route-affine replay window.
+    /// Successful local compaction rebases the removed prefix, while retained
+    /// updates keep their original positions. A different route ends the prior
+    /// reasoning segment; fork/checkout use the selected branch.
+    pub fn responses_reasoning(
+        &self,
+        endpoint: &EndpointId,
+        model: &ModelId,
+    ) -> Result<Option<(octet_ai::ReasoningConfig, octet_ai::ReasoningConfig)>, SessionError> {
+        let branch = self.active_branch_entries()?;
+        let kept = branch.iter().rev().find_map(|entry| match &entry.value {
+            EntryValue::Compaction { first_kept, .. } => Some(first_kept),
+            _ => None,
+        });
+        let start = kept
+            .and_then(|id| branch.iter().position(|entry| &entry.id == id))
+            .unwrap_or(0);
+        let mut state = None;
+        for (index, entry) in branch.iter().enumerate() {
+            if let EntryValue::Config {
+                model: Some(selected),
+                ..
+            } = &entry.value
+            {
+                if selected != &model.0 {
+                    state = None;
+                }
+            }
+            if let EntryValue::ResponsesReasoning {
+                endpoint: recorded_endpoint,
+                model: recorded_model,
+                baseline,
+                update,
+            } = &entry.value
+            {
+                if recorded_endpoint != endpoint || recorded_model != model {
+                    state = None;
+                    continue;
+                }
+                if update.is_none() {
+                    state = Some((baseline.clone(), baseline.clone()));
+                }
+                let (pin, effective) =
+                    state.get_or_insert_with(|| (baseline.clone(), baseline.clone()));
+                if let Some(update) = update {
+                    *effective = update.reasoning.clone();
+                }
+                if index < start {
+                    *pin = effective.clone();
+                }
+            }
+        }
+        Ok(state)
     }
 
     /// Returns the current head entry ID (`None` for an empty session).
@@ -3134,7 +3646,7 @@ impl Session {
     /// the active branch semantics.
     fn reconstruct_context(&self) -> Result<Vec<Message>, SessionError> {
         let mut newest_first: Vec<Message> = Vec::new();
-        let mut summary: Option<String> = None;
+        let mut summary: Option<(String, Option<SnapcompactCheckpoint>)> = None;
         let mut boundary: Option<EntryId> = None;
 
         let mut cursor = self.head.as_ref();
@@ -3144,12 +3656,15 @@ impl Session {
                 .ok_or_else(|| SessionError::UnknownEntry(id.clone()))?;
             match &entry.value {
                 EntryValue::Message(m) => newest_first.push(m.clone()),
-                EntryValue::Config { .. }
+                EntryValue::ResponsesReasoning { .. }
+                | EntryValue::ResponsesSteering { .. }
+                | EntryValue::Config { .. }
                 | EntryValue::PromptTemplateSelected { .. }
                 | EntryValue::ResponsesTurn { .. }
                 | EntryValue::ResponsesCompaction { .. } => {}
                 EntryValue::Compaction {
                     summary: compaction_summary,
+                    snapcompact,
                     first_kept,
                     ..
                 } => {
@@ -3158,7 +3673,7 @@ impl Session {
                     // the marker nearest the head is model-visible; injecting
                     // older summaries again duplicates overlapping history.
                     if boundary.is_none() {
-                        summary = Some(compaction_summary.clone());
+                        summary = Some((compaction_summary.clone(), snapcompact.clone()));
                         boundary = Some(first_kept.clone());
                     }
                 }
@@ -3174,16 +3689,54 @@ impl Session {
 
         let mut messages: Vec<Message> = summary
             .into_iter()
-            .map(|summary| {
+            .map(|(summary, snapcompact)| {
                 Message::User(UserMessage {
-                    content: vec![UserPart::Text(format!(
-                        "[summary of earlier conversation]\n{summary}"
-                    ))],
+                    content: compaction_parts(&summary, snapcompact.as_ref()),
                 })
             })
             .collect();
         messages.extend(newest_first.into_iter().rev());
         Ok(coalesce_tool_results(messages))
+    }
+
+    /// Preview the proposed checkpoint without touching the durable branch.
+    /// Used to refuse a bitmap checkpoint that cannot fit the active model.
+    pub fn preview_compaction_context(
+        &self,
+        first_kept: &EntryId,
+        summary: &str,
+        checkpoint: &SnapcompactCheckpoint,
+    ) -> Result<Vec<Message>, SessionError> {
+        let branch = self.active_branch_entries()?;
+        let start = branch
+            .iter()
+            .position(|entry| &entry.id == first_kept)
+            .ok_or_else(|| SessionError::UnknownEntry(first_kept.clone()))?;
+        let mut messages = vec![Message::User(UserMessage {
+            content: compaction_parts(summary, Some(checkpoint)),
+        })];
+        messages.extend(
+            branch[start..]
+                .iter()
+                .filter_map(|entry| match &entry.value {
+                    EntryValue::Message(message) => Some(message.clone()),
+                    _ => None,
+                }),
+        );
+        Ok(coalesce_tool_results(messages))
+    }
+
+    /// The active checkpoint is bitmap-only and cannot be replayed on a text model.
+    pub fn has_snapcompact_context(&self) -> Result<bool, SessionError> {
+        Ok(self
+            .active_branch_entries()?
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.value {
+                EntryValue::Compaction { snapcompact, .. } => Some(snapcompact.is_some()),
+                _ => None,
+            })
+            .unwrap_or(false))
     }
 
     /// Borrows the cached model-visible context without deep-cloning message
@@ -3231,15 +3784,24 @@ impl Session {
         for entry in reverse {
             match &entry.value {
                 EntryValue::Message(message) => messages.push(message.clone()),
-                EntryValue::Compaction { summary, .. } => {
+                EntryValue::Compaction {
+                    summary,
+                    snapcompact,
+                    ..
+                } => {
                     messages.clear();
+                    let text = snapcompact
+                        .as_ref()
+                        .map_or(summary.as_str(), |image| image.source_text.as_str());
                     messages.push(Message::User(UserMessage {
                         content: vec![UserPart::Text(format!(
-                            "[summary of earlier conversation]\n{summary}"
+                            "[summary of earlier conversation]\n{text}"
                         ))],
                     }));
                 }
-                EntryValue::Config { .. }
+                EntryValue::ResponsesReasoning { .. }
+                | EntryValue::ResponsesSteering { .. }
+                | EntryValue::Config { .. }
                 | EntryValue::PromptTemplateSelected { .. }
                 | EntryValue::ResponsesTurn { .. }
                 | EntryValue::ResponsesCompaction { .. }
@@ -3545,7 +4107,7 @@ impl Session {
             Err(crate::secure_fs::SecureFileError::Io(error))
                 if error.kind() == std::io::ErrorKind::NotFound =>
             {
-                return Ok(None)
+                return Ok(None);
             }
             Err(error) => return Err(partial_journal_file_error(error)),
         };
@@ -3676,6 +4238,16 @@ fn append_context_message(messages: &mut Vec<Message>, message: &Message) {
 /// message before the next `role:user` media message. Individual tool results
 /// stay individual *entries* on disk; coalescing happens only during context
 /// reconstruction.
+fn compaction_parts(summary: &str, checkpoint: Option<&SnapcompactCheckpoint>) -> Vec<UserPart> {
+    let mut parts = vec![UserPart::Text(format!(
+        "[summary of earlier conversation]\n{summary}"
+    ))];
+    if let Some(checkpoint) = checkpoint {
+        parts.extend(checkpoint.frames.iter().cloned().map(UserPart::Media));
+    }
+    parts
+}
+
 fn coalesce_tool_results(messages: Vec<Message>) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(messages.len());
     for message in messages {
@@ -3826,6 +4398,7 @@ mod tests {
                     tool_output: None,
                     tool_started_unix_ms: None,
                     tool_finished_unix_ms: None,
+                    native_steering: None,
                     local_synthetic_assistant: false,
                     extension_metadata: Default::default(),
                 }),
@@ -3843,6 +4416,7 @@ mod tests {
                     tool_output: None,
                     tool_started_unix_ms: None,
                     tool_finished_unix_ms: None,
+                    native_steering: None,
                     local_synthetic_assistant: false,
                     extension_metadata: Default::default(),
                 }),
@@ -3862,6 +4436,7 @@ mod tests {
                 tool_output: None,
                 tool_started_unix_ms: None,
                 tool_finished_unix_ms: None,
+                native_steering: None,
                 local_synthetic_assistant: false,
                 extension_metadata: Default::default(),
             })
@@ -5445,7 +6020,9 @@ mod tests {
         let reopened = Session::open(&path).unwrap();
         assert!(matches!(
             reopened.entries()[1].value,
-            EntryValue::Config { .. }
+            EntryValue::ResponsesReasoning { .. }
+                | EntryValue::ResponsesSteering { .. }
+                | EntryValue::Config { .. }
         ));
         let ctx = reopened.context().unwrap();
         assert_eq!(ctx.len(), 2, "config entries are not model-visible");
@@ -5732,6 +6309,216 @@ mod tests {
     }
 
     #[test]
+    fn responses_replay_cache_advances_suffix_without_copying_settled_payloads() {
+        for turns in [16, 64, 256] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut session = Session::create(directory.path().join("replay.jsonl")).unwrap();
+            let endpoint = EndpointId("responses".into());
+            let model = ModelId("m".into());
+            session
+                .append(user(&"settled prefix".repeat(1024)))
+                .unwrap();
+            let first = session
+                .responses_replay_snapshot(&endpoint, &model)
+                .unwrap()
+                .unwrap();
+            let octet_ai::responses::ResponsesReplayItem::User(first_user) = &first[0] else {
+                panic!("user")
+            };
+            let UserPart::Text(first_text) = &first_user.content[0] else {
+                panic!("text")
+            };
+            let first_text_ptr = first_text.as_ptr();
+            drop(first);
+            for turn in 0..turns {
+                session.append(user("new request")).unwrap();
+                session
+                    .append_assistant_turn(
+                        AssistantMessage {
+                            content: vec![AssistantPart::Text("answer".into())],
+                            model: model.clone(),
+                            protocol: Protocol::OpenAiResponses,
+                        },
+                        endpoint.clone(),
+                        model.clone(),
+                        Usage::default(),
+                        None,
+                        StopReason::EndTurn,
+                        Some(responses_output(&format!("output-{turn}"))),
+                    )
+                    .unwrap();
+                let replay = session
+                    .responses_replay_snapshot(&endpoint, &model)
+                    .unwrap()
+                    .unwrap();
+                let again = session
+                    .responses_replay_snapshot(&endpoint, &model)
+                    .unwrap()
+                    .unwrap();
+                assert!(Arc::ptr_eq(&replay, &again));
+                let octet_ai::responses::ResponsesReplayItem::User(first_user) = &replay[0] else {
+                    panic!("user")
+                };
+                let UserPart::Text(first_text) = &first_user.content[0] else {
+                    panic!("text")
+                };
+                assert_eq!(
+                    first_text.as_ptr(),
+                    first_text_ptr,
+                    "settled payload was cloned"
+                );
+            }
+            assert_eq!(session.responses_replay_work.get(), (1, turns * 3));
+            let replay = session
+                .responses_replay_snapshot(&endpoint, &model)
+                .unwrap()
+                .unwrap();
+            let full = session
+                .rebuild_responses_replay(&endpoint, &model)
+                .unwrap()
+                .unwrap();
+            assert_eq!(replay_debug_json(&replay), replay_debug_json(&full));
+            // An externally retained snapshot remains immutable on append.
+            session.append(user("after snapshot")).unwrap();
+            let newer = session
+                .responses_replay_snapshot(&endpoint, &model)
+                .unwrap()
+                .unwrap();
+            assert_eq!(newer.len(), replay.len() + 1);
+        }
+    }
+
+    #[test]
+    fn responses_replay_cache_invalidates_routes_branches_compactions_and_repairs_gaps() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("boundaries.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let endpoint = EndpointId("responses".into());
+        let model = ModelId("m".into());
+        let root = session.append(user("root")).unwrap();
+        assert_eq!(
+            session
+                .responses_replay_snapshot(&endpoint, &model)
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        let assistant = session.append(responses_assistant("answer")).unwrap();
+        assert!(session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap()
+            .is_none());
+        session
+            .append_responses_turn(
+                assistant,
+                endpoint.clone(),
+                model.clone(),
+                responses_output("raw"),
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .responses_replay_snapshot(&endpoint, &model)
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(session
+            .responses_replay_snapshot(&EndpointId("other".into()), &model)
+            .unwrap()
+            .is_none());
+        session
+            .append_responses_compaction(
+                endpoint.clone(),
+                model.clone(),
+                responses_compact_output("native"),
+            )
+            .unwrap();
+        let native = session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &native[0],
+            octet_ai::responses::ResponsesReplayItem::Compacted(_)
+        ));
+        assert_eq!(native.len(), 1);
+        let kept = session.append(user("kept")).unwrap();
+        session.compact("local summary", kept).unwrap();
+        let local = session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            replay_debug_json(&local),
+            replay_debug_json(
+                &session
+                    .rebuild_responses_replay(&endpoint, &model)
+                    .unwrap()
+                    .unwrap()
+            )
+        );
+        session.checkout(root).unwrap();
+        assert_eq!(
+            session
+                .responses_replay_snapshot(&endpoint, &model)
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        session.checkout_root().unwrap();
+        assert!(session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        drop(session);
+        assert!(Session::open(&path)
+            .unwrap()
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn responses_replay_legacy_fallback_does_not_rescan_history_per_turn() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("legacy.jsonl")).unwrap();
+        let endpoint = EndpointId("responses".into());
+        let model = ModelId("m".into());
+        session.append(user("root")).unwrap();
+        session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap();
+        session.append(responses_assistant("legacy gap")).unwrap();
+        assert!(session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap()
+            .is_none());
+        for turn in 0..64 {
+            session.append(user("new request")).unwrap();
+            let assistant = session.append(responses_assistant("answer")).unwrap();
+            session
+                .append_responses_turn(
+                    assistant,
+                    endpoint.clone(),
+                    model.clone(),
+                    responses_output(&format!("{turn}")),
+                )
+                .unwrap();
+            assert!(session
+                .responses_replay_snapshot(&endpoint, &model)
+                .unwrap()
+                .is_none());
+        }
+        assert_eq!(session.responses_replay_work.get(), (1, 1 + 64 * 3));
+    }
+
+    #[test]
     fn responses_replay_survives_restart_and_uses_only_the_active_branch() {
         let dir = tempfile::tempdir().unwrap();
         let path = temp_path(&dir);
@@ -5781,7 +6568,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_replay_rejects_route_mismatch_and_legacy_gaps() {
+    fn responses_replay_falls_back_on_route_mismatch_and_legacy_gaps() {
         let dir = tempfile::tempdir().unwrap();
         let mut legacy = Session::create(dir.path().join("legacy.jsonl")).unwrap();
         legacy.append(user("prompt")).unwrap();
@@ -5808,10 +6595,112 @@ mod tests {
                 responses_output("raw"),
             )
             .unwrap();
-        let error = mismatch
+        assert!(mismatch
             .responses_replay_items(&EndpointId("responses".into()), &ModelId("m".into()))
-            .unwrap_err();
-        assert!(matches!(error, SessionError::ResponsesRouteMismatch { .. }));
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn responses_model_switch_uses_canonical_history_and_fresh_reasoning() {
+        use octet_ai::{ReasoningConfig, ReasoningEffort};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("switch.jsonl");
+        let endpoint = EndpointId("codex".into());
+        let astra = ModelId("gpt-6-astra".into());
+        let luna = ModelId("gpt-6-luna".into());
+        let low = ReasoningConfig::Effort(ReasoningEffort::Low);
+        let high = ReasoningConfig::Effort(ReasoningEffort::High);
+        let mut session = Session::create(&path).unwrap();
+        session.append(user("first prompt")).unwrap();
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("astra answer".into())],
+                model: astra.clone(),
+                protocol: Protocol::OpenAiResponses,
+            })))
+            .unwrap();
+        session
+            .append_responses_turn(
+                assistant,
+                endpoint.clone(),
+                astra.clone(),
+                responses_output("astra opaque"),
+            )
+            .unwrap();
+        session
+            .append(EntryValue::ResponsesReasoning {
+                endpoint: endpoint.clone(),
+                model: astra.clone(),
+                baseline: low.clone(),
+                update: Some(octet_ai::ResponsesConfigurationUpdate {
+                    reasoning: high.clone(),
+                }),
+            })
+            .unwrap();
+        session
+            .append(EntryValue::Config {
+                model: Some(luna.0.clone()),
+                reasoning: None,
+                reasoning_mode: None,
+            })
+            .unwrap();
+        session.append(user("second prompt")).unwrap();
+
+        for session in [&session, &Session::open(&path).unwrap()] {
+            assert!(session
+                .responses_replay_snapshot(&endpoint, &luna)
+                .unwrap()
+                .is_none());
+            assert_eq!(session.responses_reasoning(&endpoint, &luna).unwrap(), None);
+            assert_eq!(
+                session
+                    .context()
+                    .unwrap()
+                    .iter()
+                    .map(text_of)
+                    .collect::<Vec<_>>(),
+                ["first prompt", "astra answer", "second prompt"]
+            );
+        }
+        // Returning to Astra after Luna has responded must not revive Astra's
+        // prior reasoning pin or replay either route's opaque output.
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("luna answer".into())],
+                model: luna.clone(),
+                protocol: Protocol::OpenAiResponses,
+            })))
+            .unwrap();
+        session
+            .append_responses_turn(
+                assistant,
+                endpoint.clone(),
+                luna.clone(),
+                responses_output("luna opaque"),
+            )
+            .unwrap();
+        session
+            .append(EntryValue::ResponsesReasoning {
+                endpoint: endpoint.clone(),
+                model: luna.clone(),
+                baseline: low.clone(),
+                update: None,
+            })
+            .unwrap();
+        assert_eq!(
+            session.responses_reasoning(&endpoint, &luna).unwrap(),
+            Some((low, ReasoningConfig::Effort(ReasoningEffort::Low)))
+        );
+        assert_eq!(
+            session.responses_reasoning(&endpoint, &astra).unwrap(),
+            None
+        );
+        assert!(session
+            .responses_replay_snapshot(&endpoint, &astra)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -5934,6 +6823,9 @@ mod tests {
                 }
                 octet_ai::responses::ResponsesReplayItem::Output(output) => {
                     serde_json::to_value(output).unwrap()
+                }
+                octet_ai::responses::ResponsesReplayItem::ConfigurationUpdate(update) => {
+                    serde_json::to_value(update).unwrap()
                 }
                 octet_ai::responses::ResponsesReplayItem::Compacted(output) => {
                     serde_json::to_value(output).unwrap()

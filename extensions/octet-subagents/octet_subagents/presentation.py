@@ -182,6 +182,13 @@ def worker_references(worker: Worker) -> List[Dict[str, Any]]:
     return references
 
 
+def _model_label(provider: str, model: str) -> str:
+    """Qualify bare IDs without repeating a host-canonical provider prefix."""
+    if provider in {"inherit", "inherited"} or model.startswith(provider + "/"):
+        return model
+    return "%s/%s" % (provider, model)
+
+
 def worker_secondary(worker: Worker, now_ms: int) -> str:
     """Information-only row for the live `/subagents` panel.
 
@@ -206,7 +213,7 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
     # `requested→effective` so a pane-per-worker fleet is legible and a selection
     # the host has not applied is never implied to be in force.
     if worker.requested_model != "inherit":
-        requested_model = "%s/%s" % (worker.requested_provider, worker.requested_model)
+        requested_model = _model_label(worker.requested_provider, worker.requested_model)
         marker = "" if worker.model_policy_applied else " (not applied by host)"
         pieces.append("model %s%s" % (requested_model, marker))
     if worker.requested_reasoning != "inherit":
@@ -252,9 +259,9 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
             )
     if worker.recovered:
         pieces.append("restarted")
-    if worker.host_diagnostic and (worker.detached or worker.awaiting_approval):
-        # The host named why this worker is parked or was refused; a detached
-        # row without its reason is useless, and the reason is host-observed.
+    if worker.host_diagnostic:
+        # Keep host recovery guidance visible even after interrupted work settles;
+        # this is a bounded host diagnostic, never child prose or tool content.
         reason = bounded_text(safe_label(worker.host_diagnostic), 160).strip()
         if reason:
             pieces.append(reason)
@@ -283,9 +290,12 @@ def _selection_text(worker: Worker) -> str:
     """
     requested = []
     if worker.requested_provider != "inherit" or worker.requested_model != "inherit":
-        requested.append(
-            "provider/model %s/%s" % (worker.requested_provider, worker.requested_model)
-        )
+        if worker.requested_provider == "inherit":
+            requested.append("model %s" % worker.requested_model)
+        else:
+            requested.append(
+                "provider/model %s" % _model_label(worker.requested_provider, worker.requested_model)
+            )
     if worker.requested_reasoning != "inherit":
         requested.append("reasoning %s" % worker.requested_reasoning)
     if not requested:
@@ -298,7 +308,7 @@ def _selection_text(worker: Worker) -> str:
     text = "%s (%s; effective %s / reasoning %s)" % (
         ", ".join(requested),
         applied,
-        worker.effective_model,
+        _model_label(worker.effective_provider, worker.effective_model),
         worker.effective_reasoning,
     )
     if worker.reasoning_note:
@@ -335,7 +345,11 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         "Worker: %s (%s)" % (worker.name, worker.agent_id),
         "Parentage: parent > %s; depth %d (maximum 1)" % (worker.name, worker.depth),
         "Elapsed: %s" % duration_label(worker.elapsed_ms(now_ms)),
-        "Model/profile: %s (inherited) / %s" % (worker.effective_model, worker.profile),
+        "Model/profile: %s%s / %s" % (
+            _model_label(worker.effective_provider, worker.effective_model),
+            " (inherited)" if worker.requested_model == "inherit" and worker.requested_provider == "inherit" else "",
+            worker.profile,
+        ),
         "Orchestration selection: %s" % _selection_text(worker),
         "Current phase/tool: %s" % safe_label(worker.current_tool or worker.phase),
         "Requested tool policy: %s"
@@ -387,7 +401,7 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         "Session: %s" % (worker.session or "not yet exposed by agent_sessions"),
         "Session ownership: %s" % ownership,
     ]
-    if worker.host_diagnostic and (worker.detached or worker.awaiting_approval):
+    if worker.host_diagnostic:
         lines.append("Host reattachment: %s" % worker.host_diagnostic)
     if worker.reattach_count:
         lines.append(

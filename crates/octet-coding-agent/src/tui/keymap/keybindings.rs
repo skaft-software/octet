@@ -269,6 +269,7 @@ impl KeybindingsManager {
         let path = agent_dir.join("keybindings.json");
         let mut manager = Self::with_platform(platform, wsl, Self::load_from_file(&path));
         manager.config_path = Some(path);
+        manager.report_conflicts();
         manager
     }
 
@@ -278,6 +279,30 @@ impl KeybindingsManager {
             return;
         };
         self.set_user_bindings(Self::load_from_file(&path));
+        self.report_conflicts();
+    }
+
+    fn report_conflicts(&self) {
+        let Some(path) = &self.config_path else {
+            return;
+        };
+        crate::output::checked_diagnostics(
+            crate::output::DiagnosticComponent::Keybindings(format!(
+                "conflicts:{}",
+                path.display()
+            )),
+            self.conflicts
+                .iter()
+                .map(|conflict| {
+                    format!(
+                        "keybindings: {} is claimed by {}; /hotkeys shows resolved actions",
+                        conflict.key,
+                        conflict.keybindings.join(", ")
+                    )
+                })
+                .collect(),
+            true,
+        );
     }
 
     /// The ordered set of definitions.
@@ -387,7 +412,26 @@ impl KeybindingsManager {
             return BTreeMap::new();
         };
         let (migrated, _) = migrate_keybindings_config(&raw);
-        to_keybindings_config(&migrated)
+        let config = to_keybindings_config(&migrated);
+        crate::output::checked_diagnostics(
+            crate::output::DiagnosticComponent::Keybindings(format!("schema:{}", path.display())),
+            migrated
+                .iter()
+                .filter_map(|(id, _)| {
+                    if !BASE_DEFINITIONS.iter().any(|(known, _, _)| id == known) {
+                        Some(format!("keybindings: unknown action {id:?}"))
+                    } else if !config.contains_key(id) {
+                        Some(format!(
+                            "keybindings: {id:?} must be a key string or an array of key strings"
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            true,
+        );
+        config
     }
 }
 
@@ -461,21 +505,45 @@ pub const KEYBINDING_NAME_MIGRATIONS: &[(&str, &str)] = &[
     ("deleteSessionNoninvasive", "app.session.deleteNoninvasive"),
 ];
 
-/// Read a keybindings JSON object from disk, ignoring a missing or malformed
-/// file exactly like upstream.
+/// Read a bounded user keybindings object. A missing file uses defaults;
+/// malformed or unsafe files use defaults with component-scoped diagnostics.
 #[must_use]
 pub fn load_raw_config(path: &Path) -> Option<serde_json::Map<String, Value>> {
-    // Resolve the trusted user directory, but never follow a linked final file.
-    let path = path.parent()?.canonicalize().ok()?.join(path.file_name()?);
-    let raw = String::from_utf8(
-        octet_agent::secure_fs::read_regular_file_bounded(&path, 256 * 1024).ok()?,
-    )
-    .ok()?;
-    let stripped = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
-    match serde_json::from_str::<Value>(stripped) {
-        Ok(Value::Object(map)) => Some(map),
-        _ => None,
-    }
+    let result = (|| -> Result<Option<serde_json::Map<String, Value>>, String> {
+        let parent = path.parent().ok_or("keybinding path has no parent")?;
+        let parent = match parent.canonicalize() {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        let path = parent.join(path.file_name().ok_or("keybinding path has no file name")?);
+        let bytes = match octet_agent::secure_fs::read_regular_file_bounded(&path, 256 * 1024) {
+            Ok(bytes) => bytes,
+            Err(octet_agent::secure_fs::SecureFileError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(None)
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        let raw = String::from_utf8(bytes).map_err(|error| error.to_string())?;
+        let stripped = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+        match serde_json::from_str::<Value>(stripped).map_err(|error| error.to_string())? {
+            Value::Object(map) => Ok(Some(map)),
+            _ => Err("expected a JSON object".into()),
+        }
+    })();
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Keybindings(format!("file:{}", path.display())),
+        result
+            .as_ref()
+            .err()
+            .map(|error| format!("keybindings: {}: {error}", path.display()))
+            .into_iter()
+            .collect(),
+        true,
+    );
+    result.ok().flatten()
 }
 
 /// Rewrite legacy flat names to namespaced ids.

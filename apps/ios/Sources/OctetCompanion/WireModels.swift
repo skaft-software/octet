@@ -65,11 +65,8 @@ public indirect enum WireJSONValue: Codable, Equatable, Sendable {
     }
 
     public var uint64Value: UInt64? {
-        guard case .number(let value) = self,
-              value >= 0,
-              value.rounded() == value,
-              value <= Double(UInt64.max) else { return nil }
-        return UInt64(value)
+        guard case .number(let value) = self else { return nil }
+        return UInt64(exactly: value)
     }
 
     public func value(for key: String) -> WireJSONValue? {

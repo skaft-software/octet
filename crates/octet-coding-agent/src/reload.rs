@@ -15,8 +15,8 @@
 //! if plan.contains(ReloadLayer::Extensions) { /* caller restarts children */ }
 //! plan.record(ReloadLayer::Resources, LayerOutcome::Reloaded);
 //! let report = supervisor.finish(plan)?;                // one pass, one report
-//! for notice in report.diagnostics() { /* transcript */ }
-//! // Show report.summary() for explicit commands, not automatic passes.
+//! // Typed component results own automatic problem/event feedback.
+//! // Show report.notices() and report.summary() only for explicit commands.
 //! ```
 //!
 //! The decision functions are pure: [`ReloadSupervisor::observe`] consumes a
@@ -39,8 +39,9 @@
 //! 1000 ms interval, and custom theme files); everything else reloads on
 //! demand. This module deliberately goes further: it *samples* all three
 //! layers on the same bounded schedule, but it applies nothing outside the
-//! same boundary discipline `/reload` already uses (queued to idle, debounced,
-//! fixed order `resources → extensions → host`). A watched theme file is one
+//! same boundary discipline `/reload` already uses (queued to idle, debounced).
+//! Host consent precedes any teardown; an admitted re-exec supersedes in-process
+//! rebuilds, otherwise resources precede extensions. A watched theme file is one
 //! resource path, so theme auto-reload falls out of the resources layer
 //! without wiring a second watcher.
 //!
@@ -54,7 +55,9 @@
 //!
 //! # What a reload loses (honest limits)
 //!
-//! Nothing here is lossless. At an idle boundary:
+//! These are possible interruption classes, not unconditional claims of loss.
+//! The interactive idle boundary has no foreground model/tool call in flight;
+//! previews use current queued requests/workers and actual discards are events:
 //!
 //! * A **model call in flight** dies when the run is stopped for a reload; the
 //!   records already appended to the session survive, the unrecorded turn does
@@ -85,12 +88,12 @@
 //!   module only selects layers, orders them, and reports.
 //! * Watching unbounded trees. Directory targets expand to a fixed depth and a
 //!   fixed per-poll inspection budget, and the budget being hit is reported.
-//!   The budget bounds `symlink_metadata` calls; directory reads stop with it,
-//!   and the layer whose enumeration stopped is recorded as capped per layer
-//!   (`ScanMeta::capped`), with every entry already read but not inspected
-//!   counted (`ScanMeta::skipped`) — never silently ignored.
-//! * Worker-level reload. Delegated workers keep running across a resources or
-//!   extensions reload; only a forced/host reload can interrupt one.
+//!   The budget bounds both `symlink_metadata` calls and yielded directory
+//!   entries (plus at most one overflow witness). Partial layers are capped
+//!   (`ScanMeta::capped`), never used to infer changes. `ScanMeta::skipped` is
+//!   only a lower bound: unread directory contents are deliberately unknown.
+//! * Worker-level reload. The interactive caller defers automatic teardown while
+//!   workers are active; host replacement retains explicit detach consent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -228,7 +231,7 @@ impl ReloadRequester {
 pub enum ReloadUserAction {
     /// Report what a pass would do now and change nothing.
     DryRun,
-    /// Take a pass now, at any boundary, naming every loss.
+    /// Take a pass now, with the caller previewing current interruption risks.
     Force,
 }
 
@@ -509,13 +512,14 @@ impl ExecutableFingerprint {
 ///
 /// * [`Self::capped`] — per layer, a boolean: the budget was exhausted while
 ///   that layer was being enumerated, so part of the layer is unobserved. This
-///   boolean is the record; it is what refuses a disappearance inference and
-///   what makes a layer report [`SkipReason::WatcherCapReached`].
+///   boolean is the record; it refuses all change/disappearance inferences and
+///   makes a layer report [`SkipReason::WatcherCapReached`].
 /// * [`Self::skipped`] — per layer, a count: candidates the scanner had already
 ///   read (a target, or an entry of a directory it did read) but could not
-///   inspect. A layer can be capped with a skipped count of zero, because a
-///   directory the budget never read has unknown contents and is therefore not
-///   counted — that is why the boolean, not the count, is the rule.
+///   inspect, including an overflow witness if it names a path. This is a
+///   **lower bound**, not the total omitted paths: enumeration itself stops at
+///   the budget. A capped layer can have zero known skipped paths; unread
+///   contents are unknown, not empty.
 ///
 /// The depth bound ([`MAX_SCAN_DEPTH`]) is *not* a cap: looking no deeper than a
 /// fixed level is a rule about which files a layer consists of, so it never sets
@@ -524,14 +528,14 @@ impl ExecutableFingerprint {
 pub struct ScanMeta {
     /// Metadata inspections performed.
     pub inspected: usize,
-    /// Inspections skipped because the budget was exhausted, per layer.
+    /// Lower bound on paths skipped by the budget, per layer; unread totals are unknown.
     pub skipped: [usize; 3],
     /// Whether the budget stopped this layer's enumeration, per layer.
     pub capped: [bool; 3],
 }
 
 impl ScanMeta {
-    /// Total skipped count.
+    /// Total known skipped paths (a lower bound, not an exact omitted total).
     pub fn skipped_total(&self) -> usize {
         self.skipped.iter().sum()
     }
@@ -613,9 +617,11 @@ pub trait MetadataSource {
     /// executable, where the target's own mtime is the interesting signal.
     fn target_metadata(&self, path: &Path) -> Option<FileFingerprint>;
 
-    /// Immediate entries of `path` in deterministic order. A missing or
-    /// unreadable directory yields no entries.
-    fn read_dir(&self, path: &Path) -> Vec<PathBuf>;
+    /// Lazy immediate entries of `path`, in filesystem order. Do not collect,
+    /// sort, or filter errors here: the scanner bounds iteration before sorting
+    /// and counts failed entries against the enumeration budget too. A missing
+    /// or unreadable directory yields no entries.
+    fn read_dir(&self, path: &Path) -> Box<dyn Iterator<Item = std::io::Result<PathBuf>> + '_>;
 
     /// The executable currently selected by the package manager or PATH. This
     /// is re-resolved on every call, never cached.
@@ -642,16 +648,11 @@ impl MetadataSource for SystemMetadata {
             .map(FileFingerprint::from_metadata)
     }
 
-    fn read_dir(&self, path: &Path) -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return Vec::new();
-        };
-        let mut paths = entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths
+    fn read_dir(&self, path: &Path) -> Box<dyn Iterator<Item = std::io::Result<PathBuf>> + '_> {
+        match std::fs::read_dir(path) {
+            Ok(entries) => Box::new(entries.map(|entry| entry.map(|entry| entry.path()))),
+            Err(_) => Box::new(std::iter::empty()),
+        }
     }
 
     fn current_exe(&self) -> Option<PathBuf> {
@@ -913,10 +914,12 @@ impl ReloadWatcher {
     /// caller can disable the bound with `0` or `usize::MAX`. The rule, exactly:
     ///
     /// * at most `max_inspections` `symlink_metadata` calls happen per poll;
-    /// * once the budget is exhausted the scanner stops expanding directories,
-    ///   so no further directory read happens either (a directory is only read
-    ///   for a target or entry whose own inspection was admitted, which bounds
-    ///   the directory reads by the budget as well);
+    /// * directory iteration yields at most `max_inspections + 1` entries
+    ///   across the poll, including errors and an overflow witness. Each read
+    ///   stops at the remaining enumeration/inspection allowance plus one,
+    ///   before collecting or sorting; fully read directories remain sorted;
+    /// * exhausted budgets stop expansion, including nested directories. The
+    ///   number of opened directories is bounded by admitted inspections;
     /// * the layer whose enumeration stopped is recorded in
     ///   [`ScanMeta::capped`] — including the case where a directory could not
     ///   be read at all, where there is nothing to count;
@@ -980,11 +983,34 @@ impl ReloadWatcher {
             budget.stop(layer);
             return;
         }
-        let children = source.read_dir(directory);
-        for child in children {
+        let remaining = (budget.max_inspections - budget.inspected)
+            .min(budget.max_inspections.saturating_sub(budget.enumerated));
+        if remaining == 0 {
+            budget.stop(layer);
+            return;
+        }
+        let mut children = Vec::new();
+        for (index, child) in source.read_dir(directory).take(remaining + 1).enumerate() {
+            budget.enumerated += 1;
+            if index == remaining {
+                // One witness proves this directory was not fully scanned;
+                // finding the actual omitted total would defeat the bound.
+                budget.stop(layer);
+                if child.is_ok() {
+                    budget.skip(layer);
+                }
+                break;
+            }
+            if let Ok(child) = child {
+                children.push(child);
+            }
+        }
+        children.sort();
+        let mut children = children.into_iter();
+        while let Some(child) = children.next() {
             if budget.exhausted() {
-                budget.skip(layer);
-                continue;
+                budget.skip_count(layer, 1 + children.len());
+                break;
             }
             let fingerprint = source
                 .symlink_metadata(&child)
@@ -1027,6 +1053,7 @@ impl ReloadWatcher {
 struct ScanBudget {
     max_inspections: usize,
     inspected: usize,
+    enumerated: usize,
     skipped: [usize; 3],
     capped: [bool; 3],
 }
@@ -1043,8 +1070,12 @@ impl ScanBudget {
     /// One candidate this layer could enumerate but the budget could not
     /// inspect. Counting it also records the cap for that layer.
     fn skip(&mut self, layer: ReloadLayer) {
+        self.skip_count(layer, 1);
+    }
+
+    fn skip_count(&mut self, layer: ReloadLayer, count: usize) {
         self.capped[layer.index()] = true;
-        self.skipped[layer.index()] = self.skipped[layer.index()].saturating_add(1);
+        self.skipped[layer.index()] = self.skipped[layer.index()].saturating_add(count);
     }
 
     /// A budget stop with nothing countable: a directory the scanner was
@@ -1186,7 +1217,7 @@ pub struct ReloadReport {
     pub due: bool,
     /// Inspections performed before the pass.
     pub inspected_paths: usize,
-    /// Inspections skipped by the budget, per layer.
+    /// Lower bound on skipped paths across layers; unread totals are unknown.
     pub skipped_paths: usize,
     /// Whether the inspection budget was hit.
     pub watcher_cap_reached: bool,
@@ -1257,7 +1288,10 @@ impl ReloadReport {
             summary.push_str(&format!(" ({losses} named loss{})", plural(losses)));
         }
         if self.watcher_cap_reached {
-            summary.push_str(&format!(" (watcher cap: {} skipped)", self.skipped_paths));
+            summary.push_str(&format!(
+                " (watcher cap: at least {} skipped; total unknown)",
+                self.skipped_paths
+            ));
         }
         let label = if self.dry_run {
             "reload preview"
@@ -1282,8 +1316,7 @@ impl ReloadReport {
         let mut notices = Vec::new();
         if self.forced {
             notices.push(
-                "reload (forced): in-flight work is abandoned; persisted records survive and \
-                 workers stay reattachable"
+                "reload (forced): applying an explicit pass; interruption risks are previewed from current state"
                     .to_owned(),
             );
         }
@@ -1319,6 +1352,11 @@ impl ReloadReport {
                     "reload: {} reload failed; the previous state is kept",
                     line.layer.label()
                 )),
+                LayerOutcome::Skipped(SkipReason::NoChange)
+                    if detailed && line.layer == ReloadLayer::Host =>
+                {
+                    notices.push("reload: binary unchanged".to_owned());
+                }
                 LayerOutcome::Reloaded | LayerOutcome::Skipped(_) => {}
             }
             if detailed && !line.detached.is_empty() {
@@ -1341,7 +1379,7 @@ impl ReloadReport {
         }
         if self.watcher_cap_reached {
             notices.push(format!(
-                "reload: watcher inspected {} paths and skipped {} (per-poll cap)",
+                "reload: watcher inspected {} paths and skipped at least {} (per-poll cap; total unknown)",
                 self.inspected_paths, self.skipped_paths
             ));
         }
@@ -1395,7 +1433,6 @@ struct PlannedLayer {
 
 impl ReloadPlan {
     /// Layers included in this pass, in fixed order.
-    #[cfg(test)]
     pub fn layers(&self) -> Vec<ReloadLayer> {
         self.layers.iter().map(|line| line.layer).collect()
     }
@@ -1481,9 +1518,8 @@ impl ReloadPlan {
         }
     }
 
-    /// Finish the pass. Missing outcomes become skipped lines; a forced pass
-    /// names every loss, and an extensions reload always names the in-flight
-    /// host request it drops.
+    /// Finish the pass. Missing outcomes become skipped lines. Only producers
+    /// that actually discarded work may record losses; force is not evidence of loss.
     ///
     /// Private on purpose: a plan must be completed through
     /// [`ReloadSupervisor::finish`], which validates the admission token and
@@ -1506,19 +1542,7 @@ impl ReloadPlan {
                     LayerOutcome::Skipped(SkipReason::NoChange)
                 }
             });
-            let mut losses = planned.losses;
-            if forced {
-                for loss in ReloadLoss::ALL {
-                    if !losses.contains(&loss) {
-                        losses.push(loss);
-                    }
-                }
-            } else if matches!(outcome, LayerOutcome::Reloaded | LayerOutcome::WouldReload)
-                && planned.layer == ReloadLayer::Extensions
-                && !losses.contains(&ReloadLoss::ExtensionHostRequest)
-            {
-                losses.push(ReloadLoss::ExtensionHostRequest);
-            }
+            let losses = planned.losses;
             layers.push(LayerReport {
                 layer: planned.layer,
                 outcome,
@@ -1549,6 +1573,18 @@ impl ReloadPlan {
     }
 }
 
+/// Components are checked independently: a skipped component cannot clear its problem.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ReloadComponent {
+    WatchCoverage,
+    Host,
+    Extension(String),
+    ExtensionShortcuts,
+    ExtensionRescan(String),
+    Workers,
+    ProviderCatalog,
+}
+
 /// The supervisor: a pure `(now, observed) → decision` state machine.
 ///
 /// Rules, in one place:
@@ -1569,8 +1605,8 @@ impl ReloadPlan {
 ///    requires a real executable change, because a re-exec is only ever
 ///    justified by evidence. `/reload --force` is the one path that takes every
 ///    layer now.
-/// 6. `force` supersedes queued and in-flight passes (generation bump) and
-///    names every loss, because it may be taken while a run owns the session.
+/// 6. `force` supersedes queued and in-flight passes (generation bump). The
+///    caller previews current interruption risks; only actual discards are losses.
 /// 7. `dry_run` reports what a pass would do and changes nothing.
 #[derive(Debug)]
 pub struct ReloadSupervisor {
@@ -1578,6 +1614,7 @@ pub struct ReloadSupervisor {
     baseline: BTreeMap<PathBuf, BaselineEntry>,
     baseline_executable: Option<ExecutableFingerprint>,
     baseline_ready: bool,
+    baseline_layers_ready: [bool; 3],
     last_scan: Option<Instant>,
     scan: ScanMeta,
     stale: BTreeMap<ReloadLayer, LayerChange>,
@@ -1587,6 +1624,7 @@ pub struct ReloadSupervisor {
     generation: u64,
     next_sequence: u64,
     in_flight: Option<ReloadToken>,
+    problems: BTreeMap<ReloadComponent, Vec<String>>,
 }
 
 impl ReloadSupervisor {
@@ -1597,6 +1635,7 @@ impl ReloadSupervisor {
             baseline: BTreeMap::new(),
             baseline_executable: None,
             baseline_ready: false,
+            baseline_layers_ready: [false; 3],
             last_scan: None,
             scan: ScanMeta::default(),
             stale: BTreeMap::new(),
@@ -1606,6 +1645,28 @@ impl ReloadSupervisor {
             generation: 0,
             next_sequence: 0,
             in_flight: None,
+            problems: BTreeMap::new(),
+        }
+    }
+
+    /// Report current problems on appearance/change, or every explicit request.
+    /// Call only after actually checking this component. Events never enter here.
+    pub(crate) fn checked_problems(
+        &mut self,
+        component: ReloadComponent,
+        problems: Vec<String>,
+        explicit: bool,
+    ) -> Vec<String> {
+        if problems.is_empty() {
+            self.problems.remove(&component);
+            return Vec::new();
+        }
+        let changed = self.problems.get(&component) != Some(&problems);
+        self.problems.insert(component, problems.clone());
+        if explicit || changed {
+            problems
+        } else {
+            Vec::new()
         }
     }
 
@@ -1680,16 +1741,23 @@ impl ReloadSupervisor {
         let mut changed: BTreeMap<ReloadLayer, Vec<PathBuf>> = BTreeMap::new();
         let mut observed = BTreeSet::new();
         for entry in scan.entries() {
+            let layer = entry.layer();
+            if scan.capped_for(layer) {
+                // Filesystem order can change between partial reads. Neither
+                // compare nor advance a layer's baseline from partial evidence.
+                continue;
+            }
             let path = entry.path().to_path_buf();
             observed.insert(path.clone());
-            let layer = entry.layer();
             let fingerprint = entry.fingerprint();
             match self.baseline.get(entry.path()) {
                 Some(previous)
                     if !previous.fingerprint.differs_from(&fingerprint)
                         && previous.layer == layer => {}
                 Some(_) => changed.entry(layer).or_default().push(path.clone()),
-                None if !first => changed.entry(layer).or_default().push(path.clone()),
+                None if self.baseline_layers_ready[layer.index()] => {
+                    changed.entry(layer).or_default().push(path.clone())
+                }
                 None => {}
             }
             self.baseline
@@ -1760,6 +1828,11 @@ impl ReloadSupervisor {
         }
 
         self.baseline_ready = true;
+        for layer in ReloadLayer::ORDER {
+            if !scan.capped_for(layer) {
+                self.baseline_layers_ready[layer.index()] = true;
+            }
+        }
         summary.queued_layers = self.queued_in_order();
         summary.due = self.is_due(now);
         summary
@@ -1800,9 +1873,9 @@ impl ReloadSupervisor {
     /// The explicit force path: take a pass over **every** layer now, at any
     /// boundary.
     ///
-    /// A forced pass supersedes anything queued or in flight (generation bump)
-    /// and names every loss, because it may be taken while a run owns the
-    /// session. Records already persisted survive; in-flight work does not.
+    /// A forced pass supersedes anything queued or in flight (generation bump).
+    /// The caller must preview current risks and report actual discarded work.
+    /// Force alone is not evidence of loss.
     pub fn force(&mut self) -> ReloadPlan {
         self.generation = self.generation.wrapping_add(1);
         if !self.requesters.contains(&ReloadRequester::Forced) {
@@ -1868,10 +1941,6 @@ impl ReloadSupervisor {
         for layer in ReloadLayer::ORDER {
             match self.stale.get(&layer) {
                 Some(change) => {
-                    let mut losses = Vec::new();
-                    if layer == ReloadLayer::Extensions {
-                        losses.push(ReloadLoss::ExtensionHostRequest);
-                    }
                     layers.push(LayerReport {
                         layer,
                         outcome: LayerOutcome::WouldReload,
@@ -1879,7 +1948,7 @@ impl ReloadSupervisor {
                         changed_overflow: change.overflow,
                         detached: Vec::new(),
                         reattached: Vec::new(),
-                        losses,
+                        losses: Vec::new(),
                         notes: Vec::new(),
                     });
                 }
@@ -2152,8 +2221,8 @@ mod tests {
             self.entries.get(path).copied()
         }
 
-        fn read_dir(&self, path: &Path) -> Vec<PathBuf> {
-            self.dirs.get(path).cloned().unwrap_or_default()
+        fn read_dir(&self, path: &Path) -> Box<dyn Iterator<Item = std::io::Result<PathBuf>> + '_> {
+            Box::new(self.dirs.get(path).into_iter().flatten().cloned().map(Ok))
         }
 
         fn current_exe(&self) -> Option<PathBuf> {
@@ -2611,7 +2680,7 @@ mod tests {
     }
 
     #[test]
-    fn force_names_every_loss_and_supersedes_a_queued_pass() {
+    fn force_supersedes_a_queued_pass_without_inventing_losses() {
         let start = base();
         let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
         let watcher = resources_watcher();
@@ -2630,13 +2699,13 @@ mod tests {
         assert!(!supervisor.is_queued());
         plan.record_reload(ReloadLayer::Resources);
         let report = supervisor.finish(plan).expect("current plan");
-        // A forced pass names every loss on every layer it selects.
+        // Force authorizes a pass; it does not prove any work was lost.
         for layer in ReloadLayer::ORDER {
-            assert_eq!(losses_of(&report, layer), ReloadLoss::ALL.to_vec());
+            assert!(losses_of(&report, layer).is_empty());
         }
         assert_eq!(report.layers[0].outcome, LayerOutcome::Reloaded);
         assert!(report.notices()[0].contains("reload (forced)"));
-        assert!(summary_mentions(&report, "4 named losses"));
+        assert!(!summary_mentions(&report, "named loss"));
     }
 
     #[test]
@@ -2686,13 +2755,12 @@ mod tests {
     }
 
     #[test]
-    fn the_inspection_budget_stops_every_poll_at_its_bound_and_records_the_rest() {
+    fn the_inspection_budget_stops_every_poll_and_reports_a_skipped_lower_bound() {
         let start = base();
         // Fixture: one watched directory with ten files, so eleven candidates
         // exist (the target itself plus each enumerable entry).
         const CAP: usize = 3;
         const FILES: usize = 10;
-        const CANDIDATES: usize = FILES + 1;
 
         // The budget is an argument of the scan, not state of the watcher: the
         // supervisor's `ReloadSettings` is the one authority, which is exactly
@@ -2709,10 +2777,9 @@ mod tests {
         let scan = watcher.scan(&source);
         assert_eq!(scan.inspected(), CAP);
         assert!(scan.capped_for(ReloadLayer::Resources));
-        // Rule 2: nothing is dropped silently — every candidate the layer could
-        // enumerate is either inspected or counted as skipped for its layer.
-        assert_eq!(scan.inspected() + scan.meta().skipped_total(), CANDIDATES);
-        assert_eq!(skipped_for(&scan, ReloadLayer::Resources), CANDIDATES - CAP);
+        // Only the overflow witness is known. Counting all omitted files would
+        // require the very unbounded enumeration the budget must prevent.
+        assert_eq!(skipped_for(&scan, ReloadLayer::Resources), 1);
         assert!(scan.truncated());
         // Rule 3: the budget is clamped, so no caller can switch the bound off.
         assert_eq!(watcher.scan_with(&source, 0).inspected(), 1);
@@ -2725,10 +2792,7 @@ mod tests {
         }
         let wide = ceiling.scan(&many);
         assert_eq!(wide.inspected(), MAX_INSPECTIONS_PER_POLL);
-        assert_eq!(
-            skipped_for(&wide, ReloadLayer::Resources),
-            BIG_FILES + 1 - MAX_INSPECTIONS_PER_POLL
-        );
+        assert_eq!(skipped_for(&wide, ReloadLayer::Resources), 1);
         assert!(wide.truncated());
 
         // The supervisor records the cap once, on the layer it truncated, and
@@ -2751,11 +2815,172 @@ mod tests {
             Some(LayerOutcome::Skipped(SkipReason::WatcherCapReached))
         );
         assert!(report.watcher_cap_reached);
-        assert_eq!(report.skipped_paths, CANDIDATES - CAP);
+        assert_eq!(report.skipped_paths, 1);
         assert!(report
             .notices()
             .iter()
             .any(|notice| notice.contains("per-poll cap")));
+    }
+
+    /// Generates entries lazily, without allocating the enormous fixture tree.
+    struct GeneratedDirectory {
+        root_entries: usize,
+        nested: bool,
+        errors: bool,
+        next_calls: std::cell::Cell<usize>,
+        yielded: std::cell::Cell<usize>,
+        inspections: std::cell::Cell<usize>,
+        opens: std::cell::Cell<usize>,
+    }
+
+    impl MetadataSource for GeneratedDirectory {
+        fn symlink_metadata(&self, path: &Path) -> Option<FileFingerprint> {
+            self.inspections.set(self.inspections.get() + 1);
+            Some(
+                if path == Path::new("/skills")
+                    || (self.nested && path.parent() == Some(Path::new("/skills")))
+                {
+                    directory_fingerprint()
+                } else {
+                    file_fingerprint(1)
+                },
+            )
+        }
+
+        fn target_metadata(&self, _path: &Path) -> Option<FileFingerprint> {
+            Some(file_fingerprint(1))
+        }
+
+        fn read_dir(&self, path: &Path) -> Box<dyn Iterator<Item = std::io::Result<PathBuf>> + '_> {
+            self.opens.set(self.opens.get() + 1);
+            let count = if path == Path::new("/skills") {
+                self.root_entries
+            } else {
+                usize::MAX
+            };
+            let path = path.to_path_buf();
+            let mut indices = 0..count;
+            Box::new(std::iter::from_fn(move || {
+                self.next_calls.set(self.next_calls.get() + 1);
+                let index = indices.next()?;
+                self.yielded.set(self.yielded.get() + 1);
+                Some(if self.errors {
+                    Err(std::io::Error::other("unreadable entry"))
+                } else {
+                    Ok(path.join(format!("{:020}", count - index - 1)))
+                })
+            }))
+        }
+
+        fn current_exe(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/bin/octet"))
+        }
+    }
+
+    #[test]
+    fn enumeration_work_is_bounded_before_collecting_sorting_or_filtering_errors() {
+        const CAP: usize = 32;
+        let watcher = budgeted_watcher(&[("/skills", ReloadLayer::Resources)], CAP);
+        for root_entries in [1_000, usize::MAX] {
+            for errors in [false, true] {
+                let source = GeneratedDirectory {
+                    root_entries,
+                    nested: false,
+                    errors,
+                    next_calls: Default::default(),
+                    yielded: Default::default(),
+                    inspections: Default::default(),
+                    opens: Default::default(),
+                };
+                let scan = watcher.scan(&source);
+                // Root inspection leaves CAP - 1 entries plus one witness.
+                assert_eq!(source.yielded.get(), CAP);
+                assert_eq!(source.next_calls.get(), CAP);
+                assert_eq!(source.opens.get(), 1);
+                assert_eq!(source.inspections.get(), if errors { 1 } else { CAP });
+                assert_eq!(
+                    skipped_for(&scan, ReloadLayer::Resources),
+                    usize::from(!errors)
+                );
+                assert!(scan.capped_for(ReloadLayer::Resources));
+                assert!(
+                    scan.executable().is_some(),
+                    "executable sampling is independent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nested_enumeration_shares_the_poll_budget_and_complete_directories_are_sorted() {
+        const CAP: usize = 32;
+        let watcher = budgeted_watcher(&[("/skills", ReloadLayer::Resources)], CAP);
+        let mut source = GeneratedDirectory {
+            root_entries: CAP / 2,
+            nested: true,
+            errors: false,
+            next_calls: Default::default(),
+            yielded: Default::default(),
+            inspections: Default::default(),
+            opens: Default::default(),
+        };
+        let scan = watcher.scan(&source);
+        assert_eq!(source.yielded.get(), CAP + 1);
+        // The fully read parent also needs one EOF probe; directories opened
+        // (and therefore EOF probes) are bounded by admitted inspections.
+        assert_eq!(source.next_calls.get(), CAP + 2);
+        assert_eq!(source.opens.get(), 2);
+        assert!(source.inspections.get() <= CAP);
+        assert!(scan.capped_for(ReloadLayer::Resources));
+
+        source.nested = false;
+        source.yielded.set(0);
+        source.next_calls.set(0);
+        let scan = watcher.scan(&source);
+        assert!(!scan.truncated());
+        assert_eq!(source.yielded.get(), CAP / 2);
+        assert_eq!(source.next_calls.get(), CAP / 2 + 1);
+        assert!(scan
+            .entries()
+            .windows(2)
+            .all(|pair| pair[0].path() < pair[1].path()));
+    }
+
+    #[test]
+    fn capped_scans_neither_compare_nor_advance_a_layers_baseline() {
+        let start = base();
+        let mut source = Fake::new();
+        source
+            .dir("/skills")
+            .file("/skills/a.md", 1)
+            .file("/skills/b.md", 1);
+        let watcher = budgeted_watcher(&[("/skills", ReloadLayer::Resources)], TEST_BUDGET);
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        supervisor.observe(start, &watcher.scan(&source));
+        source
+            .file("/skills/a.md", 2)
+            .remove("/skills/b.md")
+            .file("/skills/c.md", 1);
+        let partial = watcher.scan_with(&source, 2);
+        assert!(partial.truncated());
+        let summary = supervisor.observe(start + Duration::from_secs(1), &partial);
+        assert!(summary.changed_layers.is_empty());
+        assert!(!supervisor.is_queued());
+        let summary = supervisor.observe(start + Duration::from_secs(2), &watcher.scan(&source));
+        assert_eq!(
+            summary.changed_paths, 3,
+            "change, removal, and addition survive the cap"
+        );
+
+        // A first partial observation cannot manufacture additions when the
+        // layer later obtains its first complete baseline.
+        let mut fresh = ReloadSupervisor::new(ReloadSettings::default());
+        fresh.observe(start, &partial);
+        assert!(fresh
+            .observe(start + Duration::from_secs(1), &watcher.scan(&source))
+            .changed_layers
+            .is_empty());
+        assert!(!fresh.is_queued());
     }
 
     #[test]
@@ -2915,7 +3140,7 @@ mod tests {
     }
 
     #[test]
-    fn an_extension_reload_names_the_host_request_it_drops_and_a_host_pass_does_not() {
+    fn extension_and_host_reloads_do_not_invent_host_request_losses() {
         let start = base();
 
         // An explicit request (or an extension's `session/reload`) selects the
@@ -2929,13 +3154,11 @@ mod tests {
         };
         plan.record_reload(ReloadLayer::Extensions);
         let report = supervisor.finish(plan).expect("current");
-        assert!(
-            losses_of(&report, ReloadLayer::Extensions).contains(&ReloadLoss::ExtensionHostRequest)
-        );
-        assert!(report
+        assert!(losses_of(&report, ReloadLayer::Extensions).is_empty());
+        assert!(!report
             .diagnostics()
             .iter()
-            .any(|notice| { notice.contains(ReloadLoss::ExtensionHostRequest.label()) }));
+            .any(|notice| notice.contains("lost work")));
 
         // A host pass justified by a real executable change carries no
         // extension-restart loss: the replacement image rebuilds them.
@@ -3028,6 +3251,60 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_host_is_reported_on_demand_but_not_in_automatic_diagnostics() {
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        let mut plan = supervisor.force();
+        plan.record_reload(ReloadLayer::Resources);
+        plan.record(
+            ReloadLayer::Host,
+            LayerOutcome::Skipped(SkipReason::NoChange),
+        );
+        let report = supervisor.finish(plan).unwrap();
+        assert!(report
+            .notices()
+            .iter()
+            .any(|line| line == "reload: binary unchanged"));
+        assert!(!report
+            .diagnostics()
+            .iter()
+            .any(|line| line.contains("binary unchanged")));
+    }
+
+    #[test]
+    fn reload_problems_suppress_repeats_but_recur_after_checked_clear() {
+        let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
+        let host = ReloadComponent::Host;
+        let extension = ReloadComponent::Extension("fixture".into());
+        let problem = vec!["unavailable".to_owned()];
+        assert_eq!(
+            supervisor.checked_problems(host.clone(), problem.clone(), false),
+            problem
+        );
+        assert!(supervisor
+            .checked_problems(host.clone(), problem.clone(), false)
+            .is_empty());
+        // A successful, unrelated component does not clear the skipped host.
+        supervisor.checked_problems(extension, Vec::new(), false);
+        assert!(supervisor
+            .checked_problems(host.clone(), problem.clone(), false)
+            .is_empty());
+        assert_eq!(
+            supervisor.checked_problems(host.clone(), problem.clone(), true),
+            problem
+        );
+        let changed = vec!["consent required".to_owned()];
+        assert_eq!(
+            supervisor.checked_problems(host.clone(), changed.clone(), false),
+            changed
+        );
+        supervisor.checked_problems(host.clone(), Vec::new(), false);
+        assert_eq!(
+            supervisor.checked_problems(host, changed.clone(), false),
+            changed
+        );
+    }
+
+    #[test]
     fn compact_reload_diagnostics_preserve_failures_limits_losses_and_caller_notes() {
         let mut supervisor = ReloadSupervisor::new(ReloadSettings::default());
         let mut plan = supervisor.force();
@@ -3046,14 +3323,11 @@ mod tests {
             "reload (forced)",
             "resources reload failed",
             "fixture warning",
-            "skipped 2",
-            "lost work",
+            "skipped at least 2",
         ] {
             assert!(text.contains(detail), "{text}");
         }
-        for loss in ReloadLoss::ALL {
-            assert!(text.contains(loss.label()), "{text}");
-        }
+        assert!(!text.contains("lost work"), "{text}");
         for notice in notices {
             assert!(!notice.chars().any(char::is_control), "{notice:?}");
             assert!(notice.len() <= MAX_NOTE_BYTES);

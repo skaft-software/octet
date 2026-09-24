@@ -55,7 +55,7 @@ SPAWN_SCHEMA: Dict[str, Any] = {
         "provider": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128,
+            "maxLength": 256,
             "default": "inherit",
             "description": (
                 "Per-worker orchestration selection. `inherit` (the default) uses the "
@@ -67,24 +67,24 @@ SPAWN_SCHEMA: Dict[str, Any] = {
         "model": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128,
+            "maxLength": 256,
             "default": "inherit",
             "description": (
                 "Per-worker model selection; `inherit` (the default) uses the parent "
-                "session's model. API 0.2 agent_sessions carries no per-child model "
-                "field, so a request is validated and recorded as requested, and the "
-                "panel reports whether the host confirmed it."
+                "session's model. Explicit routes are resolved by the host's configured "
+                "catalog and used by the worker; discover exact identifiers with subagent_models. "
+                "Unknown routes are rejected without fallback."
             ),
         },
         "reasoning": {
             "type": "string",
-            "enum": ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+            "enum": ["inherit", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
             "default": "inherit",
             "description": (
                 "Per-worker reasoning effort; `inherit` (the default) uses the parent's "
                 "already-normalized selection. An unknown level is rejected, and a level "
-                "above the model's ceiling is clamped with the same policy the coding "
-                "agent uses."
+                "above the model's ceiling is normalized by the host using configured "
+                "model metadata, never caller capability hints."
             ),
         },
         "reasoning_capability": {
@@ -103,9 +103,9 @@ SPAWN_SCHEMA: Dict[str, Any] = {
                 "ultra": {"type": "boolean"},
             },
             "description": (
-                "The target model's advertised effort range, as declared by the caller. "
-                "Omitted means the product's wire defaults (floor minimal, ceiling high). "
-                "The extension never guesses a ceiling it cannot read."
+                "Legacy caller hint, retained for request compatibility only. "
+                "The host uses its configured model metadata, never these values, "
+                "to normalize reasoning and reports the effective choice."
             ),
         },
         "tools": {
@@ -235,8 +235,10 @@ class SdkAgentSessions:
         max_cost_microdollars: Optional[int],
         max_output_bytes: int,
         timeout_ms: Optional[int],
+        model_selection: Optional[Mapping[str, str]],
     ) -> Mapping[str, Any]:
         return self.extension.spawn_agent(
+            model_selection=model_selection,
             task_name=task_name,
             profile=profile,
             fingerprint=fingerprint,
@@ -490,6 +492,10 @@ def _error_result(operation: str, error: Exception) -> Dict[str, Any]:
     elif isinstance(error, RpcError):
         code = "agent_sessions_error"
         message = bounded_text(error.message, 4096)
+        for typed_code in ("unsupported_model", "unsupported_reasoning"):
+            if message.startswith(typed_code + ":"):
+                code = typed_code
+                break
     else:
         code = "internal_error"
         message = "the bounded subagent operation failed"
@@ -514,6 +520,7 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
             "content_parts",
             "lifecycle_events",
             "agent_sessions",
+            "agent_model_selection_v1",
             "delegation_telemetry_v1",
         ),
     )
@@ -526,6 +533,15 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
             _require_agent_sessions(extension)
             owner = Owner.from_context(context)
             token = current_cancellation()
+            if operation == "models":
+                if not isinstance(arguments, Mapping) or set(arguments) - {"query", "limit"}:
+                    raise SubagentError("subagent_models accepts only query and limit")
+                try:
+                    result = extension.list_agent_models(**arguments)
+                except ValueError as error:
+                    raise SubagentError(str(error)) from error
+                return tool_result(text_content(json.dumps(result, ensure_ascii=True)),
+                                   metadata={"operation": "models"})
             if operation == "spawn":
                 result = orchestrator.spawn(sessions, owner, arguments, token)
             elif operation == "status":
@@ -553,6 +569,16 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
                 error_type=type(error).__name__,
             )
             return _error_result(operation, error)
+
+    @extension.tool(
+        name="subagent_models",
+        description="Discover configured, credential-available worker models and supported reasoning. Bounded owner-scoped catalog; credentials are never returned. Use exact provider/model identifiers for subagent_spawn.",
+        parameters={"type": "object", "additionalProperties": False, "properties": {
+            "query": {"type": "string", "maxLength": 128},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}},
+    )
+    def subagent_models(arguments: Mapping[str, Any], context: Mapping[str, Any]):
+        return invoke("models", arguments, context)
 
     @extension.tool(
         name="subagent_spawn",

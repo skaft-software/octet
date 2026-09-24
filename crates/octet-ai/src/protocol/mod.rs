@@ -19,6 +19,41 @@ pub(crate) fn cache_session_id(req: &Request) -> Option<&str> {
     cache_session_id_for(req.cache_retention, req.session_id.as_deref())
 }
 
+/// OpenCode's routing header is not a prompt-cache control: even a request
+/// without explicit cache retention must stay on the same session route.
+pub(crate) fn is_opencode_session_route(model: &crate::catalog::Model) -> bool {
+    model.spec.cache.send_session_affinity_headers
+        && matches!(
+            model.endpoint.id.0.as_str(),
+            "opencode" | "opencode-go" | "opencode-anthropic" | "opencode-google"
+        )
+}
+
+pub(crate) fn add_opencode_session_header(
+    model: &crate::catalog::Model,
+    req: &Request,
+    headers: &mut http::HeaderMap,
+) -> Result<(), AiError> {
+    const NAME: &str = "x-opencode-session";
+    if !is_opencode_session_route(model)
+        || model.endpoint.default_headers.contains_key(NAME)
+        || model
+            .spec
+            .preset
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case(NAME))
+    {
+        return Ok(());
+    }
+    if let Some(session_id) = req.session_id.as_deref().filter(|id| !id.is_empty()) {
+        let value = http::HeaderValue::from_str(session_id)
+            .map_err(|_| ConfigError::InvalidHeader(NAME.into()))?;
+        headers.insert(http::HeaderName::from_static(NAME), value);
+    }
+    Ok(())
+}
+
 pub(crate) fn cache_session_id_for(
     retention: CacheRetention,
     session_id: Option<&str>,
@@ -71,20 +106,17 @@ pub(crate) mod sse;
 /// Pi's per-API `supportsStrictMode` default with a model's explicit
 /// declaration applied.
 ///
-/// Pi's defaults are API-specific (`openai-completions` detects strict support,
-/// `openai-responses` defaults to `false` unless generated metadata enables it,
-/// Azure/Codex Responses and Google default to `true`, Bedrock and Anthropic to
-/// `false`). A model preset may set `supports_strict_mode` to override the
-/// route default in either direction. This is compatibility data, never a
-/// provider-name branch.
+/// Responses defaults off except Azure/Codex; Google and Mistral default on;
+/// Anthropic and Bedrock default off. Public OpenAI Chat accepts strict tools,
+/// but unknown compatible Chat endpoints do not inherit that guarantee. A model
+/// preset may override the route default in either direction.
 pub(crate) fn strict_mode_for(model: &crate::catalog::Model) -> bool {
     use crate::types::Protocol;
     if let Some(declared) = model.spec.preset.supports_strict_mode {
         return declared;
     }
-    // Deliberately compared by name, not matched exhaustively: a new wire
-    // protocol must not force an edit here, and every future route keeps the
-    // conservative default until it declares otherwise.
+    // Only the Chat-compatible fallback changes here; the other API defaults
+    // remain unchanged.
     if model.spec.protocol == Protocol::OpenAiResponses {
         return matches!(
             model.endpoint.runtime.responses_profile,
@@ -92,14 +124,19 @@ pub(crate) fn strict_mode_for(model: &crate::catalog::Model) -> bool {
                 | crate::types::ResponsesRuntimeProfile::Codex
         );
     }
+    if model.spec.protocol == Protocol::OpenAiChat {
+        let url = &model.endpoint.base_url;
+        return url.scheme() == "https"
+            && url.host_str() == Some("api.openai.com")
+            && url.path() == "/v1/";
+    }
     if model.spec.protocol == Protocol::AnthropicMessages {
         return anthropic_strict_tools_for(model);
     }
     if model.spec.protocol == Protocol::BedrockConverse {
         return false;
     }
-    // OpenAI Chat, Google, Mistral and every future route default to Pi's
-    // detected/compliant strict support (true).
+    // Google, Mistral and future routes retain their existing defaults.
     true
 }
 
@@ -424,6 +461,7 @@ pub(crate) mod harness {
             display_name: None,
             protocol,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: input,
                 output_modalities: output,
                 tools: true,

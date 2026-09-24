@@ -42,6 +42,14 @@ fn rendered_history_rows(shell: &InteractiveShell) -> Vec<(usize, String)> {
     ))
 }
 
+// Appending a mutable tail row must not change the first semantic history row
+// or the order of the overlapping part of the reader's window.
+fn assert_history_prefix(actual: &[(usize, String)], expected: &[(usize, String)]) {
+    assert!(!actual.is_empty() && !expected.is_empty());
+    let overlap = actual.len().min(expected.len());
+    assert_eq!(&actual[..overlap], &expected[..overlap]);
+}
+
 fn roster(count: usize, state: &str) -> octet_agent::ExtensionPresentationSnapshot {
     serde_json::from_value(serde_json::json!({
         "revision": count + 1,
@@ -275,10 +283,26 @@ fn semantic_scroll_captures_history_before_worker_growth_without_a_frame() {
         assert!(!expected.is_empty());
         let old_length = shell.state.borrow().transcript_cache.borrow().lines.len();
         assert!(shell.set_subagent_presentation(Some(&roster(8, "running")), true));
-        assert_eq!(rendered_history_rows(&shell), expected);
-        assert!(shell.state.borrow().transcript_cache.borrow().lines.len() > old_length);
+        assert_history_prefix(&rendered_history_rows(&shell), &expected);
+        assert_eq!(
+            shell.state.borrow().transcript_cache.borrow().lines.len(),
+            old_length
+        );
+        assert!(shell_chrome(&shell.state.borrow(), WIDTH, Instant::now())
+            .subagents
+            .is_empty());
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .rendered_transcript(WIDTH)
+                .iter()
+                .filter(|line| line.contains("Subagents"))
+                .count(),
+            1
+        );
         assert!(shell.set_subagent_presentation(Some(&roster(1, "succeeded")), false));
-        assert_eq!(rendered_history_rows(&shell), expected);
+        assert_history_prefix(&rendered_history_rows(&shell), &expected);
         assert!(!shell.state.borrow().follow_tail);
     }
 }
@@ -316,7 +340,7 @@ fn semantic_scroll_rebases_pending_roster_reflow_before_next_navigation() {
 }
 
 #[test]
-fn semantic_scroll_keeps_reasoning_anchor_when_first_roster_is_inserted() {
+fn semantic_scroll_keeps_reasoning_anchor_when_first_roster_appears() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(WIDTH, HEIGHT);
     let run = shell.begin_run("openai");
@@ -337,24 +361,30 @@ fn semantic_scroll_keeps_reasoning_anchor_when_first_roster_is_inserted() {
     assert!(!expected.is_empty());
     let anchor = shell.state.borrow().viewport_anchor.get().unwrap();
     assert!(shell.set_subagent_presentation(Some(&roster(4, "running")), true));
-    assert_eq!(rendered_history_rows(&shell), expected);
+    assert_history_prefix(&rendered_history_rows(&shell), &expected);
     let state = shell.state.borrow();
     let current = state.viewport_anchor.get().unwrap();
     assert_eq!(current.commit_id, anchor.commit_id);
     assert_eq!(current.text_offset, anchor.text_offset);
-    let index = state.subagent_activity_block.unwrap();
+    assert!(shell_chrome(&state, WIDTH, Instant::now())
+        .subagents
+        .is_empty());
     let cache = state.transcript_cache.borrow();
-    assert!(cache.lines
-        [cache.block_starts[index]..cache.block_starts[index] + cache.block_lengths[index]]
-        .iter()
-        .any(|line| line.contains("Subagents")));
+    assert_eq!(
+        cache
+            .lines
+            .iter()
+            .filter(|line| line.contains("Subagents"))
+            .count(),
+        1
+    );
     assert_eq!(cache.block_starts.len(), state.transcript.len());
 }
 
 #[test]
-fn worker_roster_is_transcript_material_at_the_live_tail_and_in_history() {
+fn worker_roster_stays_at_the_live_tail_while_reading_history() {
     let mut shell = worker_history_shell();
-    // The active roster is a transcript block, never pinned chrome.
+    // The active roster is one transcript tail row, not composer chrome.
     let live = rendered_history_rows(&shell);
     assert!(!live.is_empty());
     shell.scroll_lines(-24);
@@ -365,25 +395,39 @@ fn worker_roster_is_transcript_material_at_the_live_tail_and_in_history() {
         "scrolling back anchors the reader's window"
     );
 
-    // A live roster update is an in-place transcript edit: it must never return
-    // the reader to the tail, and the rows they were reading stay visible.
+    // A live roster update repaints the tail without returning the reader to
+    // it or moving the semantic history anchor.
     assert!(shell.set_subagent_presentation(Some(&roster(8, "running")), true));
     assert!(!shell.state.borrow().follow_tail);
     let after = rendered_history_rows(&shell);
-    let texts = |rows: &[(usize, String)]| {
-        rows.iter()
-            .map(|(_, text)| text.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(texts(&after), texts(&expected), "{expected:?} vs {after:?}");
+    assert_history_prefix(&after, &expected);
+    let chrome = shell_chrome(&shell.state.borrow(), WIDTH, Instant::now());
+    assert!(chrome.subagents.is_empty());
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(WIDTH)
+            .iter()
+            .filter(|line| line.contains("/subagents"))
+            .count(),
+        1
+    );
+    assert!(chrome.transcript_rows >= 1);
 
     shell.scroll_lines(i16::MAX);
     assert!(shell.state.borrow().follow_tail);
     let state = shell.state.borrow();
-    let index = state.subagent_activity_block.expect("live roster block");
+    assert!(shell_chrome(&state, WIDTH, Instant::now())
+        .subagents
+        .is_empty());
     let cache = state.transcript_cache.borrow();
-    assert!(cache.lines
-        [cache.block_starts[index]..cache.block_starts[index] + cache.block_lengths[index]]
-        .iter()
-        .any(|line| line.contains("Subagents")));
+    assert_eq!(
+        cache
+            .lines
+            .iter()
+            .filter(|line| line.contains("Subagents"))
+            .count(),
+        1
+    );
 }

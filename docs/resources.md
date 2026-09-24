@@ -2,10 +2,9 @@
 
 Prompts, skills, and executable extensions share one filesystem
 resolver. Resource-specific parsers own their schemas; the resolver owns the
-cross-cutting local safety and precedence contract. Theme-file customization
-and filesystem theme discovery remain disabled. The compiled default theme
-offers built-in `auto`, `light`, and `dark` terminal appearances through `/theme`;
-these choices do not load theme files. See [Theme status](themes.md).
+cross-cutting local safety and precedence contract. Built-in `auto`, `light`,
+and `dark` appearances are available through `/theme` without
+theme files. Named theme files follow the separate bounded [theme loader](themes.md).
 
 ## Locations and precedence
 
@@ -77,6 +76,36 @@ These lookup locations do not promise full Agent Skills/Pi parser compatibility
 or additional symlink support. Parser-specific shapes and symlink behavior for
 those additional roots require their exact source contract.
 
+### Skill catalog budgets
+
+Discovery accepts at most 32 KiB of YAML frontmatter per skill and has a
+4096-entry per-root scan limit. Those are per-input limits, not global catalog
+limits. Across **all roots**, the retained discovery catalog additionally has
+these caps:
+
+- **1024 UTF-8 bytes per description**, including an ellipsis when shortened.
+  Only the metadata excerpt is shortened; the source file and instruction body
+  are unchanged. The full description allocation is not retained.
+- **256 descriptors / 256 KiB of descriptor payload bytes**, whichever is
+  reached first. Payload counts text fields, encoded paths, and JSON-serialized
+  arbitrary metadata, not allocator overhead. Admission follows deterministic
+  root/candidate order. Later definitions still replace earlier ones of the same
+  ID; if a larger replacement
+  does not fit, its predecessor is removed rather than advertised as the winner.
+- **64 KiB of rendered model-catalog text**, including XML escaping, framing,
+  paths, and any cap notice. Rendering uses ID/path order and stops before the
+  first entry that does not fit. Names, location paths, XML entities, and closing
+  tags are never cut. `disable-model-invocation` skills remain excluded.
+
+Description caps and omitted counts appear in discovery diagnostics. Catalog
+omission is not deactivation: winning source locations remain indexed, so a
+known `/skill:NAME` or `/skills load NAME` can still load an omitted skill with
+the usual trust, required-tool, symlink, and 256 KiB file limits. An omitted
+header is parsed on demand; a changed skill ID requires rediscovery. Listing and
+search use the bounded descriptors, not the complete source index. These limits
+bound retained descriptors and model context, not total discovery work or RSS:
+the lightweight source index and diagnostics still grow with discovered inputs.
+
 ## Reads and diagnostics
 
 For octet-native resource roots, selected files, and directory entrypoints, the
@@ -98,6 +127,12 @@ Invalid UTF-8, invalid names, inaccessible roots, rejected links, oversized
 files, parser failures, and precedence decisions become inspectable
 diagnostics. One broken customization does not prevent the core binary from
 starting.
+
+Automatic reload suppresses repeated resource/bootstrap and keybinding problems
+per checked component. A successful check clears that component's remembered
+problem, allowing a later recurrence to appear; skipped checks do not clear it.
+Explicit commands still report their diagnostics, and actual work losses are
+never suppressed as duplicate configuration warnings.
 
 ## Reload
 

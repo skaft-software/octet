@@ -56,7 +56,16 @@ An explicitly read-only tool may run without an additional prompt. Every
 or the host denies the intent, the bridge fails closed. It uses a one-use
 approval retry only when the host actually negotiates `approvals`; octet `0.8.0`'s
 coding product does not currently enable approval issuance, so those calls are
-denied with an explanatory tool error. An MCP tool call is never automatically
+denied with an explanatory tool error. The working-tree coding host now supplies
+a scoped `mcp.tool.call` adapter: `unsafe_host` permits unknown/destructive calls
+only for the admitted `octet-mcp` process and its exact active, owner-scoped tool
+call. The exact published tool identity, arguments, and generation must match; hints
+never authorize a different call. Controlled policies deny external calls and
+still prevent process startup. Generic operations remain denied and approval-token
+issuance remains off; this does not add a new per-server permission configuration.
+The bridge owns configured-server provenance; the target server label is only
+namespace-checked, not an independent host permission key.
+An MCP tool call is never automatically
 replayed after timeout, cancellation, crash, or an ambiguous disconnect.
 
 Server descriptions, schemas, logs, errors, and results are untrusted data.
@@ -430,10 +439,12 @@ a failure; a connection ends with a committed SSE event ID, the next connection
 sends that exact `Last-Event-ID`, and a peer that replays the acknowledged
 identity fails closed with `sse_event_replayed` (an empty `id:` clears the
 cursor). Its committed cursor is memory-only, exactly like the session identity.
-At most `backoffInitialMs`→`backoffMaxMs` consecutive failed connections (bounded
-by `maxRestarts`) and at most 64 total connections are attempted; exceeding
-either ends the stream through the normal bounded lifecycle failure path instead
-of looping forever. The retired standalone/legacy SSE transport is still not
+Failed connections use `backoffInitialMs`→`backoffMaxMs` and are bounded by
+`maxRestarts` consecutive failures and 64 lifetime failures. Healthy completed
+streams and renewals after an established SSE response do not consume either
+failure budget. A timeout before establishing the SSE response counts as a
+failure. Exceeding either bound ends the stream through the normal bounded
+lifecycle failure path. The retired standalone/legacy SSE transport is still not
 implemented.
 
 HTTP response bodies, event streams, request slots, timeouts, and shutdown use
@@ -454,6 +465,12 @@ change publishes complete dynamic definitions. The bundled API `0.4` SDK keeps
 eight committed octet schema/handler snapshots, so an older in-flight model turn
 uses the handler and validation schema from the `catalog_revision` it saw.
 Removed/restarted servers never alias an old epoch to a new connection.
+
+The bridge filters unsupported schema keywords at every schema node, including
+schema-valued `additionalProperties`. Recursive MCP `$defs`/`$ref` constraints
+cannot be enforced by octet's tool bus; omitting them may make a catch-all
+schema permissive, not grant approval for a tool call. The read-only annotation
+and host policy gates remain separate.
 
 Calls use bounded concurrency and timeout, forward octet cancellation as MCP
 `notifications/cancelled`, and retain safe server/tool provenance and terminal
@@ -481,7 +498,9 @@ active host-derived session owner and process generation.
 Servers transition through configured, connecting, ready, refreshing,
 degraded, backoff, parked, and stopped states. Transient crashes reconnect with
 bounded full-jitter exponential backoff. Permanent configuration/protocol
-failures and exhausted retry budgets park. Refresh reads a catalog without
+failures and exhausted retry budgets park. A successful connection and catalog
+publish resets the restart failure counter, so healthy sessions do not deplete
+it. Refresh reads a catalog without
 relaunching; restart explicitly replaces a connection; stop removes its current
 tools and closes it. Shutdown closes all roots in bounded parallel workers, and
 octet's extension process-group cleanup is the final descendant fence.

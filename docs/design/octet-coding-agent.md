@@ -37,6 +37,13 @@ without a provisional model footer; branded readiness and prompt submission
 still wait for launch resolution, extension startup, and history hydration.
 Plain, print, and RPC retain their non-TUI bootstrap path. This is a responsiveness
 boundary, not a reduction in provider latency or native-history replay work.
+A launch with a proven built-in selection initializes only its required route;
+a resume without an explicit selection remains fleet-ready because its model
+provenance is not known until the session is opened. A valid positive custom
+inventory uses its cache immediately, refreshing stale metadata for a later
+catalog build. Once idle, `/model` opens from current routes and enriches the
+fleet in the background; filtering and highlighted model identity survive the
+refresh, while cancellation/failure leaves the active selection untouched.
 
 Startup resolves the persistent session before final model selection:
 
@@ -243,8 +250,17 @@ V2 delegation. Without the service, Ultra is clamped to the highest ordinary
 safe effort. The coding host chooses this activation policy, while `octet-agent`
 enforces execution, isolation, provenance, limits, and cancellation;
 `octet-ai` only reports the provider capability. Delegated children inherit the
-root's approved extensions, sandbox, model/reasoning and cache settings,
+root's approved extensions, sandbox and cache settings,
 compaction/completion/output policy, retry and turn bounds, and cost ceiling.
+Model/reasoning default to the parent's effective selection. With negotiated
+`agent_model_selection_v1`, the product resolves explicit worker selections
+against the same credential-filtered catalog as `/model`; `subagent_models`
+provides bounded, secret-free discovery. A live child-session service completes
+any deferred provider inventories during build/rebuild before the active run,
+and provider-sync boundaries refresh the resolver snapshot. The kernel pins the
+resolved worker model/reasoning for continuation and recovery, uses its pricing
+and model limits, and refuses unavailable saved selections rather than falling
+back to the parent. No credentials or endpoint overrides come from the extension.
 Their bounded status, spawn/list result, and durable spawn record include the
 same effective tool-policy snapshot plus source-only parent-inherited versus
 child-override orchestration provenance; they never expose paths, environment

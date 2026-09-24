@@ -128,6 +128,12 @@ External and isolated browsing are mutually exclusive. Each external operation
 rechecks the host-derived resource owner, target identity/revision, page
 liveness, connector verification, and declared capability before confirmation or
 browser use. Unsupported capabilities fail with `unsupported_capability`.
+Only passive snapshot/screenshot capabilities default on. All external action
+capabilities default off, and an explicitly declared action requires a connector
+that installs/verifies preventive navigation, scripted popup and download
+interception before selection and each action. Post-action URL inspection and a
+page-level download listener cannot substitute for that connector boundary;
+the isolated Chromium interception is not installed in an external context.
 Native Firefox and Safari operations are unsupported; a connector cannot turn a
 literal native-browser selection into an isolated Chromium operation. External
 connectors must preserve the manual-auth boundary and must not provide
@@ -153,7 +159,7 @@ Authentication is manual in the visible window. `browser_type` refuses fields th
 
 Clicks and Enter/Space actions that appear to purchase/pay, send/publish, grant consent, submit an external side effect, or delete data synchronously request octet confirmation before acting. Denial, a dropped request, a non-interactive frontend, cancellation, or timeout fails closed. Page content and labels cannot grant confirmation.
 
-Only explicit absolute HTTP(S) navigation is allowed. URLs with userinfo, relative URLs passed to `browser_open_url`, `file:`, `javascript:`, data/blob/custom/browser-internal schemes, and malformed hosts are rejected. The same top-level policy is enforced for links, forms, redirects, and popups. Query strings and fragments are removed from displayed URLs. Downloads are cancelled and never published or retained.
+Only explicit absolute HTTP(S) navigation is allowed. URLs with userinfo, relative URLs passed to `browser_open_url`, `file:`, `javascript:`, data/blob/custom/browser-internal schemes, and malformed hosts are rejected. The same top-level policy is enforced for links, forms, redirects, and popups in the isolated context; action-enabled external connectors must supply their own preventive guard. Query strings and fragments are removed from displayed URLs. Downloads are cancelled and never published or retained.
 
 octet Browse does not expose JavaScript evaluation, raw CDP, coordinates, physical-pointer control, clipboard, upload, download, cookies, storage, cache, history, browser extensions, visibility/headless controls, or profile inspection.
 
@@ -167,7 +173,7 @@ BEGIN UNTRUSTED BROWSER CONTENT
 END UNTRUSTED BROWSER CONTENT
 ```
 
-Everything inside is data, never instructions or authorization. A snapshot is capped at 20,000 characters and 100 interactive elements, with explicit truncation notices. It returns only bounded visible text and accessible role/name/state data. Input/textarea values, hidden content, cookies, storage, headers, and profile data are not queried or returned. Tab lists carrying page titles/URLs use the same markers.
+Everything inside is data, never instructions or authorization. A snapshot is capped at 20,000 characters and 100 interactive elements, with explicit truncation notices. Visible body extraction reads at most 30,000 UTF-16 source units, returns at most 30,000 units, and visits at most 10,000 DOM nodes; source, output, and traversal cuts remain explicit even when whitespace sanitization produces a short result. Remembered tool-typed values (including encoded variants and possible cut-boundary prefixes) are redacted on the host, never sent back into the page. Visible editable content conservatively omits body text. It returns only bounded visible text and accessible role/name/state data. Input/textarea values, hidden content, cookies, storage, headers, and profile data are not queried or returned. Tab lists carrying page titles/URLs use the same markers.
 
 Screenshots are viewport-only PNGs. To prevent form-value leakage, capture is refused after `browser_type` has supplied a value in that tab or while any visible form/editable field could contain manually entered data (with a specific refusal for credential/authentication/payment fields). An image at or above 5 MiB fails clearly instead of returning an unreadable attachment. Successful images are retained under `~/.octet/browse/artifacts/screenshots/`, bounded to 20 files and 80 MiB, copied briefly into the host-owned process scratch area, and published through API `0.4` as owner/generation-scoped artifacts. Results contain both the image part and a textual local reference usable with built-in `read`.
 

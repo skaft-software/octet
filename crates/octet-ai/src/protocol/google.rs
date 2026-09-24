@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use crate::error::{AiError, ConfigError, DecodeError, ProviderError};
 use crate::protocol::sse::SseEvent;
 use crate::protocol::{emit_event, HttpRequestParts};
-use crate::stream::{ResponseBuilder, StreamEvent};
+use crate::stream::{ResponseBuilder, StreamEvent, MAX_TOOL_ARGUMENT_BYTES};
 use crate::types::{
     AssistantPart, ImageSource, Media, Message, OutputFormat, Protocol, ProviderPartMetadata,
     ReasoningConfig, Request, StopReason, ToolCallId, ToolChoice, ToolResultPart, Usage, UserPart,
@@ -23,7 +23,6 @@ use crate::validate::{normalize_request_reasoning, validate_request};
 /// it well below the aggregate response cap so a malicious provider cannot use
 /// a single metadata field to retain an excessive allocation.
 const MAX_THOUGHT_SIGNATURE_BYTES: usize = 64 * 1024;
-const FUNCTION_ARGS_KEY_PREFIX: &str = "google_function_args_";
 
 /// Builds a Google Generative AI / Vertex streaming request.
 pub(crate) fn build_request(
@@ -84,6 +83,7 @@ pub(crate) fn build_request(
         http::header::ACCEPT,
         http::HeaderValue::from_static("text/event-stream"),
     );
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -785,6 +785,7 @@ fn decode_google_function_call(
             events,
             builder,
             StreamEvent::ToolCallStart {
+                async_execution: false,
                 index,
                 id: ToolCallId(id),
                 name: call.name,
@@ -796,19 +797,32 @@ fn decode_google_function_call(
     // Gemini may send cumulative function-call snapshots. Keep a merged object
     // privately until terminal rather than appending multiple complete JSON
     // objects into canonical tool arguments.
-    let args_key = function_args_key(index);
-    let merged = match builder.temp_buffers.get(&args_key) {
-        Some(previous) => {
-            let mut prior = serde_json::from_str::<Value>(previous)
-                .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-            merge_json_object(&mut prior, call.args);
-            prior
-        }
-        None => call.args,
+    let (old_size, new_size) = match builder.google_function_args.get(&index) {
+        Some((prior, size)) => (
+            *size,
+            size.checked_add_signed(merged_size_change(prior, &call.args)?)
+                .ok_or(DecodeError::ToolArgumentsTooLarge)?,
+        ),
+        None => (0, argument_json_size(&call.args)?),
     };
-    let args = serde_json::to_string(&merged)
-        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-    builder.replace_temp_buffer(args_key, args)?;
+    if new_size > MAX_TOOL_ARGUMENT_BYTES {
+        return Err(DecodeError::ToolArgumentsTooLarge.into());
+    }
+    // Reserve the prospective size before mutating retained state. Only changed
+    // subtrees are measured; untouched argument prefixes are neither reparsed
+    // nor serialized on each delta.
+    builder.resize_buffered_content(old_size, new_size)?;
+    match builder.google_function_args.get_mut(&index) {
+        Some((prior, size)) => {
+            merge_json_object(prior, call.args);
+            *size = new_size;
+        }
+        None => {
+            builder
+                .google_function_args
+                .insert(index, (call.args, new_size));
+        }
+    }
     Ok(())
 }
 
@@ -859,8 +873,51 @@ fn google_canonical_index(builder: &mut ResponseBuilder, key: &str) -> usize {
     index
 }
 
-fn function_args_key(index: usize) -> String {
-    format!("{FUNCTION_ARGS_KEY_PREFIX}{index}")
+// Count escaped JSON bytes without materializing a serialized copy. Every
+// subtree of a valid tool argument must itself fit the argument ceiling.
+fn argument_json_size(value: &impl serde::Serialize) -> Result<usize, AiError> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .filter(|size| *size <= MAX_TOOL_ARGUMENT_BYTES)
+                .ok_or_else(|| std::io::Error::other("tool arguments exceed byte limit"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|_| AiError::Decode(DecodeError::ToolArgumentsTooLarge))?;
+    Ok(counter.0)
+}
+
+fn merged_size_change(target: &Value, source: &Value) -> Result<isize, AiError> {
+    match (target, source) {
+        (Value::Object(target), Value::Object(source)) => {
+            let mut change = 0;
+            let mut members = target.len();
+            for (key, value) in source {
+                if let Some(existing) = target.get(key) {
+                    change += merged_size_change(existing, value)?;
+                } else {
+                    // A new member contributes its quoted key, colon, value,
+                    // and a comma unless it is the object's first member.
+                    change += (argument_json_size(key)?
+                        + 1
+                        + argument_json_size(value)?
+                        + usize::from(members > 0)) as isize;
+                    members += 1;
+                }
+            }
+            Ok(change)
+        }
+        _ => Ok(argument_json_size(source)? as isize - argument_json_size(target)? as isize),
+    }
 }
 
 fn merge_json_object(target: &mut Value, source: Value) {
@@ -933,7 +990,10 @@ fn close_google_tool_calls(
         .collect::<Vec<_>>();
     indices.sort_unstable();
     for index in indices {
-        if let Some(args) = builder.take_temp_buffer(&function_args_key(index)) {
+        if let Some((args, size)) = builder.google_function_args.remove(&index) {
+            builder.release_buffered_content(size);
+            let args = serde_json::to_string(&args)
+                .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
             emit_event(
                 events,
                 builder,
@@ -1018,6 +1078,7 @@ mod tests {
                 endpoint: EndpointId("google".to_owned()),
                 protocol: Protocol::GoogleGenerativeAi,
                 capabilities: Capabilities {
+                    responses_features: Default::default(),
                     input_modalities: ModalitySet::none(),
                     output_modalities: ModalitySet::none(),
                     tools: true,
@@ -1049,7 +1110,7 @@ mod tests {
 
     #[test]
     fn maps_structured_output_to_native_json_schema() {
-        let request = Request {
+        let mut request = Request {
             messages: Vec::new(),
             system: None,
             tools: Vec::new(),
@@ -1081,6 +1142,21 @@ mod tests {
             body["generationConfig"]["responseJsonSchema"]["type"],
             "object"
         );
+
+        let mut zen = model();
+        std::sync::Arc::make_mut(&mut zen.spec)
+            .cache
+            .send_session_affinity_headers = true;
+        std::sync::Arc::make_mut(&mut zen.endpoint).id = EndpointId("opencode-google".into());
+        request.cache_retention = crate::types::CacheRetention::None;
+        request.session_id = Some("zen-session".into());
+        assert_eq!(
+            build_request(&zen, &request).unwrap().headers["x-opencode-session"],
+            "zen-session"
+        );
+        request.session_id = None;
+        let parts = build_request(&zen, &request).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
     }
 
     #[test]
@@ -1089,6 +1165,7 @@ mod tests {
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call-1".to_owned()),
                         name: "lookup".to_owned(),
                         arguments_json: r#"{"city":"Paris"}"#.to_owned(),
@@ -1178,6 +1255,71 @@ mod tests {
                 AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature { .. }),
                 AssistantPart::Text(text)
             ] if text == "visible"
+        ));
+    }
+
+    #[test]
+    fn incremental_argument_size_matches_recursive_merge_and_escaping() {
+        let mut prior = serde_json::json!({});
+        let mut size = argument_json_size(&prior).unwrap();
+        for update in [
+            serde_json::json!({"nested": {"a": "long prefix", "b": 1}, "array": [1, 2]}),
+            serde_json::json!({"nested": {"a": "x", "quoted\"": "\n\t\"é"}}),
+            serde_json::json!({"array": {"empty": {}}, "new": null}),
+            serde_json::json!({"nested": false, "array": {"empty": {"x": 3}}}),
+            serde_json::json!({}),
+        ] {
+            size = size
+                .checked_add_signed(merged_size_change(&prior, &update).unwrap())
+                .unwrap();
+            merge_json_object(&mut prior, update);
+            assert_eq!(size, serde_json::to_vec(&prior).unwrap().len());
+        }
+    }
+
+    #[test]
+    fn argument_update_reserves_before_mutating_the_retained_object() {
+        let mut builder =
+            ResponseBuilder::new(model().spec.id.clone(), Protocol::GoogleGenerativeAi, None);
+        let mut events = Vec::new();
+        let call = |args| GoogleFunctionCall {
+            id: None,
+            name: "read".to_owned(),
+            args,
+        };
+        decode_google_function_call(
+            &mut events,
+            &mut builder,
+            0,
+            call(serde_json::json!({"path": "a"})),
+            None,
+        )
+        .unwrap();
+        let prior = builder.google_function_args[&0].clone();
+        assert_eq!(builder.buffered_content_bytes, prior.1);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ToolCallArgsDelta { .. })));
+        builder.aggregate_content_bytes = crate::stream::MAX_RESPONSE_CONTENT_BYTES - prior.1;
+        assert!(matches!(
+            decode_google_function_call(
+                &mut events,
+                &mut builder,
+                0,
+                call(serde_json::json!({"line": 2})),
+                None
+            ),
+            Err(AiError::Decode(DecodeError::ResponseTooLarge))
+        ));
+        assert_eq!(builder.google_function_args[&0], prior);
+        assert_eq!(builder.buffered_content_bytes, prior.1);
+    }
+
+    #[test]
+    fn google_argument_size_enforces_the_tool_limit_before_retention() {
+        assert!(matches!(
+            argument_json_size(&"x".repeat(MAX_TOOL_ARGUMENT_BYTES)),
+            Err(AiError::Decode(DecodeError::ToolArgumentsTooLarge))
         ));
     }
 

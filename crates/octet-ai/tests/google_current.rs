@@ -25,6 +25,7 @@ fn fixture_model(base_url: &str) -> Model {
             endpoint: EndpointId("google-current".to_owned()),
             protocol: Protocol::GoogleGenerativeAi,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -64,6 +65,7 @@ fn fixture_request() -> Request {
             content: vec![UserPart::Text("Look up Paris.".to_owned())],
         })],
         tools: vec![ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "lookup".to_owned(),
             description: "Look up a city.".to_owned(),

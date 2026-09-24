@@ -14,14 +14,20 @@ Stable product tokens include the terminal surface, text hierarchy, layout,
 spacing, byte silhouette, interaction grammar, and semantic
 success/warning/error colours. Adaptive model tokens identify both model
 provenance and the active shell atmosphere: the startup atmosphere, each
-persisted prompt card, the composer for the model that will receive the next
-prompt, and focused controls in picker and completion menus. Changing models
-changes provenance and ambience, never behavior or authority.
+persisted prompt marker and compact text highlight, the composer for the model
+that will receive the next prompt, and focused controls in picker and
+completion menus. Changing models changes provenance and ambience, never
+behavior or authority.
 
-Every submitted prompt captures its model-lab colour. That stored colour paints
-the prompt marker and card background for the lifetime of the transcript, so a
-later model switch cannot recolour old prompts. The composer immediately adopts
-the selected next model's colour, including while another model's run is still
+Every submitted prompt captures its model-lab colour. The compiled default
+paints its marker and each wrapped text line with that provenance, retaining
+inline Markdown styling and leaving the gutter, blank spacing and trailing row
+unpainted. Known dark TrueColor uses a
+hue-balanced 0.10-luminance highlight with a light foreground; Light uses a
+contrasting pale tint, while unknown/no-colour profiles retain terminal-default
+canvas and readable text. Custom theme cards retain their configured surfaces.
+A later model switch cannot recolour old prompts. The composer immediately
+adopts the selected next model's colour, including while another model's run is still
 settling. Picker and completion focus consistently use the active model's
 adaptive accent as shell atmosphere, not the focused candidate's provider
 provenance. Queued-steering chrome follows the same accent because it previews
@@ -45,6 +51,30 @@ Structured telemetry is evidence for measurement; it is not a one-row-per-event
 rendering instruction. Presentation code coalesces activity by stable request,
 tool, and worker identity.
 
+Subagent orchestration occupies one tool-like transcript block. Its bold
+heading shows state counts (queued separately from running) and `/subagents`;
+while workers are queued or running, up to four indented child lines show task
+and `↑input ↓output` token counts, with an
+overflow count for the rest. Input includes uncached, cache-read, and
+cache-write tokens and advances when the provider reports usage. Output
+advances from settled provider usage, plus a `~`-marked, throttled estimate
+from streamed text/reasoning deltas while generating; retries discard the
+provisional estimate. Neither estimate nor UI refresh changes billed usage,
+budgets, or cost. Providers without streamed deltas cannot provide live token
+progress. The marker blinks and the block
+remains the mutable tail; later parent output is placed above it. Once the
+workers settle, the child lines disappear and the same block fixes in its
+completion position with a green marker for all success, red for all failure,
+or yellow for mixed outcomes. Raw calls, arguments, worker prompts and costs
+remain hidden. On session hydration, durable call/results without worker
+telemetry yield a neutral “activity recorded” row, not a claim
+that a spawned child has completed; only proven orchestration failures colour
+that restored row as failed. `/subagents` retains the detailed roster,
+reasons, usage, and read-only child transcripts after settlement. No duplicate
+pinned strip or automatic per-worker notices are created. This does not
+suppress ordinary tool/run failures or approval prompts, or alter model-visible
+errors, durable results, or accounting.
+
 Opt-in provider readiness (`queued`, `loading`, or `ready`) is live activity,
 not a fourth transcript layer. It replaces one mutable request-status row with a
 friendly provider label and bounded sanitized detail; real model output or a
@@ -54,8 +84,8 @@ content, or default telemetry.
 ## Surface and geometry contract
 
 Transcript surfaces, the composer, footer, and pickers resolve one shared
-horizontal grid. In the default theme, full-width rules, cards, and event or
-prompt markers begin at terminal column 0; primary text begins at column 2; and
+horizontal grid. In the default theme, full-width rules and event/prompt
+markers begin at terminal column 0; primary text begins at column 2; and
 nested detail begins at column 4. Narrow pickers collapse to compact rows,
 regular terminals stack labels over metadata, and genuinely wide terminals may
 use columns. The composer keeps stable full-width top and bottom rules and no
@@ -68,7 +98,10 @@ resize earlier rows.
 
 There is exactly one breathing row between transcript content and the composer.
 The composer does not animate or recolour merely because work starts or draft
-text changes; transcript activity owns liveness. The footer is one quiet line:
+text changes; transcript activity owns liveness. Assistant prose and submitted
+prompts use the available width after their outer gutter, including list/quote
+indentation; code, diffs, diagrams and tables retain their existing viewport
+geometry. The footer is one quiet line:
 `model · reasoning · context%/limit · cost` on the left, with the workspace path
 right-aligned. Values remain live and model-bound, not fixed example text. Home
 paths use `~`; long paths shorten from the left or disappear before left-hand
@@ -115,7 +148,7 @@ terminal-sanitized again for presentation, bounded to 4 KiB at a UTF-8 boundary,
 and included in semantic copy. Raw envelopes and headers remain diagnostic
 evidence rather than transcript copy.
 
-Tool failures follow the same rule: collapsed rows retain a bounded actionable
+Visible tool failures follow the same rule: collapsed rows retain a bounded actionable
 summary while complete captured output remains available through disclosure when
 it exists.
 

@@ -454,9 +454,20 @@ pub fn translate_with_bindings(
             }
             let steer = key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL;
             let submit = matches("tui.input.submit");
+            // Explicit skill invocations are prompts, not local commands.
+            // During a run they must wait for idle prompt preparation to
+            // expand and validate the skill before the agent sees its text.
+            if press && steer && editor_text.starts_with("/skill:") {
+                return if active {
+                    InputAction::Queue(editor_text.to_owned())
+                } else {
+                    InputAction::Submit(editor_text.to_owned())
+                };
+            }
             if press
                 && (submit || steer)
                 && editor_text.starts_with('/')
+                && !editor_text.starts_with("/skill:")
                 && !crate::tui::composer::looks_like_absolute_path(editor_text)
             {
                 return InputAction::Command(editor_text.to_owned());
@@ -845,6 +856,57 @@ mod tests {
                 InputAction::Command("/model".into())
             );
         }
+    }
+
+    #[test]
+    fn explicit_skill_invocations_are_prompts_at_idle_and_during_a_run() {
+        for text in ["/skill:review", "/skill:review inspect this"] {
+            assert_eq!(
+                translate_with_popup(
+                    Some(key(KeyCode::Enter, KeyModifiers::NONE)),
+                    false,
+                    text,
+                    false
+                ),
+                InputAction::Submit(text.into())
+            );
+            assert_eq!(
+                translate_with_popup(
+                    Some(key(KeyCode::Enter, KeyModifiers::NONE)),
+                    true,
+                    text,
+                    false
+                ),
+                InputAction::Queue(text.into())
+            );
+            assert_eq!(
+                translate_with_popup(
+                    Some(key(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                    true,
+                    text,
+                    false
+                ),
+                InputAction::Queue(text.into())
+            );
+            assert_eq!(
+                translate_with_popup(
+                    Some(key(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                    false,
+                    text,
+                    false
+                ),
+                InputAction::Submit(text.into())
+            );
+        }
+        assert_eq!(
+            translate_with_popup(
+                Some(key(KeyCode::Enter, KeyModifiers::NONE)),
+                true,
+                "/skills load review",
+                false
+            ),
+            InputAction::Command("/skills load review".into())
+        );
     }
 
     #[test]

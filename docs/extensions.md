@@ -1,7 +1,8 @@
 # Executable extensions
 
 Extensions add tools and bounded, host-shaped integrations to octet's fast,
-small coding host. Browse, MCP, web search, and host-owned subagents
+small coding host. They are not a promise to run unchanged Pi extensions or to
+replace every host subsystem. Browse, MCP, web search, and host-owned subagents
 remain supported integrations with their package-specific limits; Serve remains
 a separate application.
 
@@ -53,6 +54,15 @@ Generated `octet_extension.api_v03` and [TypeScript bindings](../sdk/typescript/
 remain live contract implementations, not complete process runtimes.
 [Earlier examples](../examples/README.md#legacy-extension-examples) retain their
 exact API versions.
+
+For a host-owned replacement of local compaction (not a model-callable tool),
+see the source [octet-snap-compact extension](../extensions/octet-snap-compact/README.md).
+API `0.4` offers its `compaction_strategy` feature only to manifests declaring
+`hooks = ["compaction_strategy"]`. The hook receives `{model_id, text}` in
+`hook/run` batches and returns `{compaction_frames: [base64_png, ...]}`. The host
+selects it only for vision models, retains the checkpoint and refuses malformed,
+partial, oversized or over-budget renderings before committing. No other API
+version negotiates this replacement hook.
 
 An authoring smoke check covers discovery and explicit enablement, exact
 negotiation, one real tool call, cooperative cancellation, and clean shutdown.
@@ -179,7 +189,7 @@ Each `[contributes].flags` declaration needs a globally visible `name`, an exact
 
 API `0.1` manifests cannot declare these flags. Supported later manifests retain
 their selected initialization wires; declaration does not execute third-party
-code or widen the selected wire contract.
+code or imply Pi `registerFlag` compatibility.
 
 ## Transport contract
 

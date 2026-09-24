@@ -450,6 +450,7 @@ pub(crate) fn decode_stream_event(
                     &mut events,
                     builder,
                     StreamEvent::ToolCallStart {
+                        async_execution: false,
                         index: canonical,
                         id: ToolCallId(id.to_owned()),
                         name: name.to_owned(),

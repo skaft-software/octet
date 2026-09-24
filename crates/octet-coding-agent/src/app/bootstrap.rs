@@ -259,6 +259,7 @@ fn extension_provider_bootstrap_model(catalog: &ModelCatalog) -> Model {
                 agent_delegation: None,
                 structured_output: false,
                 deferred_tool_loading: false,
+                responses_features: Default::default(),
             },
             limits: ModelLimits {
                 context_window: 128_000,
@@ -768,15 +769,15 @@ where
             etag,
             checked_at: Some(inventory_checked_at()),
         };
-        if let Err(error) = crate::auth::write_private_atomic(
-            path,
-            &serde_json::to_vec(&cache)?,
-            ".provider-models-",
-        ) {
-            crate::output::stderr!(
-                "warning: could not persist {provider_id} model metadata: {error}"
-            );
-        }
+        let _ = bootstrap_check(
+            format!("inventory-write:{provider_id}"),
+            crate::auth::write_private_atomic(
+                path,
+                &serde_json::to_vec(&cache)?,
+                ".provider-models-",
+            ),
+            |error| format!("warning: could not persist {provider_id} model metadata: {error}"),
+        );
         Ok(body)
     });
     match fetched {
@@ -826,7 +827,11 @@ where
     F: FnOnce(String, http::HeaderMap) -> anyhow::Result<ProviderInventoryResponse>,
 {
     let fingerprint = credential_fingerprint(credential);
-    match load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint) {
+    match bootstrap_check(
+        format!("inventory-cache:{provider_id}"),
+        load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint),
+        |error| format!("warning: {provider_id} model cache unavailable: {error}"),
+    ) {
         Ok(Some(CachedProviderInventory::Available(body))) => {
             schedule_provider_inventory_refresh(
                 path,
@@ -863,7 +868,7 @@ where
         )
         .map(Some),
         Err(cache_error) => {
-            crate::output::stderr!("warning: {provider_id} model cache unavailable: {cache_error}");
+            let _ = cache_error;
             refresh_provider_inventory_with(
                 &path,
                 provider_id,
@@ -945,11 +950,15 @@ fn cached_provider_inventory_offline_at(
     credential: &str,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let fingerprint = credential_fingerprint(credential);
-    match load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint) {
+    match bootstrap_check(
+        format!("inventory-cache:{provider_id}"),
+        load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint),
+        |error| format!("warning: {provider_id} model cache unavailable: {error}"),
+    ) {
         Ok(Some(CachedProviderInventory::Available(body))) => Ok(Some(body)),
         Ok(Some(CachedProviderInventory::Unavailable)) | Ok(None) => Ok(None),
         Err(error) => {
-            crate::output::stderr!("warning: {provider_id} model cache unavailable: {error}");
+            let _ = error;
             Ok(None)
         }
     }
@@ -967,7 +976,11 @@ fn cached_provider_inventory_or_schedule(
 ) -> Option<serde_json::Value> {
     let path = provider_inventory_cache_path(provider_id);
     let fingerprint = credential_fingerprint(credential);
-    match load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint) {
+    match bootstrap_check(
+        format!("inventory-cache:{provider_id}"),
+        load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint),
+        |error| format!("warning: {provider_id} model cache unavailable: {error}"),
+    ) {
         Ok(Some(CachedProviderInventory::Available(body))) => {
             schedule_provider_inventory_refresh(
                 path,
@@ -1002,7 +1015,7 @@ fn cached_provider_inventory_or_schedule(
             None
         }
         Err(error) => {
-            crate::output::stderr!("warning: {provider_id} model cache unavailable: {error}");
+            let _ = error;
             schedule_provider_inventory_refresh(
                 path,
                 provider_id,
@@ -1550,6 +1563,22 @@ fn builtin_discovery_reasoning(
     declaration: Option<&ProviderDeclaration>,
 ) -> anyhow::Result<DiscoveredReasoning> {
     let mut metadata = decode_reasoning_metadata(entry)?;
+    if declaration.is_some_and(|declaration| declaration.id == "openrouter")
+        && metadata.supported != Some(false)
+    {
+        if let Some(reasoning) = entry.get("reasoning").filter(|value| {
+            [
+                "mandatory",
+                "supported_efforts",
+                "default_effort",
+                "default_enabled",
+            ]
+            .iter()
+            .any(|key| value.get(*key).is_some())
+        }) {
+            return decode_openrouter_reasoning(reasoning);
+        }
+    }
     if metadata.source == octet_ai::types::ReasoningMetadataSource::Absent {
         if advertised_reasoning_parameter(entry)
             && declaration.is_some_and(|declaration| declaration.id == "openrouter")
@@ -1567,6 +1596,80 @@ fn builtin_discovery_reasoning(
         }
     }
     Ok(metadata)
+}
+
+/// OpenRouter's endpoint contract is not the generic `reasoning.values` schema.
+/// In particular, accepting a reasoning parameter does not prove that Off (or
+/// any particular effort) is supported. Keep the advertised efforts exact.
+fn decode_openrouter_reasoning(value: &serde_json::Value) -> anyhow::Result<DiscoveredReasoning> {
+    use octet_ai::types::{ReasoningMetadataSource, ReasoningOptions};
+    let mandatory = value
+        .get("mandatory")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| anyhow::anyhow!("invalid OpenRouter reasoning mandatory flag"))?;
+    let enabled = value
+        .get("default_enabled")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("invalid OpenRouter reasoning default_enabled flag"))
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        !mandatory || enabled != Some(false),
+        "mandatory reasoning cannot default to disabled"
+    );
+    let (control, options) = if let Some(efforts) = value.get("supported_efforts") {
+        let mut options = decode_reasoning_options(efforts, value.get("default_effort"))?;
+        anyhow::ensure!(options.values.iter().all(|value| {
+            value == "none" || matches!(ReasoningConfig::from_provider_value(value), Some(ReasoningConfig::Effort(e)) if e != octet_ai::ReasoningEffort::Ultra)
+        }), "invalid OpenRouter reasoning effort");
+        let has_off = options.choices().contains(&ReasoningConfig::Off);
+        anyhow::ensure!(
+            !mandatory || !has_off,
+            "mandatory reasoning cannot advertise Off"
+        );
+        if !mandatory && !has_off {
+            // Optionality explicitly permits Off, but does not advertise an
+            // effort named `none`. Keep it separate from the exact effort set.
+            options.values.insert(0, "false".into());
+        }
+        if enabled == Some(false) {
+            options.default = Some(if has_off { "none" } else { "false" }.into());
+        }
+        // `default_enabled: true` does not override an exact `none` default:
+        // OpenRouter publishes that combination for optional GPT-5.1 routes.
+        (ReasoningControl::Effort, options)
+    } else {
+        anyhow::ensure!(
+            value.get("default_effort").is_none(),
+            "reasoning default_effort requires supported_efforts"
+        );
+        if mandatory {
+            (
+                ReasoningControl::AlwaysOn,
+                ReasoningOptions {
+                    values: vec!["default".into()],
+                    default: Some("default".into()),
+                },
+            )
+        } else {
+            (
+                ReasoningControl::Toggle,
+                ReasoningOptions {
+                    values: vec!["false".into(), "true".into()],
+                    default: enabled.map(|enabled| enabled.to_string()),
+                },
+            )
+        }
+    };
+    Ok(DiscoveredReasoning {
+        source: ReasoningMetadataSource::Explicit,
+        supported: Some(true),
+        control: Some(control),
+        options: Some(options),
+        profile: None,
+    })
 }
 
 /// Whether an inventory advertises a reasoning request parameter.
@@ -1983,7 +2086,7 @@ fn gpt_6_family_model(id: &str) -> bool {
 /// Sparse public OpenAI inventory entries may use the documented GPT-6 family
 /// fallback. Other compatible providers must supply capability metadata.
 fn public_openai_gpt_6_model(declaration: &ProviderDeclaration, id: &str) -> bool {
-    declaration.id == "openai" && gpt_6_family_model(id)
+    declaration.id == "openai" && matches!(id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
 }
 
 fn effort_capability(
@@ -2059,6 +2162,26 @@ fn sparse_route_reasoning(
             _ => return None,
         });
     }
+    if declaration.id == "anthropic"
+        && protocol == Protocol::AnthropicMessages
+        && id == "claude-opus-5-5"
+    {
+        // https://platform.claude.com/docs/en/models/opus-5-5/overview
+        // Adaptive thinking is always on; omitting effort defaults to medium.
+        return Some(effort_capability(
+            Mode::Standard,
+            &["low", "medium", "high", "xhigh", "max"],
+            Some("medium"),
+        ));
+    }
+    if declaration.id == "xai" && protocol == Protocol::OpenAiResponses && id == "grok-4.7" {
+        // https://docs.x.ai/developers/grok-4-7
+        return Some(effort_capability(
+            Mode::Standard,
+            &["low", "medium", "high", "xhigh"],
+            Some("high"),
+        ));
+    }
     if declaration.id == "deepseek" && protocol == Protocol::OpenAiChat {
         return Some(match id {
             "deepseek-flash" => effort_capability(
@@ -2090,10 +2213,14 @@ fn sparse_route_reasoning(
                 Some("low"),
             ));
         }
-        if id.starts_with("gpt-5")
-            || public_openai_gpt_6_model(declaration, id)
-            || matches!(id, "o1" | "o3" | "o3-mini" | "o4-mini")
-        {
+        if matches!(id, "gpt-6-sol" | "gpt-6-luna") {
+            return Some(effort_capability(
+                Mode::Standard,
+                &["none", "low", "medium", "high", "xhigh", "max"],
+                Some("medium"),
+            ));
+        }
+        if id.starts_with("gpt-5") || matches!(id, "o1" | "o3" | "o3-mini" | "o4-mini") {
             return Some(effort_capability(
                 Mode::Standard,
                 &["low", "medium", "high"],
@@ -2183,6 +2310,13 @@ fn discovered_reasoning_capability(
             return Some(capability);
         }
     };
+    // A parameter-only OpenRouter inventory proves neither optionality nor
+    // effort choices. Use the endpoint default, not a fabricated disabling value.
+    if declaration.id == "openrouter" && metadata.options.is_none() {
+        let mut capability = effort_capability(mode, &["default"], Some("default"));
+        capability.control = ReasoningControl::AlwaysOn;
+        return Some(capability);
+    }
     let mut capability = known.unwrap_or_else(|| {
         effort_capability(
             mode.clone(),
@@ -2229,6 +2363,44 @@ fn discovered_preset_binding<'a>(
     model_id: &str,
 ) -> Option<&'a ProviderRoute> {
     declaration.route_for_model(model_id)
+}
+
+/// Official public-API quotes for inventory-returned models missing from the
+/// older models.dev snapshot. Never share these rates with subscription or
+/// third-party routes, and never turn pricing into an availability assertion.
+fn current_direct_model_pricing(provider: &str, id: &str) -> Option<Pricing> {
+    match (provider, id) {
+        ("anthropic", "claude-opus-5-5") => Some(Pricing {
+            // https://platform.claude.com/docs/en/models/opus-5-5/overview
+            input: TokenRate(4_000_000),
+            output: TokenRate(20_000_000),
+            cache_read: TokenRate(200_000),
+            cache_write_5m: TokenRate(5_000_000),
+            cache_write_1h: Some(TokenRate(8_000_000)),
+            reasoning: None,
+            tiers: vec![],
+        }),
+        ("xai", "grok-4.7") => Some(Pricing {
+            // https://docs.x.ai/developers/pricing (global, standard tier).
+            input: TokenRate(2_000_000),
+            output: TokenRate(6_000_000),
+            cache_read: TokenRate(500_000),
+            // xAI quotes no separate write rate; new prompt tokens use input.
+            cache_write_5m: TokenRate(2_000_000),
+            cache_write_1h: None,
+            reasoning: None,
+            tiers: vec![PricingTier {
+                min_input_tokens: 200_000,
+                input: Some(TokenRate(4_000_000)),
+                output: Some(TokenRate(12_000_000)),
+                cache_read: Some(TokenRate(1_000_000)),
+                cache_write_5m: Some(TokenRate(4_000_000)),
+                cache_write_1h: None,
+                reasoning: None,
+            }],
+        }),
+        _ => None,
+    }
 }
 
 fn register_openai_compatible_models(
@@ -2280,10 +2452,21 @@ fn register_openai_compatible_models_from_response(
             continue;
         }
         let protocol = route.protocol;
-        let context_window = model.context_window.unwrap_or(128_000);
+        let public_gpt_6 = protocol == Protocol::OpenAiResponses
+            && public_openai_gpt_6_model(declaration, api_name);
+        let direct_grok_4_7 = declaration.id == "xai"
+            && protocol == Protocol::OpenAiResponses
+            && api_name == "grok-4.7";
+        let context_window = model.context_window.unwrap_or(if public_gpt_6 {
+            1_050_000
+        } else if direct_grok_4_7 {
+            500_000
+        } else {
+            128_000
+        });
         let max_output_tokens = model
             .max_output_tokens
-            .unwrap_or(32_768)
+            .unwrap_or(if public_gpt_6 { 128_000 } else { 32_768 })
             .min(context_window);
         let reasoning = discovered_reasoning_capability(
             declaration,
@@ -2305,12 +2488,13 @@ fn register_openai_compatible_models_from_response(
             .discovery_capabilities
             .gpt_vision_fallback(api_name)
             && (!gpt_6_family_model(api_name) || public_openai_gpt_6_model(declaration, api_name));
-        let mut input_modalities =
-            if model.vision || (!model.modalities_asserted && gpt_vision_fallback) {
-                ModalitySet::none().with(octet_ai::Modality::Image)
-            } else {
-                ModalitySet::none()
-            };
+        let mut input_modalities = if model.vision
+            || (!model.modalities_asserted && (gpt_vision_fallback || direct_grok_4_7))
+        {
+            ModalitySet::none().with(octet_ai::Modality::Image)
+        } else {
+            ModalitySet::none()
+        };
         // Audio inventory metadata is only actionable on the Chat codec; the
         // Responses and Anthropic codecs intentionally have no audio mapping.
         if model.audio && protocol == Protocol::OpenAiChat {
@@ -2320,7 +2504,10 @@ fn register_openai_compatible_models_from_response(
             catalog,
             declaration,
             api_name,
-            model.display_name.clone(),
+            model
+                .display_name
+                .clone()
+                .or_else(|| direct_grok_4_7.then(|| "Grok 4.7".into())),
             Capabilities {
                 input_modalities,
                 output_modalities: ModalitySet::none(),
@@ -2336,12 +2523,18 @@ fn register_openai_compatible_models_from_response(
                     .structured_output
                     .unwrap_or(protocol != Protocol::OpenAiChat),
                 deferred_tool_loading: false,
+                responses_features: octet_ai::ResponsesFeatures {
+                    async_tools: public_gpt_6 && model.tools,
+                    steering: public_gpt_6,
+                    reasoning_effort_updates: public_gpt_6,
+                    compact_reasoning_effort_updates: false,
+                },
             },
             ModelLimits {
                 context_window,
                 max_output_tokens,
             },
-            None,
+            current_direct_model_pricing(declaration.id, api_name),
         )?;
     }
     Ok(())
@@ -2389,16 +2582,23 @@ fn register_anthropic_compatible_models_from_response(
         {
             continue;
         }
-        let context_window = model.context_window.unwrap_or(200_000);
+        let direct_opus_5_5 = declaration.id == "anthropic" && api_name == "claude-opus-5-5";
+        let context_window =
+            model
+                .context_window
+                .unwrap_or(if direct_opus_5_5 { 1_000_000 } else { 200_000 });
         let max_output_tokens = model
             .max_output_tokens
-            .unwrap_or(64_000)
+            .unwrap_or(if direct_opus_5_5 { 128_000 } else { 64_000 })
             .min(context_window);
         crate::providers::register_discovered_model(
             catalog,
             declaration,
             api_name,
-            model.display_name.clone(),
+            model
+                .display_name
+                .clone()
+                .or_else(|| direct_opus_5_5.then(|| "Claude Opus 5.5".into())),
             Capabilities {
                 input_modalities: if model.vision
                     || (!model.modalities_asserted
@@ -2430,12 +2630,13 @@ fn register_anthropic_compatible_models_from_response(
                 agent_delegation: None,
                 structured_output: model.structured_output.unwrap_or(true),
                 deferred_tool_loading: false,
+                responses_features: Default::default(),
             },
             ModelLimits {
                 context_window,
                 max_output_tokens,
             },
-            None,
+            current_direct_model_pricing(declaration.id, api_name),
         )?;
     }
     Ok(())
@@ -2585,6 +2786,8 @@ fn register_deepseek_legacy_alias(
             structured_output: false,
 
             deferred_tool_loading: false,
+
+            responses_features: Default::default(),
         },
         limits: ModelLimits {
             context_window,
@@ -2653,6 +2856,8 @@ fn register_deepseek_models_from_response(
                 structured_output: model.structured_output.unwrap_or(false),
 
                 deferred_tool_loading: false,
+
+                responses_features: Default::default(),
             },
             ModelLimits {
                 context_window,
@@ -2924,6 +3129,8 @@ fn openrouter_models_from_response(
                 structured_output: discovered_structured_output(entry).unwrap_or(false),
 
                 deferred_tool_loading: false,
+
+                responses_features: Default::default(),
             },
             limits: ModelLimits {
                 context_window,
@@ -3063,6 +3270,7 @@ fn register_azure_openai(
             agent_delegation: None,
             structured_output: true,
             deferred_tool_loading: false,
+            responses_features: Default::default(),
         },
         ModelLimits {
             context_window: 128_000,
@@ -3212,6 +3420,211 @@ fn merge_provider_catalog(target: &mut ModelCatalog, source: ModelCatalog) -> an
     Ok(())
 }
 
+#[cfg(test)]
+mod stored_api_key_catalog_tests {
+    use super::*;
+    use crate::provider_setup::BuiltinApiKeyStore;
+
+    fn saved_keys() -> (tempfile::TempDir, BuiltinApiKeyStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("credentials/api-keys");
+        let store = BuiltinApiKeyStore::for_test(root.clone());
+        for provider in ["openai", "anthropic", "gemini"] {
+            store
+                .save(provider, "synthetic-stored-key".into(), false)
+                .unwrap();
+        }
+        // Subsequent startup resolves a fresh store, not an in-memory key.
+        (directory, BuiltinApiKeyStore::for_test(root))
+    }
+
+    fn offline_catalog(store: &BuiltinApiKeyStore) -> ModelCatalog {
+        let mut catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(None),
+                    |id| store.load(id).map_err(Into::into),
+                )
+            },
+        )
+        .unwrap();
+        // Exactly the production ordering: bind existing endpoints, then prune.
+        // Both embedded endpoints have synthetic stored credentials, so this
+        // does not consult ambient environment values or make network requests.
+        catalog.retain_configured_models();
+        catalog
+    }
+
+    #[test]
+    fn offline_stored_keys_preserve_exact_embedded_inventory_and_native_auth() {
+        let (_directory, store) = saved_keys();
+        let catalog = offline_catalog(&store);
+        let embedded = ModelCatalog::builtin().unwrap();
+        assert_eq!(catalog.models().count(), embedded.models().count());
+        assert!(catalog.models().count() > 0);
+        for spec in embedded.models() {
+            let model = catalog.resolve(&spec.id).unwrap();
+            assert_eq!(model.spec.protocol, spec.protocol);
+            assert_eq!(model.spec.api_name, spec.api_name);
+            assert_eq!(
+                model.endpoint.base_url,
+                embedded.resolve(&spec.id).unwrap().endpoint.base_url
+            );
+            match spec.endpoint.0.as_str() {
+                "openai" => assert!(matches!(model.endpoint.auth, Auth::Bearer(_))),
+                "anthropic" => assert!(
+                    matches!(&model.endpoint.auth, Auth::Header { name, .. } if name == "x-api-key")
+                ),
+                other => panic!("unexpected embedded endpoint: {other}"),
+            }
+            assert!(!format!("{:?}", model.endpoint.auth).contains("synthetic-stored-key"));
+        }
+        // Saved Gemini credentials do not authorize expanding offline inventory.
+        assert!(!catalog.models().any(|model| model.endpoint.0 == "gemini"));
+    }
+
+    #[test]
+    fn online_discovery_failure_keeps_stored_key_embedded_fallback() {
+        let (_directory, store) = saved_keys();
+        let mut catalog = offline_catalog(&store);
+        let expected = catalog
+            .models()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>();
+        merge_declaration_inventory(
+            &mut catalog,
+            &crate::providers::OPENAI,
+            Ok(Err(anyhow::anyhow!("synthetic discovery failure"))),
+        );
+        catalog.retain_configured_models();
+        for id in expected {
+            assert!(catalog.resolve(&id).is_ok());
+        }
+    }
+
+    #[test]
+    fn embedded_binding_reads_only_readiness_selected_credential_sources() {
+        let (_directory, store) = saved_keys();
+        let mut consulted = Vec::new();
+        let catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Routes(vec!["openai"]),
+            |declaration| {
+                consulted.push(declaration.id);
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(None),
+                    |id| store.load(id).map_err(Into::into),
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(consulted, ["openai"]);
+        for spec in catalog.models() {
+            let model = catalog.resolve(&spec.id).unwrap();
+            match spec.endpoint.0.as_str() {
+                "openai" => assert!(matches!(model.endpoint.auth, Auth::Bearer(_))),
+                "anthropic" => assert!(matches!(model.endpoint.auth, Auth::HeaderEnv { .. })),
+                other => panic!("unexpected embedded endpoint: {other}"),
+            }
+        }
+        bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Routes(vec!["codex"]),
+            |_| panic!("Codex readiness cannot inspect unrelated API-key stores"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn embedded_binding_preserves_environment_precedence_and_dynamic_aliases() {
+        let catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(Some("synthetic-environment-key".into())),
+                    |_| panic!("a configured environment must never access stored keys"),
+                )
+            },
+        )
+        .unwrap();
+        for spec in catalog.models() {
+            let model = catalog.resolve(&spec.id).unwrap();
+            assert!(matches!(&model.endpoint.auth, Auth::BearerEnv { var }
+                if var == "OPENAI_API_KEY" || var == "ANTHROPIC_AUTH_TOKEN"));
+        }
+    }
+
+    #[test]
+    fn embedded_binding_isolates_invalid_environment_without_stored_fallback() {
+        let (_directory, store) = saved_keys();
+        let mut catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |variable| {
+                        if declaration.id == "openai" {
+                            Err(octet_ai::ConfigError::InvalidEnv(variable.to_owned()))
+                        } else {
+                            Ok(None)
+                        }
+                    },
+                    |id| {
+                        assert_ne!(id, "openai", "invalid environment must not change identity");
+                        store.load(id).map_err(Into::into)
+                    },
+                )
+            },
+        )
+        .unwrap();
+        catalog.retain_configured_models();
+        assert!(catalog
+            .models()
+            .any(|model| model.endpoint.0 == "anthropic"));
+        assert!(!catalog.models().any(|model| model.endpoint.0 == "openai"));
+    }
+
+    #[test]
+    fn embedded_binding_isolates_invalid_stored_credentials_from_valid_accounts() {
+        let (_directory, store) = saved_keys();
+        octet_agent::secure_fs::write_private_atomic(
+            &store.path("openai").unwrap(),
+            b"synthetic-secret-invalid-json",
+            8192,
+        )
+        .unwrap();
+        let mut consulted = Vec::new();
+        let mut catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                consulted.push(declaration.id);
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(None),
+                    |id| store.load(id).map_err(Into::into),
+                )
+            },
+        )
+        .unwrap();
+        catalog.retain_configured_models();
+        consulted.sort_unstable();
+        assert_eq!(consulted, ["anthropic", "openai"]);
+        assert!(catalog
+            .models()
+            .any(|model| model.endpoint.0 == "anthropic"));
+        assert!(!catalog.has_endpoint(&EndpointId("openai".into())));
+        assert!(!catalog.models().any(|model| model.endpoint.0 == "openai"));
+    }
+}
+
 /// Declarations whose configuration was consulted while building a catalog.
 ///
 /// Test-only observability for the readiness plan: an unrelated provider being
@@ -3341,6 +3754,21 @@ fn spawn_declaration_inventory(
         })
 }
 
+/// Attach a diagnostic to the operation that was actually checked. Calling a
+/// different provider, or skipping discovery, cannot clear this component.
+fn bootstrap_check<T, E: std::fmt::Display>(
+    component: impl Into<String>,
+    result: Result<T, E>,
+    message: impl FnOnce(&E) -> String,
+) -> Result<T, E> {
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap(component.into()),
+        result.as_ref().err().map(message).into_iter().collect(),
+        true,
+    );
+    result
+}
+
 /// Merge one provider inventory into the launch catalog.
 ///
 /// Discovery is always non-fatal: a provider that cannot authenticate, times
@@ -3351,20 +3779,29 @@ fn merge_declaration_inventory(
     declaration: &ProviderDeclaration,
     outcome: std::thread::Result<anyhow::Result<ModelCatalog>>,
 ) {
-    match outcome {
+    let mut diagnostics = crate::output::DiagnosticCheck::new(
+        crate::output::DiagnosticComponent::Bootstrap(format!("provider-merge:{}", declaration.id)),
+    );
+    let result = (|| match outcome {
         Ok(Ok(provider_catalog)) => {
             if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
-                crate::output::stderr!("warning: {} unavailable: {error}", declaration.name);
+                diagnostics.problem(format!(
+                    "warning: {} unavailable: {error}",
+                    declaration.name
+                ));
             }
         }
-        Ok(Err(error)) => {
-            crate::output::stderr!("warning: {} unavailable: {error}", declaration.name)
-        }
-        Err(_) => crate::output::stderr!(
+        Ok(Err(error)) => diagnostics.problem(format!(
+            "warning: {} unavailable: {error}",
+            declaration.name
+        )),
+        Err(_) => diagnostics.problem(format!(
             "warning: {} unavailable: model discovery thread panicked",
             declaration.name
-        ),
-    }
+        )),
+    })();
+    diagnostics.finish(true);
+    result
 }
 
 /// Initialize one declaration's inventory on the readiness path.
@@ -3377,20 +3814,30 @@ fn register_declaration_inventory(
     catalog: &mut ModelCatalog,
     declaration: &'static ProviderDeclaration,
 ) {
-    match declaration_is_configured(declaration) {
+    match bootstrap_check(
+        format!("provider-credential:{}", declaration.id),
+        declaration_is_configured(declaration),
+        |error| format!("warning: {} unavailable: {error}", declaration.name),
+    ) {
         Ok(true) => {}
         Ok(false) => return,
         Err(error) => {
-            crate::output::stderr!("warning: {} unavailable: {error}", declaration.name);
+            let _ = error;
             return;
         }
     }
-    match spawn_declaration_inventory(declaration) {
+    match bootstrap_check(
+        format!("provider-spawn:{}", declaration.id),
+        spawn_declaration_inventory(declaration),
+        |error| {
+            format!(
+                "warning: could not start {} model discovery: {error}",
+                declaration.name
+            )
+        },
+    ) {
         Ok(handle) => merge_declaration_inventory(catalog, declaration, handle.join()),
-        Err(error) => crate::output::stderr!(
-            "warning: could not start {} model discovery: {error}",
-            declaration.name
-        ),
+        Err(_) => {}
     }
 }
 
@@ -3428,23 +3875,33 @@ fn register_selected_preset_inventories(catalog: &mut ModelCatalog, routes: &[&'
 fn register_configured_presets_parallel(catalog: &mut ModelCatalog) {
     let mut jobs = Vec::new();
     for declaration in BUILTIN_PROVIDER_DECLARATIONS {
-        match declaration_is_configured(declaration) {
+        match bootstrap_check(
+            format!("provider-credential:{}", declaration.id),
+            declaration_is_configured(declaration),
+            |error| format!("warning: {} unavailable: {error}", declaration.name),
+        ) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(error) => {
                 // An invalid/oversized optional credential must not become a
                 // request, but one unusable provider must not block other
                 // configured providers from starting.
-                crate::output::stderr!("warning: {} unavailable: {error}", declaration.name);
+                let _ = error;
                 continue;
             }
         }
-        match spawn_declaration_inventory(declaration) {
+        match bootstrap_check(
+            format!("provider-spawn:{}", declaration.id),
+            spawn_declaration_inventory(declaration),
+            |error| {
+                format!(
+                    "warning: could not start {} model discovery: {error}",
+                    declaration.name
+                )
+            },
+        ) {
             Ok(handle) => jobs.push((declaration, handle)),
-            Err(error) => crate::output::stderr!(
-                "warning: could not start {} model discovery: {error}",
-                declaration.name
-            ),
+            Err(_) => {}
         }
     }
 
@@ -3509,13 +3966,11 @@ fn load_custom_model_cache(
     )
 }
 
-fn save_custom_model_cache_for(
-    store: &crate::auth::custom::CredentialStore,
-    provider_id: &str,
+fn custom_model_cache_bytes(
     base_url: &str,
     credential_fingerprint: &str,
     models: &[crate::auth::custom::CustomModel],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<u8>> {
     // Cache a redacted copy, never mutate the credential registry's configured
     // model: those private headers must remain available to actual requests.
     let mut models = models.to_vec();
@@ -3528,7 +3983,20 @@ fn save_custom_model_cache_for(
         credential_fingerprint: credential_fingerprint.to_owned(),
         models,
     };
-    store.save_model_cache_for(provider_id, &serde_json::to_vec_pretty(&cache)?)
+    serde_json::to_vec_pretty(&cache).map_err(Into::into)
+}
+
+fn save_custom_model_cache_for(
+    store: &crate::auth::custom::CredentialStore,
+    provider_id: &str,
+    base_url: &str,
+    credential_fingerprint: &str,
+    models: &[crate::auth::custom::CustomModel],
+) -> anyhow::Result<()> {
+    store.save_model_cache_for(
+        provider_id,
+        &custom_model_cache_bytes(base_url, credential_fingerprint, models)?,
+    )
 }
 
 #[cfg(test)]
@@ -3563,6 +4031,10 @@ fn schedule_custom_model_cache_refresh_for(
     }
     let configured = configured_custom_models(&cred);
     let cache_fingerprint = custom_model_cache_fingerprint(&credential_fingerprint, &configured);
+    let expected = match store.load_model_cache_for(&provider_id) {
+        Ok(Some(bytes)) => bytes,
+        _ => return,
+    };
     let _ = std::thread::Builder::new()
         .name(format!("octet-custom-{provider_id}-catalog-refresh"))
         .spawn(move || {
@@ -3574,73 +4046,14 @@ fn schedule_custom_model_cache_refresh_for(
                 &configured,
             );
             if !discovered.is_empty() {
-                let _ = save_custom_model_cache_for(
-                    &store,
-                    &provider_id,
-                    &cred.base_url,
-                    &cache_fingerprint,
-                    &discovered,
-                );
+                if let Ok(bytes) =
+                    custom_model_cache_bytes(&cred.base_url, &cache_fingerprint, &discovered)
+                {
+                    let _ =
+                        store.save_model_cache_if_unchanged_for(&provider_id, &expected, &bytes);
+                }
             }
         });
-}
-
-fn refresh_stale_custom_models_with_for<F>(
-    store: &crate::auth::custom::CredentialStore,
-    provider_id: &str,
-    cred: &crate::auth::custom::CustomCredential,
-    credential_fingerprint: &str,
-    cached: Vec<crate::auth::custom::CustomModel>,
-    refresh_interval: Duration,
-    discover: F,
-) -> Vec<crate::auth::custom::CustomModel>
-where
-    F: FnOnce(&crate::auth::custom::CustomCredential) -> Vec<crate::auth::custom::CustomModel>,
-{
-    if !store
-        .model_cache_is_stale_for(provider_id, refresh_interval)
-        .unwrap_or(true)
-    {
-        return cached;
-    }
-
-    let discovered = discover_and_cache_custom_models_with_for(
-        store,
-        provider_id,
-        cred,
-        credential_fingerprint,
-        false,
-        discover,
-    );
-    if discovered.is_empty() {
-        // A transient discovery failure must not discard a last-good catalog.
-        cached
-    } else {
-        discovered
-    }
-}
-
-#[cfg(test)]
-fn refresh_stale_custom_models_with<F>(
-    store: &crate::auth::custom::CredentialStore,
-    cred: &crate::auth::custom::CustomCredential,
-    credential_fingerprint: &str,
-    cached: Vec<crate::auth::custom::CustomModel>,
-    refresh_interval: Duration,
-    discover: F,
-) -> Vec<crate::auth::custom::CustomModel>
-where
-    F: FnOnce(&crate::auth::custom::CustomCredential) -> Vec<crate::auth::custom::CustomModel>,
-{
-    refresh_stale_custom_models_with_for(
-        store,
-        crate::auth::custom::ENDPOINT_ID,
-        cred,
-        credential_fingerprint,
-        cached,
-        refresh_interval,
-        discover,
-    )
 }
 
 fn discover_and_cache_custom_models_with_for<F>(
@@ -3659,15 +4072,17 @@ where
         &configured_custom_models(cred),
     );
     if persist_empty || !discovered.is_empty() {
-        if let Err(error) = save_custom_model_cache_for(
-            store,
-            provider_id,
-            &cred.base_url,
-            credential_fingerprint,
-            &discovered,
-        ) {
-            crate::output::stderr!("warning: could not persist custom model metadata: {error}");
-        }
+        let _ = bootstrap_check(
+            format!("custom-cache-write:{provider_id}"),
+            save_custom_model_cache_for(
+                store,
+                provider_id,
+                &cred.base_url,
+                credential_fingerprint,
+                &discovered,
+            ),
+            |error| format!("warning: could not persist custom model metadata: {error}"),
+        );
     }
     discovered
 }
@@ -4175,21 +4590,23 @@ fn register_custom_openai_endpoints_from_store(
                     }),
                     None => build(provider_id, provider),
                 };
-                match result {
+                let label = provider.label.trim();
+                let label = if label.is_empty() { provider_id } else { label };
+                match bootstrap_check(format!("custom-provider:{provider_id}"), result, |error| {
+                    format!("warning: custom provider {label:?} unavailable: {error}")
+                }) {
                     Ok(provider_catalog) => {
-                        if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
-                            crate::output::stderr!(
-                                "warning: custom provider {provider_id:?} unavailable: {error}"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        let label = provider.label.trim();
-                        let label = if label.is_empty() { provider_id } else { label };
-                        crate::output::stderr!(
-                            "warning: custom provider {label:?} unavailable: {error}"
+                        let _ = bootstrap_check(
+                            format!("custom-merge:{provider_id}"),
+                            merge_provider_catalog(catalog, provider_catalog),
+                            |error| {
+                                format!(
+                                    "warning: custom provider {provider_id:?} unavailable: {error}"
+                                )
+                            },
                         );
                     }
+                    Err(_) => {}
                 }
             }
         });
@@ -4303,31 +4720,32 @@ fn register_custom_openai_provider(
     let cache_fingerprint =
         custom_model_cache_fingerprint(&custom_credential_fingerprint, &configured);
     let cached = if cred.auto_discover {
-        match load_custom_model_cache_for(store, provider_id, &cred.base_url, &cache_fingerprint) {
+        match bootstrap_check(
+            format!("custom-cache:{provider_id}"),
+            load_custom_model_cache_for(store, provider_id, &cred.base_url, &cache_fingerprint),
+            |error| format!("warning: custom provider model cache unavailable: {error}"),
+        ) {
             Ok(models) => models,
-            Err(error) => {
-                crate::output::stderr!("warning: custom provider model cache unavailable: {error}");
-                None
-            }
+            Err(_) => None,
         }
     } else {
         None
     };
     let models: Vec<CustomModel> = match cached {
         Some(CachedCustomInventory::Available(models)) => {
-            if offline {
-                models
-            } else {
-                refresh_stale_custom_models_with_for(
-                    store,
-                    provider_id,
-                    &cred,
-                    &cache_fingerprint,
-                    models,
+            // A positive, identity-matched cache is usable immediately. Refresh
+            // stale metadata off the startup path; a later catalog build reads
+            // the completed cache, while this launch retains its last good list.
+            if !offline {
+                schedule_custom_model_cache_refresh_for(
+                    store.clone(),
+                    provider_id.to_owned(),
+                    cred.clone(),
+                    custom_credential_fingerprint.clone(),
                     PROVIDER_INVENTORY_REFRESH_INTERVAL,
-                    |cred| discover_models(cred, provider_id),
-                )
+                );
             }
+            models
         }
         Some(CachedCustomInventory::Unavailable)
             if cred.auto_discover && !offline && configured.is_empty() =>
@@ -4427,6 +4845,8 @@ fn register_custom_openai_provider(
                 structured_output: model.structured_output,
 
                 deferred_tool_loading: false,
+
+                responses_features: Default::default(),
             },
             limits: ModelLimits {
                 context_window: model.context_window,
@@ -4471,177 +4891,189 @@ fn discover_models_blocking(
     provider_id: &str,
     report_errors: bool,
 ) -> Vec<crate::auth::custom::CustomModel> {
-    use crate::auth::custom::CustomModel;
+    let mut diagnostics = crate::output::DiagnosticCheck::new(
+        crate::output::DiagnosticComponent::Bootstrap(format!("custom-discovery:{provider_id}")),
+    );
+    let result = (|| {
+        use crate::auth::custom::CustomModel;
 
-    // Build the models URL following octet's convention: base_url is versioned
-    // (e.g. http://host/v1/) and we join the path segment.
-    let base = if cred.base_url.ends_with('/') {
-        cred.base_url.clone()
-    } else {
-        format!("{}/", cred.base_url)
-    };
-    let models_url = match url::Url::parse(&base).and_then(|u| u.join("models")) {
-        Ok(u) => u.to_string(),
-        Err(e) => {
-            if report_errors {
-                crate::output::stderr!("warning: auto-discover URL parse failed: {e}");
-            }
-            return Vec::new();
-        }
-    };
-
-    let client = match blocking_discovery_client(std::time::Duration::from_secs(10)) {
-        Ok(c) => c,
-        Err(e) => {
-            if report_errors {
-                crate::output::stderr!("warning: auto-discover client build failed: {e}");
-            }
-            return Vec::new();
-        }
-    };
-
-    let mut req = client.get(&models_url);
-    let discovery_key = (!cred.api_key.trim().is_empty()).then(|| cred.api_key.clone());
-    if let Some(key) = discovery_key {
-        req = req.header("Authorization", format!("Bearer {key}"));
-    }
-    for h in &cred.headers {
-        req = req.header(&h.name, &h.value);
-    }
-
-    let resp = match req
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            if report_errors {
-                crate::output::stderr!("warning: auto-discover GET {} failed: {e}", models_url);
-            }
-            return Vec::new();
-        }
-    };
-
-    let status = resp.status();
-    let body = match bounded_discovery_json(resp, "custom models") {
-        Ok(value) => value,
-        Err(error) => {
-            if report_errors {
-                crate::output::stderr!(
-                    "warning: auto-discover {} returned HTTP {} with an invalid or oversized body: {error}",
-                    models_url,
-                    status.as_u16()
-                );
-            }
-            return Vec::new();
-        }
-    };
-
-    let data = match body
-        .get("data")
-        .or_else(|| body.get("models"))
-        .and_then(serde_json::Value::as_array)
-        .or_else(|| body.as_array())
-    {
-        Some(arr) => arr,
-        None => {
-            if report_errors {
-                crate::output::stderr!(
-                    "warning: auto-discover {} missing 'data'/'models' array",
-                    models_url
-                );
-            }
-            return Vec::new();
-        }
-    };
-
-    let mut models = Vec::new();
-    for entry in data {
-        let id = entry
-            .get("id")
-            .or_else(|| entry.get("slug"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        if id.is_empty() || id == "default" {
-            continue;
-        }
-
-        let described = match self_described_entry(
-            entry,
-            EndpointId(crate::auth::custom::endpoint_id(provider_id)),
-            id,
-            Protocol::OpenAiChat,
-        ) {
-            Ok(value) => value,
-            Err(_) => {
+        // Build the models URL following octet's convention: base_url is versioned
+        // (e.g. http://host/v1/) and we join the path segment.
+        let base = if cred.base_url.ends_with('/') {
+            cred.base_url.clone()
+        } else {
+            format!("{}/", cred.base_url)
+        };
+        let models_url = match url::Url::parse(&base).and_then(|u| u.join("models")) {
+            Ok(u) => u.to_string(),
+            Err(e) => {
                 if report_errors {
-                    crate::output::stderr!("warning: invalid endpoint capability self-description");
+                    diagnostics.problem(format!("warning: auto-discover URL parse failed: {e}"));
+                }
+                return Vec::new();
+            }
+        };
+
+        let client = match blocking_discovery_client(std::time::Duration::from_secs(10)) {
+            Ok(c) => c,
+            Err(e) => {
+                if report_errors {
+                    diagnostics.problem(format!("warning: auto-discover client build failed: {e}"));
+                }
+                return Vec::new();
+            }
+        };
+
+        let mut req = client.get(&models_url);
+        let discovery_key = (!cred.api_key.trim().is_empty()).then(|| cred.api_key.clone());
+        if let Some(key) = discovery_key {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        for h in &cred.headers {
+            req = req.header(&h.name, &h.value);
+        }
+
+        let resp = match req
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if report_errors {
+                    diagnostics.problem(format!(
+                        "warning: auto-discover GET {} failed: {e}",
+                        models_url
+                    ));
+                }
+                return Vec::new();
+            }
+        };
+
+        let status = resp.status();
+        let body = match bounded_discovery_json(resp, "custom models") {
+            Ok(value) => value,
+            Err(error) => {
+                if report_errors {
+                    diagnostics.problem(format!(
+                        "warning: auto-discover {} returned HTTP {} with an invalid or oversized body: {error}",
+                        models_url,
+                        status.as_u16())
+                    );
+                }
+                return Vec::new();
+            }
+        };
+
+        let data = match body
+            .get("data")
+            .or_else(|| body.get("models"))
+            .and_then(serde_json::Value::as_array)
+            .or_else(|| body.as_array())
+        {
+            Some(arr) => arr,
+            None => {
+                if report_errors {
+                    diagnostics.problem(format!(
+                        "warning: auto-discover {} missing 'data'/'models' array",
+                        models_url
+                    ));
+                }
+                return Vec::new();
+            }
+        };
+
+        let mut models = Vec::new();
+        for entry in data {
+            let id = entry
+                .get("id")
+                .or_else(|| entry.get("slug"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if id.is_empty() || id == "default" {
+                continue;
+            }
+
+            let described = match self_described_entry(
+                entry,
+                EndpointId(crate::auth::custom::endpoint_id(provider_id)),
+                id,
+                Protocol::OpenAiChat,
+            ) {
+                Ok(value) => value,
+                Err(_) => {
+                    if report_errors {
+                        diagnostics.problem(format!(
+                            "warning: invalid endpoint capability self-description"
+                        ));
+                    }
+                    continue;
+                }
+            };
+            let entry = described.as_ref().unwrap_or(entry);
+            let ctx = extract_ctx_from_model_entry(entry);
+            let vision = entry
+                .get("architecture")
+                .and_then(|a| a.get("input_modalities"))
+                .and_then(|m| m.as_array())
+                .map(|arr| arr.iter().any(|v| v.as_str() == Some("image")))
+                .unwrap_or(false)
+                || input_modalities_from_entry(entry).contains(octet_ai::Modality::Image)
+                || (!has_metadata_assertion(entry, MODALITY_FIELDS) && model_id_implies_vision(id));
+            let vision = asserted_capability(entry, &["vision"]).unwrap_or(vision);
+
+            let supported_parameters = entry
+                .get("supported_parameters")
+                .and_then(serde_json::Value::as_array);
+            let supports = |name: &str| {
+                supported_parameters.is_some_and(|parameters| {
+                    parameters
+                        .iter()
+                        .any(|parameter| parameter.as_str() == Some(name))
+                })
+            };
+            let max_output_tokens =
+                positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
+                    .unwrap_or(16_384)
+                    .min(ctx);
+            let mut model = CustomModel {
+                api_name: id.to_string(),
+                display_name: discovered_display_name(entry, id).unwrap_or_default(),
+                context_window: ctx,
+                max_output_tokens,
+                tools: custom_model_metadata_supports_tools(entry),
+                parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"])
+                    .unwrap_or_else(|| supports("parallel_tool_calls")),
+                vision,
+                structured_output: discovered_structured_output(entry)
+                    .unwrap_or_else(|| supports("response_format")),
+                reasoning: false,
+                reasoning_configurable: true,
+                reasoning_values: Vec::new(),
+                reasoning_default: String::new(),
+                reasoning_profile: None,
+                reasoning_source: None,
+                // Auto-discovered local models are not guaranteed to implement
+                // OpenAI's newer `developer` role. vLLM Qwen chat templates, in
+                // particular, reject it while still accepting `system`.
+                reasoning_uses_system_message: true,
+                pricing: None,
+                // Inventory is not authority for request headers or wire overrides.
+                preset: Default::default(),
+            };
+            if apply_discovered_reasoning(entry, &mut model).is_err() {
+                if report_errors {
+                    diagnostics.problem(format!(
+                        "warning: model discovery contains invalid reasoning metadata"
+                    ));
                 }
                 continue;
             }
-        };
-        let entry = described.as_ref().unwrap_or(entry);
-        let ctx = extract_ctx_from_model_entry(entry);
-        let vision = entry
-            .get("architecture")
-            .and_then(|a| a.get("input_modalities"))
-            .and_then(|m| m.as_array())
-            .map(|arr| arr.iter().any(|v| v.as_str() == Some("image")))
-            .unwrap_or(false)
-            || input_modalities_from_entry(entry).contains(octet_ai::Modality::Image)
-            || (!has_metadata_assertion(entry, MODALITY_FIELDS) && model_id_implies_vision(id));
-        let vision = asserted_capability(entry, &["vision"]).unwrap_or(vision);
-
-        let supported_parameters = entry
-            .get("supported_parameters")
-            .and_then(serde_json::Value::as_array);
-        let supports = |name: &str| {
-            supported_parameters.is_some_and(|parameters| {
-                parameters
-                    .iter()
-                    .any(|parameter| parameter.as_str() == Some(name))
-            })
-        };
-        let max_output_tokens =
-            positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
-                .unwrap_or(16_384)
-                .min(ctx);
-        let mut model = CustomModel {
-            api_name: id.to_string(),
-            display_name: discovered_display_name(entry, id).unwrap_or_default(),
-            context_window: ctx,
-            max_output_tokens,
-            tools: custom_model_metadata_supports_tools(entry),
-            parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"])
-                .unwrap_or_else(|| supports("parallel_tool_calls")),
-            vision,
-            structured_output: discovered_structured_output(entry)
-                .unwrap_or_else(|| supports("response_format")),
-            reasoning: false,
-            reasoning_configurable: true,
-            reasoning_values: Vec::new(),
-            reasoning_default: String::new(),
-            reasoning_profile: None,
-            reasoning_source: None,
-            // Auto-discovered local models are not guaranteed to implement
-            // OpenAI's newer `developer` role. vLLM Qwen chat templates, in
-            // particular, reject it while still accepting `system`.
-            reasoning_uses_system_message: true,
-            pricing: None,
-            // Inventory is not authority for request headers or wire overrides.
-            preset: Default::default(),
-        };
-        if apply_discovered_reasoning(entry, &mut model).is_err() {
-            if report_errors {
-                crate::output::stderr!(
-                    "warning: model discovery contains invalid reasoning metadata"
-                );
-            }
-            continue;
+            models.push(model);
         }
-        models.push(model);
-    }
-    apply_known_custom_model_defaults(cred, models)
+        apply_known_custom_model_defaults(cred, models)
+    })();
+    diagnostics.finish(report_errors);
+    result
 }
 
 /// Walk the model metadata looking for a context length. vLLM emits
@@ -4714,15 +5146,14 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
 /// Codex retains the provider-advertised maximum as discovery metadata, while
 /// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
 /// Luna uses its 372K default; smaller advertised windows remain authoritative.
-/// Version 7 records the pre-cap backend default window alongside the effective
-/// window so the explicit override and its clamp notice stay exact; version 6
-/// caches are refreshed.
-const CODEX_MODEL_CACHE_VERSION: u8 = 7;
+/// Version 8 invalidates inventories filtered by the pre-0.155 Codex client
+/// version, so a fresh cache cannot hide GPT-6 Sol/Luna after upgrading.
+const CODEX_MODEL_CACHE_VERSION: u8 = 8;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
 // filter out models that require a contemporary Codex client.
-const CODEX_MODELS_CLIENT_VERSION: &str = "0.153.2";
+const CODEX_MODELS_CLIENT_VERSION: &str = "0.156.1";
 
 pub(crate) fn effective_compaction_threshold_fraction(config: &Config, model: &Model) -> f64 {
     let Some(max_active_tokens) = config
@@ -4753,6 +5184,9 @@ struct DiscoveredCodexModel {
     max_output_tokens: u64,
     min_effort: octet_ai::ReasoningEffort,
     max_effort: octet_ai::ReasoningEffort,
+    /// Positive account-inventory authority, never inferred from a model name.
+    #[serde(default)]
+    reasoning_effort_updates: bool,
     responses_lite: bool,
     // `Option<T>` normally treats a missing key as `None`; the custom decoder
     // keeps explicit null valid while making incomplete dynamic metadata fail.
@@ -4898,8 +5332,8 @@ fn codex_models_from_response(
                 (None, Some(maximum)) => (maximum, maximum),
                 (None, None) => fallback,
             };
-        if id == "gpt-6-astra" {
-            // Keep Astra's larger advertised input envelope distinct from the
+        if matches!(id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna") {
+            // Keep the observed GPT-6 input envelope distinct from the
             // conservative Codex working budget, and never overstate the
             // provider's 872K input allowance when only a total window appears.
             max_context_window = max_context_window.min(CODEX_ASTRA_MAX_CONTEXT_WINDOW);
@@ -4959,6 +5393,10 @@ fn codex_models_from_response(
             max_output_tokens,
             min_effort,
             max_effort,
+            reasoning_effort_updates: entry
+                .get("supports_reasoning_effort_updates")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
             responses_lite,
             agent_delegation,
         });
@@ -5026,7 +5464,10 @@ fn codex_model_limits(
 }
 
 fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if model_id == "gpt-6-astra" || model_id == "gpt-5.6-luna" {
+    if matches!(
+        model_id,
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" | "gpt-5.6-luna"
+    ) {
         octet_ai::ReasoningEffort::Low
     } else {
         octet_ai::ReasoningEffort::Minimal
@@ -5036,7 +5477,9 @@ fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
 // New Codex families accept the top `max` effort tier. Live discovery narrows
 // this range when the backend publishes explicit supported reasoning levels.
 fn codex_max_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if model_id == "gpt-6-astra" || model_id.starts_with("gpt-5.6-") {
+    if matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
+        || model_id.starts_with("gpt-5.6-")
+    {
         octet_ai::ReasoningEffort::Max
     } else {
         octet_ai::ReasoningEffort::High
@@ -5049,7 +5492,7 @@ fn codex_max_effort(model_id: &str) -> octet_ai::ReasoningEffort {
 /// OAuth model to text-only.
 fn codex_supports_image_input(model_id: &str) -> bool {
     model_id == "codex-mini-latest"
-        || model_id == "gpt-6-astra"
+        || matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
         || model_id.starts_with("gpt-5.4")
         || model_id.starts_with("gpt-5.5")
         || model_id.starts_with("gpt-5.6")
@@ -5092,9 +5535,12 @@ fn load_codex_model_cache(
         return Ok(None);
     }
     for model in &mut cache.models {
-        if model.id == "gpt-6-astra" {
+        if matches!(
+            model.id.as_str(),
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        ) {
             // Current-schema caches can still contain a previously accepted
-            // over-cap Astra entry; normalize it to the fixed contract.
+            // over-cap GPT-6 entry; normalize it to the fixed contract.
             model.max_output_tokens = model.max_output_tokens.min(CODEX_MAX_OUTPUT_TOKENS);
         }
     }
@@ -5171,7 +5617,13 @@ fn codex_inventory_models(
     fixture: bool,
     discover: impl FnOnce(crate::auth::codex::CredentialStore) -> anyhow::Result<CodexDiscovery>,
 ) -> (Vec<DiscoveredCodexModel>, CodexInventorySource) {
-    let cache = load_codex_model_cache(store, initial_claims);
+    let cache = bootstrap_check(
+        "codex-cache",
+        load_codex_model_cache(store, initial_claims),
+        |error| {
+            format!("warning: Codex model cache was unusable ({error}); using discovery or conservative fallback")
+        },
+    );
     if fixture || offline {
         // No provider request on either path. A fresh, account- and
         // plan-matched cache is still used, reduced to the conservative
@@ -5193,9 +5645,7 @@ fn codex_inventory_models(
                 fallback_source,
             ),
             Err(error) => {
-                crate::output::stderr!(
-                    "warning: Codex model cache was unusable ({error}); using conservative offline fallback catalog"
-                );
+                let _ = error;
                 (
                     fallback_codex_models(initial_claims.plan.as_ref()),
                     fallback_source,
@@ -5205,37 +5655,32 @@ fn codex_inventory_models(
     }
     match cache {
         Ok(Some(models)) => (models, CodexInventorySource::FreshCache),
-        cache_result => match discover(store.clone()) {
-            Ok(discovery) => {
-                if let Err(error) = save_codex_model_cache(store, &discovery) {
-                    crate::output::stderr!(
-                        "warning: could not persist Codex model metadata: {error}"
+        _cache_result => {
+            match bootstrap_check("codex-discovery", discover(store.clone()), |error| {
+                format!("warning: Codex model auto-discovery failed; using conservative fallback catalog: {error}")
+            }) {
+                Ok(discovery) => {
+                    let _ = bootstrap_check(
+                        "codex-cache-write",
+                        save_codex_model_cache(store, &discovery),
+                        |error| format!("warning: could not persist Codex model metadata: {error}"),
                     );
+                    (discovery.models, CodexInventorySource::OnlineDiscovery)
                 }
-                (discovery.models, CodexInventorySource::OnlineDiscovery)
-            }
-            Err(discovery_error) => {
-                if let Err(cache_error) = cache_result {
-                    crate::output::stderr!(
-                        "warning: Codex model cache was unusable ({cache_error}); live discovery also failed ({discovery_error}); using conservative fallback catalog"
-                    );
-                } else {
-                    crate::output::stderr!(
-                        "warning: Codex model auto-discovery failed; using conservative fallback catalog: {discovery_error}"
-                    );
+                Err(_) => {
+                    // Discovery may have refreshed a token before the inventory
+                    // request failed, so re-read claims for the fallback limits.
+                    let current_claims = crate::auth::codex::usable_subscription_claims(store)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| initial_claims.clone());
+                    (
+                        fallback_codex_models(current_claims.plan.as_ref()),
+                        CodexInventorySource::ConservativeFallback,
+                    )
                 }
-                // Discovery may have refreshed a token before the inventory
-                // request failed, so re-read claims for the fallback limits.
-                let current_claims = crate::auth::codex::usable_subscription_claims(store)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| initial_claims.clone());
-                (
-                    fallback_codex_models(current_claims.plan.as_ref()),
-                    CodexInventorySource::ConservativeFallback,
-                )
             }
-        },
+        }
     }
 }
 
@@ -5262,6 +5707,7 @@ fn conservative_offline_codex_models(
     mut models: Vec<DiscoveredCodexModel>,
 ) -> Vec<DiscoveredCodexModel> {
     for model in &mut models {
+        model.reasoning_effort_updates = false;
         model.responses_lite = false;
         model.agent_delegation = None;
         strip_codex_ultra(&mut model.reasoning_options);
@@ -5290,6 +5736,7 @@ fn fallback_codex_models(
                 max_output_tokens: limits.max_output_tokens,
                 min_effort: codex_min_effort(model_id),
                 max_effort: codex_max_effort(model_id),
+                reasoning_effort_updates: false,
                 responses_lite: false,
                 agent_delegation: None,
             }
@@ -5456,15 +5903,24 @@ fn codex_user_agent() -> String {
 /// Fail-closed: an unreadable, unrecognised, or out-of-range value leaves the
 /// deliberate cap in force and reports why.
 fn codex_context_override_from_env() -> anyhow::Result<CodexContextOverride> {
-    let requested = optional_env(CODEX_CONTEXT_OVERRIDE_ENV)?;
-    let acknowledged = optional_env(CODEX_CONTEXT_ACKNOWLEDGE_ENV)?;
-    match CodexContextOverride::parse(requested.as_deref(), acknowledged.as_deref()) {
-        Ok(user_override) => Ok(user_override),
-        Err(error) => {
-            crate::output::stderr!("warning: {error}; keeping the deliberate Codex context cap");
-            Ok(CodexContextOverride::NONE)
+    let mut diagnostics = crate::output::DiagnosticCheck::new(
+        crate::output::DiagnosticComponent::Bootstrap("codex-context-override".into()),
+    );
+    let result = (|| {
+        let requested = optional_env(CODEX_CONTEXT_OVERRIDE_ENV)?;
+        let acknowledged = optional_env(CODEX_CONTEXT_ACKNOWLEDGE_ENV)?;
+        match CodexContextOverride::parse(requested.as_deref(), acknowledged.as_deref()) {
+            Ok(user_override) => Ok(user_override),
+            Err(error) => {
+                diagnostics.problem(format!(
+                    "warning: {error}; keeping the deliberate Codex context cap"
+                ));
+                Ok(CodexContextOverride::NONE)
+            }
         }
-    }
+    })();
+    diagnostics.finish(result.is_ok());
+    result
 }
 
 /// Resolve the context envelope for one discovered Codex model.
@@ -5479,7 +5935,10 @@ fn codex_context_resolve_for_registration(
     tier: CodexContextTier,
     user_override: CodexContextOverride,
 ) -> crate::codex_context::CodexContextWindow {
-    match resolve_codex_context_window(
+    let mut diagnostics = crate::output::DiagnosticCheck::new(
+        crate::output::DiagnosticComponent::Bootstrap(format!("codex-context:{}", model.id)),
+    );
+    let result = (|| match resolve_codex_context_window(
         &model.id,
         tier,
         model.default_context_window,
@@ -5489,7 +5948,9 @@ fn codex_context_resolve_for_registration(
     ) {
         Ok(resolution) => resolution,
         Err(error) => {
-            crate::output::stderr!("warning: {error}; keeping the deliberate Codex context cap");
+            diagnostics.problem(format!(
+                "warning: {error}; keeping the deliberate Codex context cap"
+            ));
             resolve_codex_context_window(
                 &model.id,
                 tier,
@@ -5500,7 +5961,9 @@ fn codex_context_resolve_for_registration(
             )
             .expect("resolving a Codex context window without a user override cannot fail")
         }
-    }
+    })();
+    diagnostics.finish(true);
+    result
 }
 
 /// Record the single user-facing note one catalog model needs, if any.
@@ -5637,15 +6100,18 @@ fn register_openai_codex_with_notes(
     let tier = codex_context_tier(initial_claims.plan.as_ref());
 
     for model in models {
-        // Astra is always namespaced so an OAuth selection cannot be confused
-        // with the direct public OpenAI route when credentials change. Other
+        // GPT-6 routes are always namespaced so an OAuth selection cannot be
+        // confused with the public OpenAI route when credentials change. Other
         // Codex ids retain their historical collision-based compatibility.
-        let catalog_id =
-            if model.id == "gpt-6-astra" || catalog.resolve(&ModelId(model.id.clone())).is_ok() {
-                ModelId(format!("{}/{}", declaration.id, model.id))
-            } else {
-                ModelId(model.id.clone())
-            };
+        let catalog_id = if matches!(
+            model.id.as_str(),
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        ) || catalog.resolve(&ModelId(model.id.clone())).is_ok()
+        {
+            ModelId(format!("{}/{}", declaration.id, model.id))
+        } else {
+            ModelId(model.id.clone())
+        };
         let limits = {
             let resolution = codex_context_resolve_for_registration(&model, tier, user_override);
             // Recording is not printing: the note is shown once, for the
@@ -5696,6 +6162,11 @@ fn register_openai_codex_with_notes(
                 structured_output: false,
 
                 deferred_tool_loading: false,
+
+                responses_features: octet_ai::ResponsesFeatures {
+                    reasoning_effort_updates: model.reasoning_effort_updates,
+                    ..Default::default()
+                },
             },
             limits,
             pricing,
@@ -5762,6 +6233,7 @@ pub(crate) fn register_offline_openrouter_model(
             agent_delegation: None,
             structured_output: false,
             deferred_tool_loading: false,
+            responses_features: Default::default(),
         },
         limits: ModelLimits {
             context_window: 131_072,
@@ -5903,6 +6375,73 @@ fn base_model_catalog_with_custom_store(
     base_model_catalog_with_readiness(offline, explicit_custom_store, &CatalogReadiness::Fleet)
 }
 
+/// Bind only the embedded catalog's existing endpoints, before credential
+/// pruning. This is local credential resolution, not discovery or registration
+/// of additional static inventories. Only readiness-selected declarations may
+/// access their private credential source; protocol/model metadata stays intact.
+fn bind_embedded_provider_credentials(
+    embedded: ModelCatalog,
+    readiness: &CatalogReadiness,
+    mut resolve: impl FnMut(
+        &ProviderDeclaration,
+    ) -> anyhow::Result<Option<crate::providers::EnvironmentCredential>>,
+) -> anyhow::Result<ModelCatalog> {
+    let mut catalog = ModelCatalog::default();
+    let mut unavailable = std::collections::HashSet::new();
+    for spec in embedded.models() {
+        if unavailable.contains(&spec.endpoint) {
+            continue;
+        }
+        let model = embedded.resolve(&spec.id)?;
+        if !catalog.has_endpoint(&model.endpoint.id) {
+            let mut endpoint = (*model.endpoint).clone();
+            if let Some((declaration, route)) = BUILTIN_PROVIDER_DECLARATIONS
+                .iter()
+                .filter(|declaration| readiness.includes(declaration.id))
+                .find_map(|declaration| {
+                    declaration
+                        .routes
+                        .iter()
+                        .find(|route| route.endpoint_id == endpoint.id.0)
+                        .map(|route| (declaration, route))
+                })
+            {
+                let authentication = resolve(declaration).and_then(|credential| {
+                    credential
+                        .map(|credential| crate::providers::environment_auth(route, &credential))
+                        .transpose()
+                });
+                match bootstrap_check(
+                    format!("provider-credential:{}", declaration.id),
+                    authentication,
+                    |_| {
+                        format!(
+                            "warning: {} unavailable: could not resolve provider credentials",
+                            declaration.name
+                        )
+                    },
+                ) {
+                    Ok(Some(authentication)) => endpoint.auth = authentication,
+                    Ok(None) => {}
+                    Err(_) => {
+                        // An invalid source cannot fall back to another identity.
+                        // Omit only this account's embedded models; other accounts
+                        // and later custom-provider registration remain usable.
+                        unavailable.insert(endpoint.id.clone());
+                        continue;
+                    }
+                }
+            }
+            catalog.register_endpoint(endpoint)?;
+            if let Some(label) = embedded.endpoint_label(&model.endpoint.id) {
+                catalog.set_endpoint_label(model.endpoint.id.clone(), label)?;
+            }
+        }
+        catalog.register_model(spec.clone())?;
+    }
+    Ok(catalog)
+}
+
 fn base_model_catalog_with_readiness(
     offline: bool,
     explicit_custom_store: Option<&crate::auth::custom::CredentialStore>,
@@ -5911,11 +6450,19 @@ fn base_model_catalog_with_readiness(
     let mut catalog = ModelCatalog::builtin()?;
     // The embedded catalog describes supported integrations, not enabled
     // accounts. Do not offer a cloud model until its endpoint can resolve a
-    // credential from this process's environment. Unit tests intentionally
-    // retain the complete fixture catalog so they can exercise protocol and
-    // session behavior without ambient secrets.
+    // credential from the environment or owner-private key store. Bind existing
+    // native endpoints before pruning so offline startup and discovery failure
+    // retain exactly the same embedded fallback models for either key source.
+    // Unit tests use injected local stores rather than ambient credentials.
     #[cfg(not(test))]
-    catalog.retain_configured_models();
+    {
+        catalog = bind_embedded_provider_credentials(
+            catalog,
+            readiness,
+            crate::providers::resolve_environment,
+        )?;
+        catalog.retain_configured_models();
+    }
     startup_phase("catalog.base");
     if cfg!(test) && readiness.is_fleet() {
         // Tests keep the historical deterministic DeepSeek fixture and never
@@ -5937,9 +6484,11 @@ fn base_model_catalog_with_readiness(
         )?;
         register_deepseek_v4_pro(&mut catalog, declaration)?;
     } else if offline {
-        if let Err(error) = register_cached_openrouter_models_offline(&mut catalog) {
-            crate::output::stderr!("warning: OpenRouter model cache unavailable: {error}");
-        }
+        let _ = bootstrap_check(
+            "openrouter-offline",
+            register_cached_openrouter_models_offline(&mut catalog),
+            |error| format!("warning: OpenRouter model cache unavailable: {error}"),
+        );
     } else {
         match readiness {
             // The historical full initialization: every detected provider.
@@ -5970,30 +6519,31 @@ fn base_model_catalog_with_readiness(
         return Ok(catalog);
     }
     if let Some(store) = explicit_custom_store {
-        if let Err(error) =
-            register_custom_openai_endpoints_from_store(&mut catalog, store, offline)
-        {
-            crate::output::stderr!("warning: custom provider registry unavailable: {error}");
-        }
+        let _ = bootstrap_check(
+            "custom-registry",
+            register_custom_openai_endpoints_from_store(&mut catalog, store, offline),
+            |error| format!("warning: custom provider registry unavailable: {error}"),
+        );
         if !cfg!(test) {
-            if let Err(error) =
-                register_default_apple_foundation_models(&mut catalog, store, offline)
-            {
-                crate::output::stderr!("warning: Apple Foundation Models unavailable: {error}");
-            }
+            let _ = bootstrap_check(
+                "apple-foundation",
+                register_default_apple_foundation_models(&mut catalog, store, offline),
+                |error| format!("warning: Apple Foundation Models unavailable: {error}"),
+            );
             catalog.retain_configured_models();
         }
     } else if !cfg!(test) {
         let store = crate::auth::custom::CredentialStore::new(crate::auth::custom::default_path());
-        if let Err(error) =
-            register_custom_openai_endpoints_from_store(&mut catalog, &store, offline)
-        {
-            crate::output::stderr!("warning: custom provider registry unavailable: {error}");
-        }
-        if let Err(error) = register_default_apple_foundation_models(&mut catalog, &store, offline)
-        {
-            crate::output::stderr!("warning: Apple Foundation Models unavailable: {error}");
-        }
+        let _ = bootstrap_check(
+            "custom-registry",
+            register_custom_openai_endpoints_from_store(&mut catalog, &store, offline),
+            |error| format!("warning: custom provider registry unavailable: {error}"),
+        );
+        let _ = bootstrap_check(
+            "apple-foundation",
+            register_default_apple_foundation_models(&mut catalog, &store, offline),
+            |error| format!("warning: Apple Foundation Models unavailable: {error}"),
+        );
         // Custom providers may use provider-scoped environment credentials;
         // hide models whose referenced variable is not configured, just as the
         // built-in provider catalog does above.
@@ -6041,14 +6591,17 @@ fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
 ///
 /// This trace is the off-screen timing signal every frontend shares; nothing in
 /// it is ever rendered on the startup screen. Stable phase names:
-/// `catalog.base`, `catalog.selected`, `catalog.codex`, `catalog.copilot`,
+/// `process.enter`, `cli.configured`, `selection.resolved`, `catalog.base`,
+/// `catalog.selected`, `catalog.codex`, `catalog.copilot`,
 /// `catalog.fallback`, `catalog.enrich`, `codex.credentials`, `codex.inventory`,
 /// `bootstrap.ready`, `session.resolve`, `session.replay`,
 /// `extensions.provider-preflight`, `extensions.prestart`, `extensions.activate`,
-/// `app.build`, `history.hydrate`, `frame.ready`. The last two are emitted by the
-/// interactive frontend; `codex.credentials` and `codex.inventory` separate
-/// credential refresh from the inventory request inside one selected-route wait,
-/// and `catalog.selected` bounds the selected-route inventory wait itself (the
+/// `app.build`, `history.hydrate`, `frame.ready`. `process.enter` starts after
+/// the Tokio runtime has initialized; spawn-to-first-editable-frame latency must
+/// be measured outside the process on a PTY, not inferred from this trace.
+/// `codex.credentials` and `codex.inventory` separate credential refresh from
+/// the inventory request inside one selected-route wait, and
+/// `catalog.selected` bounds the selected-route inventory wait itself (the
 /// delta after `catalog.base`) so a configured but unselected provider's
 /// discovery is never attributed to readiness.
 pub(crate) fn startup_phase(phase: &str) {
@@ -6135,9 +6688,11 @@ fn register_codex_catalog(
     if !cfg!(test) {
         let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
         // Non-fatal: a stale or malformed OAuth file must never block octet startup.
-        if let Err(error) = register_openai_codex_with_notes(catalog, store, offline, notes) {
-            crate::output::stderr!("warning: OpenAI Codex models unavailable: {error}");
-        }
+        let _ = bootstrap_check(
+            "codex-registration",
+            register_openai_codex_with_notes(catalog, store, offline, notes),
+            |error| format!("warning: OpenAI Codex models unavailable: {error}"),
+        );
     }
 }
 
@@ -6147,9 +6702,11 @@ fn register_copilot_catalog(catalog: &mut ModelCatalog, offline: bool) {
     if cfg!(test) || offline {
         return;
     }
-    if let Err(error) = crate::auth::copilot::register_available_models_blocking(catalog, offline) {
-        crate::output::stderr!("warning: GitHub Copilot models unavailable: {error}");
-    }
+    let _ = bootstrap_check(
+        "copilot-registration",
+        crate::auth::copilot::register_available_models_blocking(catalog, offline),
+        |error| format!("warning: GitHub Copilot models unavailable: {error}"),
+    );
 }
 
 /// Build the catalog without ChatGPT models, used to make `/logout` atomic when
@@ -6195,9 +6752,11 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
     let sessions = SessionStore::new(&config.session_dir, &config.workspace);
     // Record the workspace path so cross-workspace browsing can name each
     // session's home. Non-fatal: pickers fall back to directory names.
-    if let Err(error) = sessions.write_workspace_marker() {
-        crate::output::stderr!("warning: could not write session workspace marker: {error}");
-    }
+    let _ = bootstrap_check(
+        "session-workspace-marker",
+        sessions.write_workspace_marker(),
+        |error| format!("warning: could not write session workspace marker: {error}"),
+    );
     let client = AiClient::try_new()?;
     startup_phase("bootstrap.ready");
     Ok(Bootstrap {
@@ -6273,6 +6832,34 @@ fn persisted_session_config(session: &Session) -> anyhow::Result<PersistedSessio
         let entry = session
             .entry(id)
             .ok_or_else(|| anyhow::anyhow!("session head references missing entry {}", id.0))?;
+        if let EntryValue::ResponsesReasoning {
+            model,
+            baseline,
+            update,
+            ..
+        } = &entry.value
+        {
+            // A host-issued update is the effective selection, not the pinned
+            // request baseline. Newer route selections must never inherit an
+            // older route's effort while walking the active ancestry backwards.
+            if persisted
+                .model
+                .as_ref()
+                .is_none_or(|selected| selected == model)
+            {
+                if persisted.model.is_none() {
+                    persisted.model = Some(model.clone());
+                }
+                if persisted.reasoning.is_none() {
+                    persisted.reasoning = Some(
+                        update
+                            .as_ref()
+                            .map(|update| update.reasoning.clone())
+                            .unwrap_or_else(|| baseline.clone()),
+                    );
+                }
+            }
+        }
         if let EntryValue::Config {
             model,
             reasoning,
@@ -6803,14 +7390,22 @@ fn apply_extension_tool_policy(host: &mut ExtensionHost, config: &Config, model:
     host.finalize_tool_surface();
 }
 
-fn configured_extension_host(config: &Config, model: &Model) -> anyhow::Result<ExtensionHost> {
+fn configured_extension_host(
+    config: &Config,
+    model: &Model,
+) -> anyhow::Result<(ExtensionHost, Option<TelemetryObserver>)> {
     let mut host = ExtensionHost::new();
     host.load(&CoreTools);
     apply_extension_tool_policy(&mut host, config, model);
-    if let Some(path) = config.telemetry.as_deref() {
-        host.observe(TelemetryObserver::new(path, env!("CARGO_PKG_VERSION"))?);
+    let telemetry = config
+        .telemetry
+        .as_deref()
+        .map(|path| TelemetryObserver::new(path, env!("CARGO_PKG_VERSION")))
+        .transpose()?;
+    if let Some(observer) = &telemetry {
+        host.observe(observer.clone());
     }
-    Ok(host)
+    Ok((host, telemetry))
 }
 
 #[cfg(test)]
@@ -6841,8 +7436,8 @@ fn configured_extensions_with_runtime_manager(
     runtime_manager: Option<ExtensionRuntimeManager>,
     provider_runtime: ExtensionProviderRuntime,
 ) -> anyhow::Result<(ExtensionHost, ExecutableExtensions)> {
-    let mut extensions = configured_extension_host(config, model)?;
-    let executable_extensions = ExecutableExtensions::discover_and_start_with_provider_runtime(
+    let (mut extensions, telemetry) = configured_extension_host(config, model)?;
+    let mut executable_extensions = ExecutableExtensions::discover_and_start_with_provider_runtime(
         config,
         session,
         model,
@@ -6852,6 +7447,7 @@ fn configured_extensions_with_runtime_manager(
         runtime_manager,
         provider_runtime,
     );
+    executable_extensions.set_telemetry(telemetry);
     startup_phase("extensions.activate");
     Ok((extensions, executable_extensions))
 }
@@ -6892,6 +7488,27 @@ fn subagents_surface_available(
             .tool_definitions()
             .iter()
             .any(|definition| definition.name == "subagent_spawn")
+}
+
+/// A live worker surface can select any configured provider while the root run
+/// borrows the App. Complete deferred inventories at this idle boundary, not in
+/// a model tool on a Tokio worker. Disabled/unavailable extensions retain the
+/// ordinary narrow startup. Extension routes are reprojected by the caller.
+fn complete_delegation_catalog(
+    service_available: bool,
+    config: &Config,
+    catalog: &mut ModelCatalog,
+    readiness: &mut CatalogReadiness,
+    notes: &mut CodexContextNotes,
+) -> anyhow::Result<()> {
+    if service_available && !readiness.is_fleet() {
+        let (complete, additional_notes) =
+            model_catalog_for_readiness(config.offline, &CatalogReadiness::Fleet)?;
+        *catalog = complete;
+        notes.merge(additional_notes);
+        *readiness = CatalogReadiness::Fleet;
+    }
+    Ok(())
 }
 
 fn configure_v2_delegation(
@@ -6982,8 +7599,8 @@ pub(crate) fn build_app_with_runtime_manager(
         prestarted_extensions,
         prepared_session,
         modeless: _,
-        codex_context_notes,
-        readiness,
+        mut codex_context_notes,
+        mut readiness,
     } = boot;
     let mut system = system;
     startup_phase("app.build");
@@ -7032,14 +7649,24 @@ pub(crate) fn build_app_with_runtime_manager(
         runtime_manager,
         provider_runtime,
     )?;
+    complete_delegation_catalog(
+        executable_extensions.has_agent_session_service(),
+        &config,
+        &mut catalog,
+        &mut readiness,
+        &mut codex_context_notes,
+    )?;
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
     let model = catalog.resolve(&launch.model)?;
-    let requested_reasoning = normalize_reasoning_for_model(&launch.reasoning, &model)?;
+    // Keep the original persisted/explicit choice until the diagnostic boundary;
+    // pre-normalizing it there would silently hide an unsupported Off selection.
+    let requested_reasoning = launch.reasoning;
+    let normalized_reasoning = normalize_reasoning_for_model(&requested_reasoning, &model)?;
     // `bootstrap_model` can be an old provider generation. The extension host
     // state exposes only the selected model identity, but refresh both the
     // policy surface and snapshots from the final catalog before any App work.
     apply_extension_tool_policy(&mut extensions, &config, &model);
-    executable_extensions.refresh_host_state(&session, &model, &requested_reasoning, &sessions);
+    executable_extensions.refresh_host_state(&session, &model, &normalized_reasoning, &sessions);
     let compact_model = config
         .compaction
         .compact_model
@@ -7059,9 +7686,14 @@ pub(crate) fn build_app_with_runtime_manager(
             &model,
             subagents_available,
         )?;
-    if let Some(diagnostic) = migration_diagnostic {
-        crate::output::stderr!("warning: {diagnostic}");
-    }
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap("reasoning-migration".into()),
+        migration_diagnostic
+            .into_iter()
+            .map(|diagnostic| format!("warning: {diagnostic}"))
+            .collect(),
+        true,
+    );
     config.model = Some(model.spec.id.clone());
     config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
@@ -7103,8 +7735,19 @@ pub(crate) fn build_app_with_runtime_manager(
         config.compaction.keep_recent_tokens,
     )?;
     agent.set_max_session_cost_microdollars(config.max_cost_microdollars);
+    if service_available {
+        agent.set_delegation_model_resolver(Arc::new(
+            super::delegation_models::CodingAgentModelResolver::new(catalog.clone()),
+        ));
+    }
     configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
     executable_extensions.bind_agent_sessions(&agent)?;
+    if agent.reasoning() != &reasoning {
+        // Construction restores durable effort. Install and bind observation
+        // before applying an explicit override that may enter Ultra; the setter
+        // also synchronizes the delegation template for future workers.
+        agent.set_reasoning(reasoning.clone())?;
+    }
     agent.finalize_tool_surface();
     let system_tokens = estimate_text_tokens(agent.system_prompt());
 
@@ -7185,7 +7828,7 @@ pub fn rebuild_app(
     // Idle rebuilds of the same session preserve delivery. A new or resumed
     // different session owns a fresh latch; the previous session's notice must
     // not suppress the effective-model note in the newly opened transcript.
-    let codex_context_notes = app.codex_context_notes.clone();
+    let mut codex_context_notes = app.codex_context_notes.clone();
     if selection.as_ref().is_some_and(|selection| {
         let path = match selection {
             SessionSelection::CreateNew(path) | SessionSelection::OpenExisting(path) => path,
@@ -7194,7 +7837,7 @@ pub fn rebuild_app(
     }) {
         codex_context_notes.delivered.set(false);
     }
-    let readiness = app.readiness.clone();
+    let mut readiness = app.readiness.clone();
     let compact_model = config
         .compaction
         .compact_model
@@ -7249,14 +7892,16 @@ pub fn rebuild_app(
     };
     validate_compaction_route(config.compaction.mode, &model, compact_model.as_ref())?;
     let requested_reasoning = match (new_reasoning, persisted.reasoning) {
-        (Some(reasoning), _) => normalize_reasoning_for_model(&reasoning, &model)?,
-        (None, Some(reasoning)) => normalize_reasoning_for_model(&reasoning, &model)?,
+        (Some(reasoning), _) | (None, Some(reasoning)) => reasoning,
         (None, None) if changing_model => {
             let level = level_from_reasoning(&reasoning, &old_model)?;
             thinking_to_reasoning(level, &model)?
         }
-        (None, None) => normalize_reasoning_for_model(&reasoning, &model)?,
+        (None, None) => reasoning,
     };
+    // Validate before releasing the old agent, but retain the original choice
+    // for the visible migration diagnostic after extension gates are known.
+    let normalized_reasoning = normalize_reasoning_for_model(&requested_reasoning, &model)?;
     let requested_reasoning_mode = if let Some(mode) = new_reasoning_mode {
         mode
     } else if explicit_reasoning {
@@ -7284,6 +7929,12 @@ pub fn rebuild_app(
     let provider_runtime = released_extensions.provider_runtime();
     released_extensions.clear_provider_catalog(&mut catalog, &client);
     released_extensions.release_binding_blocking();
+    // These are actual queue discards, not inferred interruption risks. Use the
+    // existing terminal-aware diagnostic route: interactive lifecycle callers
+    // defer this queue through final hydration; never print into the raw frame.
+    for notice in released_extensions.discard_stale_host_requests() {
+        crate::output::stderr!("{notice}");
+    }
     let released_extensions = ReleasedExtensionBindingCleanup::new(released_extensions);
     drop(app);
     let mut session = match selection {
@@ -7332,10 +7983,17 @@ pub fn rebuild_app(
         &config,
         &session,
         &model,
-        &requested_reasoning,
+        &normalized_reasoning,
         &sessions,
         runtime_manager,
         provider_runtime,
+    )?;
+    complete_delegation_catalog(
+        executable_extensions.has_agent_session_service(),
+        &config,
+        &mut catalog,
+        &mut readiness,
+        &mut codex_context_notes,
     )?;
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
     let service_available = executable_extensions.has_agent_session_service();
@@ -7348,9 +8006,14 @@ pub fn rebuild_app(
             &model,
             subagents_available,
         )?;
-    if let Some(diagnostic) = migration_diagnostic {
-        crate::output::stderr!("warning: {diagnostic}");
-    }
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap("reasoning-migration".into()),
+        migration_diagnostic
+            .into_iter()
+            .map(|diagnostic| format!("warning: {diagnostic}"))
+            .collect(),
+        true,
+    );
     config.model = Some(model.spec.id.clone());
     config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
@@ -7390,8 +8053,19 @@ pub fn rebuild_app(
         config.compaction.keep_recent_tokens,
     )?;
     agent.set_max_session_cost_microdollars(config.max_cost_microdollars);
+    if service_available {
+        agent.set_delegation_model_resolver(Arc::new(
+            super::delegation_models::CodingAgentModelResolver::new(catalog.clone()),
+        ));
+    }
     configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
     executable_extensions.bind_agent_sessions(&agent)?;
+    if agent.reasoning() != &reasoning {
+        // Construction restores durable effort. Install and bind observation
+        // before applying an explicit override that may enter Ultra; the setter
+        // also synchronizes the delegation template for future workers.
+        agent.set_reasoning(reasoning.clone())?;
+    }
     agent.finalize_tool_surface();
     let system_tokens = estimate_text_tokens(agent.system_prompt());
 

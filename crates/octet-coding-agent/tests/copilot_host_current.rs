@@ -478,13 +478,15 @@ async fn copilot_registration_preserves_explicit_protocols_and_never_catalogs_se
     disabled["policy"]["state"] = json!("disabled");
     let mut unknown_reasoning = model("unknown-reasoning", "/responses");
     unknown_reasoning["capabilities"]["supports"]["reasoning"] = json!(true);
+    let mut no_tools = model("no-tools", "/responses");
+    no_tools["capabilities"]["supports"]["tool_calls"] = json!(false);
     Mock::given(method("GET"))
         .and(path("/models"))
         .and(header("authorization", format!("Bearer {INFERENCE}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
             model("gpt-looking-chat", "/chat/completions"),
             model("claude-looking-responses", "/responses"),
-            model("anthropic-only", "/v1/messages"), disabled, unknown_reasoning
+            model("anthropic-only", "/v1/messages"), disabled, unknown_reasoning, no_tools
         ]})))
         .mount(&server)
         .await;
@@ -494,6 +496,9 @@ async fn copilot_registration_preserves_explicit_protocols_and_never_catalogs_se
         .await
         .unwrap();
     assert_eq!(catalog.models().count(), 2);
+    assert!(catalog
+        .resolve(&ModelId("github-copilot/no-tools".into()))
+        .is_err());
     for (id, protocol, endpoint_id) in [
         (
             "gpt-looking-chat",
@@ -539,8 +544,6 @@ async fn copilot_bad_inventory_is_atomic_and_does_not_fall_back_to_static_models
     invalid_limits["capabilities"]["limits"]["max_output_tokens"] = json!(0);
     let mut invalid_flags = model("invalid-flags", "/responses");
     invalid_flags["capabilities"]["supports"]["tool_calls"] = json!("true");
-    let mut contradictory_flags = model("contradictory-flags", "/responses");
-    contradictory_flags["capabilities"]["supports"]["tool_calls"] = json!(false);
     for inventory in [
         json!({"data": []}),
         json!({"data": [model("unsupported", "/v1/messages")]}),
@@ -553,7 +556,6 @@ async fn copilot_bad_inventory_is_atomic_and_does_not_fall_back_to_static_models
         json!({"data": [model("valid", "/responses"), secret_name]}),
         json!({"data": [model("valid", "/responses"), invalid_limits]}),
         json!({"data": [model("valid", "/responses"), invalid_flags]}),
-        json!({"data": [model("valid", "/responses"), contradictory_flags]}),
     ] {
         let (_temp, store, _) = private_store();
         store.save(OAUTH).unwrap();

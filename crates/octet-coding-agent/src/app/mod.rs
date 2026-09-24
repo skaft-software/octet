@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 pub mod bootstrap;
+mod delegation_models;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -377,6 +378,38 @@ pub fn supported_levels_with_subagents(
         .collect()
 }
 
+/// Explicit interactive choices must not silently normalize an unsupported effort.
+/// Startup/configuration normalization intentionally retains its separate policy.
+pub fn requested_thinking_to_reasoning(
+    level: ThinkingLevel,
+    model: &Model,
+    subagents_available: bool,
+) -> anyhow::Result<ReasoningConfig> {
+    anyhow::ensure!(
+        supported_levels_with_subagents(model, subagents_available).contains(&level),
+        "thinking {} is not supported by {} with the current subagent capabilities",
+        level.label(),
+        model.spec.id.0,
+    );
+    let reasoning = thinking_to_reasoning_with_subagents(level, model, subagents_available)?;
+    // Ultra is a host delegation tier, not a wire update effort. Agent/RunControl
+    // check the observation runtime and rebase reasoning at a safe boundary.
+    if model.responses_features().reasoning_effort_updates
+        && reasoning != ReasoningConfig::Effort(ReasoningEffort::Ultra)
+    {
+        let update = octet_ai::ResponsesConfigurationUpdate {
+            reasoning: reasoning.clone(),
+        };
+        octet_ai::responses::validate_responses_input(
+            model,
+            &octet_ai::ResponsesInput::new(vec![update.to_item()]),
+            &reasoning,
+            false,
+        )?;
+    }
+    Ok(reasoning)
+}
+
 /// An Agent-owning runtime transition. These are valid only while idle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reconfig {
@@ -589,15 +622,10 @@ impl App {
     /// plan deferred at startup.
     ///
     /// Enrichment is never readiness: readiness already initialized the active
-    /// model's own route, so a surface that enumerates every route (the `/model`
-    /// picker, provider setup, a status page) calls this first and shows the
-    /// same provider list a fleet launch would have shown. Idempotent: a launch
-    /// whose plan was already the fleet returns immediately, and a second call
-    /// performs nothing.
-    ///
-    /// The live extension-provided routes are re-projected onto the fresh fleet
-    /// catalog, so enrichment cannot drop them. The agent, the session, and the
-    /// active model are untouched.
+    /// model's own route. Fleet surfaces may call this synchronously; the idle
+    /// `/model` picker instead builds the fleet on a worker and applies its
+    /// result through `apply_picker_catalog` while the panel remains interactive.
+    /// Both paths keep the agent, session, and active model untouched.
     /// Complete the catalog for one surface that is about to enumerate routes,
     /// reporting a failure instead of hiding a partial provider list.
     ///
@@ -626,6 +654,39 @@ impl App {
         Ok(())
     }
 
+    /// Admit one deferred picker inventory only for the model that launched it.
+    /// A failed or obsolete build leaves the current catalog and selection in
+    /// place; extension declarations are reprojected at the idle owner boundary.
+    pub(crate) fn apply_picker_catalog(
+        &mut self,
+        expected_model: &ModelId,
+        mut catalog: ModelCatalog,
+        notes: crate::app::bootstrap::CodexContextNotes,
+    ) -> anyhow::Result<bool> {
+        if self.readiness.is_fleet() || self.model.spec.id != *expected_model {
+            return Ok(false);
+        }
+        self.executable_extensions
+            .rescan_post_mutation_resources(&self.config);
+        self.executable_extensions
+            .synchronize_provider_catalog(&mut catalog, &self.client);
+        if !catalog_route_matches_active_model(&catalog, &self.model) {
+            anyhow::bail!(
+                "the active model {} route changed during catalog discovery; keeping the current routes",
+                self.model.spec.id.0
+            );
+        }
+        self.catalog = catalog;
+        self.codex_context_notes.merge(notes);
+        self.readiness = crate::app::bootstrap::CatalogReadiness::Fleet;
+        if self.executable_extensions.has_agent_session_service() {
+            self.agent.set_delegation_model_resolver(Arc::new(
+                delegation_models::CodingAgentModelResolver::new(self.catalog.clone()),
+            ));
+        }
+        Ok(true)
+    }
+
     /// Current provider-visible tool schema reserve, including live extension
     /// catalog changes published after application bootstrap.
     pub fn current_tool_schema_tokens(&self) -> u64 {
@@ -643,6 +704,11 @@ impl App {
             self.executable_extensions
                 .synchronize_provider_catalog(&mut self.catalog, &self.client),
         );
+        if self.executable_extensions.has_agent_session_service() {
+            self.agent.set_delegation_model_resolver(Arc::new(
+                delegation_models::CodingAgentModelResolver::new(self.catalog.clone()),
+            ));
+        }
         diagnostics
     }
 
@@ -806,6 +872,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reasoning, ReasoningConfig::Effort(ReasoningEffort::Ultra));
+
+        let mut qualified = model;
+        Arc::make_mut(&mut qualified.spec).protocol = octet_ai::Protocol::OpenAiResponses;
+        Arc::make_mut(&mut qualified.spec)
+            .capabilities
+            .responses_features
+            .reasoning_effort_updates = true;
+        Arc::make_mut(&mut qualified.endpoint)
+            .runtime
+            .responses_features
+            .reasoning_effort_updates = true;
+        assert!(qualified.responses_features().reasoning_effort_updates);
+        assert_eq!(
+            requested_thinking_to_reasoning(ThinkingLevel::Ultra, &qualified, true).unwrap(),
+            ReasoningConfig::Effort(ReasoningEffort::Ultra)
+        );
+        assert!(requested_thinking_to_reasoning(ThinkingLevel::Ultra, &qualified, false).is_err());
     }
     #[test]
     fn ultra_floor_cannot_override_the_effective_runtime_ceiling() {

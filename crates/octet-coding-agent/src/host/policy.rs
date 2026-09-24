@@ -231,6 +231,7 @@ pub(crate) fn register_inline_model(
         display_name: None,
         protocol,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities,
             output_modalities: ModalitySet::none(),
             tools: true,

@@ -25,6 +25,7 @@ fn model(url: &str, protocol: Protocol) -> Model {
             display_name: None,
             protocol,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -61,6 +62,7 @@ fn request() -> Request {
             content: vec![UserPart::Text("go".into())],
         })],
         tools: vec![ToolDef {
+            async_execution: false,
             name: "language".into(),
             description: "a grammar".into(),
             parameters: json!({"type":"object", "properties":{"source":{"type":"string"}},
@@ -200,9 +202,9 @@ async fn grammar_custom_calls_decode_and_replay_on_real_http_for_both_openai_cod
                 ResponsesReplayItem::Output(response.responses_output.unwrap()),
                 ResponsesReplayItem::User(tool_result()),
             ];
-            req.responses = Some(ResponsesOptions::full_replay(encode_responses_replay(
-                &model, None, &replay,
-            )));
+            req.responses = Some(ResponsesOptions::full_replay(
+                encode_responses_replay(&model, None, &replay).unwrap(),
+            ));
             client.complete(&model, req).await.unwrap();
         }
         let requests = server.received_requests().await.unwrap();

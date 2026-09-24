@@ -108,10 +108,53 @@ persisting synthesized fields. Custom normalized caches advance to version 9 so
 old sparse results cannot hide self-descriptions. These are deterministic source
 contracts, not evidence that any public provider currently emits the extension.
 
+## First-run setup (unreleased)
+
+When an interactive launch has no available models and no explicit model
+selection, the setup menu offers, in order:
+
+1. **Add an API key** — choose a supported built-in provider, paste into a masked
+   input, and review before saving. This is a dedicated secret input, not the
+   conversation composer; no environment variable is required.
+2. **Sign in with ChatGPT / other supported OAuth subscriptions** — choose
+   **ChatGPT (OpenAI Codex)** or **GitHub Copilot** and complete the provider's
+   device authorization. No other subscription login is implied.
+3. **Local/self-hosted models** — choose LM Studio or an explicit
+   OpenAI-compatible endpoint, then discover/select a model and review the
+   custom registry change.
+4. **Continue without a provider** — leave setup without saving provider data.
+
+Existing available models and explicit model selections are not replaced by this
+menu. Print/RPC do not open it. Subscription sign-in requires an online launch;
+`--offline` is not a local-inference guarantee. After saving a credential, the
+catalog is refreshed and model selection uses the ordinary picker. Saving is
+not a successful inference check, and a discovery failure can leave the saved
+credential in place for retry.
+
+Built-in API keys are saved in
+`~/.octet/credentials/api-keys/<provider>.json`, with owner-private directories
+(`0700`) and files (`0600`), atomic publication, and explicit consent before
+replacement. Environment credentials take precedence over saved keys. Native
+provider routes remain native; saving a key does not turn Anthropic, Gemini, or
+OpenAI into a custom OpenAI-compatible endpoint.
+
+A saved API key must remain recoverable to authenticate provider requests:
+owner-private storage is **not hashing or encryption at rest**. Keep the store
+out of repositories, support reports, and shared backups. Keys are not copied to
+prompts, configuration, model metadata, or setup receipts. AWS/Bedrock, Azure,
+Vertex, and Cloudflare require additional account, deployment, region, or
+endpoint configuration and are not offered as one-field API-key setup; use their
+documented configuration below.
+
+See [Getting started](getting-started.md#3-choose-one-provider-lane) and
+[CLI alternatives](cli.md#provider-setup). This describes the source candidate,
+not a claim that published 0.7.6 includes this menu.
+
 ## Cloud setup
 
-Set the credential variables for the chosen row, then run `octet --model ID`.
-Do not put credentials into prompts or repository configuration.
+Alternatively, set the credential variables for the chosen row, then run
+`octet --model ID`. Do not put credentials into prompts or repository
+configuration.
 
 | Provider | Credential and routing setup | Example model ID |
 | --- | --- | --- |
@@ -251,8 +294,29 @@ This uses hosted device login instead of a manually managed API key. A successfu
 account-scoped live inventory is authoritative. octet does not infer Ultra,
 collaboration, Responses Lite, or model availability from a name or subscription
 plan. Missing or unusable metadata falls back conservatively. If live inventory
-omits Astra, no Codex Astra route is injected; when present, select
-`codex/gpt-6-astra` independently of a direct OpenAI preset.
+omits a model, no corresponding GPT-6 Codex route is injected. When advertised,
+select `codex/gpt-6-astra`, `codex/gpt-6-sol`, or `codex/gpt-6-luna`; these stay
+namespaced independently of direct OpenAI presets.
+
+Codex discovery sends compatibility version **`0.156.1`**. GPT-6 Sol and Luna
+require at least `0.155.0`: older query versions filter them out on the server,
+even when the account has access. Read-only checks on 2026-09-23 confirmed that
+changing only this query version from `0.153.2`/`0.154.0` to `0.156.1` returned
+**`gpt-6-sol`** and **`gpt-6-luna`** with the same OAuth credential. Cache version
+8 invalidates the older filtered inventories; the next online launch refreshes
+them without another login. Offline launches never perform this refresh.
+
+The observed OAuth contracts include text/image input, a 272K working window,
+medium reasoning by default, and low/medium/high/xhigh/max choices; Sol also
+advertises Ultra. Both advertise Responses Lite and V2 delegation. All three
+GPT-6 routes positively advertise `supports_reasoning_effort_updates`. This
+independent capability is retained only with fresh online account metadata;
+offline reduction disables it, just like Lite/V2. These are
+account-scoped inventory observations, not successful inference checks or claims
+about other accounts. Public API `none` support is not imported into the OAuth
+choices. Output budgeting and separately sourced prices remain unchanged; the
+inventory check did not establish those values. New slugs require account
+inventory, not a static alias.
 
 For advertised Ultra/V2 support, first review and activate the subagents source
 inside an appropriate OS isolation boundary:
@@ -291,9 +355,10 @@ Enterprise authorities and environment endpoint overrides are not supported.
 
 Subsequent credential resolution rejects local logout/replacement and rejected
 inference origins, but logout does not remotely revoke already-running requests.
-The TUI `/login` and `/logout` commands are not yet wired to Copilot; use the CLI
-flags and restart existing catalog owners after account changes. NDJSON does not
-gain login/logout commands or OAuth payload fields. Rust embedders retain the
+First-run setup offers GitHub Copilot device sign-in. The TUI `/login` and
+`/logout` slash commands are not yet wired to Copilot; use the CLI flags for
+later account changes and restart existing catalog owners afterward. NDJSON
+does not gain login/logout commands or OAuth payload fields. Rust embedders retain the
 [credential-safe SDK seam](sdk.md#host-owned-github-copilot).
 
 This describes source integration, not live-provider or native-client
@@ -312,11 +377,11 @@ work, not implied by these codec repairs.
 
 ## Local and custom endpoints
 
-With no configured model, interactive setup offers **LM Studio** or an
-**OpenAI-compatible endpoint**. Choose one endpoint, an optional credential
-source, a discovered/manual model ID, and review before saving. No localhost or
-network scan occurs. Compatible servers include llama.cpp, vLLM, SGLang, LM Studio,
-and compatible gateways.
+Choose **Local/self-hosted models** in [first-run setup](#first-run-setup-unreleased)
+for **LM Studio** or an **OpenAI-compatible endpoint**. Choose one endpoint, an
+optional credential source, a discovered/manual model ID, and review before
+saving. No localhost or network scan occurs. Compatible servers include
+llama.cpp, vLLM, SGLang, LM Studio, and compatible gateways.
 
 For scripts, review before adding `--yes`:
 
@@ -485,6 +550,24 @@ Unknown metadata and a lack of displayed reasoning do **not** establish that the
 server has disabled thinking. Reasoning can increase latency and token usage;
 use `--reasoning off` when the model supports it to opt out.
 
+The OpenRouter route decodes that provider's own per-model `reasoning` object
+(`mandatory`, `default_enabled`, `supported_efforts`, `default_effort`) rather
+than inferring optionality from the mere presence of a `reasoning_effort`
+parameter. Mandatory models offer only their advertised efforts (for GLM 5.3,
+`max/high/low`, default `max`), or only `on` if no efforts are published. A saved
+unsupported `off` is normalized to an advertised choice with a diagnostic.
+Local summaries use that same contract: Off only when supported, otherwise the
+advertised default. A parameter list without an exact contract offers only the
+endpoint default, never a guessed `none/minimal/low/medium/high` range.
+
+For the OpenRouter profile, `off` **omits** the reasoning object rather than
+sending `effort: "none"` or `enabled: false`; the endpoint may therefore still
+reason according to its default. Enabled efforts are sent verbatim; an enabled
+boolean-only contract sends `enabled: true`. Other providers retain their
+existing explicit-disable behavior. This is a wire-compatibility policy, not a
+guarantee that selecting Off disables reasoning on OpenRouter.
+See [reasoning selection and thinking](provider-thinking.md).
+
 ## Protocols and transport
 
 | Protocol | Streaming | Tools | Reasoning | Images | Structured output |
@@ -499,8 +582,10 @@ modalities, tools, structured output, output limits, and reasoning. Google uses
 native [generateContent](design/octet-ai.md#google-generatecontent), not an OpenAI
 translation; protocol recognition alone does not imply [native audio support](media.md#formats-and-limits).
 
-Direct OpenAI defaults to HTTP/SSE Responses. Codex uses `WebSocketPreferred`
-with HTTP/SSE fallback and endpoint-configured zstd HTTP request compression;
+Direct OpenAI and Codex declare `WebSocketPreferred` with HTTP/SSE fallback
+for ordinary requests. Native steering requires its bidirectional WebSocket
+operation and does not replay accepted input through HTTP. Codex additionally
+uses endpoint-configured zstd HTTP request compression;
 compression failure keeps the valid uncompressed body. These are provider
 [declarations](../crates/octet-coding-agent/src/providers/declarations.json),
 not automatic properties of the Responses codec.
@@ -567,22 +652,48 @@ Displayed numeric usage/cost is then a known subtotal; a fork starts independent
 accounting. See the [agent recovery contract](design/octet-agent.md#in-process-provider-recovery)
 for eligibility, budgets, and verification limits.
 
-## Astra source limits
+## GPT-6 contracts and execution
 
-Direct `gpt-6-astra` is declared on Responses with text/image input, a 1.05M-token
-context window, 128K output, and `low` through `max` effort. Inputs above 272K
-use the long-context price tier. Current source supports selection,
-text/images, reasoning, and ordinary/parallel tool calls. It does **not** implement
-native async tools (`async: true` and pending-call lifecycle), steering an active
-Responses WebSocket response, or coding-loop reasoning changes through
-`configuration_update` with verified cache preservation. Execution-time input is
-queued for a later model-turn boundary; `parallel_tool_calls` is not native async.
-These limits also apply to Codex Astra. Public API support does not prove OAuth
-endpoint support; additional capabilities require fresh account-scoped metadata
-or verified endpoint behavior.
+Direct `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna` are declared on Responses with
+text/image input, a 1.05M-token context window and 128K output. Astra accepts
+`low` through `max` (default low); Sol/Luna additionally accept Off/`none` and
+default to medium. Exact public pricing and its above-272K tier are recorded in
+[the catalog sources](../crates/octet-ai/models/SOURCES.md). New public prices
+are not borrowed for Codex Sol/Luna: their subscription cost remains unknown.
 
-Third-party Astra inventory does not inherit direct OpenAI capabilities from its
-name or pinned record. For example, OpenRouter must advertise image input,
-tools/structured output, and reasoning on its own route. Its snapshot can enrich
-a missing label or price, not enable Responses Lite, delegation, or extra effort
-choices.
+Model and endpoint feature declarations must **both** opt in:
+
+- **Async tools:** qualified host-parallel observations advertise `async: true`.
+  Complete calls are persisted before a bounded background job starts; the model
+  can advance while those jobs run, and each result uses its original call ID.
+  This is not speculative execution of streamed arguments. Synchronous calls,
+  effectful work, approvals, and hard usage ceilings retain their barriers.
+  Interrupted pending work is not blindly rerun after restart.
+- **Native steering:** public GPT-6 uses `response.steer` on the active socket,
+  with durable admission before dispatch and separate accounting/persistence for
+  every response segment. Provider acceptance is not proof that an instruction
+  was followed. Ambiguous disconnects are not automatically replayed. Routes or
+  input forms without qualification retain ordinary queued steering; Codex does
+  not gain native steering from its model name. Hard cumulative ceilings retain
+  the ordinary queue boundary.
+- **Thinking changes:** qualified `/thinking` changes queue for the next response
+  boundary without cancelling the root run. The request-level reasoning baseline
+  stays fixed and ordered `configuration_update` items carry ordinary effort
+  changes. Off still requires an advertised `none`; Ultra/delegation-mode changes
+  are not ordinary wire effort updates. Durable replay retains the baseline and
+  effective selection. Compaction must rebase only after a successful summary;
+  standalone native compact rejects update histories without separate authority.
+
+Codex currently qualifies reasoning updates from positive account inventory, not
+async tools or native steering. Lite/V2 do not imply either feature. Public API
+support and deterministic loopback tests are not live OAuth inference or cache-hit
+qualification. See [reasoning controls](provider-thinking.md) and
+[the protocol contract](../crates/octet-ai/docs/responses-controls.md).
+
+Third-party GPT-6 inventory does not inherit these capabilities from a name or
+snapshot. OpenRouter must advertise its own images, tools and exact reasoning
+choices; its ordinary Chat route does not become a Responses control endpoint.
+Provider-managed misalignment monitoring remains independent of host approval:
+`misalignment_policy_violation` stops automatic retry, and already completed
+work is not undone. Octet does not provision project webhooks or safety-alert
+subscriptions automatically.

@@ -85,6 +85,14 @@ The documented configuration example uses `bash_timeout_secs = 120` and
 `max_output_bytes = 1048576`; [configuration](configuration.md#settings) records
 these alongside capability controls. Capture limits differ from the TUI's
 collapsible preview: expanding a panel cannot restore discarded bytes.
+Bash spill files retain at most 16 MiB per stream and share a **64 MiB / 32-file
+budget per resource owner**, including active captures. Oldest files expire
+first; paths may expire after a result is returned and are cleaned up when the
+last agent with that owner closes. Pipes continue draining after a limit.
+Quota-limited files use `partial_output_path` and `spill_truncated=true`, never
+`full_output_path`. Storage failures use `spill_error=true`; eviction during
+capture uses `spill_expired=true` without advertising an available path. Bounded
+capture workers handle disk writes and cleanup off the async input/run path.
 
 ## Bash output and temporary spills
 

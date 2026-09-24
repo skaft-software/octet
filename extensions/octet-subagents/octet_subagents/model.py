@@ -56,7 +56,7 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_./:-]{1,512}$")
 # Provider and model ids as the product spells them (`provider/model`), never a
 # free-form command line. `inherit` means "the parent session's selection".
-_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:/:-]{0,127}$")
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9._+:/@-]{0,255}$")
 INHERIT = "inherit"
 # The state the host produces when an owning run retires a child record before
 # the extension observes it. It means "still owned by this session, currently
@@ -167,16 +167,11 @@ class SpawnRequest:
     fingerprint: str
 
     @property
-    def effective_reasoning(self) -> str:
-        from .reasoning import clamp_and_describe
-
-        return clamp_and_describe(self.reasoning, self.reasoning_capability)[0]
-
-    @property
-    def reasoning_note(self) -> Optional[str]:
-        from .reasoning import clamp_and_describe
-
-        return clamp_and_describe(self.reasoning, self.reasoning_capability)[1]
+    def model_selection(self) -> Optional[Dict[str, str]]:
+        selection = {key: value for key, value in (
+            ("provider", self.provider), ("model", self.model), ("reasoning", self.reasoning)
+        ) if value != INHERIT}
+        return selection or None
 
     @property
     def inherits_model_policy(self) -> bool:
@@ -184,7 +179,7 @@ class SpawnRequest:
 
     @classmethod
     def parse(
-        cls, arguments: Mapping[str, Any], *, known_models: Sequence[str] = ()
+        cls, arguments: Mapping[str, Any]
     ) -> "SpawnRequest":
         if not isinstance(arguments, Mapping):
             raise SubagentError("subagent_spawn arguments must be an object")
@@ -226,49 +221,20 @@ class SpawnRequest:
                 "profile must be one of: %s" % ", ".join(sorted(PROFILE_INSTRUCTIONS))
             )
 
-        # Per-worker orchestration selection. Unset means "inherit the parent
-        # session's provider/model/reasoning". A selection is only accepted when
-        # this process can confirm it is configured for the calling session,
-        # because API 0.2 `agent/spawn` exposes no provider catalog and carries no
-        # per-child model field: an unverifiable provider/model is refused with a
-        # typed error instead of being silently coerced to the inherited model.
+        # Validate syntax here; only the host's configured catalog can admit
+        # a route or normalize its reasoning. Caller capability hints are not
+        # execution authority and are never forwarded as model metadata.
         provider = _model_id(arguments.get("provider", INHERIT), "provider")
         model = _model_id(arguments.get("model", INHERIT), "model")
         from .reasoning import ReasoningCapability, parse_level
 
         reasoning = parse_level(arguments.get("reasoning", INHERIT))
         capability = ReasoningCapability.parse(arguments.get("reasoning_capability"))
-        confirmed = {
-            value
-            for value in known_models
-            if isinstance(value, str) and value and len(value.encode("utf-8")) <= 128
-        }
-        if model != INHERIT and model not in confirmed:
+        if provider != INHERIT and model == INHERIT:
             raise SubagentError(
-                "model %s is not a model this session can confirm as configured; "
-                "octet's API 0.2 agent_sessions exposes no provider catalog and "
-                "carries no per-child model field, so an unverifiable selection is "
-                "refused rather than silently coerced to the inherited model"
-                % model,
+                "provider selection requires an explicit model; pass provider and model together",
                 code="unsupported_model",
             )
-        if provider != INHERIT:
-            if model == INHERIT:
-                raise SubagentError(
-                    "provider selection requires an explicit model; pass provider "
-                    "and model together",
-                    code="unsupported_model",
-                )
-            model_provider = model.split("/", 1)[0] if "/" in model else None
-            if model_provider != provider:
-                raise SubagentError(
-                    "provider %s does not match the confirmed model %s; this session "
-                    "can only confirm providers it can observe for the parent model"
-                    % (provider, model),
-                    code="unsupported_model",
-                )
-        # Clamping is applied lazily by `effective_reasoning` so the request and
-        # its effective selection are both visible without duplicating policy.
 
         tools_value = arguments.get("tools", list(CHILD_TOOLS))
         if not isinstance(tools_value, list) or not tools_value:
@@ -415,7 +381,7 @@ HARD ORCHESTRATION BOUNDARIES
 BOUNDS
 - {wall_line}
 - {turns_line}
-- Token/context ceilings: inherit the parent session exactly; no separate child token budget is requested.
+- Token/context ceilings: inherit the parent's session token ceiling; the selected model's context/output capabilities bound inherited settings. No separate child token budget is requested.
 - {cost_line}
 - Final output must be no more than {self.max_output_bytes} UTF-8 bytes.
 octet owns the actual session, persistence, approvals, cancellation, hard limits, and descendant cleanup. Stop earlier if a host limit is lower.
@@ -495,12 +461,8 @@ class Worker:
     launchable: bool = False
     launch_blocked: Optional[str] = None
     live_task: Optional[bool] = None
-    # Per-worker orchestration selection. `provider`/`model`/`reasoning` are the
-    # request; `effective_*` is what this process believes the worker runs with
-    # (today: the parent's inherited selection, because API 0.2 `agent/spawn`
-    # carries no model field). `model_policy_applied` is False until the host
-    # reports a per-worker selection, so the panel can never imply that a
-    # requested model took effect.
+    # Requested selections remain separate from host-confirmed execution
+    # settings, including across continuation and recovery.
     requested_provider: str = INHERIT
     effective_provider: str = "inherited"
     requested_reasoning: str = INHERIT

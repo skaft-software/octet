@@ -112,7 +112,7 @@ pub(crate) fn tool_display_label(name: &str) -> String {
         "search" => "Explored".to_string(),
         "edit" => "Edit".to_string(),
         "write" => "Write".to_string(),
-        _ if name.starts_with("subagent_") => "Delegated".to_string(),
+        _ if super::is_subagent_tool(name) => "Delegated".to_string(),
         _ if name.starts_with("browser_") => "Browse".to_string(),
         _ if name.starts_with("ssh_") => "SSH".to_string(),
         _ => {
@@ -286,19 +286,16 @@ pub(super) fn render_compact_tool_output(
     output_indent: &str,
 ) -> Vec<String> {
     let output = sanitize_for_terminal(&panel.output);
-    let mut lines = output
+    let lines = output
         .lines()
-        .filter(|line| !line.trim().is_empty() && *line != "(no output)")
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+        .filter(|line| !line.trim().is_empty() && *line != "(no output)");
     let omitted = if expanded {
         0
     } else {
-        let omitted = lines.len().saturating_sub(COMPACT_EXEC_OUTPUT_ROWS);
-        if omitted > 0 {
-            lines.drain(..omitted);
-        }
-        omitted
+        lines
+            .clone()
+            .count()
+            .saturating_sub(COMPACT_EXEC_OUTPUT_ROWS)
     };
     let mut rendered = Vec::new();
     if omitted > 0 {
@@ -311,9 +308,9 @@ pub(super) fn render_compact_tool_output(
             width,
         ));
     }
-    for line in lines {
+    for line in lines.skip(omitted) {
         rendered.extend(wrap_hanging(
-            &understated_tool_output(theme, &line),
+            &understated_tool_output(theme, line),
             output_indent,
             output_indent,
             width,

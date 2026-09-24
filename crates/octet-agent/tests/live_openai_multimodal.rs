@@ -55,6 +55,7 @@ async fn live_openai_compatible_inline_png_reaches_the_model() {
             display_name: None,
             protocol: Protocol::OpenAiChat,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: false,

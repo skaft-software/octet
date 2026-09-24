@@ -29,6 +29,9 @@ pub enum CacheRetention {
     /// Provider default short-lived cache retention.
     #[default]
     Short,
+    /// Short retention for a one-off Anthropic cache warm: place the message
+    /// breakpoint before the synthetic final user turn, not on that turn.
+    WarmShort,
     /// Request the provider's long-lived retention where supported.
     Long,
 }
@@ -52,9 +55,16 @@ pub struct CacheCompatibility {
     /// Optional Anthropic-style cache-control convention on Chat payloads.
     #[serde(default)]
     pub cache_control_format: Option<CacheControlFormat>,
+    /// Whether this Responses route accepts an explicit prompt-cache mode.
+    #[serde(default)]
+    pub supports_explicit_prompt_cache_mode: bool,
     /// Whether Anthropic-style cache markers are accepted on tool definitions.
     #[serde(default = "default_true")]
     pub supports_cache_control_on_tools: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 const fn default_true() -> bool {
@@ -69,6 +79,7 @@ impl Default for CacheCompatibility {
             send_session_affinity_headers: false,
             session_affinity_format: None,
             cache_control_format: None,
+            supports_explicit_prompt_cache_mode: false,
             supports_cache_control_on_tools: true,
         }
     }
@@ -143,6 +154,9 @@ pub enum EndpointTransport {
 /// family needs data, not a client branch.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestRuntime {
+    /// Explicit endpoint authority, intersected with model Responses features.
+    #[serde(default)]
+    pub responses_features: ResponsesFeatures,
     /// Encoding applied to a complete request body before it is sent.
     #[serde(default)]
     pub body_encoding: RequestBodyEncoding,
@@ -321,9 +335,42 @@ impl std::fmt::Debug for Endpoint {
     }
 }
 
+/// Explicit Responses feature authority. Missing metadata grants no feature.
+/// Model and endpoint declarations are intersected; Lite/V2 and model names do
+/// not grant these capabilities. None of these flags authorizes tool execution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResponsesFeatures {
+    /// Function/custom tools may return results after later assistant turns.
+    pub async_tools: bool,
+    /// The endpoint supports native WebSocket mid-turn steering.
+    pub steering: bool,
+    /// Ordered input items may update reasoning effort without changing baseline.
+    pub reasoning_effort_updates: bool,
+    /// Separately qualified compact endpoint accepts configuration updates.
+    pub compact_reasoning_effort_updates: bool,
+}
+
+impl ResponsesFeatures {
+    /// Requires explicit agreement between model and endpoint declarations.
+    pub const fn intersection(self, endpoint: Self) -> Self {
+        Self {
+            async_tools: self.async_tools && endpoint.async_tools,
+            steering: self.steering && endpoint.steering,
+            reasoning_effort_updates: self.reasoning_effort_updates
+                && endpoint.reasoning_effort_updates,
+            compact_reasoning_effort_updates: self.compact_reasoning_effort_updates
+                && endpoint.compact_reasoning_effort_updates,
+        }
+    }
+}
+
 /// Model capabilities.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
+    /// Explicit model authority; endpoint support is independently required.
+    #[serde(default)]
+    pub responses_features: ResponsesFeatures,
     /// Supported modalities for model input.
     pub input_modalities: ModalitySet,
     /// Supported modalities for model output.
@@ -1143,6 +1190,9 @@ pub enum ToolArgumentValidation {
 /// Call to a tool.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCall {
+    /// Provider async scheduling marker, never permission to execute a tool.
+    #[serde(default, rename = "async", skip_serializing_if = "is_false")]
+    pub async_execution: bool,
     /// Unique call identifier.
     pub id: ToolCallId,
     /// Name of the tool to invoke.
@@ -1369,6 +1419,9 @@ pub struct Request {
 /// Tool definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolDef {
+    /// Provider async scheduling marker, never permission to execute a tool.
+    #[serde(default, rename = "async", skip_serializing_if = "is_false")]
+    pub async_execution: bool,
     /// Name of the tool.
     pub name: String,
     /// Description of what the tool does.
@@ -1621,6 +1674,8 @@ pub enum StopReason {
     /// [`Response::deferred`]; the host owns durable suspension and poll
     /// scheduling. This variant never means "retry the generation request".
     Deferred,
+    /// Native Responses interruption with an independently streamed successor.
+    Steered,
     /// Other custom/unknown reason.
     Other(String),
 }
@@ -1637,6 +1692,7 @@ impl StopReason {
             StopReason::Refusal => "refusal",
             StopReason::PauseTurn => "pause_turn",
             StopReason::Deferred => "deferred",
+            StopReason::Steered => "steered",
             StopReason::Other(s) => s,
         }
     }
@@ -1665,6 +1721,7 @@ impl<'de> serde::Deserialize<'de> for StopReason {
             "refusal" | "content_filter" => Ok(StopReason::Refusal),
             "pause_turn" => Ok(StopReason::PauseTurn),
             "deferred" => Ok(StopReason::Deferred),
+            "steered" => Ok(StopReason::Steered),
             _ => Ok(StopReason::Other(s)),
         }
     }
@@ -1754,6 +1811,20 @@ mod tests {
     }
 
     #[test]
+    fn explicit_prompt_cache_mode_is_opt_in_and_backwards_compatible() {
+        let mut serialized = serde_json::to_value(CacheCompatibility::default()).unwrap();
+        assert!(!serialized["supports_explicit_prompt_cache_mode"]
+            .as_bool()
+            .unwrap());
+        serialized
+            .as_object_mut()
+            .unwrap()
+            .remove("supports_explicit_prompt_cache_mode");
+        let parsed: CacheCompatibility = serde_json::from_value(serialized).unwrap();
+        assert!(!parsed.supports_explicit_prompt_cache_mode);
+    }
+
+    #[test]
     fn test_modality_set_algebra() {
         let empty = ModalitySet::none();
         assert!(!empty.contains(Modality::Image));
@@ -1778,6 +1849,7 @@ mod tests {
             display_name: None,
             protocol: Protocol::OpenAiChat,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -1919,6 +1991,7 @@ mod tests {
     #[test]
     fn test_tool_call_arguments_value() {
         let tc = ToolCall {
+            async_execution: false,
             id: ToolCallId("call_1".to_string()),
             name: "grep".to_string(),
             arguments_json: r#"{"pattern": "test"}"#.to_string(),
@@ -1928,6 +2001,7 @@ mod tests {
         assert_eq!(parsed["pattern"], "test");
 
         let tc_invalid = ToolCall {
+            async_execution: false,
             id: ToolCallId("call_2".to_string()),
             name: "grep".to_string(),
             arguments_json: r#""just a string""#.to_string(),
@@ -1942,6 +2016,7 @@ mod tests {
             system: Some("sys".to_string()),
             messages: vec![],
             tools: vec![ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "tool".to_string(),
                 description: "desc".to_string(),

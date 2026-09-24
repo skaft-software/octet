@@ -29,6 +29,11 @@ _SELECTION_FIELDS = (
 )
 
 # These are operation capabilities, not permissions to bypass Browse policy.
+_ACTION_CAPABILITIES = frozenset({
+    "click", "type", "press", "scroll", "wait", "navigation",
+    "tab_close", "new_tab", "popup",
+})
+
 _CAPABILITY_NAMES = (
     "snapshot",
     "click",
@@ -98,31 +103,25 @@ def _safe_reason(value: Any, default: str) -> str:
 
 
 def _capabilities(
-    value: Optional[Mapping[str, Any]], *, supported: bool, reason: str
+    value: Optional[Mapping[str, Any]], *, supported: bool, reason: str,
+    preventive_boundary: bool,
 ) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     for name in _CAPABILITY_NAMES:
         raw = value.get(name) if isinstance(value, Mapping) else None
         if isinstance(raw, Mapping):
-            enabled = bool(raw.get("supported", False)) if supported else False
+            enabled = raw.get("supported") is True if supported else False
             detail = _safe_reason(raw.get("reason"), reason if not enabled else "")
         elif isinstance(raw, bool):
             enabled = raw if supported else False
             detail = "" if enabled else reason
         else:
-            # Existing-tab integrations can safely reuse the Browse operation
-            # policy, but never infer capabilities such as windows or popups.
-            enabled = supported and name in {
-                "snapshot",
-                "click",
-                "type",
-                "press",
-                "scroll",
-                "wait",
-                "screenshot",
-                "tab_close",
-            }
+            # Passive inspection is the only inferred external capability.
+            enabled = supported and name in {"snapshot", "screenshot"}
             detail = "" if enabled else reason
+        if enabled and name in _ACTION_CAPABILITIES and not preventive_boundary:
+            enabled = False
+            detail = "External actions require a connector-enforced preventive navigation, popup, and download boundary."
         result[name] = {"supported": enabled}
         if detail:
             result[name]["reason"] = bounded_text(detail, 256)
@@ -362,6 +361,7 @@ class BackendDescriptor:
 Selector = Callable[[TargetSelection, ResourceOwner], Any]
 Verifier = Callable[[PlaywrightTarget, TargetSelection, ResourceOwner], Any]
 Lifecycle = Callable[[PlaywrightTarget, ResourceOwner], Any]
+PreventiveBoundary = Callable[[PlaywrightTarget, ResourceOwner], bool]
 
 
 class BrowserConnector:
@@ -382,6 +382,7 @@ class BrowserConnector:
         verify_target: Optional[Verifier] = None,
         release: Optional[Lifecycle] = None,
         stop: Optional[Lifecycle] = None,
+        enforce_boundary: Optional[PreventiveBoundary] = None,
         label: Optional[str] = None,
         capabilities: Optional[Mapping[str, Any]] = None,
         limitations: Iterable[str] = (),
@@ -394,6 +395,7 @@ class BrowserConnector:
         self._verifier = verify_target
         self._release = release
         self._stop = stop
+        self._enforce_boundary = enforce_boundary
         self.label = bounded_text(label or connector_id, 160)
         self.limitations = tuple(bounded_text(item, 256) for item in limitations)[:8]
         self.supported = self.browser_family == "chromium"
@@ -407,6 +409,7 @@ class BrowserConnector:
             capabilities,
             supported=self.supported,
             reason=reason,
+            preventive_boundary=callable(enforce_boundary),
         )
         self._lock = threading.RLock()
 
@@ -466,7 +469,33 @@ class BrowserConnector:
             self.browser_family,
         )
         self.verify(target, selection, owner)
+        if any(self.capabilities[name]["supported"] for name in _ACTION_CAPABILITIES):
+            try:
+                self.require_boundary(target, owner)
+            except BrowseError:
+                # Selection has not been attached yet; release any bridge-owned
+                # guard/claim installed before the boundary check failed.
+                try:
+                    self.release(target, owner)
+                except BrowseError:
+                    pass
+                raise
         return target
+
+    def require_boundary(self, target: PlaywrightTarget, owner: ResourceOwner) -> None:
+        """Require the integration's preventive guard before an external action."""
+        try:
+            active = self._enforce_boundary(target, owner) if self._enforce_boundary else False
+        except Exception as error:
+            raise BrowseError(
+                "backend_boundary_failed",
+                "The selected connector could not enforce its preventive browser boundary.",
+            ) from error
+        if active is not True:
+            raise BrowseError(
+                "backend_boundary_failed",
+                "The selected connector has no active preventive browser boundary.",
+            )
 
     def verify(
         self,

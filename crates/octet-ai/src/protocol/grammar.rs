@@ -50,10 +50,24 @@ pub(super) fn start(builder: &mut ResponseBuilder, index: usize) -> Result<(), A
     if builder.ended_indices.contains(&index) || is_open(builder, index) {
         return Err(invalid("started more than once"));
     }
+    let property = resolve_property(builder, index)?;
+    builder.replace_temp_buffer(property_key(index), property)?;
     builder.replace_temp_buffer(key(index), String::new())
 }
 
-fn property(builder: &ResponseBuilder, index: usize) -> Result<String, AiError> {
+fn property_key(index: usize) -> String {
+    format!("custom_property_{index}")
+}
+
+fn property(builder: &ResponseBuilder, index: usize) -> Result<&str, AiError> {
+    builder
+        .temp_buffers
+        .get(&property_key(index))
+        .map(String::as_str)
+        .ok_or_else(|| invalid("arrived before its call"))
+}
+
+fn resolve_property(builder: &ResponseBuilder, index: usize) -> Result<String, AiError> {
     let call = builder
         .tool_call_builders
         .get(&index)
@@ -78,13 +92,12 @@ pub(super) fn delta(
     if !is_open(builder, index) || builder.ended_indices.contains(&index) {
         return Err(invalid("delta arrived outside an open custom call"));
     }
-    let property = property(builder, index)?;
     builder.append_temp_buffer_bounded(key(index), text, MAX_TOOL_ARGUMENT_BYTES)?;
     let quoted = serde_json::to_string(text).expect("a string is serializable");
     let prefix = if builder.tool_call_builders[&index].arguments_json.is_empty() {
         format!(
             "{{{}:\"",
-            serde_json::to_string(&property).expect("a string is serializable")
+            serde_json::to_string(property(builder, index)?).expect("a string is serializable")
         )
     } else {
         String::new()
@@ -109,12 +122,11 @@ pub(super) fn finish(
     index: usize,
     complete: Option<&str>,
 ) -> Result<(), AiError> {
-    let property = property(builder, index)?;
     if builder.ended_indices.contains(&index) {
         if let Some(complete) = complete {
             let prior = replay_input(
                 &builder.tool_call_builders[&index].arguments_json,
-                &property,
+                property(builder, index)?,
             )?;
             if prior != complete {
                 return Err(invalid("changed after closure"));
@@ -152,4 +164,56 @@ pub(super) fn finish(
             argument_error: None,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ConstrainedSampling, GrammarVariants, ModelId, Protocol, ToolCallId};
+
+    #[test]
+    fn custom_property_is_resolved_once_and_preserves_fragment_escaping() {
+        let mut builder =
+            ResponseBuilder::new(ModelId("test".to_owned()), Protocol::OpenAiResponses, None);
+        builder.tool_definitions = Some(vec![ToolDef {
+            async_execution: false,
+            name: "custom".to_owned(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object", "required": ["source"],
+                "properties": {"source": {"type": "string"}}}),
+            constrained_sampling: Some(ConstrainedSampling::Grammar {
+                variants: GrammarVariants {
+                    openai_lark: None,
+                    openai_regex: Some("(?s).*".to_owned()),
+                },
+            }),
+        }]);
+        let mut events = Vec::new();
+        emit_event(
+            &mut events,
+            &mut builder,
+            StreamEvent::ToolCallStart {
+                async_execution: false,
+                index: 0,
+                id: ToolCallId("call".to_owned()),
+                name: "custom".to_owned(),
+            },
+        )
+        .unwrap();
+        start(&mut builder, 0).unwrap();
+        assert_eq!(property(&builder, 0).unwrap(), "source");
+        // The immutable request definitions are no longer needed for framing.
+        builder.tool_definitions = None;
+        delta(&mut events, &mut builder, 0, "\"line\n").unwrap();
+        delta(&mut events, &mut builder, 0, "é").unwrap();
+        finish(&mut events, &mut builder, 0, Some("\"line\né")).unwrap();
+        let args = &builder.tool_call_builders[&0].arguments_json;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(args).unwrap(),
+            serde_json::json!({"source": "\"line\né"})
+        );
+        finish(&mut events, &mut builder, 0, Some("\"line\né")).unwrap();
+        assert!(finish(&mut events, &mut builder, 0, Some("changed")).is_err());
+        assert_eq!(builder.buffered_content_bytes, "source".len());
+    }
 }

@@ -277,10 +277,11 @@ Exact helpers:
 
 - `spawn_agent(*, task_name, message, idempotency_key, tools, max_depth,
   max_concurrent_children, max_turns, max_tokens=None, max_cost_microdollars,
-  max_output_bytes, timeout_ms, profile=None, fingerprint=None,
+  max_output_bytes, timeout_ms, profile=None, fingerprint=None, model_selection=None,
   parent_request_id=...)`;
 - `send_agent_message(target, message, *, parent_request_id=...)`;
 - `follow_up_agent(target, message, *, parent_request_id=...)`;
+- `list_agent_models(*, query=None, limit=50, parent_request_id=...)`;
 - `list_agents(*, parent_request_id=...)`;
 - `wait_agents(*, timeout_ms=30_000, parent_request_id=...)`;
 - `interrupt_agent(target, *, parent_request_id=...)`.

@@ -40,13 +40,11 @@ def reject_json_constant(value: str) -> None:
 def microdollars(value: object | None) -> int:
     """Dollars per token -> microdollars per million tokens.
 
-    A missing field means the provider does not charge that category (zero).
-    A negative field is OpenRouter's dynamic-routing placeholder; it is not a
-    rate and must never become zero, so it is reported as unpriced by the
-    caller.
+    Missing rates and OpenRouter's negative dynamic-routing placeholder are
+    unknown, not free; only an explicit zero quotes a free rate.
     """
     if value is None or value == "":
-        return 0
+        raise _Unpriced
     if isinstance(value, bool):
         raise ValueError(f"invalid OpenRouter price: {value!r}")
     try:
@@ -77,8 +75,8 @@ def model_cost(pricing: object) -> dict[str, int] | None:
             "cache_write": microdollars(pricing.get("input_cache_write")),
         }
     except _Unpriced:
-        # One dynamic placeholder makes the whole rate unknown: pricing a
-        # partially known request would silently undercount a cost ceiling.
+        # Every billed bucket needs a rate: a missing or dynamic price makes
+        # the whole cost unknown rather than undercounting a cost ceiling.
         return None
 
 

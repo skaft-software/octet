@@ -26,7 +26,7 @@ version-matched assets and channel evidence; it does not qualify this candidate.
 | Python distribution / import | `octet-extension-sdk` / `octet_extension` |
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | Executable bundles | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
-| Independent source extensions | `octet-computer-use`, `octet-import-aider`, `octet-import-cline`, `octet-import-pi` |
+| Independent source extensions | `octet-computer-use`, `octet-import-aider`, `octet-import-pi` |
 | Separate application package | `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
 | Product, SDK, Serve and four executable-bundle distribution versions | `0.8.0` RC; installed compatibility `requires_octet = "=0.8.0"` |
@@ -38,7 +38,7 @@ Current extension authoring and the four executable-bundle manifests target API
 `0.4`, the feature-negotiated wire supported by the Python `Extension` runtime
 alongside retained `0.1`/`0.2`. Canonical API `0.3` remains a separate supported
 wire; generated `0.3` types are not a complete `0.3` process runtime. The minimal
-canonical process example and independent computer-use/Aider/Cline/Pi adapters
+canonical process example and independent computer-use/Aider/Pi adapters
 retain version `0.1.0` with exact `=0.8.0` host pins.
 Renaming first-party wire fields such as `octet_version` does not renumber APIs
 or preserve old-name aliases. Historical releases, measurements, upstream

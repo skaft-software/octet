@@ -75,7 +75,9 @@ Physical takeover detection and hard process-loss release need native evidence.
 The independently tested screenshot module requires selected-window-only,
 bounded pixel/byte/count storage under an owner/generation. Durable records hold
 references, never payloads in receipts/logs; projection needs an explicit live
-matching owner. No arbitrary model path is a screenshot source. This contract
+matching owner. Staged files have a per-transport owner prefix; cleanup never
+sweeps another transport's in-flight screenshots from shared host scratch.
+No arbitrary model path is a screenshot source. This contract
 is not an assertion that API 0.3 projection or lifecycle wiring is implemented:
 the composed runtime refuses screenshot operations and never captures payloads.
 

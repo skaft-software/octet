@@ -459,8 +459,9 @@ impl PtyOctet {
             thread::sleep(Duration::from_millis(5));
         }
         panic!(
-            "PTY condition timed out; transcript: {}",
-            visible_bytes(&self.pty.output)
+            "PTY condition timed out; transcript: {}; tail: {}",
+            visible_bytes(&self.pty.output),
+            visible_bytes(&self.pty.output[self.pty.output.len().saturating_sub(4096)..])
         );
     }
 
@@ -1072,15 +1073,16 @@ fn assert_green_gemma_frame(parser: &vt100::Parser) {
     assert_single_welcome(parser, INITIAL_COLUMNS, "first-ready Gemma");
     assert!(text.contains("Gemma 4 31B"), "{text}");
     assert!(text.contains("~/workspace"), "{text}");
-    let wordmark = status_colors(parser, "octet", INITIAL_COLUMNS).unwrap();
-    let vt100::Color::Rgb(red, green, blue) = wordmark[0] else {
-        panic!("SSH/Ghostty fixture lost truecolor: {wordmark:?}");
+    // The default footer and welcome wordmark are neutral; the composer
+    // rules carry the model accent across the full terminal width.
+    let rule_colors = status_colors(parser, "─", INITIAL_COLUMNS).unwrap();
+    let vt100::Color::Rgb(red, green, blue) = rule_colors[0] else {
+        panic!("SSH/Ghostty fixture lost truecolor: {rule_colors:?}");
     };
     assert!(
         green > red && green > blue,
-        "Gemma accent is green: {wordmark:?}"
+        "Gemma accent is green: {rule_colors:?}"
     );
-    assert!(wordmark.iter().all(|color| *color == wordmark[0]));
     let (rows, columns) = parser.screen().size();
     let mut logo_columns = vec![None; usize::from(columns)];
     let mut rules = 0;
@@ -1089,7 +1091,11 @@ fn assert_green_gemma_frame(parser: &vt100::Parser) {
             let cell = parser.screen().cell(row, col).unwrap();
             match cell.contents().as_str() {
                 "─" => {
-                    assert_eq!(cell.fgcolor(), wordmark[0], "mixed composer accent\n{text}");
+                    assert_eq!(
+                        cell.fgcolor(),
+                        rule_colors[0],
+                        "mixed composer accent\n{text}"
+                    );
                     rules += 1;
                 }
                 "█" => {
@@ -1114,7 +1120,7 @@ fn assert_green_gemma_frame(parser: &vt100::Parser) {
                     let vt100::Color::Rgb(r, g, b) = cell.fgcolor() else {
                         panic!("logo lost truecolor");
                     };
-                    let column = usize::from(col - 2) / 3; // 24-cell mark in a 96-column fixture
+                    let column = usize::from(col - 2) / 2; // Fixed 16-cell mark in the default card
                     for ((base, accent), actual) in gradient[column]
                         .into_iter()
                         .zip([red, green, blue])
@@ -1379,8 +1385,17 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
             assert!(parser.screen().contents().contains("Set up a provider"));
             assert!(!parser.screen().hide_cursor());
         }
-        // Open the existing endpoint-input owner, type without submitting, and
-        // Ctrl-C out. This never probes a service or writes provider state.
+        // Local endpoints are nested under the cloud-first setup menu. Open
+        // the endpoint-input owner, type without submitting, and Ctrl-C out.
+        // This never probes a service or writes provider state.
+        octet.pty.write_input(b"Local\r");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "› LM Studio",
+            STARTUP_TIMEOUT,
+        );
         octet.pty.write_input(b"\x1b[B\r");
         await_screen(
             &mut octet,
@@ -1407,8 +1422,16 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
             STARTUP_TIMEOUT,
         );
         assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        octet.pty.write_input(b"\x1b"); // Leave nested local setup.
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Add an API key",
+            STARTUP_TIMEOUT,
+        );
         let readiness_start = consumed;
-        octet.pty.write_input(b"\x1b[B\x1b[B\r"); // Continue without a provider.
+        octet.pty.write_input(b"Continue without\r");
         octet.wait_until(STARTUP_TIMEOUT, |bytes| {
             synchronized_frame_end_containing(&bytes[readiness_start..], b"setup needed").is_some()
         });
@@ -2299,9 +2322,12 @@ fn assert_single_welcome(parser: &vt100::Parser, columns: u16, label: &str) {
         .lines()
         .position(|line| line.contains(&version))
         .unwrap();
-    let logo_box = (usize::from(columns) / 3).clamp(14, 24);
-    let scale = (logo_box / 8).min(3);
-    let top = version_row + (6 - 2 * scale) / 2;
+    // The compiled welcome card uses a fixed 16-cell, four-row logo; the
+    // footer owns model identity and the card no longer expands with width.
+    let logo_box = 16;
+    let logo_rows = 4;
+    let scale = logo_box / 8;
+    let top = version_row + (logo_rows - 2 * scale) / 2;
     let left = 2 + (logo_box - 8 * scale) / 2;
     let (rows, _) = parser.screen().size();
     for row in 0..usize::from(rows) {
@@ -2429,7 +2455,7 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                             "{label}-setting{step}: redundant thinking notice\n{screen}"
                         );
                         if consumed > redraw_start
-                            && screen.contains(&format!("Qwen 3.8 27B / {level}"))
+                            && screen.contains(&format!("Qwen 3.8 27B · {level}"))
                         {
                             break;
                         }
@@ -2890,7 +2916,7 @@ fn real_octet_initial_changelog_without_model_preserves_setup_choice() {
         "Set up a provider",
         STARTUP_TIMEOUT,
     );
-    octet.pty.write_input(b"\x1b[B\x1b[B\r");
+    octet.pty.write_input(b"Continue without\r");
     await_screen(
         &mut octet,
         &mut parser,

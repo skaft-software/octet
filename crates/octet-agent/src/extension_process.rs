@@ -58,10 +58,10 @@ use crate::delegation::{
 use crate::effect::{EffectPolicy, ToolEffect};
 use crate::events::AgentEvent;
 use crate::extension::{
-    AssistantPersistenceContext, DynamicToolRegistration, EventObserver, Extension, ExtensionHost,
-    PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
-    PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
-    ToolCallHook,
+    AssistantPersistenceContext, CompactionStrategy, DynamicToolRegistration, EventObserver,
+    Extension, ExtensionHost, PersistenceMetadataHook, PersistenceMetadataProposal,
+    PostMutationContext, PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext,
+    ProviderRetryHook, ToolCallHook,
 };
 use crate::extension_api_v03 as api_v03;
 use crate::extension_policy::{
@@ -128,6 +128,8 @@ pub const EXTENSION_FEATURE_DYNAMIC_TOOLS: &str = "dynamic_tools";
 pub const EXTENSION_FEATURE_RUNTIME_COMMANDS: &str = "runtime_commands";
 /// API `0.2` host-owned child model-session service.
 pub const EXTENSION_FEATURE_AGENT_SESSIONS: &str = "agent_sessions";
+/// Host-confirmed configured worker routing and bounded discovery.
+pub const EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1: &str = "agent_model_selection_v1";
 /// API `0.2` first-party delegation telemetry contract.
 pub const EXTENSION_FEATURE_DELEGATION_TELEMETRY: &str = "delegation_telemetry_v1";
 /// Stable schema label shown by `/extensions status`.
@@ -188,6 +190,8 @@ pub const EXTENSION_FEATURE_SYSTEM_PROMPT_READ: &str = "system_prompt_read";
 /// Credentials, authorization headers, and provider endpoints are never part of
 /// this surface: octet owns provider transport.
 pub const EXTENSION_FEATURE_MODEL_CATALOG: &str = "model_catalog";
+/// API 0.4 host-owned local compaction replacement (vision models only).
+pub const EXTENSION_FEATURE_COMPACTION_STRATEGY: &str = "compaction_strategy";
 
 const API_0_2_REQUIRED_FEATURES: &[&str] = &[
     EXTENSION_FEATURE_REQUEST_CANCELLATION,
@@ -2106,6 +2110,16 @@ impl ExtensionManifest {
                     .into(),
             ));
         }
+        if self
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::CompactionStrategy)
+            && self.api_version != EXTENSION_API_VERSION_0_4
+        {
+            return Err(ExtensionRuntimeError::InvalidManifest(
+                "compaction_strategy requires extension API 0.4".into(),
+            ));
+        }
         if self.api_version == EXTENSION_API_VERSION_0_1 && self.contributes.providers {
             return Err(ExtensionRuntimeError::InvalidManifest(
                 "provider catalogs require extension API 0.2 or later".into(),
@@ -2326,6 +2340,8 @@ pub enum ExtensionHook {
     /// Advises on a host-admitted provider retry without changing retry safety
     /// or the host retry budget.
     ProviderRetry,
+    /// Replaces the parent-model local compaction call on vision routes.
+    CompactionStrategy,
     /// Proposes one namespaced metadata value for a completed assistant turn
     /// before its atomic durable persistence boundary.
     BeforePersistence,
@@ -2723,6 +2739,9 @@ pub struct ToolCatalogUpdateResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionPolicy {
+    /// Optional configured provider, model and reasoning selection.
+    #[serde(default)]
+    pub model_selection: Option<crate::delegation::AgentModelSelection>,
     /// Requested upper-bound tool allowlist. Accepted standard tools are
     /// `read`, `search`, `edit`, `write`, and `bash`.
     pub tools: Vec<String>,
@@ -2756,6 +2775,9 @@ pub struct AgentSessionPolicy {
 impl From<AgentSessionPolicy> for ExtensionAgentSessionPolicy {
     fn from(policy: AgentSessionPolicy) -> Self {
         Self {
+            model_selection: policy.model_selection,
+            resolved_model: None,
+            resolved_reasoning: None,
             tools: policy.tools,
             max_depth: policy.max_depth,
             max_concurrent_children: policy.max_concurrent_children,
@@ -2820,6 +2842,20 @@ pub struct AgentSessionTargetRequest {
 pub struct AgentSessionListRequest {
     /// Active host request that supplies the authoritative resource owner.
     pub parent_request_id: u64,
+}
+
+/// Owner-bound, bounded configured-model discovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionModelsRequest {
+    /// Active host request defining the resource owner.
+    pub parent_request_id: u64,
+    #[serde(default)]
+    /// Optional case-insensitive search, at most 128 bytes.
+    pub query: Option<String>,
+    #[serde(default)]
+    /// Maximum rows, default 50, range 1 through 100.
+    pub limit: Option<usize>,
 }
 
 /// API `0.2` request to wait for owned child-session state changes.
@@ -3577,6 +3613,9 @@ pub struct ExtensionHookOutput {
     /// Advice accepted only for a typed `provider_retry` hook response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_retry: Option<ExtensionProviderRetryAdvice>,
+    /// Base64 PNG frames returned only from the API 0.4 compaction hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_frames: Option<Vec<String>>,
     /// Metadata accepted only for a typed `before_persistence` hook response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence_metadata: Option<ExtensionPersistenceMetadata>,
@@ -5664,6 +5703,8 @@ pub mod methods {
     pub const AGENT_FOLLOW_UP: &str = "agent/follow_up";
     /// Extension request to inspect owned child sessions.
     pub const AGENT_LIST: &str = "agent/list";
+    /// Discover configured worker model choices for an owner.
+    pub const AGENT_MODELS: &str = "agent/models";
     /// Extension request to wait for owned child-session state changes.
     pub const AGENT_WAIT: &str = "agent/wait";
     /// Extension request to interrupt an owned child-session tree.
@@ -6298,14 +6339,19 @@ impl ExtensionProcess {
         self.negotiated_protocol().features
     }
 
+    /// Tests one feature against the current process generation without cloning
+    /// the negotiated catalog. The connection fence is held through the lookup.
+    pub fn supports_feature(&self, feature: &str) -> bool {
+        let connection = read_std_lock(&self.inner.connection);
+        let supported = read_std_lock(&connection.protocol).supports(feature);
+        supported
+    }
+
     pub(crate) fn bind_agent_session_service(
         &self,
         service: ExtensionDelegationService,
     ) -> Result<(), ExtensionRuntimeError> {
-        if !self
-            .negotiated_protocol()
-            .supports(EXTENSION_FEATURE_AGENT_SESSIONS)
-        {
+        if !self.supports_feature(EXTENSION_FEATURE_AGENT_SESSIONS) {
             return Err(ExtensionRuntimeError::Protocol(format!(
                 "extension `{}` did not negotiate `{EXTENSION_FEATURE_AGENT_SESSIONS}`",
                 self.inner.descriptor.manifest.name
@@ -7631,6 +7677,30 @@ impl ExtensionProcess {
         lock_std_mutex(&self.inner.answered_confirmations).contains(generation, request_id)
     }
 
+    /// Checks an adapter's target against the exact host-issued, owner-scoped
+    /// tool call. Commands, settled requests, and other generations cannot lend
+    /// their authority to a tool policy request. The digest never retains raw
+    /// tool arguments beyond the existing request frame.
+    pub fn policy_matches_tool_call(
+        &self,
+        generation: u64,
+        parent_request_id: u64,
+        tool: &str,
+        arguments: &serde_json::Value,
+    ) -> bool {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if generation != connection.generation {
+            return false;
+        }
+        let expected = tool_call_policy_digest(tool, arguments);
+        let pending = lock_std_mutex(&connection.pending);
+        pending.get(&parent_request_id).is_some_and(|parent| {
+            parent.resource_owner.is_some()
+                && parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
+                && parent.tool_call_policy_digest == Some(expected)
+        })
+    }
+
     /// Answers an extension-originated API `0.2` policy evaluation request.
     /// Classification and approval issuance remain host-owned; this method
     /// only sends the already-decided typed result to the matching generation.
@@ -8576,10 +8646,72 @@ impl PersistenceMetadataHook for ExtensionProcess {
     }
 }
 
+#[async_trait::async_trait]
+impl CompactionStrategy for ExtensionProcess {
+    async fn render(
+        &self,
+        model_id: &str,
+        text: &str,
+        owner: &str,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if self.api_version() != EXTENSION_API_VERSION_0_4
+            || !self.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY)
+        {
+            return Err("compaction_strategy was not negotiated".into());
+        }
+        let generation = read_std_lock(&self.inner.connection).generation;
+        let mut context = self.execution_context();
+        context.resource_owner = Some(ExtensionResourceOwner {
+            session_id: owner.to_owned(),
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: generation,
+        });
+        let output = self
+            .run_hook(
+                ExtensionHook::CompactionStrategy,
+                serde_json::json!({ "model_id": model_id, "text": text }),
+                context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if read_std_lock(&self.inner.connection).generation != generation {
+            return Err("compaction strategy changed generation during render".into());
+        }
+        let encoded = output
+            .compaction_frames
+            .ok_or("compaction strategy returned no frames")?;
+        if encoded.is_empty() || encoded.len() > 32 {
+            return Err("compaction strategy returned an invalid frame count".into());
+        }
+        let mut frames = Vec::with_capacity(encoded.len());
+        for item in encoded {
+            if item.len() > 512 * 1024 {
+                return Err("compaction frame exceeds 512 KiB".into());
+            }
+            frames.push(
+                base64::engine::general_purpose::STANDARD
+                    .decode(item)
+                    .map_err(|_| "compaction frame is not base64")?,
+            );
+        }
+        Ok(frames)
+    }
+}
+
 impl Extension for ExtensionProcess {
     fn register(&self, host: &mut ExtensionHost) {
         self.register_dynamic_tool_catalog(host);
         host.observe(self.clone());
+        if self.api_version() == EXTENSION_API_VERSION_0_4
+            && self.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY)
+            && self
+                .inner
+                .contributions
+                .hooks
+                .contains(&ExtensionHook::CompactionStrategy)
+        {
+            host.compaction_strategy(self.clone());
+        }
         if self.inner.contributions.hooks.iter().any(|hook| {
             matches!(
                 hook,
@@ -9258,6 +9390,7 @@ struct ProcessTool {
 impl Tool for ProcessTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: self.definition.name.clone(),
             description: self.definition.description.clone(),
@@ -9572,6 +9705,12 @@ struct PendingRequest {
     child_interaction_progress: Option<ToolProgressSink>,
     resource_owner: Option<ExtensionResourceOwner>,
     last_progress_sequence: Option<u64>,
+    tool_call_policy_digest: Option<[u8; 32]>,
+}
+
+fn tool_call_policy_digest(tool: &str, arguments: &serde_json::Value) -> [u8; 32] {
+    // JSON Values serialize deterministically (object keys are ordered).
+    Sha256::digest(serde_json::to_vec(&(tool, arguments)).expect("JSON values serialize")).into()
 }
 
 type PendingRequests = Arc<StdMutex<HashMap<u64, PendingRequest>>>;
@@ -10385,6 +10524,14 @@ impl ProcessConnection {
                     child_interaction_progress,
                     resource_owner,
                     last_progress_sequence: None,
+                    tool_call_policy_digest: (method == methods::TOOL_CALL)
+                        .then(|| {
+                            Some(tool_call_policy_digest(
+                                message["params"]["name"].as_str()?,
+                                message["params"].get("arguments")?,
+                            ))
+                        })
+                        .flatten(),
                 },
             );
             if let Some(request_started) = request_started {
@@ -11163,6 +11310,7 @@ fn decode_provider_stream_event(
             }
             Ok(DecodedProviderStreamEvent::emit(
                 StreamEvent::ToolCallStart {
+                    async_execution: false,
                     index: payload.index,
                     id: ToolCallId(payload.id),
                     name: payload.name,
@@ -11820,8 +11968,18 @@ async fn spawn_connection(
         .iter()
         .map(|feature| (*feature).to_owned())
         .collect::<Vec<_>>();
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::CompactionStrategy)
+    {
+        optional_features.push(EXTENSION_FEATURE_COMPACTION_STRATEGY.to_owned());
+    }
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());
+        optional_features.push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.to_owned());
     }
     if offered_host_services.approvals {
         optional_features.push(EXTENSION_FEATURE_APPROVALS.to_owned());
@@ -11896,7 +12054,7 @@ async fn spawn_connection(
             flag_values,
             protocol: (uses_api_0_2_capabilities(&descriptor.manifest.api_version)).then(|| {
                 ExtensionProtocolRequest {
-                    version: EXTENSION_API_VERSION_0_2.to_owned(),
+                    version: descriptor.manifest.api_version.clone(),
                     required_features,
                     optional_features,
                     limits: ExtensionProtocolLimits {
@@ -12423,8 +12581,17 @@ fn negotiate_contributions_with_host_services(
                 .chain(API_0_2_OPTIONAL_FEATURES)
                 .copied()
                 .collect::<BTreeSet<_>>();
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::CompactionStrategy)
+            {
+                allowed.insert(EXTENSION_FEATURE_COMPACTION_STRATEGY);
+            }
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
+                allowed.insert(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1);
                 if manifest.name == "octet-subagents" {
                     allowed.insert(EXTENSION_FEATURE_DELEGATION_TELEMETRY);
                 }
@@ -12454,6 +12621,17 @@ fn negotiate_contributions_with_host_services(
                     "extension is missing required feature `{feature}`"
                 )));
             }
+            if manifest
+                .contributes
+                .hooks
+                .contains(&ExtensionHook::CompactionStrategy)
+                && !features.contains(EXTENSION_FEATURE_COMPACTION_STRATEGY)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "compaction_strategy hook requires negotiated compaction_strategy feature"
+                        .into(),
+                ));
+            }
             if offered_host_services.agent_sessions
                 && manifest.name == "octet-subagents"
                 && !features.contains(EXTENSION_FEATURE_DELEGATION_TELEMETRY)
@@ -12461,6 +12639,13 @@ fn negotiate_contributions_with_host_services(
                 return Err(ExtensionRuntimeError::Protocol(format!(
                     "first-party octet-subagents requires `{EXTENSION_FEATURE_DELEGATION_TELEMETRY}`; reinstall the current workspace bundle"
                 )));
+            }
+            if features.contains(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
+                && !features.contains(EXTENSION_FEATURE_AGENT_SESSIONS)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "agent_model_selection_v1 negotiation requires agent_sessions".into(),
+                ));
             }
             if features.contains(EXTENSION_FEATURE_APPROVALS)
                 && !features.contains(EXTENSION_FEATURE_POLICY_INTENTS)
@@ -12637,6 +12822,26 @@ fn is_canonical_api(version: &str) -> bool {
     version == EXTENSION_API_VERSION_0_3
 }
 
+// Counts the complete prospective catalog's input AND output schema bytes.
+// Individual register frames are bounded independently; many small mutations
+// must not accumulate an arbitrarily large live catalog.
+const MAX_TOOL_CATALOG_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
+
+struct SchemaByteBudget(usize);
+
+impl Write for SchemaByteBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.checked_sub(bytes.len()).ok_or_else(|| {
+            std::io::Error::other("tool catalog aggregate schema byte limit exceeded")
+        })?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn validate_tool_definitions(
     tools: &[ToolDefinition],
     api_version: &str,
@@ -12646,6 +12851,16 @@ fn validate_tool_definitions(
             "tool catalog contains {} tools; limit is {MAX_DYNAMIC_EXTENSION_TOOLS}",
             tools.len()
         )));
+    }
+    let mut schema_budget = SchemaByteBudget(MAX_TOOL_CATALOG_SCHEMA_BYTES);
+    for tool in tools {
+        for schema in std::iter::once(&tool.parameters).chain(tool.output_schema.iter()) {
+            serde_json::to_writer(&mut schema_budget, schema).map_err(|_| {
+                ExtensionRuntimeError::Protocol(format!(
+                    "tool catalog aggregate schema bytes exceed {MAX_TOOL_CATALOG_SCHEMA_BYTES}"
+                ))
+            })?;
+        }
     }
     let mut names = BTreeSet::new();
     for tool in tools {
@@ -13565,6 +13780,10 @@ impl ProtocolReadState {
 }
 
 enum AgentSessionOperation {
+    Models {
+        query: Option<String>,
+        limit: usize,
+    },
     Spawn {
         task_name: String,
         profile: Option<String>,
@@ -13622,6 +13841,9 @@ async fn execute_agent_session_operation(
         }
         AgentSessionOperation::FollowUp { target, message } => {
             service.follow_up(&resource_owner, &target, message).await
+        }
+        AgentSessionOperation::Models { query, limit } => {
+            service.models(&resource_owner, query.as_deref(), limit)
         }
         AgentSessionOperation::List => service.list(&resource_owner),
         AgentSessionOperation::Wait { timeout } => {
@@ -15751,6 +15973,13 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                         )
                     }
                 };
+                if request.policy.model_selection.is_some() {
+                    if let Err(error) =
+                        require_feature(state, EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
+                    {
+                        return reject_unparented_child_request(state, id, error);
+                    }
+                }
                 let policy: ExtensionAgentSessionPolicy = request.policy.into();
                 if let Err(error) = policy.validate() {
                     return reject_unparented_child_request(
@@ -15819,6 +16048,36 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                     AgentSessionOperation::FollowUp {
                         target: request.target,
                         message: request.message,
+                    },
+                )?;
+            }
+            methods::AGENT_MODELS => {
+                let id = parse_child_request_id(object, methods::AGENT_MODELS)?;
+                if let Err(error) = require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)
+                    .and_then(|()| {
+                        require_feature(state, EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
+                    })
+                {
+                    return reject_unparented_child_request(state, id, error);
+                }
+                let request: AgentSessionModelsRequest = match serde_json::from_value(params) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return reject_unparented_child_request(
+                            state,
+                            id,
+                            format!("invalid model discovery request: {error}"),
+                        )
+                    }
+                };
+                queue_agent_session_operation(
+                    state,
+                    id,
+                    request.parent_request_id,
+                    methods::AGENT_MODELS,
+                    AgentSessionOperation::Models {
+                        query: request.query,
+                        limit: request.limit.unwrap_or(50),
                     },
                 )?;
             }
@@ -17536,6 +17795,7 @@ confirmations = true
                 child_interaction_progress: None,
                 resource_owner,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
     }
@@ -20084,6 +20344,7 @@ print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'sn
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         lock_std_mutex(&state.pending).remove(&7);
@@ -20129,6 +20390,7 @@ print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'sn
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         let state = Arc::new(state);
@@ -20207,6 +20469,7 @@ print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'sn
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         handle_protocol_line(
@@ -20255,6 +20518,7 @@ print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'sn
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         handle_protocol_line(
@@ -20267,6 +20531,49 @@ print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'sn
         assert_eq!(response["id"], "py:1");
         assert!(response["result"]["value"].is_null());
         assert!(lock_std_mutex(&state.child_requests).is_empty());
+    }
+
+    #[test]
+    fn prospective_tool_catalog_has_one_input_and_output_schema_byte_budget() {
+        let tool = |name: &str, bytes: usize| ToolDefinition {
+            name: name.into(),
+            description: "bounded definition".into(),
+            parameters: serde_json::json!({"type": "object", "description": "x".repeat(bytes)}),
+            output_schema: Some(
+                serde_json::json!({"type": "object", "description": "y".repeat(bytes)}),
+            ),
+        };
+        let mut catalog = Vec::new();
+        for index in 0..6 {
+            let next = tool(&format!("tool_{index}"), 300_000);
+            validate_tool_definitions(std::slice::from_ref(&next), EXTENSION_API_VERSION_0_2)
+                .unwrap();
+            catalog.push(next);
+            validate_tool_definitions(&catalog, EXTENSION_API_VERSION_0_2).unwrap();
+        }
+        let addition = tool("overflow", 300_000);
+        validate_tool_definitions(std::slice::from_ref(&addition), EXTENSION_API_VERSION_0_2)
+            .unwrap();
+        let mut prospective = catalog.clone();
+        prospective.push(addition);
+        assert!(
+            validate_tool_definitions(&prospective, EXTENSION_API_VERSION_0_2)
+                .unwrap_err()
+                .to_string()
+                .contains("aggregate schema bytes")
+        );
+        validate_tool_definitions(&catalog, EXTENSION_API_VERSION_0_2).unwrap();
+        prospective[0] = tool("tool_0", 1);
+        validate_tool_definitions(&prospective, EXTENSION_API_VERSION_0_2).unwrap();
+        // Inclusive exact byte boundary, without allocating a serialized copy.
+        let mut exact = tool("exact", 0);
+        exact.output_schema = None;
+        let overhead = serde_json::to_vec(&exact.parameters).unwrap().len();
+        exact.parameters["description"] =
+            serde_json::Value::String("z".repeat(MAX_TOOL_CATALOG_SCHEMA_BYTES - overhead));
+        validate_tool_definitions(std::slice::from_ref(&exact), EXTENSION_API_VERSION_0_2).unwrap();
+        exact.output_schema = Some(serde_json::json!({}));
+        assert!(validate_tool_definitions(&[exact], EXTENSION_API_VERSION_0_2).is_err());
     }
 
     #[test]
@@ -20363,6 +20670,91 @@ print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'sn
         assert!(manifest.contributes.context);
         assert!(manifest.contributes.confirmations);
         assert_eq!(manifest.runtime, ExtensionRuntimeSettings::default());
+    }
+
+    #[test]
+    fn compaction_strategy_manifest_is_api_v04_only() {
+        let source = include_str!("../../../extensions/octet-snap-compact/extension.toml");
+        let manifest = ExtensionManifest::parse(source).expect("source extension manifest");
+        assert_eq!(manifest.api_version, EXTENSION_API_VERSION_0_4);
+        assert_eq!(
+            manifest.contributes.hooks,
+            vec![ExtensionHook::CompactionStrategy]
+        );
+        let legacy = source.replace("api_version = \"0.4\"", "api_version = \"0.3\"");
+        assert!(matches!(
+            ExtensionManifest::parse(&legacy),
+            Err(ExtensionRuntimeError::InvalidManifest(message))
+                if message.contains("compaction_strategy requires extension API 0.4")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_strategy_negotiates_and_renders_through_host() {
+        let temp = TempDir::new().expect("tempdir");
+        write_executable_script(
+            &temp.path().join("extension.py"),
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+
+def receive():
+    return json.loads(sys.stdin.readline())
+
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+init = receive()
+assert init["params"]["api_version"] == "0.4"
+assert init["params"]["contributes"]["hooks"] == ["compaction_strategy"]
+protocol = init["params"]["protocol"]
+assert protocol["version"] == "0.4", protocol
+assert "compaction_strategy" in protocol["optional_features"]
+send({"jsonrpc": "2.0", "id": init["id"], "result": {
+    "api_version": "0.4", "tools": [], "commands": [],
+    "protocol": {"version": "0.4", "features":
+        protocol["required_features"] + ["compaction_strategy"],
+        "limits": {"max_concurrent_requests": 1}},
+}})
+request = receive()
+assert request["method"] == "hook/run"
+assert request["params"]["hook"] == "compaction_strategy"
+assert request["params"]["payload"] == {"model_id": "vision-model", "text": "history"}
+send({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "disposition": {"action": "continue"}, "context": [], "notifications": [],
+    "compaction_frames": ["iVBORw0KGgo="],
+}})
+shutdown = receive()
+assert shutdown["method"] == "shutdown"
+send({"jsonrpc": "2.0", "id": shutdown["id"], "result": {"terminal": "shutdown"}})
+"#,
+        );
+        let manifest = ExtensionManifest::parse(include_str!(
+            "../../../extensions/octet-snap-compact/extension.toml"
+        ))
+        .expect("source extension manifest");
+        let process = ExtensionProcess::start(
+            trusted_descriptor(temp.path(), manifest),
+            ExtensionRuntimeConfig::new(temp.path()),
+        )
+        .await
+        .expect("start API 0.4 compaction process");
+        assert!(process.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY));
+        let mut host = ExtensionHost::new();
+        process.register(&mut host);
+        assert!(host.compaction_strategy.is_some());
+        let frames = host
+            .compaction_strategy
+            .unwrap()
+            .render("vision-model", "history", "session-owner")
+            .await
+            .expect("render through host");
+        assert_eq!(frames, vec![b"\x89PNG\r\n\x1a\n".to_vec()]);
+        assert!(process.shutdown().await);
     }
 
     #[test]
@@ -22607,9 +22999,16 @@ command = "agent-service"
             ),
             Err(ExtensionRuntimeError::Protocol(message)) if message.contains("agent_sessions")
         ));
+        let mut routing_response = response();
+        routing_response
+            .protocol
+            .as_mut()
+            .unwrap()
+            .features
+            .push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.into());
         let (_, protocol) = negotiate_contributions_with_host_services(
             &manifest,
-            response(),
+            routing_response.clone(),
             DEFAULT_PENDING_REQUESTS,
             OfferedHostServices {
                 agent_sessions: true,
@@ -22618,6 +23017,17 @@ command = "agent-service"
         )
         .unwrap();
         assert!(protocol.supports(EXTENSION_FEATURE_AGENT_SESSIONS));
+        assert!(protocol.supports(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1));
+        routing_response
+            .protocol
+            .as_mut()
+            .unwrap()
+            .features
+            .retain(|f| f != EXTENSION_FEATURE_AGENT_SESSIONS);
+        assert!(matches!(negotiate_contributions_with_host_services(
+            &manifest, routing_response, DEFAULT_PENDING_REQUESTS,
+            OfferedHostServices { agent_sessions: true, ..OfferedHostServices::default() },
+        ), Err(ExtensionRuntimeError::Protocol(message)) if message.contains("requires agent_sessions")));
     }
 
     #[test]
@@ -23328,7 +23738,18 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
         let process = ExtensionProcess::start(descriptor, ExtensionRuntimeConfig::new(temp.path()))
             .await
             .expect("start process");
+        assert!(!process.supports_feature("old-generation-sentinel"));
+        // A synthetic feature on the old connection proves the query does not
+        // capture initialization or an old generation's cloned feature set.
+        {
+            let connection = read_std_lock(&process.inner.connection);
+            write_std_lock(&connection.protocol)
+                .features
+                .insert("old-generation-sentinel".into());
+        }
+        assert!(process.supports_feature("old-generation-sentinel"));
         let report = process.reload().await.expect("reload");
+        assert!(!process.supports_feature("old-generation-sentinel"));
         assert_eq!(report.generation, 2);
         assert!(report.previous_shutdown_graceful);
         assert!(process.is_running());
@@ -24025,6 +24446,7 @@ def send(value):
 
 
 initialize = receive()
+assert initialize["params"]["protocol"]["version"] == "0.2", initialize
 assert "runtime_commands" in initialize["params"]["protocol"]["optional_features"], initialize
 send({
     "jsonrpc": "2.0",
@@ -24190,6 +24612,86 @@ shortcuts = [{ key = "ctrl+shift+p", name = "toggle-panel", description = "Toggl
             .await
             .unwrap();
         assert_eq!(output.text, "shortcut executed");
+        assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_catalog_rejects_prospective_schema_overflow_without_publication() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("schema-budget.py");
+        write_executable_script(
+            &script_path,
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+def receive():
+    line = sys.stdin.readline()
+    assert line, "host closed stdin"
+    return json.loads(line)
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+initialize = receive()
+send({"jsonrpc":"2.0", "id":initialize["id"], "result": {
+    "api_version":"0.2", "tools":[], "commands":[],
+    "protocol":{"version":"0.2", "features":["request_cancellation", "content_parts", "dynamic_tools"],
+                "limits":{"max_concurrent_requests":1}}
+}})
+for index in range(7):
+    schema = {"type":"object", "description":"x" * 300000}
+    tool = {"name":"bulk_" + str(index), "description":"bounded", "parameters":schema, "output_schema":schema}
+    send({"jsonrpc":"2.0", "id":"catalog-" + str(index), "method":"tools/register", "params":{"tools":[tool]}})
+    ack = receive()
+    if index < 6:
+        assert ack["result"]["revision"] == index + 1, ack
+        assert ack["result"]["tools"] == ["bulk_" + str(i) for i in range(index + 1)], ack
+    else:
+        assert ack["error"]["code"] == -32602, ack
+        assert "aggregate schema bytes" in ack["error"]["message"], ack
+with open(os.path.join(os.environ["OCTET_WORKSPACE"], "catalog-checked"), "w") as marker:
+    marker.write("checked")
+shutdown = receive()
+assert shutdown["method"] == "shutdown", shutdown
+send({"jsonrpc":"2.0", "id":shutdown["id"], "result":{}})
+"#,
+        );
+        let manifest = ExtensionManifest::parse(
+            r#"name = "schema-budget"
+version = "0.2.0"
+api_version = "0.2"
+[entrypoint]
+command = "schema-budget.py"
+"#,
+        )
+        .unwrap();
+        let process = ExtensionProcess::start(
+            trusted_descriptor(temp.path(), manifest),
+            ExtensionRuntimeConfig::new(temp.path()),
+        )
+        .await
+        .unwrap();
+        let mut host = ExtensionHost::new();
+        host.load(&process);
+        host.finalize_tool_surface();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !temp.path().join("catalog-checked").exists() {
+                assert!(
+                    process.is_running(),
+                    "fixture exited before verifying acknowledgements"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("bounded catalog mutation completion");
+        assert_eq!(host.tool_definitions().len(), 6);
+        let connection = read_std_lock(&process.inner.connection);
+        assert_eq!(connection.catalog_revision.load(Ordering::Acquire), 6);
+        drop(connection);
         assert!(process.shutdown().await);
     }
 

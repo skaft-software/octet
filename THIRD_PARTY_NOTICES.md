@@ -20,6 +20,23 @@ port of Pi's TUI architecture.
 - License: MIT
 - [License text](third_party/licenses/PI-MIT.txt)
 
+## grok-mermaid and grok-build
+
+The terminal flowchart layout and label cleanup in
+`crates/sexy-tui-rs/src/rich_text/mermaid/layout.rs` and `labels.rs` are adapted from
+[xai-org/grok-build](https://github.com/xai-org/grok-build)'s
+`xai-grok-markdown/src/mermaid.rs`, the Rust origin of
+[grok-mermaid](https://github.com/xl0/grok-mermaid) 0.2.3 used by Pi.
+Octet modifications include plain-text output, its bounded graph-parser adapter,
+removal of the ratatui dependency, Rust 2021 compatibility, and hard canvas
+limits. This does not add a Node/npm build or runtime dependency, nor imply
+complete upstream renderer equivalence.
+
+- Copyright 2023–2026 SpaceXAI
+- Copyright 2026 Alexey Zaytsev
+- License: Apache License 2.0 (separate from Pi's MIT license)
+- [License text](third_party/licenses/GROK-MERMAID-APACHE-2.0.txt)
+
 ## Terminus 2 and Terminal-Bench
 
 The Terminus 2 agent informed octet's design patterns.

@@ -1,0 +1,15 @@
+name = "octet-snap-compact"
+version = "0.1.0"
+api_version = "0.4"
+description = "Replace vision-model local compaction with deterministic oxi-snapcompact PNG frames"
+
+[entrypoint]
+command = "extension.py"
+
+[capabilities]
+filesystem = "none"
+process = true
+network = false
+
+[contributes]
+hooks = ["compaction_strategy"]

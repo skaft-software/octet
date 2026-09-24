@@ -11,6 +11,8 @@ updates stable, and degrades to deterministic escape-free text.
 - Typed `Document` / `Block` / `Inline` rich text; raw ANSI is not the content model.
 - CommonMark + GFM Markdown: headings, emphasis, links, quotes, nested/task lists,
   fenced code, rules, tables, autolinks, and visible fallback text.
+- Pi-style inline/display math and bounded Mermaid flowchart/group layout, with
+  original-source fallback for incomplete, unsupported, or too-wide diagrams.
 - Stable-prefix, bounded-tail streaming Markdown with arbitrary UTF-8 byte chunks.
 - Optional `syntect` highlighting mapped to semantic theme roles.
 - Unified diffs with visible `+`/`-` prefixes and optional line numbers.
@@ -391,4 +393,10 @@ in [`VENDORED.md`](VENDORED.md).
 
 ## License
 
-MIT
+`MIT AND Apache-2.0`: the crate combines MIT-licensed code (including the Pi
+ports; see [`LICENSE`](LICENSE)) with Apache-2.0 Mermaid layout and label-cleanup
+adaptations from grok-build/grok-mermaid. This is not a choice of either license.
+The Apache copyright notices and license are retained alongside the adapted
+modules in `src/rich_text/mermaid/LICENSE-APACHE`.
+See [`VENDORED.md`](VENDORED.md) for provenance and
+[`docs/rich-rendering.md`](docs/rich-rendering.md#math-and-diagrams) for scope.

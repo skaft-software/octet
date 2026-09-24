@@ -252,11 +252,17 @@ pub(crate) fn render(package: &Value, theme: &str) -> anyhow::Result<Vec<u8>> {
         .or_else(|| package["source_title"].as_str())
         .unwrap_or("octet session");
     let mut html = format!("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">\n<title>{}</title>\n<style>:root{{color-scheme:{scheme};background:{background};color:{foreground}}}body{{max-width:72rem;margin:2rem auto;padding:0 1rem;font:16px system-ui}}article{{background:{card};padding:1rem;margin:1rem 0;border-radius:.5rem}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}code{{font-family:ui-monospace,monospace}}blockquote{{border-left:.2rem solid {muted};margin-left:0;padding-left:1rem}}table{{border-collapse:collapse;max-width:100%}}th,td{{border:1px solid {muted};padding:.35rem}}a{{color:inherit}}summary{{cursor:pointer}}.notice{{color:{muted}}}img{{max-width:100%;height:auto}}.syntax-comment{{color:{muted}}}.syntax-keyword,.syntax-operator{{color:{keyword}}}.syntax-string{{color:{string}}}.syntax-number{{color:{number}}}.syntax-function{{color:{function}}}.syntax-type{{color:{ty}}}</style></head><body>\n<h1>{}</h1>\n<p class=\"notice\">Private session export. Redaction is not proof of secret-free content. Images may contain sensitive information. Raw HTML, external links and terminal controls are inert; Markdown is formatted, while audio and remote media are omitted. Accounting values are known subtotals if any usage_uncertainty record exists or a usage record has no price.</p>\n", escape(title), escape(title));
-    let mut metadata = package.clone();
-    metadata
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("export package must be an object"))?
-        .remove("records");
+    // Project metadata directly: cloning the package first also duplicates
+    // every transcript/media record only to immediately discard that copy.
+    let metadata = Value::Object(
+        package
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("export package must be an object"))?
+            .iter()
+            .filter(|(key, _)| key.as_str() != "records")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
     details("Export metadata", &metadata, &mut html)?;
     let records = package["records"]
         .as_array()
@@ -321,6 +327,23 @@ mod tests {
     }
 
     #[test]
+    fn metadata_projection_preserves_all_non_record_fields() {
+        let package = json!({
+            "metadata": {"name": "fixture"}, "source_title": "original",
+            "future_metadata": {"nested": ["retained", 42]},
+            "records": [{"type": "config", "sentinel": "record-only-content"}],
+        });
+        let mut expected = package.clone();
+        expected.as_object_mut().unwrap().remove("records");
+        let mut expected_details = String::new();
+        details("Export metadata", &expected, &mut expected_details).unwrap();
+        let html = String::from_utf8(render(&package, "light").unwrap()).unwrap();
+        assert!(html.contains(&expected_details));
+        assert_eq!(html.matches("record-only-content").count(), 1);
+        assert_eq!(package["records"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn rich_markdown_matches_reviewable_static_golden() {
         let mut html = String::new();
         markdown("# Report\n\nA **bold** and *clear* answer with `code`.\n\n- first\n- second\n\n```rust\nfn main() {}\n```\n", &mut html);
@@ -348,6 +371,7 @@ mod tests {
                     content: vec![
                         octet_ai::AssistantPart::Text("**A clear answer**".into()),
                         octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                            async_execution: false,
                             id: octet_ai::ToolCallId("call-1".into()),
                             name: "read".into(),
                             arguments_json: "{\"path\":\"README.md\"}".into(),

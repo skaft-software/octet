@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-//! Real-binary VT100 coverage for the first-run local-provider setup journey.
+//! Real-binary VT100 coverage for the first-run provider setup journey.
 //!
 //! Every process owns a disposable HOME, workspace, and session directory. The
 //! only endpoint used by the online cases is a fresh loopback listener. The
@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -247,13 +247,30 @@ impl PtyTerminal {
 struct PtyOctet {
     child: Child,
     terminal: PtyTerminal,
-    _root: TempDir,
+    _root: Arc<TempDir>,
     home: PathBuf,
 }
 
 impl PtyOctet {
     fn spawn(columns: u16, rows: u16, locale: &str, offline: bool, configured: bool) -> Self {
-        let root = tempfile::tempdir().expect("setup TUI tempdir");
+        Self::spawn_with_root(
+            Arc::new(tempfile::tempdir().expect("setup TUI tempdir")),
+            columns,
+            rows,
+            locale,
+            offline,
+            configured,
+        )
+    }
+
+    fn spawn_with_root(
+        root: Arc<TempDir>,
+        columns: u16,
+        rows: u16,
+        locale: &str,
+        offline: bool,
+        configured: bool,
+    ) -> Self {
         let canonical_root = root
             .path()
             .canonicalize()
@@ -639,17 +656,76 @@ fn has_styling_sgr(bytes: &[u8]) -> bool {
     false
 }
 
-fn assert_no_provider_state(octet: &PtyOctet) {
+fn fixture_files(directory: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory).expect("read fixture directory") {
+        let path = entry.expect("fixture entry").path();
+        if path.is_dir() {
+            files.extend(fixture_files(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+fn assert_no_secret_outside_store(octet: &PtyOctet, allowed: Option<&Path>) {
     assert!(
-        !octet.credentials_path().exists(),
-        "setup cancellation created a custom registry"
+        !octet
+            .terminal
+            .output
+            .windows(SECRET.len())
+            .any(|value| value == SECRET.as_bytes()),
+        "API key echoed in the terminal stream"
     );
-    if let Ok(config) = fs::read_to_string(octet.config_path()) {
+    // HOME uses the canonical root (macOS /var aliases /private/var), so the
+    // allowed credential path and the scanned fixture paths must use it too.
+    let root = octet
+        ._root
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    for path in fixture_files(&root) {
+        if allowed == Some(path.as_path()) {
+            continue;
+        }
+        let bytes = fs::read(&path).expect("read fixture file");
         assert!(
-            !config.contains("custom/"),
-            "setup selection leaked into config: {config}"
+            !bytes
+                .windows(SECRET.len())
+                .any(|value| value == SECRET.as_bytes()),
+            "API key leaked outside its private store: {}",
+            path.display()
         );
     }
+}
+
+fn assert_no_provider_state(octet: &PtyOctet) {
+    assert!(
+        fixture_files(&octet.home.join(".octet/credentials")).is_empty(),
+        "setup cancellation wrote provider credentials"
+    );
+    if let Ok(config) = fs::read_to_string(octet.config_path()) {
+        let config: toml::Value = toml::from_str(&config).expect("valid fixture config");
+        assert!(
+            config.get("model").is_none(),
+            "setup selection leaked into config"
+        );
+    }
+    assert_no_secret_outside_store(octet, None);
+}
+
+fn choose_local_setup(
+    octet: &mut PtyOctet,
+    parser: &mut vt100::Parser,
+    consumed: &mut usize,
+    columns: u16,
+) {
+    // Local endpoints are opt-in rather than the first-run default.
+    octet.terminal.write_input(b"Local\r");
+    octet.wait_for_screen(parser, consumed, columns, WAIT, |screen| {
+        screen.contains("LM Studio") && !screen.contains("Add an API key")
+    });
 }
 
 fn choose_openai_endpoint(
@@ -689,6 +765,232 @@ fn choose_manual_model(
     octet.terminal.write_input(&input);
 }
 
+fn assert_first_run_choices(screen: &str) {
+    let choices = [
+        "Add an API key",
+        // Ordinary picker columns may truncate the long subscription label.
+        "Sign in with ChatGPT",
+        "Local/self-hosted models",
+        "Continue without a provider",
+    ];
+    let positions = choices.map(|choice| {
+        screen
+            .find(choice)
+            .unwrap_or_else(|| panic!("missing {choice:?}: {screen}"))
+    });
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "wrong first-run order: {screen}"
+    );
+    assert!(
+        screen.contains("› Add an API key"),
+        "API key is not the default choice: {screen}"
+    );
+    assert!(
+        !screen.contains("› LM Studio"),
+        "local setup is still the default"
+    );
+}
+
+fn open_builtin_key_input(
+    octet: &mut PtyOctet,
+    parser: &mut vt100::Parser,
+    consumed: &mut usize,
+    columns: u16,
+) {
+    // Enter without navigation must open the first (API-key) choice.
+    octet.terminal.write_input(b"\r");
+    octet.wait_for_text(parser, consumed, columns, "Choose your API-key provider");
+    octet.terminal.write_input(b"OpenAI\r");
+    octet.wait_for_text(
+        parser,
+        consumed,
+        columns,
+        "OpenAI API key (input hidden; paste, then Enter):",
+    );
+    assert_eq!(
+        terminal_attributes(octet.terminal.slave.as_raw_fd()).c_lflag & libc::ECHO,
+        0
+    );
+}
+
+#[test]
+fn setup_fresh_home_defaults_to_api_key_and_cancellation_never_echoes_or_saves_it() {
+    let _guard = test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let columns = 120;
+    for cancel in [b"\x1b".as_slice(), b"\x03".as_slice()] {
+        let mut octet = PtyOctet::spawn(columns, ROWS, "C.UTF-8", true, false);
+        let mut parser = vt100::Parser::new(ROWS, columns, 1024);
+        let mut consumed = 0;
+        let first = octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
+        assert_first_run_choices(&first);
+        assert_no_provider_state(&octet);
+        open_builtin_key_input(&mut octet, &mut parser, &mut consumed, columns);
+
+        let start = octet.terminal.output.len();
+        octet.terminal.write_input(SECRET.as_bytes());
+        let masked = octet.wait_for_screen_after_output(
+            &mut parser,
+            &mut consumed,
+            columns,
+            WAIT,
+            start,
+            |screen| screen.contains("OpenAI API key (input hidden; paste, then Enter):"),
+        );
+        assert!(!masked.contains(SECRET));
+        assert_no_provider_state(&octet);
+        octet.terminal.write_input(cancel);
+        octet.wait_for_text(&mut parser, &mut consumed, columns, "Add an API key");
+        assert_no_provider_state(&octet);
+
+        // Submitting the hidden input is still not consent to persist it.
+        open_builtin_key_input(&mut octet, &mut parser, &mut consumed, columns);
+        octet
+            .terminal
+            .write_input(format!("\x1b[200~{SECRET}\x1b[201~\r").as_bytes());
+        octet.wait_for_text(&mut parser, &mut consumed, columns, "Save OpenAI API key?");
+        assert_no_provider_state(&octet);
+        // Select-list review uses Escape; Ctrl-C belongs to temporary input.
+        octet.terminal.write_input(b"\x1b");
+        octet.wait_for_text(&mut parser, &mut consumed, columns, "Add an API key");
+        assert_no_provider_state(&octet);
+        octet.terminal.write_input(b"Continue without\r");
+        octet.wait_for_text(&mut parser, &mut consumed, columns, "No configured model");
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        assert_no_provider_state(&octet);
+    }
+}
+
+#[test]
+fn setup_builtin_api_key_saves_after_review_selects_native_model_and_survives_restart_offline() {
+    let _guard = test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let columns = 120;
+    // A synthetic, unusable key and --offline exercise real private persistence
+    // without live credentials, discovery, or any inference submission.
+    let mut octet = PtyOctet::spawn(columns, ROWS, "C.UTF-8", true, false);
+    let mut parser = vt100::Parser::new(ROWS, columns, 1024);
+    let mut consumed = 0;
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
+    open_builtin_key_input(&mut octet, &mut parser, &mut consumed, columns);
+    octet.terminal.write_input(format!("{SECRET}\r").as_bytes());
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Save OpenAI API key?");
+    assert_no_provider_state(&octet);
+
+    octet.terminal.write_input(b"\r");
+    let models = octet.wait_for_text(&mut parser, &mut consumed, columns, "Select model");
+    assert!(
+        models.contains("OpenAI"),
+        "native provider missing from model picker: {models}"
+    );
+    let key_path = octet.home.join(".octet/credentials/api-keys/openai.json");
+    let saved_key = fs::read(&key_path).expect("saved native API key");
+    let credential: serde_json::Value = serde_json::from_slice(&saved_key).unwrap();
+    assert_eq!(credential["api_key"], SECRET);
+    assert_eq!(
+        fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        !octet.credentials_path().exists(),
+        "built-in provider became a custom endpoint"
+    );
+    assert_no_secret_outside_store(&octet, Some(&key_path));
+
+    // Select an embedded native Chat model: no inference is submitted, and
+    // unlike a Responses route this cannot trigger startup Responses prewarm.
+    octet.terminal.write_input(b"4o\r");
+    octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
+        screen.contains("GPT-4o mini")
+            && screen.lines().any(|line| line.trim() == "›")
+            && !screen.contains("Select model")
+    });
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(octet.config_path()).unwrap()).unwrap();
+    assert_eq!(config["model"].as_str(), Some("gpt-4o-mini"));
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    assert_no_secret_outside_store(&octet, Some(&key_path));
+
+    // A new process (not --continue or an in-memory catalog reuse) must activate
+    // the saved key and remembered model from this HOME with no environment key.
+    let mut restarted = PtyOctet::spawn_with_root(
+        Arc::clone(&octet._root),
+        columns,
+        ROWS,
+        "C.UTF-8",
+        true,
+        false,
+    );
+    let mut restart_parser = vt100::Parser::new(ROWS, columns, 1024);
+    let mut restart_consumed = 0;
+    restarted.wait_for_screen(
+        &mut restart_parser,
+        &mut restart_consumed,
+        columns,
+        WAIT,
+        |screen| screen.contains("GPT-4o mini") && screen.lines().any(|line| line.trim() == "›"),
+    );
+    let capture = restarted.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    let output = String::from_utf8_lossy(&capture.output);
+    assert!(
+        !output.contains("Set up a provider"),
+        "restart reopened onboarding"
+    );
+    assert!(
+        !output.contains("Select model"),
+        "restart forgot the selected model"
+    );
+    assert_no_secret_outside_store(&restarted, Some(&key_path));
+    assert_eq!(
+        fs::read(&key_path).unwrap(),
+        saved_key,
+        "restart rewrote the credential"
+    );
+    assert_eq!(
+        fixture_files(&restarted.home.join(".octet/credentials")),
+        vec![key_path]
+    );
+}
+
+#[test]
+fn setup_supported_subscription_choices_cancel_offline_without_credentials() {
+    let _guard = test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let columns = 120;
+    let mut octet = PtyOctet::spawn(columns, ROWS, "C.UTF-8", true, false);
+    let mut parser = vt100::Parser::new(ROWS, columns, 1024);
+    let mut consumed = 0;
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
+    octet.terminal.write_input(b"\x1b[B\r");
+    let subscriptions = octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "Sign in with a subscription",
+    );
+    assert!(subscriptions.contains("ChatGPT (OpenAI Codex)"));
+    assert!(subscriptions.contains("GitHub Copilot"));
+    assert_no_provider_state(&octet);
+    octet.terminal.write_input(b"\x1b");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Add an API key");
+    octet.terminal.write_input(b"Continue without\r");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "No configured model");
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    assert_no_provider_state(&octet);
+}
+
 #[test]
 fn setup_discovery_reaches_normal_prompt_and_records_secret_free_receipt() {
     let _guard = test_lock()
@@ -701,10 +1003,11 @@ fn setup_discovery_reaches_normal_prompt_and_records_secret_free_receipt() {
     let mut consumed = 0;
 
     let first = octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
-    assert!(first.contains("LM Studio"));
-    assert!(first.contains("OpenAI-compatible endpoint"));
+    assert!(first.contains("Add an API key"));
+    assert!(first.contains("Local/self-hosted models"));
     octet.assert_screen_shape(&parser, columns, false);
 
+    choose_local_setup(&mut octet, &mut parser, &mut consumed, columns);
     choose_openai_endpoint(
         &mut octet,
         &mut parser,
@@ -791,6 +1094,7 @@ fn setup_auth_failure_supports_retry_edit_back_manual_review_and_cancel() {
     let mut parser = vt100::Parser::new(ROWS, COLUMNS, 1024);
     let mut consumed = 0;
     octet.wait_for_text(&mut parser, &mut consumed, COLUMNS, "Set up a provider");
+    choose_local_setup(&mut octet, &mut parser, &mut consumed, COLUMNS);
 
     choose_openai_endpoint(
         &mut octet,
@@ -873,8 +1177,10 @@ fn setup_auth_failure_supports_retry_edit_back_manual_review_and_cancel() {
     octet.terminal.write_input(b"\x1b[B\r");
     octet.wait_for_text(&mut parser, &mut consumed, COLUMNS, "Set up a provider");
 
-    // Continue without a provider is an explicit cancellation screen/action.
-    octet.terminal.write_input(b"\x1b[B\x1b[B\r");
+    // Cancel the nested local flow, then explicitly continue without a provider.
+    octet.terminal.write_input(b"Cancel setup\r");
+    octet.wait_for_text(&mut parser, &mut consumed, COLUMNS, "Add an API key");
+    octet.terminal.write_input(b"Continue without\r");
     let modeless = octet.wait_for_text(&mut parser, &mut consumed, COLUMNS, "No configured model");
     assert!(!modeless.contains("Review provider setup"));
     assert_no_provider_state(&octet);
@@ -917,6 +1223,12 @@ fn setup_manual_narrow_ascii_no_color_and_configured_startup_remain_bounded() {
         !has_styling_sgr(&narrow.terminal.output),
         "no-color setup frame emitted styling SGR"
     );
+    choose_local_setup(
+        &mut narrow,
+        &mut narrow_parser,
+        &mut narrow_consumed,
+        NARROW_COLUMNS,
+    );
     choose_openai_endpoint(
         &mut narrow,
         &mut narrow_parser,
@@ -943,8 +1255,15 @@ fn setup_manual_narrow_ascii_no_color_and_configured_startup_remain_bounded() {
         !has_styling_sgr(&narrow.terminal.output),
         "no-color review frame emitted styling SGR"
     );
-    // Escape cancels the review without saving the manual inventory.
+    // Escape discards local review and returns to the first-run choices.
     narrow.terminal.write_input(b"\x1b");
+    narrow.wait_for_text(
+        &mut narrow_parser,
+        &mut narrow_consumed,
+        NARROW_COLUMNS,
+        "Add an API key",
+    );
+    narrow.terminal.write_input(b"Continue without\r");
     narrow.wait_for_text(
         &mut narrow_parser,
         &mut narrow_consumed,

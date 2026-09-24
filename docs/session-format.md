@@ -48,12 +48,18 @@ is itself `type`-tagged (`crates/octet-agent/src/session.rs:479`):
 | `value.type` | Meaning |
 | --- | --- |
 | `message` | A complete user/assistant/tool-result message that is model-visible. |
-| `compaction` | Manual compaction: history older than `first_kept` is replaced by `summary` when context is reconstructed. |
+| `compaction` | Local compaction: history older than `first_kept` is replaced by `summary`, or by its optional `snapcompact` inline PNG frames plus lead-in on vision routes. |
 | `responses_turn` | Opaque OpenAI Responses output stored beside its canonical assistant message. Not model-visible. |
 | `responses_compaction` | Opaque `POST /responses/compact` checkpoint that covers the active branch through `covered_through`. |
 | `config` | Model/reasoning marker; not model-visible. |
 | `prompt_template_selected` | Recorded template name and full-file hash for provenance. |
 | `skill_activated` / `skill_resource_read` / `skill_deactivated` | Explicit skill activation lifecycle and bounded resource reads. |
+
+An API 0.4 bitmap compaction retains `snapcompact.source_text` alongside the
+base64-encoded inline `snapcompact.frames`, for later re-compaction without
+losing earlier source. Only frames and the bounded lead-in enter vision-model
+context. A text-only model refuses an active bitmap checkpoint instead of
+silently omitting it. Existing text-only compaction records omit this field.
 
 Conversation entries commit complete semantic boundaries, not provisional
 streaming deltas. Auxiliary observations below and the assistant sidecar are

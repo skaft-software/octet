@@ -69,7 +69,7 @@ fn changelog_rich_report_uses_existing_renderer_for_headings_lists_and_code() {
     let document = parse_markdown(source);
     shell.show_report(
         OrdinarySurfaceMetadata::with_purpose("Changelog", "Bundled release notes"),
-        ReportBody::Markdown(document.clone()),
+        ReportBody::Markdown(Arc::new(document.clone())),
     );
     let state = shell.state.borrow();
     let layout = crate::tui::layout::PresentationLayout::new(&state.theme, 80);

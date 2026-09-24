@@ -1,7 +1,8 @@
 # octet documentation
 
 octet is a fast, small coding host across cloud and local models. Extensions add
-tools and bounded host-shaped integrations. These source docs include the
+tools and bounded host-shaped integrations; they do not promise Pi execution
+parity or an everything-as-extension platform. These source docs include the
 local 0.8.0 RC; [published installation](installation.md) remains separate.
 
 ## Getting started
@@ -33,6 +34,7 @@ local 0.8.0 RC; [published installation](installation.md) remains separate.
 - [Themes](themes.md)
 - [Shell aliases](shell-aliases.md)
 - [tmux setup](tmux.md)
+- [Herdr integration](herdr.md)
 - [Windows setup](windows.md)
 - [Termux (Android)](termux.md)
 

@@ -1,7 +1,8 @@
 //! OpenAI Chat Completions private wire protocol codec.
 
 use base64::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::{AiError, ConfigError, DecodeError, ProviderError};
 use crate::protocol::sse::SseEvent;
@@ -422,6 +423,129 @@ struct ChatChunk {
     choices: Vec<ChatChunkChoice>,
     #[serde(default)]
     usage: Option<ChatUsage>,
+}
+
+/// Decode normal frames directly into their typed DTO, noticing error
+/// envelopes without a full-DOM prepass. An untagged enum would buffer every
+/// chunk, and its defaulted chunk variant would swallow error-only objects.
+struct ChatStreamChunk {
+    chunk: ChatChunk,
+    has_error: bool,
+}
+
+impl<'de> Deserialize<'de> for ChatStreamChunk {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Id,
+            Choices,
+            Usage,
+            Error,
+            #[serde(other)]
+            Other,
+        }
+
+        struct ChunkVisitor;
+        impl<'de> Visitor<'de> for ChunkVisitor {
+            type Value = ChatStreamChunk;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ChatChunk")
+            }
+
+            fn visit_seq<A>(self, sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                // Preserve the derived DTO's sequence/default behavior too.
+                Ok(ChatStreamChunk {
+                    chunk: ChatChunk::deserialize(de::value::SeqAccessDeserializer::new(sequence))?,
+                    has_error: false,
+                })
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut id = None;
+                let mut choices = None;
+                let mut usage = None;
+                let mut has_error = false;
+                while let Some(field) = map.next_key::<Field>()? {
+                    match field {
+                        Field::Id => {
+                            if id.is_some() {
+                                return Err(de::Error::duplicate_field("id"));
+                            }
+                            id = Some(map.next_value()?);
+                            continue;
+                        }
+                        Field::Choices => {
+                            if choices.is_some() {
+                                return Err(de::Error::duplicate_field("choices"));
+                            }
+                            choices = Some(map.next_value()?);
+                            continue;
+                        }
+                        Field::Usage => {
+                            if usage.is_some() {
+                                return Err(de::Error::duplicate_field("usage"));
+                            }
+                            usage = Some(map.next_value()?);
+                            continue;
+                        }
+                        // Error fields were ignored by the original DTO:
+                        // their types and duplicates must remain permissive.
+                        Field::Error => has_error = true,
+                        Field::Other => {}
+                    }
+                    map.next_value::<IgnoredAny>()?;
+                }
+                Ok(ChatStreamChunk {
+                    chunk: ChatChunk {
+                        id: id.unwrap_or_default(),
+                        choices: choices.unwrap_or_default(),
+                        usage: usage.unwrap_or_default(),
+                    },
+                    has_error,
+                })
+            }
+        }
+        deserializer.deserialize_struct("ChatChunk", &["id", "choices", "usage"], ChunkVisitor)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHAT_STREAM_JSON_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn decode_stream_json<'de, T: Deserialize<'de>>(data: &'de str) -> Result<T, serde_json::Error> {
+    #[cfg(test)]
+    CHAT_STREAM_JSON_DECODES.with(|count| count.set(count.get() + 1));
+    serde_json::from_str(data)
+}
+
+fn decode_chat_chunk(data: &str) -> Result<ChatChunk, AiError> {
+    let frame: ChatStreamChunk = decode_stream_json(data).map_err(|error| {
+        // A valid provider error wins even over malformed chunk fields, in
+        // either key order. Only a failed decode or an error-bearing frame
+        // needs this permissive fallback, never ordinary text/tool/usage data.
+        provider_error_from_stream_event(data)
+            .map(AiError::Provider)
+            .unwrap_or_else(|| AiError::Decode(DecodeError::Json(error.to_string())))
+    })?;
+    if frame.has_error {
+        if let Some(error) = provider_error_from_stream_event(data) {
+            return Err(AiError::Provider(error));
+        }
+    }
+    Ok(frame.chunk)
 }
 
 #[derive(Deserialize)]
@@ -941,11 +1065,21 @@ pub(crate) fn build_request(
     } else {
         None
     };
-    let reasoning = if openrouter_reasoning && !always_on {
-        Some(ChatReasoningConfig {
-            effort: wire,
-            enabled: None,
-        })
+    let reasoning = if openrouter_reasoning && !always_on && enabled {
+        // OpenRouter Off leaves the endpoint default in force, including for
+        // auxiliary summary requests. Never manufacture an explicit disable.
+        if reasoning_capability.is_some_and(|c| c.control == crate::types::ReasoningControl::Toggle)
+        {
+            Some(ChatReasoningConfig {
+                effort: None,
+                enabled: Some(true),
+            })
+        } else {
+            wire.map(|effort| ChatReasoningConfig {
+                effort: Some(effort),
+                enabled: None,
+            })
+        }
     } else if matches!(
         reasoning_mode,
         Some(OpenAiChatReasoningMode::Together { .. })
@@ -1094,7 +1228,9 @@ pub(crate) fn build_request(
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "chat/completions")?;
 
     let mut headers = http::HeaderMap::new();
-    let affinity_format = model.spec.cache.send_session_affinity_headers.then_some(
+    let affinity_format = (model.spec.cache.send_session_affinity_headers
+        && !crate::protocol::is_opencode_session_route(model))
+    .then_some(
         model
             .spec
             .cache
@@ -1132,6 +1268,7 @@ pub(crate) fn build_request(
             crate::types::SessionAffinityFormat::Codex => {}
         }
     }
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -1393,6 +1530,7 @@ fn decode_response_inner(
             };
 
             content.push(AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: ToolCallId(tc.id.clone()),
                 name: name.clone(),
                 arguments_json,
@@ -1460,6 +1598,11 @@ fn decode_response_inner(
                 StopReason::EndTurn
             }
         });
+    let diagnostics = if choice.finish_reason.is_none() {
+        vec![defaulted_stop_reason_diagnostic()]
+    } else {
+        Vec::new()
+    };
     let usage = map_usage(&resp.usage)?;
 
     let cost = model
@@ -1476,7 +1619,7 @@ fn decode_response_inner(
         cost,
         response_id: Some(resp.id),
         responses_output: None,
-        diagnostics: Vec::new(),
+        diagnostics,
         deferred: None,
     })
 }
@@ -1501,7 +1644,7 @@ fn emit_reasoning_delta(
 }
 
 fn provider_error_from_stream_event(data: &str) -> Option<ProviderError> {
-    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    let value: serde_json::Value = decode_stream_json(data).ok()?;
     let error = value.get("error").and_then(|value| value.as_object())?;
     let message = error
         .get("message")
@@ -1533,6 +1676,7 @@ fn provider_error_from_stream_event(data: &str) -> Option<ProviderError> {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         });
+    // An explicit outer null/non-string still masks the nested request_id.
     let request_id = value
         .get("request_id")
         .or_else(|| error.get("request_id"))
@@ -1557,10 +1701,6 @@ pub(crate) fn decode_stream_event(
     // cap until EOF.
     builder.observe_provider_stream_event()?;
 
-    if let Some(provider_error) = provider_error_from_stream_event(&sse_event.data) {
-        return Err(AiError::Provider(provider_error));
-    }
-
     if sse_event.data == "[DONE]" {
         let mut events = Vec::new();
         // Resolve a content-based Qwen tool call before closing the response.
@@ -1575,13 +1715,24 @@ pub(crate) fn decode_stream_event(
         // Providers that omit a finish_reason chunk entirely leave parts open
         // here; close them so the terminal response stays balanced (§8).
         close_open_parts(&mut events, builder)?;
+        // Record fallback provenance without changing finalization or treating
+        // absent usage as evidence of zero provider billing.
+        if builder.stop_reason.is_none() {
+            builder.add_diagnostic(defaulted_stop_reason_diagnostic());
+        }
+        if builder.usage.is_none() {
+            builder.add_diagnostic(crate::Diagnostic {
+                code: "chat_usage_missing".to_owned(),
+                message: "Chat completion supplied no usage; billing is not known to be zero"
+                    .to_owned(),
+            });
+        }
         let resp = builder.finish_mut()?;
         events.push(StreamEvent::Finished(resp));
         return Ok(events);
     }
 
-    let chunk: ChatChunk = serde_json::from_str(&sse_event.data)
-        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let chunk = decode_chat_chunk(&sse_event.data)?;
 
     let mut events = Vec::new();
 
@@ -1717,6 +1868,7 @@ pub(crate) fn decode_stream_event(
                         &mut events,
                         builder,
                         StreamEvent::ToolCallStart {
+                            async_execution: false,
                             index: idx,
                             id: ToolCallId(id),
                             name,
@@ -2040,21 +2192,32 @@ fn skip_pending_prefix_at(builder: &mut ResponseBuilder, pending_head: &mut usiz
     builder.release_buffered_content(bytes);
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+struct PendingWork {
+    scanned_bytes: usize,
+    compactions: usize,
+    shifted_bytes: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PENDING_WORK: std::cell::Cell<PendingWork> = const {
+        std::cell::Cell::new(PendingWork { scanned_bytes: 0, compactions: 0, shifted_bytes: 0 })
+    };
+}
+
 fn compact_pending_prefix(builder: &mut ResponseBuilder, pending_head: usize) {
     if pending_head > 0 {
+        #[cfg(test)]
+        PENDING_WORK.with(|work| {
+            let mut count = work.get();
+            count.compactions += 1;
+            count.shifted_bytes += builder.qwen_xml_pending.len() - pending_head;
+            work.set(count);
+        });
         builder.qwen_xml_pending.drain(..pending_head);
     }
-}
-
-fn drain_pending_prefix(builder: &mut ResponseBuilder, bytes: usize) -> String {
-    let value = builder.qwen_xml_pending.drain(..bytes).collect();
-    builder.release_buffered_content(bytes);
-    value
-}
-
-fn discard_pending_prefix(builder: &mut ResponseBuilder, bytes: usize) {
-    builder.qwen_xml_pending.drain(..bytes);
-    builder.release_buffered_content(bytes);
 }
 
 fn buffer_compat_tool_calls(
@@ -2109,6 +2272,7 @@ fn emit_compat_tool_call(
         events,
         builder,
         StreamEvent::ToolCallStart {
+            async_execution: false,
             index,
             id: ToolCallId(format!("qwen_xml_call_{}", call_number + 1)),
             name,
@@ -2139,20 +2303,44 @@ fn emit_text_without_locked_marker(
 ) -> Result<(), AiError> {
     builder.reserve_buffered_content(delta.len())?;
     builder.qwen_xml_pending.push_str(delta);
-    while let Some(index) = builder.qwen_xml_pending.find(TOOL_OUTPUT_LOCKED) {
+    // Consume prefixes logically and compact the String once. Repeatedly
+    // draining its front shifts every remaining dense marker and turns a
+    // single provider frame into quadratic work.
+    let mut pending_head = 0usize;
+    loop {
+        let pending = &builder.qwen_xml_pending[pending_head..];
+        let index = pending.find(TOOL_OUTPUT_LOCKED);
+        #[cfg(test)]
+        PENDING_WORK.with(|work| {
+            let mut count = work.get();
+            count.scanned_bytes +=
+                index.map_or(pending.len(), |index| index + TOOL_OUTPUT_LOCKED.len());
+            work.set(count);
+        });
+        let Some(index) = index else {
+            break;
+        };
         if index > 0 {
-            let text = drain_pending_prefix(builder, index);
-            emit_text_delta(events, builder, &text)?;
+            let text = take_pending_prefix_at(builder, &mut pending_head, index);
+            if let Err(error) = emit_text_delta(events, builder, &text) {
+                compact_pending_prefix(builder, pending_head);
+                return Err(error);
+            }
         }
-        discard_pending_prefix(builder, TOOL_OUTPUT_LOCKED.len());
+        skip_pending_prefix_at(builder, &mut pending_head, TOOL_OUTPUT_LOCKED.len());
         builder.tool_output_locked_seen = true;
     }
-    let keep = marker_suffix_len(&builder.qwen_xml_pending, TOOL_OUTPUT_LOCKED);
-    let flush = builder.qwen_xml_pending.len().saturating_sub(keep);
+    let pending = &builder.qwen_xml_pending[pending_head..];
+    let keep = marker_suffix_len(pending, TOOL_OUTPUT_LOCKED);
+    let flush = pending.len().saturating_sub(keep);
     if flush > 0 {
-        let text = drain_pending_prefix(builder, flush);
-        emit_text_delta(events, builder, &text)?;
+        let text = take_pending_prefix_at(builder, &mut pending_head, flush);
+        if let Err(error) = emit_text_delta(events, builder, &text) {
+            compact_pending_prefix(builder, pending_head);
+            return Err(error);
+        }
     }
+    compact_pending_prefix(builder, pending_head);
     Ok(())
 }
 
@@ -2615,6 +2803,13 @@ fn close_open_parts(
     Ok(())
 }
 
+fn defaulted_stop_reason_diagnostic() -> crate::Diagnostic {
+    crate::Diagnostic {
+        code: "chat_defaulted_stop_reason".to_owned(),
+        message: "Chat completion stop reason was defaulted".to_owned(),
+    }
+}
+
 fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
         "stop" => StopReason::EndTurn,
@@ -2724,6 +2919,7 @@ mod tests {
             display_name: None,
             protocol: Protocol::OpenAiChat,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: input,
                 output_modalities: output,
                 tools,
@@ -2769,6 +2965,113 @@ mod tests {
             spec: Arc::new(spec),
             endpoint: Arc::new(ep),
         }
+    }
+
+    #[test]
+    fn openrouter_summary_reasoning_never_invents_a_disable() {
+        use crate::types::{ReasoningControl, ReasoningOptions};
+        let mut model = make_test_model(false, false, false, false, true, false);
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability.openai_chat_mode = OpenAiChatReasoningMode::OpenRouter;
+        capability.options = Some(ReasoningOptions {
+            values: vec!["max".into(), "high".into(), "low".into()],
+            default: Some("max".into()),
+        });
+        capability.max_effort = ReasoningEffort::Max;
+        let mut req = Request {
+            system: Some("Summarize the conversation".into()),
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("history".into())],
+            })],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: Some(1024),
+            temperature: None,
+            stop: vec![],
+            reasoning: crate::select_auxiliary_reasoning(&model).unwrap(),
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::Short,
+            session_id: None,
+        };
+        let body = |model: &Model, req: &Request| -> serde_json::Value {
+            serde_json::from_slice(&build_request(model, req).unwrap().body).unwrap()
+        };
+        assert_eq!(
+            body(&model, &req)["reasoning"],
+            serde_json::json!({"effort":"max"})
+        );
+        req.reasoning = ReasoningConfig::Off;
+        assert!(matches!(
+            build_request(&model, &req),
+            Err(AiError::Unsupported(crate::UnsupportedError::Reasoning))
+        ));
+        // Optional OpenRouter Off is omission, not an unadvertised `none`.
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability
+            .options
+            .as_mut()
+            .unwrap()
+            .values
+            .insert(0, "none".into());
+        assert!(body(&model, &req).get("reasoning").is_none());
+        Arc::make_mut(&mut model.spec).preset.thinking_format =
+            Some(crate::declarations::ThinkingFormat::OpenRouter);
+        assert!(body(&model, &req).get("reasoning").is_none());
+        Arc::make_mut(&mut model.spec).preset.thinking_format = None;
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability.control = ReasoningControl::Toggle;
+        capability.options = Some(ReasoningOptions {
+            values: vec!["false".into(), "true".into()],
+            default: Some("false".into()),
+        });
+        assert!(body(&model, &req).get("reasoning").is_none());
+        req.reasoning = ReasoningConfig::On;
+        assert_eq!(
+            body(&model, &req)["reasoning"],
+            serde_json::json!({"enabled":true})
+        );
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability.control = ReasoningControl::AlwaysOn;
+        capability.options = Some(ReasoningOptions {
+            values: vec!["default".into()],
+            default: Some("default".into()),
+        });
+        req.reasoning = crate::select_auxiliary_reasoning(&model).unwrap();
+        assert!(body(&model, &req).get("reasoning").is_none());
+        // Other profiles retain explicit Off semantics.
+        let capability = Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        capability.control = ReasoningControl::Effort;
+        capability.openai_chat_mode = OpenAiChatReasoningMode::Standard;
+        capability.options = Some(ReasoningOptions {
+            values: vec!["none".into(), "high".into()],
+            default: Some("high".into()),
+        });
+        req.reasoning = ReasoningConfig::Off;
+        assert_eq!(body(&model, &req)["reasoning_effort"], "none");
     }
 
     #[test]
@@ -3026,6 +3329,7 @@ mod tests {
             .deferred_tool_loading = true;
 
         let make_tool = |name: &str| crate::types::ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: name.to_string(),
             description: "test tool".to_string(),
@@ -3036,6 +3340,7 @@ mod tests {
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call-1".into()),
                         name: "read".into(),
                         arguments_json: "{}".to_string(),
@@ -3088,6 +3393,7 @@ mod tests {
             .preset
             .supports_openai_grammar_tools = Some(true);
         let tool = ToolDef {
+            async_execution: false,
             name: "language".to_owned(),
             description: "grammar".to_owned(),
             parameters: serde_json::json!({"type":"object", "properties":{"source":{"type":"string"}},
@@ -3132,6 +3438,7 @@ mod tests {
             })],
             tools: vec![
                 crate::types::ToolDef {
+                    async_execution: false,
                     constrained_sampling: Some(ConstrainedSampling::JsonSchema {
                         strict: ConstrainedSamplingStrict::Prefer,
                     }),
@@ -3144,6 +3451,7 @@ mod tests {
                     }),
                 },
                 crate::types::ToolDef {
+                    async_execution: false,
                     constrained_sampling: Some(ConstrainedSampling::Grammar {
                         variants: GrammarVariants {
                             openai_lark: Some("start: WORD".to_string()),
@@ -3208,6 +3516,7 @@ mod tests {
                 content: vec![UserPart::Text("go".into())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: Some(ConstrainedSampling::JsonSchema {
                     strict: ConstrainedSamplingStrict::Require,
                 }),
@@ -3251,6 +3560,7 @@ mod tests {
             .deferred_tool_loading = false;
 
         let make_tool = |name: &str| crate::types::ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: name.to_string(),
             description: "test tool".to_string(),
@@ -3261,6 +3571,7 @@ mod tests {
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call-1".into()),
                         name: "read".into(),
                         arguments_json: "{}".to_string(),
@@ -3328,6 +3639,7 @@ mod tests {
                 content: vec![UserPart::Text("Read sentinel.txt".into())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "read".into(),
                 description: "Read a file".into(),
@@ -3382,6 +3694,7 @@ mod tests {
                             state: None,
                         }),
                         AssistantPart::ToolCall(ToolCall {
+                            async_execution: false,
                             id: ToolCallId("call_1".to_string()),
                             name: "lookup".to_string(),
                             arguments_json: "{}".to_string(),
@@ -3459,6 +3772,7 @@ mod tests {
                             state: None,
                         }),
                         AssistantPart::ToolCall(ToolCall {
+                            async_execution: false,
                             id: ToolCallId(canonical_tool_id.into()),
                             name: "read".into(),
                             arguments_json: r#"{"path":"README.md"}"#.into(),
@@ -3613,11 +3927,42 @@ mod tests {
         assert_eq!(resp.stop_reason, StopReason::EndTurn);
         assert_eq!(resp.usage.input_tokens, 10);
         assert_eq!(resp.usage.output_tokens, 5);
+        assert!(resp.diagnostics.is_empty());
         if let AssistantPart::Text(ref t) = resp.message.content[0] {
             assert_eq!(t, "Hello back!");
         } else {
             panic!("Expected Text part");
         }
+    }
+
+    #[test]
+    fn nonstream_defaulted_stop_diagnostic_preserves_required_usage() {
+        let model = make_test_model(false, false, false, false, true, false);
+        let mut body = serde_json::json!({
+            "id": "private-response-id",
+            "choices": [{"message": {"reasoning": "private reasoning"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 12},
+        });
+        for null_finish in [false, true] {
+            if null_finish {
+                body["choices"][0]["finish_reason"] = serde_json::Value::Null;
+            }
+            let response = decode_response(&model, body.to_string().as_bytes(), None).unwrap();
+            assert_eq!(response.stop_reason, StopReason::EndTurn);
+            assert_eq!(response.usage.output_tokens, 12);
+            assert_eq!(response.diagnostics.len(), 1);
+            assert_eq!(response.diagnostics[0].code, "chat_defaulted_stop_reason");
+            assert_eq!(
+                response.diagnostics[0].message,
+                "Chat completion stop reason was defaulted"
+            );
+        }
+        // Nonstream usage was never defaulted: keep the existing decode error.
+        body.as_object_mut().unwrap().remove("usage");
+        assert!(matches!(
+            decode_response(&model, body.to_string().as_bytes(), None),
+            Err(AiError::Decode(DecodeError::Json(_)))
+        ));
     }
 
     #[test]
@@ -3818,6 +4163,7 @@ mod tests {
                 content: vec![UserPart::Text("latest user turn".to_string())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "read".to_string(),
                 description: "Read a file".to_string(),
@@ -3971,6 +4317,77 @@ mod tests {
             serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
         assert!(body.get("prompt_cache_key").is_none());
         assert!(body.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn opencode_chat_session_header_is_independent_of_cache_retention() {
+        let mut model = make_test_model(false, false, false, false, false, false);
+        Arc::make_mut(&mut model.spec)
+            .cache
+            .send_session_affinity_headers = true;
+        Arc::make_mut(&mut model.endpoint).id = EndpointId("opencode-go".into());
+        let mut req = Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("hello".into())],
+            })],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::None,
+            session_id: Some("zen-session".into()),
+        };
+        for retention in [
+            crate::types::CacheRetention::None,
+            crate::types::CacheRetention::Short,
+        ] {
+            req.cache_retention = retention;
+            let parts = build_request(&model, &req).unwrap();
+            assert_eq!(parts.headers["x-opencode-session"], "zen-session");
+            assert!(parts.headers.get("session_id").is_none());
+            assert!(parts.headers.get("x-session-affinity").is_none());
+        }
+        req.session_id = None;
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+
+        req.session_id = Some("zen-session".into());
+        Arc::make_mut(&mut model.endpoint).id = EndpointId("opencode".into());
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(parts.headers["x-opencode-session"], "zen-session");
+        Arc::make_mut(&mut model.endpoint)
+            .default_headers
+            .insert("x-opencode-session", "caller-session".parse().unwrap());
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+        Arc::make_mut(&mut model.endpoint)
+            .default_headers
+            .remove("x-opencode-session");
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .headers
+            .insert("X-OpenCode-Session".into(), "preset-session".into());
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .headers
+            .remove("X-OpenCode-Session");
+        Arc::make_mut(&mut model.endpoint).id = EndpointId("baseten".into());
+        req.cache_retention = crate::types::CacheRetention::Short;
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(parts.headers["session_id"], "zen-session");
+        assert_eq!(parts.headers["x-session-affinity"], "zen-session");
+        assert!(parts.headers.get("x-opencode-session").is_none());
     }
 
     #[test]
@@ -4247,6 +4664,7 @@ mod fixture_tests {
     async fn schema_mismatch_is_marked_before_tool_call_end() {
         let model = harness::model(Protocol::OpenAiChat, None);
         let tools = [ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),
@@ -4387,6 +4805,56 @@ mod fixture_tests {
         assert_eq!(joined_text(&events), "Done without a finish chunk");
         let resp = harness::finished(&events);
         assert_eq!(resp.usage.output_tokens, 4);
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+        assert_eq!(resp.diagnostics.len(), 1);
+        assert_eq!(resp.diagnostics[0].code, "chat_defaulted_stop_reason");
+    }
+
+    #[tokio::test]
+    async fn chat_completion_diagnostics_distinguish_missing_usage_from_reported_zero() {
+        let model = harness::model(Protocol::OpenAiChat, None);
+        for (report_stop, report_usage) in
+            [(true, true), (false, true), (true, false), (false, false)]
+        {
+            let mut chunk = serde_json::json!({
+                "id": "private-response-id",
+                "choices": [{"delta": {"reasoning": "private reasoning"}}],
+            });
+            if report_stop {
+                chunk["choices"][0]["finish_reason"] = "stop".into();
+            }
+            if report_usage {
+                chunk["usage"] = serde_json::json!({"prompt_tokens": 0, "completion_tokens": 0});
+            }
+            let data = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+            let events = harness::drive(&model, decode_stream_event, data.as_bytes(), 0)
+                .await
+                .unwrap();
+            let response = harness::finished(&events);
+            assert_eq!(response.stop_reason, StopReason::EndTurn);
+            assert_eq!(response.usage, crate::Usage::default());
+            let codes: Vec<_> = response
+                .diagnostics
+                .iter()
+                .map(|diag| diag.code.as_str())
+                .collect();
+            assert_eq!(codes.contains(&"chat_defaulted_stop_reason"), !report_stop);
+            assert_eq!(codes.contains(&"chat_usage_missing"), !report_usage);
+            assert_eq!(
+                codes.len(),
+                usize::from(!report_stop) + usize::from(!report_usage)
+            );
+            for diagnostic in &response.diagnostics {
+                assert!(!diagnostic.message.contains("private"));
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, StreamEvent::Usage(_)))
+                    .count(),
+                usize::from(report_usage)
+            );
+        }
     }
 
     #[tokio::test]
@@ -4410,6 +4878,7 @@ mod fixture_tests {
             .expect("reasoning part present");
         assert_eq!(reasoning.text.as_deref(), Some("Let me think about it."));
         assert_eq!(joined_text(&events), "Answer: 42");
+        assert!(resp.diagnostics.is_empty());
     }
 
     #[tokio::test]
@@ -4521,6 +4990,232 @@ mod fixture_tests {
             }
             other => panic!("expected provider error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stream_error_fields_keep_permissive_fallbacks_and_precedence() {
+        for (data, message, code, kind, request_id) in [
+            (
+                r#"{"error":{"message":"nested","code":429,"type":"inner","request_id":"nested-id"},"message":"outer","code":"outer","type":"outer","request_id":"outer-id"}"#,
+                "nested",
+                Some("429"),
+                Some("inner"),
+                Some("outer-id"),
+            ),
+            (
+                r#"{"error":{"message":[],"code":{},"type":false,"request_id":"nested-id"},"message":"fallback","code":"outer","type":"outer","request_id":null}"#,
+                "fallback",
+                Some("outer"),
+                Some("outer"),
+                None,
+            ),
+            (
+                r#"{"error":{"message":"","code":18446744073709551615,"request_id":"nested-id"}}"#,
+                "",
+                Some("18446744073709551615"),
+                None,
+                Some("nested-id"),
+            ),
+            (
+                r#"{"error":{"message":"error","code":0},"request_id":42}"#,
+                "error",
+                Some("0"),
+                None,
+                None,
+            ),
+            (
+                r#"{"error":{"message":"error","code":-1},"code":"fallback"}"#,
+                "error",
+                Some("fallback"),
+                None,
+                None,
+            ),
+            (
+                r#"{"error":{"message":"error","code":1.0},"code":429}"#,
+                "error",
+                None,
+                None,
+                None,
+            ),
+            (
+                r#"{"error":{"message":false},"message":"fallback"}"#,
+                "fallback",
+                None,
+                None,
+                None,
+            ),
+            (
+                r#"{"error":{},"message":"old","message":"last","code":"old","code":"last","type":{},"type":"last","request_id":"old","request_id":"last"}"#,
+                "last",
+                Some("last"),
+                Some("last"),
+                Some("last"),
+            ),
+            (
+                r#"{"error":null,"error":{"message":"old","message":"last","code":1,"code":2}}"#,
+                "last",
+                Some("2"),
+                None,
+                None,
+            ),
+            (
+                r#"{"choices":[{"delta":{"content":"must not escape"}}],"error":{"message":"denied"}}"#,
+                "denied",
+                None,
+                None,
+                None,
+            ),
+        ] {
+            super::CHAT_STREAM_JSON_DECODES.with(|count| count.set(0));
+            let Some(AiError::Provider(error)) = super::decode_chat_chunk(data).err() else {
+                panic!("expected provider error for {data}");
+            };
+            assert_eq!(error.message, message, "{data}");
+            assert_eq!(error.code.as_deref(), code, "{data}");
+            assert_eq!(error.kind.as_deref(), kind, "{data}");
+            assert_eq!(error.request_id.as_deref(), request_id, "{data}");
+            assert_eq!(super::CHAT_STREAM_JSON_DECODES.with(|count| count.get()), 2);
+        }
+    }
+
+    #[test]
+    fn malformed_chunk_fields_cannot_hide_a_provider_error() {
+        for malformed in [
+            r#""id":null"#,
+            r#""id":"first","id":"second""#,
+            r#""choices":null"#,
+            r#""choices":[{}]"#,
+            r#""usage":{"prompt_tokens":"bad"}"#,
+        ] {
+            for data in [
+                format!(r#"{{{malformed},"error":{{"message":"denied"}}}}"#),
+                format!(r#"{{"error":{{"message":"denied"}},{malformed}}}"#),
+            ] {
+                super::CHAT_STREAM_JSON_DECODES.with(|count| count.set(0));
+                assert!(
+                    matches!(super::decode_chat_chunk(&data), Err(AiError::Provider(error)) if error.message == "denied"),
+                    "{data}"
+                );
+                assert_eq!(super::CHAT_STREAM_JSON_DECODES.with(|count| count.get()), 2);
+            }
+            assert!(matches!(
+                super::decode_chat_chunk(&format!("{{{malformed}}}")),
+                Err(AiError::Decode(DecodeError::Json(_)))
+            ));
+        }
+        for data in [
+            r#"{"error":{"message":"denied"},"choices":["#,
+            "[DONE] ",
+            "null",
+        ] {
+            assert!(matches!(
+                super::decode_chat_chunk(data),
+                Err(AiError::Decode(DecodeError::Json(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn defaulted_chunks_and_malformed_error_metadata_stay_permissive() {
+        for data in [
+            "{}",
+            "[]",
+            r#"["id",[],null]"#,
+            r#"{"error":null,"message":"not an error"}"#,
+            r#"{"error":false,"message":"not an error"}"#,
+            r#"{"error":[],"message":"not an error"}"#,
+            r#"{"error":"not an object","message":"not an error"}"#,
+            r#"{"error":{"message":{},"code":[]},"message":false}"#,
+            r#"{"error":{"code":429},"message":[],"type":{},"request_id":[]}"#,
+            r#"{"error":{"message":"overwritten"},"error":null}"#,
+        ] {
+            super::CHAT_STREAM_JSON_DECODES.with(|count| count.set(0));
+            let chunk = super::decode_chat_chunk(data).unwrap();
+            let legacy: super::ChatChunk = serde_json::from_str(data).unwrap();
+            assert_eq!(chunk.id, legacy.id, "{data}");
+            assert_eq!(chunk.choices.len(), legacy.choices.len(), "{data}");
+            assert!(chunk.usage.is_none());
+            let expected_decodes = if data.contains("\"error\"") { 2 } else { 1 };
+            assert_eq!(
+                super::CHAT_STREAM_JSON_DECODES.with(|count| count.get()),
+                expected_decodes
+            );
+        }
+    }
+
+    #[test]
+    fn unrepresentable_error_metadata_keeps_the_legacy_chunk_fallback() {
+        // Ignored metadata may be syntactically skippable even when Value
+        // cannot represent it. This is not a reason to reject a valid chunk.
+        for data in [
+            r#"{"error":{"message":1e400}}"#,
+            r#"{"message":1e400,"choices":[]}"#,
+            r#"{"error":{"message":"ignored"},"unknown":1e400}"#,
+        ] {
+            let legacy: super::ChatChunk = serde_json::from_str(data).unwrap();
+            let chunk = super::decode_chat_chunk(data).unwrap();
+            assert_eq!(chunk.id, legacy.id);
+            assert_eq!(chunk.choices.len(), legacy.choices.len());
+        }
+    }
+
+    #[test]
+    fn chat_sse_decodes_once_per_json_frame_and_counts_done_before_finishing() {
+        let model = harness::model(Protocol::OpenAiChat, None);
+        let mut builder = ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, None);
+        super::CHAT_STREAM_JSON_DECODES.with(|count| count.set(0));
+        let mut events = Vec::new();
+        for data in [
+            content_event("ordinary 🙂 text").data,
+            "{}".to_owned(),
+            r#"{"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}"#.to_owned(),
+        ] {
+            events.extend(
+                decode_stream_event(&model, &SseEvent { event: None, data }, &mut builder).unwrap(),
+            );
+        }
+        assert_eq!(super::CHAT_STREAM_JSON_DECODES.with(|count| count.get()), 3);
+        assert_eq!(builder.provider_event_count, 3);
+        events.extend(
+            decode_stream_event(
+                &model,
+                &SseEvent {
+                    event: None,
+                    data: "[DONE]".to_owned(),
+                },
+                &mut builder,
+            )
+            .unwrap(),
+        );
+        assert_eq!(super::CHAT_STREAM_JSON_DECODES.with(|count| count.get()), 3);
+        // finish_mut replaces the consumed response builder with an empty one.
+        assert_eq!(builder.provider_event_count, 0);
+        assert_eq!(joined_text(&events), "ordinary 🙂 text");
+        assert_eq!(harness::finished(&events).usage.total_tokens, 13);
+
+        let mut builder = ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, None);
+        let error = SseEvent {
+            event: None,
+            data: r#"{"error":{"message":"denied"}}"#.to_owned(),
+        };
+        assert!(matches!(
+            decode_stream_event(&model, &error, &mut builder),
+            Err(AiError::Provider(_))
+        ));
+        assert_eq!(builder.provider_event_count, 1);
+        assert!(!builder.started);
+
+        builder.provider_event_count = MAX_RESPONSE_EVENTS;
+        super::CHAT_STREAM_JSON_DECODES.with(|count| count.set(0));
+        let done = SseEvent {
+            event: None,
+            data: "[DONE]".to_owned(),
+        };
+        assert!(matches!(
+            decode_stream_event(&model, &done, &mut builder),
+            Err(AiError::Decode(DecodeError::TooManyStreamEvents))
+        ));
+        assert_eq!(super::CHAT_STREAM_JSON_DECODES.with(|count| count.get()), 0);
     }
 
     #[test]
@@ -4746,6 +5441,187 @@ mod fixture_tests {
             harness::finished(&events).stop_reason,
             StopReason::Other("tool_output_locked".to_string())
         );
+    }
+
+    #[test]
+    fn tools_disabled_dense_locked_markers_scan_once_and_compact_once() {
+        let mut model = harness::model(Protocol::OpenAiChat, None);
+        std::sync::Arc::make_mut(&mut model.spec).capabilities.tools = false;
+        for count in [128, 4096] {
+            for text in ["", "🙂é"] {
+                let suffix = "[tool_out";
+                let content = format!(
+                    "{}{suffix}",
+                    format!("{text}{}", super::TOOL_OUTPUT_LOCKED).repeat(count)
+                );
+                let mut builder =
+                    ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, None);
+                super::PENDING_WORK.with(|work| work.set(super::PendingWork::default()));
+                let mut events =
+                    decode_stream_event(&model, &content_event(&content), &mut builder).unwrap();
+                let work = super::PENDING_WORK.with(|work| work.get());
+                assert_eq!(work.scanned_bytes, content.len());
+                assert_eq!(work.compactions, 1);
+                assert_eq!(work.shifted_bytes, suffix.len());
+                assert_eq!(builder.qwen_xml_pending, suffix);
+                assert_eq!(builder.buffered_content_bytes, suffix.len());
+                assert_eq!(builder.aggregate_content_bytes, text.len() * count);
+                assert_eq!(joined_text(&events), text.repeat(count));
+                events.extend(
+                    decode_stream_event(
+                        &model,
+                        &SseEvent {
+                            event: None,
+                            data: "[DONE]".to_owned(),
+                        },
+                        &mut builder,
+                    )
+                    .unwrap(),
+                );
+                assert_eq!(
+                    joined_text(&events),
+                    format!("{}{suffix}", text.repeat(count))
+                );
+                assert_eq!(builder.buffered_content_bytes, 0);
+                // Finalization consumes these counters along with the content;
+                // the pre-finish assertions above verify the retained budget.
+                assert_eq!(builder.aggregate_content_bytes, 0);
+                assert_eq!(
+                    harness::finished(&events).stop_reason,
+                    StopReason::Other("tool_output_locked".to_owned())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tools_disabled_locked_markers_preserve_unicode_splits_and_end_flush() {
+        let mut model = harness::model(Protocol::OpenAiChat, None);
+        std::sync::Arc::make_mut(&mut model.spec).capabilities.tools = false;
+        for (content, expected, locked) in [
+            (
+                "α[tool_output_locked]β[tool_output_locked]🙂[tool_out",
+                "αβ🙂[tool_out",
+                true,
+            ),
+            ("é[tool_out", "é[tool_out", false),
+        ] {
+            for split in content
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(content.len()))
+            {
+                for finish_chunk in [false, true] {
+                    let mut builder =
+                        ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, None);
+                    let mut events = Vec::new();
+                    for delta in [&content[..split], &content[split..]] {
+                        events.extend(
+                            decode_stream_event(&model, &content_event(delta), &mut builder)
+                                .unwrap(),
+                        );
+                        assert_eq!(
+                            builder.buffered_content_bytes,
+                            builder.qwen_xml_pending.len()
+                        );
+                    }
+                    if finish_chunk {
+                        events.extend(
+                            decode_stream_event(
+                                &model,
+                                &SseEvent {
+                                    event: None,
+                                    data: r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#
+                                        .to_owned(),
+                                },
+                                &mut builder,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    assert_eq!(
+                        builder.aggregate_content_bytes + builder.buffered_content_bytes,
+                        expected.len(),
+                        "split={split}, finish={finish_chunk}"
+                    );
+                    events.extend(
+                        decode_stream_event(
+                            &model,
+                            &SseEvent {
+                                event: None,
+                                data: "[DONE]".to_owned(),
+                            },
+                            &mut builder,
+                        )
+                        .unwrap(),
+                    );
+                    assert_eq!(
+                        joined_text(&events),
+                        expected,
+                        "split={split}, finish={finish_chunk}"
+                    );
+                    assert_eq!(builder.buffered_content_bytes, 0);
+                    assert_eq!(builder.aggregate_content_bytes, 0);
+                    assert_eq!(
+                        harness::finished(&events).stop_reason,
+                        if locked {
+                            StopReason::Other("tool_output_locked".to_owned())
+                        } else {
+                            StopReason::EndTurn
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tools_disabled_marker_filter_reserves_before_appending() {
+        let mut builder = ResponseBuilder::new(
+            crate::types::ModelId("m".to_owned()),
+            Protocol::OpenAiChat,
+            None,
+        );
+        builder
+            .reserve_buffered_content(MAX_RESPONSE_CONTENT_BYTES)
+            .unwrap();
+        let error = super::emit_text_without_locked_marker(
+            &mut Vec::new(),
+            &mut builder,
+            super::TOOL_OUTPUT_LOCKED,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AiError::Decode(DecodeError::ResponseTooLarge)
+        ));
+        assert!(builder.qwen_xml_pending.is_empty());
+        assert_eq!(builder.buffered_content_bytes, MAX_RESPONSE_CONTENT_BYTES);
+        assert!(!builder.tool_output_locked_seen);
+    }
+
+    #[test]
+    fn tools_disabled_marker_filter_compacts_released_bytes_on_event_limit() {
+        for (content, remaining) in [
+            ("é[tool_output_locked]tail", "[tool_output_locked]tail"),
+            ("[tool_output_locked]é[tool_out", "[tool_out"),
+        ] {
+            let mut builder = ResponseBuilder::new(
+                crate::types::ModelId("m".to_owned()),
+                Protocol::OpenAiChat,
+                None,
+            );
+            builder.event_count = MAX_RESPONSE_EVENTS;
+            let error =
+                super::emit_text_without_locked_marker(&mut Vec::new(), &mut builder, content)
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                AiError::Decode(DecodeError::TooManyStreamEvents)
+            ));
+            assert_eq!(builder.qwen_xml_pending, remaining);
+            assert_eq!(builder.buffered_content_bytes, remaining.len());
+        }
     }
 
     #[tokio::test]

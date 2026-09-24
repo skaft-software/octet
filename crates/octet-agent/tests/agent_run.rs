@@ -35,6 +35,8 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 const MAX_CONNECT_ATTEMPTS_FOR_TEST: usize = 6;
+const ONE_PIXEL_PNG: &[u8] =
+    include_bytes!("../../octet-coding-agent/tests/fixtures/export_html/one-pixel.png");
 
 // ── Scripted SSE bodies (Anthropic Messages wire shapes) ───────────────────
 
@@ -824,6 +826,7 @@ fn scripted_model(uri: &str) -> Model {
             display_name: None,
             protocol: Protocol::AnthropicMessages,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -1320,9 +1323,8 @@ fn request_has_no_tools(request: &serde_json::Value) -> bool {
 
 #[tokio::test]
 async fn normal_terminal_turn_without_user_visible_content_fails_loudly() {
-    // Each shape names its own cause: an empty reply, and a model that spent the
-    // whole turn on reasoning without ever emitting answer text (what a local
-    // thinking model does when its budget or template produces no final answer).
+    // Distinguish the observed response shapes without inferring why the
+    // provider ended the turn without an answer.
     for (body, expected) in [
         (empty_turn(), "no user-visible content"),
         (
@@ -1364,6 +1366,176 @@ async fn normal_terminal_turn_without_user_visible_content_fails_loudly() {
             "an empty turn must not be presented as a completed model turn"
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn chat_reasoning_only_diagnostic_retains_usage_without_retry() {
+    for (report_stop, report_usage) in [(true, true), (false, true), (true, false), (false, false)]
+    {
+        let response_id = "private-response-id\u{1b}[31m\n";
+        let reasoning = "private-reasoning\u{1b}[31m\n";
+        let mut chunks = vec![serde_json::json!({
+            "id": response_id,
+            "choices": [{"delta": {"reasoning": reasoning}}],
+        })];
+        if report_stop {
+            chunks.push(serde_json::json!({
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+            }));
+        }
+        if report_usage {
+            chunks.push(serde_json::json!({
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 12,
+                    "completion_tokens_details": {"reasoning_tokens": 12},
+                },
+            }));
+        }
+        let body = chunks
+            .into_iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(Script {
+                bodies: vec![body],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let session_path = sessions.path().join("session.jsonl");
+        let mut model = openai_multimodal_model(&server.uri());
+        Arc::make_mut(&mut model.spec).limits = ModelLimits {
+            context_window: 32_768,
+            max_output_tokens: 32_768,
+        };
+        let mut agent = build_agent_with_reasoning(
+            model,
+            &session_path,
+            workspace.path(),
+            ReasoningConfig::Off,
+            Some(4),
+        );
+        let mut run = agent.prompt("return an answer").await.unwrap();
+        let events = collect(&mut run).await;
+        drop(run);
+        let requests = wire_requests(&server).await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "completed reasoning-only turns must not be replayed"
+        );
+        let error = match assert_single_run_finished(&events) {
+            FinishReason::Failed(error @ octet_agent::AgentError::IncompleteResponse { .. }) => {
+                error
+            }
+            other => panic!("reasoning-only completion must fail, got {other:?}"),
+        };
+        let diagnostic = octet_agent::public_error_diagnostic(error, "test", "scripted");
+        assert!(diagnostic.contains("provider returned reasoning but no answer text"));
+        assert!(diagnostic.contains("stop=end_turn"));
+        assert!(diagnostic.contains(&format!("chat_stop_defaulted={}", !report_stop)));
+        let requested_cap = requests[0]["max_completion_tokens"].as_u64().unwrap();
+        assert!(requested_cap > 0 && requested_cap < 32_768);
+        assert!(diagnostic.contains(&format!("request_max_output_tokens={requested_cap}")));
+        assert!(diagnostic.contains("not automatically retried"));
+        if report_usage {
+            assert!(diagnostic.contains("output_tokens=12; reasoning_tokens=12"));
+            assert!(!diagnostic.contains("usage=not_reported"));
+        } else {
+            assert!(diagnostic.contains("usage=not_reported"));
+            assert!(!diagnostic.contains("reasoning_tokens="));
+            assert!(!diagnostic.contains("; output_tokens="));
+        }
+        for forbidden in ["private-response-id", "private-reasoning", "\u{1b}", "\n"] {
+            assert!(!diagnostic.contains(forbidden));
+        }
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TurnFinished { .. } | AgentEvent::ProviderRetry { .. }
+        )));
+        let reopened = Session::open_read_only(&session_path).unwrap();
+        assert!(reopened.context().unwrap().iter().any(|message| matches!(
+            message,
+            Message::Assistant(assistant) if assistant.content.iter().any(|part| matches!(
+                part,
+                AssistantPart::Reasoning(part) if part.text.as_deref() == Some(reasoning)
+            ))
+        )));
+        let records = reopened.usage_records();
+        assert_eq!(records.len(), 1);
+        assert!(matches!(
+            records[0].kind,
+            UsageRecordKind::AssistantTurn { .. }
+        ));
+        assert_eq!(records[0].stop_reason, Some(octet_ai::StopReason::EndTurn));
+        let expected_usage = if report_usage {
+            Usage {
+                input_tokens: 5,
+                output_tokens: 12,
+                reasoning_tokens: 12,
+                total_tokens: 17,
+                ..Usage::default()
+            }
+        } else {
+            // Preserve the existing accounting representation, not a billing claim.
+            Usage::default()
+        };
+        assert_eq!(records[0].usage, expected_usage);
+    }
+}
+
+#[tokio::test]
+async fn chat_reasoning_answer_and_length_continuation_remain_successful() {
+    for finish_reason in ["stop", "length"] {
+        let chunk = serde_json::json!({
+            "id": "chat-reasoning-answer",
+            "choices": [{
+                "delta": {"reasoning": "private reasoning", "content": "answer"},
+                "finish_reason": finish_reason,
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 12},
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(Script {
+                bodies: vec![
+                    format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+                    openai_text_turn("continued"),
+                ],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let mut agent = build_agent_with_reasoning(
+            openai_multimodal_model(&server.uri()),
+            &sessions.path().join("session.jsonl"),
+            workspace.path(),
+            ReasoningConfig::Off,
+            Some(4),
+        );
+        let output = agent.complete("return an answer").await.unwrap();
+        assert!(matches!(output.reason, FinishReason::Completed));
+        let requests = wire_requests(&server).await;
+        if finish_reason == "length" {
+            assert_eq!(output.text, "answercontinued");
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]
+                .to_string()
+                .contains("truncated at the token limit"));
+        } else {
+            assert_eq!(output.text, "answer");
+            assert_eq!(requests.len(), 1);
+        }
     }
 }
 
@@ -2726,7 +2898,7 @@ async fn openai_compatible_agent_sends_inline_image_end_to_end() {
     let input = UserInput::from(vec![
         InputPart::Text("describe this image".into()),
         InputPart::Media(Media::image_bytes(
-            bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\n"),
+            bytes::Bytes::from_static(ONE_PIXEL_PNG),
             "image/png".parse().unwrap(),
         )),
     ]);
@@ -2746,7 +2918,7 @@ async fn openai_compatible_agent_sends_inline_image_end_to_end() {
     assert_eq!(content[1]["type"], "image_url");
     assert_eq!(
         content[1]["image_url"]["url"],
-        "data:image/png;base64,iVBORw0KGgo="
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
     );
     assert!(matches!(
         &agent.session().context().unwrap()[0],
@@ -3049,6 +3221,7 @@ async fn resumed_agent_reexecutes_only_missing_tool_results() {
         .session_mut()
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("crashed_call".into()),
                 name: "read".into(),
                 arguments_json: serde_json::json!({"path": "recover.txt"}).to_string(),
@@ -3103,6 +3276,7 @@ async fn restart_never_replays_a_mutating_tool_without_an_idempotency_contract()
         .session_mut()
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("possibly_committed".into()),
                 name: "unsafe_recovery".into(),
                 arguments_json: "{}".into(),
@@ -3266,7 +3440,7 @@ async fn prompt_with_media_persists_media_user_part() {
     let input = UserInput::from(vec![
         InputPart::Text("what is in this image?".into()),
         InputPart::Media(Media::image_bytes(
-            bytes::Bytes::from_static(&[0x89, 0x50, 0x4e, 0x47]),
+            bytes::Bytes::from_static(ONE_PIXEL_PNG),
             "image/png".parse().unwrap(),
         )),
     ]);
@@ -3460,6 +3634,7 @@ struct ParallelOverlapProbe {
 impl Tool for ParallelOverlapProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "parallel_overlap_probe".into(),
             description: "Records whether independent calls overlap".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4313,6 +4488,7 @@ struct ProgressTool {
 impl Tool for ProgressTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "progress_test".to_string(),
             description: "Emits progress and sleeps".to_string(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4353,6 +4529,7 @@ struct QueuedActivationTool {
 impl Tool for QueuedActivationTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "queued_activation".into(),
             description: "Queues a semantic activation event".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4411,6 +4588,7 @@ struct LargeOutputTool;
 impl Tool for LargeOutputTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "large_output".into(),
             description: "Returns a large result".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4441,6 +4619,7 @@ struct RichErrorTool;
 impl Tool for RichErrorTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "rich_error".into(),
             description: "Returns a structured error with supported media".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4483,6 +4662,7 @@ struct RegisteredToolsProbe {
 impl Tool for RegisteredToolsProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "registered_tools_probe".into(),
             description: "Records the final registered tool set".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4578,6 +4758,7 @@ struct UnsafeRecoveryTool {
 impl Tool for UnsafeRecoveryTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "unsafe_recovery".into(),
             description: "Represents an irreversible external mutation".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4607,6 +4788,7 @@ impl Tool for UnsafeRecoveryTool {
 impl Tool for CountingRecoveryTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "count_recovery".into(),
             description: "Counts crash-recovery executions".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
@@ -4889,6 +5071,7 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
             content: (0..65)
                 .map(|index| {
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: octet_ai::ToolCallId(format!("recover-{index}")),
                         name: "count_recovery".into(),
                         arguments_json: "{}".into(),
@@ -4982,6 +5165,7 @@ async fn host_classification_overrides_a_safe_replay_claim() {
     session
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("classified-recovery".into()),
                 name: "count_recovery".into(),
                 arguments_json: "{}".into(),
@@ -5761,6 +5945,7 @@ struct ClassifiedEffectProbe {
 impl Tool for ClassifiedEffectProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: self.name.to_owned(),
             description: "effect admission probe".to_owned(),
             parameters: serde_json::json!({
@@ -5803,6 +5988,7 @@ struct SchemaMismatchBashProbe {
 impl Tool for SchemaMismatchBashProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "bash".into(),
             description: "Records schema-rejected Bash calls".into(),
             parameters: serde_json::json!({
@@ -6200,6 +6386,7 @@ async fn resumed_schema_rejection_skips_hooks_effects_and_replay() {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: octet_ai::ToolCallId("persisted_schema_rejection".into()),
                     name: "bash".into(),
                     arguments_json: r#"{"command":"provider-secret-value"}"#.into(),
@@ -10492,6 +10679,7 @@ struct TerminateProbe;
 impl Tool for TerminateProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "terminate_probe".into(),
             description: "Requests run termination when `stop` is true".into(),
             parameters: serde_json::json!({
@@ -10721,6 +10909,7 @@ struct PreviewProbe;
 impl Tool for PreviewProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "preview_probe".into(),
             description: "Publishes a burst of replaceable panel state".into(),
             parameters: serde_json::json!({
@@ -10890,6 +11079,7 @@ struct StreamingProbe;
 impl Tool for StreamingProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "stream_probe".into(),
             description: "Streams bounded partial output".into(),
             parameters: serde_json::json!({
@@ -11143,6 +11333,7 @@ struct DurableMemoProbe {
 impl Tool for DurableMemoProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "durable_memo_probe".into(),
             description: "Records a session-backed memo".into(),
             parameters: serde_json::json!({"type":"object","properties":{}}),
@@ -11201,6 +11392,7 @@ async fn immutable_tool_results_recover_torn_heads_and_branch_checkout_without_r
                     name: "unavailable_side_effect".into(),
                     arguments_json: "{}".into(),
                     argument_error: None,
+                    async_execution: false,
                 })],
                 model: scripted_model(&server.uri()).spec.id.clone(),
                 protocol: Protocol::AnthropicMessages,
@@ -11792,3 +11984,6 @@ async fn turn_cost_after_retry_excludes_failed_attempt_uncertainty() {
     assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
     assert_eq!(wire_requests(&server).await.len(), 2);
 }
+
+#[path = "agent_run/gpt6.rs"]
+mod gpt6;

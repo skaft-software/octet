@@ -115,6 +115,21 @@ final class CompanionWireTests: XCTestCase {
         )
     }
 
+    func testUnsignedWireNumberRejectsOverflowAndNonIntegers() {
+        XCTAssertEqual(WireJSONValue.number(42).uint64Value, 42)
+        XCTAssertNil(WireJSONValue.number(Double(UInt64.max)).uint64Value) // Rounds to 2^64.
+        XCTAssertNil(WireJSONValue.number(-1).uint64Value)
+        XCTAssertNil(WireJSONValue.number(1.5).uint64Value)
+        XCTAssertNil(WireJSONValue.number(.infinity).uint64Value)
+    }
+
+    func testAckWithOverflowingProtocolIsRejected() {
+        let ack = Data(#"{"protocol":18446744073709551616,"hostID":"host-1","sessionID":"session-1","commandID":"cmd-1","disposition":{"status":"accepted"}}"#.utf8)
+        XCTAssertThrowsError(
+            try CommandEnvelopeEncoder.inspectSessionAck(ack, hostID: "host-1", sessionID: "session-1", commandID: "cmd-1")
+        )
+    }
+
     func testBootstrapDecoderRefusesForeignHostsAndFutureProtocols() throws {
         let data = Fixture.bootstrap()
         XCTAssertEqual(try WireDecoder.bootstrap(data, expectedHostID: "host-1").sessions.count, 1)

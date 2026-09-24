@@ -93,13 +93,21 @@ pub(super) fn render_welcome_card(
         return render_pi_startup(state, width);
     }
 
-    const ROWS: usize = 6;
+    let rows = if state.theme.is_compiled_default() {
+        4
+    } else {
+        6
+    };
     let elapsed = if state.theme.capabilities().animation && welcome_is_mutable(state) {
         now.saturating_duration_since(started).as_secs_f32()
     } else {
         crate::tui::splash::DURATION
     };
-    let logo_width = (usize::from(width) / 3).clamp(14, 24);
+    let logo_width = if state.theme.is_compiled_default() {
+        16
+    } else {
+        (usize::from(width) / 3).clamp(14, 24)
+    };
     let adaptive_accent = state
         .theme
         .is_compiled_default()
@@ -109,7 +117,7 @@ pub(super) fn render_welcome_card(
     let logo = crate::tui::splash::render_logo(
         &state.theme,
         logo_width,
-        ROWS,
+        rows,
         elapsed,
         adaptive_accent,
         splash_color,
@@ -142,7 +150,11 @@ pub(super) fn render_welcome_card(
     let text_width =
         width.saturating_sub(logo_width as u16 + 5 + if box_color.is_some() { 2 } else { 0 });
     if text_width < if has_update { 12 } else { 10 }
-        || max_rows < ROWS + 2 + usize::from(has_update)
+        || max_rows
+            < rows
+                + 2
+                + usize::from(has_update)
+                + usize::from(state.theme.is_compiled_default() && model.trim().is_empty())
     {
         // A narrow or short terminal cannot fit the two-column card. Keep a compact,
         // bounded identity instead of silently dropping the startup surface.
@@ -170,14 +182,72 @@ pub(super) fn render_welcome_card(
         ));
         compact.push(changelog_hint(state, width));
         compact.extend(super::startup_update::update_hint(state, width));
-        compact.push(fit_line(&splash_text(&identity), width));
+        if model.trim().is_empty() || !state.theme.is_compiled_default() {
+            compact.push(fit_line(&splash_text(&identity), width));
+        }
+        if state.theme.is_compiled_default() {
+            compact.push(fit_line(
+                &format!(
+                    "{} {}",
+                    splash_text(if width < 30 { "mode:" } else { "permissions:" }),
+                    state.theme.bold(&state.theme.fg(
+                        if state.safe_mode { "accent" } else { "warning" },
+                        if state.safe_mode {
+                            "safe mode"
+                        } else {
+                            "full access"
+                        },
+                    )),
+                ),
+                width,
+            ));
+        }
         compact.push(fit_line(
             &format!("{} {}", splash_bold("Ctrl+D"), splash_text("to exit")),
             width,
         ));
+        // The update action and setup/permission state outrank the changelog
+        // hint when a short viewport cannot fit the entire compact card.
+        if compact.len() > max_rows {
+            compact.remove(if width >= 8 { 3 } else { 2 });
+        }
+        if compact.len() > max_rows && width >= 8 {
+            compact.remove(0);
+        }
+        compact.truncate(max_rows);
         return compact;
     }
-    let mut text = if splash_color.is_some() {
+    let mut text = if state.theme.is_compiled_default() {
+        let mut text = vec![
+            format!(
+                "{} {}",
+                state.theme.bold("octet"),
+                state.theme.dim(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+            ),
+            changelog_hint(state, text_width),
+            format!(
+                "{} {}",
+                state.theme.dim("permissions:"),
+                state.theme.bold(&state.theme.fg(
+                    if state.safe_mode { "accent" } else { "warning" },
+                    if state.safe_mode {
+                        "safe mode"
+                    } else {
+                        "full access"
+                    },
+                )),
+            ),
+            format!(
+                "{} {}",
+                state.theme.bold("Ctrl+D"),
+                state.theme.dim("to exit")
+            ),
+        ];
+        if model.trim().is_empty() {
+            text.insert(2, state.theme.fg("warning", &identity));
+        }
+        text
+    } else if splash_color.is_some() {
         vec![
             format!(
                 "{} {}",
@@ -392,17 +462,17 @@ mod tests {
 
     #[test]
     fn welcome_logo_occupied_geometry_narrow() {
-        assert_welcome_logo_geometry(&[(46, 1)]);
+        assert_welcome_logo_geometry(&[(23, 1)]);
     }
 
     #[test]
     fn welcome_logo_occupied_geometry_intermediate() {
-        assert_welcome_logo_geometry(&[(60, 2), (48, 2), (71, 2)]);
+        assert_welcome_logo_geometry(&[(46, 2), (60, 2), (48, 2), (71, 2)]);
     }
 
     #[test]
     fn welcome_logo_occupied_geometry_wide() {
-        assert_welcome_logo_geometry(&[(80, 3), (72, 3), (120, 3)]);
+        assert_welcome_logo_geometry(&[(80, 2), (72, 2), (120, 2)]);
     }
 
     fn assert_welcome_logo_geometry(widths: &[(u16, usize)]) {
@@ -417,9 +487,10 @@ mod tests {
         ] {
             let mut capabilities = TerminalCapabilities::test(true, unicode, color);
             capabilities.animation = animation;
-            let shell = InteractiveShell::test_shell_with_theme(
+            let mut shell = InteractiveShell::test_shell_with_theme(
                 crate::tui::theme::test_theme_with(capabilities),
             );
+            shell.set_identity("anthropic", "claude-sonnet-4", "high");
             let started = Instant::now();
             shell.state.borrow_mut().startup_card_started_at = Some(started);
             let glyph = if unicode { '█' } else { '#' };
@@ -432,7 +503,16 @@ mod tests {
                         10,
                         started + Duration::from_secs_f32(elapsed),
                     );
-                    assert_eq!(rendered.len(), 8, "fixed welcome layout at {width}");
+                    assert_eq!(rendered.len(), 6, "compact welcome layout at {width}");
+                    let plain = strip_terminal_sequences(&rendered.join("\n"));
+                    assert!(
+                        !plain.contains("Claude Sonnet"),
+                        "footer owns model identity: {plain}"
+                    );
+                    assert!(
+                        plain.contains("full access"),
+                        "permission mode lost: {plain}"
+                    );
                     let occupied = rendered
                         .iter()
                         .enumerate()

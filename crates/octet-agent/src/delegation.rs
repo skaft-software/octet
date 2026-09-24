@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use octet_ai::{AssistantPart, Cost, ToolDef, Usage, PICODOLLARS_PER_MICRODOLLAR};
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,8 @@ const ROOT_AGENT_ID: &str = "root";
 const ROOT_AGENT_PATH: &str = "/root";
 const COMMAND_CHANNEL_CAPACITY: usize = 32;
 const MAX_TELEMETRY_FAILURE_BYTES: usize = 4 * 1024;
+/// Coalesce streaming progress so a chatty provider cannot flood the root UI.
+const STREAMED_OUTPUT_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 /// Rolling per-child tool-activity entries retained for owner inspection.
 const MAX_CHILD_TOOL_ACTIVITY: usize = 6;
 /// Bounded single-line summary of one child tool call's arguments.
@@ -53,6 +55,10 @@ const MAX_PENDING_MESSAGE_BYTES: usize = (COMMAND_CHANNEL_CAPACITY + 1) * MAX_PR
 const MAX_QUEUED_FOLLOW_UPS: usize = COMMAND_CHANNEL_CAPACITY;
 const MAX_QUEUED_FOLLOW_UP_BYTES: usize =
     (COMMAND_CHANNEL_CAPACITY + 1) * MAX_PROVENANCE_TEXT_BYTES;
+/// A task that cannot be durably appended is retried only a few times. This is
+/// deliberately not an exactly-once side-effect guarantee: child-session
+/// persistence remains the authority for whether an input was accepted.
+const MAX_UNDELIVERED_TASK_ATTEMPTS: u8 = 3;
 const MAX_TOOL_TIMEOUT_MS: u64 = 3_600_000;
 /// Extension children share one host permit pool; eight active workers leave
 /// headroom for root-side native children as well.
@@ -402,8 +408,76 @@ impl DelegationBinding {
     }
 }
 
+/// Secret-free requested or host-confirmed worker selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentModelSelection {
+    /// Configured provider identifier.
+    pub provider: String,
+    /// Configured model identifier or resolved host model.
+    pub model: String,
+    /// Reasoning selection or supported choices.
+    pub reasoning: String,
+}
+impl Default for AgentModelSelection {
+    fn default() -> Self {
+        Self {
+            provider: "inherit".into(),
+            model: "inherit".into(),
+            reasoning: "inherit".into(),
+        }
+    }
+}
+/// Bounded public configured-model discovery record. Never include transport or credentials.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentModelDescriptor {
+    /// Configured model identifier or resolved host model.
+    pub model: String,
+    /// Configured provider identifier.
+    pub provider: String,
+    /// Optional human-facing label.
+    pub display_name: Option<String>,
+    /// Reasoning selection or supported choices.
+    pub reasoning: Vec<String>,
+    /// Context capacity in tokens.
+    pub context_window: u64,
+    /// Output capacity in tokens.
+    pub max_output_tokens: u64,
+}
+/// Host-only resolved transport and effective public selection.
+pub struct ResolvedAgentModel {
+    /// Configured model identifier or resolved host model.
+    pub model: octet_ai::Model,
+    /// Reasoning selection or supported choices.
+    pub reasoning: octet_ai::ReasoningConfig,
+    /// Canonical effective nonsecret selection.
+    pub metadata: AgentModelSelection,
+}
+/// Product-owned configured catalog and reasoning policy. Errors must be secret-free.
+pub trait AgentModelResolver: Send + Sync {
+    /// Resolve against configured inventory and normalize with product reasoning policy.
+    fn resolve(
+        &self,
+        selection: &AgentModelSelection,
+        parent_model: &octet_ai::Model,
+        parent_reasoning: &octet_ai::ReasoningConfig,
+    ) -> Result<ResolvedAgentModel, String>;
+    /// Return at most limit matches; the host requests one extra row for truncation.
+    fn models(
+        &self,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AgentModelDescriptor>, String>;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExtensionAgentSessionPolicy {
+    #[serde(default)]
+    pub(crate) model_selection: Option<AgentModelSelection>,
+    #[serde(default)]
+    pub(crate) resolved_model: Option<AgentModelSelection>,
+    #[serde(default)]
+    pub(crate) resolved_reasoning: Option<octet_ai::ReasoningConfig>,
     /// Child tool scope: a non-empty duplicate-free subset of the standard
     /// tools `read`, `search`, `edit`, `write`, and `bash`.
     pub(crate) tools: Vec<String>,
@@ -431,6 +505,27 @@ pub(crate) struct ExtensionAgentSessionPolicy {
     pub(crate) timeout_ms: Option<u64>,
 }
 
+fn resolved_model_json(policy: Option<&ExtensionAgentSessionPolicy>) -> Value {
+    match policy.and_then(|p| p.resolved_model.as_ref().map(|m| (p, m))) {
+        Some((policy, model)) => {
+            json!({"provider": model.provider, "model": model.model, "reasoning": policy.resolved_reasoning})
+        }
+        None => Value::Null,
+    }
+}
+
+/// Project effective policy without exposing the internal recovery encoding.
+fn public_policy_json(policy: Option<&ExtensionAgentSessionPolicy>) -> Value {
+    let Some(policy) = policy else {
+        return Value::Null;
+    };
+    let mut value = serde_json::to_value(policy).expect("policy is JSON serializable");
+    let object = value.as_object_mut().expect("policy serializes as object");
+    object.remove("resolved_reasoning");
+    object.insert("resolved_model".into(), resolved_model_json(Some(policy)));
+    value
+}
+
 fn child_orchestration_provenance(
     extension_policy: Option<&ExtensionAgentSessionPolicy>,
 ) -> DelegationOrchestrationProvenance {
@@ -448,6 +543,19 @@ fn child_orchestration_provenance(
 
 impl ExtensionAgentSessionPolicy {
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if let Some(selection) = &self.model_selection {
+            if selection.provider != "inherit" && selection.model == "inherit" {
+                return Err("unsupported_model: provider requires explicit model".into());
+            }
+            if [&selection.provider, &selection.model, &selection.reasoning]
+                .iter()
+                .any(|value| {
+                    value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+                })
+            {
+                return Err("unsupported_model: invalid selection identifier".into());
+            }
+        }
         if self.tools.is_empty() || self.tools.len() > EXTENSION_CHILD_TOOLS.len() {
             return Err(
                 "child tools must be a non-empty subset of the standard child tool names".into(),
@@ -664,6 +772,15 @@ impl DelegationBinding {
             .map_err(AgentError::Delegation)
     }
 
+    pub(crate) fn set_model_resolver(&self, resolver: Arc<dyn AgentModelResolver>) {
+        *self
+            .manager
+            .template
+            .model_resolver
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(resolver);
+    }
+
     pub(crate) fn update_base_system(&self, system: String) {
         if self.identity.id == ROOT_AGENT_ID {
             *self
@@ -674,6 +791,17 @@ impl DelegationBinding {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = system;
         }
     }
+    pub(crate) fn update_reasoning(&self, reasoning: octet_ai::ReasoningConfig) {
+        if self.identity.id == ROOT_AGENT_ID {
+            *self
+                .manager
+                .template
+                .reasoning
+                .write()
+                .unwrap_or_else(|p| p.into_inner()) = reasoning;
+        }
+    }
+
     pub(crate) fn update_runtime_settings(&self, settings: DelegationRuntimeSettings) {
         if self.identity.id == ROOT_AGENT_ID {
             *self
@@ -865,6 +993,76 @@ impl ExtensionDelegationService {
         }
     }
 
+    pub(crate) fn models(
+        &self,
+        resource_owner: &str,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Value, String> {
+        if !(1..=100).contains(&limit)
+            || query.is_some_and(|q| q.len() > 128 || q.chars().any(char::is_control))
+        {
+            return Err("invalid model discovery bounds".into());
+        }
+        let manager = self.manager()?;
+        let owner = self.owner_identity(&manager, resource_owner)?;
+        if owner.depth != 0 {
+            return Err("model discovery is root-owner only".into());
+        }
+        let resolver = manager
+            .template
+            .model_resolver
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut models = if let Some(resolver) = resolver.as_ref() {
+            resolver.models(query, limit + 1)?
+        } else {
+            let resolved = manager.template.resolve_model(None)?;
+            let m = &resolved.model.spec;
+            vec![AgentModelDescriptor {
+                model: resolved.metadata.model,
+                provider: resolved.metadata.provider,
+                display_name: m.display_name.clone(),
+                reasoning: vec![resolved.metadata.reasoning],
+                context_window: m.limits.context_window,
+                max_output_tokens: m.limits.max_output_tokens,
+            }]
+        };
+        if models.len() > limit + 1
+            || models.iter().any(|m| {
+                [&m.model, &m.provider]
+                    .iter()
+                    .any(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+                    || m.display_name
+                        .as_ref()
+                        .is_some_and(|name| name.len() > 512 || name.chars().any(char::is_control))
+                    || m.reasoning.len() > 32
+                    || m.reasoning
+                        .iter()
+                        .any(|r| r.is_empty() || r.len() > 256 || r.chars().any(char::is_control))
+            })
+        {
+            return Err("configured model discovery exceeded public metadata bounds".into());
+        }
+        if let Some(query) = query {
+            let query = query.to_lowercase();
+            models.retain(|m| {
+                format!(
+                    "{} {} {}",
+                    m.model,
+                    m.provider,
+                    m.display_name.as_deref().unwrap_or("")
+                )
+                .to_lowercase()
+                .contains(&query)
+            });
+        }
+        let truncated = models.len() > limit;
+        models.truncate(limit);
+        Ok(json!({"models": models, "truncated": truncated}))
+    }
+
     pub(crate) fn spawn(
         &self,
         resource_owner: &str,
@@ -902,11 +1100,6 @@ impl ExtensionDelegationService {
             manager.publish_external_failure("spawn_rejected", &error);
             error
         };
-        if policy.max_cost_microdollars.is_some() && manager.template.model.spec.pricing.is_none() {
-            return Err(reject_spawn(
-                "extension children with a cost ceiling require trusted model pricing".into(),
-            ));
-        }
         let mut service_state = self
             .state
             .lock()
@@ -1209,6 +1402,7 @@ pub(crate) struct DelegationRuntimeSettings {
     pub(crate) completion_policy: CompletionPolicy,
     pub(crate) output_modalities: octet_ai::OutputModalities,
     pub(crate) max_output_tokens: u64,
+    pub(crate) tool_schema_budget_bytes: usize,
     pub(crate) max_session_tokens: Option<u64>,
     pub(crate) max_session_cost_microdollars: Option<u64>,
     pub(crate) provider_retries_enabled: bool,
@@ -1216,6 +1410,7 @@ pub(crate) struct DelegationRuntimeSettings {
 }
 
 pub(crate) struct DelegationTemplate {
+    pub(crate) model_resolver: RwLock<Option<Arc<dyn AgentModelResolver>>>,
     pub(crate) client: octet_ai::AiClient,
     pub(crate) model: octet_ai::Model,
     pub(crate) base_system: RwLock<String>,
@@ -1223,10 +1418,134 @@ pub(crate) struct DelegationTemplate {
     pub(crate) effect_broker: crate::EffectBroker,
     pub(crate) extensions: ExtensionHost,
     pub(crate) max_turns: Option<u64>,
-    pub(crate) reasoning: octet_ai::ReasoningConfig,
+    pub(crate) reasoning: RwLock<octet_ai::ReasoningConfig>,
     pub(crate) reasoning_mode: octet_ai::ReasoningMode,
     pub(crate) cache_retention: octet_ai::CacheRetention,
     pub(crate) runtime: RwLock<DelegationRuntimeSettings>,
+}
+
+fn lower_child_reasoning(mut resolved: ResolvedAgentModel) -> ResolvedAgentModel {
+    // Astra's host-side Ultra tier enables V2 collaboration, but the
+    // observed child-run wire contract is xhigh. Keep root and generic
+    // Ultra lowering unchanged by translating only this child boundary.
+    let reasoning = if resolved.model.spec.api_name == "gpt-6-astra"
+        && resolved.model.spec.capabilities.agent_delegation == Some(octet_ai::AgentDelegation::V2)
+        && resolved
+            .model
+            .spec
+            .capabilities
+            .reasoning
+            .as_ref()
+            .is_some_and(|reasoning| reasoning.max_effort == octet_ai::ReasoningEffort::Ultra)
+        && resolved.reasoning == octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra)
+    {
+        octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Xhigh)
+    } else {
+        resolved.reasoning.clone()
+    };
+    if reasoning != resolved.reasoning {
+        resolved.reasoning = reasoning;
+        resolved.metadata.reasoning = "xhigh".into();
+    }
+    resolved
+}
+
+impl DelegationTemplate {
+    fn resolve_model(
+        &self,
+        policy: Option<&ExtensionAgentSessionPolicy>,
+    ) -> Result<ResolvedAgentModel, String> {
+        // Existing workers keep their host-pinned effort across parent changes.
+        // Only a new inherited worker reads the parent's current selection.
+        let reasoning = policy
+            .and_then(|p| p.resolved_reasoning.clone())
+            .unwrap_or_else(|| {
+                self.reasoning
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+            });
+        let reasoning_label = match &reasoning {
+            octet_ai::ReasoningConfig::Off => "off".into(),
+            octet_ai::ReasoningConfig::On => "on".into(),
+            octet_ai::ReasoningConfig::Effort(effort) => format!("{effort:?}").to_lowercase(),
+            octet_ai::ReasoningConfig::Budget(n) => format!("budget={n}"),
+        };
+        if policy
+            .and_then(|p| p.resolved_model.as_ref())
+            .is_some_and(|pinned| pinned.reasoning != reasoning_label)
+        {
+            return Err("unsupported_reasoning: saved worker reasoning changed".into());
+        }
+        let mut selection = policy
+            .and_then(|p| p.resolved_model.as_ref().or(p.model_selection.as_ref()))
+            .cloned()
+            .unwrap_or_default();
+        // A newly inherited worker must retain the parent's exact binding, not
+        // re-select updated catalog metadata merely because admission pinned IDs.
+        if policy.is_some_and(|p| {
+            p.model_selection
+                .as_ref()
+                .is_none_or(|s| s == &AgentModelSelection::default())
+                && p.resolved_model
+                    .as_ref()
+                    .is_some_and(|m| m.model == self.model.spec.id.0)
+                && p.resolved_reasoning.as_ref() == Some(&reasoning)
+        }) {
+            selection = AgentModelSelection::default();
+        }
+        if let Some(resolver) = self
+            .model_resolver
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            let resolved =
+                lower_child_reasoning(resolver.resolve(&selection, &self.model, &reasoning)?);
+            if let Some(policy) = policy {
+                if policy
+                    .resolved_model
+                    .as_ref()
+                    .is_some_and(|pinned| pinned != &resolved.metadata)
+                    || policy
+                        .resolved_reasoning
+                        .as_ref()
+                        .is_some_and(|pinned| pinned != &resolved.reasoning)
+                {
+                    return Err(
+                        "unsupported_model: saved worker selection no longer resolves exactly"
+                            .into(),
+                    );
+                }
+            }
+            return Ok(resolved);
+        }
+        let metadata = AgentModelSelection {
+            provider: self.model.spec.endpoint.0.clone(),
+            model: self.model.spec.id.0.clone(),
+            reasoning: reasoning_label,
+        };
+        let resolved = lower_child_reasoning(ResolvedAgentModel {
+            model: self.model.clone(),
+            reasoning: reasoning.clone(),
+            metadata,
+        });
+        if (selection.provider != "inherit" && selection.provider != resolved.metadata.provider)
+            || (selection.model != "inherit" && selection.model != resolved.metadata.model)
+        {
+            return Err("unsupported_model: no configured model resolver".into());
+        }
+        if selection.reasoning != "inherit" && selection.reasoning != resolved.metadata.reasoning {
+            return Err("unsupported_reasoning: no configured reasoning resolver".into());
+        }
+        if policy
+            .and_then(|p| p.resolved_reasoning.as_ref())
+            .is_some_and(|pinned| pinned != &resolved.reasoning)
+        {
+            return Err("unsupported_reasoning: saved worker reasoning changed".into());
+        }
+        Ok(resolved)
+    }
 }
 
 pub(crate) struct DelegationManager {
@@ -1363,6 +1682,10 @@ struct AgentRecord {
     pending_messages: VecDeque<DirectedMessage>,
     reserved_messages: QueueUsage,
     queued_follow_ups: QueueUsage,
+    /// Accepted follow-ups remain here until the child session confirms their
+    /// durable delivery. The channel is only a process-local wakeup path.
+    pending_follow_ups: VecDeque<QueuedFollowUp>,
+    pending_initial_task: Option<QueuedInitialTask>,
     mailbox: VecDeque<MailboxMessage>,
     mailbox_delivery: Option<MailboxDeliveryPlan>,
     resource_owner: Option<String>,
@@ -1384,6 +1707,8 @@ struct AgentRecord {
     active_tools: BTreeMap<String, String>,
     recent_tools: VecDeque<ChildToolActivity>,
     usage: Usage,
+    /// Process-local provisional generation; never part of durable/billable usage.
+    streamed_output_bytes: u64,
     usage_uncertain: bool,
     cost: Option<Cost>,
     cost_microdollars: Option<u64>,
@@ -1400,6 +1725,8 @@ struct AgentRecord {
     /// `run_worker`. It is deliberately not durable: after a restart no task is
     /// live, which is exactly what a launchable handle needs to know.
     live_task: bool,
+    /// Process-local incarnation; a fleet claim may be reused by many starts.
+    worker_generation: u64,
     /// Command receiver parked for a detached record restored from the
     /// durable roster. Keeping it alive buffers a later turn's steering or
     /// follow-up until reattachment; it is taken exactly once.
@@ -1459,6 +1786,16 @@ struct DurableFleetRecord {
     durable_diagnostic: Option<String>,
     #[serde(default)]
     claim: Option<DurableFleetClaim>,
+    #[serde(default)]
+    pending_messages: VecDeque<DirectedMessage>,
+    #[serde(default)]
+    queued_follow_ups: VecDeque<QueuedFollowUp>,
+    #[serde(default)]
+    pending_initial_task: Option<QueuedInitialTask>,
+    #[serde(default)]
+    mailbox: VecDeque<DurableMailboxMessage>,
+    #[serde(default)]
+    mailbox_delivery: Option<MailboxDeliveryPlan>,
 }
 
 impl Default for DurableFleetRecord {
@@ -1500,6 +1837,11 @@ impl Default for DurableFleetRecord {
             resource_owner: None,
             durable_diagnostic: None,
             claim: None,
+            pending_messages: VecDeque::new(),
+            queued_follow_ups: VecDeque::new(),
+            pending_initial_task: None,
+            mailbox: VecDeque::new(),
+            mailbox_delivery: None,
         }
     }
 }
@@ -1511,6 +1853,16 @@ struct DurableFleet {
     version: u32,
     root_session: PathBuf,
     records: Vec<DurableFleetRecord>,
+    #[serde(default = "default_mailbox_delivery_id")]
+    next_mailbox_delivery: u64,
+    #[serde(default)]
+    root_mailbox: VecDeque<DurableMailboxMessage>,
+    #[serde(default)]
+    root_mailbox_delivery: Option<MailboxDeliveryPlan>,
+}
+
+fn default_mailbox_delivery_id() -> u64 {
+    1
 }
 
 /// Fits every admitted fleet (at most 256 agents), including JSON's worst-case
@@ -1519,7 +1871,94 @@ struct DurableFleet {
 /// this aggregate bound; admitted terminal summaries must not poison a fleet.
 const MAX_FLEET_ROSTER_BYTES: usize =
     256 * (12 * MAX_PROVENANCE_TEXT_BYTES + 64 * 1024) + 64 * 1024;
-const FLEET_ROSTER_VERSION: u32 = 1;
+const ROSTER_PROJECTION_BYTES: usize = 256 * 1024;
+
+/// The roster is an index into the durable child sessions, not another copy
+/// of every answer. Preserve full live/provenance output; only its restart
+/// projection shares the remaining roster byte budget. Both native and extension
+/// workers accumulate Completed/LimitReached text solely from TurnFinished, which
+/// the agent emits only after append_assistant_turn_with_metadata succeeds.
+/// Failure and approval diagnostics are metadata, never output-budget candidates.
+fn encode_durable_fleet(mut fleet: DurableFleet) -> io::Result<Vec<u8>> {
+    let mut texts = Vec::new();
+    for (index, record) in fleet.records.iter_mut().enumerate() {
+        if let Some(text) = roster_status_text(&mut record.status) {
+            if !text.is_empty() {
+                texts.push((index, std::mem::take(text)));
+            }
+        }
+    }
+    let base_bytes = serde_json::to_vec(&fleet).map_err(io::Error::other)?.len();
+    let available = ROSTER_PROJECTION_BYTES
+        .saturating_sub(base_bytes)
+        .max(texts.len() * json_text_bytes(ROSTER_OUTPUT_SUFFIX));
+    let requested: usize = texts.iter().map(|(_, text)| json_text_bytes(text)).sum();
+    let budget = available / texts.len().max(1);
+    // Metadata still fails closed. Never turn a status into an unmarked empty
+    // answer just to make an overfull roster fit.
+    if base_bytes.saturating_add(available) > MAX_FLEET_ROSTER_BYTES
+        || (requested > available && budget < json_text_bytes(ROSTER_OUTPUT_SUFFIX))
+    {
+        return Err(io::Error::other(
+            "durable fleet metadata exceeded its bounded size",
+        ));
+    }
+    for (index, text) in texts {
+        *roster_status_text(&mut fleet.records[index].status).expect("saved status text") =
+            if requested <= available {
+                text
+            } else {
+                bound_roster_text(&text, budget)
+            };
+    }
+    let encoded = serde_json::to_vec(&fleet).map_err(io::Error::other)?;
+    debug_assert!(encoded.len() <= MAX_FLEET_ROSTER_BYTES);
+    Ok(encoded)
+}
+
+const ROSTER_OUTPUT_SUFFIX: &str = "\n...[truncated in fleet roster; inspect child session]";
+
+fn roster_status_text(status: &mut DelegatedAgentStatus) -> Option<&mut String> {
+    match status {
+        DelegatedAgentStatus::Completed { output }
+        | DelegatedAgentStatus::LimitReached { output, .. } => Some(output),
+        _ => None,
+    }
+}
+
+// serde_json's escaped string content size (excluding the two quotes). A raw
+// UTF-8 budget alone is insufficient: control bytes expand by up to six times.
+fn json_char_bytes(ch: char) -> usize {
+    match ch {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        '\u{0}'..='\u{1f}' => 6,
+        _ => ch.len_utf8(),
+    }
+}
+
+fn json_text_bytes(text: &str) -> usize {
+    text.chars().map(json_char_bytes).sum()
+}
+
+fn bound_roster_text(text: &str, budget: usize) -> String {
+    if json_text_bytes(text) <= budget {
+        return text.to_owned();
+    }
+    let mut remaining = budget - json_text_bytes(ROSTER_OUTPUT_SUFFIX);
+    let mut end = 0;
+    for ch in text.chars() {
+        let size = json_char_bytes(ch);
+        if size > remaining {
+            break;
+        }
+        remaining -= size;
+        end += ch.len_utf8();
+    }
+    format!("{}{ROSTER_OUTPUT_SUFFIX}", &text[..end])
+}
+
+// Version 2 pins per-worker routes; v1 readers must not inherit a wrong parent route.
+const FLEET_ROSTER_VERSION: u32 = 2;
 const FLEET_ROSTER_FILE: &str = "fleet.json";
 /// Versioned durable claim that fences execution of one session's fleet to a
 /// single live owner. A larger or malformed file fails closed instead of being
@@ -1744,8 +2183,12 @@ impl QueueUsage {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct DirectedMessage {
+    /// Cryptographically random host delivery identity, persisted until the
+    /// child session records this exact envelope.
+    #[serde(default)]
+    delivery_id: String,
     from: String,
     message: String,
 }
@@ -1764,7 +2207,54 @@ struct MailboxMessage {
     leased: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DurableMailboxMessage {
+    kind: String,
+    from: String,
+    task_name: Option<String>,
+    message: String,
+    evictable: bool,
+    continued: bool,
+    leased: bool,
+}
+
+impl From<&MailboxMessage> for DurableMailboxMessage {
+    fn from(message: &MailboxMessage) -> Self {
+        Self {
+            kind: message.kind.into(),
+            from: message.from.clone(),
+            task_name: message.task_name.clone(),
+            message: message.message.clone(),
+            evictable: message.evictable,
+            continued: message.continued,
+            leased: message.leased,
+        }
+    }
+}
+
+impl From<DurableMailboxMessage> for MailboxMessage {
+    fn from(message: DurableMailboxMessage) -> Self {
+        // Mailbox kinds are host-generated constants. Unknown persisted values
+        // are rendered as a bounded diagnostic rather than becoming a trusted
+        // static string.
+        let kind = match message.kind.as_str() {
+            "message" => "message",
+            "task_status" => "task_status",
+            _ => "diagnostic",
+        };
+        Self {
+            kind,
+            from: message.from,
+            task_name: message.task_name,
+            message: message.message,
+            evictable: message.evictable,
+            continued: message.continued,
+            leased: message.leased,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct MailboxDeliveryPlan {
     id: u64,
     complete_messages: usize,
@@ -1804,11 +2294,9 @@ struct WorkerCommand {
 }
 
 struct WorkerStartup {
+    generation: u64,
     identity: AgentIdentity,
     session: Session,
-    /// Initial task. `None` reattaches a detached worker with an empty task
-    /// queue; it idles until an explicit follow-up task or stop arrives.
-    initial_task: Option<String>,
     commands: mpsc::Receiver<WorkerCommand>,
     shutdown: crate::CancellationToken,
     initial_permit: OwnedSemaphorePermit,
@@ -1821,6 +2309,7 @@ struct WorkerStartup {
 struct WorkerLiveness {
     manager: Arc<DelegationManager>,
     id: String,
+    generation: u64,
 }
 
 /// One record this manager is about to start from its durable snapshot.
@@ -1832,21 +2321,23 @@ struct ReattachPlan {
 }
 
 impl WorkerLiveness {
-    fn new(manager: &Arc<DelegationManager>, id: String) -> Self {
+    fn new(manager: &Arc<DelegationManager>, id: String, generation: u64) -> Self {
         Self {
             manager: Arc::clone(manager),
             id,
+            generation,
         }
     }
 }
 
 impl Drop for WorkerLiveness {
     fn drop(&mut self) {
-        self.manager.mark_worker_stopped(&self.id);
+        self.manager.mark_worker_stopped(&self.id, self.generation);
     }
 }
 
 struct ChildRunContext<'a> {
+    queued_delivery_ids: BTreeSet<String>,
     identity: &'a AgentIdentity,
     commands: &'a mut mpsc::Receiver<WorkerCommand>,
     shutdown: &'a crate::CancellationToken,
@@ -1861,9 +2352,9 @@ impl WorkerCommand {
         }
     }
 
-    fn follow_up(follow_up: QueuedFollowUp) -> Self {
+    fn follow_up() -> Self {
         Self {
-            kind: WorkerCommandKind::FollowUp(follow_up),
+            kind: WorkerCommandKind::FollowUp,
         }
     }
 
@@ -1876,7 +2367,7 @@ impl WorkerCommand {
 
 enum WorkerCommandKind {
     Message(DirectedMessage),
-    FollowUp(QueuedFollowUp),
+    FollowUp,
     Shutdown,
 }
 
@@ -2074,7 +2565,12 @@ impl DelegationManager {
                         .clone()
                         .unwrap_or_else(|| record.task_name.clone()),
                     profile: record.extension_profile.clone(),
-                    model: self.template.model.spec.id.0.clone(),
+                    model: record
+                        .extension_policy
+                        .as_ref()
+                        .and_then(|p| p.resolved_model.as_ref())
+                        .map(|m| m.model.clone())
+                        .unwrap_or_else(|| self.template.model.spec.id.0.clone()),
                     state: record.status.label().to_owned(),
                     phase: if !record.active_tools.is_empty() {
                         "using_tool".to_owned()
@@ -2100,6 +2596,12 @@ impl DelegationManager {
                     cache_read_tokens: record.usage.cache_read_tokens,
                     cache_write_tokens: record.usage.cache_write_tokens,
                     output_tokens: record.usage.output_tokens,
+                    estimated_output_tokens: (record.streamed_output_bytes > 0).then(|| {
+                        record
+                            .usage
+                            .output_tokens
+                            .saturating_add(record.streamed_output_bytes.div_ceil(4))
+                    }),
                     reasoning_tokens: record.usage.reasoning_tokens,
                     total_tokens: record.usage.total_tokens,
                     cost: if record.usage_uncertain {
@@ -2459,8 +2961,11 @@ impl DelegationManager {
             version: FLEET_ROSTER_VERSION,
             root_session: self.root_session.clone(),
             records: state.records.values().map(durable_fleet_record).collect(),
+            next_mailbox_delivery: state.next_mailbox_delivery,
+            root_mailbox: state.root_mailbox.iter().map(Into::into).collect(),
+            root_mailbox_delivery: state.root_mailbox_delivery,
         };
-        let encoded = match serde_json::to_vec(&fleet) {
+        let encoded = match encode_durable_fleet(fleet) {
             Ok(encoded) => encoded,
             Err(error) => {
                 self.fail_persistence_locked(state, &io::Error::other(error));
@@ -2524,11 +3029,19 @@ impl DelegationManager {
             command_tx,
             shutdown: crate::CancellationToken::default(),
             interrupt_requested: false,
-            pending_messages: VecDeque::new(),
+            pending_messages: durable.pending_messages,
             reserved_messages: QueueUsage::default(),
-            queued_follow_ups: QueueUsage::default(),
-            mailbox: VecDeque::new(),
-            mailbox_delivery: None,
+            queued_follow_ups: durable.queued_follow_ups.iter().fold(
+                QueueUsage::default(),
+                |mut usage, follow_up| {
+                    usage.add_usage(follow_up.usage());
+                    usage
+                },
+            ),
+            pending_follow_ups: durable.queued_follow_ups,
+            pending_initial_task: durable.pending_initial_task,
+            mailbox: durable.mailbox.into_iter().map(Into::into).collect(),
+            mailbox_delivery: durable.mailbox_delivery,
             resource_owner: durable.resource_owner,
             extension_policy,
             effective_tool_policy,
@@ -2548,6 +3061,7 @@ impl DelegationManager {
             active_tools: BTreeMap::new(),
             recent_tools: VecDeque::new(),
             usage: durable.usage,
+            streamed_output_bytes: 0,
             usage_uncertain: durable.usage_uncertain,
             cost: durable.cost,
             cost_microdollars: durable.cost_microdollars,
@@ -2555,6 +3069,7 @@ impl DelegationManager {
             turn_limit: durable.turn_limit,
             detached: true,
             live_task: false,
+            worker_generation: 0,
             // A restored record keeps its command receiver for every state that
             // an explicit follow-up can resume, so a later turn is never told
             // "no longer available" for a worker the session still owns.
@@ -2562,6 +3077,63 @@ impl DelegationManager {
             durable_diagnostic: claim_reason.or(durable.durable_diagnostic),
             claim: durable.claim,
         }
+    }
+
+    fn discard_session_delivered_inputs(record: &mut AgentRecord) -> Result<(), String> {
+        let file = secure_fs::open_private_file_for_read(&record.session_path)
+            .map_err(|error| format!("could not open child session: {error}"))?;
+        let session = Session::open_read_only_with_file(record.session_path.clone(), file)
+            .map_err(|error| format!("could not read child session: {error}"))?;
+        Self::discard_inputs_delivered_to_session(record, &session)
+    }
+
+    fn discard_inputs_delivered_to_session(
+        record: &mut AgentRecord,
+        session: &Session,
+    ) -> Result<(), String> {
+        // Reconcile only the active head's ancestry. Historical entries on an
+        // abandoned branch are not authority for a later resumed worker.
+        let mut delivered = BTreeSet::new();
+        let mut cursor = session.head();
+        while let Some(id) = cursor {
+            let entry = session
+                .entry(&id)
+                .ok_or_else(|| "child session has an invalid active ancestry".to_owned())?;
+            if let crate::session::EntryValue::Message(octet_ai::Message::User(message)) =
+                &entry.value
+            {
+                for text in message.content.iter().filter_map(|part| match part {
+                    octet_ai::UserPart::Text(text) => Some(text.as_str()),
+                    _ => None,
+                }) {
+                    delivered.extend(delivery_ids_in_envelopes(text));
+                }
+            }
+            cursor = entry.parent.clone();
+        }
+        if record
+            .pending_initial_task
+            .as_ref()
+            .is_some_and(|task| delivered.contains(&task.delivery_id))
+        {
+            record.pending_initial_task = None;
+        }
+        // Legacy empty IDs have no safe identity evidence and are retained.
+        record.pending_messages.retain(|message| {
+            message.delivery_id.is_empty() || !delivered.contains(&message.delivery_id)
+        });
+        record.pending_follow_ups.retain(|follow_up| {
+            follow_up.delivery_id.is_empty() || !delivered.contains(&follow_up.delivery_id)
+        });
+        record.queued_follow_ups =
+            record
+                .pending_follow_ups
+                .iter()
+                .fold(QueueUsage::default(), |mut usage, follow_up| {
+                    usage.add_usage(follow_up.usage());
+                    usage
+                });
+        Ok(())
     }
 
     /// Reconstruct the session-owned fleet persisted by an earlier run or
@@ -2595,7 +3167,9 @@ impl DelegationManager {
         let Ok(fleet) = serde_json::from_slice::<DurableFleet>(&bytes) else {
             return;
         };
-        if fleet.version != FLEET_ROSTER_VERSION || fleet.root_session != self.root_session {
+        if !matches!(fleet.version, 1 | FLEET_ROSTER_VERSION)
+            || fleet.root_session != self.root_session
+        {
             return;
         }
         let effective_tool_policy = self
@@ -2609,6 +3183,9 @@ impl DelegationManager {
         if state.shutting_down || state.persistence_error.is_some() {
             return;
         }
+        state.next_mailbox_delivery = fleet.next_mailbox_delivery.max(1);
+        state.root_mailbox = fleet.root_mailbox.into_iter().map(Into::into).collect();
+        state.root_mailbox_delivery = fleet.root_mailbox_delivery;
         let capacity = self.config.limits.max_total_agents.saturating_sub(1);
         let refusal = self.lease_refusal_reason();
         for durable in fleet.records.into_iter().take(capacity) {
@@ -2616,19 +3193,36 @@ impl DelegationManager {
                 continue;
             }
             let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
-            let record = Self::agent_record_from_durable(
+            let mut record = Self::agent_record_from_durable(
                 durable,
                 effective_tool_policy.clone(),
                 refusal.as_deref(),
                 command_tx,
                 Some(command_rx),
             );
+            // The child session is authoritative for prompt delivery. A roster
+            // snapshot can lag a successful append, so never replay a queued
+            // input that is already present in that durable session. An unreadable
+            // authority fails closed rather than guessing from queue payloads.
+            if let Err(error) = Self::discard_session_delivered_inputs(&mut record) {
+                // Unavailable authority is not evidence of delivery. Preserve
+                // every accepted payload and attempt count until a successful
+                // reopen can reconcile them, even across another restart.
+                record.status = DelegatedAgentStatus::Detached;
+                record.detached = true;
+                record.durable_diagnostic = Some(bounded_text(&format!(
+                    "child session authority could not be read; queued inputs retained without replay: {error}"
+                )));
+            }
             if let Some(number) = agent_number_from_id(&record.identity.id) {
                 state.next_agent_number = state.next_agent_number.max(number.saturating_add(1));
             }
             state.records.insert(record.identity.id.clone(), record);
             state.total_agents = state.total_agents.saturating_add(1);
         }
+        // Upgrade legacy records and acknowledge any child-session delivery
+        // observations before another process can reconstruct this roster.
+        self.persist_durable_fleet_locked(&mut state);
         drop(state);
         self.changed.notify_waiters();
         self.publish_telemetry(None, None);
@@ -2679,10 +3273,11 @@ impl DelegationManager {
 
     /// Reattach every detached record the owning session can prove it may run.
     ///
-    /// Reattachment resumes the persisted child session with an empty task
-    /// queue: the worker advertises idle until an explicit follow-up task or
-    /// stop arrives. It never spawns a duplicate worker, and it acquires a permit
-    /// per record so the concurrency cap still holds across the turn boundary.
+    /// Reattachment runs only undelivered durable tasks. If reconciliation
+    /// leaves no task, the worker settles as interrupted with its session
+    /// retained for an explicit follow-up; it must not idle forever as pending
+    /// or replay already delivered work. Each start acquires a permit so the
+    /// concurrency cap still holds across the turn boundary.
     ///
     /// Every start requires a fresh durable fleet claim: a manager whose lease
     /// was refused, was superseded, or cannot be re-proved refuses the record
@@ -2811,6 +3406,14 @@ impl DelegationManager {
                         continue;
                     }
                 };
+                let record = state.records.get_mut(&id).expect("selected child exists");
+                if let Err(error) = Self::discard_inputs_delivered_to_session(record, &session) {
+                    let reason = bounded_text(&format!("worker was not reattached: {error}"));
+                    record.detached = true;
+                    record.durable_diagnostic = Some(reason.clone());
+                    refused.push((id, reason));
+                    continue;
+                }
                 // Keep receivers and liveness on the records until the entire
                 // batch's provenance is committed. A failed reopen only refuses
                 // this child; a journal failure leaves all unstarted receivers
@@ -2894,46 +3497,74 @@ impl DelegationManager {
             }
         }
         for plan in plans {
+            let has_tasks = !self.restored_tasks(&plan.id).is_empty();
+            let status = if has_tasks {
+                DelegatedAgentStatus::Pending
+            } else {
+                DelegatedAgentStatus::Interrupted
+            };
+            let settled_at = timestamp_ms();
+            if let Err(error) = self.journal.append(&ProvenanceEvent::AgentStatus {
+                timestamp_ms: settled_at,
+                agent_id: &plan.id,
+                status: &status,
+            }) {
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                self.fail_persistence_locked(&mut state, &error);
+                return Err(format!(
+                    "could not persist reattachment settlement: {error}"
+                ));
+            }
             let startup = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
                 let record = state
                     .records
                     .get_mut(&plan.id)
                     .expect("selected child exists");
-                // A restored record retains its buffered commands. A worker
-                // that settled without a receiver needs a fresh channel.
-                let commands = match record.detached_commands.take() {
-                    Some(commands) => commands,
-                    None => {
-                        let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
-                        record.command_tx = command_tx;
-                        command_rx
-                    }
-                };
-                record.status = DelegatedAgentStatus::Idle;
+                record.status = status;
                 record.detached = false;
-                record.durable_diagnostic = None;
                 record.claim = Some(plan.claim);
-                record.live_task = true;
-                WorkerStartup {
-                    identity: record.identity.clone(),
-                    session: plan.session,
-                    initial_task: None,
-                    commands,
-                    shutdown: record.shutdown.clone(),
-                    initial_permit: plan.initial_permit,
-                    extension_policy: record.extension_policy.clone(),
-                    deadline: record.deadline_at_ms.map(wall_deadline_instant),
-                    deadline_ms: record.deadline_at_ms,
+                record.live_task = has_tasks;
+                let startup = if has_tasks {
+                    let commands = match record.detached_commands.take() {
+                        Some(commands) => commands,
+                        None => {
+                            let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+                            record.command_tx = tx;
+                            rx
+                        }
+                    };
+                    record.durable_diagnostic = None;
+                    record.worker_generation += 1;
+                    Some(WorkerStartup {
+                        generation: record.worker_generation,
+                        identity: record.identity.clone(),
+                        session: plan.session,
+                        commands,
+                        shutdown: record.shutdown.clone(),
+                        initial_permit: plan.initial_permit,
+                        extension_policy: record.extension_policy.clone(),
+                        deadline: record.deadline_at_ms.map(wall_deadline_instant),
+                        deadline_ms: record.deadline_at_ms,
+                    })
+                } else {
+                    record.completed_at_ms = Some(u64::try_from(settled_at).unwrap_or(u64::MAX));
+                    record.durable_diagnostic = Some(
+                        "worker was interrupted before its outcome was retained; no undelivered task remains. Use subagent_continue (or followup_task) to resume the retained session explicitly; delivered work was not replayed".into(),
+                    );
+                    None
+                };
+                self.persist_durable_fleet_locked(&mut state);
+                if let Some(error) = &state.persistence_error {
+                    return Err(format!(
+                        "could not persist reattachment settlement: {error}"
+                    ));
                 }
+                startup
             };
-            let manager = Arc::clone(self);
-            tokio::spawn(async move {
-                manager.run_worker(startup).await;
-            });
+            if let Some(startup) = startup {
+                self.spawn_worker(startup);
+            }
         }
         {
             let mut state = self
@@ -3001,8 +3632,8 @@ impl DelegationManager {
             }
             // Session-scoped lifetime: a new owning run reattaches the fleet
             // that survived the previous turn instead of retiring it. Live
-            // workers keep running; workers reconstructed from the durable
-            // roster are resumed with an empty task queue. Execution capacity
+            // workers keep running; restored workers run undelivered tasks or
+            // settle as interrupted for explicit continuation. Execution capacity
             // is *not* handed back here: a surviving worker keeps its slot, so
             // the cap cannot drift up on reattachment.
             {
@@ -3128,6 +3759,28 @@ impl DelegationManager {
             ExtensionDelegationService::validate_resource_owner(&provenance.resource_owner)?;
         }
         let extension_requested_policy = extension_policy.clone();
+        let resolved = self.template.resolve_model(extension_policy.as_ref())?;
+        if extension_policy.is_some()
+            && resolved.model.spec.pricing.is_none()
+            && (extension_policy
+                .as_ref()
+                .is_some_and(|p| p.max_cost_microdollars.is_some())
+                || self
+                    .template
+                    .runtime
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .max_session_cost_microdollars
+                    .is_some())
+        {
+            return Err(
+                "extension children with a cost ceiling require trusted model pricing".into(),
+            );
+        }
+        if let Some(policy) = extension_policy.as_mut() {
+            policy.resolved_model = Some(resolved.metadata.clone());
+            policy.resolved_reasoning = Some(resolved.reasoning.clone());
+        }
         if let Some(policy) = extension_policy.as_mut() {
             policy.validate()?;
             if owner.depth.saturating_add(1) > policy.max_depth {
@@ -3170,6 +3823,7 @@ impl DelegationManager {
             .sandbox
             .effective_tool_policy(self.template.effect_broker.policy());
         let initial_task = message;
+        let initial_delivery_id = new_delivery_id()?;
         if owner.depth >= self.config.limits.max_depth {
             return Err(format!(
                 "delegation depth limit reached at {} (max depth {})",
@@ -3344,6 +3998,12 @@ impl DelegationManager {
                     pending_messages: VecDeque::new(),
                     reserved_messages: QueueUsage::default(),
                     queued_follow_ups: QueueUsage::default(),
+                    pending_follow_ups: VecDeque::new(),
+                    pending_initial_task: Some(QueuedInitialTask {
+                        task: initial_task.clone(),
+                        delivery_id: initial_delivery_id,
+                        attempts: 0,
+                    }),
                     mailbox: VecDeque::new(),
                     mailbox_delivery: None,
                     resource_owner: None,
@@ -3377,23 +4037,28 @@ impl DelegationManager {
                     active_tools: BTreeMap::new(),
                     recent_tools: VecDeque::new(),
                     usage: Usage::default(),
+                    streamed_output_bytes: 0,
                     usage_uncertain: false,
-                    cost: (extension_policy.is_some()
-                        && self.template.model.spec.pricing.is_some())
-                    .then_some(Cost::default()),
+                    cost: (extension_policy.is_some() && resolved.model.spec.pricing.is_some())
+                        .then_some(Cost::default()),
                     cost_microdollars: (extension_policy.is_some()
-                        && self.template.model.spec.pricing.is_some())
+                        && resolved.model.spec.pricing.is_some())
                     .then_some(0),
                     deadline_at_ms,
                     turn_limit,
                     detached: false,
                     live_task: true,
+                    worker_generation: 1,
                     detached_commands: None,
                     durable_diagnostic: None,
                     claim: self.current_claim(),
                 },
             );
             state.total_agents += 1;
+            self.persist_durable_fleet_locked(&mut state);
+            if let Some(error) = &state.persistence_error {
+                return Err(format!("could not persist initial delegated task: {error}"));
+            }
             (identity, session, command_rx, shutdown, task_name)
         };
 
@@ -3402,22 +4067,17 @@ impl DelegationManager {
             .as_ref()
             .and_then(|policy| policy.max_turns)
             .or(self.template.max_turns);
-        let manager = Arc::clone(self);
-        let worker_identity = identity.clone();
-        tokio::spawn(async move {
-            manager
-                .run_worker(WorkerStartup {
-                    identity: worker_identity,
-                    session,
-                    initial_task: Some(initial_task),
-                    commands: command_rx,
-                    shutdown,
-                    initial_permit: permit,
-                    extension_policy,
-                    deadline,
-                    deadline_ms: deadline_at_ms,
-                })
-                .await;
+        self.spawn_worker(WorkerStartup {
+            generation: 1,
+            identity: identity.clone(),
+            session,
+
+            commands: command_rx,
+            shutdown,
+            initial_permit: permit,
+            extension_policy,
+            deadline,
+            deadline_ms: deadline_at_ms,
         });
         self.changed.notify_waiters();
         self.publish_telemetry(None, None);
@@ -3436,7 +4096,8 @@ impl DelegationManager {
                 .as_ref()
                 .and_then(|provenance| provenance.fingerprint.as_deref()),
             "status": "pending",
-            "policy": result_policy,
+            "resolved_model": resolved_model_json(result_policy.as_ref()),
+            "policy": public_policy_json(result_policy.as_ref()),
             "effective_tool_policy": effective_tool_policy,
             "orchestration_provenance": orchestration_provenance,
             "created_at_ms": created_at_ms,
@@ -3447,11 +4108,41 @@ impl DelegationManager {
         }))
     }
 
+    /// Keep a join handle for the actual worker future so a panic or external
+    /// abort cannot strand its record in `Running`.
+    fn spawn_worker(self: &Arc<Self>, startup: WorkerStartup) {
+        let id = startup.identity.id.clone();
+        // The incarnation was advanced atomically with publication of the
+        // pending record: an old supervisor cannot settle its replacement even
+        // in the interval before this new task is actually spawned.
+        let generation = startup.generation;
+        let claim = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .records
+            .get(&id)
+            .and_then(|record| record.claim.clone());
+        let supervisor = Arc::clone(self);
+        tokio::spawn(async move {
+            let worker = Arc::clone(&supervisor);
+            let result = tokio::spawn(async move { worker.run_worker(startup).await }).await;
+            if let Err(error) = result {
+                let cause = if error.is_panic() {
+                    "worker task panicked"
+                } else {
+                    "worker task was aborted"
+                };
+                supervisor.mark_worker_aborted(&id, claim.as_ref(), generation, cause);
+            }
+        });
+    }
+
     async fn run_worker(self: Arc<Self>, startup: WorkerStartup) {
         let WorkerStartup {
+            generation,
             identity,
             session,
-            initial_task,
             mut commands,
             shutdown,
             initial_permit,
@@ -3460,13 +4151,10 @@ impl DelegationManager {
             mut deadline_ms,
         } = startup;
         let session_path = session.path().to_path_buf();
-        let _liveness = WorkerLiveness::new(&self, identity.id.clone());
+        let _liveness = WorkerLiveness::new(&self, identity.id.clone(), generation);
         let mut unopened_session = Some(session);
         let mut agent = None;
-        let mut queued_tasks = match initial_task {
-            Some(task) => VecDeque::from([QueuedTask::Initial(task)]),
-            None => VecDeque::new(),
-        };
+        let mut queued_tasks = self.restored_tasks(&identity.id);
         let mut initial_permit = Some(initial_permit);
         let mut retry_undelivered_task = false;
         let mut retry_pending_messages = 0;
@@ -3544,14 +4232,26 @@ impl DelegationManager {
                             // at the FIFO head, and retry only after explicit new
                             // work prevents a persistent failure hot loop.
                             initial_permit.take();
-                            self.fail_worker_start(
-                                &identity.id,
-                                bounded_text(&format!(
-                                    "delegated agent could not start; task retained for retry: {error}"
-                                )),
+                            let task = queued_tasks.pop_front().expect("startup task exists");
+                            let restored = restore_undelivered_task(
+                                &mut queued_tasks,
+                                task.clone(),
+                                false,
+                                &WorkerOutcome::Failed(error.to_string()),
                             );
+                            self.persist_task_result(&identity.id, &task, &restored, false);
+                            let diagnostic = match restored {
+                                TaskRestore::DeadLettered { attempts } => format!(
+                                    "delegated task was dead-lettered after {attempts} undelivered attempts: {error}"
+                                ),
+                                _ => format!(
+                                    "delegated agent could not start; task retained for retry: {error}"
+                                ),
+                            };
+                            self.fail_worker_start(&identity.id, bounded_text(&diagnostic));
                             self.request_shutdown_descendants(&identity.id);
-                            retry_undelivered_task = true;
+                            retry_undelivered_task =
+                                matches!(restored, TaskRestore::Restored { .. });
                             retry_pending_messages = self.pending_message_count(&identity.id);
                             continue;
                         }
@@ -3631,6 +4331,11 @@ impl DelegationManager {
                         agent.as_mut().expect("delegated agent initialized"),
                         formatted_task,
                         ChildRunContext {
+                            queued_delivery_ids: queued_tasks
+                                .iter()
+                                .chain(std::iter::once(&task))
+                                .map(|task| task.delivery_id().to_owned())
+                                .collect(),
                             identity: &identity,
                             commands: &mut commands,
                             shutdown: &shutdown,
@@ -3645,7 +4350,13 @@ impl DelegationManager {
                         .as_ref()
                         .expect("delegated agent remains initialized")
                         .session(),
-                    self.template.model.spec.pricing.is_some(),
+                    agent
+                        .as_ref()
+                        .expect("initialized child")
+                        .model()
+                        .spec
+                        .pricing
+                        .is_some(),
                 );
                 drop(permit);
 
@@ -3675,8 +4386,23 @@ impl DelegationManager {
                         delivered_follow_ups.add_usage(usage);
                     }
                 }
-                let task_restored =
-                    restore_undelivered_task(&mut queued_tasks, task, task_delivered, &outcome);
+                let task_restore = restore_undelivered_task(
+                    &mut queued_tasks,
+                    task.clone(),
+                    task_delivered,
+                    &outcome,
+                );
+                self.persist_task_result(&identity.id, &task, &task_restore, task_delivered);
+                let task_restored = matches!(task_restore, TaskRestore::Restored { .. });
+                match task_restore {
+                    TaskRestore::Restored { .. } => {}
+                    TaskRestore::DeadLettered { attempts } => {
+                        outcome = WorkerOutcome::Failed(format!(
+                            "delegated task was dead-lettered after {attempts} undelivered attempts"
+                        ));
+                    }
+                    TaskRestore::NotRestored => {}
+                }
                 self.release_follow_up_usage(&identity.id, delivered_follow_ups);
                 let retained_pending_messages = self.pending_message_count(&identity.id);
 
@@ -3698,7 +4424,7 @@ impl DelegationManager {
                     }
                     WorkerOutcome::Interrupted => {
                         queued_tasks
-                            .extend(deferred_follow_ups.into_iter().map(QueuedTask::FollowUp));
+                            .extend(deferred_follow_ups.into_iter().map(QueuedTask::follow_up));
                         let saw_shutdown = self.drain_interrupted_commands(
                             &identity.id,
                             &mut commands,
@@ -3734,7 +4460,7 @@ impl DelegationManager {
                         );
                         self.request_shutdown_descendants(&identity.id);
                         queued_tasks
-                            .extend(deferred_follow_ups.into_iter().map(QueuedTask::FollowUp));
+                            .extend(deferred_follow_ups.into_iter().map(QueuedTask::follow_up));
                         // A max-turn run is a durable terminal completion, not
                         // a retryable task failure. Follow-ups may explicitly
                         // resume the same child session.
@@ -3769,7 +4495,7 @@ impl DelegationManager {
                         );
                         self.request_shutdown_descendants(&identity.id);
                         queued_tasks
-                            .extend(deferred_follow_ups.into_iter().map(QueuedTask::FollowUp));
+                            .extend(deferred_follow_ups.into_iter().map(QueuedTask::follow_up));
                         // A pre-flight prompt failure did not durably accept the
                         // active task. Keep it at the FIFO head, but wait for an
                         // explicit message or follow-up instead of hot-looping
@@ -3786,7 +4512,7 @@ impl DelegationManager {
                             true,
                         );
                         queued_tasks
-                            .extend(deferred_follow_ups.into_iter().map(QueuedTask::FollowUp));
+                            .extend(deferred_follow_ups.into_iter().map(QueuedTask::follow_up));
                         retry_undelivered_task = false;
                         retry_pending_messages = 0;
                     }
@@ -3844,8 +4570,19 @@ impl DelegationManager {
                     retry_undelivered_task = false;
                     retry_pending_messages = 0;
                 }
-                WorkerCommandKind::FollowUp(follow_up) => {
-                    queued_tasks.push_back(QueuedTask::FollowUp(follow_up));
+                WorkerCommandKind::FollowUp => {
+                    let pending = self.restored_tasks(&identity.id);
+                    // A wakeup can outlive queue seeding or delivery. It is not
+                    // a second acceptance and must not trigger another retry.
+                    let new_work = pending.iter().any(|pending| {
+                        !queued_tasks
+                            .iter()
+                            .any(|queued| queued.delivery_id() == pending.delivery_id())
+                    });
+                    queued_tasks = pending;
+                    if !new_work {
+                        continue;
+                    }
                     retry_undelivered_task = false;
                     retry_pending_messages = 0;
                 }
@@ -3888,10 +4625,14 @@ impl DelegationManager {
 
     fn build_child_agent(
         self: &Arc<Self>,
-        session: Session,
+        mut session: Session,
         identity: &AgentIdentity,
         extension_policy: Option<&ExtensionAgentSessionPolicy>,
     ) -> Result<Agent, DelegationError> {
+        let resolved = self
+            .template
+            .resolve_model(extension_policy)
+            .map_err(DelegationError::InvalidConfig)?;
         let parent_path = identity
             .path
             .rsplit_once('/')
@@ -3954,37 +4695,45 @@ impl DelegationManager {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        // Astra's host-side Ultra tier enables V2 collaboration, but the
-        // observed child-run wire contract is xhigh. Keep root and generic
-        // Ultra lowering unchanged by translating only this child boundary.
-        let child_reasoning = if self.template.model.spec.api_name == "gpt-6-astra"
-            && self.template.model.spec.capabilities.agent_delegation
-                == Some(octet_ai::AgentDelegation::V2)
-            && self
-                .template
-                .model
-                .spec
-                .capabilities
-                .reasoning
-                .as_ref()
-                .is_some_and(|reasoning| reasoning.max_effort == octet_ai::ReasoningEffort::Ultra)
-            && self.template.reasoning
-                == octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra)
-        {
-            octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Xhigh)
-        } else {
-            self.template.reasoning.clone()
-        };
+        if extension_policy.is_some() {
+            let mut cursor = session.head_ref();
+            let mut matches_config = false;
+            while let Some(id) = cursor {
+                let entry = session.entry(id).expect("session branch entries exist");
+                if let crate::session::EntryValue::Config {
+                    model, reasoning, ..
+                } = &entry.value
+                {
+                    matches_config = model.as_deref() == Some(&resolved.metadata.model)
+                        && reasoning.as_deref() == Some(&resolved.metadata.reasoning);
+                    break;
+                }
+                cursor = entry.parent.as_ref();
+            }
+            if !matches_config {
+                session.append(crate::session::EntryValue::Config {
+                    model: Some(resolved.metadata.model.clone()),
+                    reasoning: Some(resolved.metadata.reasoning.clone()),
+                    reasoning_mode: Some(
+                        match self.template.reasoning_mode {
+                            octet_ai::ReasoningMode::Standard => "standard",
+                            octet_ai::ReasoningMode::Pro => "pro",
+                        }
+                        .into(),
+                    ),
+                })?;
+            }
+        }
         let mut agent = Agent::new(AgentConfig {
             client: self.template.client.clone(),
-            model: self.template.model.clone(),
+            model: resolved.model.clone(),
             session,
             system,
             sandbox: self.template.sandbox.clone(),
             effect_broker: self.template.effect_broker.clone(),
             extensions,
             max_turns,
-            reasoning: child_reasoning,
+            reasoning: resolved.reasoning.clone(),
             reasoning_mode: self.template.reasoning_mode,
             cache_retention: self.template.cache_retention,
             session_id: None,
@@ -4009,8 +4758,13 @@ impl DelegationManager {
         )?;
         agent.set_completion_policy(runtime.completion_policy);
         agent.set_output_modalities(runtime.output_modalities);
+        agent.set_tool_schema_budget_bytes(runtime.tool_schema_budget_bytes);
         if let Some(policy) = extension_policy {
-            agent.inherit_max_output_tokens(runtime.max_output_tokens);
+            agent.inherit_max_output_tokens(
+                runtime
+                    .max_output_tokens
+                    .min(resolved.model.spec.limits.max_output_tokens),
+            );
             let max_session_tokens = match (runtime.max_session_tokens, policy.max_tokens) {
                 (Some(parent), Some(requested)) => Some(parent.min(requested)),
                 (Some(parent), None) => Some(parent),
@@ -4027,7 +4781,11 @@ impl DelegationManager {
             agent.set_max_session_tokens(max_session_tokens);
             agent.set_max_session_cost_microdollars(max_session_cost_microdollars);
         } else {
-            agent.inherit_max_output_tokens(runtime.max_output_tokens);
+            agent.inherit_max_output_tokens(
+                runtime
+                    .max_output_tokens
+                    .min(resolved.model.spec.limits.max_output_tokens),
+            );
             agent.set_max_session_tokens(runtime.max_session_tokens);
             agent.set_max_session_cost_microdollars(runtime.max_session_cost_microdollars);
         }
@@ -4053,6 +4811,7 @@ impl DelegationManager {
         context: ChildRunContext<'_>,
     ) -> WorkerExecution {
         let ChildRunContext {
+            mut queued_delivery_ids,
             identity,
             commands,
             shutdown,
@@ -4147,7 +4906,7 @@ impl DelegationManager {
         let mut defer_messages = false;
         let mut submitted_follow_ups = VecDeque::new();
         let mut deferred_follow_ups = VecDeque::new();
-        let mut defer_follow_ups = false;
+        let mut defer_follow_ups = queued_delivery_ids.len() > 1;
         let mut acknowledged_follow_ups = QueueUsage::default();
         let mut requested_interrupt = false;
         let mut requested_shutdown = false;
@@ -4157,6 +4916,7 @@ impl DelegationManager {
             .and_then(|policy| policy.max_turns)
             .or(self.template.max_turns);
         let mut turns_completed = 0_u64;
+        let mut last_stream_update = None;
         let mut commands_open = true;
         enum Next {
             Event,
@@ -4210,9 +4970,7 @@ impl DelegationManager {
                         if defer_messages
                             || requested_interrupt
                             || requested_shutdown
-                            || control
-                                .try_steer(format_direct_message(&message.from, &message.message))
-                                .is_err()
+                            || control.try_steer(format_direct_message(&message)).is_err()
                         {
                             // Once one message cannot enter the active run, keep
                             // later messages behind it to preserve FIFO order.
@@ -4222,24 +4980,28 @@ impl DelegationManager {
                             submitted_messages.push_back(message);
                         }
                     }
-                    WorkerCommandKind::FollowUp(follow_up) => {
-                        if defer_follow_ups
-                            || requested_interrupt
-                            || requested_shutdown
-                            || control
-                                .try_follow_up(format_follow_up(
-                                    &follow_up.from,
-                                    &follow_up.message,
-                                    &[],
-                                ))
-                                .is_err()
-                        {
-                            // Preserve FIFO across the active run-control queue
-                            // and the worker's deferred queue.
-                            defer_follow_ups = true;
-                            deferred_follow_ups.push_back(follow_up);
-                        } else {
-                            submitted_follow_ups.push_back(follow_up);
+                    WorkerCommandKind::FollowUp => {
+                        for task in self.restored_tasks(&identity.id) {
+                            let QueuedTask::FollowUp(follow_up) = task else {
+                                continue;
+                            };
+                            if !queued_delivery_ids.insert(follow_up.delivery_id.clone()) {
+                                continue;
+                            }
+                            if defer_follow_ups
+                                || requested_interrupt
+                                || requested_shutdown
+                                || control
+                                    .try_follow_up(format_follow_up(&follow_up, &[]))
+                                    .is_err()
+                            {
+                                // Preserve FIFO across the active run-control queue
+                                // and the worker's deferred queue.
+                                defer_follow_ups = true;
+                                deferred_follow_ups.push_back(follow_up);
+                            } else {
+                                submitted_follow_ups.push_back(follow_up);
+                            }
                         }
                     }
                     WorkerCommandKind::Shutdown => {
@@ -4284,6 +5046,7 @@ impl DelegationManager {
                                 );
                                 break;
                             };
+                            self.acknowledge_follow_up_delivery(&identity.id, &follow_up);
                             acknowledged_follow_ups.add_usage(follow_up.usage());
                         }
                     }
@@ -4297,6 +5060,17 @@ impl DelegationManager {
                             Ok(output) => output.is_error(),
                         };
                         self.update_agent_tool_finished(&identity.id, &id.0, is_error);
+                    }
+                    Some(AgentEvent::OutputDelta { text, .. }) => {
+                        self.update_agent_streamed_output(
+                            &identity.id,
+                            text.len(),
+                            &mut last_stream_update,
+                        );
+                    }
+                    Some(AgentEvent::ProviderRetry { .. }) => {
+                        self.clear_agent_streamed_output(&identity.id);
+                        last_stream_update = None;
                     }
                     Some(AgentEvent::ProviderUsageUncertain) => {
                         self.mark_agent_usage_uncertain(&identity.id);
@@ -4312,6 +5086,7 @@ impl DelegationManager {
                             session_cost_microdollars,
                             false,
                         );
+                        last_stream_update = None;
                     }
                     Some(AgentEvent::TurnFinished {
                         message,
@@ -4325,6 +5100,7 @@ impl DelegationManager {
                             session_cost_microdollars,
                             true,
                         );
+                        last_stream_update = None;
                         turns_completed = turns_completed.saturating_add(1);
                         if extension_policy.is_some_and(|policy| {
                             policy
@@ -4468,6 +5244,49 @@ impl DelegationManager {
         self.publish_telemetry(None, None);
     }
 
+    fn update_agent_streamed_output(
+        &self,
+        id: &str,
+        bytes: usize,
+        last_update: &mut Option<Instant>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = state.records.get_mut(id) else {
+            return;
+        };
+        let previous = record.streamed_output_bytes.div_ceil(4);
+        record.streamed_output_bytes = record.streamed_output_bytes.saturating_add(bytes as u64);
+        let changed = record.streamed_output_bytes.div_ceil(4) != previous;
+        drop(state);
+        let now = Instant::now();
+        if changed
+            && last_update
+                .is_none_or(|last| now.duration_since(last) >= STREAMED_OUTPUT_UPDATE_INTERVAL)
+        {
+            *last_update = Some(now);
+            self.publish_telemetry(None, None);
+        }
+    }
+
+    fn clear_agent_streamed_output(&self, id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = state.records.get_mut(id) else {
+            return;
+        };
+        let changed = record.streamed_output_bytes != 0;
+        record.streamed_output_bytes = 0;
+        drop(state);
+        if changed {
+            self.publish_telemetry(None, None);
+        }
+    }
+
     fn update_agent_usage(
         &self,
         id: &str,
@@ -4486,6 +5305,7 @@ impl DelegationManager {
             record.turn_count = record.turn_count.saturating_add(1);
         }
         record.usage = usage;
+        record.streamed_output_bytes = 0;
         if !record.usage_uncertain && cost_microdollars.is_some() {
             record.cost_microdollars = cost_microdollars;
         }
@@ -4513,6 +5333,7 @@ impl DelegationManager {
             return;
         };
         record.usage = usage;
+        record.streamed_output_bytes = 0;
         record.cost = aggregate_cost;
         record.usage_uncertain = session.has_uncertain_usage();
         record.cost_microdollars = if record.usage_uncertain {
@@ -4529,14 +5350,71 @@ impl DelegationManager {
     /// Marks a worker task dead the moment `run_worker` returns, whatever the
     /// exit path was. A session-owned record without a live task is what a
     /// launchable interactive handle requires.
-    fn mark_worker_stopped(&self, id: &str) {
+    fn mark_worker_stopped(&self, id: &str, generation: u64) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(record) = state.records.get_mut(id) {
-            record.live_task = false;
+            if record.worker_generation == generation {
+                record.live_task = false;
+            }
         }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    /// The join supervisor alone calls this after an abnormal task exit. A
+    /// normal worker has already committed a terminal status, so this cannot
+    /// create a duplicate terminal notification.
+    fn mark_worker_aborted(
+        &self,
+        id: &str,
+        claim: Option<&DurableFleetClaim>,
+        generation: u64,
+        cause: &str,
+    ) {
+        // Claim, running-state check, and terminal mutation share this one
+        // lock. An old supervisor therefore cannot settle a newer reattachment.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.persistence_error.is_some() {
+            return;
+        }
+        let Some(record) = state.records.get_mut(id) else {
+            return;
+        };
+        if record.claim.as_ref() != claim
+            || record.worker_generation != generation
+            || !record.status.is_running()
+        {
+            return;
+        }
+        record.live_task = false;
+        // The crashed receiver is gone; an explicit follow-up must reopen this
+        // session rather than publishing into the dead process-local channel.
+        record.detached = true;
+        record.status = DelegatedAgentStatus::Failed {
+            error: bounded_text(&format!("delegated {cause}; worker settled by supervisor")),
+        };
+        record.completed_at_ms = Some(u64::try_from(timestamp_ms()).unwrap_or(u64::MAX));
+        let parent_id = record.parent_id.clone();
+        let message = MailboxMessage {
+            kind: "task_status",
+            from: id.to_owned(),
+            task_name: Some(record.task_name.clone()),
+            message: status_message(&record.identity.path, &record.status),
+            evictable: true,
+            continued: false,
+            leased: false,
+        };
+        push_mailbox_locked(&mut state, &parent_id, message);
+        self.persist_durable_fleet_locked(&mut state);
+        drop(state);
+        self.changed.notify_waiters();
+        self.publish_telemetry(None, None);
     }
 
     fn worker_is_detached(&self, id: &str) -> bool {
@@ -4733,6 +5611,14 @@ impl DelegationManager {
                 return true;
             };
             record.status = status;
+            if matches!(
+                record.status,
+                DelegatedAgentStatus::Interrupted
+                    | DelegatedAgentStatus::Shutdown
+                    | DelegatedAgentStatus::TimedOut
+            ) {
+                record.pending_initial_task = None;
+            }
             if matches!(record.status, DelegatedAgentStatus::Running)
                 && record.started_at_ms.is_none()
             {
@@ -4870,6 +5756,30 @@ impl DelegationManager {
         self.changed.notify_waiters();
     }
 
+    fn restored_tasks(&self, id: &str) -> VecDeque<QueuedTask> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .records
+            .get(id)
+            .map(|record| {
+                record
+                    .pending_initial_task
+                    .iter()
+                    .cloned()
+                    .map(QueuedTask::Initial)
+                    .chain(
+                        record
+                            .pending_follow_ups
+                            .iter()
+                            .cloned()
+                            .map(QueuedTask::follow_up),
+                    )
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn pending_message_count(&self, id: &str) -> usize {
         let state = self
             .state
@@ -4955,8 +5865,9 @@ impl DelegationManager {
         while let Ok(command) = commands.try_recv() {
             match command.kind {
                 WorkerCommandKind::Message(message) => messages.push(message),
-                WorkerCommandKind::FollowUp(follow_up) => {
-                    queued_tasks.push_back(QueuedTask::FollowUp(follow_up));
+                WorkerCommandKind::FollowUp => {
+                    *queued_tasks = self.restored_tasks(target);
+                    queued_tasks.retain(|task| matches!(task, QueuedTask::FollowUp(_)));
                 }
                 WorkerCommandKind::Shutdown => saw_shutdown = true,
             }
@@ -5075,6 +5986,77 @@ impl DelegationManager {
         }
     }
 
+    /// Drops one follow-up from the durable queue only after the child agent
+    /// reports `FollowUpDelivered`, which is emitted after its session append.
+    fn acknowledge_follow_up_delivery(&self, target: &str, follow_up: &QueuedFollowUp) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(record) = state.records.get_mut(target) {
+            record
+                .pending_follow_ups
+                .retain(|pending| pending.delivery_id != follow_up.delivery_id);
+            self.persist_durable_fleet_locked(&mut state);
+        }
+    }
+
+    fn persist_task_result(
+        &self,
+        target: &str,
+        task: &QueuedTask,
+        result: &TaskRestore,
+        delivered: bool,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = state.records.get_mut(target) else {
+            return;
+        };
+        let clear = delivered || matches!(result, TaskRestore::DeadLettered { .. });
+        match task {
+            QueuedTask::Initial(task) => {
+                if let Some(pending) = record
+                    .pending_initial_task
+                    .as_mut()
+                    .filter(|pending| pending.delivery_id == task.delivery_id)
+                {
+                    if clear {
+                        record.pending_initial_task = None;
+                    } else if let TaskRestore::Restored { attempts } = result {
+                        pending.attempts = *attempts;
+                    }
+                }
+            }
+            QueuedTask::FollowUp(task) => {
+                if clear {
+                    record
+                        .pending_follow_ups
+                        .retain(|pending| pending.delivery_id != task.delivery_id);
+                    if !delivered {
+                        record.queued_follow_ups.remove(task.usage());
+                    }
+                } else if let TaskRestore::Restored { attempts } = result {
+                    if let Some(pending) = record
+                        .pending_follow_ups
+                        .iter_mut()
+                        .find(|pending| pending.delivery_id == task.delivery_id)
+                    {
+                        pending.attempts = *attempts;
+                    }
+                }
+            }
+        }
+        if let TaskRestore::DeadLettered { attempts } = result {
+            record.durable_diagnostic = Some(format!(
+                "delegated task dead-lettered after {attempts} undelivered attempts"
+            ));
+        }
+        self.persist_durable_fleet_locked(&mut state);
+    }
+
     fn release_follow_up_usage(&self, target: &str, usage: QueueUsage) {
         if usage.messages == 0 {
             return;
@@ -5109,6 +6091,7 @@ impl DelegationManager {
     ) -> Result<Value, String> {
         validate_durable_text("message", &message)?;
         let candidate = DirectedMessage {
+            delivery_id: new_delivery_id()?,
             from: owner.id.clone(),
             message,
         };
@@ -5243,6 +6226,10 @@ impl DelegationManager {
                         record.pending_messages.push_back(candidate);
                     }
                 }
+                self.persist_durable_fleet_locked(&mut state);
+                if let Some(error) = state.persistence_error.clone() {
+                    return Err(format!("could not persist queued message: {error}"));
+                }
             }
             (target_id, delivery)
         };
@@ -5257,8 +6244,10 @@ impl DelegationManager {
     ) -> Result<Value, String> {
         validate_durable_text("follow-up", &request.message)?;
         let follow_up = QueuedFollowUp {
+            delivery_id: new_delivery_id()?,
             from: owner.id.clone(),
             message: request.message,
+            attempts: 0,
         };
         let (target_id, target_path, running_now, resume) = {
             // The journal_order guard spans decide → append → commit so that
@@ -5340,6 +6329,14 @@ impl DelegationManager {
                             "worker could not be resumed: its child session could not be reopened: {error}"
                         )
                     })?;
+                    Self::discard_inputs_delivered_to_session(
+                        state
+                            .records
+                            .get_mut(&target_id)
+                            .expect("resolved child exists"),
+                        &session,
+                    )
+                    .map_err(|error| format!("worker could not be resumed: {error}"))?;
                     let commands = match state
                         .records
                         .get_mut(&target_id)
@@ -5407,9 +6404,9 @@ impl DelegationManager {
                 let resume = match (permit, session.take(), resumed_commands.take(), claim) {
                     (Some(initial_permit), Some(session), Some(commands), Some(claim)) => Some((
                         WorkerStartup {
+                            generation: state.records[&target_id].worker_generation + 1,
                             identity: state.records[&target_id].identity.clone(),
                             session,
-                            initial_task: None,
                             commands,
                             shutdown,
                             initial_permit,
@@ -5482,10 +6479,11 @@ impl DelegationManager {
                                 record.deadline_at_ms = Some(now.saturating_add(timeout));
                             }
                         }
-                        if let Some((_, claim)) = &resume {
+                        if let Some((startup, claim)) = &resume {
                             // The explicit decision clears the park: the worker
                             // may run again under this session owner's claim.
                             record.claim = Some(claim.clone());
+                            record.worker_generation = startup.generation;
                             record.detached = false;
                             record.durable_diagnostic = None;
                             record.live_task = true;
@@ -5495,8 +6493,16 @@ impl DelegationManager {
                 if let Some(record) = state.records.get_mut(&target_id) {
                     let usage = follow_up.usage();
                     record.queued_follow_ups.add_usage(usage);
+                    record.pending_follow_ups.push_back(follow_up.clone());
                 }
-                command_permit.send(WorkerCommand::follow_up(follow_up));
+                // The journal proves provenance; the fleet roster proves the
+                // queued payload. Do not acknowledge acceptance until both are
+                // durable, otherwise a restart could silently lose this input.
+                self.persist_durable_fleet_locked(&mut state);
+                if let Some(error) = state.persistence_error.clone() {
+                    return Err(format!("could not persist queued follow-up: {error}"));
+                }
+                command_permit.send(WorkerCommand::follow_up());
             }
             (target_id, target_path, running_now, resume)
         };
@@ -5513,10 +6519,7 @@ impl DelegationManager {
                 .and_then(|record| record.deadline_at_ms);
             startup.deadline_ms = host_deadline;
             startup.deadline = host_deadline.map(wall_deadline_instant);
-            let manager = Arc::clone(self);
-            tokio::spawn(async move {
-                manager.run_worker(startup).await;
-            });
+            self.spawn_worker(startup);
         }
         self.changed.notify_waiters();
         Ok(json!({
@@ -5624,6 +6627,10 @@ impl DelegationManager {
         };
         if let Some(value) = leased {
             state.next_mailbox_delivery = state.next_mailbox_delivery.saturating_add(1);
+            self.persist_durable_fleet_locked(&mut state);
+            if let Some(error) = state.persistence_error.clone() {
+                return Err(format!("could not persist mailbox delivery: {error}"));
+            }
             return Ok(Some(WaitOutput {
                 value,
                 delivery_id: Some(delivery_id),
@@ -5669,6 +6676,9 @@ impl DelegationManager {
         } else {
             false
         };
+        if resolved {
+            self.persist_durable_fleet_locked(&mut state);
+        }
         drop(state);
         if resolved {
             self.changed.notify_waiters();
@@ -5928,10 +6938,17 @@ enum PermitWait {
     Shutdown,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct QueuedFollowUp {
+    /// Cryptographically random host delivery identity, persisted until the
+    /// child session records this exact envelope.
+    #[serde(default)]
+    delivery_id: String,
     from: String,
     message: String,
+    /// Number of failed attempts to append this input to the child session.
+    #[serde(default)]
+    attempts: u8,
 }
 
 impl QueuedFollowUp {
@@ -5943,28 +6960,80 @@ impl QueuedFollowUp {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct QueuedInitialTask {
+    task: String,
+    delivery_id: String,
+    attempts: u8,
+}
+
+#[derive(Clone)]
 enum QueuedTask {
-    Initial(String),
+    Initial(QueuedInitialTask),
     FollowUp(QueuedFollowUp),
 }
 
 impl QueuedTask {
+    #[cfg(test)]
+    fn initial(task: String) -> Self {
+        Self::Initial(QueuedInitialTask {
+            task,
+            delivery_id: new_delivery_id().unwrap(),
+            attempts: 0,
+        })
+    }
+
+    fn delivery_id(&self) -> &str {
+        match self {
+            Self::Initial(task) => &task.delivery_id,
+            Self::FollowUp(task) => &task.delivery_id,
+        }
+    }
+
+    fn follow_up(follow_up: QueuedFollowUp) -> Self {
+        Self::FollowUp(follow_up)
+    }
+
     fn format(&self, pending: &[DirectedMessage]) -> String {
         match self {
-            Self::Initial(task) => format_initial_task(task, pending),
-            Self::FollowUp(follow_up) => {
-                format_follow_up(&follow_up.from, &follow_up.message, pending)
-            }
+            Self::Initial(task) => format_initial_task(
+                &format!(
+                    "<octet_delegation_delivery id=\"{}\" kind=\"initial\">\n{}\n</octet_delegation_delivery>",
+                    task.delivery_id, task.task
+                ),
+                pending,
+            ),
+            Self::FollowUp(follow_up) => format_follow_up(follow_up, pending),
+        }
+    }
+
+    fn attempts(&self) -> u8 {
+        match self {
+            Self::Initial(task) => task.attempts,
+            Self::FollowUp(follow_up) => follow_up.attempts,
+        }
+    }
+
+    fn increment_attempts(&mut self) {
+        match self {
+            Self::Initial(task) => task.attempts = task.attempts.saturating_add(1),
+            Self::FollowUp(follow_up) => follow_up.attempts = follow_up.attempts.saturating_add(1),
         }
     }
 }
 
+enum TaskRestore {
+    NotRestored,
+    Restored { attempts: u8 },
+    DeadLettered { attempts: u8 },
+}
+
 fn restore_undelivered_task(
     queued_tasks: &mut VecDeque<QueuedTask>,
-    task: QueuedTask,
+    mut task: QueuedTask,
     task_delivered: bool,
     outcome: &WorkerOutcome,
-) -> bool {
+) -> TaskRestore {
     let should_restore = !task_delivered
         && match outcome {
             WorkerOutcome::Shutdown => false,
@@ -5976,10 +7045,17 @@ fn restore_undelivered_task(
             | WorkerOutcome::Failed(_) => true,
         };
     if !should_restore {
-        return false;
+        return TaskRestore::NotRestored;
     }
+    task.increment_attempts();
+    if task.attempts() >= MAX_UNDELIVERED_TASK_ATTEMPTS {
+        return TaskRestore::DeadLettered {
+            attempts: task.attempts(),
+        };
+    }
+    let attempts = task.attempts();
     queued_tasks.push_front(task);
-    true
+    TaskRestore::Restored { attempts }
 }
 
 struct WorkerExecution {
@@ -6273,35 +7349,68 @@ fn child_instructions(
     )
 }
 
+fn new_delivery_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("could not allocate delivery identity: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn delivery_ids_in_envelopes(text: &str) -> BTreeSet<String> {
+    const OPEN: &str = "<octet_delegation_delivery id=\"";
+    const MIDDLE: &str = "\" kind=\"";
+    const CLOSE: &str = "</octet_delegation_delivery>";
+    let mut ids = BTreeSet::new();
+    let mut rest = text;
+    while let Some(offset) = rest.find(OPEN) {
+        rest = &rest[offset + OPEN.len()..];
+        let Some((id, tail)) = rest.split_once(MIDDLE) else {
+            break;
+        };
+        let Some((kind, tail)) = tail.split_once("\">\n") else {
+            break;
+        };
+        let Some(close) = tail.find(CLOSE) else { break };
+        if id.len() == 32
+            && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && matches!(kind, "message" | "follow_up" | "initial")
+        {
+            ids.insert(id.to_owned());
+        }
+        rest = &tail[close + CLOSE.len()..];
+    }
+    ids
+}
+
 fn format_initial_task(task: &str, pending: &[DirectedMessage]) -> String {
     if pending.is_empty() {
         return task.to_owned();
     }
     let mut formatted = String::new();
     for directed in pending {
-        formatted.push_str(&format_direct_message(&directed.from, &directed.message));
+        formatted.push_str(&format_direct_message(directed));
         formatted.push_str("\n\n");
     }
     formatted.push_str(task);
     formatted
 }
 
-fn format_direct_message(from: &str, message: &str) -> String {
+fn format_direct_message(message: &DirectedMessage) -> String {
     format!(
-        "<agent_message from=\"{}\">\n{}\n</agent_message>",
-        from, message
+        "<octet_delegation_delivery id=\"{}\" kind=\"message\">\n<agent_message from=\"{}\">\n{}\n</agent_message>\n</octet_delegation_delivery>",
+        message.delivery_id, message.from, message.message
     )
 }
 
-fn format_follow_up(from: &str, message: &str, pending: &[DirectedMessage]) -> String {
+fn format_follow_up(follow_up: &QueuedFollowUp, pending: &[DirectedMessage]) -> String {
     let mut formatted = String::new();
     for directed in pending {
-        formatted.push_str(&format_direct_message(&directed.from, &directed.message));
+        formatted.push_str(&format_direct_message(directed));
         formatted.push_str("\n\n");
     }
     formatted.push_str(&format!(
-        "<followup_task from=\"{}\">\n{}\n</followup_task>",
-        from, message
+        "<octet_delegation_delivery id=\"{}\" kind=\"follow_up\">\n<followup_task from=\"{}\">\n{}\n</followup_task>\n</octet_delegation_delivery>",
+        follow_up.delivery_id, follow_up.from, follow_up.message
     ));
     formatted
 }
@@ -6660,6 +7769,11 @@ fn durable_fleet_record(record: &AgentRecord) -> DurableFleetRecord {
         resource_owner: record.resource_owner.clone(),
         durable_diagnostic: record.durable_diagnostic.clone(),
         claim: record.claim.clone(),
+        pending_messages: record.pending_messages.clone(),
+        queued_follow_ups: record.pending_follow_ups.clone(),
+        pending_initial_task: record.pending_initial_task.clone(),
+        mailbox: record.mailbox.iter().map(Into::into).collect(),
+        mailbox_delivery: record.mailbox_delivery,
     }
 }
 
@@ -6684,7 +7798,8 @@ fn extension_spawn_result_value(record: &AgentRecord) -> Value {
         "idempotency_key": record.extension_idempotency_key,
         "fingerprint": record.extension_fingerprint,
         "status": record.status,
-        "policy": record.extension_policy,
+        "resolved_model": resolved_model_json(record.extension_policy.as_ref()),
+        "policy": public_policy_json(record.extension_policy.as_ref()),
         "effective_tool_policy": record.effective_tool_policy,
         "orchestration_provenance": record.orchestration_provenance,
         "created_at_ms": record.created_at_ms,
@@ -6831,7 +7946,7 @@ pub fn resolve_launchable_child_session(
         let Ok(fleet) = serde_json::from_slice::<DurableFleet>(&bytes) else {
             continue;
         };
-        if fleet.version != FLEET_ROSTER_VERSION {
+        if !matches!(fleet.version, 1 | FLEET_ROSTER_VERSION) {
             continue;
         }
         let scoped_path = fleet_roster_path(session_directory, &fleet.root_session);
@@ -7018,7 +8133,8 @@ fn agent_record_value(record: &AgentRecord) -> Value {
         "depth": record.identity.depth,
         "session": record.session_path,
         "status": record.status,
-        "policy": record.extension_policy,
+        "resolved_model": resolved_model_json(record.extension_policy.as_ref()),
+        "policy": public_policy_json(record.extension_policy.as_ref()),
         "effective_tool_policy": record.effective_tool_policy,
         "orchestration_provenance": record.orchestration_provenance,
         "profile": record.extension_profile,
@@ -7072,6 +8188,7 @@ fn target_message_schema() -> Value {
 
 fn tool_def(name: &str, description: &str, input_schema: Value) -> ToolDef {
     ToolDef {
+        async_execution: false,
         constrained_sampling: None,
         name: name.into(),
         description: description.into(),
@@ -7342,6 +8459,9 @@ mod tests {
 
     fn test_extension_policy() -> ExtensionAgentSessionPolicy {
         ExtensionAgentSessionPolicy {
+            model_selection: None,
+            resolved_model: None,
+            resolved_reasoning: None,
             tools: vec!["read".into(), "search".into()],
             max_depth: 1,
             max_concurrent_children: 2,
@@ -7377,6 +8497,7 @@ mod tests {
             .unwrap();
         let max_output_tokens = model.spec.limits.max_output_tokens;
         DelegationTemplate {
+            model_resolver: RwLock::new(None),
             client: octet_ai::AiClient::new(),
             model,
             base_system: RwLock::new("test".into()),
@@ -7384,7 +8505,7 @@ mod tests {
             effect_broker: crate::EffectBroker::default(),
             extensions: ExtensionHost::new(),
             max_turns: Some(4),
-            reasoning: octet_ai::ReasoningConfig::Off,
+            reasoning: RwLock::new(octet_ai::ReasoningConfig::Off),
             reasoning_mode: octet_ai::ReasoningMode::Standard,
             cache_retention: octet_ai::CacheRetention::Short,
             runtime: RwLock::new(DelegationRuntimeSettings {
@@ -7395,6 +8516,7 @@ mod tests {
                 completion_policy: CompletionPolicy::Natural,
                 output_modalities: octet_ai::OutputModalities::Text,
                 max_output_tokens,
+                tool_schema_budget_bytes: crate::agent::DEFAULT_TOOL_SCHEMA_BUDGET_BYTES,
                 max_session_tokens: None,
                 max_session_cost_microdollars: None,
                 provider_retries_enabled: true,
@@ -7475,6 +8597,392 @@ mod tests {
         manager
     }
 
+    struct AlternateModelResolver {
+        model: octet_ai::Model,
+    }
+    impl AgentModelResolver for AlternateModelResolver {
+        fn resolve(
+            &self,
+            selection: &AgentModelSelection,
+            parent: &octet_ai::Model,
+            reasoning: &octet_ai::ReasoningConfig,
+        ) -> Result<ResolvedAgentModel, String> {
+            let model = match selection.model.as_str() {
+                "inherit" => parent.clone(),
+                id if id == self.model.spec.id.0 => self.model.clone(),
+                _ => return Err("unsupported_model: not configured".into()),
+            };
+            if selection.reasoning != "inherit" && selection.reasoning != "off" {
+                return Err("unsupported_reasoning: unsupported fixture level".into());
+            }
+            Ok(ResolvedAgentModel {
+                metadata: AgentModelSelection {
+                    provider: model.spec.endpoint.0.clone(),
+                    model: model.spec.id.0.clone(),
+                    reasoning: "off".into(),
+                },
+                model,
+                reasoning: reasoning.clone(),
+            })
+        }
+        fn models(
+            &self,
+            _query: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<AgentModelDescriptor>, String> {
+            Ok((0..limit)
+                .map(|_| AgentModelDescriptor {
+                    model: self.model.spec.id.0.clone(),
+                    provider: self.model.spec.endpoint.0.clone(),
+                    display_name: None,
+                    reasoning: vec!["off".into()],
+                    context_window: self.model.spec.limits.context_window,
+                    max_output_tokens: self.model.spec.limits.max_output_tokens,
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_model_routes_spawn_and_continuation_and_pins_durable_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let team = directory.path().join("team-multimodel");
+        std::fs::create_dir(&team).unwrap();
+        let parent_server = MockServer::start().await;
+        let alternate_server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+            .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"alternate answer\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5,\"total_tokens\":25}}\n\ndata: [DONE]\n\n"))
+            .expect(2).mount(&alternate_server).await;
+        let mut manager = writable_manager_with_core_tools(&team);
+        let inner = Arc::get_mut(&mut manager).unwrap();
+        Arc::make_mut(&mut inner.template.model.endpoint).base_url =
+            url::Url::parse(&format!("{}/", parent_server.uri())).unwrap();
+        let mut alternate = inner.template.model.clone();
+        Arc::make_mut(&mut inner.template.model.spec).pricing = None;
+        let spec = Arc::make_mut(&mut alternate.spec);
+        spec.id = octet_ai::ModelId("fixture-alternate".into());
+        spec.api_name = "alternate-wire-model".into();
+        spec.limits.max_output_tokens = 1024;
+        let endpoint = Arc::make_mut(&mut alternate.endpoint);
+        endpoint.base_url = url::Url::parse(&format!("{}/", alternate_server.uri())).unwrap();
+        endpoint.auth = octet_ai::Auth::None;
+        *inner.template.model_resolver.get_mut().unwrap() =
+            Some(Arc::new(AlternateModelResolver { model: alternate }));
+        let binding = manager.root_binding();
+        let telemetry = manager.attach_telemetry();
+        let service = binding
+            .extension_service("extension-routing", "parent-session", "root-owner")
+            .unwrap();
+        let request = || {
+            let mut request =
+                test_extension_spawn("routing", None, None, "use alternate", "routing-key");
+            request.policy.model_selection = Some(AgentModelSelection {
+                model: "fixture-alternate".into(),
+                ..Default::default()
+            });
+            request
+        };
+        let first = service.spawn("root-owner", request()).unwrap();
+        assert_eq!(first["resolved_model"]["model"], "fixture-alternate");
+        assert_eq!(first["resolved_model"]["reasoning"], json!({"type":"off"}));
+        assert_eq!(
+            first["policy"]["resolved_model"]["reasoning"],
+            json!({"type":"off"})
+        );
+        assert!(first["policy"].get("resolved_reasoning").is_none());
+        let id = first["agent_id"].as_str().unwrap();
+        for run in 0..2 {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let state = manager.state.lock().unwrap().records[id].status.clone();
+                    if matches!(state, DelegatedAgentStatus::Completed { .. }) {
+                        break;
+                    }
+                    assert!(
+                        !matches!(state, DelegatedAgentStatus::Failed { .. }),
+                        "{state:?}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if run == 0 {
+                service
+                    .follow_up("root-owner", id, "continue same route".into())
+                    .await
+                    .unwrap();
+            }
+        }
+        assert!(parent_server.received_requests().await.unwrap().is_empty());
+        for request in alternate_server.received_requests().await.unwrap() {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["model"], "alternate-wire-model");
+            assert!(
+                body["max_completion_tokens"]
+                    .as_u64()
+                    .or_else(|| body["max_tokens"].as_u64())
+                    .unwrap()
+                    <= 1024
+            );
+        }
+        service.state.lock().unwrap().owners.clear();
+        assert_eq!(
+            service.spawn("root-owner", request()).unwrap()["agent_id"],
+            id
+        );
+        let listed = service.list("root-owner").unwrap();
+        assert_eq!(
+            listed["agents"][0]["policy"]["resolved_model"]["reasoning"],
+            json!({"type":"off"})
+        );
+        let replay = service.spawn("root-owner", request()).unwrap();
+        assert_eq!(
+            replay["policy"]["resolved_model"]["reasoning"],
+            json!({"type":"off"})
+        );
+        let mut changed = request();
+        changed.policy.model_selection.as_mut().unwrap().reasoning = "off".into();
+        assert!(service
+            .spawn("root-owner", changed)
+            .unwrap_err()
+            .contains("different input"));
+        let state = manager.state.lock().unwrap();
+        assert!(state.records[id].cost_microdollars.is_some());
+        assert_eq!(
+            telemetry.borrow().as_ref().unwrap().children[0].model,
+            "fixture-alternate"
+        );
+        let fleet: Value = serde_json::from_slice(
+            &std::fs::read(fleet_roster_path(&team, Path::new(""))).unwrap(),
+        )
+        .unwrap();
+        assert!(fleet.to_string().contains("fixture-alternate"));
+        let policy = state.records[id].extension_policy.as_ref().unwrap();
+        let encoded = serde_json::to_vec(policy).unwrap();
+        let restored: ExtensionAgentSessionPolicy = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            manager
+                .template
+                .resolve_model(Some(&restored))
+                .unwrap()
+                .model
+                .spec
+                .id
+                .0,
+            "fixture-alternate"
+        );
+        assert_eq!(
+            resolved_model_json(Some(&restored))["model"],
+            "fixture-alternate"
+        );
+        let mut changed_reasoning = restored.clone();
+        changed_reasoning.resolved_reasoning = Some(octet_ai::ReasoningConfig::On);
+        assert!(manager
+            .template
+            .resolve_model(Some(&changed_reasoning))
+            .is_err());
+        drop(state);
+        let catalog = service.models("root-owner", None, 1).unwrap();
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["truncated"], true);
+        assert!(service.models("wrong-owner", None, 1).is_err());
+        assert!(service.models("root-owner", None, 101).is_err());
+        assert!(service
+            .models("root-owner", Some(&"x".repeat(129)), 1)
+            .is_err());
+        binding.request_shutdown();
+    }
+
+    #[test]
+    fn legacy_fleet_roster_loads_and_upgrades_without_routing_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let session_path = root.join("legacy-child.jsonl");
+        Session::create(&session_path).unwrap();
+        {
+            let manager = writable_manager(&root);
+            insert_durable_detached_record(
+                &manager,
+                "agent-1",
+                "/root/legacy",
+                session_path,
+                DelegatedAgentStatus::Completed {
+                    output: "old result".into(),
+                },
+            );
+            manager.persist_durable_fleet_locked(&mut manager.state.lock().unwrap());
+        }
+        let path = fleet_roster_path(&root, Path::new(""));
+        let mut fleet: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        fleet["version"] = json!(1);
+        std::fs::write(&path, serde_json::to_vec(&fleet).unwrap()).unwrap();
+        let manager = writable_manager(&root);
+        manager.restore_durable_fleet();
+        let mut state = manager.state.lock().unwrap();
+        assert_eq!(state.records.len(), 1);
+        assert!(state.records["agent-1"].extension_policy.is_none());
+        manager.persist_durable_fleet_locked(&mut state);
+        let upgraded: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(upgraded["version"], 2);
+    }
+
+    #[tokio::test]
+    async fn configured_route_survives_fleet_reconstruction_with_a_different_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let alternate_server = MockServer::start().await;
+        let changed_parent_server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"route persisted\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+            .expect(2).mount(&alternate_server).await;
+        let mut alternate = test_template(&root).model;
+        Arc::make_mut(&mut alternate.spec).id = octet_ai::ModelId("saved-alternate".into());
+        Arc::make_mut(&mut alternate.spec).api_name = "saved-wire-model".into();
+        Arc::make_mut(&mut alternate.endpoint).base_url =
+            url::Url::parse(&format!("{}/", alternate_server.uri())).unwrap();
+        Arc::make_mut(&mut alternate.endpoint).auth = octet_ai::Auth::None;
+        let session_path = root.join("saved-child.jsonl");
+        {
+            let manager = writable_manager_with_core_tools(&root);
+            *manager.template.model_resolver.write().unwrap() =
+                Some(Arc::new(AlternateModelResolver {
+                    model: alternate.clone(),
+                }));
+            let session = Session::create(&session_path).unwrap();
+            insert_durable_detached_record(
+                &manager,
+                "agent-1",
+                "/root/saved",
+                session_path.clone(),
+                DelegatedAgentStatus::Completed {
+                    output: "first run".into(),
+                },
+            );
+            let mut policy = test_extension_policy();
+            policy.model_selection = Some(AgentModelSelection {
+                model: "saved-alternate".into(),
+                ..Default::default()
+            });
+            let resolved = manager.template.resolve_model(Some(&policy)).unwrap();
+            policy.resolved_model = Some(resolved.metadata);
+            policy.resolved_reasoning = Some(resolved.reasoning);
+            let identity = manager.state.lock().unwrap().records["agent-1"]
+                .identity
+                .clone();
+            let mut child = manager
+                .build_child_agent(session, &identity, Some(&policy))
+                .unwrap();
+            child.complete("original child task").await.unwrap();
+            let mut state = manager.state.lock().unwrap();
+            state.records.get_mut("agent-1").unwrap().extension_policy = Some(policy);
+            manager.persist_durable_fleet_locked(&mut state);
+        }
+        let fleet: Value = serde_json::from_slice(
+            &std::fs::read(fleet_roster_path(&root, Path::new(""))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fleet["version"], 2,
+            "old v1 hosts must reject routed rosters"
+        );
+        // The old manager and child are gone. Rebuild from disk with a different
+        // parent binding and run the ordinary durable follow-up path.
+        let mut manager = writable_manager_with_core_tools(&root);
+        let template = &mut Arc::get_mut(&mut manager).unwrap().template;
+        Arc::make_mut(&mut template.model.spec).id = octet_ai::ModelId("different-parent".into());
+        Arc::make_mut(&mut template.model.endpoint).base_url =
+            url::Url::parse(&format!("{}/", changed_parent_server.uri())).unwrap();
+        *template.model_resolver.get_mut().unwrap() =
+            Some(Arc::new(AlternateModelResolver { model: alternate }));
+        manager.restore_durable_fleet();
+        assert_eq!(
+            manager.state.lock().unwrap().records["agent-1"]
+                .extension_policy
+                .as_ref()
+                .unwrap()
+                .resolved_model
+                .as_ref()
+                .unwrap()
+                .model,
+            "saved-alternate"
+        );
+        manager.prepare_owning_run(&root_identity()).unwrap();
+        manager
+            .follow_up(
+                &root_identity(),
+                FollowUpRequest {
+                    target: "agent-1".into(),
+                    message: "continue after restart".into(),
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = manager.state.lock().unwrap().records["agent-1"]
+                    .status
+                    .clone();
+                if matches!(status, DelegatedAgentStatus::Completed { .. }) {
+                    break;
+                }
+                assert!(
+                    !matches!(status, DelegatedAgentStatus::Failed { .. }),
+                    "{status:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(changed_parent_server
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty());
+        let requests = alternate_server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(body["model"], "saved-wire-model");
+        assert!(body.to_string().contains("original child task"));
+        let transcript = Session::open(&session_path).unwrap();
+        assert!(transcript.entries().iter().any(|entry| matches!(&entry.value,
+            crate::session::EntryValue::Config { model: Some(model), reasoning: Some(reasoning), .. }
+            if model == "saved-alternate" && reasoning == "off")));
+        manager.root_binding().request_shutdown();
+    }
+
+    #[test]
+    fn model_selection_refuses_before_admission_without_a_resolver() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager_with_core_tools(directory.path());
+        let service = manager
+            .root_binding()
+            .extension_service("extension-routing", "parent-session", "root-owner")
+            .unwrap();
+        for selection in [
+            AgentModelSelection {
+                model: "unknown".into(),
+                ..Default::default()
+            },
+            AgentModelSelection {
+                reasoning: "high".into(),
+                ..Default::default()
+            },
+        ] {
+            let mut request =
+                test_extension_spawn("routing", None, None, "must not run", "routing-key");
+            request.policy.model_selection = Some(selection);
+            assert!(service
+                .spawn("root-owner", request)
+                .unwrap_err()
+                .starts_with("unsupported_"));
+            assert!(manager.state.lock().unwrap().records.is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn delegated_astra_ultra_v2_child_uses_xhigh_wire_effort() {
         let directory = tempfile::tempdir().unwrap();
@@ -7511,6 +9019,7 @@ mod tests {
             let endpoint = Arc::make_mut(&mut model.endpoint);
             endpoint.base_url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
             endpoint.auth = octet_ai::Auth::None;
+            endpoint.transport = octet_ai::EndpointTransport::Http;
             manager_mut
                 .template
                 .runtime
@@ -7518,7 +9027,7 @@ mod tests {
                 .unwrap()
                 .max_output_tokens = model.spec.limits.max_output_tokens;
             manager_mut.template.model = model;
-            manager_mut.template.reasoning =
+            *manager_mut.template.reasoning.get_mut().unwrap() =
                 octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
         }
 
@@ -7820,6 +9329,7 @@ mod tests {
                 &mut agent,
                 "task accepted before startup failed".into(),
                 ChildRunContext {
+                    queued_delivery_ids: BTreeSet::new(),
                     identity: &child,
                     commands: &mut commands,
                     shutdown: &shutdown,
@@ -7884,6 +9394,7 @@ mod tests {
                 &mut agent,
                 "task persisted through the original descriptor".into(),
                 ChildRunContext {
+                    queued_delivery_ids: BTreeSet::new(),
                     identity: &child,
                     commands: &mut commands,
                     shutdown: &shutdown,
@@ -8309,6 +9820,13 @@ mod tests {
                 session_path,
                 DelegatedAgentStatus::Detached,
             );
+        }
+        // Only genuinely queued work needs an execution slot on reattachment.
+        for record in manager.state.lock().unwrap().records.values_mut() {
+            let QueuedTask::Initial(task) = QueuedTask::initial("undelivered work".into()) else {
+                unreachable!()
+            };
+            record.pending_initial_task = Some(task);
         }
         assert_eq!(manager.current_permits().available_permits(), 3);
 
@@ -8895,10 +10413,14 @@ mod tests {
         {
             let state = manager.state.lock().unwrap();
             let record = &state.records["agent-1"];
-            assert_eq!(record.status, DelegatedAgentStatus::Idle);
+            assert_eq!(record.status, DelegatedAgentStatus::Interrupted);
             assert!(!record.detached);
-            assert!(record.live_task);
-            assert!(record.durable_diagnostic.is_none());
+            assert!(!record.live_task);
+            assert!(record
+                .durable_diagnostic
+                .as_deref()
+                .unwrap()
+                .contains("subagent_continue"));
             let claim = record.claim.as_ref().expect("reattached record is claimed");
             assert!(claim.generation > old_claim.generation, "{claim:?}");
             assert_ne!(claim.instance, old_claim.instance);
@@ -9044,6 +10566,14 @@ mod tests {
         );
         {
             let mut state = owner.state.lock().unwrap();
+            let QueuedTask::Initial(task) = QueuedTask::initial("undelivered work".into()) else {
+                unreachable!()
+            };
+            state
+                .records
+                .get_mut("agent-1")
+                .unwrap()
+                .pending_initial_task = Some(task);
             owner.persist_durable_fleet_locked(&mut state);
         }
         owner.prepare_owning_run(&root_identity()).unwrap();
@@ -9410,7 +10940,7 @@ mod tests {
             assert!(state.persistence_error.is_none());
         }
         let bytes = std::fs::read(manager.roster_path.as_ref().unwrap()).unwrap();
-        assert!(bytes.len() > 256 * 1024);
+        assert!(bytes.len() <= ROSTER_PROJECTION_BYTES);
         assert_eq!(
             serde_json::from_slice::<DurableFleet>(&bytes)
                 .unwrap()
@@ -10140,6 +11670,7 @@ mod tests {
             let endpoint = Arc::make_mut(&mut model.endpoint);
             endpoint.base_url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
             endpoint.auth = octet_ai::Auth::None;
+            endpoint.transport = octet_ai::EndpointTransport::Http;
             manager_mut
                 .template
                 .runtime
@@ -10149,7 +11680,7 @@ mod tests {
             // An Astra request without an explicit effort is a validated
             // `Reasoning` rejection, so this span boundary runs at the host's
             // Ultra tier like the wire-contract sibling test.
-            manager_mut.template.reasoning =
+            *manager_mut.template.reasoning.get_mut().unwrap() =
                 octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
             manager_mut.template.model = model;
         }
@@ -10165,6 +11696,7 @@ mod tests {
                 &mut child,
                 "report ok".into(),
                 ChildRunContext {
+                    queued_delivery_ids: BTreeSet::new(),
                     identity: &identity,
                     commands: &mut commands,
                     shutdown: &shutdown,
@@ -10228,6 +11760,7 @@ mod tests {
                 &mut agent,
                 "must not execute".into(),
                 ChildRunContext {
+                    queued_delivery_ids: BTreeSet::new(),
                     identity: &identity,
                     commands: &mut commands,
                     shutdown: &shutdown,
@@ -10782,10 +12315,12 @@ mod tests {
             let mut state = manager.state.lock().unwrap();
             let pending = &mut state.records.get_mut(&child.id).unwrap().pending_messages;
             pending.push_back(DirectedMessage {
+                delivery_id: "test-delivery".into(),
                 from: "older-a".into(),
                 message: "first".into(),
             });
             pending.push_back(DirectedMessage {
+                delivery_id: "test-delivery".into(),
                 from: "older-b".into(),
                 message: "second".into(),
             });
@@ -10796,6 +12331,7 @@ mod tests {
             let record = state.records.get_mut(&child.id).unwrap();
             assert_eq!(record.reserved_messages.messages, 2);
             record.pending_messages.push_back(DirectedMessage {
+                delivery_id: "test-delivery".into(),
                 from: "newer".into(),
                 message: "third".into(),
             });
@@ -10818,25 +12354,32 @@ mod tests {
     fn undelivered_initial_task_returns_to_the_fifo_head_once() {
         let mut queued_tasks = VecDeque::from([
             QueuedTask::FollowUp(QueuedFollowUp {
+                delivery_id: "test-follow-up".into(),
                 from: ROOT_AGENT_ID.into(),
                 message: "older follow-up".into(),
+                attempts: 0,
             }),
             QueuedTask::FollowUp(QueuedFollowUp {
+                delivery_id: "test-follow-up".into(),
                 from: ROOT_AGENT_ID.into(),
                 message: "newer follow-up".into(),
+                attempts: 0,
             }),
         ]);
 
-        assert!(restore_undelivered_task(
-            &mut queued_tasks,
-            QueuedTask::Initial("initial task".into()),
-            false,
-            &WorkerOutcome::Failed("session append failed".into()),
+        assert!(matches!(
+            restore_undelivered_task(
+                &mut queued_tasks,
+                QueuedTask::initial("initial task".into()),
+                false,
+                &WorkerOutcome::Failed("session append failed".into()),
+            ),
+            TaskRestore::Restored { .. }
         ));
         let labels = queued_tasks
             .iter()
             .map(|task| match task {
-                QueuedTask::Initial(task) => task.as_str(),
+                QueuedTask::Initial(task) => task.task.as_str(),
                 QueuedTask::FollowUp(follow_up) => follow_up.message.as_str(),
             })
             .collect::<Vec<_>>();
@@ -10846,20 +12389,1035 @@ mod tests {
         );
 
         let delivered = queued_tasks.pop_front().unwrap();
-        assert!(!restore_undelivered_task(
-            &mut queued_tasks,
-            delivered,
-            true,
-            &WorkerOutcome::Completed(String::new()),
+        assert!(matches!(
+            restore_undelivered_task(
+                &mut queued_tasks,
+                delivered,
+                true,
+                &WorkerOutcome::Completed(String::new()),
+            ),
+            TaskRestore::NotRestored
         ));
         let labels = queued_tasks
             .iter()
             .map(|task| match task {
-                QueuedTask::Initial(task) => task.as_str(),
+                QueuedTask::Initial(task) => task.task.as_str(),
                 QueuedTask::FollowUp(follow_up) => follow_up.message.as_str(),
             })
             .collect::<Vec<_>>();
         assert_eq!(labels, vec!["older follow-up", "newer follow-up"]);
+    }
+
+    async fn stop_fixture_worker(manager: Arc<DelegationManager>) {
+        manager.request_shutdown_descendants(ROOT_AGENT_ID);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while Arc::strong_count(&manager) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker and supervisor must release the old manager");
+    }
+
+    async fn assert_restart_follow_up_order(first: &str, second: &str) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let session_path = root.join("child.jsonl");
+        Session::create(&session_path).unwrap();
+        let first_id = {
+            let manager = writable_manager(root);
+            // Simulate acceptance immediately before process loss: the attached
+            // channel is never polled, but acceptance must persist the payload.
+            let (child, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Pending);
+            manager
+                .follow_up(
+                    &root_identity(),
+                    FollowUpRequest {
+                        target: child.id.clone(),
+                        message: first.into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let state = manager.state.lock().unwrap();
+            state.records[&child.id].pending_follow_ups[0]
+                .delivery_id
+                .clone()
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+            .expect(2).mount(&server).await;
+        let mut manager = writable_manager(root);
+        let template = &mut Arc::get_mut(&mut manager).unwrap().template;
+        Arc::make_mut(&mut template.model.endpoint).base_url =
+            url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        Arc::make_mut(&mut template.model.endpoint).auth = octet_ai::Auth::None;
+        manager.restore_durable_fleet();
+        // Exercise explicit resume, not automatic prepare_owning_run reattach.
+        manager
+            .follow_up(
+                &root_identity(),
+                FollowUpRequest {
+                    target: "agent-1".into(),
+                    message: second.into(),
+                },
+            )
+            .await
+            .unwrap();
+        let second_id = manager.state.lock().unwrap().records["agent-1"].pending_follow_ups[1]
+            .delivery_id
+            .clone();
+        assert_ne!(first_id, second_id, "equal text is still distinct work");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let done = {
+                    let state = manager.state.lock().unwrap();
+                    let record = &state.records["agent-1"];
+                    assert!(
+                        !matches!(record.status, DelegatedAgentStatus::Failed { .. }),
+                        "{:?}",
+                        record.status
+                    );
+                    matches!(record.status, DelegatedAgentStatus::Completed { .. })
+                        && record.pending_follow_ups.is_empty()
+                        && record.queued_follow_ups.messages == 0
+                };
+                if done {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        stop_fixture_worker(manager).await;
+        let transcript = Session::open_read_only(&session_path).unwrap();
+        let delivered = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.value {
+                crate::EntryValue::Message(octet_ai::Message::User(message)) => {
+                    let text = message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            octet_ai::UserPart::Text(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delivered.len(),
+            2,
+            "each accepted envelope gets one user turn"
+        );
+        assert!(delivered[0].contains(first));
+        assert!(delivered[1].contains(second));
+        assert_eq!(
+            delivery_ids_in_envelopes(&delivered[0]),
+            BTreeSet::from([first_id])
+        );
+        assert_eq!(
+            delivery_ids_in_envelopes(&delivered[1]),
+            BTreeSet::from([second_id])
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        let restored = writable_manager(root);
+        restored.restore_durable_fleet();
+        assert!(restored.restored_tasks("agent-1").is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_preserves_older_durable_follow_up_order() {
+        assert_restart_follow_up_order("older A", "new B").await;
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_preserves_identical_text_with_distinct_delivery_ids() {
+        assert_restart_follow_up_order("identical text", "identical text").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initial_startup_retry_count_and_dead_letter_survive_real_fleet_restarts() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let workspace = root.join("missing-workspace");
+        let mut manager = writable_manager_with_workspace(root, &workspace);
+        manager
+            .spawn(
+                &root_identity(),
+                SpawnRequest {
+                    task_name: "initial".into(),
+                    display_task_name: None,
+                    message: "durable initial payload".into(),
+                    extension_policy: None,
+                    extension_provenance: None,
+                },
+            )
+            .unwrap();
+        // No await has yielded to the spawned task: acknowledgement itself is
+        // evidence that the initial payload/identity and zero attempts are safe.
+        let fleet: DurableFleet = serde_json::from_slice(
+            &std::fs::read(fleet_roster_path(&root, Path::new(""))).unwrap(),
+        )
+        .unwrap();
+        let initial = fleet.records[0].pending_initial_task.as_ref().unwrap();
+        assert_eq!(initial.task, "durable initial payload");
+        assert_eq!(initial.attempts, 0);
+        let delivery_id = initial.delivery_id.clone();
+        assert_eq!(delivery_id.len(), 32);
+        for attempts in 1..=MAX_UNDELIVERED_TASK_ATTEMPTS {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if matches!(
+                        manager.state.lock().unwrap().records["agent-1"].status,
+                        DelegatedAgentStatus::Failed { .. }
+                    ) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            {
+                let state = manager.state.lock().unwrap();
+                let record = &state.records["agent-1"];
+                if attempts < MAX_UNDELIVERED_TASK_ATTEMPTS {
+                    let pending = record.pending_initial_task.as_ref().unwrap();
+                    assert_eq!(pending.attempts, attempts);
+                    assert_eq!(pending.delivery_id, delivery_id);
+                } else {
+                    assert!(record.pending_initial_task.is_none());
+                    assert!(record
+                        .durable_diagnostic
+                        .as_deref()
+                        .unwrap()
+                        .contains("dead-lettered after 3"));
+                }
+            }
+            stop_fixture_worker(manager).await;
+            manager = writable_manager_with_workspace(root, &workspace);
+            manager.restore_durable_fleet();
+            if attempts < MAX_UNDELIVERED_TASK_ATTEMPTS {
+                assert_eq!(
+                    manager.state.lock().unwrap().records["agent-1"]
+                        .pending_initial_task
+                        .as_ref()
+                        .unwrap()
+                        .attempts,
+                    attempts
+                );
+                manager.prepare_owning_run(&root_identity()).unwrap();
+            }
+        }
+        assert!(manager.restored_tasks("agent-1").is_empty());
+    }
+
+    #[test]
+    fn restart_reconciles_initial_delivery_only_on_active_ancestry_by_identity() {
+        for abandoned in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let task = QueuedTask::initial("same payload".into());
+            let QueuedTask::Initial(initial) = &task else {
+                unreachable!()
+            };
+            let session_path = root.join("child.jsonl");
+            let mut session = Session::create(&session_path).unwrap();
+            session
+                .append(crate::EntryValue::Message(octet_ai::Message::User(
+                    octet_ai::UserMessage {
+                        content: vec![octet_ai::UserPart::Text(task.format(&[]))],
+                    },
+                )))
+                .unwrap();
+            if abandoned {
+                session.checkout_root().unwrap();
+                // Same content on the active branch is not the same delivery.
+                session
+                    .append(crate::EntryValue::Message(octet_ai::Message::User(
+                        octet_ai::UserMessage {
+                            content: vec![octet_ai::UserPart::Text(
+                                QueuedTask::initial("same payload".into()).format(&[]),
+                            )],
+                        },
+                    )))
+                    .unwrap();
+            }
+            drop(session);
+            {
+                let manager = writable_manager(root);
+                let (child, _commands) =
+                    insert_test_record(&manager, DelegatedAgentStatus::Pending);
+                let mut state = manager.state.lock().unwrap();
+                state
+                    .records
+                    .get_mut(&child.id)
+                    .unwrap()
+                    .pending_initial_task = Some(initial.clone());
+                manager.persist_durable_fleet_locked(&mut state);
+            }
+            let manager = writable_manager(root);
+            manager.restore_durable_fleet();
+            assert_eq!(
+                manager.restored_tasks("agent-1").len(),
+                usize::from(abandoned)
+            );
+            let fleet: DurableFleet = serde_json::from_slice(
+                &std::fs::read(fleet_roster_path(&root, Path::new(""))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(fleet.records[0].pending_initial_task.is_some(), abandoned);
+        }
+    }
+
+    #[tokio::test]
+    async fn reattached_delivered_task_settles_and_explicit_follow_up_never_replays_mutation() {
+        for result_persisted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let session_path = root.join("child.jsonl");
+            let task = QueuedTask::initial("original task".into());
+            let QueuedTask::Initial(initial) = &task else {
+                unreachable!()
+            };
+            let mut session = Session::create(&session_path).unwrap();
+            let prompt = session
+                .append(crate::EntryValue::Message(octet_ai::Message::User(
+                    octet_ai::UserMessage {
+                        content: vec![octet_ai::UserPart::Text(task.format(&[]))],
+                    },
+                )))
+                .unwrap();
+            let model = test_template(root).model;
+            session
+                .append(crate::EntryValue::Message(octet_ai::Message::Assistant(
+                    octet_ai::AssistantMessage {
+                        content: vec![AssistantPart::ToolCall(octet_ai::ToolCall {
+                            id: octet_ai::ToolCallId("prior-write".into()),
+                            name: "write".into(),
+                            arguments_json:
+                                json!({"path": "effect.txt", "content": "original mutation"})
+                                    .to_string(),
+                            argument_error: None,
+                            async_execution: false,
+                        })],
+                        model: model.spec.id.clone(),
+                        protocol: model.spec.protocol,
+                    },
+                )))
+                .unwrap();
+            if result_persisted {
+                session
+                    .append(crate::EntryValue::Message(octet_ai::Message::User(
+                        octet_ai::UserMessage {
+                            content: vec![octet_ai::UserPart::ToolResult(octet_ai::ToolResult {
+                                tool_call_id: octet_ai::ToolCallId("prior-write".into()),
+                                content: vec![octet_ai::ToolResultPart::Text("written".into())],
+                                is_error: false,
+                                added_tool_names: None,
+                            })],
+                        },
+                    )))
+                    .unwrap();
+                // A driven interruption also leaves a checkpoint: not success evidence.
+                session.checkpoint(prompt).unwrap();
+            }
+            drop(session);
+            // The owner removed the original output after the effect occurred.
+            // Replaying write would recreate it (no overwrite guard can mask replay).
+            std::fs::write(root.join("effect.txt"), "original mutation").unwrap();
+            std::fs::remove_file(root.join("effect.txt")).unwrap();
+            {
+                let manager = writable_manager(root);
+                let (child, _commands) =
+                    insert_test_record(&manager, DelegatedAgentStatus::Running);
+                let mut state = manager.state.lock().unwrap();
+                let record = state.records.get_mut(&child.id).unwrap();
+                record.pending_initial_task = Some(initial.clone());
+                record.pending_messages.push_back(DirectedMessage {
+                    delivery_id: new_delivery_id().unwrap(),
+                    from: ROOT_AGENT_ID.into(),
+                    message: "retained steering".into(),
+                });
+                manager.persist_durable_fleet_locked(&mut state);
+            }
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+                .expect(1).mount(&server).await;
+            let mut manager = writable_manager_with_core_tools(root);
+            let template = &mut Arc::get_mut(&mut manager).unwrap().template;
+            Arc::make_mut(&mut template.model.endpoint).base_url =
+                url::Url::parse(&format!("{}/", server.uri())).unwrap();
+            Arc::make_mut(&mut template.model.endpoint).auth = octet_ai::Auth::None;
+            template.effect_broker = crate::EffectBroker::new(crate::EffectPolicy::UnsafeHost);
+            manager.restore_durable_fleet();
+            let before = std::fs::read(&session_path).unwrap();
+            for _ in 0..2 {
+                manager.prepare_owning_run(&root_identity()).unwrap();
+                let listed = manager.list_value_for(&root_identity()).unwrap();
+                assert_eq!(listed["agents"][0]["status"]["state"], "interrupted");
+                assert!(listed["agents"][0]["diagnostic"]
+                    .as_str()
+                    .unwrap()
+                    .contains("subagent_continue"));
+                assert!(!manager.state.lock().unwrap().records["agent-1"].live_task);
+                assert_eq!(manager.current_permits().available_permits(), 3);
+            }
+            assert!(server.received_requests().await.unwrap().is_empty());
+            assert_eq!(std::fs::read(&session_path).unwrap(), before);
+            let fleet: DurableFleet = serde_json::from_slice(
+                &std::fs::read(fleet_roster_path(&root, Path::new(""))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(fleet.records[0].status, DelegatedAgentStatus::Interrupted);
+            assert!(fleet.records[0].pending_initial_task.is_none());
+            assert_eq!(fleet.records[0].pending_messages.len(), 1);
+            let resumed = manager
+                .follow_up(
+                    &root_identity(),
+                    FollowUpRequest {
+                        target: "agent-1".into(),
+                        message: "continue from retained history".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(resumed["delivery"], "new_run");
+            assert!(manager.state.lock().unwrap().records["agent-1"]
+                .durable_diagnostic
+                .is_none());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let status = manager.state.lock().unwrap().records["agent-1"]
+                        .status
+                        .clone();
+                    assert!(
+                        !matches!(status, DelegatedAgentStatus::Failed { .. }),
+                        "{status:?}"
+                    );
+                    if matches!(status, DelegatedAgentStatus::Completed { .. }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            stop_fixture_worker(manager).await;
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(String::from_utf8_lossy(&requests[0].body).contains("retained steering"));
+            assert!(
+                !root.join("effect.txt").exists(),
+                "prior mutation was replayed"
+            );
+            let session = Session::open_read_only(&session_path).unwrap();
+            let delivered = session.entries().iter().filter(|entry| match &entry.value {
+                crate::EntryValue::Message(octet_ai::Message::User(message)) => message.content.iter().any(|part| {
+                    matches!(part, octet_ai::UserPart::Text(text) if delivery_ids_in_envelopes(text).contains(&initial.delivery_id))
+                }),
+                _ => false,
+            }).count();
+            assert_eq!(delivered, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_session_authority_retains_work_until_explicit_or_auto_repair() {
+        for automatic in [false, true] {
+            for already_delivered in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path();
+                let session_path = root.join("child.jsonl");
+                let saved_path = root.join("child.saved");
+                let QueuedTask::Initial(mut initial) = QueuedTask::initial("initial work".into())
+                else {
+                    unreachable!()
+                };
+                initial.attempts = 2;
+                let message = DirectedMessage {
+                    delivery_id: new_delivery_id().unwrap(),
+                    from: ROOT_AGENT_ID.into(),
+                    message: "accepted message".into(),
+                };
+                let follow_up = QueuedFollowUp {
+                    delivery_id: new_delivery_id().unwrap(),
+                    from: ROOT_AGENT_ID.into(),
+                    message: "accepted follow-up".into(),
+                    attempts: 1,
+                };
+                let mut session = Session::create(&session_path).unwrap();
+                if already_delivered {
+                    for text in [
+                        QueuedTask::Initial(initial.clone()).format(std::slice::from_ref(&message)),
+                        format_follow_up(&follow_up, &[]),
+                    ] {
+                        session
+                            .append(crate::EntryValue::Message(octet_ai::Message::User(
+                                octet_ai::UserMessage {
+                                    content: vec![octet_ai::UserPart::Text(text)],
+                                },
+                            )))
+                            .unwrap();
+                    }
+                }
+                drop(session);
+                std::fs::rename(&session_path, &saved_path).unwrap();
+                std::fs::create_dir(&session_path).unwrap();
+                {
+                    let manager = writable_manager(root);
+                    let (child, _commands) =
+                        insert_test_record(&manager, DelegatedAgentStatus::Pending);
+                    let mut state = manager.state.lock().unwrap();
+                    let record = state.records.get_mut(&child.id).unwrap();
+                    record.pending_initial_task = Some(initial.clone());
+                    record.pending_messages.push_back(message.clone());
+                    record.pending_follow_ups.push_back(follow_up.clone());
+                    record.queued_follow_ups.add_usage(follow_up.usage());
+                    manager.persist_durable_fleet_locked(&mut state);
+                }
+                // Repeat reconstruction while authority is unreadable: neither
+                // restore's rewrite nor failed reattachment may destroy work.
+                {
+                    let manager = writable_manager(root);
+                    manager.restore_durable_fleet();
+                    let state = manager.state.lock().unwrap();
+                    let record = &state.records["agent-1"];
+                    assert!(!record.live_task);
+                    assert!(record
+                        .durable_diagnostic
+                        .as_deref()
+                        .unwrap()
+                        .contains("authority could not be read"));
+                    assert_eq!(record.pending_initial_task.as_ref().unwrap().attempts, 2);
+                    assert_eq!(record.pending_follow_ups[0].attempts, 1);
+                    assert_eq!(record.pending_messages[0].delivery_id, message.delivery_id);
+                }
+                let server = MockServer::start().await;
+                let expected_runs = if already_delivered { 1 } else { 3 };
+                Mock::given(method("POST")).and(path("/chat/completions"))
+                    .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                        .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+                    .expect(expected_runs).mount(&server).await;
+                let mut manager = writable_manager(root);
+                let template = &mut Arc::get_mut(&mut manager).unwrap().template;
+                Arc::make_mut(&mut template.model.endpoint).base_url =
+                    url::Url::parse(&format!("{}/", server.uri())).unwrap();
+                Arc::make_mut(&mut template.model.endpoint).auth = octet_ai::Auth::None;
+                manager.restore_durable_fleet();
+                manager.prepare_owning_run(&root_identity()).unwrap();
+                assert!(!manager.state.lock().unwrap().records["agent-1"].live_task);
+                assert!(manager
+                    .follow_up(
+                        &root_identity(),
+                        FollowUpRequest {
+                            target: "agent-1".into(),
+                            message: "must refuse".into(),
+                        }
+                    )
+                    .await
+                    .unwrap_err()
+                    .contains("could not be reopened"));
+                assert!(server.received_requests().await.unwrap().is_empty());
+                let fleet: DurableFleet = serde_json::from_slice(
+                    &std::fs::read(fleet_roster_path(&root, Path::new(""))).unwrap(),
+                )
+                .unwrap();
+                let retained = &fleet.records[0];
+                assert_eq!(
+                    retained.pending_initial_task.as_ref().unwrap().delivery_id,
+                    initial.delivery_id
+                );
+                assert_eq!(
+                    retained.pending_initial_task.as_ref().unwrap().attempts,
+                    initial.attempts
+                );
+                assert_eq!(
+                    retained.pending_messages[0].delivery_id,
+                    message.delivery_id
+                );
+                assert_eq!(retained.queued_follow_ups[0], follow_up);
+                // Repair the same authority. Automatic reattachment must run
+                // the same identity reconciliation as explicit follow-up resume.
+                std::fs::remove_dir(&session_path).unwrap();
+                std::fs::rename(&saved_path, &session_path).unwrap();
+                if automatic {
+                    manager.prepare_owning_run(&root_identity()).unwrap();
+                }
+                manager
+                    .follow_up(
+                        &root_identity(),
+                        FollowUpRequest {
+                            target: "agent-1".into(),
+                            message: "new B".into(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let done = {
+                            let state = manager.state.lock().unwrap();
+                            let record = &state.records["agent-1"];
+                            assert!(
+                                !matches!(record.status, DelegatedAgentStatus::Failed { .. }),
+                                "{:?}",
+                                record.status
+                            );
+                            matches!(record.status, DelegatedAgentStatus::Completed { .. })
+                                && record.pending_initial_task.is_none()
+                                && record.pending_messages.is_empty()
+                                && record.pending_follow_ups.is_empty()
+                        };
+                        if done {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                stop_fixture_worker(manager).await;
+                assert_eq!(
+                    server.received_requests().await.unwrap().len(),
+                    expected_runs as usize
+                );
+                let session = Session::open_read_only(&session_path).unwrap();
+                let user_texts = session
+                    .entries()
+                    .iter()
+                    .filter_map(|entry| match &entry.value {
+                        crate::EntryValue::Message(octet_ai::Message::User(message)) => {
+                            Some(&message.content)
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter_map(|part| match part {
+                        octet_ai::UserPart::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                for id in [
+                    &initial.delivery_id,
+                    &message.delivery_id,
+                    &follow_up.delivery_id,
+                ] {
+                    assert_eq!(
+                        user_texts
+                            .iter()
+                            .filter(|text| delivery_ids_in_envelopes(text).contains(id))
+                            .count(),
+                        1,
+                        "each accepted identity appears once: automatic={automatic}, previously_delivered={already_delivered}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_first_worker_does_not_strand_later_reattachment_plans() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"healthy completed\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+            .expect(1).mount(&server).await;
+        let mut manager = writable_manager(root);
+        let template = &mut Arc::get_mut(&mut manager).unwrap().template;
+        Arc::make_mut(&mut template.model.endpoint).base_url =
+            url::Url::parse(&format!("{}/", server.uri())).unwrap();
+        Arc::make_mut(&mut template.model.endpoint).auth = octet_ai::Auth::None;
+        let missing = root.join("missing.jsonl");
+        let healthy = root.join("healthy.jsonl");
+        Session::create(&healthy).unwrap();
+        for (id, name, path) in [
+            ("agent-1", "/root/missing", missing),
+            ("agent-2", "/root/healthy", healthy),
+        ] {
+            insert_durable_detached_record(
+                &manager,
+                id,
+                name,
+                path,
+                DelegatedAgentStatus::Detached,
+            );
+            let QueuedTask::Initial(initial) = QueuedTask::initial(format!("work for {id}")) else {
+                unreachable!()
+            };
+            manager
+                .state
+                .lock()
+                .unwrap()
+                .records
+                .get_mut(id)
+                .unwrap()
+                .pending_initial_task = Some(initial);
+        }
+        manager.prepare_owning_run(&root_identity()).unwrap();
+        {
+            let state = manager.state.lock().unwrap();
+            let unavailable = &state.records["agent-1"];
+            assert_eq!(unavailable.status, DelegatedAgentStatus::Detached);
+            assert!(!unavailable.live_task);
+            assert!(unavailable.detached_commands.is_some());
+            assert!(unavailable.pending_initial_task.is_some());
+            assert!(state.records["agent-2"].live_task);
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let status = manager.state.lock().unwrap().records["agent-2"]
+                    .status
+                    .clone();
+                assert!(
+                    !matches!(status, DelegatedAgentStatus::Failed { .. }),
+                    "{status:?}"
+                );
+                if matches!(status, DelegatedAgentStatus::Completed { .. }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        stop_fixture_worker(manager).await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stale_worker_liveness_drop_cannot_clear_replacement_liveness() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let (child, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        let old_liveness = WorkerLiveness::new(&manager, child.id.clone(), 1);
+        {
+            let mut state = manager.state.lock().unwrap();
+            let record = state.records.get_mut(&child.id).unwrap();
+            // Old worker published its park, and the replacement was admitted
+            // before the old future's liveness guard could finish dropping.
+            record.worker_generation = 2;
+            record.live_task = true;
+        }
+        drop(old_liveness);
+        assert!(manager.state.lock().unwrap().records[&child.id].live_task);
+        drop(WorkerLiveness::new(&manager, child.id.clone(), 2));
+        assert!(!manager.state.lock().unwrap().records[&child.id].live_task);
+    }
+
+    struct PanickingModelResolver;
+
+    impl AgentModelResolver for PanickingModelResolver {
+        fn resolve(
+            &self,
+            _selection: &AgentModelSelection,
+            _parent: &octet_ai::Model,
+            _reasoning: &octet_ai::ReasoningConfig,
+        ) -> Result<ResolvedAgentModel, String> {
+            panic!("real worker startup panic");
+        }
+        fn models(
+            &self,
+            _query: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<AgentModelDescriptor>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn real_worker_panic_is_supervised_and_wakes_a_registered_waiter() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        manager
+            .spawn(
+                &root_identity(),
+                SpawnRequest {
+                    task_name: "panic".into(),
+                    display_task_name: None,
+                    message: "panic in startup".into(),
+                    extension_policy: None,
+                    extension_provenance: None,
+                },
+            )
+            .unwrap();
+        *manager.template.model_resolver.write().unwrap() = Some(Arc::new(PanickingModelResolver));
+        let owner = root_identity();
+        let cancellation = crate::CancellationToken::default();
+        let wait = manager.wait(
+            &owner,
+            Duration::from_secs(30),
+            &cancellation,
+            MAX_PROVENANCE_TEXT_BYTES,
+        );
+        tokio::pin!(wait);
+        assert!(
+            futures_util::poll!(&mut wait).is_pending(),
+            "waiter registers before the worker runs"
+        );
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut wait)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.value.to_string().contains("worker task panicked"));
+        let state = manager.state.lock().unwrap();
+        assert!(!state.records["agent-1"].live_task);
+        assert!(matches!(&state.records["agent-1"].status,
+            DelegatedAgentStatus::Failed { error } if error.contains("settled by supervisor")));
+    }
+
+    #[test]
+    fn durable_queues_round_trip_in_order_with_delivery_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let (child, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Detached);
+        let durable = {
+            let mut state = manager.state.lock().unwrap();
+            state.next_mailbox_delivery = 42;
+            let record = state.records.get_mut(&child.id).unwrap();
+            record.pending_messages.push_back(DirectedMessage {
+                delivery_id: "test-delivery".into(),
+                from: ROOT_AGENT_ID.into(),
+                message: "first message".into(),
+            });
+            record.pending_messages.push_back(DirectedMessage {
+                delivery_id: "test-delivery".into(),
+                from: ROOT_AGENT_ID.into(),
+                message: "second message".into(),
+            });
+            record.pending_follow_ups.push_back(QueuedFollowUp {
+                delivery_id: "test-follow-up".into(),
+                from: ROOT_AGENT_ID.into(),
+                message: "retry me".into(),
+                attempts: 2,
+            });
+            record.mailbox.push_back(MailboxMessage {
+                kind: "message",
+                from: ROOT_AGENT_ID.into(),
+                task_name: None,
+                message: "leased mail".into(),
+                evictable: false,
+                continued: true,
+                leased: true,
+            });
+            record.mailbox_delivery = Some(MailboxDeliveryPlan {
+                id: 41,
+                complete_messages: 0,
+                partial_bytes: 3,
+                touched_messages: 1,
+            });
+            durable_fleet_record(record)
+        };
+        let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let restored = DelegationManager::agent_record_from_durable(
+            durable,
+            test_effective_tool_policy(),
+            None,
+            tx,
+            Some(rx),
+        );
+        assert_eq!(
+            restored
+                .pending_messages
+                .iter()
+                .map(|message| message.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first message", "second message"]
+        );
+        assert_eq!(restored.pending_follow_ups[0].attempts, 2);
+        assert_eq!(restored.mailbox_delivery.unwrap().id, 41);
+        assert!(restored.mailbox[0].leased);
+        assert!(restored.mailbox[0].continued);
+    }
+
+    #[tokio::test]
+    async fn queue_enqueue_is_not_acknowledged_when_roster_persistence_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = writable_manager(directory.path());
+        let blocked_roster = directory.path().join("blocked-roster");
+        std::fs::create_dir(&blocked_roster).unwrap();
+        Arc::get_mut(&mut manager)
+            .expect("fixture manager is uniquely owned")
+            .roster_path = Some(blocked_roster);
+        let (child, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Detached);
+        let root = manager.root_binding().identity;
+        let error = manager
+            .send_message(&root, &child.id, "must not be acknowledged".into())
+            .await
+            .expect_err("failed roster write must reject the enqueue");
+        assert!(error.contains("could not persist queued message"));
+        assert!(manager.state.lock().unwrap().persistence_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn worker_abort_settles_once_and_wakes_waiters() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let (child, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .records
+            .get_mut(&child.id)
+            .unwrap()
+            .live_task = true;
+        let notified = manager.changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        manager.mark_worker_aborted(&child.id, None, 0, "worker task panicked");
+        tokio::time::timeout(Duration::from_secs(1), &mut notified)
+            .await
+            .expect("worker abort did not wake waiters");
+        let state = manager.state.lock().unwrap();
+        assert!(matches!(
+            &state.records[&child.id].status,
+            DelegatedAgentStatus::Failed { error } if error.contains("worker task panicked")
+        ));
+        drop(state);
+        manager.mark_worker_aborted(&child.id, None, 0, "worker task panicked");
+        assert!(matches!(
+            &manager.state.lock().unwrap().records[&child.id].status,
+            DelegatedAgentStatus::Failed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_supervisor_cannot_settle_a_same_claim_replacement_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        manager
+            .spawn(
+                &root_identity(),
+                SpawnRequest {
+                    task_name: "replace".into(),
+                    display_task_name: None,
+                    message: "original".into(),
+                    extension_policy: None,
+                    extension_provenance: None,
+                },
+            )
+            .unwrap();
+        *manager.template.model_resolver.write().unwrap() = Some(Arc::new(PanickingModelResolver));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    manager.state.lock().unwrap().records["agent-1"].status,
+                    DelegatedAgentStatus::Failed { .. }
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (claim, generation, session_path, initial) = {
+            let state = manager.state.lock().unwrap();
+            let record = &state.records["agent-1"];
+            (
+                record.claim.clone(),
+                record.worker_generation,
+                record.session_path.clone(),
+                record.pending_initial_task.clone().unwrap(),
+            )
+        };
+        // Simulate a session append preceding the abnormal exit's lost roster
+        // acknowledgement. Same-process resume must reconcile it too.
+        let mut session = Session::open(&session_path).unwrap();
+        session
+            .append(crate::EntryValue::Message(octet_ai::Message::User(
+                octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text(
+                        QueuedTask::Initial(initial).format(&[]),
+                    )],
+                },
+            )))
+            .unwrap();
+        drop(session);
+        manager
+            .follow_up(
+                &root_identity(),
+                FollowUpRequest {
+                    target: "agent-1".into(),
+                    message: "replacement".into(),
+                },
+            )
+            .await
+            .unwrap();
+        // Do not yield to the replacement yet: generation fencing must already
+        // hold at publication, not only after spawn_worker polls its future.
+        let mailbox_len = manager.state.lock().unwrap().root_mailbox.len();
+        manager.mark_worker_aborted(
+            "agent-1",
+            claim.as_ref(),
+            generation,
+            "old worker task panicked",
+        );
+        {
+            let state = manager.state.lock().unwrap();
+            let record = &state.records["agent-1"];
+            assert_eq!(record.claim, claim);
+            assert_eq!(record.worker_generation, generation + 1);
+            assert_eq!(record.status, DelegatedAgentStatus::Pending);
+            assert!(record.live_task);
+            assert!(record.pending_initial_task.is_none());
+            assert_eq!(record.pending_follow_ups.len(), 1);
+            assert_eq!(state.root_mailbox.len(), mailbox_len);
+        }
+        stop_fixture_worker(manager).await;
+    }
+
+    #[test]
+    fn undelivered_tasks_dead_letter_after_a_small_durable_cap() {
+        let mut queued = VecDeque::new();
+        let mut task = QueuedTask::initial("poison".into());
+        for attempts in 1..MAX_UNDELIVERED_TASK_ATTEMPTS {
+            assert!(matches!(
+                restore_undelivered_task(
+                    &mut queued,
+                    task,
+                    false,
+                    &WorkerOutcome::Failed("append failed".into())
+                ),
+                TaskRestore::Restored { attempts: observed } if observed == attempts
+            ));
+            task = queued.pop_front().unwrap();
+        }
+        assert!(matches!(
+            restore_undelivered_task(
+                &mut queued,
+                task,
+                false,
+                &WorkerOutcome::Failed("append failed".into())
+            ),
+            TaskRestore::DeadLettered { attempts } if attempts == MAX_UNDELIVERED_TASK_ATTEMPTS
+        ));
+        assert!(queued.is_empty());
+
+        assert!(matches!(
+            restore_undelivered_task(
+                &mut queued,
+                QueuedTask::initial("transient".into()),
+                false,
+                &WorkerOutcome::Failed("once".into())
+            ),
+            TaskRestore::Restored { attempts: 1 }
+        ));
     }
 
     #[test]
@@ -10872,6 +13430,7 @@ mod tests {
             let pending = &mut state.records.get_mut(&child.id).unwrap().pending_messages;
             for index in 0..MAX_PENDING_MESSAGES {
                 pending.push_back(DirectedMessage {
+                    delivery_id: format!("test-delivery-{index}"),
                     from: ROOT_AGENT_ID.into(),
                     message: format!("message-{index}"),
                 });
@@ -10880,6 +13439,7 @@ mod tests {
 
         let leased = manager.take_pending_messages(&child.id);
         let candidate = DirectedMessage {
+            delivery_id: "test-delivery".into(),
             from: ROOT_AGENT_ID.into(),
             message: "overflow".into(),
         };
@@ -11224,6 +13784,63 @@ mod tests {
     }
 
     #[test]
+    fn streamed_output_progress_is_throttled_and_separate_from_reported_usage() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        let mut telemetry = manager.attach_telemetry();
+        let usage = Usage {
+            input_tokens: 10,
+            cache_read_tokens: 20,
+            cache_write_tokens: 5,
+            output_tokens: 4,
+            total_tokens: 39,
+            ..Usage::default()
+        };
+        manager.update_agent_usage(&identity.id, usage, Some(7), true);
+        telemetry.borrow_and_update();
+
+        let mut last_update = None;
+        manager.update_agent_streamed_output(&identity.id, 40, &mut last_update);
+        {
+            let snapshot = telemetry.borrow_and_update();
+            let live = &snapshot.as_ref().unwrap().children[0];
+            assert_eq!(live.output_tokens, 4);
+            assert_eq!(live.estimated_output_tokens, Some(14));
+            assert_eq!(live.total_tokens, 39);
+            assert_eq!(live.cost_microdollars, Some(7));
+        }
+        manager.update_agent_streamed_output(&identity.id, 40, &mut last_update);
+        assert!(
+            !telemetry.has_changed().unwrap(),
+            "stream updates are coalesced"
+        );
+        last_update = Some(Instant::now() - STREAMED_OUTPUT_UPDATE_INTERVAL);
+        manager.update_agent_streamed_output(&identity.id, 4, &mut last_update);
+        assert_eq!(
+            telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
+            Some(25)
+        );
+
+        manager.clear_agent_streamed_output(&identity.id);
+        assert_eq!(
+            telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
+            None,
+            "a retry must discard provisional generation"
+        );
+        manager.update_agent_streamed_output(&identity.id, 20, &mut None);
+        manager.update_agent_usage(&identity.id, usage, Some(7), true);
+        let snapshot = telemetry.borrow();
+        let settled = &snapshot.as_ref().unwrap().children[0];
+        assert_eq!(settled.estimated_output_tokens, None);
+        assert_eq!(settled.output_tokens, 4);
+        assert_eq!(
+            manager.state.lock().unwrap().records[&identity.id].usage,
+            usage
+        );
+    }
+
+    #[test]
     fn child_unknown_usage_is_sticky_and_preserves_the_known_subtotal_for_root_mirroring() {
         let directory = tempfile::tempdir().unwrap();
         let manager = writable_manager(directory.path());
@@ -11283,6 +13900,38 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_changes_update_new_workers_but_preserve_existing_worker_pins() {
+        use octet_ai::{ReasoningConfig, ReasoningEffort};
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let binding = manager.root_binding();
+        let mut pinned = test_extension_policy();
+        let initial = manager.template.resolve_model(None).unwrap();
+        pinned.resolved_model = Some(initial.metadata);
+        pinned.resolved_reasoning = Some(initial.reasoning.clone());
+        for reasoning in [
+            ReasoningConfig::Effort(ReasoningEffort::Max),
+            ReasoningConfig::Effort(ReasoningEffort::Ultra),
+            ReasoningConfig::Off,
+            ReasoningConfig::Effort(ReasoningEffort::Low),
+        ] {
+            binding.update_reasoning(reasoning.clone());
+            assert_eq!(
+                manager.template.resolve_model(None).unwrap().reasoning,
+                reasoning
+            );
+            assert_eq!(
+                manager
+                    .template
+                    .resolve_model(Some(&pinned))
+                    .unwrap()
+                    .reasoning,
+                initial.reasoning
+            );
+        }
+    }
+
+    #[test]
     fn root_outage_limit_updates_bound_child_template() {
         let directory = tempfile::tempdir().unwrap();
         let manager = writable_manager(directory.path());
@@ -11295,7 +13944,7 @@ mod tests {
             effect_broker: manager.template.effect_broker.clone(),
             extensions: manager.template.extensions.clone(),
             max_turns: Some(4),
-            reasoning: manager.template.reasoning.clone(),
+            reasoning: manager.template.reasoning.read().unwrap().clone(),
             reasoning_mode: manager.template.reasoning_mode,
             cache_retention: manager.template.cache_retention,
             session_id: None,
@@ -11390,6 +14039,7 @@ mod tests {
             let mut state = manager.state.lock().unwrap();
             let record = state.records.get_mut(&identity.id).unwrap();
             record.pending_messages.push_back(DirectedMessage {
+                delivery_id: "test-delivery".into(),
                 from: ROOT_AGENT_ID.into(),
                 message: "queued".into(),
             });
@@ -11516,6 +14166,196 @@ mod tests {
         let state = manager.state.lock().unwrap();
         assert!(state.persistence_error.is_some());
         assert!(state.records["agent-1"].pending_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn roster_output_prefixes_preserve_full_child_sessions_after_reload() {
+        for (count, bytes, extension) in [(16, 16 * 1024, true), (2, 128 * 1024, false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let output = "x".repeat(bytes);
+            {
+                let manager = writable_manager(directory.path());
+                for index in 0..count {
+                    let session_path = directory.path().join(format!("child-{index}.jsonl"));
+                    let mut session = Session::create(&session_path).unwrap();
+                    // The production TurnFinished boundary has already appended
+                    // this complete message before execute_child_run collects it.
+                    session
+                        .append(crate::session::EntryValue::Message(
+                            octet_ai::Message::Assistant(octet_ai::AssistantMessage {
+                                content: vec![AssistantPart::Text(output.clone())],
+                                model: manager.template.model.spec.id.clone(),
+                                protocol: manager.template.model.spec.protocol,
+                            }),
+                        ))
+                        .unwrap();
+                    drop(session);
+                    let id = format!("agent-{}", index + 1);
+                    let policy = extension.then(|| {
+                        let mut policy = test_extension_policy();
+                        policy.max_output_bytes = bytes;
+                        policy
+                    });
+                    insert_fixture_record(
+                        &manager,
+                        DurableFleetRecord {
+                            agent_id: id.clone(),
+                            agent_path: format!("/root/worker-{index}"),
+                            parent_id: ROOT_AGENT_ID.into(),
+                            depth: 1,
+                            session_path,
+                            status: DelegatedAgentStatus::Running,
+                            extension_policy: policy,
+                            ..DurableFleetRecord::default()
+                        },
+                        false,
+                        false,
+                        true,
+                    );
+                    let status = if index % 2 == 0 {
+                        DelegatedAgentStatus::Completed {
+                            output: output.clone(),
+                        }
+                    } else {
+                        DelegatedAgentStatus::LimitReached {
+                            output: output.clone(),
+                            turn_count: 1,
+                            turn_limit: 1,
+                        }
+                    };
+                    assert!(manager.set_status(&id, status, false));
+                }
+                assert!(manager.state.lock().unwrap().persistence_error.is_none());
+            }
+            let manager = writable_manager(directory.path());
+            manager.restore_durable_fleet();
+            let mut state = manager.state.lock().unwrap();
+            assert_eq!(state.records.len(), count);
+            for record in state.records.values_mut() {
+                let prefix = roster_status_text(&mut record.status).unwrap();
+                assert!(prefix.ends_with(ROSTER_OUTPUT_SUFFIX));
+                let session = Session::open_read_only(&record.session_path).unwrap();
+                let complete: Vec<&str> = session
+                    .entries()
+                    .iter()
+                    .filter_map(|entry| {
+                        if let crate::session::EntryValue::Message(octet_ai::Message::Assistant(
+                            message,
+                        )) = &entry.value
+                        {
+                            message.content.iter().find_map(|part| match part {
+                                AssistantPart::Text(text) => Some(text.as_str()),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(complete, vec![output.as_str()]);
+            }
+        }
+    }
+
+    #[test]
+    fn allowed_worker_outputs_compose_with_durable_roster_budget() {
+        for (count, bytes, character) in [
+            (16, 16 * 1024, 'x'),
+            (2, 128 * 1024, 'é'),
+            (16, 16 * 1024, '\0'),
+        ] {
+            let output = character.to_string().repeat(bytes / character.len_utf8());
+            let fleet = DurableFleet {
+                version: FLEET_ROSTER_VERSION,
+                root_session: PathBuf::from("root.jsonl"),
+                records: (0..count)
+                    .map(|index| DurableFleetRecord {
+                        agent_id: format!("agent-{index}"),
+                        session_path: PathBuf::from(format!("child-{index}.jsonl")),
+                        status: DelegatedAgentStatus::Completed {
+                            output: output.clone(),
+                        },
+                        ..DurableFleetRecord::default()
+                    })
+                    .collect(),
+                next_mailbox_delivery: 1,
+                root_mailbox: VecDeque::new(),
+                root_mailbox_delivery: None,
+            };
+            assert!(serde_json::to_vec(&fleet).unwrap().len() > ROSTER_PROJECTION_BYTES);
+            let encoded = encode_durable_fleet(fleet).unwrap();
+            assert!(encoded.len() <= MAX_FLEET_ROSTER_BYTES);
+            let restored: DurableFleet = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(restored.records.len(), count);
+            for (index, record) in restored.records.iter().enumerate() {
+                assert_eq!(
+                    record.session_path,
+                    PathBuf::from(format!("child-{index}.jsonl"))
+                );
+                let DelegatedAgentStatus::Completed { output: retained } = &record.status else {
+                    panic!("lost status")
+                };
+                assert!(retained.ends_with(ROSTER_OUTPUT_SUFFIX));
+                assert!(output.starts_with(retained.strip_suffix(ROSTER_OUTPUT_SUFFIX).unwrap()));
+            }
+        }
+        let small = DurableFleet {
+            version: FLEET_ROSTER_VERSION,
+            root_session: PathBuf::from("root.jsonl"),
+            records: vec![DurableFleetRecord {
+                status: DelegatedAgentStatus::Completed {
+                    output: "small answer".into(),
+                },
+                ..DurableFleetRecord::default()
+            }],
+            next_mailbox_delivery: 1,
+            root_mailbox: VecDeque::new(),
+            root_mailbox_delivery: None,
+        };
+        assert_eq!(
+            encode_durable_fleet(small.clone()).unwrap(),
+            serde_json::to_vec(&small).unwrap()
+        );
+        for status in [
+            DelegatedAgentStatus::Failed {
+                error: "e".repeat(128 * 1024),
+            },
+            DelegatedAgentStatus::AwaitingApproval {
+                reason: "a".repeat(128 * 1024),
+            },
+        ] {
+            let fleet = DurableFleet {
+                version: FLEET_ROSTER_VERSION,
+                root_session: PathBuf::from("root.jsonl"),
+                records: vec![
+                    DurableFleetRecord {
+                        status: status.clone(),
+                        ..DurableFleetRecord::default()
+                    },
+                    DurableFleetRecord {
+                        status: DelegatedAgentStatus::Completed {
+                            output: "x".repeat(128 * 1024),
+                        },
+                        ..DurableFleetRecord::default()
+                    },
+                ],
+                next_mailbox_delivery: 1,
+                root_mailbox: VecDeque::new(),
+                root_mailbox_delivery: None,
+            };
+            let restored: DurableFleet =
+                serde_json::from_slice(&encode_durable_fleet(fleet).unwrap()).unwrap();
+            assert_eq!(restored.records[0].status, status);
+        }
+        let oversized_metadata = DurableFleet {
+            version: FLEET_ROSTER_VERSION,
+            root_session: PathBuf::from("x".repeat(MAX_FLEET_ROSTER_BYTES)),
+            records: vec![],
+            next_mailbox_delivery: 1,
+            root_mailbox: VecDeque::new(),
+            root_mailbox_delivery: None,
+        };
+        assert!(encode_durable_fleet(oversized_metadata).is_err());
     }
 
     #[test]

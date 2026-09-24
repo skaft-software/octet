@@ -43,7 +43,8 @@ fn audio_fallback_text(audio: &crate::types::AudioMedia, placeholder: &str) -> S
 ///   text while dropping opaque/empty cross-model reasoning;
 /// - normalizes tool-call IDs to the common provider-safe wire shape; and
 /// - inserts synthetic error results for tool calls that have no result before
-///   the next assistant message (or the end of history).
+///   the next assistant message (or the end of history), except async calls
+///   whose pending state must survive until subsequent strict validation.
 ///
 /// [`crate::AiClient`] applies this automatically before validation and wire
 /// serialization. It is public for callers that need to inspect or estimate the
@@ -497,6 +498,12 @@ fn insert_missing_tool_results(messages: Vec<Message>) -> Vec<Message> {
                 push_synthetic_results(&mut out, &mut pending, &mut synthetic_ids);
                 for part in &assistant.content {
                     if let AssistantPart::ToolCall(call) = part {
+                        // Preserve pending async work and its later real result.
+                        // Route/tool/schema authority is checked by request validation;
+                        // a provider marker alone never authorizes execution.
+                        if call.async_execution {
+                            continue;
+                        }
                         pending.push(call.id.clone());
                     }
                 }
@@ -575,6 +582,7 @@ mod tests {
                 display_name: None,
                 protocol,
                 capabilities: Capabilities {
+                    responses_features: Default::default(),
                     input_modalities,
                     output_modalities: ModalitySet::none(),
                     tools: true,
@@ -606,6 +614,7 @@ mod tests {
 
     fn call(id: &str) -> AssistantPart {
         AssistantPart::ToolCall(ToolCall {
+            async_execution: false,
             id: ToolCallId(id.to_string()),
             name: "read".to_string(),
             arguments_json: "{}".to_string(),

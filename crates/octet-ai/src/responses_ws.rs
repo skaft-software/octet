@@ -13,15 +13,138 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
+#[cfg(test)]
+use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::{self, Message};
-use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::client::IntoClientRequest};
 use url::Url;
 
 use crate::error::{AiError, ConfigError, TransportError, TransportPhase};
 
+#[path = "responses_steering.rs"]
+mod steering_transport;
+pub(crate) use steering_transport::SteeringOperation;
+
 const RESPONSES_WEBSOCKETS_BETA: &str = "responses_websockets=2026-02-06";
 const EVENT_CHANNEL_CAPACITY: usize = 64;
+// Preserve tungstenite's message/frame ceilings, and independently bound queued
+// serialized event bytes. The latter is not a claim about exact Value heap size.
+const MAX_WS_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_WS_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const EVENT_CHANNEL_BYTES: usize = 64 * 1024 * 1024;
+
+fn websocket_config() -> tungstenite::protocol::WebSocketConfig {
+    tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_WS_FRAME_BYTES))
+}
+
+// Count without allocating a serialized copy, stopping as soon as the bound is
+// exceeded. Used both for channel admission and prospective prelude admission.
+fn bounded_event_size(value: &Value, limit: usize) -> Option<usize> {
+    struct Counter {
+        bytes: usize,
+        limit: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(bytes.len())
+                .filter(|size| *size <= self.limit)
+                .ok_or_else(|| std::io::Error::other("event exceeds byte limit"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { bytes: 0, limit };
+    serde_json::to_writer(&mut counter, value).ok()?;
+    Some(counter.bytes)
+}
+
+struct QueuedEvent {
+    event: Result<Value, AiError>,
+    _permit: OwnedSemaphorePermit,
+}
+
+pub(crate) struct EventSender {
+    sender: mpsc::Sender<QueuedEvent>,
+    bytes: Arc<Semaphore>,
+}
+
+#[derive(Debug)]
+pub(crate) struct EventReceiver {
+    receiver: mpsc::Receiver<QueuedEvent>,
+}
+
+impl EventReceiver {
+    pub(crate) fn close(&mut self) {
+        self.receiver.close();
+    }
+
+    pub(crate) async fn recv(&mut self) -> Option<Result<Value, AiError>> {
+        self.receiver.recv().await.map(|queued| queued.event)
+    }
+
+    #[cfg(test)]
+    fn try_recv(&mut self) -> Result<Result<Value, AiError>, mpsc::error::TryRecvError> {
+        self.receiver.try_recv().map(|queued| queued.event)
+    }
+}
+
+impl EventSender {
+    fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+    async fn closed(&self) {
+        self.sender.closed().await
+    }
+
+    pub(crate) async fn send(&self, event: Result<Value, AiError>) -> Result<(), ()> {
+        let size = match &event {
+            Ok(value) => bounded_event_size(value, EVENT_CHANNEL_BYTES),
+            Err(_) => Some(0),
+        };
+        let size = size.ok_or(())?;
+        let permit = tokio::select! {
+            biased;
+            _ = self.sender.closed() => return Err(()),
+            permit = Arc::clone(&self.bytes).acquire_many_owned(size as u32) =>
+                permit.map_err(|_| ())?,
+        };
+        self.sender
+            .send(QueuedEvent {
+                event,
+                _permit: permit,
+            })
+            .await
+            .map_err(|_| ())
+    }
+}
+
+pub(crate) fn event_channel(capacity: usize) -> (EventSender, EventReceiver) {
+    let (sender, receiver) = mpsc::channel(capacity);
+    (
+        EventSender {
+            sender,
+            bytes: Arc::new(Semaphore::new(EVENT_CHANNEL_BYTES)),
+        },
+        EventReceiver { receiver },
+    )
+}
+
+fn decode_websocket_event(bytes: &[u8]) -> Result<Value, AiError> {
+    if bytes.len() > MAX_WS_MESSAGE_BYTES {
+        return Err(crate::error::DecodeError::ResponseTooLarge.into());
+    }
+    serde_json::from_slice(bytes).map_err(|error| {
+        crate::error::DecodeError::Json(format!("invalid Responses WebSocket event: {error}"))
+            .into()
+    })
+}
 const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Normal liveness probes catch a lost route well before the five-minute
@@ -163,7 +286,7 @@ fn production_dialer() -> SocketDialer<ResponsesSocket> {
         Box::pin(async move {
             let url = websocket_url(url)?;
             let request = connect_request(url, &headers)?;
-            match connect_async(request).await {
+            match connect_async_with_config(request, Some(websocket_config()), false).await {
                 Ok((socket, _)) => Ok(socket),
                 Err(error) => Err(websocket_connect_error(error)),
             }
@@ -259,10 +382,11 @@ fn without_continuation_fields(body: &Value) -> Option<Value> {
     let Value::Object(object) = body else {
         return None;
     };
-    let mut fixed = object.clone();
-    fixed.remove("input");
-    fixed.remove("previous_response_id");
-    fixed.remove("generate");
+    let fixed = object
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "input" | "previous_response_id" | "generate"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     Some(Value::Object(fixed))
 }
 
@@ -286,7 +410,7 @@ fn incremental_body(body: &Value, continuation: Option<&Continuation>) -> (Value
         return (body.clone(), false);
     };
     if body.get("previous_response_id").is_some()
-        || without_continuation_fields(body) != Some(continuation.fixed_body.clone())
+        || without_continuation_fields(body).as_ref() != Some(&continuation.fixed_body)
     {
         return (body.clone(), false);
     }
@@ -305,10 +429,13 @@ fn incremental_body(body: &Value, continuation: Option<&Continuation>) -> (Value
         return (body.clone(), false);
     }
 
-    let mut incremental = body.clone();
-    let Some(object) = incremental.as_object_mut() else {
-        return (body.clone(), false);
-    };
+    let mut object = body
+        .as_object()
+        .expect("input belongs to an object")
+        .iter()
+        .filter(|(key, _)| key.as_str() != "input")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<String, Value>>();
     object.insert(
         "previous_response_id".to_owned(),
         Value::String(continuation.response_id.clone()),
@@ -317,7 +444,7 @@ fn incremental_body(body: &Value, continuation: Option<&Continuation>) -> (Value
         "input".to_owned(),
         Value::Array(input[baseline_len..].to_vec()),
     );
-    (incremental, true)
+    (Value::Object(object), true)
 }
 
 fn terminal_kind(value: &Value) -> Option<&str> {
@@ -368,8 +495,9 @@ fn update_continuation(full_body: &Value, value: &Value, continuation: &mut Opti
 }
 
 struct RequestCommand {
+    steering: Option<SteeringOperation>,
     body: Value,
-    reply: mpsc::Sender<Result<Value, AiError>>,
+    reply: EventSender,
     /// Taken by the actor before the generation loop so the command itself
     /// stays borrowable across reconnect attempts.
     started: Option<oneshot::Sender<Result<(), String>>>,
@@ -438,23 +566,24 @@ impl ResponsesWsPool {
         // cached session.
         let url = websocket_url(url)?;
         let request = connect_request(url, &headers)?;
-        let (socket, _) = match connect_async(request).await {
-            Ok(connected) => connected,
-            Err(error) => {
-                let error = websocket_connect_error(error);
-                if let Some(key) = key {
-                    let mut state = self.state.lock().await;
-                    if let Some(connection) = state.sessions.get(key) {
-                        if connection.alive.load(Ordering::Acquire) {
-                            return Ok(connection.clone());
+        let (socket, _) =
+            match connect_async_with_config(request, Some(websocket_config()), false).await {
+                Ok(connected) => connected,
+                Err(error) => {
+                    let error = websocket_connect_error(error);
+                    if let Some(key) = key {
+                        let mut state = self.state.lock().await;
+                        if let Some(connection) = state.sessions.get(key) {
+                            if connection.alive.load(Ordering::Acquire) {
+                                return Ok(connection.clone());
+                            }
                         }
+                        state.sessions.remove(key);
+                        state.disabled.insert(key.to_owned());
                     }
-                    state.sessions.remove(key);
-                    state.disabled.insert(key.to_owned());
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
 
         let (sender, receiver) = mpsc::channel(4);
         let alive = Arc::new(AtomicBool::new(true));
@@ -561,7 +690,33 @@ impl ResponsesWsPool {
         startup_timeout: Duration,
         connect_timeout: Option<Duration>,
         resumer: Option<ResponseResumer>,
-    ) -> Result<mpsc::Receiver<Result<Value, AiError>>, AiError> {
+    ) -> Result<EventReceiver, AiError> {
+        self.request_operation(
+            key,
+            url,
+            headers,
+            body,
+            liveness,
+            startup_timeout,
+            connect_timeout,
+            resumer,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn request_operation(
+        &self,
+        key: Option<&str>,
+        url: Url,
+        headers: http::HeaderMap,
+        body: Value,
+        liveness: ResponsesWsLiveness,
+        startup_timeout: Duration,
+        connect_timeout: Option<Duration>,
+        resumer: Option<ResponseResumer>,
+        steering: Option<SteeringOperation>,
+    ) -> Result<EventReceiver, AiError> {
         let deadline = tokio::time::Instant::now() + startup_timeout;
         // Only this future owns connection establishment; no generation command
         // exists yet. A timeout here is proven safe for HTTP fallback.
@@ -581,7 +736,7 @@ impl ResponsesWsPool {
         // without letting that outer timer misclassify a handshake timeout.
         tokio::time::timeout_at(
             deadline,
-            self.send_request(key, connection, body, liveness, resumer),
+            self.send_request_operation(key, connection, body, liveness, resumer, steering),
         )
         .await
         .map_err(|_| {
@@ -594,17 +749,19 @@ impl ResponsesWsPool {
         })?
     }
 
-    async fn send_request(
+    async fn send_request_operation(
         &self,
         key: Option<&str>,
         connection: Connection,
         body: Value,
         liveness: ResponsesWsLiveness,
         resumer: Option<ResponseResumer>,
-    ) -> Result<mpsc::Receiver<Result<Value, AiError>>, AiError> {
-        let (reply, events) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        steering: Option<SteeringOperation>,
+    ) -> Result<EventReceiver, AiError> {
+        let (reply, events) = event_channel(EVENT_CHANNEL_CAPACITY);
         let (started, started_result) = oneshot::channel();
         let command = RequestCommand {
+            steering,
             body,
             reply,
             started: Some(started),
@@ -858,7 +1015,7 @@ fn interrupted(
 /// consumer, a later retry on this attempt would duplicate it. Returns `false`
 /// when the consumer is gone.
 async fn flush_pre_output(
-    reply: &mpsc::Sender<Result<Value, AiError>>,
+    reply: &EventSender,
     pre_output: &mut Vec<Value>,
     pre_output_bytes: &mut usize,
     visible: &mut bool,
@@ -882,7 +1039,7 @@ async fn flush_pre_output(
 /// Returns `false` when the consumer is gone.
 #[allow(clippy::too_many_arguments)]
 async fn publish_event(
-    reply: &mpsc::Sender<Result<Value, AiError>>,
+    reply: &EventSender,
     pre_output: &mut Vec<Value>,
     pre_output_bytes: &mut usize,
     visible: &mut bool,
@@ -890,17 +1047,15 @@ async fn publish_event(
     value: Value,
 ) -> bool {
     if !*visible {
-        if is_pre_output_event(&value)
-            && pre_output.len() < PRE_OUTPUT_BUFFER_EVENTS
-            && *pre_output_bytes < PRE_OUTPUT_BUFFER_BYTES
-        {
-            *pre_output_bytes = pre_output_bytes.saturating_add(
-                serde_json::to_string(&value)
-                    .map(|text| text.len())
-                    .unwrap_or_default(),
-            );
-            pre_output.push(value);
-            return true;
+        if is_pre_output_event(&value) && pre_output.len() < PRE_OUTPUT_BUFFER_EVENTS {
+            if let Some(size) = bounded_event_size(
+                &value,
+                PRE_OUTPUT_BUFFER_BYTES.saturating_sub(*pre_output_bytes),
+            ) {
+                *pre_output_bytes += size;
+                pre_output.push(value);
+                return true;
+            }
         }
         if !flush_pre_output(reply, pre_output, pre_output_bytes, visible, progress).await {
             return false;
@@ -923,6 +1078,13 @@ async fn handle_provider_event(
     visible: &mut bool,
     progress: &mut GenerationProgress,
 ) -> Option<AttemptOutcome> {
+    // Check before continuation cloning or channel admission, including events
+    // supplied by cursor retrieval rather than the WebSocket decoder.
+    if bounded_event_size(&value, EVENT_CHANNEL_BYTES).is_none() {
+        return Some(AttemptOutcome::Fatal {
+            error: crate::error::DecodeError::ResponseTooLarge.into(),
+        });
+    }
     let is_terminal = terminal_kind(&value).is_some();
     // Provider rejections belong to the host retry classifier and its shared
     // physical-attempt budget. No transport-local generation replay is allowed,
@@ -982,10 +1144,7 @@ async fn handle_provider_event(
 /// before the transport failed (the pre-row `Started` / `first_body_seen`
 /// contract), and this happens only once the attempt can never be retried, so
 /// nothing is duplicated later. Returns `false` when the consumer is gone.
-async fn flush_pending_prelude(
-    reply: &mpsc::Sender<Result<Value, AiError>>,
-    prelude: &mut Vec<Value>,
-) -> bool {
+async fn flush_pending_prelude(reply: &EventSender, prelude: &mut Vec<Value>) -> bool {
     for buffered in prelude.drain(..) {
         if reply.send(Ok(buffered)).await.is_err() {
             return false;
@@ -1079,41 +1238,10 @@ where
             }
         };
         match message {
-            Message::Text(text) => {
-                let value = match serde_json::from_str::<Value>(text.as_ref()) {
+            Message::Text(_) | Message::Binary(_) => {
+                let value = match decode_websocket_event(message.into_data().as_ref()) {
                     Ok(value) => value,
-                    Err(error) => {
-                        return AttemptOutcome::Fatal {
-                            error: AiError::Decode(crate::error::DecodeError::Json(format!(
-                                "invalid Responses WebSocket event: {error}"
-                            ))),
-                        };
-                    }
-                };
-                if let Some(outcome) = handle_provider_event(
-                    value,
-                    command,
-                    continuation,
-                    pre_output,
-                    pre_output_bytes,
-                    &mut visible,
-                    &mut progress,
-                )
-                .await
-                {
-                    return outcome;
-                }
-            }
-            Message::Binary(bytes) => {
-                let value = match serde_json::from_slice::<Value>(&bytes) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        return AttemptOutcome::Fatal {
-                            error: AiError::Decode(crate::error::DecodeError::Json(format!(
-                                "invalid Responses WebSocket event: {error}"
-                            ))),
-                        };
-                    }
+                    Err(error) => return AttemptOutcome::Fatal { error },
                 };
                 if let Some(outcome) = handle_provider_event(
                     value,
@@ -1432,7 +1560,14 @@ async fn run_connection<S>(
             continue;
         }
         let started = command.started.take();
-        let (wire_body, _) = incremental_body(&command.body, continuation.as_ref());
+        let (wire_body, _) = incremental_body(
+            &command.body,
+            if command.steering.is_some() {
+                None
+            } else {
+                continuation.as_ref()
+            },
+        );
         let Value::Object(mut payload) = wire_body else {
             let _ = started.map(|started| {
                 started.send(Err("Responses WebSocket body is not an object".to_owned()))
@@ -1489,7 +1624,14 @@ async fn run_connection<S>(
         }
         let _ = started.map(|started| started.send(Ok(())));
 
-        match run_generation(&mut socket, &command, &mut continuation).await {
+        let outcome = if let Some(steering) = command.steering.take() {
+            // Steering changes replay lineage; never cache a guessed input prefix.
+            continuation = None;
+            steering_transport::run(&mut socket, &command, steering).await
+        } else {
+            run_generation(&mut socket, &command, &mut continuation).await
+        };
+        match outcome {
             GenerationEnd::Completed => {}
             GenerationEnd::Abandoned => {
                 alive.store(false, Ordering::Release);
@@ -1533,6 +1675,95 @@ mod tests {
 
     type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
     type ServerSocket = WebSocketStream<TcpStream>;
+
+    #[test]
+    fn websocket_byte_admission_precedes_json_decoding() {
+        assert_eq!(
+            websocket_config().max_message_size,
+            Some(MAX_WS_MESSAGE_BYTES)
+        );
+        assert_eq!(websocket_config().max_frame_size, Some(MAX_WS_FRAME_BYTES));
+        // Invalid JSON must report the byte limit, not a parse error.
+        let bytes = vec![b'x'; MAX_WS_MESSAGE_BYTES + 1];
+        assert!(matches!(
+            decode_websocket_event(&bytes),
+            Err(AiError::Decode(crate::error::DecodeError::ResponseTooLarge))
+        ));
+        let value = json!({"text": "\n\"é"});
+        let size = serde_json::to_vec(&value).unwrap().len();
+        assert_eq!(bounded_event_size(&value, size), Some(size));
+        assert_eq!(bounded_event_size(&value, size - 1), None);
+    }
+
+    #[tokio::test]
+    async fn event_channel_backpressures_bytes_and_releases_on_receive_or_drop() {
+        let (mut sender, mut receiver) = event_channel(64);
+        sender.bytes = Arc::new(Semaphore::new(8));
+        let value = json!("aa"); // Four serialized bytes.
+        sender.send(Ok(value.clone())).await.unwrap();
+        sender.send(Ok(value.clone())).await.unwrap();
+        assert_eq!(sender.bytes.available_permits(), 0);
+        let pending = sender.send(Ok(value.clone()));
+        tokio::pin!(pending);
+        assert!(matches!(
+            futures_util::poll!(&mut pending),
+            std::task::Poll::Pending
+        ));
+        assert_eq!(receiver.recv().await.unwrap().unwrap(), value);
+        pending.await.unwrap();
+        assert_eq!(sender.bytes.available_permits(), 0);
+        let pending = sender.send(Ok(value));
+        tokio::pin!(pending);
+        assert!(matches!(
+            futures_util::poll!(&mut pending),
+            std::task::Poll::Pending
+        ));
+        receiver.close();
+        assert!(sender.is_closed());
+        assert!(pending.await.is_err());
+        drop(receiver);
+        assert_eq!(sender.bytes.available_permits(), 8);
+    }
+
+    #[tokio::test]
+    async fn prospective_prelude_limit_flushes_without_losing_events() {
+        let (reply, mut receiver) = event_channel(64);
+        let mut prelude = Vec::new();
+        let mut bytes = 0;
+        let mut visible = false;
+        let mut progress = GenerationProgress::default();
+        let first = json!({"type": "response.created", "padding": "x".repeat(35_000)});
+        let second = json!({"type": "response.in_progress", "padding": "y".repeat(35_000)});
+        assert!(
+            publish_event(
+                &reply,
+                &mut prelude,
+                &mut bytes,
+                &mut visible,
+                &mut progress,
+                first.clone()
+            )
+            .await
+        );
+        assert_eq!(prelude.len(), 1);
+        assert!(bytes <= PRE_OUTPUT_BUFFER_BYTES);
+        assert!(
+            publish_event(
+                &reply,
+                &mut prelude,
+                &mut bytes,
+                &mut visible,
+                &mut progress,
+                second.clone()
+            )
+            .await
+        );
+        assert!(prelude.is_empty());
+        assert_eq!(bytes, 0);
+        assert!(visible);
+        assert_eq!(receiver.recv().await.unwrap().unwrap(), first);
+        assert_eq!(receiver.recv().await.unwrap().unwrap(), second);
+    }
 
     fn item(id: &str) -> Value {
         serde_json::json!({"type": "message", "id": id})
@@ -1937,11 +2168,12 @@ mod tests {
             unreachable_dialer(),
         )
         .await;
-        let (reply, events) = mpsc::channel(1);
+        let (reply, events) = event_channel(1);
         let (started, started_rx) = oneshot::channel();
         connection
             .sender
             .send(RequestCommand {
+                steering: None,
                 body: serde_json::json!({"model": "gpt", "input": []}),
                 reply,
                 started: Some(started),
@@ -1992,12 +2224,13 @@ mod tests {
             unreachable_dialer(),
         )
         .await;
-        let (reply, _events) = mpsc::channel(1);
+        let (reply, _events) = event_channel(1);
         let (started, mut started_rx) = oneshot::channel();
         let guard = state.lock().await;
         connection
             .sender
             .send(RequestCommand {
+                steering: None,
                 body: serde_json::json!({"model": "gpt", "input": []}),
                 reply,
                 started: Some(started),
@@ -2066,11 +2299,12 @@ mod tests {
                 unreachable_dialer(),
             )
             .await;
-            let (reply, mut events) = mpsc::channel(1);
+            let (reply, mut events) = event_channel(1);
             let (started, started_rx) = oneshot::channel();
             connection
                 .sender
                 .send(RequestCommand {
+                    steering: None,
                     body: serde_json::json!({"model": "gpt", "input": []}),
                     reply,
                     started: Some(started),
@@ -2168,11 +2402,12 @@ mod tests {
                     unreachable_dialer(),
                 )
                 .await;
-                let (reply, mut events) = mpsc::channel(1);
+                let (reply, mut events) = event_channel(1);
                 let (started, started_rx) = oneshot::channel();
                 connection
                     .sender
                     .send(RequestCommand {
+                        steering: None,
                         body: serde_json::json!({"model": "gpt", "input": []}),
                         reply,
                         started: Some(started),
@@ -2389,11 +2624,12 @@ mod tests {
         liveness: ResponsesWsLiveness,
         resumer: Option<ResponseResumer>,
     ) -> (Vec<Value>, Option<AiError>) {
-        let (reply, mut events) = mpsc::channel(16);
+        let (reply, mut events) = event_channel(16);
         let (started, started_rx) = oneshot::channel();
         connection
             .sender
             .send(RequestCommand {
+                steering: None,
                 body: test_generation_request(),
                 reply,
                 started: Some(started),
@@ -2694,7 +2930,7 @@ mod tests {
                     })
                 })
             };
-            let (reply, mut events) = mpsc::channel(16);
+            let (reply, mut events) = event_channel(16);
             connection
                 .sender
                 .send(RequestCommand {
@@ -2703,6 +2939,7 @@ mod tests {
                     started: None,
                     liveness: liveness(),
                     resumer: Some(resumer),
+                    steering: None,
                 })
                 .await
                 .unwrap();

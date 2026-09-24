@@ -25,6 +25,7 @@ fn transcript_block_is_final(block: &TranscriptBlock) -> bool {
     match block {
         TranscriptBlock::Assistant(block) | TranscriptBlock::Reasoning(block) => block.finished,
         TranscriptBlock::Tool(panel) => panel.finished,
+        TranscriptBlock::Subagents(summary) => summary.active_count() == 0,
         TranscriptBlock::Shell(shell) => !shell.running,
         TranscriptBlock::Compaction(_)
         | TranscriptBlock::User { .. }
@@ -124,6 +125,7 @@ fn finalized_block_rows_are_stable(block: &TranscriptBlock) -> bool {
     match block {
         TranscriptBlock::Assistant(_) | TranscriptBlock::User { .. } => true,
         TranscriptBlock::Tool(panel) => finalized_tool_rows_are_stable(panel),
+        TranscriptBlock::Subagents(_) => true,
         TranscriptBlock::Shell(shell) => shell.output.trim().is_empty(),
         TranscriptBlock::Outcome(_)
         | TranscriptBlock::UpdateAvailable(_)

@@ -600,10 +600,16 @@ pub(super) fn render_pending_steering(
             count
         )
     };
-    // Discoverability for Option/Alt+Up. It edits the *local* follow-up queue
-    // only, so it is shown only while a follow-up is queued; admitted steering
-    // cannot be recalled and must not advertise an affordance it lacks.
-    let hint = if state.follow_up_queue.is_empty() {
+    // Receipt state is authoritative even before the delivery event arrives.
+    // Sticky `/answer` and steering already claimed for persistence cannot edit.
+    let editable = !state.follow_up_queue.is_empty()
+        || state.steering_queue.iter().any(|entry| {
+            entry
+                .recall
+                .as_ref()
+                .is_some_and(|receipt| receipt.is_pending())
+        });
+    let hint = if !editable {
         String::new()
     } else {
         format!(
@@ -647,7 +653,7 @@ pub(super) fn render_pending_steering(
         .steering_queue
         .first()
         .map(|entry| entry.display.as_str())
-        .unwrap_or_else(|| state.follow_up_queue[0].transcript_text.as_str());
+        .unwrap_or_else(|| state.follow_up_queue[0].composed.transcript_text.as_str());
     let preview = steering_preview_text(state, display);
     let preview = if visible_width(&preview) > preview_budget {
         clipped_steering_content(state, &preview, preview_budget)

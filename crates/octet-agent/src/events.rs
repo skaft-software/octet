@@ -94,8 +94,12 @@ pub struct DelegationTelemetryChild {
     pub cache_read_tokens: u64,
     /// Prompt tokens written to cache.
     pub cache_write_tokens: u64,
-    /// Generated output tokens.
+    /// Generated output tokens reported by the provider for settled turns.
     pub output_tokens: u64,
+    /// UI-only estimate including the current provisional text/reasoning stream.
+    /// Never used for billing, budgets, or durable usage; absent between streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_output_tokens: Option<u64>,
     /// Reasoning tokens, a subset of output tokens.
     pub reasoning_tokens: u64,
     /// Provider-reported total tokens for the child session.
@@ -519,6 +523,8 @@ pub struct CompactionInfo {
 pub enum CompactionKind {
     /// A local canonical summary and retained full-fidelity tail.
     Local,
+    /// A deterministic bitmap checkpoint and retained full-fidelity tail.
+    Snapcompact,
     /// A route-affine opaque Responses checkpoint.
     NativeResponses {
         /// Session entry containing the opaque compact output.

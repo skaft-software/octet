@@ -75,6 +75,9 @@ pub enum AssistantMessageFrame {
     },
     /// Tool call started.
     ToolCallStart {
+        /// Provider async marker; carries no execution authority.
+        #[serde(default, rename = "async")]
+        async_execution: bool,
         /// Canonical part index.
         index: usize,
         /// Tool call identifier.
@@ -260,10 +263,16 @@ impl AssistantMessageFrameEncoder {
                 Ok(Some(AssistantMessageFrame::ReasoningEnd { index: *index }))
             }
 
-            StreamEvent::ToolCallStart { index, id, name } => {
+            StreamEvent::ToolCallStart {
+                index,
+                id,
+                name,
+                async_execution,
+            } => {
                 self.require_started("toolcall_start")?;
                 self.start_block(*index, BlockKind::ToolCall)?;
                 Ok(Some(AssistantMessageFrame::ToolCallStart {
+                    async_execution: *async_execution,
                     index: *index,
                     id: id.clone(),
                     name: name.clone(),
@@ -436,12 +445,18 @@ pub fn reduce_assistant_message_frames(
             AssistantMessageFrame::ReasoningEnd { index } => {
                 end_block(&mut states, *index, BlockKind::Reasoning, "reasoning_end")?;
             }
-            AssistantMessageFrame::ToolCallStart { index, id, name } => {
+            AssistantMessageFrame::ToolCallStart {
+                index,
+                id,
+                name,
+                async_execution,
+            } => {
                 append_block(
                     message,
                     &mut states,
                     *index,
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: *async_execution,
                         id: id.clone(),
                         name: name.clone(),
                         arguments_json: String::new(),
@@ -609,6 +624,7 @@ mod tests {
             },
             StreamEvent::TextEnd { index: 1 },
             StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 2,
                 id: ToolCallId("call-1".to_string()),
                 name: "lookup".to_string(),

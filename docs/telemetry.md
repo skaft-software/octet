@@ -3,9 +3,10 @@
 Octet has two independent telemetry surfaces. They never share a lifecycle and
 neither is an accounting authority.
 
-1. **Durable usage/pricing accounting** in `octet-agent`'s `Session` and the
-   optional `--telemetry` JSONL observer (`TelemetryObserver`). This is the
-   authoritative record of tokens, cost and usage uncertainty.
+1. The optional **`--telemetry` JSONL observer** (`TelemetryObserver`) records
+   operational facts alongside, but independently of, durable usage/pricing
+   accounting. `octet-agent`'s `Session`, not the observer, is the authoritative
+   record of tokens, cost and usage uncertainty.
 2. **Vendor-neutral observer spans** in `octet_agent::telemetry::{spans, schema}`.
    These are explicit, callback-owned, and purely observational.
 
@@ -32,6 +33,14 @@ bounded JSON object per line to an owner-only (`0o600`) file when a caller
 explicitly installs it. It records operational facts and hashes, never prompts,
 tool arguments, tool output, credentials or provider payloads. Streaming deltas
 are aggregated in memory and are not written.
+
+Writes run on an ordered worker with a **256-record / 1 MiB** admission budget,
+including in-flight writes. Saturation rejects observations, not agent work or
+authoritative accounting. `status()` exposes rejected records, failures and
+pending work; `flush()` and `shutdown(Duration)` report incomplete delivery.
+Hosts must surface those diagnostics at a lifecycle boundary. Shutdown is
+bounded, but cannot cancel an uninterruptible OS write; a timed-out worker may
+outlive its caller, and pending records are not claimed delivered.
 
 ## Observer spans
 

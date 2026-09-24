@@ -30,36 +30,36 @@ Bundle documentation: [extension README](../extensions/octet-subagents/README.md
 
 ## Per-worker provider, model, and reasoning
 
-`subagent_spawn` accepts `provider`, `model`, and `reasoning` per worker. All
-three default to `inherit`, which copies the parent session's already-normalized
-selection exactly and is the recommended default.
+`subagent_spawn` accepts optional `provider`, `model`, and `reasoning` identifiers.
+Omitted values (or `inherit`) inherit the parent's selection. Explicit selections
+require negotiated `agent_model_selection_v1`; older hosts fail closed before
+creating a worker. The host resolves configured, credential-available routes and
+never substitutes the parent model for an unknown or unavailable route.
+
+Use `subagent_models` first to discover exact identifiers and supported reasoning:
 
 ```json
-{
-  "name": "cheap-reader",
-  "task": "List every caller of the auth helper.",
-  "profile": "explore",
-  "provider": "inherit",
-  "model": "inherit",
-  "reasoning": "inherit",
-  "tools": ["read", "search"]
-}
+{"query": "haiku", "limit": 10}
 ```
 
-The selection is validated fail-closed, never silently coerced:
+`query` is optional plain text (at most 128 UTF-8 bytes); `limit` defaults to 50
+and is bounded to 1–100. Results contain `models` and `truncated`; rows expose
+provider/model identifiers, display name, reasoning levels, context window and
+maximum output tokens, never credentials. Narrow the query when truncated.
+Discovery is owner-bound and read-only; it does not authenticate or start workers.
 
-- a `model` this session **cannot confirm as configured** is refused with the
-  typed `unsupported_model` error (API `0.2` exposes no provider catalog and the
-  host reports exactly one model to the extension — the parent session's);
-- a `provider` supplied without a matching `model`, or a malformed id, is refused
-  with `unsupported_model`;
-- an unknown `reasoning` level is refused with `unsupported_reasoning`;
-- a level above the target model's ceiling is **clamped** by the same ladder the
-  coding agent uses (`crates/octet-coding-agent/src/app/mod.rs`), with an explicit
-  note. The extension mirrors that policy; it does not invent a second one.
+Reasoning identifiers are `inherit`, `off`, `on`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, `max`, and `ultra`; use the choices returned for the target model.
+`on` supports binary/always-on models; the host remains authoritative.
 
-The panel and inspector show both the requested and the effective selection, and
-mark a request the host has not confirmed rather than implying it took effect.
+Supply an explicit model with an explicit provider. Unknown routes and unsupported
+reasoning fail with `unsupported_model` / `unsupported_reasoning`. The host alone
+normalizes reasoning against configured model metadata. The legacy
+`reasoning_capability` input is only a compatibility hint and cannot affect
+execution. Requested and host-confirmed effective selections stay separate in
+the inspector, survive restoration, and are preserved by continuation. Host
+`policy.resolved_model` carries effective provider/model and serialized
+`ReasoningConfig`; the extension does not guess an effective route or clamp effort.
 
 ## Drive the fleet
 
@@ -72,7 +72,7 @@ mark a request the host has not confirmed rather than implying it took effect.
 | `/subagents stop <name-or-id\|all>` | Owner-bound interruption. |
 | `/subagents open-all tmux\|herdr` | Reopen the parent and every running worker as interactive sessions, one pane each. |
 
-The model-facing equivalents are `subagent_spawn`, `subagent_status`,
+The model-facing equivalents are `subagent_models`, `subagent_spawn`, `subagent_status`,
 `subagent_wait`, `subagent_stop`, and `subagent_continue`.
 
 ## Open the fleet in panes
@@ -171,6 +171,32 @@ silently. Matching legacy `fleet.json` snapshots are read-only migration sources
 new scoped snapshots take precedence. Execution caps do not drift up across that
 boundary: reattachment takes a slot per record and leaves the excess visibly
 detached.
+
+The restart roster remains bounded to 256 KiB. When completed/limit-reached
+output would exceed that budget, the roster retains explicitly marked output
+prefixes; complete committed responses remain in the referenced child sessions.
+Approval reasons and failure diagnostics are not shortened by this output budget,
+and oversized metadata still fails closed.
+
+Initial tasks and accepted follow-ups persist their payload, random delivery
+identity, and failed-delivery count before acknowledgement. Restart reconciliation
+uses delivery identities on the child session's active ancestry, not matching
+text: identical requests remain distinct work. Explicit resume drains older
+accepted work before the new follow-up; process-local commands only wake that
+durable queue. Undelivered startup or prompt failures are retained for explicit
+retry and dead-lettered after three failed attempts, with durable diagnostics.
+Unreadable child-session authority retains accepted payloads and retry counts
+without executing them. After repair, both automatic reattachment and explicit
+resume reconcile delivery identities before replaying only undelivered inputs.
+If reattachment finds no undelivered task, the worker settles as `interrupted`
+with an explicit continuation hint rather than waiting forever as `pending`.
+Its session, usage, and buffered messages remain available to `subagent_continue`.
+A delivered prompt or checkpoint alone is not proof of successful completion;
+reattachment neither invents success nor automatically replays delivered work.
+Worker panics are supervised and wake parent waiters; neither an old supervisor
+nor an old worker's cleanup can settle a newer worker incarnation. The standard
+release build retains panic unwinding so this isolation also works in installed
+binaries; an embedder choosing `panic = "abort"` instead terminates the process.
 
 The extension models the gap as **detached, not dead**:
 

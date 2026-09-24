@@ -27,7 +27,7 @@ pub struct ParityOptions {
     /// Set the selected session's display name (must not be empty).
     #[arg(long, short = 'n', value_name = "NAME")]
     pub name: Option<String>,
-    /// Unsupported until an accounting-preserving ephemeral backend exists.
+    /// Discard the headless transcript after persisting accounting-only usage.
     #[arg(long, conflicts_with_all = ["continue_", "resume", "fork", "session_id"])]
     pub no_session: bool,
     /// Comma-separated model patterns (`provider/*`, `sonnet:high`) that scope

@@ -9,6 +9,7 @@ from unittest import mock
 
 from octet_mcp.config import BridgeConfig, HttpAuthConfig, ServerConfig
 from octet_mcp.manager import BridgeManager
+from octet_mcp.protocol import McpTransportError
 
 from .helpers import (
     FakeExtension,
@@ -109,7 +110,7 @@ class ManagerTests(unittest.TestCase):
         self.assertNotIn(added_name, final)
         self.assertIn(versioned_name, final)
 
-    def test_crash_restarts_once_then_parks_without_replaying_calls(self):
+    def test_crash_restarts_after_each_success_without_replaying_calls(self):
         bridge_limits = limits(
             backoff_initial_ms=10,
             backoff_max_ms=20,
@@ -137,11 +138,41 @@ class ManagerTests(unittest.TestCase):
         second = extension._tools[second_name]["handler"]({"value": "second"}, {})
         self.assertTrue(second["is_error"])
         wait_for(
-            lambda: root_node(manager.snapshot(), "fixture")["state"] == "unavailable",
-            message="parked after restart budget",
+            lambda: extension._revision >= initial_revision + 4
+            and root_node(manager.snapshot(), "fixture")["state"] == "active",
+            message="restart counter reset after a successful startup",
         )
-        server = root_node(manager.snapshot(), "fixture")
-        self.assertIn("catalog", server["secondary"])
+        self.assertEqual(manager._servers["fixture"].restart_attempt, 0)
+
+    def test_consecutive_failed_starts_back_off_then_park(self):
+        server = server_config("stable", max_restarts=1)
+        extension = FakeExtension(self.scratch)
+        clients = []
+
+        def factory(*_args):
+            client = mock.Mock(alive=False)
+            client.start.side_effect = McpTransportError("transport_lost", "MCP fixture transport lost")
+            clients.append(client)
+            return client
+
+        manager = BridgeManager(
+            extension,
+            BridgeConfig(servers=(server,), limits=limits(backoff_initial_ms=10, backoff_max_ms=20)),
+            scratch_directory=self.scratch,
+            client_factory=factory,
+            random_source=random.Random(1),
+        )
+        self.managers.append(manager)
+        with mock.patch("octet_mcp.manager.threading.Timer") as timer:
+            self.assertFalse(manager._start_server("fixture", False))
+            self.assertEqual(manager._servers["fixture"].state, "backoff")
+            self.assertEqual(manager._servers["fixture"].restart_attempt, 1)
+            self.assertGreaterEqual(timer.call_args.args[0], 0.001)
+            self.assertLessEqual(timer.call_args.args[0], 0.01)
+            self.assertFalse(manager._start_server("fixture", False))
+            self.assertEqual(manager._servers["fixture"].state, "parked")
+            self.assertEqual(len(clients), 2)
+            self.assertEqual(timer.call_count, 1)
 
     def test_permanent_protocol_failure_parks_and_publishes_no_tool(self):
         extension, manager = self.manager(server_config("malformed", max_restarts=8))

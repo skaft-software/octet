@@ -181,6 +181,17 @@ pub trait ProviderRetryHook: Send + Sync {
     async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice;
 }
 
+/// Optional API 0.4 replacement for local parent-model summarization.
+/// The host selects this only for a vision-capable active model and owns the
+/// history boundary, validation, checkpoint and subsequent replay.
+#[async_trait::async_trait]
+pub trait CompactionStrategy: Send + Sync {
+    /// Render the complete supplied transcript slice as PNG frames. A failed
+    /// slice aborts compaction; partial frames must never become a checkpoint.
+    async fn render(&self, model_id: &str, text: &str, owner: &str)
+        -> Result<Vec<Vec<u8>>, String>;
+}
+
 /// Stable semantic summary of a completed assistant turn before it becomes a
 /// durable session entry.
 ///
@@ -688,6 +699,21 @@ fn validate_dynamic_catalog(
     owner: &str,
     tools: &[Arc<dyn Tool>],
 ) -> Result<(), String> {
+    // Tool::definition returns an owned schema. Extract existing names once,
+    // not once per candidate (which repeatedly cloned every nested schema).
+    let registered_names = registry
+        .groups
+        .iter()
+        .filter(|group| group.owner != owner)
+        .flat_map(|group| &group.tools)
+        .map(|tool| tool.definition().name)
+        .collect::<BTreeSet<_>>();
+    let reserved_names = registry
+        .reservations
+        .iter()
+        .filter(|reservation| reservation.owner != owner)
+        .flat_map(|reservation| reservation.names.iter())
+        .collect::<BTreeSet<_>>();
     let mut names = BTreeSet::new();
     for tool in tools {
         let name = tool.definition().name;
@@ -697,23 +723,12 @@ fn validate_dynamic_catalog(
         if registry.static_names.contains(&name) {
             return Err(format!("dynamic tool `{name}` conflicts with a host tool"));
         }
-        if registry
-            .groups
-            .iter()
-            .filter(|group| group.owner != owner)
-            .flat_map(|group| &group.tools)
-            .any(|registered| registered.definition().name == name)
-        {
+        if registered_names.contains(&name) {
             return Err(format!(
                 "dynamic tool `{name}` conflicts with another extension"
             ));
         }
-        if registry
-            .reservations
-            .iter()
-            .filter(|reservation| reservation.owner != owner)
-            .any(|reservation| reservation.names.contains(&name))
-        {
+        if reserved_names.contains(&name) {
             return Err(format!(
                 "dynamic tool `{name}` is reserved by another extension update"
             ));
@@ -730,6 +745,8 @@ pub struct ExtensionHost {
     pub(crate) observers: Vec<Arc<dyn EventObserver>>,
     pub(crate) tool_call_hooks: Vec<Arc<dyn ToolCallHook>>,
     pub(crate) provider_retry_hooks: Vec<Arc<dyn ProviderRetryHook>>,
+    pub(crate) compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
+    pub(crate) duplicate_compaction_strategy: bool,
     pub(crate) persistence_metadata_hooks: Vec<RegisteredPersistenceMetadataHook>,
     pub(crate) duplicate_tools: Vec<String>,
     pub(crate) invalid_metadata_namespaces: Vec<String>,
@@ -743,6 +760,8 @@ impl Default for ExtensionHost {
             observers: Vec::new(),
             tool_call_hooks: Vec::new(),
             provider_retry_hooks: Vec::new(),
+            compaction_strategy: None,
+            duplicate_compaction_strategy: false,
             persistence_metadata_hooks: Vec::new(),
             duplicate_tools: Vec::new(),
             invalid_metadata_namespaces: Vec::new(),
@@ -855,6 +874,16 @@ impl ExtensionHost {
         self.provider_retry_hooks.push(Arc::new(hook));
     }
 
+    /// Register the one active local-compaction strategy. Competing providers
+    /// are rejected when the Agent is constructed instead of depending on load order.
+    pub fn compaction_strategy(&mut self, strategy: impl CompactionStrategy + 'static) {
+        if self.compaction_strategy.is_some() {
+            self.duplicate_compaction_strategy = true;
+        } else {
+            self.compaction_strategy = Some(Arc::new(strategy));
+        }
+    }
+
     /// Register a typed pre-persistence metadata hook under one extension-owned
     /// namespace.
     ///
@@ -947,6 +976,8 @@ impl ExtensionHost {
         scoped.observers = self.observers.clone();
         scoped.tool_call_hooks = self.tool_call_hooks.clone();
         scoped.provider_retry_hooks = self.provider_retry_hooks.clone();
+        scoped.compaction_strategy = self.compaction_strategy.clone();
+        scoped.duplicate_compaction_strategy = self.duplicate_compaction_strategy;
         scoped.persistence_metadata_hooks = self.persistence_metadata_hooks.clone();
         scoped.invalid_metadata_namespaces = self.invalid_metadata_namespaces.clone();
         let mut effective = Vec::new();
@@ -1123,6 +1154,7 @@ mod tests {
     impl Tool for NamedTool {
         fn definition(&self) -> ToolDef {
             ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: self.0.to_string(),
                 description: String::new(),
@@ -1199,6 +1231,60 @@ mod tests {
 
     fn named_tool(name: &'static str) -> Arc<dyn Tool> {
         Arc::new(NamedTool(name))
+    }
+
+    #[test]
+    fn dynamic_catalog_clones_each_definition_once_per_validation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountedTool {
+            name: String,
+            definitions: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl Tool for CountedTool {
+            fn definition(&self) -> ToolDef {
+                self.definitions.fetch_add(1, Ordering::Relaxed);
+                ToolDef {
+                    async_execution: false,
+                    name: self.name.clone(),
+                    description: String::new(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    constrained_sampling: None,
+                }
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &ToolContext<'_>,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!("validation never executes tools")
+            }
+        }
+        for count in [8, 32, 128] {
+            let definitions = Arc::new(AtomicUsize::new(0));
+            let tools = |prefix: &str| {
+                (0..count)
+                    .map(|index| {
+                        Arc::new(CountedTool {
+                            name: format!("{prefix}_{index}"),
+                            definitions: Arc::clone(&definitions),
+                        }) as Arc<dyn Tool>
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let registry = DynamicToolRegistry {
+                groups: vec![DynamicToolGroup {
+                    owner: "other".into(),
+                    tools: tools("old"),
+                }],
+                ..DynamicToolRegistry::default()
+            };
+            validate_dynamic_catalog(&registry, "new", &tools("new")).unwrap();
+            assert_eq!(definitions.load(Ordering::Relaxed), 2 * count);
+            assert!(validate_dynamic_catalog(&registry, "new", &tools("old")).is_err());
+            // Replacing one's own group never conflicts with its previous names.
+            validate_dynamic_catalog(&registry, "other", &tools("old")).unwrap();
+        }
     }
 
     #[test]

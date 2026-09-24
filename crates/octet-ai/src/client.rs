@@ -1793,6 +1793,7 @@ async fn stream_http(
                         let idx = index_counter;
                         index_counter += 1;
                         yield StreamEvent::ToolCallStart {
+                            async_execution: false,
                             index: idx,
                             id: tc.id.clone(),
                             name: tc.name.clone(),
@@ -1912,6 +1913,87 @@ impl ResponsesResume {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+// A separate guard and builder are created for every response.created. A tiny
+// in-memory channel feeds already-decoded canonical events to the existing
+// guard one at a time; no extra inference loop or background decoder is needed.
+fn steering_event_stream(
+    pool: ResponsesWsPool,
+    key: Option<String>,
+    model: Model,
+    mut raw: crate::responses_ws::EventReceiver,
+    request: Arc<StdMutex<Request>>,
+    ledger: crate::steering::Ledger,
+    completed: Arc<StdMutex<Option<crate::AssistantMessage>>>,
+    diagnostics: Vec<crate::Diagnostic>,
+    redactor: CredentialRedactor,
+) -> std::pin::Pin<
+    Box<dyn futures_core::Stream<Item = Result<crate::steering::SteeringEvent, AiError>> + Send>,
+> {
+    use crate::steering::SteeringEvent;
+    let decode = try_stream! {
+        let mut segment: Option<(String, ResponseBuilder, mpsc::Sender<StreamEvent>, ResponseStream)> = None;
+        let mut first = true;
+        while let Some(value) = raw.recv().await {
+            let value = value?;
+            if value.get("type").and_then(serde_json::Value::as_str)==Some("octet.steer.update") {
+                let update = serde_json::from_value(value.get("update").cloned().unwrap_or_default())
+                    .map_err(|_| crate::steering::invalid("invalid internal steering update"))?;
+                yield SteeringEvent::Steer(update);
+                continue;
+            }
+            if value.get("type").and_then(serde_json::Value::as_str)==Some("response.created") {
+                if segment.is_some() { Err(crate::steering::invalid("overlapping response segments"))?; }
+                let id = value.pointer("/response/id").and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| crate::steering::invalid("response segment has no id"))?.to_owned();
+                let req = request.lock().unwrap_or_else(|p|p.into_inner()).clone();
+                let mut builder = ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, model.spec.pricing.clone());
+                builder.set_tool_definitions(&req.tools)?;
+                builder.requested_service_tier = req.responses.as_ref().and_then(|o|o.service_tier);
+                builder.set_buffer_ambiguous_compatibility_content(req.compatibility==crate::CompatibilityMode::Lossy);
+                if first { for diagnostic in &diagnostics { builder.add_diagnostic(diagnostic.clone()); } first=false; }
+                let (tx, mut rx) = mpsc::channel(1);
+                let guard = crate::stream::guard(try_stream! { while let Some(event) = rx.recv().await { yield event; } });
+                segment = Some((id,builder,tx,guard));
+            }
+            let (id,builder,tx,guard) = segment.as_mut()
+                .ok_or_else(|| crate::steering::invalid("provider event outside response segment"))?;
+            let sse = crate::protocol::sse::SseEvent { event:None, data:value.to_string() };
+            let decoded = crate::protocol::openai_responses::decode_stream_event(&model,&sse,builder)?;
+            let mut finished = false;
+            for event in decoded {
+                tx.send(event).await.map_err(|_| crate::steering::invalid("response segment guard closed"))?;
+                let event = guard.next().await.ok_or_else(|| crate::steering::invalid("response segment guard ended"))??;
+                finished = matches!(&event,StreamEvent::Finished(_));
+                if let StreamEvent::Finished(response) = &event {
+                    *completed.lock().unwrap_or_else(|p|p.into_inner()) = Some(response.message.clone());
+                }
+                yield SteeringEvent::Response {response_id:id.clone(),event};
+            }
+            if finished {
+                let (_,_,tx,mut guard) = segment.take().expect("active segment");
+                drop(tx);
+                if let Some(event) = guard.next().await { event?; }
+            }
+        }
+        if segment.is_some() { Err(AiError::StreamProtocol(StreamProtocolError::PrematureEof))?; }
+    };
+    let stream = decode.then(move |item| {
+        let pool = pool.clone();
+        let key = key.clone();
+        let ledger = ledger.clone();
+        let redactor = redactor.clone();
+        async move {
+            if item.is_err() {
+                crate::steering::ambiguous(&ledger);
+                pool.disable(key.as_deref()).await;
+            }
+            item.map_err(|e| sanitize_ai_error(&redactor, e))
+        }
+    });
+    Box::pin(stream)
+}
+
 /// Decode a cached Responses WebSocket using the same protocol builder as the
 /// ordinary SSE path. The wire event shape is JSON rather than `data:` framed
 /// SSE, so each message is wrapped in the codec's private event view.
@@ -1921,7 +2003,7 @@ fn responses_websocket_stream(
     pool_key: Option<String>,
     model: Model,
     requested_service_tier: Option<crate::types::ServiceTier>,
-    mut events: mpsc::Receiver<Result<serde_json::Value, AiError>>,
+    mut events: crate::responses_ws::EventReceiver,
     diagnostics: Vec<crate::error::Diagnostic>,
     tool_definitions: Vec<ToolDef>,
     buffer_ambiguous_compatibility_content: bool,
@@ -2394,6 +2476,152 @@ impl AiClient {
         }))
     }
 
+    /// Opens an explicitly multi-response, in-flight steering operation.
+    ///
+    /// Both model and endpoint must advertise steering and select native
+    /// WebSockets. There is no HTTP fallback, reconnect or inference retry.
+    /// Proxies, request signers and opaque host transports fail closed rather
+    /// than bypassing their transport/authentication requirements.
+    pub async fn steerable_responses(
+        &self,
+        model: &Model,
+        mut req: Request,
+    ) -> Result<crate::steering::SteeringSession, AiError> {
+        use crate::steering::{SteeringControl, SteeringSession};
+        let mut prepared = model.clone();
+        crate::declarations::azure::apply(&mut prepared, None, &Default::default())?;
+        let model = &prepared;
+        crate::catalog::validate_endpoint(&model.endpoint)?;
+        crate::catalog::validate_model_spec(&model.spec)?;
+        if model.spec.endpoint != model.endpoint.id {
+            return Err(crate::ConfigError::UnknownEndpoint(model.spec.endpoint.clone()).into());
+        }
+        if !model.responses_features().steering
+            || model.spec.protocol != Protocol::OpenAiResponses
+            || model.endpoint.transport != crate::EndpointTransport::WebSocketPreferred
+            || matches!(&model.endpoint.auth, crate::Auth::RequestSigner(_))
+            || self
+                .host_stream_transports
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains_key(&model.endpoint.id)
+        {
+            return Err(crate::steering::invalid(
+                "route is not qualified for native Responses steering",
+            ));
+        }
+        req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
+        crate::json_repair::validate_tool_definitions(&req.tools).map_err(AiError::Decode)?;
+        let parts = crate::protocol::openai_responses::build_request(model, &req)?;
+        if parts.body.len() > 64 * 1024 * 1024 {
+            return Err(DecodeError::ResponseTooLarge.into());
+        }
+        if self.request_proxy(&parts.url)?.is_some() || !parts.streaming {
+            return Err(crate::steering::invalid(
+                "native steering requires an unproxied streaming WebSocket route",
+            ));
+        }
+        let mut headers = model.endpoint.default_headers.clone();
+        merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+        for (key, value) in &parts.headers {
+            headers.insert(key.clone(), value.clone());
+        }
+        let resolved = crate::auth::resolve_headers(&model.endpoint.auth)
+            .await
+            .map_err(AiError::Auth)?;
+        let mut redactor = resolved.redactor;
+        let mut current_key = None;
+        for (key, value) in resolved.headers {
+            if let Some(key) = key {
+                current_key = Some(key.clone());
+                headers.insert(key, value);
+            } else if let Some(key) = &current_key {
+                headers.append(key.clone(), value);
+            }
+        }
+        redactor.include_header_values(&headers);
+        if model
+            .endpoint
+            .runtime
+            .responses_profile
+            .sends_websocket_beta_header()
+        {
+            headers.insert(
+                http::HeaderName::from_static("openai-beta"),
+                http::HeaderValue::from_static(ResponsesWsPool::beta_header_value()),
+            );
+        }
+        let mut body: serde_json::Value = serde_json::from_slice(&parts.body)
+            .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+        if let Some(object) = body.as_object_mut() {
+            object.remove("stream");
+            object.remove("background");
+        }
+        let key = req
+            .session_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(|id| responses_websocket_key(model, id, &parts.url, &headers));
+        let (sender, commands) = mpsc::channel(crate::steering::MAX_STEERS);
+        let ledger = Arc::new(StdMutex::new(Vec::new()));
+        let request = Arc::new(StdMutex::new(req));
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        let operation = crate::responses_ws::SteeringOperation {
+            commands,
+            ledger: ledger.clone(),
+            request: request.clone(),
+            initial_timeout: self.stream_initial_timeout,
+            idle_timeout: self.stream_idle_timeout,
+            deadline: self.stream_deadline,
+            cancel: cancelled,
+            redactor: redactor.clone(),
+        };
+        self.mark_request_dispatch();
+        let events = self
+            .responses_ws
+            .request_operation(
+                key.as_deref(),
+                parts.url,
+                headers,
+                body,
+                ResponsesWsLiveness::for_response_idle(self.stream_idle_timeout),
+                model.endpoint.timeout,
+                Some(Duration::from_millis(
+                    crate::declarations::codex::DEFAULT_CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS,
+                )),
+                None,
+                Some(operation),
+            )
+            .await
+            .map_err(|e| sanitize_ai_error(&redactor, e))?;
+        let completed = Arc::new(StdMutex::new(None));
+        let control = SteeringControl {
+            sender,
+            ledger: ledger.clone(),
+            model: model.clone(),
+            completed: completed.clone(),
+        };
+        Ok(SteeringSession {
+            control,
+            cancel: Some(cancel),
+            events: steering_event_stream(
+                self.responses_ws.clone(),
+                key,
+                model.clone(),
+                events,
+                request,
+                ledger,
+                completed,
+                parts.diagnostics,
+                redactor,
+            ),
+        })
+    }
+
     /// Best-effort prewarms a cached OpenAI Responses WebSocket.
     ///
     /// The request is sent with the provider-specific `generate=false` flag,
@@ -2794,6 +3022,24 @@ impl AiClient {
             model,
             request.reasoning.as_ref(),
         )?;
+        // Raw compact DTOs must cross the same replay-update authority boundary
+        // as ResponsesCompactRequest::for_model, before credentials or dispatch.
+        let baseline = request
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::ReasoningConfig::from_provider_value)
+            .or_else(|| {
+                model
+                    .spec
+                    .capabilities
+                    .reasoning
+                    .as_ref()
+                    .and_then(|capability| capability.default_selection())
+            })
+            .unwrap_or(crate::ReasoningConfig::Off);
+        crate::responses::validate_responses_input(model, &request.input, &baseline, true)?;
         let rich_codex_schema = model
             .endpoint
             .runtime
@@ -3236,7 +3482,7 @@ mod tests {
         let model = catalog.resolve(&id).unwrap();
         for deadline in [Duration::ZERO, Duration::from_secs(5)] {
             let pool = ResponsesWsPool::default();
-            let (sender, receiver) = mpsc::channel(1);
+            let (sender, receiver) = crate::responses_ws::event_channel(1);
             sender
                 .send(Ok(serde_json::json!({
                     "type": "error", "code": "invalid_request_error", "message": "invalid"

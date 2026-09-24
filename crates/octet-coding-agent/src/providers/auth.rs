@@ -1,7 +1,7 @@
 //! Private provider credential lifecycle.
 //!
-//! Only this module reads API-key environment values for catalog discovery or
-//! turns an environment-variable name into an `octet_ai::Auth`. Public provider
+//! Only this module resolves API-key environment/store values for discovery or
+//! turns their private source into an `octet_ai::Auth`. Public provider
 //! definitions expose setup labels and variable names, never this value type.
 
 use std::fmt;
@@ -16,6 +16,13 @@ use super::contract::{EndpointAuthPresentation, ProviderDeclaration, ProviderRou
 pub(crate) struct EnvironmentCredential {
     variable: &'static str,
     value: String,
+    source: CredentialSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CredentialSource {
+    Environment,
+    Stored,
 }
 
 impl fmt::Debug for EnvironmentCredential {
@@ -23,6 +30,7 @@ impl fmt::Debug for EnvironmentCredential {
         formatter
             .debug_struct("EnvironmentCredential")
             .field("variable", &self.variable)
+            .field("source", &self.source)
             .field("value", &"<redacted>")
             .finish()
     }
@@ -38,6 +46,7 @@ impl EnvironmentCredential {
         Self {
             variable,
             value: value.into(),
+            source: CredentialSource::Environment,
         }
     }
 
@@ -46,17 +55,34 @@ impl EnvironmentCredential {
     }
 }
 
-/// Resolve the first configured environment variable declared by a provider.
-/// Invalid Unicode is an actionable configuration failure; oversized values are
-/// rejected by `octet_ai` before they reach a request header.
+/// Resolve declared environment variables first, then the owner-private API-key
+/// store for providers supported by one-key setup. Environment errors fail closed
+/// rather than silently changing identity; configured environment sources retain
+/// their per-request lookup semantics. No environment values are changed.
 pub(crate) fn resolve_environment(
     declaration: &ProviderDeclaration,
+) -> anyhow::Result<Option<EnvironmentCredential>> {
+    resolve_environment_with(
+        declaration,
+        octet_ai::auth::read_bounded_env,
+        |provider_id| {
+            crate::provider_setup::BuiltinApiKeyStore::default_store()?
+                .load(provider_id)
+                .map_err(Into::into)
+        },
+    )
+}
+
+pub(crate) fn resolve_environment_with(
+    declaration: &ProviderDeclaration,
+    mut read_environment: impl FnMut(&str) -> Result<Option<String>, octet_ai::ConfigError>,
+    read_stored: impl FnOnce(&str) -> anyhow::Result<Option<String>>,
 ) -> anyhow::Result<Option<EnvironmentCredential>> {
     let Some(variables) = declaration.authentication.environment_variables() else {
         return Ok(None);
     };
     for variable in variables {
-        let value = match octet_ai::auth::read_bounded_env(variable) {
+        let value = match read_environment(variable) {
             Ok(value) => value,
             Err(octet_ai::ConfigError::InvalidEnv(_)) => {
                 anyhow::bail!("could not read {variable}: invalid environment value")
@@ -64,10 +90,26 @@ pub(crate) fn resolve_environment(
             Err(error) => return Err(error.into()),
         };
         if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
-            return Ok(Some(EnvironmentCredential { variable, value }));
+            return Ok(Some(EnvironmentCredential {
+                variable,
+                value,
+                source: CredentialSource::Environment,
+            }));
         }
     }
-    Ok(None)
+    let Some(provider) = crate::provider_setup::builtin_api_key_providers()
+        .into_iter()
+        .find(|provider| provider.id == declaration.id)
+    else {
+        return Ok(None);
+    };
+    Ok(
+        read_stored(provider.id)?.map(|value| EnvironmentCredential {
+            variable: provider.credential_variable,
+            value,
+            source: CredentialSource::Stored,
+        }),
+    )
 }
 
 /// Whether a credential variable carries a bearer token rather than the
@@ -89,6 +131,21 @@ pub(crate) fn environment_auth(
     route: &ProviderRoute,
     credential: &EnvironmentCredential,
 ) -> anyhow::Result<Auth> {
+    if credential.source == CredentialSource::Stored {
+        if bearer_token_variable(credential.variable())
+            || route.auth_presentation == EndpointAuthPresentation::Bearer
+        {
+            return Ok(Auth::bearer(credential.value().to_owned()));
+        }
+        // Discovery and inference must share the declaration's exact native
+        // header presentation. Each supported presentation supplies one header.
+        let headers = environment_discovery_headers(route, credential)?;
+        let (name, value) = headers
+            .iter()
+            .next()
+            .expect("one declared credential header");
+        return Ok(Auth::header(name.clone(), value.to_str()?.to_owned()));
+    }
     if bearer_token_variable(credential.variable()) {
         return Ok(Auth::bearer_env(credential.variable()));
     }
@@ -1361,8 +1418,239 @@ pub(crate) fn missing_environment_diagnostic(
 mod tests {
     use super::*;
     use crate::providers::contract::{
-        ProviderAuthentication, ANTHROPIC, CLOUDFLARE_AI_GATEWAY, GEMINI, OPENAI,
+        ProviderAuthentication, ANTHROPIC, CLOUDFLARE_AI_GATEWAY, GEMINI, META, OPENAI,
     };
+
+    #[test]
+    fn meta_api_key_is_private_bearer_auth_not_a_subscription_login() {
+        let mut store_reads = 0;
+        let credential = resolve_environment_with(
+            &META,
+            |variable| {
+                assert_eq!(variable, "META_API_KEY");
+                Ok(Some("meta-fixture-key".into()))
+            },
+            |_| {
+                store_reads += 1;
+                Ok(Some("stored-fixture-key".into()))
+            },
+        )
+        .unwrap()
+        .expect("environment key");
+        assert_eq!(store_reads, 0);
+        assert_eq!(credential.source, CredentialSource::Environment);
+        let headers = environment_discovery_headers(&META.routes[0], &credential).unwrap();
+        assert_eq!(
+            headers[http::header::AUTHORIZATION].to_str().unwrap(),
+            "Bearer meta-fixture-key"
+        );
+        assert!(headers[http::header::AUTHORIZATION].is_sensitive());
+        assert!(matches!(
+            environment_auth(&META.routes[0], &credential).unwrap(),
+            Auth::BearerEnv { .. }
+        ));
+        assert!(!format!("{credential:?}").contains("meta-fixture-key"));
+
+        let stored = resolve_environment_with(
+            &META,
+            |_| Ok(None),
+            |provider_id| {
+                assert_eq!(provider_id, "meta");
+                Ok(Some("stored-fixture-key".into()))
+            },
+        )
+        .unwrap()
+        .expect("stored key");
+        assert_eq!(stored.source, CredentialSource::Stored);
+        assert!(matches!(
+            environment_auth(&META.routes[0], &stored).unwrap(),
+            Auth::Bearer(_)
+        ));
+        assert!(!format!("{stored:?}").contains("stored-fixture-key"));
+    }
+
+    #[test]
+    fn configured_environment_wins_without_reading_stored_keys() {
+        for declaration in [&OPENAI, &ANTHROPIC, &GEMINI, &CLOUDFLARE_AI_GATEWAY] {
+            let mut variables_read = Vec::new();
+            let credential = resolve_environment_with(
+                declaration,
+                |variable| {
+                    variables_read.push(variable.to_owned());
+                    Ok(Some("synthetic-environment-key".into()))
+                },
+                |_| panic!("configured environment must not access credential storage"),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(variables_read.len(), 1);
+            assert_eq!(credential.source, CredentialSource::Environment);
+            let auth = environment_auth(&declaration.routes[0], &credential).unwrap();
+            assert!(matches!(
+                auth,
+                Auth::BearerEnv { .. } | Auth::HeaderEnv { .. } | Auth::HeaderBearerEnv { .. }
+            ));
+            assert!(!format!("{auth:?} {credential:?}").contains("synthetic-environment-key"));
+        }
+    }
+
+    #[test]
+    fn invalid_environment_never_falls_back_to_a_different_identity() {
+        for error in [
+            octet_ai::ConfigError::InvalidEnv("OPENAI_API_KEY".into()),
+            octet_ai::ConfigError::EnvironmentValueTooLarge {
+                var: "OPENAI_API_KEY".into(),
+                max_bytes: octet_ai::auth::MAX_ENV_VALUE_BYTES,
+            },
+        ] {
+            let mut error = Some(error);
+            assert!(resolve_environment_with(
+                &OPENAI,
+                |_| Err(error.take().unwrap()),
+                |_| panic!("an invalid environment source must fail closed"),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn environment_alias_order_is_preserved_before_stored_fallback() {
+        let mut variables_read = Vec::new();
+        let credential = resolve_environment_with(
+            &ANTHROPIC,
+            |variable| {
+                variables_read.push(variable.to_owned());
+                Ok(match variable {
+                    "ANTHROPIC_AUTH_TOKEN" => Some(" \n".into()),
+                    "ANTHROPIC_OAUTH_TOKEN" => Some("synthetic-oauth-token".into()),
+                    _ => panic!("later sources must not override a configured alias"),
+                })
+            },
+            |_| panic!("environment aliases precede stored API keys"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            variables_read,
+            ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"]
+        );
+        assert!(
+            matches!(environment_auth(&ANTHROPIC.routes[0], &credential).unwrap(), Auth::BearerEnv { var } if var == "ANTHROPIC_OAUTH_TOKEN")
+        );
+    }
+
+    #[test]
+    fn absent_or_ineligible_credentials_contribute_no_stored_route() {
+        assert!(
+            resolve_environment_with(&OPENAI, |_| Ok(None), |_| Ok(None))
+                .unwrap()
+                .is_none()
+        );
+        for declaration in [
+            &super::super::contract::CODEX,
+            &super::super::contract::VERTEX,
+            &super::super::contract::BEDROCK,
+            &super::super::contract::AZURE_OPENAI,
+            &CLOUDFLARE_AI_GATEWAY,
+        ] {
+            assert!(resolve_environment_with(
+                declaration,
+                |_| Ok(None),
+                |_| panic!("one-key setup does not own this credential route"),
+            )
+            .unwrap()
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn stored_keys_reactivate_native_catalogs_after_a_fresh_store_load() {
+        use crate::provider_setup::BuiltinApiKeyStore;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("credentials/api-keys");
+        let store = BuiltinApiKeyStore::for_test(root.clone());
+        for id in ["openai", "anthropic", "gemini"] {
+            store
+                .save(id, "synthetic-stored-key".into(), false)
+                .unwrap();
+        }
+        drop(store);
+        let restarted = BuiltinApiKeyStore::for_test(root);
+        for (declaration, expected_header) in [
+            (&OPENAI, "authorization"),
+            (&ANTHROPIC, "x-api-key"),
+            (&GEMINI, "x-goog-api-key"),
+        ] {
+            let credential = resolve_environment_with(
+                declaration,
+                |_| Ok(Some(" \n".into())),
+                |id| restarted.load(id).map_err(Into::into),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(credential.source, CredentialSource::Stored);
+            assert_eq!(credential.value(), "synthetic-stored-key");
+            if declaration.id == "anthropic" {
+                assert_eq!(credential.variable(), "ANTHROPIC_API_KEY");
+            }
+            let headers =
+                environment_discovery_headers(&declaration.routes[0], &credential).unwrap();
+            assert!(headers[expected_header].is_sensitive());
+            assert_eq!(
+                headers[expected_header],
+                if declaration.id == "openai" {
+                    "Bearer synthetic-stored-key"
+                } else {
+                    "synthetic-stored-key"
+                }
+            );
+            let auth = environment_auth(&declaration.routes[0], &credential).unwrap();
+            if declaration.id == "openai" {
+                assert!(matches!(auth, Auth::Bearer(_)));
+            } else {
+                assert!(matches!(&auth, Auth::Header { name, .. } if name == expected_header));
+            }
+            assert!(!format!("{credential:?} {auth:?}").contains("synthetic-stored-key"));
+            // Same canonical registration seam startup uses; no GET /models or
+            // inference traffic. Gemini supplies an offline static inventory.
+            let mut catalog = octet_ai::ModelCatalog::default();
+            crate::providers::register_environment_endpoints(
+                &mut catalog,
+                declaration,
+                &credential,
+                std::time::Duration::from_secs(30),
+            )
+            .unwrap();
+            crate::providers::register_static_models(&mut catalog, declaration).unwrap();
+            if declaration.id == "gemini" {
+                assert!(catalog.models().next().is_some());
+                for model in catalog.models() {
+                    let resolved = catalog.resolve(&model.id).unwrap();
+                    assert!(
+                        matches!(&resolved.endpoint.auth, Auth::Header { name, .. } if name == "x-goog-api-key")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_stored_keys_fail_closed_without_echoing_file_contents() {
+        use crate::provider_setup::BuiltinApiKeyStore;
+        let directory = tempfile::tempdir().unwrap();
+        let store = BuiltinApiKeyStore::for_test(directory.path().join("credentials/api-keys"));
+        let path = store.path("openai").unwrap();
+        octet_agent::secure_fs::write_private_atomic(&path, b"synthetic-secret-invalid-json", 4096)
+            .unwrap();
+        let error = resolve_environment_with(
+            &OPENAI,
+            |_| Ok(None),
+            |id| store.load(id).map_err(Into::into),
+        )
+        .unwrap_err();
+        assert!(!format!("{error:#} {error:?}").contains("synthetic-secret"));
+        assert!(error.to_string().contains("credential store"));
+    }
 
     fn fixture_credentials(label: &str) -> octet_ai::AwsCredentials {
         octet_ai::AwsCredentials::new(format!("{label}-access"), format!("{label}-secret"), None)
@@ -1637,6 +1925,7 @@ ignored key = ignored
         let credential = EnvironmentCredential {
             variable: "TEST_PROVIDER_KEY",
             value: "secret-value-must-not-appear".to_owned(),
+            source: CredentialSource::Environment,
         };
         assert!(!format!("{credential:?}").contains(&credential.value));
         assert!(missing_environment_diagnostic(&OPENAI)
@@ -1649,6 +1938,7 @@ ignored key = ignored
         let credential = EnvironmentCredential {
             variable: "TEST_PROVIDER_KEY",
             value: "not-formatted".to_owned(),
+            source: CredentialSource::Environment,
         };
         let auth = environment_auth(&ANTHROPIC.routes[0], &credential).unwrap();
         assert!(matches!(auth, Auth::HeaderEnv { .. }));
@@ -1665,6 +1955,7 @@ ignored key = ignored
         let credential = EnvironmentCredential {
             variable: "TEST_PROVIDER_KEY",
             value: "not-formatted".to_owned(),
+            source: CredentialSource::Environment,
         };
         let bearer = environment_discovery_headers(&OPENAI.routes[0], &credential).unwrap();
         assert!(bearer[http::header::AUTHORIZATION].is_sensitive());

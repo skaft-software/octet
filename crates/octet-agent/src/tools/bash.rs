@@ -9,6 +9,10 @@
 //! never implicit fallbacks.
 
 #[cfg(any(unix, windows))]
+#[path = "bash_spill.rs"]
+mod spill;
+
+#[cfg(any(unix, windows))]
 use std::collections::VecDeque;
 #[cfg(any(unix, windows))]
 use std::path::PathBuf;
@@ -24,12 +28,6 @@ const POST_KILL_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// Leave room for exit/capture metadata inside the per-tool result cap.
 #[cfg(any(unix, windows))]
 const CAPTURE_ENVELOPE_RESERVE: usize = 256;
-#[cfg(any(unix, windows))]
-const MAX_SPILL_BYTES: usize = 16 * 1024 * 1024;
-#[cfg(any(unix, windows))]
-const MAX_RETAINED_SPILL_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(any(unix, windows))]
-const MAX_SPILL_FILES: usize = 32;
 use bytes::Bytes;
 use octet_ai::ToolDef;
 use serde::Deserialize;
@@ -52,6 +50,9 @@ use crate::tools::parse_args;
 use crate::tools::validate_effect_path;
 
 const MAX_BASH_COMMAND_BYTES: usize = 128 * 1024;
+/// Spill storage is independently bounded from the model-visible head/tail.
+#[cfg(any(unix, windows))]
+const MAX_BASH_SPILL_BYTES: usize = 16 * 1024 * 1024;
 
 /// One Bash-compatible shell request.
 #[derive(Deserialize)]
@@ -74,17 +75,27 @@ struct BashArgs {
 /// Windows, the child is assigned to a private Job Object before it resumes.
 /// Spill paths are temporary: this tool owns at most 64 MiB / 32 files,
 /// including active captures, with a 16 MiB prefix limit per stream. Oldest
-/// retained files are evicted first; dropping the tool removes the remainder.
+/// retained files are evicted first; retiring the resource owner removes the remainder.
 #[derive(Default)]
-pub struct BashTool {
-    #[cfg(any(unix, windows))]
-    spills: Arc<Mutex<SpillStore>>,
+pub struct BashTool;
+
+impl BashTool {
+    /// Release private spill files when the host resource owner is retired.
+    /// Cleanup runs off the caller thread; in-flight captures cannot retain
+    /// further output in the retired owner's store.
+    pub fn release_owner(resource_owner: &str) {
+        #[cfg(any(unix, windows))]
+        spill::release_owner(resource_owner);
+        #[cfg(not(any(unix, windows)))]
+        let _ = resource_owner;
+    }
 }
 
 #[async_trait::async_trait]
 impl Tool for BashTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "bash".to_string(),
             description: "Run a command through the configured Bash-compatible shell. \
@@ -92,9 +103,9 @@ impl Tool for BashTool {
                           status and bounded stdout/stderr. Complete streams end with \
                           complete_<stream>=true; truncated_<stream>=... means bytes \
                           were omitted. Truncated output may include a private full_output_path, \
-                          or partial_output_path containing only a prefix if spill storage was capped \
-                          or failed. Spills are limited to 16 MiB per stream and 64 MiB / 32 files \
-                          per tool; paths expire on oldest-first eviction or tool shutdown."
+                          or partial_output_path containing only a prefix if the 16 MiB per-stream \
+                          spill limit was reached or storage failed. Spills are limited to 64 MiB / \
+                          32 files per resource owner and expire oldest-first or at owner shutdown."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -308,14 +319,14 @@ impl BashTool {
         let stderr_progress = ctx.progress.clone();
 
         let work = async {
-            let (out, err, status) = tokio::join!(
+            let (mut out, mut err, status) = tokio::join!(
                 read_bounded_with_progress(
                     &mut stdout_pipe,
                     capture_budget,
                     &stdout_progress,
                     OutputStream::Stdout,
                     checkpoints,
-                    &self.spills,
+                    (ctx.resource_owner, ctx.execution_scope),
                 ),
                 read_bounded_with_progress(
                     &mut stderr_pipe,
@@ -323,10 +334,12 @@ impl BashTool {
                     &stderr_progress,
                     OutputStream::Stderr,
                     checkpoints,
-                    &self.spills,
+                    (ctx.resource_owner, ctx.execution_scope),
                 ),
                 wait_for_bash_process(&mut child, handoff),
             );
+            // EOF-only spills share the readers' deadline and drop cancellation.
+            rebalance_captures(&mut out, &mut err, capture_budget).await;
             (out, err, status)
         };
         tokio::pin!(work);
@@ -345,8 +358,7 @@ impl BashTool {
                     effective_timeout.as_secs_f64()
                 );
                 match drained {
-                    Ok((mut out, mut err, status)) => {
-                        rebalance_captures(&mut out, &mut err, capture_budget);
+                    Ok((out, err, status)) => {
                         guard.disarm();
                         if out.total_bytes > 0 {
                             message.push('\n');
@@ -372,8 +384,7 @@ impl BashTool {
                 }
                 Err(ToolError::new(message))
             }
-            Ok((mut out, mut err, status)) => {
-                rebalance_captures(&mut out, &mut err, capture_budget);
+            Ok((out, err, status)) => {
                 let status = status.map_err(|e| {
                     ToolError::new(format!("error io\nfailed to wait for command: {e}"))
                 })?;
@@ -916,14 +927,14 @@ impl BashTool {
         let stderr_progress = ctx.progress.clone();
 
         let work = async {
-            let (out, err, status) = tokio::join!(
+            let (mut out, mut err, status) = tokio::join!(
                 read_bounded_with_progress(
                     &mut stdout_pipe,
                     capture_budget,
                     &stdout_progress,
                     OutputStream::Stdout,
                     checkpoints,
-                    &self.spills,
+                    (ctx.resource_owner, ctx.execution_scope),
                 ),
                 read_bounded_with_progress(
                     &mut stderr_pipe,
@@ -931,10 +942,12 @@ impl BashTool {
                     &stderr_progress,
                     OutputStream::Stderr,
                     checkpoints,
-                    &self.spills,
+                    (ctx.resource_owner, ctx.execution_scope),
                 ),
                 child.wait(),
             );
+            // EOF-only spills share the readers' deadline and drop cancellation.
+            rebalance_captures(&mut out, &mut err, capture_budget).await;
             (out, err, status)
         };
         tokio::pin!(work);
@@ -948,8 +961,7 @@ impl BashTool {
                     effective_timeout.as_secs_f64()
                 );
                 match drained {
-                    Ok((mut out, mut err, status)) => {
-                        rebalance_captures(&mut out, &mut err, capture_budget);
+                    Ok((out, err, status)) => {
                         guard.disarm();
                         if out.total_bytes > 0 {
                             message.push('\n');
@@ -973,8 +985,7 @@ impl BashTool {
                 }
                 Err(ToolError::new(message))
             }
-            Ok((mut out, mut err, status)) => {
-                rebalance_captures(&mut out, &mut err, capture_budget);
+            Ok((out, err, status)) => {
                 let status = status.map_err(|error| {
                     ToolError::new(format!("error io\nfailed to wait for command: {error}"))
                 })?;
@@ -1009,112 +1020,13 @@ impl BashTool {
     }
 }
 
-/// Owns retained files and accounts for both retained and in-flight storage.
-/// Active captures cannot be evicted; pressure discards further spill bytes
-/// instead of blocking pipe draining or exceeding the aggregate bound.
+/// Pin the owner's retirement fence from capture admission, even if the writer
+/// is only needed after both streams reach EOF.
 #[cfg(any(unix, windows))]
-#[derive(Default)]
-struct SpillStore {
-    retained: VecDeque<(tempfile::NamedTempFile, usize)>,
-    bytes: usize,
-    active_files: usize,
-}
-
-#[cfg(any(unix, windows))]
-impl SpillStore {
-    fn evict_oldest(&mut self) -> bool {
-        let Some((file, bytes)) = self.retained.pop_front() else {
-            return false;
-        };
-        // Close/unlink before releasing its allowance.
-        drop(file);
-        self.bytes -= bytes;
-        true
-    }
-}
-
-/// RAII reservation: cancellation, abandoned drains and complete small results
-/// delete their active file and release all quota. Only truncated final results
-/// transfer ownership to the tool's bounded retained queue, never `keep()`.
-#[cfg(any(unix, windows))]
-struct Spill {
-    owner: Arc<Mutex<SpillStore>>,
-    file: Option<tempfile::NamedTempFile>,
-    charged_bytes: usize,
-}
-
-#[cfg(any(unix, windows))]
-impl Spill {
-    fn start(owner: &Arc<Mutex<SpillStore>>) -> std::io::Result<Option<Self>> {
-        let mut store = owner.lock().unwrap_or_else(|poison| poison.into_inner());
-        while store.retained.len() + store.active_files >= MAX_SPILL_FILES {
-            if !store.evict_oldest() {
-                return Ok(None);
-            }
-        }
-        let file = tempfile::Builder::new()
-            .prefix("octet-bash-")
-            .suffix(".log")
-            .tempfile()?;
-        store.active_files += 1;
-        Ok(Some(Self {
-            owner: Arc::clone(owner),
-            file: Some(file),
-            charged_bytes: 0,
-        }))
-    }
-
-    /// Reserve before writing, including possible partial writes on I/O failure.
-    /// Returns false when only a prefix could fit in the storage allowance.
-    fn append(&mut self, bytes: &[u8]) -> std::io::Result<bool> {
-        use std::io::Write;
-        let wanted = bytes.len().min(MAX_SPILL_BYTES - self.charged_bytes);
-        let granted = {
-            let mut store = self
-                .owner
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            while store.bytes + wanted > MAX_RETAINED_SPILL_BYTES {
-                if !store.evict_oldest() {
-                    break;
-                }
-            }
-            let granted = wanted.min(MAX_RETAINED_SPILL_BYTES - store.bytes);
-            store.bytes += granted;
-            self.charged_bytes += granted;
-            granted
-        };
-        self.file.as_mut().unwrap().write_all(&bytes[..granted])?;
-        Ok(granted == bytes.len())
-    }
-
-    fn retain(mut self) -> (PathBuf, bool) {
-        let file = self.file.take().unwrap();
-        let sync_failed = file.as_file().sync_data().is_err();
-        let path = file.path().to_owned();
-        let mut store = self
-            .owner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        store.active_files -= 1;
-        store.retained.push_back((file, self.charged_bytes));
-        (path, sync_failed)
-    }
-}
-
-#[cfg(any(unix, windows))]
-impl Drop for Spill {
-    fn drop(&mut self) {
-        if let Some(file) = self.file.take() {
-            drop(file);
-            let mut store = self
-                .owner
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            store.active_files -= 1;
-            store.bytes -= self.charged_bytes;
-        }
-    }
+struct PendingSpill {
+    owner: Arc<spill::OwnerState>,
+    scope: String,
+    limit: usize,
 }
 
 /// Byte-bounded stream capture keeping the head and tail halves of the budget.
@@ -1124,10 +1036,13 @@ struct Capture {
     tail: VecDeque<u8>,
     total_bytes: usize,
     truncated: bool,
-    spill: Option<Spill>,
-    spill_path: Option<PathBuf>,
-    spill_error: bool,
+    // Head + tail are the exact provisional stream until the first eviction.
+    // No separate prefix buffer or spill worker is needed while output fits.
+    pending_spill: Option<PendingSpill>,
+    spill: Option<spill::Spill>,
+    spill_bytes: usize,
     spill_truncated: bool,
+    spill_error: bool,
 }
 
 #[cfg(any(unix, windows))]
@@ -1138,11 +1053,44 @@ impl Capture {
             tail: VecDeque::new(),
             total_bytes: 0,
             truncated: false,
+            pending_spill: None,
             spill: None,
-            spill_path: None,
-            spill_error: false,
+            spill_bytes: 0,
             spill_truncated: false,
+            spill_error: false,
         }
+    }
+
+    /// Flush the exact provisional bytes before any head/tail bytes are lost.
+    /// The writer splits these borrowed slices into bounded queue messages.
+    async fn promote_spill(&mut self) -> Option<spill::Writer> {
+        let pending = self.pending_spill.take()?;
+        let mut writer = spill::Writer::start(pending.owner, pending.scope, pending.limit);
+        writer.chunk(&self.head).await;
+        let (first, second) = self.tail.as_slices();
+        writer.chunk(first).await;
+        writer.chunk(second).await;
+        Some(writer)
+    }
+
+    fn record_spill(&mut self, outcome: spill::Outcome) {
+        self.spill = outcome.spill;
+        self.spill_bytes = outcome.bytes;
+        self.spill_truncated = outcome.truncated;
+        self.spill_error |= outcome.error;
+    }
+
+    /// A stream may fit its provisional allowance but not the final shared one.
+    /// Materialize it before shrinking, and report whether budgeting must be
+    /// repeated to account for the newly known private path length.
+    async fn spill_if_truncated(&mut self, budget: usize) -> bool {
+        if self.total_bytes > budget {
+            if let Some(writer) = self.promote_spill().await {
+                self.record_spill(writer.finish().await);
+                return true;
+            }
+        }
+        false
     }
 
     /// Finalize a capture recorded with an equal-or-larger provisional
@@ -1158,15 +1106,21 @@ impl Capture {
 
         let head_cap = budget / 2;
         let tail_cap = budget.saturating_sub(head_cap);
+        if self.tail.len() < tail_cap {
+            // Shared-budget/path overhead can cut inside the provisional head.
+            // Its suffix still belongs in the final tail, not in omitted bytes.
+            let needed = tail_cap - self.tail.len();
+            for &byte in self.head[self.head.len() - needed..].iter().rev() {
+                self.tail.push_front(byte);
+            }
+        }
         self.head.truncate(head_cap);
         if self.tail.len() > tail_cap {
             self.tail.drain(..self.tail.len() - tail_cap);
         }
         self.truncated = true;
-        if let Some(spill) = self.spill.take() {
-            let (path, sync_failed) = spill.retain();
-            self.spill_path = Some(path);
-            self.spill_error |= sync_failed;
+        if let Some(spill) = self.spill.as_mut() {
+            spill.retain();
         }
     }
 
@@ -1190,16 +1144,23 @@ impl Capture {
     fn render(&self, name: &str) -> String {
         let mut text = self.render_capture(name);
         if self.truncated {
-            if let Some(path) = &self.spill_path {
-                let kind = if self.spill_error || self.spill_truncated {
-                    "partial"
+            if let Some(spill) = &self.spill {
+                if spill.expired() {
+                    text.push_str("\nspill_expired=true (owner retention evicted this output)");
                 } else {
-                    "full"
-                };
-                text.push_str(&format!("\n{kind}_output_path={}", path.display()));
+                    text.push_str(&format!(
+                        "\n{}_output_path={}",
+                        if self.spill_error || self.spill_truncated {
+                            "partial"
+                        } else {
+                            "full"
+                        },
+                        spill.path.display()
+                    ));
+                }
             }
             if self.spill_truncated {
-                text.push_str("\nspill_truncated=true");
+                text.push_str("\nspill_truncated=true (per-stream byte limit reached)");
             }
             if self.spill_error {
                 text.push_str("\nspill_error=true (full output could not be retained)");
@@ -1257,7 +1218,29 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     progress: &ToolProgressSink,
     stream: OutputStream,
     checkpoints: Option<&BashCheckpoints>,
-    spills: &Arc<Mutex<SpillStore>>,
+    ownership: (&str, &str),
+) -> Capture {
+    read_bounded_with_spill_limit(
+        reader,
+        budget,
+        progress,
+        stream,
+        checkpoints,
+        MAX_BASH_SPILL_BYTES,
+        ownership,
+    )
+    .await
+}
+
+#[cfg(any(unix, windows))]
+async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
+    reader: &mut Option<R>,
+    budget: usize,
+    progress: &ToolProgressSink,
+    stream: OutputStream,
+    checkpoints: Option<&BashCheckpoints>,
+    spill_limit: usize,
+    ownership: (&str, &str),
 ) -> Capture {
     let Some(reader) = reader.as_mut() else {
         return Capture::empty();
@@ -1266,6 +1249,12 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     let tail_cap = budget.saturating_sub(head_cap);
 
     let mut capture = Capture::empty();
+    capture.pending_spill = Some(PendingSpill {
+        owner: spill::owner(ownership.0),
+        scope: ownership.1.to_owned(),
+        limit: spill_limit,
+    });
+    let mut writer = None;
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf).await {
@@ -1275,20 +1264,12 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
                 break;
             }
             Ok(n) => {
-                if !capture.spill_error && !capture.spill_truncated {
-                    if capture.spill.is_none() {
-                        match Spill::start(spills) {
-                            Ok(Some(spill)) => capture.spill = Some(spill),
-                            Ok(None) => capture.spill_truncated = true,
-                            Err(_) => capture.spill_error = true,
-                        }
-                    }
-                    if let Some(spill) = &mut capture.spill {
-                        match spill.append(&buf[..n]) {
-                            Ok(complete) => capture.spill_truncated = !complete,
-                            Err(_) => capture.spill_error = true,
-                        }
-                    }
+                if writer.is_none() && capture.total_bytes.saturating_add(n) > budget {
+                    // Promote before this chunk can evict the first raw byte.
+                    writer = capture.promote_spill().await;
+                }
+                if let Some(writer) = writer.as_mut() {
+                    writer.chunk(&buf[..n]).await;
                 }
                 progress.output(stream, Bytes::copy_from_slice(&buf[..n]));
                 capture.total_bytes += n;
@@ -1315,6 +1296,9 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
             }
         }
     }
+    if let Some(writer) = writer {
+        capture.record_spill(writer.finish().await);
+    }
     capture
 }
 
@@ -1340,11 +1324,40 @@ fn shared_capture_budgets(
 }
 
 #[cfg(any(unix, windows))]
-fn rebalance_captures(stdout: &mut Capture, stderr: &mut Capture, budget: usize) {
-    let (stdout_budget, stderr_budget) =
-        shared_capture_budgets(stdout.total_bytes, stderr.total_bytes, budget);
-    stdout.fit_to_budget(stdout_budget);
-    stderr.fit_to_budget(stderr_budget);
+async fn rebalance_captures(stdout: &mut Capture, stderr: &mut Capture, budget: usize) {
+    loop {
+        // Complete inline output needs no spill-path envelope. When truncating,
+        // reserve actual private path lengths rather than assuming /tmp is short.
+        let inline_budget = if stdout.total_bytes.saturating_add(stderr.total_bytes) > budget {
+            let paths = [stdout.spill.as_ref(), stderr.spill.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(|spill| spill.path.as_os_str().len())
+                .sum::<usize>();
+            let second_section = if stdout.total_bytes > 0 && stderr.total_bytes > 0 {
+                128
+            } else {
+                0
+            };
+            budget.saturating_sub(paths + second_section)
+        } else {
+            budget
+        };
+        let (stdout_budget, stderr_budget) =
+            shared_capture_budgets(stdout.total_bytes, stderr.total_bytes, inline_budget);
+        let (out_promoted, err_promoted) = tokio::join!(
+            stdout.spill_if_truncated(stdout_budget),
+            stderr.spill_if_truncated(stderr_budget),
+        );
+        if !out_promoted && !err_promoted {
+            stdout.fit_to_budget(stdout_budget);
+            stderr.fit_to_budget(stderr_budget);
+            return;
+        }
+        // A new spill path may itself truncate the peer. Each stream promotes
+        // at most once, so at most two more budget passes are needed. Neither
+        // capture may discard provisional bytes until this settles.
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1390,235 +1403,6 @@ mod tests {
         }
     }
 
-    async fn capture_repeated(tool: &BashTool, bytes: usize, budget: usize) -> Capture {
-        let mut reader = Some(tokio::io::repeat(b'x').take(bytes as u64));
-        read_bounded_with_progress(
-            &mut reader,
-            budget,
-            &ToolProgressSink::null(),
-            OutputStream::Stdout,
-            None,
-            &tool.spills,
-        )
-        .await
-    }
-
-    fn spill_path(text: &str, kind: &str) -> PathBuf {
-        let prefix = format!("{kind}_output_path=");
-        PathBuf::from(
-            text.lines()
-                .find_map(|line| line.strip_prefix(&prefix))
-                .unwrap(),
-        )
-    }
-
-    #[tokio::test]
-    async fn spill_caps_each_stream_and_labels_full_versus_partial_prefixes() {
-        for bytes in [MAX_SPILL_BYTES, MAX_SPILL_BYTES + 8192] {
-            let tool = BashTool::default();
-            let mut capture = capture_repeated(&tool, bytes, 1024).await;
-            // Still drain/count every byte after the on-disk prefix fills.
-            assert_eq!(capture.total_bytes, bytes);
-            capture.fit_to_budget(1024);
-            let text = capture.render("stdout");
-            let limited = bytes > MAX_SPILL_BYTES;
-            let path = spill_path(&text, if limited { "partial" } else { "full" });
-            assert_eq!(
-                std::fs::metadata(&path).unwrap().len(),
-                MAX_SPILL_BYTES as u64
-            );
-            assert_eq!(text.contains("spill_truncated=true"), limited);
-            assert_eq!(text.contains("full_output_path="), !limited);
-            assert!(!text.contains("spill_error=true"));
-            assert_eq!(tool.spills.lock().unwrap().bytes, MAX_SPILL_BYTES);
-            drop(capture);
-            assert!(path.exists(), "final result must outlive its capture");
-            drop(tool);
-            assert!(!path.exists(), "tool owns retained spill cleanup");
-        }
-    }
-
-    #[tokio::test]
-    async fn spill_small_output_is_exact_and_deletes_its_provisional_file() {
-        let tool = BashTool::default();
-        let bytes = b"one\ntwo\n\n";
-        let mut reader = Some(&bytes[..]);
-        let mut capture = read_bounded_with_progress(
-            &mut reader,
-            bytes.len(),
-            &ToolProgressSink::null(),
-            OutputStream::Stdout,
-            None,
-            &tool.spills,
-        )
-        .await;
-        let path = capture
-            .spill
-            .as_ref()
-            .unwrap()
-            .file
-            .as_ref()
-            .unwrap()
-            .path()
-            .to_owned();
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        capture.fit_to_budget(bytes.len());
-        assert_eq!(capture.head, bytes);
-        assert_eq!(
-            capture.render("stdout"),
-            "stdout: 2 lines\none\ntwo\n\ncomplete_stdout=true"
-        );
-        assert!(!path.exists());
-        let store = tool.spills.lock().unwrap();
-        assert_eq!(
-            (store.bytes, store.active_files, store.retained.len()),
-            (0, 0, 0)
-        );
-    }
-
-    #[tokio::test]
-    async fn spill_aggregate_limit_evicts_oldest_retained_files() {
-        let tool = BashTool::default();
-        let mut paths = Vec::new();
-        for _ in 0..MAX_RETAINED_SPILL_BYTES / MAX_SPILL_BYTES {
-            let mut capture = capture_repeated(&tool, MAX_SPILL_BYTES, 1024).await;
-            capture.fit_to_budget(1024);
-            paths.push(spill_path(&capture.render("stdout"), "full"));
-        }
-        assert!(paths.iter().all(|path| path.exists()));
-        assert_eq!(tool.spills.lock().unwrap().bytes, MAX_RETAINED_SPILL_BYTES);
-        let mut capture = capture_repeated(&tool, 2048, 1024).await;
-        capture.fit_to_budget(1024);
-        let newest = spill_path(&capture.render("stdout"), "full");
-        assert!(!paths[0].exists());
-        assert!(paths[1..].iter().all(|path| path.exists()));
-        assert_eq!(
-            tool.spills.lock().unwrap().bytes,
-            MAX_RETAINED_SPILL_BYTES - MAX_SPILL_BYTES + 2048
-        );
-        drop(tool);
-        assert!(paths.iter().all(|path| !path.exists()));
-        assert!(!newest.exists());
-    }
-
-    #[tokio::test]
-    async fn spill_active_captures_share_the_aggregate_limit_and_cleanup() {
-        let tool = BashTool::default();
-        let mut active = Vec::new();
-        let mut paths = Vec::new();
-        for _ in 0..MAX_RETAINED_SPILL_BYTES / MAX_SPILL_BYTES {
-            let capture = capture_repeated(&tool, MAX_SPILL_BYTES, 1024).await;
-            paths.push(
-                capture
-                    .spill
-                    .as_ref()
-                    .unwrap()
-                    .file
-                    .as_ref()
-                    .unwrap()
-                    .path()
-                    .to_owned(),
-            );
-            active.push(capture);
-        }
-        let mut overflow = capture_repeated(&tool, 4096, 1024).await;
-        assert_eq!(overflow.total_bytes, 4096);
-        overflow.fit_to_budget(1024);
-        let text = overflow.render("stdout");
-        let path = spill_path(&text, "partial");
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
-        assert!(text.contains("spill_truncated=true"));
-        assert!(!text.contains("full_output_path="));
-        assert_eq!(tool.spills.lock().unwrap().bytes, MAX_RETAINED_SPILL_BYTES);
-        drop(active);
-        assert!(paths.iter().all(|path| !path.exists()));
-        assert_eq!(tool.spills.lock().unwrap().bytes, 0);
-        assert_eq!(tool.spills.lock().unwrap().active_files, 0);
-        drop(tool);
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn spill_file_count_limit_evicts_and_owners_are_isolated() {
-        let tool = BashTool::default();
-        let independent = BashTool::default();
-        let mut other = capture_repeated(&independent, 16, 8).await;
-        other.fit_to_budget(8);
-        let other_path = spill_path(&other.render("stdout"), "full");
-        let mut paths = Vec::new();
-        for _ in 0..=MAX_SPILL_FILES {
-            let mut capture = capture_repeated(&tool, 16, 8).await;
-            capture.fit_to_budget(8);
-            paths.push(spill_path(&capture.render("stdout"), "full"));
-        }
-        assert!(!paths[0].exists());
-        assert!(paths[1..].iter().all(|path| path.exists()));
-        assert_eq!(tool.spills.lock().unwrap().retained.len(), MAX_SPILL_FILES);
-        drop(tool);
-        assert!(paths.iter().all(|path| !path.exists()));
-        assert!(other_path.exists());
-        drop(independent);
-        assert!(!other_path.exists());
-    }
-
-    #[tokio::test]
-    async fn spill_active_file_count_limit_still_drains_without_a_path() {
-        let tool = BashTool::default();
-        let mut active = Vec::new();
-        for _ in 0..MAX_SPILL_FILES {
-            active.push(capture_repeated(&tool, 16, 8).await);
-        }
-        let mut overflow = capture_repeated(&tool, 4096, 1024).await;
-        overflow.fit_to_budget(1024);
-        let text = overflow.render("stdout");
-        assert_eq!(overflow.total_bytes, 4096);
-        assert!(!text.contains("_output_path="));
-        assert!(text.contains("spill_truncated=true"));
-        assert_eq!(tool.spills.lock().unwrap().active_files, MAX_SPILL_FILES);
-        drop(active);
-        assert_eq!(tool.spills.lock().unwrap().active_files, 0);
-        assert_eq!(tool.spills.lock().unwrap().bytes, 0);
-    }
-
-    #[tokio::test]
-    async fn spill_cancelled_reader_releases_in_flight_quota() {
-        use tokio::io::AsyncWriteExt;
-        let tool = BashTool::default();
-        let (mut writer, reader) = tokio::io::duplex(4096);
-        writer.write_all(b"unfinished").await.unwrap();
-        let mut reader = Some(reader);
-        let progress = ToolProgressSink::null();
-        let mut reading = Box::pin(read_bounded_with_progress(
-            &mut reader,
-            1024,
-            &progress,
-            OutputStream::Stdout,
-            None,
-            &tool.spills,
-        ));
-        assert!(futures_util::poll!(&mut reading).is_pending());
-        assert_eq!(tool.spills.lock().unwrap().active_files, 1);
-        assert_eq!(tool.spills.lock().unwrap().bytes, 10);
-        drop(reading);
-        let store = tool.spills.lock().unwrap();
-        assert_eq!(
-            (store.bytes, store.active_files, store.retained.len()),
-            (0, 0, 0)
-        );
-    }
-
-    #[tokio::test]
-    async fn spill_io_error_never_advertises_a_full_file() {
-        let tool = BashTool::default();
-        let mut capture = capture_repeated(&tool, 4096, 1024).await;
-        capture.spill_error = true;
-        capture.fit_to_budget(1024);
-        let text = capture.render("stdout");
-        assert!(spill_path(&text, "partial").exists());
-        assert!(text.contains("spill_error=true"));
-        assert!(!text.contains("full_output_path="));
-    }
-
     fn process_is_alive(pid: i32) -> bool {
         crate::extension_process::process_is_live_for_test(pid)
     }
@@ -1629,6 +1413,67 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         !process_is_alive(pid)
+    }
+
+    #[tokio::test]
+    async fn spill_quota_keeps_a_prefix_and_drains_the_rest() {
+        use tokio::io::AsyncWriteExt;
+        let bytes = b"first\nsecond\nthird\nfourth\nfifth\nlast\n";
+        let (mut writer, reader) = tokio::io::duplex(4);
+        let mut reader = Some(reader);
+        let progress = ToolProgressSink::null();
+        let drain = read_bounded_with_spill_limit(
+            &mut reader,
+            12,
+            &progress,
+            OutputStream::Stdout,
+            None,
+            9,
+            ("quota-test", "quota-call"),
+        );
+        let write = async {
+            writer.write_all(bytes).await.unwrap();
+            writer.shutdown().await.unwrap();
+        };
+        let (mut capture, ()) =
+            tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(drain, write) })
+                .await
+                .expect("quota must not stop pipe draining");
+        assert_eq!(capture.total_bytes, bytes.len());
+        assert_eq!(capture.spill_bytes, 9);
+        assert!(capture.spill_truncated);
+        assert!(!capture.spill_error);
+        capture.fit_to_budget(12);
+        let path = &capture.spill.as_ref().unwrap().path;
+        assert_eq!(std::fs::read(path).unwrap(), bytes[..9]);
+        let rendered = capture.render("stdout");
+        assert!(rendered.contains("partial_output_path="), "{rendered}");
+        assert!(rendered.contains("spill_truncated=true"), "{rendered}");
+        assert!(!rendered.contains("full_output_path="), "{rendered}");
+        assert!(!rendered.contains("spill_error=true"), "{rendered}");
+        assert!(
+            rendered.contains("last"),
+            "tail after quota was lost: {rendered}"
+        );
+        std::fs::remove_file(path).unwrap();
+
+        // Exactly reaching the cap still preserves a complete spill; only
+        // seeing an omitted byte can change the path label to partial.
+        let mut reader = Some(std::io::Cursor::new(bytes));
+        let mut capture = read_bounded_with_spill_limit(
+            &mut reader,
+            12,
+            &progress,
+            OutputStream::Stdout,
+            None,
+            bytes.len(),
+            ("quota-test", "quota-call-2"),
+        )
+        .await;
+        capture.fit_to_budget(12);
+        assert!(capture.render("stdout").contains("full_output_path="));
+        assert!(!capture.spill_truncated);
+        BashTool::release_owner("quota-test");
     }
 
     #[test]

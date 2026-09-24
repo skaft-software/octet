@@ -17,8 +17,131 @@ use crate::tui::fuzzy::{fuzzy_match, parse_search_query, SearchMode, TokenKind};
 use crate::tui::layout::{PickerLayout, PresentationLayout, MAX_APPROVAL_DETAIL_ROWS};
 use crate::tui::theme::OctetTheme;
 
+const PANEL_SEARCH_CACHE_MAX_ITEMS: usize = 4096;
+const PANEL_SEARCH_CACHE_MAX_BYTES: usize = 2 * 1024 * 1024;
+const PANEL_SEARCH_CACHE_MAX_SOURCE_BYTES: usize = PANEL_SEARCH_CACHE_MAX_BYTES / 4;
+
+struct CachedPanelSearchItem {
+    label: String,
+    description: Option<String>,
+    group: Option<String>,
+    normalized: String,
+}
+
+struct PanelSearchCache {
+    items: Vec<CachedPanelSearchItem>,
+}
+
+impl PanelSearchCache {
+    fn matches(
+        &self,
+        items: &[String],
+        descriptions: &[Option<String>],
+        groups: Option<&[String]>,
+    ) -> bool {
+        self.items.len() == items.len()
+            && self.items.iter().enumerate().all(|(index, cached)| {
+                cached.label == items[index]
+                    && cached.description.as_deref()
+                        == descriptions.get(index).and_then(Option::as_deref)
+                    && cached.group.as_deref()
+                        == groups
+                            .and_then(|groups| groups.get(index))
+                            .map(String::as_str)
+            })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.items.capacity() * std::mem::size_of::<CachedPanelSearchItem>()
+            + self
+                .items
+                .iter()
+                .map(|item| {
+                    item.label.capacity()
+                        + item.description.as_ref().map_or(0, String::capacity)
+                        + item.group.as_ref().map_or(0, String::capacity)
+                        + item.normalized.capacity()
+                })
+                .sum::<usize>()
+    }
+
+    fn build(
+        items: &[String],
+        descriptions: &[Option<String>],
+        groups: Option<&[String]>,
+    ) -> Option<Self> {
+        if items.len() > PANEL_SEARCH_CACHE_MAX_ITEMS {
+            return None;
+        }
+        // Check borrowed source sizes before cloning or normalizing. Oversized
+        // panels still search every item through the uncached path below.
+        let mut source_bytes = 0usize;
+        for (index, item) in items.iter().enumerate() {
+            source_bytes = source_bytes
+                .checked_add(item.len())?
+                .checked_add(
+                    descriptions
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .map_or(0, String::len),
+                )?
+                .checked_add(
+                    groups
+                        .and_then(|groups| groups.get(index))
+                        .map_or(0, String::len),
+                )?;
+            if source_bytes > PANEL_SEARCH_CACHE_MAX_SOURCE_BYTES {
+                return None;
+            }
+        }
+        let cached = Self {
+            items: items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let description = descriptions.get(index).and_then(Option::as_deref);
+                    let group = groups
+                        .and_then(|groups| groups.get(index))
+                        .map(String::as_str);
+                    CachedPanelSearchItem {
+                        label: item.clone(),
+                        description: description.map(str::to_owned),
+                        group: group.map(str::to_owned),
+                        normalized: normalized_panel_search_text(item, description, group),
+                    }
+                })
+                .collect(),
+        };
+        (cached.retained_bytes() <= PANEL_SEARCH_CACHE_MAX_BYTES).then_some(cached)
+    }
+}
+
+thread_local! {
+    // Input and rendering can run on different threads. Each retains at most one
+    // bounded snapshot. Exact source equality, not addresses or a hash, is the
+    // cache identity, so in-place updates and replacement panels cannot go stale.
+    static PANEL_SEARCH_CACHE: std::cell::RefCell<Option<PanelSearchCache>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+fn normalized_panel_search_text(
+    label: &str,
+    description: Option<&str>,
+    group: Option<&str>,
+) -> String {
+    #[cfg(test)]
+    panel_render_test_hook::record_search_normalization();
+    let mut searchable = label.to_lowercase();
+    for field in [description, group].into_iter().flatten() {
+        searchable.push(' ');
+        searchable.push_str(&field.to_lowercase());
+    }
+    searchable
+}
+
 /// Indices of the items matching the current filter. Every whitespace-delimited
-/// term must appear in either the label or description, case-insensitively.
+/// term must appear in the label, description, or provider, case-insensitively.
 fn filtered_indices_with_groups(
     items: &[String],
     descriptions: &[Option<String>],
@@ -29,29 +152,41 @@ fn filtered_indices_with_groups(
         .split_whitespace()
         .map(str::to_lowercase)
         .collect::<Vec<_>>();
-    items
-        .iter()
-        .enumerate()
-        .filter(|(index, item)| {
-            if needles.is_empty() {
-                return true;
-            }
-            let mut searchable = item.to_lowercase();
-            if let Some(description) = descriptions
-                .get(*index)
-                .and_then(|description| description.as_deref())
-            {
-                searchable.push(' ');
-                searchable.push_str(&description.to_lowercase());
-            }
-            if let Some(group) = groups.and_then(|groups| groups.get(*index)) {
-                searchable.push(' ');
-                searchable.push_str(&group.to_lowercase());
-            }
-            needles.iter().all(|needle| searchable.contains(needle))
-        })
-        .map(|(index, _)| index)
-        .collect()
+    if needles.is_empty() {
+        return (0..items.len()).collect();
+    }
+    PANEL_SEARCH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache
+            .as_ref()
+            .is_some_and(|cache| cache.matches(items, descriptions, groups))
+        {
+            *cache = PanelSearchCache::build(items, descriptions, groups);
+        }
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let uncached;
+                let searchable = if let Some(cache) = cache.as_ref() {
+                    &cache.items[index].normalized
+                } else {
+                    uncached = normalized_panel_search_text(
+                        item,
+                        descriptions.get(index).and_then(Option::as_deref),
+                        groups
+                            .and_then(|groups| groups.get(index))
+                            .map(String::as_str),
+                    );
+                    &uncached
+                };
+                needles
+                    .iter()
+                    .all(|needle| searchable.contains(needle))
+                    .then_some(index)
+            })
+            .collect()
+    })
 }
 
 /// Indices the typed filter matched, before any presentation grouping hides
@@ -1034,6 +1169,8 @@ pub(super) fn document_visual_lines_styled(
     width: u16,
     styled: bool,
 ) -> Vec<String> {
+    #[cfg(test)]
+    panel_render_test_hook::record_document_layout();
     let plan = PresentationLayout::new(theme, width);
     let inset = usize::from(plan.inset);
     let available = usize::from(plan.content_width);
@@ -1387,25 +1524,6 @@ fn render_provider_heading(state: &ShellState, provider: &str, width: u16) -> St
     fit_line(&format!("{prefix}{}", state.theme.bold(&provider)), width)
 }
 
-/// Minimum remaining body rows before the `/subagents` column header is worth a
-/// row. A short terminal keeps worker rows instead of chrome.
-const SUBAGENT_HEADER_MIN_BODY: usize = 5;
-
-/// Names the fields every `/subagents` row carries, in the order the extension
-/// emits them. It is chrome: never selectable, never an item index.
-fn render_subagent_column_header(state: &ShellState, width: u16) -> String {
-    let plan = PresentationLayout::new(&state.theme, width);
-    let prefix = format!("{}  ", " ".repeat(usize::from(plan.inset)));
-    let header = "state · elapsed · model · calls · turns · tokens · cost";
-    fit_line(
-        &format!(
-            "{prefix}{}",
-            subdued_text(&state.theme, &panel_cell(header, state.theme.unicode()))
-        ),
-        width,
-    )
-}
-
 /// State-group heading with its displayed count, e.g. `Running · 8`.
 fn render_subagent_heading(state: &ShellState, label: &str, count: usize, width: u16) -> String {
     let plan = PresentationLayout::new(&state.theme, width);
@@ -1462,8 +1580,10 @@ fn select_list_uses_stacked_rows(
     width: u16,
     available_rows: usize,
 ) -> bool {
-    action.is_model_picker()
+    (action.is_model_picker()
         && PresentationLayout::new(&state.theme, width).picker == PickerLayout::Stacked
+        || action.subagent_panel().is_some()
+            && PresentationLayout::new(&state.theme, width).picker != PickerLayout::Columns)
         && available_rows
             >= if action.model_provider_groups().is_some() {
                 3
@@ -1708,9 +1828,9 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
                 0..filtered.len(),
             );
             // Grouped subagent chrome is budgeted here as well: one heading per
-            // visible state group, one summary row for the collapsed terminal
-            // groups, and the column header. Budgeting the body alone made the
-            // panel claim a height it then could not honour, so the collapse
+            // visible state group and one summary row for collapsed groups.
+            // Budgeting the body alone made the panel claim a height it then
+            // could not honour, so the collapse
             // summaries were sliced off the bottom and every live worker was
             // pushed out of the window.
             let subagent_chrome = action
@@ -1731,7 +1851,7 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
                             .iter()
                             .any(|index| searched.contains(index) && panel.hides(*index))
                     }));
-                    visible + hidden + usize::from(!filtered.is_empty())
+                    visible + hidden
                 })
                 .unwrap_or(0);
             (body * row_height + headings + subagent_chrome + chrome_rows + border_rows)
@@ -1906,7 +2026,7 @@ fn render_panel_output_with_limit(
             let max_body = max_rows
                 .saturating_sub(lines.len() + usize::from(show_borders) + usize::from(show_footer));
             // `/subagents` chrome: one heading per visible state group, a
-            // column header, and a single summary line for collapsed groups.
+            // single summary line for collapsed groups.
             // Chrome is budgeted out of the body so a bounded panel can never
             // render past the row allowance it was given.
             let subagents = action.subagent_panel();
@@ -1937,11 +2057,8 @@ fn render_panel_output_with_limit(
                     .filter(|group| group.indices.iter().any(|index| filtered.contains(index)))
                     .count()
             });
-            // A column header is chrome, so it yields before any worker row.
-            let show_subagent_header = subagents.is_some() && max_body >= SUBAGENT_HEADER_MIN_BODY;
-            let requested_chrome = visible_groups
-                .saturating_add(usize::from(!hidden_groups.is_empty()))
-                .saturating_add(usize::from(show_subagent_header));
+            let requested_chrome =
+                visible_groups.saturating_add(usize::from(!hidden_groups.is_empty()));
             // Chrome yields entirely rather than pushing the panel past the row
             // allowance it was given: a short terminal keeps worker rows.
             let chrome_rows = if requested_chrome < max_body {
@@ -1955,7 +2072,6 @@ fn render_panel_output_with_limit(
             } else {
                 Vec::new()
             };
-            let show_subagent_header = show_subagent_header && chrome_fits;
             let hidden_groups_empty = hidden_groups.is_empty();
             let max_body = max_body.saturating_sub(chrome_rows);
             if filtered.is_empty() && !hidden_groups_empty && max_body > 0 {
@@ -1997,9 +2113,6 @@ fn render_panel_output_with_limit(
                 let label_width = (!confirmation && !stacked)
                     .then(|| panel_label_width(state, items, descriptions, &filtered, width))
                     .flatten();
-                if show_subagent_header {
-                    lines.push(render_subagent_column_header(state, width));
-                }
                 let mut previous_provider: Option<&str> = None;
                 let mut previous_group: Option<usize> = None;
                 for position in window {
@@ -2068,8 +2181,15 @@ fn render_panel_output_with_limit(
                 let subagent_scope = subagents
                     .and_then(|panel| panel.state_filter_label())
                     .map(|label| format!("state: {label}"));
-                if subagents.is_some() {
-                    hints.push(("ctrl+t", "show all"));
+                if let Some(panel) = subagents {
+                    hints.push((
+                        "ctrl+t",
+                        if panel.collapsed {
+                            "show all"
+                        } else {
+                            "hide finished"
+                        },
+                    ));
                     hints.push(("ctrl+f", "state filter"));
                 }
                 hints.push(("esc", "close"));
@@ -2078,7 +2198,14 @@ fn render_panel_output_with_limit(
                     width,
                     &content_inset,
                     subagent_scope.as_deref(),
-                    ("enter", "select"),
+                    (
+                        "enter",
+                        if subagents.is_some() {
+                            "inspect"
+                        } else {
+                            "select"
+                        },
+                    ),
                     &hints,
                 ));
             }
@@ -2158,6 +2285,142 @@ pub(super) fn confirmation_metadata_for_rendered_panel(
         return None;
     }
     rendered.confirmation
+}
+
+#[cfg(test)]
+mod panel_search_cache_tests {
+    use super::*;
+
+    fn reset() {
+        PANEL_SEARCH_CACHE.with(|cache| *cache.borrow_mut() = None);
+        panel_render_test_hook::reset_search_normalizations();
+    }
+
+    #[test]
+    fn unchanged_and_equal_reallocated_snapshots_normalize_only_once() {
+        reset();
+        let items = vec!["Alpha".into(), "Beta".into()];
+        let descriptions = vec![Some("Warm".into()), Some("Cold".into())];
+        let groups = vec!["OpenAI".into(), "Other".into()];
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "alpha warm openai"),
+            vec![0]
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 2);
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "beta cold"),
+            vec![1]
+        );
+        assert_eq!(
+            filtered_indices_with_groups(
+                &items.clone(),
+                &descriptions.clone(),
+                Some(&groups.clone()),
+                "openai"
+            ),
+            vec![0]
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 2);
+        PANEL_SEARCH_CACHE.with(|cache| {
+            assert!(
+                cache.borrow().as_ref().unwrap().retained_bytes() <= PANEL_SEARCH_CACHE_MAX_BYTES
+            );
+        });
+    }
+
+    #[test]
+    fn in_place_text_updates_and_item_reordering_invalidate_exactly() {
+        reset();
+        let mut items = vec!["Alpha".into(), "Bravo".into()];
+        let mut descriptions = vec![Some("Warm".into()), None];
+        let mut groups = vec!["OpenAI".into(), "Other!".into()];
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "alpha warm openai"),
+            vec![0]
+        );
+        descriptions[0].as_mut().unwrap().replace_range(.., "Cold");
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "warm").is_empty()
+        );
+        groups[0].replace_range(.., "Closed");
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "openai").is_empty()
+        );
+        items[0].replace_range(.., "Delta");
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "alpha").is_empty()
+        );
+        items.swap(0, 1);
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "delta"),
+            vec![1]
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 10);
+        // Removing metadata must also invalidate a previously matching snapshot.
+        assert!(filtered_indices_with_groups(&items, &[], None, "cold closed").is_empty());
+    }
+
+    #[test]
+    fn unicode_and_filter_terms_keep_the_original_lowercase_semantics() {
+        reset();
+        let items = vec!["İSTANBUL".into(), "ΟΣ".into(), "CAFÉ".into()];
+        let descriptions = vec![Some("ÜBER".into()), None, Some("ACCÈS".into())];
+        let groups = vec!["GRÜPPE".into()];
+        assert_eq!(
+            filtered_indices_with_groups(
+                &items,
+                &descriptions,
+                Some(&groups),
+                "i\u{307}stanbul ÜBER grüppe"
+            ),
+            vec![0]
+        );
+        // Whole-string lowercasing preserves Greek final sigma; per-char
+        // lowercasing would not be equivalent to the original implementation.
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "ος"),
+            vec![1]
+        );
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "οσ").is_empty()
+        );
+        assert_eq!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "café accès"),
+            vec![2]
+        );
+        assert!(
+            filtered_indices_with_groups(&items, &descriptions, Some(&groups), "café über")
+                .is_empty()
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 3);
+    }
+
+    #[test]
+    fn empty_filter_skips_normalization_and_oversized_panels_remain_complete() {
+        reset();
+        let mut items = vec!["other".into(); PANEL_SEARCH_CACHE_MAX_ITEMS + 1];
+        let last = items.len() - 1;
+        items[last] = "Needle".into();
+        assert_eq!(
+            filtered_indices_with_groups(&items, &[], None, " \t"),
+            (0..items.len()).collect::<Vec<_>>()
+        );
+        assert_eq!(panel_render_test_hook::search_normalizations(), 0);
+        assert_eq!(
+            filtered_indices_with_groups(&items, &[], None, "needle"),
+            vec![last]
+        );
+        PANEL_SEARCH_CACHE.with(|cache| assert!(cache.borrow().is_none()));
+        let items = vec![
+            "x".repeat(PANEL_SEARCH_CACHE_MAX_SOURCE_BYTES + 1),
+            "Needle".into(),
+        ];
+        assert_eq!(
+            filtered_indices_with_groups(&items, &[], None, "needle"),
+            vec![1]
+        );
+        PANEL_SEARCH_CACHE.with(|cache| assert!(cache.borrow().is_none()));
+    }
 }
 
 #[cfg(test)]
@@ -2258,8 +2521,134 @@ mod grouped_model_tests {
 
 #[cfg(test)]
 pub mod panel_render_test_hook {
+    thread_local! {
+        static DOCUMENT_LAYOUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static SEARCH_NORMALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub(super) fn record_search_normalization() {
+        SEARCH_NORMALIZATIONS.with(|count| count.set(count.get() + 1));
+    }
+    pub(super) fn reset_search_normalizations() {
+        SEARCH_NORMALIZATIONS.with(|count| count.set(0));
+    }
+    pub(super) fn search_normalizations() -> usize {
+        SEARCH_NORMALIZATIONS.with(std::cell::Cell::get)
+    }
+    pub(super) fn record_document_layout() {
+        DOCUMENT_LAYOUTS.with(|calls| calls.set(calls.get() + 1));
+    }
+    pub fn take_document_layouts() -> usize {
+        DOCUMENT_LAYOUTS.with(|calls| calls.replace(0))
+    }
     pub fn document_lines(text: &str, width: u16, styled: bool) -> Vec<String> {
         let theme = crate::tui::theme::test_theme();
         super::document_visual_lines_styled(text, &theme, width, styled)
+    }
+}
+
+#[cfg(test)]
+mod subagent_surface_tests {
+    use super::super::{InteractiveShell, SubagentGroup, SubagentPanel};
+    use super::*;
+
+    #[test]
+    fn subagent_menu_uses_shared_rows_and_honest_actions() {
+        for width in [40, 80, 120] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, 24);
+            shell.open_panel(Panel::SelectList {
+                surface: OrdinarySurfaceMetadata::new("Subagents"),
+                items: vec!["audit-auth".into()],
+                descriptions: vec![Some("running · 42s · test-model".into())],
+                selected: 0,
+                filter: String::new(),
+                action: PanelAction::SelectSubagent(SubagentPanel {
+                    node_ids: vec!["worker:audit".into()],
+                    groups: vec![SubagentGroup {
+                        label: "Running".into(),
+                        indices: vec![0],
+                        collapsible: false,
+                    }],
+                    collapsed: true,
+                    revealed_node: None,
+                    state_filter: None,
+                }),
+            });
+            let state = shell.state.borrow();
+            let rows = render_panel_with_limit(&state, width, 20);
+            let plain = super::super::strip_terminal_sequences(&rows.join("\n"));
+            assert!(plain.contains("audit-auth"), "{plain}");
+            assert!(plain.contains("running"), "{plain}");
+            assert!(plain.contains("enter inspect"), "{plain}");
+            assert!(!plain.contains("state · elapsed"), "{plain}");
+            assert!(rows.len() <= 20);
+            assert!(rows
+                .iter()
+                .all(|row| visible_width(row) <= usize::from(width)));
+            let worker = rows
+                .iter()
+                .position(|row| row.contains("audit-auth"))
+                .unwrap();
+            if width < 112 {
+                assert!(rows[worker + 1].contains("running"));
+                assert!(!rows[worker].contains("running"));
+            } else {
+                assert!(rows[worker].contains("running"));
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_model_subagent_menu_keeps_models_on_worker_rows() {
+        for width in [80, 120] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, 24);
+            shell.open_panel(Panel::SelectList {
+                surface: OrdinarySurfaceMetadata::new("Subagents"),
+                items: vec!["audit".into(), "search".into()],
+                descriptions: vec![
+                    Some("running · 42s · claude-sonnet-test".into()),
+                    Some("running · 4s · gpt-test".into()),
+                ],
+                selected: 0,
+                filter: String::new(),
+                action: PanelAction::SelectSubagent(SubagentPanel {
+                    node_ids: vec!["worker:audit".into(), "worker:search".into()],
+                    groups: vec![SubagentGroup {
+                        label: "Running".into(),
+                        indices: vec![0, 1],
+                        collapsible: false,
+                    }],
+                    collapsed: true,
+                    revealed_node: None,
+                    state_filter: None,
+                }),
+            });
+            let state = shell.state.borrow();
+            let rows = render_panel_with_limit(&state, width, 20);
+            let plain = super::super::strip_terminal_sequences(&rows.join("\n"));
+            assert!(plain.contains("claude-sonnet-test"), "{plain}");
+            assert!(plain.contains("gpt-test"), "{plain}");
+            let heading = plain
+                .lines()
+                .find(|line| line.contains("Subagents"))
+                .unwrap();
+            assert!(!heading.contains("test"), "{plain}");
+            for (name, model, other) in [
+                ("audit", "claude-sonnet-test", "gpt-test"),
+                ("search", "gpt-test", "claude-sonnet-test"),
+            ] {
+                let index = rows.iter().position(|row| row.contains(name)).unwrap();
+                let model_row = if width < 112 {
+                    &rows[index + 1]
+                } else {
+                    &rows[index]
+                };
+                let model_row = super::super::strip_terminal_sequences(model_row);
+                assert!(model_row.contains(model), "{name}: {plain}");
+                assert!(!model_row.contains(other), "{name}: {plain}");
+            }
+            assert!(rows.len() <= 20);
+        }
     }
 }

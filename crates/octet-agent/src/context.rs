@@ -434,6 +434,7 @@ mod tests {
             delta: "hello".into(),
         });
         tracker.observe_stream(&StreamEvent::ToolCallStart {
+            async_execution: false,
             index: 1,
             id: ToolCallId("c1".into()),
             name: "read".into(),

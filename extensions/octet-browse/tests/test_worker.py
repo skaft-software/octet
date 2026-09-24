@@ -12,6 +12,13 @@ from octet_browse.adapters import AdapterRegistry
 from octet_browse.paths import BrowsePaths
 from octet_browse.profile import ProfileManager
 from octet_browse.safety import BrowseError, ResourceOwner
+from octet_browse.snapshot import (
+    MAX_BODY_OUTPUT_CHARS,
+    MAX_BODY_SOURCE_CHARS,
+    MAX_BODY_TRAVERSAL_NODES,
+    MAX_INTERACTIVE_ELEMENTS,
+    MAX_SNAPSHOT_CHARS,
+)
 from octet_browse.worker import BrowserEngine, MAX_TABS, OperationContext, PlaywrightWorker
 
 from tests.helpers import FakeElement, FakePage
@@ -264,6 +271,56 @@ class BrowserActionSafetyTests(unittest.TestCase):
         with self.assertRaises(BrowseError) as screenshot:
             self.engine.screenshot(self.operation(), self.owner, tab_id)
         self.assertEqual(screenshot.exception.code, "screenshot_typed_values")
+
+    def test_snapshot_reports_source_cut_even_when_sanitized_text_is_short(self) -> None:
+        page = FakePage(body=" " * (MAX_BODY_SOURCE_CHARS * 3))
+        tab_id = self._attach(page)
+        tab = self.engine._tabs[tab_id]
+        tab.remember_typed_value("value remembered from the previous origin")
+        page.url = "https://other-origin.test/"
+        result = self.engine.snapshot(self.operation(), self.owner, tab_id)
+        self.assertTrue(result["truncated"])
+        self.assertIn("source budget exceeded", result["text"])
+        self.assertLess(len(result["text"]), 1000)
+        self.assertEqual(result["affected_tab_id"], tab_id)
+        self.assertEqual(result["snapshot_generation"], tab.generation)
+        self.assertEqual(len(page.body_evaluations), 1)
+        expression, argument, timeout = page.body_evaluations[0]
+        self.assertEqual(argument, {
+            "max_source": MAX_BODY_SOURCE_CHARS,
+            "max_output": MAX_BODY_OUTPUT_CHARS,
+            "max_nodes": MAX_BODY_TRAVERSAL_NODES,
+        })
+        self.assertEqual(timeout, 3000)
+        for value in tab._typed_values:
+            self.assertNotIn(value, expression)
+            self.assertNotIn(value, str(argument))
+
+    def test_snapshot_keeps_every_actionable_ref_before_truncated_body(self) -> None:
+        page = FakePage(body="x" * (MAX_BODY_SOURCE_CHARS * 2))
+        page.selector_elements["button"] = [
+            FakeElement("Button " + str(index) + "x" * 200)
+            for index in range(MAX_INTERACTIVE_ELEMENTS + 1)
+        ]
+        tab_id = self._attach(page)
+        result = self.engine.snapshot(self.operation(), self.owner, tab_id)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["element_count"], MAX_INTERACTIVE_ELEMENTS)
+        self.assertLessEqual(len(result["text"]), MAX_SNAPSHOT_CHARS)
+        for reference in self.engine._tabs[tab_id].references:
+            self.assertIn(f"[ref={reference}]", result["text"])
+        self.assertTrue(result["text"].endswith("END UNTRUSTED BROWSER CONTENT"))
+
+    def test_snapshot_redacts_overlapping_value_at_source_cut_before_sanitizing(self) -> None:
+        page = FakePage(body=" " * (MAX_BODY_SOURCE_CHARS - 5) + "abcdefgh")
+        tab_id = self._attach(page)
+        for value in ("abcde", "cdefgh"):
+            self.engine._tabs[tab_id].remember_typed_value(value)
+        result = self.engine.snapshot(self.operation(), self.owner, tab_id)
+        self.assertTrue(result["truncated"])
+        self.assertIn("[typed value withheld]", result["text"])
+        self.assertNotIn("abc", result["text"])
+        self.assertLess(len(result["text"]), 1000)
 
     def test_screenshot_refuses_any_visible_editable_field(self) -> None:
         page = FakePage()

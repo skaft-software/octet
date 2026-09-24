@@ -506,9 +506,12 @@ Generic brokers remain distinct from domain protocols:
   to the broker. No owner/service gives `-32002`, undeclared names `-32602`,
   and missing/broker-failed values the same `-32004` `secret is unavailable`.
 
-The coding product currently leaves approvals off, configures no secret broker,
-and answers generic policy intents with `deny`. It offers neither `approvals`
-nor `secrets`, despite implemented legacy host services and Python helpers.
+The coding product leaves approval-token issuance off and configures no secret
+broker. Generic policy intents still return `deny`. Its scoped `mcp.tool.call`
+adapter permits the admitted MCP bridge's exact active owner-scoped tool call
+under `unsafe_host`, including unknown/destructive tools; controlled policies
+remain denied. The host checks generation, exact published tool identity, and arguments,
+not read-only hints. It offers neither `approvals` nor `secrets`.
 
 API `0.2` confirmation, input, artifact, policy, secret, and child-session
 requests require an active `parent_request_id`. Parent settlement cancels every

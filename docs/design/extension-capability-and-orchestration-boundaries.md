@@ -55,7 +55,10 @@ This document defines how octet assigns capability ownership across host, extens
   behind the extension's owner-bound `agent_sessions` service.
 - **State model:** each child has its own append-only session and durable
   delegation state; child runs inherit the parent’s approval, sandbox policy,
-  model/reasoning settings, compaction policy, and output/turn policy.
+  compaction policy, and output/turn policy. Model/reasoning inherit by default;
+  explicit worker selections are resolved by the coding host against its
+  configured provider catalog, then pinned by the kernel for continuation and
+  recovery. The extension never chooses credentials or endpoint URLs.
 - **Failure and cancellation:** parent outcomes and shutdown requests propagate
   through delegation tokens and cancellation paths; child failures do not
   terminate sibling trees unless resource/queue policy requires.

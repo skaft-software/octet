@@ -19,7 +19,10 @@ vocabulary that uses that hierarchy without adding a second TUI.
   screen and saved lines before replaying the complete frame. PageUp transfers
   rendering to the bounded, application-owned semantic viewport for the rest of
   that shell. Explicit `--mouse app` selects that viewport from startup.
-- octet uses one compiled default theme with three built-in terminal appearance selectors: Auto adapts to a reliably detected background with a neutral fallback, while Light and Dark explicitly select contrast. Runtime theme-file loading and reload remain disabled; model-aware accents change atmosphere without changing layout or semantic status colours.
+- Auto, Light, and Dark use the compiled default layout. Auto adapts to the
+  detected terminal background; Light and Dark explicitly select contrast. All
+  retain model-aware accents and semantic status colours. Named file loading
+  follows the bounded [theme loader](../themes.md).
 - Raw mode, bracketed paste, keyboard enhancements, and mouse reporting are
   enabled only when supported and restored idempotently. Every
   interactive frame is bracketed by CSI 2026 synchronized-output markers;
@@ -57,16 +60,21 @@ An existing `--session-id` keeps its saved model unless a model is explicitly
 selected; scope order alone does not overwrite it.
 
 The working directory appears only in the footer, not again in the splash.
-The splash keeps its byte-aligned spacing, model identity, permissions, and
-release hints.
+The splash keeps its byte-aligned spacing, version, changelog/update hints,
+permissions, and exit help. Its normal compiled-default mark occupies 16×4
+cells with eight contiguous columns and the `01101111` silhouette. The footer,
+not the splash, owns the current model/reasoning row. Full access is a
+warning-class permission mode, not an ordinary failure.
 
 The eight-bar byte mark retains its model-blended gradient and finite colour
 sweep on true-colour terminals. ANSI256 and ANSI16 instead use one
 background-balanced model accent uniformly across all bars, without brightening
 animation. With no model accent, the theme's model accent is used. Explicit
 custom splash colours keep precedence; no-colour output uses terminal-default
-foreground. Geometry and the terminal background are unchanged. User-customized
-ANSI16 palettes can still affect actual contrast.
+foreground. Custom-theme fallback geometry remains unchanged; short compiled
+cards prioritize update and permission state over the changelog hint. The
+terminal background remains unchanged. User-customized ANSI16 palettes can
+still affect actual contrast.
 
 Interactive startup performs one best-effort newer-stable-release check outside
 the input and renderer loops, skipped in offline mode and cancelled on exit.
@@ -116,13 +124,14 @@ Repeated no-change frames remain quiet; source/copy and exactly-once history
 sentinels remain authoritative. These tests model emitted VT and saved-line
 reset, not a physical emulator's reflow, paint, or native selection.
 
-This covers the tested pending → progress → result/error case, not every
-historical update.
-Real updates to historical concurrent tools/rosters, retrospective Markdown
-changes, resize, and other structural transitions can still take the replay path
-below. Do not suppress that path without an emitted-history policy that preserves
-real results. Maintainer-reported Terminal.app, Ghostty and Ghostty → SSH acceptance preceded
-0.7.4 publication, but a subsequent model-switch regression showed stale splash
+This covers the tested pending → progress → result/error case, not every historical update.
+Real updates to historical concurrent tools or aggregate run outcomes,
+retrospective Markdown changes, resize, and other structural transitions can
+still take the replay path below. Arbitrary worker-roster metric updates do not
+mutate transcript history. Do not suppress that path without an emitted-history
+policy that preserves real results. Maintainer-reported Terminal.app, Ghostty and
+Ghostty → SSH acceptance preceded 0.7.4 publication, but a subsequent model-switch
+regression showed stale splash
 rows. Acceptance of one journey does not qualify every reader/selection path.
 
 A change above the old viewport cannot be repaired with cursor addressing.
@@ -190,18 +199,18 @@ temporary viewport surface rather than transcript history, start at their first
 semantic body row, and support Up/Down, PageUp/PageDown, Home, and End scrolling;
 Escape or Left returns to the composer.
 Generic presentation snapshots do not create persistent chrome. The first-party
-`octet-subagents` observation surface is the bounded exception: while an owning
-run has workers, the host renders its complete owner-fenced `subagent` roster in
-a persistent transcript event. Its quiet expanded title is `Subagents`, with
-aligned subdued column headings and explicit state on every worker row. Counts
-are reserved for collapsed groups and hidden rows. Compact worker rows retain
-task name, lifecycle,
-tokens, and cost; transient child-tool names stay in the inspector
-rather than shifting those columns on each tool start/finish. The roster's active
-dot is steady. Full host telemetry remains current, but hidden phase/elapsed
-or call-count changes do not invalidate transcript rows. Call counts remain
-retained telemetry, not row text. Native `DelegationUpdated` events
-feed this view directly; it does not poll the extension's slash command.
+subagents exception renders a bounded **Subagents** strip above the composer
+while any retained worker is active, independently of root-run activity and
+application-owned history navigation. Rows show state, model, available token
+usage and cost, and tool-call counts. Ctrl+O expands groups within the height
+cap; `/subagents` retains the complete roster, exact outcomes/reasons, and
+read-only child transcripts after the strip hides. Metric changes do not dirty
+transcript history. Raw first-party orchestration calls/results, including
+errors, stay out of the interactive transcript and semantic copy, live and on
+replay. Worker state/reason transitions add no automatic notices. This does not
+change model-visible errors, durable results, accounting, ordinary tool/run
+failures, or approval prompts. Native `DelegationUpdated` events feed the view;
+no slash-command polling is needed.
 
 Live child cost is added to the host-owned cumulative footer only until root
 settlement persists matching `delegated_agent` usage records; idle rendering
@@ -212,7 +221,9 @@ follow-ups share a compact pending-state hint above the composer. It is capped
 at two rows: a count and one clipped preview, with a `+N more` suffix. Admitted
 steering takes preview priority because it is delivered before local follow-ups.
 Explicit newlines receive a visible marker; the preview never expands into a
-second transcript.
+second transcript. The recall affordance is advertised only while at least one
+queued entry is genuinely editable, so the hint never promises a recall that the
+agent-side claim would refuse.
 
 `/extensions` opens an interactive installed-bundle activation panel instead.
 The no-argument `/subagents` command supplied by `octet-subagents` opens a
@@ -239,16 +250,21 @@ or changing draft content never recolours or animates them. Content rows carry
 no side borders, so copied prompt text cannot include frame characters. Composer
 height starts at one row and scales proportionally within a terminal-height cap.
 
-Each submitted prompt persists its model-lab colour and paints both its marker
-and full card background with that provenance. Switching models cannot recolour
-historical prompts; it only recolours the composer and prompts submitted after
-the switch. Wrapped and explicit continuation rows keep the same card background
-with a blank primary-text gutter instead of a vertical rail. Fenced Markdown
+Each submitted prompt persists its model-lab colour. The compiled default
+uses it for the marker and content-hugging highlights on each wrapped text line,
+including attachment labels; inline Markdown emphasis, code and links retain
+their own styling within the highlight. The gutter, blank spacing, and
+trailing cells keep the terminal canvas. Switching models cannot recolour historical prompts: it
+only recolours the composer and future prompts. Custom cards/rails retain their
+configured full-cell treatment. Fenced Markdown
 code is borderless and uses the compiled default's terminal-adaptive shading.
 Default tool/shell surfaces reserve a two-cell right gutter, reduced in tiny
 panes, before wrapping headers and nested output. Their source and copy text are
 unchanged; custom surfaces retain their configured geometry.
-The unknown-profile fallback remains unpainted.
+The unknown-profile fallback remains unpainted. Assistant prose and submitted
+prompts use the available width after the gutter, including list/quote
+indentation; technical blocks retain viewport width. Static and streaming
+layouts share the same policy.
 
 ## Streaming presentation stability
 
@@ -285,10 +301,11 @@ arbitrary text cannot alter the decision set.
 ## Reasoning presentation
 
 Every accepted run opens a `Working` row immediately. After the provider emits
-an actual reasoning delta, collapsed reasoning uses a fixed, quiet `Thinking`
-header without shimmer. The aligned detail row
-contains the latest semantic ATX or standalone-bold heading followed by a plain,
-subdued `Ctrl+O` hint; when no heading exists it contains only the hint. Ordinary
+an actual reasoning delta, collapsed reasoning uses a fixed bold `Thinking`
+header with the same model-adaptive shimmer as `Working`. A real semantic ATX
+or standalone-bold heading occupies the aligned detail row with a subdued
+`Ctrl+O` hint. Without a heading, the compiled default puts the hint on the
+activity row when it fits, retaining a detail row on narrow terminals. Ordinary
 body prose is never inferred as a label, and provider text is sanitized before
 display. The shimmer uses a monotonic 80 ms clock on the renderer thread,
 independent of semantic-event frequency. Late frames select the current phase
@@ -345,8 +362,9 @@ and failed tools use red. Raw protocol arguments and envelopes, unsanitized
 failure evidence, and extension-rendered payloads remain internal
 accountability/provenance data
 and are excluded from transcript copy. For operational feedback, the TUI renders
-bounded sanitized projections: search results and Bash/local-shell output use a
-muted tail, while edit/write results use a bounded unified diff. A collapsed
+bounded sanitized projections: search results use a muted tail, while retained
+Bash/local-shell output uses a secondary readable foreground and edit/write
+results use a bounded unified diff. A collapsed
 failure retains one bounded actionable reason or explicit hidden-output count;
 complete captured failure output stays available through global disclosure.
 Omission metadata distinguishes a collapsible UI tail from bytes already
@@ -358,9 +376,12 @@ value column fixed. A muted vertical `│` joins
 each wrapped header row to the single `└` that begins its nested output, making
 the output's ownership visible without adding another indentation level.
 
-Terse Bash tool headers retain the first three rendered command lines and then
-show an exact hidden-command-line count. Wrapping and explicit newlines share
-that visual budget; the stored and executed command is not truncated. The
+Terse compiled-default Bash headers retain two command-preview rows, wrapping
+at whitespace where possible and hard-wrapping oversized graphemes by terminal
+cell width; file themes retain their prior three-row limit. An exact hidden-row
+count follows. The full command remains available through disclosure and semantic
+copy. Retained output uses concise UI-collapse counts distinct from irrecoverable
+capture-byte loss. The
 command preview is independent of the output-tail budget.
 
 Ctrl+O toggles the global disclosure mode for retained reasoning, compaction,
@@ -450,9 +471,15 @@ bounded actionable reason.
 - Ctrl+S admits live steering to RunControl at the next model boundary. Its
   pending display is removed only by the durable delivery acknowledgement;
   undelivered steering is restored on settlement.
-- Option+Up/Alt+Up moves the newest local follow-up into an empty composer for
-  editing, preserving attachment/paste payloads. It neither interrupts nor
-  retracts already-admitted steering, and never overwrites a draft.
+- Option+Up/Alt+Up recalls the newest editable pending message — an
+  Enter-submitted follow-up or a Ctrl+S steering entry — into an empty composer,
+  preserving attachment/paste payloads. Recall of steering is arbitrated by the
+  submission's own receipt, not by the delayed delivery event: it succeeds only
+  before the agent claims that input for persistence, and releases the reserved
+  control budget when it wins. A refused recall leaves the entry queued for its
+  FIFO delivery projection. Sticky `/answer` input is deliberately not
+  retractable because it changes the run's tool policy. The chord neither
+  interrupts nor submits, and never overwrites a draft.
 - Escape closes the current panel/overlay/slash popup first. At the active
   composer it interrupts and arms queued dispatch only after authoritative
   aborted settlement; it never sends the unqueued draft. Repeated Escape while
@@ -493,7 +520,10 @@ a definitely pre-send failure has no new provisional answer to discard. It shows
 Retry activity is one typed, presentation-only record on the mutable `Working`
 row. Repeated retries replace it rather than appending causes to the transcript.
 Its countdown derives from the observed backoff; once the delay elapses it says
-`Retrying`, not an invented provider deadline. `TurnStarted`, meaningful output,
+`Retrying`, not an invented provider deadline. While retry state is present, the interrupt hint
+remains but the run-elapsed suffix is omitted, even after the countdown expires.
+The countdown still uses the existing one-second refresh cadence.
+`TurnStarted`, meaningful output,
 compaction/tool transitions, cancellation admission, and settlement end that
 backoff presentation. Raw causes remain with the event/diagnostic consumers;
 print, plain, and RPC output retain their existing contracts. Removing rejected

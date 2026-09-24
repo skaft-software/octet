@@ -164,4 +164,18 @@ setup conversion. Browse, MCP, web search, and subagents are bounded octet
 integrations, not a Pi component ABI.
 
 Native provider routes are independent of extension execution. Consult
-[providers](providers.md) for current routes and limits.
+[providers](providers.md) for current routes and limits; a historical comparison
+ledger is evidence about a tested route, not a promise to complete Pi's inventory.
+
+## Project and earlier section links
+
+Future migration work is tracked in the [project](https://github.com/orgs/skaft-software/projects/5),
+not promised by these commands. Model-assisted porting is not an automatic
+fallback; no current scanner invocation silently starts model use.
+
+- <a id="migration-architecture"></a>[Migration architecture](#deliberate-compatibility-boundary).
+- <a id="deterministic-scannercompiler"></a>[Deterministic scanner/compiler](#scanner-reference).
+- <a id="compatibility-process"></a>[Removed compatibility process](#pi-extension-execution-is-not-supported).
+- <a id="exact-recipes"></a>[Exact recipes](https://github.com/orgs/skaft-software/projects/5): none ship; see [classification](#classification).
+- <a id="agentic-fallback"></a>[Agentic fallback](https://github.com/orgs/skaft-software/projects/5): not an implemented automatic migration path.
+- <a id="product-promise"></a>[Current scope](#deliberate-compatibility-boundary) and [project](https://github.com/orgs/skaft-software/projects/5).

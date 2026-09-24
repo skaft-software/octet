@@ -12,7 +12,8 @@ octet reads code, edits files, and runs commands from your terminal. It has a
 native Rust core, supports cloud and local models, saves resumable sessions,
 and lets you add tools through subprocess extensions in any language.
 
-Extensions add bounded, host-shaped integrations. Browse, MCP, web search,
+Extensions add bounded, host-shaped integrations—not an everything-as-extension
+platform or a promise to run unchanged Pi extensions. Browse, MCP, web search,
 and host-owned subagents remain optional integrations; Serve is a separate
 graphical application. The host keeps authority over sessions, approvals,
 lifecycle, and resource limits.

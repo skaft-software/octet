@@ -46,11 +46,13 @@ pub mod faux;
 pub mod host_transport;
 pub mod images;
 mod json_repair;
+pub mod media;
 pub mod model_metadata;
 pub mod pricing;
 pub mod responses;
 mod responses_ws;
 pub mod runtime;
+pub mod steering;
 pub mod stream;
 mod transform;
 pub mod types;
@@ -105,18 +107,25 @@ pub use images::{
     MAX_GENERATED_IMAGE_BYTES, MAX_IMAGE_INPUTS, MAX_IMAGE_INPUT_BYTES, MAX_IMAGE_PROMPT_BYTES,
     OPENROUTER_API_KEY_VAR, OPENROUTER_IMAGES_API,
 };
+pub use media::{
+    prepare_user_image, ImageInputError, ImageInputLimits, MAX_USER_IMAGE_BYTES,
+    MAX_USER_IMAGE_PIXELS,
+};
 pub use mime::Mime;
 pub use pricing::{
     responses_cost_of, Cost, Pricing, PricingTier, TokenRate, PICODOLLARS_PER_MICRODOLLAR,
 };
 pub use responses::{
-    ComputerUseEnvironment, ComputerUseTool, ResponsesCompactRequest, ResponsesCompactResponse,
-    ResponsesInput, ResponsesItem, ResponsesItemError, ResponsesOptions, ResponsesOutput,
-    ResponsesReplayItem,
+    validate_responses_input, ComputerUseEnvironment, ComputerUseTool, ResponsesCompactRequest,
+    ResponsesCompactResponse, ResponsesConfigurationUpdate, ResponsesInput, ResponsesItem,
+    ResponsesItemError, ResponsesOptions, ResponsesOutput, ResponsesReplayItem,
 };
 pub use runtime::{
     HeaderTransform, HookModelContext, HostRequestOptions, PayloadHook, ResponseHook,
     MAX_RUNTIME_METADATA_BYTES, MAX_RUNTIME_METADATA_ENTRIES,
+};
+pub use steering::{
+    SteeringControl, SteeringEvent, SteeringSession, SteeringState, SteeringUpdate,
 };
 pub use stream::{
     CanonicalStreamAssembler, ProviderLifecycle, ProviderLifecycleState, ResponseStream,
@@ -133,9 +142,10 @@ pub use types::{
     OutputFormat, OutputModalities, Protocol, ProviderMediaRef, ProviderPartMetadata,
     ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffort,
     ReasoningEffortBudgets, ReasoningMode, ReasoningPart, ReasoningState, ReasoningStateKind,
-    Request, RequestBodyEncoding, RequestRuntime, Response, ResponsesRuntimeProfile, ServiceTier,
-    SessionAffinityFormat, StopReason, ToolArgumentValidation, ToolCall, ToolCallArgumentError,
-    ToolCallId, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
+    Request, RequestBodyEncoding, RequestRuntime, Response, ResponsesFeatures,
+    ResponsesRuntimeProfile, ServiceTier, SessionAffinityFormat, StopReason,
+    ToolArgumentValidation, ToolCall, ToolCallArgumentError, ToolCallId, ToolChoice, ToolDef,
+    ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
 };
 
 /// Selects reasoning for a host-generated auxiliary request.

@@ -18,6 +18,9 @@ use crate::session_catalog::{
     IndexedEntryUpdate, SessionCatalog, MAX_INDEXED_ENTRIES_PER_SESSION, MAX_INDEXED_ENTRY_CHARS,
 };
 
+mod accounting_index;
+mod search_projection;
+
 static NEXT_SESSION_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 // Keep the picker scanner under the same documented bounds as Session::open.
@@ -586,10 +589,16 @@ enum SummaryEntryValue {
         _model: ModelId,
         output: SummaryResponsesOutput,
     },
+    ResponsesReasoning {
+        model: ModelId,
+        baseline: octet_ai::ReasoningConfig,
+        update: Option<octet_ai::ResponsesConfigurationUpdate>,
+    },
     Config {
         model: Option<String>,
         reasoning: Option<String>,
     },
+    ResponsesSteering {},
     PromptTemplateSelected {},
     SkillActivated {},
     SkillResourceRead {},
@@ -681,6 +690,22 @@ fn active_branch_catalog_config(session: &Session) -> (Option<String>, Option<St
         let Some(entry) = session.entry(id) else {
             break;
         };
+        if let EntryValue::ResponsesReasoning {
+            model: selected,
+            baseline,
+            update,
+            ..
+        } = &entry.value
+        {
+            if model.is_none() {
+                model = Some(selected.0.clone());
+            }
+            if reasoning.is_none() {
+                reasoning = Some(crate::app::reasoning_label(
+                    update.as_ref().map_or(baseline, |update| &update.reasoning),
+                ));
+            }
+        }
         if let EntryValue::Config {
             model: configured_model,
             reasoning: configured_reasoning,
@@ -1314,10 +1339,29 @@ fn summarize_session_with_usage(
                             }
                             (SummaryEntryKind::Other, None, None, None, None)
                         }
+                        SummaryEntryValue::ResponsesReasoning {
+                            model,
+                            baseline,
+                            update,
+                        } => {
+                            let reasoning = crate::app::reasoning_label(
+                                update
+                                    .as_ref()
+                                    .map_or(&baseline, |update| &update.reasoning),
+                            );
+                            (
+                                SummaryEntryKind::Other,
+                                None,
+                                None,
+                                Some(model.0),
+                                Some(reasoning),
+                            )
+                        }
                         SummaryEntryValue::Config { model, reasoning } => {
                             (SummaryEntryKind::Other, None, None, model, reasoning)
                         }
-                        SummaryEntryValue::PromptTemplateSelected {}
+                        SummaryEntryValue::ResponsesSteering {}
+                        | SummaryEntryValue::PromptTemplateSelected {}
                         | SummaryEntryValue::SkillActivated {}
                         | SummaryEntryValue::SkillResourceRead {}
                         | SummaryEntryValue::SkillDeactivated {} => {
@@ -1558,109 +1602,12 @@ impl SessionSearchWatcher {
 /// scan that does not re-run the graph validation `summarize_session` performs;
 /// it still honours the same byte and record bounds.
 pub(crate) fn index_session_entries(path: &Path) -> anyhow::Result<Vec<IndexedEntry>> {
-    let path = absolute_read_path(path)?;
-    let file = octet_agent::secure_fs::open_regular_file_for_read(&path)?;
-    let file_len = file.metadata()?.len();
-    if file_len > MAX_SESSION_FILE_BYTES as u64 {
-        anyhow::bail!("session is {file_len} bytes (limit {MAX_SESSION_FILE_BYTES})");
-    }
-    let mut reader = BufReader::with_capacity(1024 * 1024, file);
-    let mut line_bytes = Vec::new();
-    let mut observed_bytes = 0usize;
-    let mut line_no = 0usize;
-    let mut entries = Vec::new();
-    loop {
-        line_bytes.clear();
-        let read_limit = MAX_SESSION_FILE_BYTES
-            .saturating_sub(observed_bytes)
-            .saturating_add(1);
-        let bytes_read = reader
-            .by_ref()
-            .take(u64::try_from(read_limit).expect("session byte limit fits u64"))
-            .read_until(b'\n', &mut line_bytes)?;
-        if bytes_read == 0 {
-            break;
-        }
-        observed_bytes = observed_bytes
-            .checked_add(bytes_read)
-            .ok_or_else(|| anyhow::anyhow!("session read length overflow"))?;
-        if observed_bytes > MAX_SESSION_FILE_BYTES {
-            anyhow::bail!(
-                "session exceeds the {MAX_SESSION_FILE_BYTES}-byte limit while being read"
-            );
-        }
-        line_no += 1;
-        if line_no > MAX_SESSION_RECORDS {
-            anyhow::bail!("session has more than {MAX_SESSION_RECORDS} records");
-        }
-        let has_newline = line_bytes.last() == Some(&b'\n');
-        let line_bytes = if has_newline {
-            &line_bytes[..line_bytes.len() - 1]
-        } else {
-            line_bytes.as_slice()
-        };
-        let line = match std::str::from_utf8(line_bytes) {
-            Ok(line) => line,
-            Err(_) if !has_newline => break,
-            Err(_) => continue,
-        };
-        let record = match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(record) => record,
-            Err(_) if !has_newline => break,
-            Err(_) => continue,
-        };
-        if let Some(entry) = indexed_entry_from_record(&record) {
-            entries.push(entry);
-            if entries.len() >= MAX_INDEXED_ENTRIES_PER_SESSION {
-                break;
-            }
-        }
-    }
-    Ok(entries)
+    search_projection::index(path)
 }
 
+#[cfg(test)]
 fn indexed_entry_from_record(record: &serde_json::Value) -> Option<IndexedEntry> {
-    if record.get("type").and_then(|value| value.as_str()) != Some("entry") {
-        return None;
-    }
-    let entry_id = record.get("id")?.as_str()?.to_owned();
-    let value = record.get("value")?;
-    if value.get("type").and_then(|value| value.as_str()) != Some("message") {
-        return None;
-    }
-    let (role, kind) = if value.get("User").is_some() {
-        ("User", IndexedEntryKind::User)
-    } else if value.get("Assistant").is_some() {
-        ("Assistant", IndexedEntryKind::Assistant)
-    } else {
-        return None;
-    };
-    let parts = value.get(role)?.get("content")?.as_array()?;
-    let mut text = String::new();
-    for part in parts {
-        let Some(part_text) = part.get("Text").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.extend(part_text.chars().take(MAX_INDEXED_ENTRY_CHARS));
-        if text.chars().count() >= MAX_INDEXED_ENTRY_CHARS {
-            break;
-        }
-    }
-    let text = text
-        .chars()
-        .take(MAX_INDEXED_ENTRY_CHARS)
-        .collect::<String>();
-    if text.trim().is_empty() {
-        return None;
-    }
-    Some(IndexedEntry {
-        entry_id,
-        kind,
-        text,
-    })
+    search_projection::from_value(record)
 }
 
 /// Directory (inside the workspace session store) holding accounting-only
@@ -1734,6 +1681,11 @@ struct EphemeralRun {
 /// The one active ephemeral run, if any. A shared process may take a single
 /// `--no-session` run at a time.
 static EPHEMERAL_RUN: Mutex<Option<EphemeralRun>> = Mutex::new(None);
+
+// Unit tests share the process-wide invocation slot even when the test runner
+// executes unrelated cases concurrently. Keep their separate fixtures serialized.
+#[cfg(test)]
+pub(crate) static EPHEMERAL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Register an ephemeral run: its transcript lives under `transcript_root` and
 /// is deleted afterwards, while accounting is persisted into
@@ -1997,9 +1949,16 @@ impl SessionStore {
     ///
     /// Only transcripts whose fingerprint changed since the last search are
     /// re-read; unchanged sessions are served from the disposable catalog, so a
-    /// repeat search does not re-scan the workspace.
+    /// repeat search does not re-read transcript bytes. Reconciliation still
+    /// enumerates/stats files: directory mtime cannot detect existing-file edits.
     pub fn search_entries(&self, query: &str, limit: usize) -> anyhow::Result<EntrySearchOutcome> {
         self.search_entries_with(query, limit, index_session_entries)
+    }
+
+    /// The current entry-index revision, for callers that poll for changes.
+    pub fn entry_index_revision(&self) -> anyhow::Result<i64> {
+        let catalog = SessionCatalog::open_recovering(&self.dir)?;
+        catalog.entry_revision()
     }
 
     pub(crate) fn search_entries_with<F>(
@@ -2011,26 +1970,20 @@ impl SessionStore {
     where
         F: Fn(&Path) -> anyhow::Result<Vec<IndexedEntry>>,
     {
-        let candidates = self.candidates();
-        let (mut catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
-        let indexed = catalog.entry_fingerprints()?;
-        let current_ids = candidates
-            .iter()
-            .filter_map(|candidate| {
-                candidate
-                    .path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .map(str::to_owned)
-            })
-            .collect::<HashSet<_>>();
-        let stale_ids = indexed
-            .keys()
-            .filter(|id| !current_ids.contains(*id))
-            .cloned()
-            .collect::<HashSet<_>>();
+        const BATCH_SESSIONS: usize = 32;
+        const BATCH_BYTES: usize = 8 * 1024 * 1024;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
+        let mut indexed = catalog.entry_fingerprints()?;
+        let mut scanned_sessions = 0;
+        let mut index_changed = false;
         let mut updates = Vec::new();
-        for candidate in &candidates {
+        let mut removals = HashSet::new();
+        let mut pending_bytes = 0;
+        // A search has no recency-order requirement. Stream directory entries,
+        // removing seen IDs from the old map rather than building/sorting an
+        // additional workspace-sized candidate list and current-ID set.
+        // Do not cache directory mtimes: appends/in-place edits do not change it.
+        for candidate in self.unsorted_candidates() {
             let Some(id) = candidate
                 .path
                 .file_stem()
@@ -2039,22 +1992,65 @@ impl SessionStore {
             else {
                 continue;
             };
-            let Some(fingerprint) = catalog_fingerprint(candidate) else {
+            let prior = indexed.remove(&id);
+            let Some(fingerprint) = catalog_fingerprint(&candidate) else {
+                if prior.is_some() {
+                    removals.insert(id);
+                }
+                if updates.len() + removals.len() >= BATCH_SESSIONS {
+                    index_changed |= catalog.apply_entries(&updates, &removals)?;
+                    updates.clear();
+                    removals.clear();
+                    pending_bytes = 0;
+                }
                 continue;
             };
-            if indexed.get(&id) == Some(&fingerprint) {
+            if prior == Some(fingerprint) {
                 continue;
             }
-            if let Ok(entries) = extractor(&candidate.path) {
-                updates.push(IndexedEntryUpdate {
-                    session_id: id,
-                    fingerprint,
-                    entries,
-                });
+            match extractor(&candidate.path) {
+                Ok(entries) => {
+                    let bytes = entries
+                        .iter()
+                        .map(|entry| entry.text.len() + entry.entry_id.len())
+                        .sum::<usize>();
+                    if !updates.is_empty() && pending_bytes + bytes > BATCH_BYTES {
+                        index_changed |= catalog.apply_entries(&updates, &removals)?;
+                        updates.clear();
+                        removals.clear();
+                        pending_bytes = 0;
+                    }
+                    updates.push(IndexedEntryUpdate {
+                        session_id: id,
+                        fingerprint,
+                        entries,
+                    });
+                    pending_bytes += bytes;
+                    scanned_sessions += 1;
+                }
+                Err(_) => {
+                    // Changed/unreadable transcripts must never retain old hits.
+                    if prior.is_some() {
+                        removals.insert(id);
+                    }
+                }
+            }
+            if updates.len() + removals.len() >= BATCH_SESSIONS || pending_bytes >= BATCH_BYTES {
+                index_changed |= catalog.apply_entries(&updates, &removals)?;
+                updates.clear();
+                removals.clear();
+                pending_bytes = 0;
             }
         }
-        let scanned_sessions = updates.len();
-        let index_changed = catalog.apply_entries(&updates, &stale_ids)?;
+        for id in indexed.into_keys() {
+            removals.insert(id);
+            if updates.len() + removals.len() >= BATCH_SESSIONS {
+                index_changed |= catalog.apply_entries(&updates, &removals)?;
+                updates.clear();
+                removals.clear();
+            }
+        }
+        index_changed |= catalog.apply_entries(&updates, &removals)?;
         let revision = catalog.entry_revision()?;
         let hits = catalog
             .search_entries(query, limit)?
@@ -2098,72 +2094,7 @@ impl SessionStore {
     ) -> anyhow::Result<()> {
         let mut record = record.clone();
         record.retain_accounting_uncertainty();
-        let directory = self.dir.join(EPHEMERAL_ACCOUNTING_DIRECTORY);
-        octet_agent::secure_fs::create_private_directory_all(&directory)?;
-        let path = directory.join(EPHEMERAL_ACCOUNTING_FILE);
-        let mut line = serde_json::to_vec(&record)?;
-        if line.len() > MAX_EPHEMERAL_ACCOUNTING_LINE_BYTES {
-            anyhow::bail!(
-                "ephemeral accounting record is {} bytes (limit {MAX_EPHEMERAL_ACCOUNTING_LINE_BYTES})",
-                line.len()
-            );
-        }
-        line.push(b'\n');
-        let mut file = match octet_agent::secure_fs::open_regular_file_for_append(&path) {
-            Ok(file) => file,
-            Err(octet_agent::secure_fs::SecureFileError::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                octet_agent::secure_fs::create_regular_file_for_append(&path)?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        // Serialize read/deduplicate/repair/append across concurrent invocations.
-        // A complete record whose fsync failed is retried by syncing, not appending
-        // it again. A torn trailing write is discarded before retrying its snapshot.
-        fs2::FileExt::lock_exclusive(&file)?;
-        let mut existing = Vec::new();
-        (&mut file)
-            .take(MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES + 1)
-            .read_to_end(&mut existing)?;
-        if existing.len() as u64 > MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES {
-            anyhow::bail!("ephemeral accounting ledger exceeds its byte limit");
-        }
-        if !existing.is_empty() && existing.last() != Some(&b'\n') {
-            let tail = existing
-                .iter()
-                .rposition(|byte| *byte == b'\n')
-                .map_or(0, |i| i + 1);
-            if serde_json::from_slice::<EphemeralAccountingRecord>(&existing[tail..]).is_ok() {
-                file.write_all(b"\n")?;
-                existing.push(b'\n');
-            } else {
-                file.set_len(tail as u64)?;
-                existing.truncate(tail);
-            }
-        }
-        if let Some(id) = &record.accounting_id {
-            for prior in existing
-                .split(|byte| *byte == b'\n')
-                .filter(|line| !line.is_empty())
-            {
-                let mut prior: EphemeralAccountingRecord = serde_json::from_slice(prior)?;
-                prior.retain_accounting_uncertainty();
-                if prior.accounting_id.as_ref() == Some(id) {
-                    if serde_json::to_value(&prior)? != serde_json::to_value(&record)? {
-                        anyhow::bail!("ephemeral accounting recovery key has conflicting data");
-                    }
-                    file.sync_all()?;
-                    return Ok(());
-                }
-            }
-        }
-        if (existing.len() + line.len()) as u64 > MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES {
-            anyhow::bail!("ephemeral accounting ledger exceeds its byte limit");
-        }
-        file.write_all(&line)?;
-        file.sync_all()?;
-        Ok(())
+        accounting_index::append(&self.dir.join(EPHEMERAL_ACCOUNTING_DIRECTORY), &record)
     }
 
     /// Aggregate durable accounting for every ephemeral run in this workspace.
@@ -2213,8 +2144,8 @@ impl SessionStore {
         Ok(summary)
     }
 
-    fn candidates(&self) -> Vec<SessionCandidate> {
-        let mut candidates = std::fs::read_dir(&self.dir)
+    fn unsorted_candidates(&self) -> impl Iterator<Item = SessionCandidate> {
+        std::fs::read_dir(&self.dir)
             .ok()
             .into_iter()
             .flatten()
@@ -2235,7 +2166,10 @@ impl SessionStore {
                     file_size: metadata.len(),
                 })
             })
-            .collect::<Vec<_>>();
+    }
+
+    fn candidates(&self) -> Vec<SessionCandidate> {
+        let mut candidates = self.unsorted_candidates().collect::<Vec<_>>();
         candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.modified));
         candidates
     }
@@ -2420,7 +2354,7 @@ impl SessionStore {
         &self,
         ids: impl IntoIterator<Item = &'a str>,
     ) -> anyhow::Result<Vec<(String, SessionCatalogEntry)>> {
-        let (mut catalog, cached) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         let mut updates = Vec::new();
         let mut entries = Vec::new();
 
@@ -2429,9 +2363,10 @@ impl SessionStore {
                 continue;
             };
             let fingerprint = catalog_fingerprint(&candidate);
+            let cached = catalog.lookup(id)?;
             if let Some(summary) = fingerprint.and_then(|fingerprint| {
                 cached
-                    .get(id)
+                    .as_ref()
                     .filter(|cached| cached.fingerprint == fingerprint)
                     .map(|cached| cached.summary.clone())
             }) {
@@ -2523,7 +2458,7 @@ impl SessionStore {
                 message_count: active_branch_message_count(session),
             },
         };
-        let (mut catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         catalog.apply(&[update], &HashSet::new())
     }
 
@@ -2535,7 +2470,7 @@ impl SessionStore {
         if !SessionCatalog::exists(&self.dir) {
             return Ok(());
         }
-        let (mut catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         catalog.apply(&[], &HashSet::from([id.to_owned()]))
     }
 
@@ -2583,15 +2518,13 @@ impl SessionStore {
                     .map(str::to_owned)
             })
             .collect::<HashSet<_>>();
-        let (catalog, cached) = match SessionCatalog::open_loaded(&self.dir) {
-            Ok((catalog, cached)) => (Some(catalog), cached),
-            Err(_) => (None, HashMap::new()),
-        };
-        let stale_ids = cached
-            .keys()
-            .filter(|id| !current_ids.contains(*id))
-            .cloned()
-            .collect::<HashSet<_>>();
+        let mut catalog = SessionCatalog::open_recovering(&self.dir).ok();
+        if let Some(catalog) = &mut catalog {
+            if let Ok(cached_ids) = catalog.session_ids() {
+                let stale_ids = cached_ids.difference(&current_ids).cloned().collect();
+                let _ = catalog.apply(&[], &stale_ids);
+            }
+        }
         let mut updates = Vec::new();
         let mut discovered = Vec::new();
 
@@ -2605,10 +2538,13 @@ impl SessionStore {
                 continue;
             };
             let fingerprint = catalog_fingerprint(&candidate);
+            let cached = catalog
+                .as_ref()
+                .and_then(|catalog| catalog.lookup(&id).ok().flatten());
             let summary = fingerprint
                 .and_then(|fingerprint| {
                     cached
-                        .get(&id)
+                        .as_ref()
                         .filter(|cached| cached.fingerprint == fingerprint)
                 })
                 .map(|cached| cached.summary.clone())
@@ -2633,6 +2569,12 @@ impl SessionStore {
                     // are shown but deliberately not retained in the catalog.
                     Err(_) => CachedTranscriptSummary::Unreadable,
                 });
+            if updates.len() >= 32 {
+                if let Some(catalog) = &mut catalog {
+                    let _ = catalog.apply(&updates, &HashSet::new());
+                }
+                updates.clear();
+            }
             if let Some(meta) = self.meta_from_cached_summary(candidate, id, summary) {
                 discovered.push(meta);
                 if first_only {
@@ -2642,7 +2584,7 @@ impl SessionStore {
         }
 
         if let Some(mut catalog) = catalog {
-            let _ = catalog.apply(&updates, &stale_ids);
+            let _ = catalog.apply(&updates, &HashSet::new());
         }
         discovered
     }
@@ -3305,6 +3247,9 @@ mod tests {
 
     #[test]
     fn ephemeral_append_failure_keeps_private_accounting_only_and_retries_once() {
+        let _exclusive_ephemeral = EPHEMERAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("workspace");
         let transcript_root = root.path().join("transcripts");
@@ -3686,6 +3631,76 @@ mod tests {
     }
 
     #[test]
+    fn responses_steering_metadata_is_not_a_catalog_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("steering.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let input = octet_ai::UserMessage {
+            content: vec![UserPart::Text("steered instruction".into())],
+        };
+        session
+            .append(EntryValue::ResponsesSteering {
+                endpoint: EndpointId("fixture".into()),
+                model: ModelId("fixture".into()),
+                operation: "fixture-operation".into(),
+                local_id: 1,
+                input: Some(input.clone()),
+                state: None,
+                completed: None,
+            })
+            .unwrap();
+        assert!(summarize_session(&path).unwrap().title.is_none());
+        session
+            .append(EntryValue::Message(Message::User(input)))
+            .unwrap();
+        assert_eq!(
+            summarize_session(&path).unwrap().title.as_deref(),
+            Some("steered instruction")
+        );
+    }
+
+    #[test]
+    fn responses_reasoning_catalog_uses_durable_effective_choice() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("reasoning.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Config {
+                model: Some("fixture".into()),
+                reasoning: Some("low".into()),
+                reasoning_mode: None,
+            })
+            .unwrap();
+        let baseline = octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
+        for update in [
+            None,
+            Some(octet_ai::ResponsesConfigurationUpdate {
+                reasoning: octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+            }),
+        ] {
+            session
+                .append(EntryValue::ResponsesReasoning {
+                    endpoint: EndpointId("fixture".into()),
+                    model: ModelId("fixture".into()),
+                    baseline: baseline.clone(),
+                    update,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            active_branch_catalog_config(&session),
+            (Some("fixture".into()), Some("high".into()))
+        );
+        let summary = summarize_session(&path).unwrap();
+        assert_eq!(summary.configured_model.as_deref(), Some("fixture"));
+        assert_eq!(summary.configured_reasoning.as_deref(), Some("high"));
+        assert!(
+            summary.title.is_none(),
+            "internal control is not a user prompt"
+        );
+    }
+
+    #[test]
     fn latest_skips_a_newer_config_only_session() {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -3892,6 +3907,177 @@ mod tests {
     }
 
     #[test]
+    fn entry_reconciliation_batches_refreshes_and_removals() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), root.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        for id in 0..65 {
+            std::fs::write(store.dir().join(format!("s{id:03}.jsonl")), b"{}\n").unwrap();
+        }
+        let initial = store.entry_index_revision().unwrap();
+        let cold = store
+            .search_entries_with("needle", 100, |_| {
+                Ok(vec![IndexedEntry {
+                    entry_id: "entry".into(),
+                    kind: IndexedEntryKind::User,
+                    text: "needle".into(),
+                }])
+            })
+            .unwrap();
+        assert_eq!(cold.scanned_sessions, 65);
+        assert_eq!(cold.hits.len(), 65);
+        assert_eq!(
+            cold.revision - initial,
+            3,
+            "32-session batches, not one transaction per session"
+        );
+        let warm = store
+            .search_entries_with("needle", 100, |_| panic!("unchanged transcript"))
+            .unwrap();
+        assert_eq!(warm.revision, cold.revision);
+        for id in 0..65 {
+            std::fs::remove_file(store.dir().join(format!("s{id:03}.jsonl"))).unwrap();
+        }
+        let empty = store.search_entries("needle", 100).unwrap();
+        assert!(empty.hits.is_empty());
+        assert_eq!(
+            empty.revision - cold.revision,
+            3,
+            "stale removals are bounded too"
+        );
+    }
+
+    #[test]
+    fn search_reconciles_existing_file_edits_without_directory_mtime_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), root.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("existing.jsonl");
+        let record = |text: &str| {
+            format!("{{\"type\":\"entry\",\"id\":\"e\",\"value\":{{\"type\":\"message\",\"User\":{{\"content\":[{{\"Text\":\"{text}\"}}]}}}}}}\n")
+        };
+        std::fs::write(&path, record("old needle")).unwrap();
+        assert_eq!(
+            store.search_entries("old needle", 10).unwrap().hits.len(),
+            1
+        );
+        let directory_mtime = store.dir().metadata().unwrap().modified().unwrap();
+        let previous = path.metadata().unwrap().modified().unwrap();
+        std::fs::write(&path, record("new needle")).unwrap();
+        // No clock-resolution/timing assumption in the invalidation regression.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(previous + std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            store.dir().metadata().unwrap().modified().unwrap(),
+            directory_mtime
+        );
+        let refreshed = store.search_entries("new needle", 10).unwrap();
+        assert_eq!(refreshed.scanned_sessions, 1);
+        assert_eq!(refreshed.hits.len(), 1);
+        assert!(store
+            .search_entries("old needle", 10)
+            .unwrap()
+            .hits
+            .is_empty());
+    }
+
+    #[test]
+    fn large_legacy_projection_stays_searchable_and_cached() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), root.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("legacy.jsonl");
+        let id = "long-legacy-id".repeat(100);
+        let record = serde_json::json!({"type":"entry", "id":id, "value":{"type":"message", "User":{"content":[
+            {"Media":{"data":"A".repeat(2 * 1024 * 1024)}}, {"Text":"retained needle"}
+        ]}}});
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let cold = store.search_entries("needle", 10).unwrap();
+        assert_eq!(cold.hits.len(), 1);
+        assert_eq!(cold.hits[0].entry_id, id);
+        assert_eq!(cold.hits[0].text, "retained needle");
+        let warm = store
+            .search_entries_with("needle", 10, |_| {
+                panic!("warm legacy projection must stay cached")
+            })
+            .unwrap();
+        assert_eq!(warm.hits, cold.hits);
+        assert_eq!(warm.scanned_sessions, 0);
+    }
+
+    #[test]
+    fn old_search_schema_rebuilds_and_unreadable_refresh_removes_stale_hits() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("search.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("migration needle".into())],
+            })))
+            .unwrap();
+        drop(session);
+        assert_eq!(store.search_entries("needle", 10).unwrap().hits.len(), 1);
+        let connection = rusqlite::Connection::open(SessionCatalog::path(store.dir())).unwrap();
+        connection
+            .execute_batch("DROP TABLE indexed_entry_grams; PRAGMA user_version = 4;")
+            .unwrap();
+        drop(connection);
+        let rebuilt = store.search_entries("needle", 10).unwrap();
+        assert_eq!(rebuilt.scanned_sessions, 1);
+        assert_eq!(rebuilt.hits.len(), 1);
+        std::fs::write(&path, "changed and temporarily unreadable").unwrap();
+        let refreshed = store
+            .search_entries_with("needle", 10, |_| anyhow::bail!("unreadable"))
+            .unwrap();
+        assert!(refreshed.hits.is_empty());
+        assert!(refreshed.index_changed);
+        let retry = store
+            .search_entries_with("needle", 10, |_| anyhow::bail!("unreadable"))
+            .unwrap();
+        assert!(retry.hits.is_empty());
+        assert!(!retry.index_changed);
+    }
+
+    #[test]
+    fn oversized_catalog_keeps_warm_discovery_and_search_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let mut session = Session::create(store.dir().join("oldest.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("retained needle".into())],
+            })))
+            .unwrap();
+        drop(session);
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.search_entries("needle", 10).unwrap().hits.len(), 1);
+        let connection = rusqlite::Connection::open(SessionCatalog::path(store.dir())).unwrap();
+        connection.execute_batch("CREATE TABLE padding (data BLOB); INSERT INTO padding VALUES (zeroblob(65 * 1024 * 1024)); PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        drop(connection);
+        let discovered = store.discover_with_summarizer(store.candidates(), false, |_| {
+            panic!("warm oversized catalog must not rescan transcripts")
+        });
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].title, "retained needle");
+        let search = store
+            .search_entries_with("needle", 10, |_| {
+                panic!("warm oversized index must not rescan transcripts")
+            })
+            .unwrap();
+        assert_eq!(search.hits.len(), 1);
+        assert_eq!(search.scanned_sessions, 0);
+    }
+
+    #[test]
     fn indexed_entries_keep_only_user_and_assistant_text() {
         let record = serde_json::json!({
             "type": "entry",
@@ -3987,6 +4173,7 @@ mod tests {
                         name: "test".into(),
                         arguments_json: "{}".into(),
                         argument_error: None,
+                        async_execution: false,
                     })],
                 },
             )))

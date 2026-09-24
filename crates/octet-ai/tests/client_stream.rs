@@ -27,6 +27,7 @@ fn make_test_model(base_url_str: &str, protocol: Protocol, is_audio: bool) -> Mo
         display_name: None,
         protocol,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities: ModalitySet::none().with(Modality::Image),
             output_modalities: if is_audio {
                 ModalitySet::none().with(Modality::Audio)

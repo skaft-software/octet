@@ -150,6 +150,49 @@ for a previous interrupted attempt's partial text or reasoning prefix. Keep
 this historical progress separate from current `OutputDelta`, the assembled
 answer, provider replay, and usage accounting. It does not establish a new
 NDJSON event contract.
+### Qualified Responses reasoning and steering
+
+Rust hosts can call `RunControl::set_reasoning(ReasoningConfig).await` on a run
+qualified by both model and endpoint metadata. Admission coalesces pending
+choices at the next safe response boundary; it is not a provider acknowledgement.
+The run stays active. Ordinary effort changes keep the request baseline pinned
+and chronological typed updates preserve the cache prefix. `Agent::reasoning()`
+returns effective selection, including restored session updates. Use the idle
+`Agent::set_reasoning` setter for an explicit override after reconstruction.
+Explicitly supported Ultra/V2 transitions establish a new host baseline rather
+than sending an ordinary update: they supersede earlier effort updates without
+losing conversation or opaque provider outputs, and do not require a new session.
+Install the observation runtime before selecting Ultra through either setter.
+The delegation manager remains installed when leaving Ultra; future workers
+inherit the effective effort while existing workers retain their pinned choices.
+
+Existing steering controls use the native multi-response path only on a
+qualified WebSocket route without hard cumulative ceilings. Unsupported routes
+retain ordinary queued steering. Native delivery persists an intent before
+socket dispatch, then links the canonical input to its operation/local ID only
+after the completed prefix. `Session::has_unsettled_native_steering()` identifies
+operations lacking an accounted successor settlement. Such sessions also report
+`has_uncertain_usage()` even if no explicit uncertainty record could be appended
+before a crash. They reject new prompts rather than replay uncertain input;
+start a new session. Async tool jobs are bounded, never provisionally dispatched,
+and unresolved jobs are not automatically executed after restart.
+
+These Rust controls add no NDJSON protocol-v1 command or field. See the
+[agent durability contract](design/octet-agent.md#qualified-responses-controls).
+
+### Tool-schema and compaction bounds
+
+Rust embedders can call `Agent::set_tool_schema_budget_bytes(usize)` before a
+run. The default is 128KiB for the exact serialized JSON array of
+provider-visible tool definitions. A non-empty set over the limit is refused
+before provider I/O; octet never silently drops, truncates, or rewrites tools.
+A zero budget permits only `[]`. This is an SDK setter, not a protocol v1 field,
+CLI flag, or persisted setting.
+
+Local compaction similarly refuses empty, whitespace-only, or over-128KiB
+assembled handoffs before writing a checkpoint. The cap includes host-generated
+file-operation evidence; neither the model summary nor that evidence is
+truncated to fit.
 
 ## Run requests
 

@@ -13,7 +13,7 @@ use super::transcript_commit::{
 use super::*;
 use crate::commands;
 use crate::presentation::RunPhase;
-use crate::tui::theme::ThemeSurfaceHeading;
+use crate::tui::theme::{TerminalBackground, ThemeSurfaceHeading};
 use sexy_tui_rs::CURSOR_MARKER;
 
 #[path = "scroll_regressions.rs"]
@@ -292,6 +292,7 @@ fn emulated_shell_with_mode(
             render_thread: None,
             capture_mouse: application_viewport,
             terminal_ceded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            herdr: crate::herdr::PaneReporter::disabled(),
         },
         bytes,
     )
@@ -1154,11 +1155,11 @@ fn open_grouped_subagent_panel(shell: &mut InteractiveShell, live: usize, finish
 #[test]
 fn subagent_panel_groups_states_and_collapses_finished_workers_by_default() {
     let mut shell = InteractiveShell::test_shell();
-    shell.set_size(110, 40);
+    shell.set_size(120, 40);
     // 8 live workers and 6 finished ones, mirroring the reported 32-row panel.
     open_grouped_subagent_panel(&mut shell, 8, 2);
 
-    let rows = render_panel(&shell.state.borrow(), 110);
+    let rows = render_panel(&shell.state.borrow(), 120);
     let plain = strip_terminal_sequences(&rows.join("\n"));
     // Live work is expanded, with its own counted heading.
     assert!(plain.contains("Running · 8"), "{plain}");
@@ -1190,7 +1191,7 @@ fn subagent_panel_groups_states_and_collapses_finished_workers_by_default() {
             crossterm::event::KeyModifiers::CONTROL,
         ))
         .is_none());
-    let rows = render_panel(&shell.state.borrow(), 110);
+    let rows = render_panel(&shell.state.borrow(), 120);
     let plain = strip_terminal_sequences(&rows.join("\n"));
     for visible in ["done-0", "failed-1", "stopped-1"] {
         assert!(plain.contains(visible), "{plain}");
@@ -1210,7 +1211,7 @@ fn subagent_panel_groups_states_and_collapses_finished_workers_by_default() {
     for character in "failed-1".chars() {
         shell.panel_input(&panel_key(crossterm::event::KeyCode::Char(character)));
     }
-    let plain = strip_terminal_sequences(&render_panel(&shell.state.borrow(), 110).join("\n"));
+    let plain = strip_terminal_sequences(&render_panel(&shell.state.borrow(), 120).join("\n"));
     assert!(plain.contains("failed-1"), "{plain}");
     assert!(
         !plain.contains("live-0"),
@@ -2003,6 +2004,14 @@ fn composer_always_uses_the_model_selected_for_the_next_prompt() {
 #[test]
 fn model_switch_recolors_only_the_composer_and_future_prompt() {
     let mut shell = InteractiveShell::test_shell();
+    shell.set_theme(crate::tui::theme::test_theme_for(
+        TerminalBackground::Dark,
+        crate::tui::terminal::TerminalCapabilities::test(
+            true,
+            true,
+            crate::tui::terminal::ColorDepth::TrueColor,
+        ),
+    ));
     shell.set_identity("anthropic", "claude-sonnet-4", "high");
     shell.on_prompt_submitted("prompt for Claude");
     shell.set_identity("local", "qwen3.6-27b", "high");
@@ -2040,12 +2049,22 @@ fn model_switch_recolors_only_the_composer_and_future_prompt() {
     let rendered = shell.state.borrow().rendered_transcript(80).join("\n");
     for (_, color) in &before_switch {
         let color = color.as_deref().expect("model prompt colour");
-        let red = u8::from_str_radix(&color[1..3], 16).unwrap();
-        let green = u8::from_str_radix(&color[3..5], 16).unwrap();
-        let blue = u8::from_str_radix(&color[5..7], 16).unwrap();
+        let sample = shell
+            .state
+            .borrow()
+            .theme
+            .prompt_text_highlight(Some(color), "x");
+        let paint = emulate_rows(&[sample], 2)
+            .screen()
+            .cell(0, 0)
+            .expect("sample highlight cell")
+            .bgcolor();
+        let vt100::Color::Rgb(red, green, blue) = paint else {
+            panic!("known dark profile must paint prompt text: {paint:?}");
+        };
         assert!(
             rendered.contains(&format!("48;2;{red};{green};{blue}")),
-            "stored prompt card lost {color}: {rendered:?}"
+            "stored prompt highlight lost {color}: {rendered:?}"
         );
     }
 
@@ -4060,6 +4079,7 @@ fn resumed_session_restores_every_write_as_a_diff_panel() {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId(id.into()),
                     name: "write".into(),
                     arguments_json: serde_json::json!({
@@ -4114,12 +4134,14 @@ fn duplicate_hydrated_tool_call_ids_never_leave_a_running_card() {
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("duplicate".into()),
                     name: "read".into(),
                     arguments_json: r#"{"path":"first"}"#.into(),
                     argument_error: None,
                 }),
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("duplicate".into()),
                     name: "read".into(),
                     arguments_json: r#"{"path":"second"}"#.into(),
@@ -4366,7 +4388,7 @@ fn hidden_reasoning_stream_does_not_grow_native_scrollback() {
     let visible = terminal.screen().contents();
     assert!(visible.contains("Thinking"), "{visible:?}");
     assert!(!visible.contains("Working"), "{visible:?}");
-    assert!(visible.contains("(ctrl+o to expand)"), "{visible:?}");
+    assert!(visible.contains("Ctrl+O expand"), "{visible:?}");
     assert!(!visible.contains("private sentinel"), "{visible:?}");
     let state = shell.state.borrow();
     let TranscriptBlock::Reasoning(reasoning) = state.transcript.last().unwrap() else {
@@ -4656,6 +4678,7 @@ fn resumed_compaction_summary_remains_expandable_after_theme_switch() {
             active_skills: Vec::new(),
             skill_resources: Vec::new(),
             details: Default::default(),
+            snapcompact: None,
         })
         .unwrap();
     drop(session);
@@ -7552,10 +7575,10 @@ fn collapsed_reasoning_uses_a_margin_dot_without_an_expanded_content_bullet() {
         .iter()
         .find(|line| line.contains("Thinking"))
         .expect("reasoning row");
-    let disclosure_line = reasoning_lines
-        .iter()
-        .find(|line| line.contains("(ctrl+o to expand)"))
-        .expect("reasoning disclosure row");
+    assert!(
+        reasoning_line.contains("Ctrl+O expand"),
+        "{reasoning_line:?}"
+    );
     let visual_column = |line: &str, needle: &str| {
         line.find(needle)
             .map(|offset| visible_width(&line[..offset]))
@@ -7578,10 +7601,9 @@ fn collapsed_reasoning_uses_a_margin_dot_without_an_expanded_content_bullet() {
         visual_column(reasoning_line, "Thinking"),
         "reasoning labels must align with tool labels: {tool_line:?} vs {reasoning_line:?}"
     );
-    assert_eq!(
-        visual_column(reasoning_line, "Thinking"),
-        visual_column(disclosure_line, "└"),
-        "the disclosure elbow must descend from the first label character: {reasoning_line:?} vs {disclosure_line:?}"
+    assert!(
+        !reasoning_line.contains('└'),
+        "compiled hint must stay inline: {reasoning_line:?}"
     );
 }
 
@@ -7646,9 +7668,9 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
-    assert_eq!(promoted.len(), 2, "{promoted:?}");
+    assert_eq!(promoted.len(), 1, "{promoted:?}");
     assert!(promoted[0].contains("Thinking"), "{promoted:?}");
-    assert!(promoted[1].contains("(ctrl+o to expand)"), "{promoted:?}");
+    assert!(promoted[0].contains("Ctrl+O expand"), "{promoted:?}");
     assert!(!promoted.join("\n").contains("provider-private detail"));
 }
 
@@ -7969,9 +7991,9 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_o() {
             .collect::<Vec<_>>()
     };
     let initial = transcript(&shell);
-    assert_eq!(initial.len(), 2, "{initial:?}");
+    assert_eq!(initial.len(), 1, "{initial:?}");
     assert!(initial[0].contains("Thinking"), "{initial:?}");
-    assert!(initial[1].contains("(ctrl+o to expand)"), "{initial:?}");
+    assert!(initial[0].contains("Ctrl+O expand"), "{initial:?}");
     assert!(!initial.join("\n").contains("first private sentinel"));
 
     let continuation = (0..128)
@@ -8004,7 +8026,7 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_o() {
     let expanded = transcript(&shell).join("\n");
     assert!(expanded.contains("first private sentinel"), "{expanded}");
     assert!(expanded.contains("private reasoning row 127"), "{expanded}");
-    assert!(!expanded.contains("(ctrl+o to expand)"), "{expanded}");
+    assert!(!expanded.contains("Ctrl+O expand"), "{expanded}");
 
     shell.toggle_disclosure();
     assert_eq!(transcript(&shell), initial);
@@ -8043,11 +8065,7 @@ fn a_new_reasoning_event_retires_the_previous_ctrl_o_hint() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(
-        rendered.matches("(ctrl+o to expand)").count(),
-        1,
-        "{rendered}"
-    );
+    assert_eq!(rendered.matches("Ctrl+O expand").count(), 1, "{rendered}");
     shell.toggle_disclosure();
     let expanded = shell
         .state
@@ -8059,7 +8077,7 @@ fn a_new_reasoning_event_retires_the_previous_ctrl_o_hint() {
         .join("\n");
     assert!(expanded.contains("first thought"), "{expanded}");
     assert!(expanded.contains("second thought"), "{expanded}");
-    assert!(!expanded.contains("(ctrl+o to expand)"), "{expanded}");
+    assert!(!expanded.contains("Ctrl+O expand"), "{expanded}");
 }
 
 #[test]
@@ -8387,7 +8405,14 @@ fn multiline_prompt_marks_only_the_first_row() {
 
 #[test]
 fn prompt_card_keeps_exact_persisted_provenance_across_theme_changes() {
-    let mut first_theme = crate::tui::theme::test_theme();
+    let mut first_theme = crate::tui::theme::test_theme_for(
+        TerminalBackground::Dark,
+        crate::tui::terminal::TerminalCapabilities::test(
+            true,
+            true,
+            crate::tui::terminal::ColorDepth::TrueColor,
+        ),
+    );
     crate::tui::theme::apply_model_lab(&mut first_theme, ModelLab::OpenAi);
     let block = TranscriptBlock::User {
         text: "safe\u{1b}[31m prompt".into(),
@@ -8406,7 +8431,14 @@ fn prompt_card_keeps_exact_persisted_provenance_across_theme_changes() {
     )
     .join("\n");
 
-    let mut second_theme = crate::tui::theme::test_theme();
+    let mut second_theme = crate::tui::theme::test_theme_for(
+        TerminalBackground::Dark,
+        crate::tui::terminal::TerminalCapabilities::test(
+            true,
+            true,
+            crate::tui::terminal::ColorDepth::TrueColor,
+        ),
+    );
     crate::tui::theme::apply_model_lab(&mut second_theme, ModelLab::DeepSeek);
     let second = render_block(
         None,
@@ -8419,23 +8451,34 @@ fn prompt_card_keeps_exact_persisted_provenance_across_theme_changes() {
     )
     .join("\n");
 
-    for rendered in [&first, &second] {
-        assert!(
-            rendered.contains("48;2;18;52;86m"),
-            "persisted prompt background changed: {rendered:?}"
-        );
-        assert!(!rendered.contains("\x1b[31m"), "{rendered:?}");
-        assert!(
-            rendered.lines().all(|line| visible_width(line) <= 40),
-            "{rendered:?}"
-        );
-    }
+    let background_at_prompt = |rendered: &str| {
+        let rows = rendered.lines().map(str::to_owned).collect::<Vec<_>>();
+        emulate_rows(&rows, 40)
+            .screen()
+            .cell(1, 2)
+            .expect("prompt text cell")
+            .bgcolor()
+    };
+    assert_eq!(background_at_prompt(&first), background_at_prompt(&second));
+    assert_ne!(background_at_prompt(&first), vt100::Color::Default);
+    assert!(!first.contains("\x1b[31m"), "{first:?}");
+    assert!(
+        first.lines().all(|line| visible_width(line) <= 40),
+        "{first:?}"
+    );
 }
 
 #[test]
-fn persisted_prompt_background_fills_the_shared_grid() {
+fn persisted_prompt_highlights_only_wrapped_text_cells() {
     const WIDTH: u16 = 24;
-    let theme = crate::tui::theme::test_theme();
+    let theme = crate::tui::theme::test_theme_for(
+        TerminalBackground::Dark,
+        crate::tui::terminal::TerminalCapabilities::test(
+            true,
+            true,
+            crate::tui::terminal::ColorDepth::TrueColor,
+        ),
+    );
     let block = TranscriptBlock::User {
         text: "first line  \nsecond line".into(),
         model_lab: Some(ModelLab::OpenAi),
@@ -8453,7 +8496,7 @@ fn persisted_prompt_background_fills_the_shared_grid() {
     );
     let terminal = emulate_rows(&rendered, WIDTH);
     let plan = crate::tui::layout::PresentationLayout::new(&theme, WIDTH);
-    assert_eq!(plan.inset, 0, "prompt cards must reach both terminal edges");
+    assert_eq!(plan.inset, 0, "prompt marker retains the shared grid");
     assert_eq!(
         rendered.len(),
         4,
@@ -8476,26 +8519,44 @@ fn persisted_prompt_background_fills_the_shared_grid() {
             .trim()
             .is_empty()
     );
-    assert!(rendered[0].contains("48;2;18;52;86m"), "{rendered:?}");
-    let expected = vt100::Color::Rgb(0x12, 0x34, 0x56);
+    assert!(
+        !rendered[0].contains("48;"),
+        "blank row was painted: {rendered:?}"
+    );
+    assert!(
+        !rendered[3].contains("48;"),
+        "blank row was painted: {rendered:?}"
+    );
+    let painted = emulate_rows(&[theme.prompt_text_highlight(Some("#123456"), "x")], 2)
+        .screen()
+        .cell(0, 0)
+        .expect("highlight sample")
+        .bgcolor();
+    assert_ne!(painted, vt100::Color::Default);
     for row in 0..rendered.len() as u16 {
         for column in 0..WIDTH {
-            let inside = column >= plan.inset && column < plan.inset + plan.content_width;
+            let inside = match row {
+                1 => (2..12).contains(&column), // › + space, then "first line"
+                2 => (2..13).contains(&column), // continuation gutter, then "second line"
+                _ => false,
+            };
             assert_eq!(
                 terminal
                     .screen()
                     .cell(row, column)
-                    .expect("prompt row cell inside terminal bounds")
+                    .expect("prompt cell")
                     .bgcolor(),
                 if inside {
-                    expected
+                    painted
                 } else {
                     vt100::Color::Default
                 },
-                "prompt card grid mismatch at row {row}, column {column}"
+                "unexpected painted cell at row {row}, column {column}"
             );
         }
     }
+
+    let expected = vt100::Color::Rgb(0x12, 0x34, 0x56);
 
     const CARD_WIDTH: u16 = 80;
     let card_theme = crate::tui::theme::test_theme_from_source(SURFACE_TEST_THEME);
@@ -8552,6 +8613,97 @@ fn persisted_prompt_background_fills_the_shared_grid() {
         vt100::Color::Default,
         "structural card border must remain outside the surface"
     );
+}
+
+#[test]
+fn unknown_profile_keeps_rich_prompt_styling_on_the_terminal_canvas() {
+    let theme = crate::tui::theme::test_theme();
+    let renderer = theme.rich_renderer();
+    let source = "ask `cargo check`";
+    let styled = renderer
+        .render(&parse_markdown(source), 30)
+        .lines
+        .remove(0)
+        .styled;
+    assert!(
+        styled.contains('\x1b'),
+        "inline code should be styled: {styled:?}"
+    );
+    let rows = render_user_prompt(
+        source,
+        &Some(ModelLab::OpenAi),
+        Some("#123456"),
+        &renderer,
+        &theme,
+        32,
+    );
+    assert!(rows.iter().any(|row| row.contains(&styled)), "{rows:?}");
+    assert!(rows.iter().all(|row| !row.contains("48;")), "{rows:?}");
+}
+
+#[test]
+fn compiled_prompt_highlight_preserves_media_labels_unicode_copy_and_terminal_fallbacks() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+
+    let source = "界🙂 [Image #1]  \nnext [Audio #2]";
+    let block = TranscriptBlock::User {
+        text: source.into(),
+        model_lab: Some(ModelLab::OpenAi),
+        prompt_color: Some("#123456".into()),
+        persisted: true,
+    };
+    assert_eq!(block_copy_text(&block), source);
+    for background in [
+        TerminalBackground::Unknown,
+        TerminalBackground::Dark,
+        TerminalBackground::Light,
+    ] {
+        for color in [ColorDepth::None, ColorDepth::Ansi16, ColorDepth::TrueColor] {
+            for unicode in [false, true] {
+                let theme = crate::tui::theme::test_theme_for(
+                    background,
+                    TerminalCapabilities::test(true, unicode, color),
+                );
+                let rendered = render_block(
+                    None,
+                    &block,
+                    &theme,
+                    &theme.rich_renderer(),
+                    &theme.reasoning_renderer(),
+                    24,
+                    false,
+                );
+                let plain = rendered
+                    .iter()
+                    .map(|row| strip_terminal_sequences(row))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    plain.contains("[Image #1]") && plain.contains("[Audio #2]"),
+                    "{plain:?}"
+                );
+                assert!(
+                    rendered.iter().all(|row| visible_width(row) <= 24),
+                    "{rendered:?}"
+                );
+                if color == ColorDepth::None {
+                    assert!(
+                        rendered.iter().all(|row| !row.contains('\x1b')),
+                        "{rendered:?}"
+                    );
+                }
+                let terminal = emulate_rows(&rendered, 24);
+                let screen = terminal.screen();
+                let painted = screen.cell(1, 2).unwrap().bgcolor();
+                assert_eq!(
+                    painted != vt100::Color::Default,
+                    color != ColorDepth::None && background != TerminalBackground::Unknown
+                );
+                assert_eq!(screen.cell(1, 0).unwrap().bgcolor(), vt100::Color::Default);
+                assert_eq!(screen.cell(1, 23).unwrap().bgcolor(), vt100::Color::Default);
+            }
+        }
+    }
 }
 
 #[test]
@@ -9428,24 +9580,11 @@ fn full_tui_colour_modes_preserve_readable_content_and_supported_encoding() {
                     samples.extend(AssistantBlock::finalized(
                         "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new".into(),
                     ).render(&theme.rich_renderer(), theme, width));
-                    for native in [true, false] {
-                        samples.extend(render_block(
-                            None,
-                            &TranscriptBlock::Tool(Box::new(ToolPanel::subagent_activity(
-                                &subagent_transcript_test_view(native),
-                            ))),
-                            theme,
-                            &theme.rich_renderer(),
-                            &theme.reasoning_renderer(),
-                            width,
-                            false,
-                        ));
-                    }
                 }
                 let joined = samples.join("\n");
                 let visible = strip_terminal_sequences(&joined);
                 assert!(visible.contains("-old") && visible.contains("+new"));
-                assert!(visible.contains("Audit docs") && visible.contains("Inspect tests"));
+                assert!(visible.contains("Palette check"));
                 assert!(
                     visible.contains("Palette check") && visible.contains("answer"),
                     "{depth:?}/{width}: {visible}"
@@ -9752,16 +9891,23 @@ fn bash_wraps_command_and_nests_output_under_one_elbow() {
         "tool output needs one connector for the whole nested group: {rendered:?}"
     );
     assert!(
-        rendered.iter().all(|line| !line
-            .chars()
-            .any(|character| matches!(character, '✓' | '×' | '…'))),
+        rendered
+            .iter()
+            .all(|line| !line.chars().any(|character| matches!(character, '✓' | '×'))),
         "the margin dot is the only lifecycle marker: {rendered:?}"
     );
 }
 
 #[test]
 fn bash_output_and_hidden_metadata_share_a_terminal_content_gutter() {
-    let theme = crate::tui::theme::test_theme();
+    let theme = crate::tui::theme::test_theme_for(
+        TerminalBackground::Dark,
+        crate::tui::terminal::TerminalCapabilities::test(
+            true,
+            true,
+            crate::tui::terminal::ColorDepth::TrueColor,
+        ),
+    );
     let command = "printf result";
     let args = serde_json::json!({"command": command});
     let output = (1..=8)
@@ -9787,7 +9933,7 @@ fn bash_output_and_hidden_metadata_share_a_terminal_content_gutter() {
     );
     assert!(
         details[1].contains("\x1b[38;2;"),
-        "raw Bash output should use the muted output style: {details:?}"
+        "raw Bash output should use the readable output tint: {details:?}"
     );
 
     let block = TranscriptBlock::Tool(Box::new(panel));
@@ -9807,7 +9953,7 @@ fn bash_output_and_hidden_metadata_share_a_terminal_content_gutter() {
     let label_column = visible_width(&rendered[0][..label_byte]);
     let hidden = rendered
         .iter()
-        .find(|line| line.contains("4 earlier visual rows hidden"))
+        .find(|line| line.contains("4 output rows collapsed"))
         .expect("synthetic hidden-line metadata");
     let output = rendered
         .iter()
@@ -10053,10 +10199,7 @@ fn failed_bash_output_keeps_a_bounded_excerpt_before_expansion() {
     .join("\n");
     assert!(!collapsed.contains("failed output line 1"), "{collapsed}");
     assert!(collapsed.contains("failed output line 8"), "{collapsed}");
-    assert!(
-        collapsed.contains("earlier visual rows hidden"),
-        "{collapsed}"
-    );
+    assert!(collapsed.contains("output rows collapsed"), "{collapsed}");
 
     let expanded = render_block(
         None,
@@ -10428,28 +10571,33 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
         .unwrap();
 
     assert!(shell.set_subagent_presentation(Some(&snapshot), true));
-    // Idle snapshots never park worker activity above the composer.
+    // Workers stay visible even while the root run is idle.
+    assert!(!shell.state.borrow().run.is_active());
     let chrome = shell_chrome(&shell.state.borrow(), 120, Instant::now());
     assert!(
         chrome.composer.iter().all(|row| !row.contains("Subagents")),
         "{:?}",
         chrome.composer
     );
+    assert!(chrome.subagents.is_empty());
     let activity = shell
         .state
         .borrow()
         .rendered_transcript(120)
         .iter()
-        .map(|line| strip_terminal_sequences(line))
+        .map(|row| strip_terminal_sequences(row))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(activity.contains("Subagents"), "{activity}");
-    assert!(activity.contains("read-diffs · using read"), "{activity}");
-    assert!(!activity.contains("call"), "{activity}");
-    // The live row carries real columns: the worker, its tokens, and its cost.
-    assert!(activity.contains("↑88.2k"), "{activity}");
-    assert!(activity.contains("↓99"), "{activity}");
-    assert!(activity.contains("$0.209"), "{activity}");
+    assert!(
+        activity.contains("Subagents · 1 running · /subagents"),
+        "{activity}"
+    );
+    assert!(
+        !activity.contains("read-diffs")
+            && !activity.contains("↑88.2k")
+            && !activity.contains("$0.209"),
+        "{activity}"
+    );
     assert_eq!(
         shell
             .state
@@ -10470,8 +10618,89 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
 }
 
 #[test]
+fn live_subagent_heading_is_bold_and_worker_metadata_is_terminal_safe() {
+    let mut shell = InteractiveShell::test_shell();
+    let mut view = subagent_transcript_test_view(true);
+    view.telemetry[0].task_name = "audit\x1b]52;c;SECRET\x07".into();
+    shell.state.borrow_mut().set_subagent_activity(view);
+    let state = shell.state.borrow();
+    let rows = state.rendered_transcript(80);
+    let heading = rows.iter().find(|row| row.contains("Subagents")).unwrap();
+    assert!(
+        heading.contains("\x1b[1m") && heading.contains("\x1b[22m"),
+        "{heading:?}"
+    );
+    let plain = strip_terminal_sequences(&rows.join("\n"));
+    assert!(plain.contains("└─ audit · ↑5600000 ↓3900"), "{plain}");
+    assert!(!plain.contains("SECRET"), "{plain}");
+}
+
+#[test]
+fn live_subagent_output_progress_is_marked_as_estimated_until_usage_settles() {
+    let mut shell = InteractiveShell::test_shell();
+    let mut view = subagent_transcript_test_view(true);
+    view.telemetry[0].estimated_output_tokens = Some(4_021);
+    shell.state.borrow_mut().set_subagent_activity(view.clone());
+    let live = strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
+    assert!(live.contains("audit · ↑5600000 ↓~4021"), "{live}");
+    assert_eq!(view.telemetry[0].output_tokens, 3_900);
+    assert_eq!(view.telemetry[0].total_tokens, 5_603_900);
+
+    view.telemetry[0].output_tokens = 4_010;
+    view.telemetry[0].estimated_output_tokens = None;
+    shell.state.borrow_mut().set_subagent_activity(view);
+    let settled =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
+    assert!(settled.contains("audit · ↑5600000 ↓4010"), "{settled}");
+    assert!(!settled.contains("↓~"), "{settled}");
+}
+
+#[test]
+fn subagent_transcript_row_is_height_bounded_and_points_to_the_inspector() {
+    for width in [32, 80, 120] {
+        for height in [12, 16, 24] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, height);
+            let mut view = subagent_transcript_test_view(true);
+            let worker = view.telemetry[0].clone();
+            view.telemetry = (0..8)
+                .map(|index| {
+                    let mut child = worker.clone();
+                    child.child_id = format!("worker-{index}");
+                    child.task_name = format!("worker-{index}");
+                    child
+                })
+                .collect();
+            shell.state.borrow_mut().set_subagent_activity(view);
+            let state = shell.state.borrow();
+            let rows = state.rendered_transcript(width);
+            assert!(shell_chrome(&state, width, Instant::now())
+                .subagents
+                .is_empty());
+            assert_eq!(
+                rows.iter().filter(|row| row.contains("/subagents")).count(),
+                1
+            );
+            assert!(rows
+                .iter()
+                .all(|row| visible_width(row) <= usize::from(width)));
+            let plain = rows
+                .iter()
+                .map(|row| strip_terminal_sequences(row))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(plain.matches("worker-").count(), 4, "{plain}");
+            assert!(plain.contains("+4 more"), "{plain}");
+            assert!(!plain.contains("worker-4"), "{plain}");
+            assert_eq!(state.subagent_activity.as_ref().unwrap().telemetry.len(), 8);
+        }
+    }
+}
+
+#[test]
 fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
     let mut shell = InteractiveShell::test_shell();
+    shell.set_size(120, 60);
     let child = |id: &str, task: &str, state: &str, reason: Option<&str>| {
         octet_agent::DelegationTelemetryChild {
             child_id: id.into(),
@@ -10491,6 +10720,7 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
             cache_read_tokens: 800,
             cache_write_tokens: 0,
             output_tokens: 220,
+            estimated_output_tokens: None,
             reasoning_tokens: 60,
             total_tokens: 13_020,
             cost: None,
@@ -10525,59 +10755,57 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         .borrow()
         .rendered_transcript(120)
         .iter()
-        .map(|line| strip_terminal_sequences(line))
+        .map(|row| strip_terminal_sequences(row))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(block.contains("Subagents"), "{block}");
-    assert!(block.contains("Read release history"), "{block}");
-    assert!(block.contains("Audit release surface"), "{block}");
-    let heading = block
-        .lines()
-        .find(|line| line.contains("Subagents"))
-        .expect("subagent heading");
-    let child = block
-        .lines()
-        .find(|line| line.contains("Read release history"))
-        .expect("subagent child");
-    let heading_byte = heading.find("Subagents").expect("heading text");
-    let elbow_byte = child
-        .find(['├', '└'])
-        .expect("subagent hierarchy connector");
-    let task_byte = child.find("Read release history").expect("child text");
-    let heading_column = visible_width(&heading[..heading_byte]);
-    let elbow_column = visible_width(&child[..elbow_byte]);
-    let task_column = visible_width(&child[..task_byte]);
-    assert_eq!(elbow_column, heading_column + 2, "{block}");
-    assert_eq!(task_column, elbow_column + 2, "{block}");
-    assert!(block.contains("failed"), "{block}");
-    // Hide call counts only in the row; keep live token/cost and failure detail.
-    assert!(!block.contains("call"), "{block}");
-    assert!(block.contains("12.8k"), "{block}");
     assert!(
-        block.contains("↓220") || block.contains("out 220"),
+        block.contains("Subagents · 1 running · 1 failed · /subagents"),
         "{block}"
     );
-    assert!(block.contains("$0.007"), "{block}");
     assert!(
-        block.contains("provider request failed: upstream unavailable"),
+        block.contains("Read release history · ↑12800 ↓220"),
         "{block}"
     );
+    assert!(
+        !block.contains("Audit release surface") && !block.contains("provider request failed"),
+        "{block}"
+    );
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
     let state = shell.state.borrow();
     let view = state.subagent_activity.as_ref().unwrap();
     assert!(view.telemetry.iter().all(|child| child.tool_use_count == 4));
+    assert!(view
+        .telemetry
+        .iter()
+        .any(|child| child.failure_reason.as_deref()
+            == Some("provider request failed: upstream unavailable")));
     assert_eq!(
         view.failure_reason.as_deref(),
         Some("spawn rejected: worker limit reached")
     );
+    let notices = state
+        .transcript
+        .iter()
+        .filter_map(|block| match block {
+            TranscriptBlock::Notice(text) => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        notices.is_empty(),
+        "worker diagnostics remain inspector-only"
+    );
     drop(state);
-    assert!(!shell
+    assert!(shell
         .state
         .borrow()
         .rendered_transcript(120)
         .join("\n")
-        .contains("Used subagent spawn"));
+        .contains("Subagents"));
 
-    // An empty cleanup snapshot must not erase the settled transcript event.
+    // An empty cleanup snapshot must not erase retained inspector telemetry.
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 5,
@@ -10589,7 +10817,9 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         },
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
 
     shell.on_agent_event(&octet_agent::AgentEvent::ToolStarted {
         id: octet_ai::ToolCallId("spawn-call".into()),
@@ -10598,6 +10828,95 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
     });
     let transcript = shell.state.borrow().rendered_transcript(120).join("\n");
     assert!(!transcript.contains("Used subagent spawn"), "{transcript}");
+}
+
+#[test]
+fn settled_subagent_attention_is_quiet_with_inspector_retention() {
+    for terminal in ["failed", "stopped", "awaiting_approval"] {
+        let mut shell = InteractiveShell::test_shell();
+        let mut view = subagent_transcript_test_view(true);
+        view.telemetry.truncate(1);
+        let notices = |shell: &InteractiveShell| {
+            shell
+                .state
+                .borrow()
+                .transcript
+                .iter()
+                .filter_map(|block| match block {
+                    TranscriptBlock::Notice(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        assert!(notices(&shell).is_empty());
+        view.telemetry[0].tool_use_count += 1;
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        assert!(notices(&shell).is_empty(), "live metrics are chrome-only");
+        assert!(!shell.state.borrow().run.is_active());
+
+        view.telemetry[0].state = terminal.into();
+        view.telemetry[0].failure_reason =
+            Some("action required: \x1b[31mreview worker\x1b[0m".into());
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+            .subagents
+            .is_empty());
+        let first = notices(&shell);
+        assert!(
+            first.is_empty(),
+            "settlement does not append worker notices"
+        );
+
+        // Repeated state/reason, even with fresh accounting, must not spam history.
+        view.telemetry[0].output_tokens += 1;
+        view.telemetry[0].elapsed_ms += 100;
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        assert_eq!(notices(&shell), first);
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .subagent_activity
+                .as_ref()
+                .unwrap()
+                .telemetry,
+            view.telemetry
+        );
+
+        view.telemetry[0].failure_reason = Some("new diagnostic ".repeat(1000));
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        let changed = notices(&shell);
+        assert!(
+            changed.is_empty(),
+            "changed worker diagnostics stay in the inspector"
+        );
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .subagent_activity
+                .as_ref()
+                .unwrap()
+                .telemetry,
+            view.telemetry
+        );
+        assert!(!shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .any(|block| matches!(block, TranscriptBlock::Tool(_))));
+
+        view.telemetry[0].state = "completed".into();
+        view.telemetry[0].failure_reason = None;
+        shell.state.borrow_mut().set_subagent_activity(view);
+        assert_eq!(
+            notices(&shell),
+            changed,
+            "ordinary completion adds no history"
+        );
+    }
 }
 
 fn subagent_transcript_test_view(native: bool) -> SubagentActivityView {
@@ -10621,6 +10940,7 @@ fn subagent_transcript_test_view(native: bool) -> SubagentActivityView {
             input_tokens: 5_500_000,
             cache_read_tokens: 80_000,
             cache_write_tokens: 20_000,
+            estimated_output_tokens: None,
             output_tokens: 3_900,
             reasoning_tokens: 1_000,
             total_tokens: 5_603_900,
@@ -10700,291 +11020,6 @@ fn publish_current_turn_roster(
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated { snapshot });
 }
 
-fn subagent_transcript_test_rows(
-    view: &SubagentActivityView,
-    theme: &OctetTheme,
-    width: u16,
-    verbose: bool,
-) -> Vec<String> {
-    render_block(
-        None,
-        &TranscriptBlock::Tool(Box::new(ToolPanel::subagent_activity(view))),
-        theme,
-        &theme.rich_renderer(),
-        &theme.reasoning_renderer(),
-        width,
-        verbose,
-    )
-    .iter()
-    .map(|line| strip_terminal_sequences(line))
-    .collect()
-}
-
-#[test]
-fn subagent_clipping_never_injects_sgr_into_no_color_rows() {
-    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
-    for unicode in [false, true] {
-        let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
-            true,
-            unicode,
-            ColorDepth::None,
-        ));
-        for width in [16, 24, 40, 80, 120] {
-            for expanded in [false, true] {
-                let rows = subagent_activity_render_rows(
-                    &subagent_transcript_test_view(true),
-                    &theme,
-                    width,
-                    expanded,
-                );
-                assert!(rows.iter().all(|row| !row.contains("\x1b[")), "{rows:?}");
-                assert!(rows
-                    .iter()
-                    .all(|row| visible_width(row) <= usize::from(width)));
-            }
-        }
-    }
-}
-
-#[test]
-fn subagent_transcript_groups_live_workers_and_collapses_terminal_groups() {
-    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
-
-    for (unicode, color) in [
-        (false, ColorDepth::None),
-        (true, ColorDepth::None),
-        (true, ColorDepth::TrueColor),
-    ] {
-        let theme =
-            crate::tui::theme::test_theme_with(TerminalCapabilities::test(true, unicode, color));
-        for native in [true, false] {
-            let view = subagent_transcript_test_view(native);
-            for width in [24, 40, 80, 120] {
-                for verbose in [false, true] {
-                    let rows = subagent_transcript_test_rows(&view, &theme, width, verbose);
-                    assert_eq!(
-                        rows[0],
-                        if unicode {
-                            "• Subagents"
-                        } else {
-                            "* Subagents"
-                        }
-                    );
-                    assert!(
-                        rows.iter()
-                            .all(|line| visible_width(line) <= usize::from(width)),
-                        "{rows:?}"
-                    );
-                    // Call counts stay out of every row in every mode.
-                    assert!(!rows.join("\n").contains("call"), "{rows:?}");
-                    if !unicode {
-                        // An ASCII profile renders an ASCII transcript: the
-                        // ellipsis, the connectors, and the separators all come
-                        // from the theme's own glyph table.
-                        assert!(rows.iter().all(|line| line.is_ascii()), "{rows:?}");
-                    }
-                    let joined = rows.join("\n");
-                    // Running stays expanded: the live worker keeps its own row
-                    // in both disclosure modes.
-                    assert!(joined.contains("Read changelog"), "{rows:?}");
-                    // Terminal groups are collapsed behind one counted summary
-                    // each unless the reader expands them.
-                    let summaries = rows
-                        .iter()
-                        .filter(|line| line.contains("ctrl+o shows all"))
-                        .count();
-                    if verbose {
-                        assert_eq!(summaries, 0, "{rows:?}");
-                    } else if width >= 120 {
-                        // The hint shares the row with the count, the reason, and
-                        // the names, so only a wide row carries all of it; the
-                        // count and the reason always survive.
-                        assert_eq!(summaries, 2, "{rows:?}");
-                    }
-                    assert!(joined.contains("running"), "{rows:?}");
-                    assert!(joined.contains("completed"), "{rows:?}");
-                    assert!(joined.contains("failed"), "{rows:?}");
-                    // The event never runs past its own bounded row ceiling.
-                    assert!(rows.len() < 24, "{} rows: {rows:?}", rows.len());
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn subagent_transcript_aligns_columns_by_visible_width() {
-    let theme = crate::tui::theme::test_theme();
-    for native in [true, false] {
-        let mut view = subagent_transcript_test_view(native);
-        let names = ["審査", "Review", "e\u{301}xam"];
-        for (child, name) in view.telemetry.iter_mut().zip(names) {
-            child.task_name = name.into();
-        }
-        for (activity, name) in view.activities.iter_mut().zip(names) {
-            activity.summary = name.into();
-        }
-        let rows = subagent_transcript_test_rows(&view, &theme, 120, false);
-        // heading, running group heading, column header, the live row, then one
-        // counted summary line for each collapsed terminal group.
-        assert_eq!(rows.len(), 6, "{rows:?}");
-        let header = &rows[2];
-        let live = &rows[3];
-        let cells = |row: &str| {
-            row.split("  ")
-                .map(str::trim)
-                .filter(|cell| !cell.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        // The native telemetry source carries every metric column; the
-        // extension presentation source has no elapsed or model field, and the
-        // grid drops a column rather than inventing one. Worker, state, and
-        // model are mandatory, so the model sits directly after the state and
-        // every metric column follows it.
-        let (header_cells, live_cells) = if native {
-            (
-                [
-                    "worker", "state", "model", "elapsed", "turns", "tokens", "cost",
-                ]
-                .as_slice(),
-                [
-                    "審査",
-                    "running",
-                    "test-model",
-                    "0.5s",
-                    "0",
-                    "↑5.6m ↓3.9k",
-                    "$0.165",
-                ]
-                .as_slice(),
-            )
-        } else {
-            (
-                ["worker", "state", "turns", "tokens", "cost"].as_slice(),
-                ["審査", "running", "0", "↑5.6m ↓3.9k", "$0.165"].as_slice(),
-            )
-        };
-        assert_eq!(cells(header), header_cells, "{rows:?}");
-        let live_row_cells = cells(live);
-        assert!(live_row_cells[0].ends_with("審査"), "{rows:?}");
-        assert_eq!(&live_row_cells[1..], &live_cells[1..], "{rows:?}");
-        // Columns are real: the worker and state cells start at the same visual
-        // column in the header row and in the live worker's row, measured in
-        // visible width rather than bytes.
-        for (header_cell, cell) in [("worker", "審査"), ("state", "running")] {
-            let header_column = visible_width(&header[..header.find(header_cell).unwrap()]);
-            let live_column = visible_width(&live[..live.find(cell).unwrap()]);
-            assert_eq!(header_column, live_column, "{rows:?}");
-        }
-        // Every worker row shares that one worker column - the header row's
-        // first cell included - so a wide or accented name cannot shift the
-        // state column below it. Expanded mode opens one row per worker, so all
-        // three names are measured as rows rather than as summary text.
-        let worker_column = visible_width(&live[..live.find("審査").unwrap()]);
-        let expanded = subagent_transcript_test_rows(&view, &theme, 120, true);
-        let mut worker_rows = 0;
-        for row in &expanded {
-            if row.contains("ctrl+o shows all") {
-                continue;
-            }
-            let Some(name) = ["審査", "Review", "e\u{301}xam"]
-                .into_iter()
-                .find(|name| row.contains(name))
-            else {
-                continue;
-            };
-            assert_eq!(
-                visible_width(&row[..row.find(name).unwrap()]),
-                worker_column,
-                "{row} among {expanded:?}"
-            );
-            worker_rows += 1;
-        }
-        assert_eq!(worker_rows, 3, "{expanded:?}");
-    }
-}
-
-#[test]
-fn subagent_transcript_does_not_invent_missing_activity_metrics() {
-    let theme = crate::tui::theme::test_theme();
-    let mut view = subagent_transcript_test_view(false);
-    for activity in &mut view.activities {
-        activity.metrics = None;
-    }
-    let rows = subagent_transcript_test_rows(&view, &theme, 120, false);
-    for row in &rows[1..] {
-        assert!(!row.contains("call"), "{row}");
-        assert!(
-            !row.contains('↑') && !row.contains('↓') && !row.contains('$'),
-            "{row}"
-        );
-    }
-    // The same roster with metrics still prints the tokens and cost columns, so
-    // the absence above is "nothing is invented", not "nothing renders".
-    let measured =
-        subagent_transcript_test_rows(&subagent_transcript_test_view(false), &theme, 120, false);
-    let measured = measured.join("\n");
-    assert!(
-        measured.contains('↑') && measured.contains('↓'),
-        "{measured}"
-    );
-    assert!(measured.contains('$'), "{measured}");
-}
-
-#[test]
-fn subagent_transcript_failure_wraps_at_the_group_indent() {
-    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
-
-    // A spawn that failed before it produced any worker: the reason is the
-    // whole event, so it wraps at the group indent instead of being cut off.
-    let view = SubagentActivityView {
-        failure_reason: Some("spawn rejected: \x1b[31mworker limit reached\x1b[0m".into()),
-        ..SubagentActivityView::default()
-    };
-    for unicode in [true, false] {
-        let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
-            true,
-            unicode,
-            ColorDepth::None,
-        ));
-        for width in [24, 40, 120] {
-            let rows = subagent_transcript_test_rows(&view, &theme, width, false);
-            assert_eq!(
-                rows[0],
-                if unicode {
-                    "• Subagents"
-                } else {
-                    "* Subagents"
-                }
-            );
-            // Every continuation row keeps the group indent, and the sanitized
-            // reason is complete - no escape sequence and no truncation.
-            let detail = rows[1..]
-                .iter()
-                .map(|row| {
-                    let text = row
-                        .strip_prefix("    ")
-                        .unwrap_or_else(|| panic!("group indent lost: {rows:?}"));
-                    assert!(!text.contains('\x1b'), "{rows:?}");
-                    text
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            assert_eq!(
-                detail.split_whitespace().collect::<Vec<_>>().join(" "),
-                "Failed: spawn rejected: worker limit reached",
-                "{rows:?}"
-            );
-            assert!(
-                rows.iter()
-                    .all(|line| visible_width(line) <= usize::from(width)),
-                "{rows:?}"
-            );
-        }
-    }
-}
-
 #[test]
 fn extension_tools_render_label_and_argument_like_core_tools() {
     let mut shell = InteractiveShell::test_shell();
@@ -11031,6 +11066,7 @@ fn hydrating_a_replacement_session_clears_subagent_activity() {
             input_tokens: 100,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            estimated_output_tokens: None,
             output_tokens: 10,
             reasoning_tokens: 0,
             total_tokens: 110,
@@ -11055,14 +11091,15 @@ fn hydrating_a_replacement_session_clears_subagent_activity() {
     shell.hydrate(&session).unwrap();
 
     assert!(shell.state.borrow().subagent_activity.is_none());
-    assert!(shell.state.borrow().subagent_activity_block.is_none());
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
 }
 
 /// Maintainer report: "EVERY new prompt shows the current session's subagents
 /// even if they're completed!" The delegation team is session-scoped, so its
 /// final snapshot keeps being republished after the turn it belongs to has
-/// ended. The settled roster must stay in the transcript at the end of *that*
-/// turn and must never open a second block below the next prompt.
+/// ended. The single settled row must remain above later prompts, not replay.
 #[test]
 fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
     use octet_agent::{EntryId, FinishReason};
@@ -11080,6 +11117,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11116,8 +11154,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
             .join("\n")
     };
 
-    // Turn one: one live worker, then its settlement. Both land in the
-    // transcript where the delegation happened.
+    // Turn one: the live strip disappears on settlement without history rows.
     let run_id = shell.begin_run("test-provider");
     shell.on_run_event(
         run_id,
@@ -11128,8 +11165,11 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         &delegation(snapshot(2, vec![child("agent-1", "completed")])),
     );
     let settled = transcripts(&shell);
-    assert!(settled.contains("Subagents"), "{settled}");
-    assert!(settled.contains("completed"), "{settled}");
+    assert!(settled.contains("Subagents · 1 completed"), "{settled}");
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
+    assert!(!settled.contains("Inspect tests"), "{settled}");
     shell.on_run_event(
         run_id,
         &AgentEvent::RunFinished {
@@ -11138,7 +11178,10 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         },
     );
     let after_finish = transcripts(&shell);
-    assert!(after_finish.contains("Subagents"), "{after_finish}");
+    assert!(
+        after_finish.contains("Subagents · 1 completed"),
+        "{after_finish}"
+    );
 
     // Turn two: the endpoint republishes the same, already-completed roster.
     shell.begin_run("test-provider");
@@ -11150,12 +11193,14 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
 
     let state = shell.state.borrow();
     assert!(
-        state.subagent_activity.is_none(),
-        "a settled roster must not be retained as live state for the new turn"
+        state.subagent_activity.is_some(),
+        "the session roster remains available across root turns"
     );
     assert!(
-        state.subagent_activity_block.is_none(),
-        "a settled roster must not open a block in the new turn"
+        shell_chrome(&state, 120, Instant::now())
+            .subagents
+            .is_empty(),
+        "the settled session roster never reappears in chrome"
     );
     let replayed = state
         .rendered_transcript(120)
@@ -11163,20 +11208,13 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    // The settled block still exists - exactly once, above the new prompt.
+    // Neither this turn nor the prior turn gets a synthetic roster block.
     assert_eq!(
         replayed.matches("Subagents").count(),
         1,
         "the completed roster must not be rendered again: {replayed}"
     );
-    let new_prompt = replayed
-        .find("next question")
-        .expect("the new prompt is in the transcript");
-    let settled_block = replayed.find("Subagents").expect("settled block");
-    assert!(
-        settled_block < new_prompt,
-        "the settled block must stay at the point it occurred: {replayed}"
-    );
+    assert!(replayed.contains("next question"));
     // And the new turn's own status row is still the last thing in the
     // transcript, so the working indicator is not displaced.
     assert!(
@@ -11209,10 +11247,11 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
 /// The same rule with a live worker: a roster for the *current* turn still
 /// renders, so the fix is attribution and not a blanket suppression.
 #[test]
-fn live_workers_for_the_current_turn_still_open_a_block() {
+fn live_workers_for_a_later_turn_open_a_new_transcript_row() {
     use octet_agent::{EntryId, FinishReason};
 
     let mut shell = InteractiveShell::test_shell();
+    shell.set_size(120, 60);
     let live = |id: &str| octet_agent::DelegationTelemetryChild {
         child_id: id.into(),
         task_name: format!("Inspect tests {id}"),
@@ -11225,6 +11264,7 @@ fn live_workers_for_the_current_turn_still_open_a_block() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11289,26 +11329,15 @@ fn live_workers_for_the_current_turn_still_open_a_block() {
             failure_class: None,
         },
     });
-    let rendered = shell
-        .state
-        .borrow()
-        .rendered_transcript(120)
-        .iter()
-        .map(|line| strip_terminal_sequences(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(rendered.contains("Inspect tests agent-2"), "{rendered}");
-    assert_eq!(
-        rendered.matches("Inspect tests agent-1").count(),
-        1,
+    let rendered =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(120).join("\n"));
+    assert_eq!(rendered.matches("Subagents").count(), 2, "{rendered}");
+    assert!(
+        rendered.contains("1 completed") && rendered.contains("1 running"),
         "{rendered}"
     );
-    assert_eq!(
-        rendered.matches("Subagents").count(),
-        2,
-        "the new turn gets exactly one additional block: {rendered}"
-    );
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(rendered.contains("Inspect tests agent-2"), "{rendered}");
+    assert!(!rendered.contains("Inspect tests agent-1"), "{rendered}");
 }
 
 /// The maintainer's correction, spelled out: "EVERY new prompt shows the current
@@ -11335,6 +11364,7 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11399,10 +11429,12 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
     let state = shell.state.borrow();
     assert!(
         state.subagent_activity.is_none(),
-        "an all-completed roster must not become live state"
+        "an unseen all-completed roster must not become live state"
     );
     assert!(
-        state.subagent_activity_block.is_none(),
+        shell_chrome(&state, 120, Instant::now())
+            .subagents
+            .is_empty(),
         "an all-completed roster must not open a transcript block"
     );
     let rendered = state
@@ -11423,19 +11455,17 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
     );
     assert!(
         shell_chrome(&state, 120, Instant::now())
-            .composer
+            .subagents
             .iter()
             .all(|row| !row.contains("Subagents")),
         "nothing about the roster may be composed into pinned chrome"
     );
 }
 
-/// The settled delegation event is transcript material: it must end up at the
-/// point in the transcript where the delegation happened, between the prompt
-/// that started the turn and the next prompt, and it must stay there after the
-/// run finishes or is interrupted.
+/// One live delegation creates one mutable transcript row. Settlement updates
+/// that row, and a republished completed roster cannot add another.
 #[test]
-fn the_settled_subagent_block_stays_at_the_point_the_delegation_happened() {
+fn subagent_lifecycle_retains_one_row_without_republishing() {
     use octet_agent::{EntryId, FinishReason};
 
     let mut shell = InteractiveShell::test_shell();
@@ -11451,6 +11481,7 @@ fn the_settled_subagent_block_stays_at_the_point_the_delegation_happened() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11471,53 +11502,33 @@ fn the_settled_subagent_block_stays_at_the_point_the_delegation_happened() {
         failure_reason: None,
         failure_class: None,
     };
-    let subagent_block = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .transcript
-            .iter()
-            .position(|block| {
-                matches!(
-                    block,
-                    TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some()
-                )
-            })
-            .expect("a settled subagent block")
-    };
-    let prompt_position = |shell: &InteractiveShell, text: &str| {
-        shell
-            .state
-            .borrow()
-            .transcript
-            .iter()
-            .position(|block| matches!(block, TranscriptBlock::User { text: prompt, .. } if prompt == text))
-            .unwrap_or_else(|| panic!("prompt {text} is in the transcript"))
+    let transcript_len = |shell: &InteractiveShell| shell.state.borrow().transcript.len();
+    let strip = |shell: &InteractiveShell| {
+        shell_chrome(&shell.state.borrow(), 120, Instant::now()).subagents
     };
 
-    // Turn one: the delegation lands inside its own turn.
+    // Turn one: the delegation creates one live transcript row.
     let run_id = shell.begin_run("test-provider");
     shell.on_prompt_submitted("first question");
+    let before_delegation = transcript_len(&shell);
     shell.on_run_event(
         run_id,
         &octet_agent::AgentEvent::DelegationUpdated {
             snapshot: snapshot(1, vec![child("agent-1", "running")]),
         },
     );
-    let at_delegation = subagent_block(&shell);
-    assert!(
-        at_delegation > prompt_position(&shell, "first question"),
-        "the block must follow the prompt that opened the turn"
-    );
+    assert_eq!(transcript_len(&shell), before_delegation + 1);
+    assert!(strip(&shell).is_empty());
 
-    // Settlement and the end of the run keep it exactly where it was.
+    // Settlement updates the same row; the end of the run leaves it in place.
     shell.on_run_event(
         run_id,
         &octet_agent::AgentEvent::DelegationUpdated {
             snapshot: snapshot(2, vec![child("agent-1", "completed")]),
         },
     );
-    assert_eq!(subagent_block(&shell), at_delegation);
+    assert_eq!(transcript_len(&shell), before_delegation + 1);
+    assert!(strip(&shell).is_empty());
     shell.on_run_event(
         run_id,
         &octet_agent::AgentEvent::RunFinished {
@@ -11525,38 +11536,22 @@ fn the_settled_subagent_block_stays_at_the_point_the_delegation_happened() {
             reason: FinishReason::Aborted,
         },
     );
-    assert_eq!(
-        subagent_block(&shell),
-        at_delegation,
-        "an interrupted run must leave the settled block in its own turn"
-    );
+    assert!(strip(&shell).is_empty());
 
-    // Turn two republishes the same, already-completed roster. The block stays
-    // in turn one and nothing new is appended below the new prompt.
+    // Turn two republishes the same completed roster without appending history.
     shell.begin_run("test-provider");
     shell.on_prompt_submitted("second question");
+    let before_republish = transcript_len(&shell);
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: snapshot(3, vec![child("agent-1", "completed")]),
     });
-    let second_prompt = prompt_position(&shell, "second question");
-    assert_eq!(subagent_block(&shell), at_delegation);
-    assert!(
-        subagent_block(&shell) < second_prompt,
-        "the settled block belongs to the turn that produced it"
-    );
-    assert!(
-        shell
-            .state
-            .borrow()
-            .transcript
-            .iter()
-            .skip(second_prompt)
-            .all(|block| !matches!(
-                block,
-                TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some()
-            )),
-        "no subagent block may open below the new prompt"
-    );
+    assert_eq!(transcript_len(&shell), before_republish);
+    assert!(strip(&shell).is_empty());
+    shell.select_all_transcript();
+    let copy = shell.copy_selected_plain_text().unwrap();
+    assert!(copy.contains("first question") && copy.contains("second question"));
+    assert_eq!(copy.matches("Subagents").count(), 1);
+    assert!(!copy.contains("Inspect tests"));
 }
 
 /// Maintainer report: "no working indicator or thinking for a bit" after a new
@@ -11621,6 +11616,7 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11634,7 +11630,7 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         session: Some("agent-session:opaque".into()),
     };
 
-    // A live worker keeps the transcript event active...
+    // A live worker gets one transcript row...
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 1,
@@ -11646,11 +11642,11 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         },
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
 
-    // ...and the final settlement keeps the event in the transcript (with a
-    // settled green/red margin) instead of parking it in the chrome strip.
+    // ...and final settlement updates that row in place.
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 2,
@@ -11662,10 +11658,9 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         },
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
     assert!(
         shell_chrome(&shell.state.borrow(), 120, Instant::now())
-            .composer
+            .subagents
             .iter()
             .all(|row| !row.contains("Subagents")),
         "a settled roster never composes into pinned chrome"
@@ -11678,11 +11673,11 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(settled.contains("Subagents"), "{settled}");
-    assert!(settled.contains("Inspect tests"), "{settled}");
+    assert!(settled.contains("Subagents · 1 completed"), "{settled}");
+    assert!(!settled.contains("Inspect tests"), "{settled}");
     assert!(settled.contains("completed"), "{settled}");
 
-    // A spawn that fails outright is still transcript material.
+    // A spawn failure is retained for the inspector, not synthetic history.
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 3,
@@ -11694,6 +11689,20 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         },
     });
     assert!(shell.state.borrow().subagent_activity.is_some());
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("spawn rejected: worker limit reached")
+    );
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
     let failed = shell
         .state
         .borrow()
@@ -11703,7 +11712,7 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        failed.contains("spawn rejected: worker limit reached"),
+        !failed.contains("spawn rejected: worker limit reached"),
         "{failed}"
     );
 }
@@ -11711,6 +11720,7 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
 #[test]
 fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
     let mut shell = InteractiveShell::test_shell();
+    shell.set_size(120, 120);
     let child = |id: &str, task: &str, state: &str| octet_agent::DelegationTelemetryChild {
         child_id: id.into(),
         task_name: task.into(),
@@ -11723,6 +11733,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11734,16 +11745,6 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         effective_tool_policy: test_effective_tool_policy(),
         orchestration_provenance: inherited_delegation_provenance(),
         session: Some("agent-session:opaque".into()),
-    };
-    let render = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(120)
-            .iter()
-            .map(|line| strip_terminal_sequences(line))
-            .collect::<Vec<_>>()
-            .join("\n")
     };
     let snapshot = octet_agent::DelegationTelemetrySnapshot {
         revision: 1,
@@ -11764,39 +11765,40 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
     };
     publish_current_turn_roster(&mut shell, snapshot);
 
-    assert!(!shell.verbose_tools());
-    let collapsed = render(&shell);
-    for task in [
-        "Read release history",
-        "Audit release surface",
-        "Scan changelog",
-        "Inspect tests",
-        "Check package map",
-        "Review docs",
-        "Audit extensions",
-        "Verify release",
-    ] {
-        assert!(collapsed.contains(task), "missing {task}: {collapsed}");
-    }
-
-    // Ctrl+O still controls ordinary tool disclosure, but a subagents event is
-    // already bounded to the complete eight-worker roster in either mode.
-    shell.toggle_disclosure();
-    assert!(shell.verbose_tools());
-    let expanded = render(&shell);
-    assert!(expanded.contains("Read release history"), "{expanded}");
-    assert!(expanded.contains("Verify release"), "{expanded}");
-
-    shell.toggle_disclosure();
-    assert!(!shell.verbose_tools());
-    let collapsed_again = render(&shell);
+    let compact = shell
+        .state
+        .borrow()
+        .rendered_transcript(120)
+        .iter()
+        .map(|row| strip_terminal_sequences(row))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        collapsed_again.contains("Read release history"),
-        "{collapsed_again}"
+        compact.contains("Subagents · 5 running · 3 completed · /subagents"),
+        "{compact}"
+    );
+    assert!(
+        compact.contains("Read release history · ↑100 ↓10"),
+        "{compact}"
+    );
+    assert!(compact.contains("+1 more"), "{compact}");
+    assert!(!compact.contains("Verify release"), "{compact}");
+    shell.toggle_disclosure();
+    let expanded = shell.state.borrow().rendered_transcript(120).join("\n");
+    assert!(strip_terminal_sequences(&expanded).contains("Subagents · 5 running · 3 completed"));
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .telemetry
+            .len(),
+        8
     );
 
-    // Settlement preserves the complete roster; it does not introduce a
-    // separate disclosure mode for the subagents event.
+    // Settlement hides the strip regardless of disclosure, retaining telemetry.
     shell.on_agent_event(&octet_agent::AgentEvent::DelegationUpdated {
         snapshot: octet_agent::DelegationTelemetrySnapshot {
             revision: 2,
@@ -11812,309 +11814,51 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         },
     });
     shell.toggle_disclosure();
-    assert!(shell.verbose_tools());
-    assert!(render(&shell).contains("Read release history"));
-}
-
-/// Maintainer screenshot: 32 rows where 22 dead workers buried 8 live ones
-/// ("8 running · 2 done · 8 failed · 14 stopped"). The live workers must stay
-/// visible, every terminal group must collapse to one counted row, and the
-/// event must stay bounded in both disclosure modes.
-#[test]
-fn subagent_transcript_bounds_a_large_roster_and_keeps_live_workers_visible() {
-    let mut shell = InteractiveShell::test_shell();
-    let child = |id: &str, task: &str, state: &str, elapsed: u64, reason: Option<&str>| {
-        octet_agent::DelegationTelemetryChild {
-            child_id: id.into(),
-            task_name: task.into(),
-            profile: Some("explore".into()),
-            model: "cerebras-gemma-4-31b".into(),
-            state: state.into(),
-            phase: state.into(),
-            current_tool: (state == "running").then(|| "read".into()),
-            tool_use_count: 2,
-            input_tokens: 1_000,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            output_tokens: 100,
-            reasoning_tokens: 0,
-            total_tokens: 1_100,
-            cost: None,
-            cost_microdollars: Some(1),
-            elapsed_ms: elapsed,
-            failure_class: reason.map(|_| "provider_failure".into()),
-            failure_reason: reason.map(str::to_owned),
-            effective_tool_policy: test_effective_tool_policy(),
-            orchestration_provenance: inherited_delegation_provenance(),
-            session: Some("agent-session:opaque".into()),
-        }
-    };
-    let mut children = Vec::new();
-    for index in 0..8 {
-        children.push(child(
-            &format!("live-{index}"),
-            &format!("live worker {index}"),
-            "running",
-            100 + index,
-            None,
-        ));
-    }
-    for index in 0..2 {
-        children.push(child(
-            &format!("done-{index}"),
-            &format!("done worker {index}"),
-            "completed",
-            500 + index,
-            None,
-        ));
-    }
-    for index in 0..8 {
-        children.push(child(
-            &format!("failed-{index}"),
-            &format!("failed worker {index}"),
-            "failed",
-            700 + index,
-            Some("provider request failed: upstream unavailable"),
-        ));
-    }
-    for index in 0..14 {
-        children.push(child(
-            &format!("stopped-{index}"),
-            &format!("stopped worker {index}"),
-            "stopped",
-            900 + index,
-            None,
-        ));
-    }
-    let snapshot = octet_agent::DelegationTelemetrySnapshot {
-        revision: 1,
-        captured_at_ms: 1_700_000_000_000,
-        children,
-        total_cost_microdollars: Some(1),
-        failure_reason: None,
-        failure_class: None,
-    };
-    publish_current_turn_roster(&mut shell, snapshot);
-
-    let render = |shell: &InteractiveShell, width: u16| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(width)
-            .iter()
-            .map(|line| strip_terminal_sequences(line))
-            .collect::<Vec<_>>()
-    };
-
-    let collapsed = render(&shell, 120).join("\n");
-    // Every live worker keeps its own row...
-    for index in 0..8 {
-        assert!(
-            collapsed.contains(&format!("live worker {index}")),
-            "live worker {index} is not visible: {collapsed}"
-        );
-    }
-    // ...and each terminal group reports its own displayed count.
-    for summary in ["completed · 2", "failed · 8", "stopped · 14"] {
-        assert!(
-            collapsed.contains(summary),
-            "missing {summary}: {collapsed}"
-        );
-    }
-    // The 22 dead workers are three summary rows, not 22 rows of their own: 32
-    // workers render as heading + running group + column header + 8 live rows +
-    // 3 collapsed summaries.
-    let lines = collapsed.lines().collect::<Vec<_>>();
-    let heading = lines
+    let settled = shell
+        .state
+        .borrow()
+        .rendered_transcript(120)
         .iter()
-        .position(|line| line.contains("Subagents"))
-        .expect("the event heading");
-    let summary_end = lines
-        .iter()
-        .rposition(|line| line.contains("stopped · 14"))
-        .expect("the stopped summary row");
+        .map(|row| strip_terminal_sequences(row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        settled.contains("Subagents · 3 completed · /subagents"),
+        "{settled}"
+    );
     assert_eq!(
-        summary_end - heading + 1,
-        14,
-        "the settled event must stay bounded: {collapsed}"
-    );
-    for summary in ["completed · 2", "failed · 8", "stopped · 14"] {
-        let row = lines
-            .iter()
-            .find(|line| line.contains(summary))
-            .unwrap_or_else(|| panic!("missing {summary}: {collapsed}"));
-        // One collapsed group is exactly one row: the connector, the count, and
-        // a bounded list of the workers it hides.
-        assert!(
-            row.trim_start().starts_with('└') || row.trim_start().starts_with("`-"),
-            "{row}"
-        );
-    }
-    // A group that cannot list every hidden worker still names some of them and
-    // marks the cut, rather than overflowing its row.
-    assert!(
-        collapsed.contains("done worker 0") && collapsed.contains("done worker 1"),
-        "{collapsed}"
-    );
-    assert!(
-        collapsed.contains('…') || collapsed.contains("..."),
-        "{collapsed}"
-    );
-    // The failure reason survives in the collapsed summary of the failed group.
-    assert!(
-        collapsed.contains("provider request failed: upstream unavailable"),
-        "{collapsed}"
-    );
-
-    // A narrow terminal truncates instead of overflowing.
-    let narrow = render(&shell, 40);
-    assert!(
-        narrow.iter().all(|row| visible_width(row) <= 40),
-        "{narrow:?}"
-    );
-
-    // Expanding still bounds the row count: the reader never gets an unbounded
-    // list, and the omitted tail is reported instead of silently dropped.
-    shell.toggle_disclosure();
-    let expanded = render(&shell, 120);
-    assert!(
-        expanded.len() <= 28,
-        "{} rows: {expanded:?}",
-        expanded.len()
-    );
-    assert!(
-        expanded.iter().any(|row| row.contains("more")),
-        "the bounded tail must be reported: {expanded:?}"
-    );
-    assert!(
-        expanded.join("\n").contains("live worker 0"),
-        "{expanded:?}"
-    );
-}
-
-/// The keyboard controls for the settled event: `ctrl+f` cycles the declared
-/// state narrowing (and carries it to the panel), `ctrl+s` cycles the row
-/// ordering state -> elapsed -> tokens.
-#[test]
-fn subagent_panel_keyboard_cycles_the_state_filter_and_the_row_ordering() {
-    use crossterm::event::KeyModifiers;
-
-    let mut shell = InteractiveShell::test_shell();
-    let child =
-        |id: &str, state: &str, elapsed: u64, tokens: u64| octet_agent::DelegationTelemetryChild {
-            child_id: id.into(),
-            task_name: id.into(),
-            profile: Some("explore".into()),
-            model: "test-model".into(),
-            state: state.into(),
-            phase: state.into(),
-            current_tool: None,
-            tool_use_count: 1,
-            input_tokens: tokens,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: 0,
-            total_tokens: tokens,
-            cost: None,
-            cost_microdollars: Some(1),
-            elapsed_ms: elapsed,
-            failure_class: None,
-            failure_reason: None,
-            effective_tool_policy: test_effective_tool_policy(),
-            orchestration_provenance: inherited_delegation_provenance(),
-            session: Some("agent-session:opaque".into()),
-        };
-    // `beta` is the slow worker with few tokens, `alpha` the fast one with many,
-    // so ordered by elapsed and ordered by tokens differ observably.
-    let snapshot = octet_agent::DelegationTelemetrySnapshot {
-        revision: 1,
-        captured_at_ms: 1_700_000_000_000,
-        children: vec![
-            child("alpha", "running", 100, 2_000),
-            child("beta", "running", 900, 10),
-            child("gamma", "completed", 500, 500),
-        ],
-        total_cost_microdollars: Some(1),
-        failure_reason: None,
-        failure_class: None,
-    };
-    publish_current_turn_roster(&mut shell, snapshot);
-    let rows = |shell: &InteractiveShell| {
         shell
             .state
             .borrow()
-            .rendered_transcript(120)
-            .iter()
-            .map(|line| strip_terminal_sequences(line))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    assert!(rows(&shell).contains("Subagents"), "{}", rows(&shell));
-
-    open_grouped_subagent_panel(&mut shell, 1, 1);
-    let press = |shell: &mut InteractiveShell, character: char| {
-        shell.panel_input(&panel_key_with_modifiers(
-            crossterm::event::KeyCode::Char(character),
-            KeyModifiers::CONTROL,
-        ));
-    };
-
-    // ctrl+f narrows to the first declared group, and the settled event shows
-    // the same narrowing so the two presentations cannot disagree.
-    press(&mut shell, 'f');
-    let filtered = rows(&shell);
-    assert!(filtered.contains("state: running"), "{filtered}");
-    press(&mut shell, 'f');
-    let filtered = rows(&shell);
-    assert!(filtered.contains("state: completed"), "{filtered}");
-    assert!(!filtered.contains("state: running"), "{filtered}");
-    assert!(
-        !filtered.contains("alpha"),
-        "the narrowing must hide the live rows: {filtered}"
+            .subagent_activity
+            .as_ref()
+            .unwrap()
+            .telemetry
+            .len(),
+        3
     );
-    press(&mut shell, 'f');
-    press(&mut shell, 'f');
-    press(&mut shell, 'f');
-    let restored = rows(&shell);
-    assert!(
-        !restored.contains("state:"),
-        "the cycle returns to all: {restored}"
-    );
-    assert!(restored.contains("alpha"), "{restored}");
+}
 
-    // State order keeps the host's declared order.
-    let alpha = restored.find("alpha").unwrap();
-    let beta = restored.find("beta").unwrap();
-    assert!(alpha < beta, "{restored}");
-
-    // ctrl+s orders by elapsed, largest first: the slow worker moves above the
-    // fast one even though the host declared the opposite order.
-    press(&mut shell, 's');
-    let by_elapsed = rows(&shell);
-    assert!(by_elapsed.contains("order: elapsed"), "{by_elapsed}");
-    assert!(
-        by_elapsed.find("beta").unwrap() < by_elapsed.find("alpha").unwrap(),
-        "{by_elapsed}"
-    );
-
-    // ...then by tokens, largest first: the chatty worker leads again.
-    press(&mut shell, 's');
-    let by_tokens = rows(&shell);
-    assert!(by_tokens.contains("order: tokens"), "{by_tokens}");
-    assert!(
-        by_tokens.find("alpha").unwrap() < by_tokens.find("beta").unwrap(),
-        "{by_tokens}"
-    );
-
-    // ...and back to the declared state order.
-    press(&mut shell, 's');
-    let back = rows(&shell);
-    assert!(!back.contains("order:"), "{back}");
-    assert!(
-        back.find("alpha").unwrap() < back.find("beta").unwrap(),
-        "{back}"
-    );
+/// Ctrl+F narrows the dedicated worker inspector without filtering the
+/// transcript lifecycle row.
+#[test]
+fn subagent_panel_keyboard_cycles_its_state_filter() {
+    let mut shell = InteractiveShell::test_shell();
+    open_grouped_subagent_panel(&mut shell, 2, 1);
+    let before = strip_terminal_sequences(&render_shell(&shell.state.borrow(), 120).join("\n"));
+    assert!(before.contains("live-0"), "{before}");
+    shell.panel_input(&panel_key_with_modifiers(
+        crossterm::event::KeyCode::Char('f'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    let filtered = strip_terminal_sequences(&render_shell(&shell.state.borrow(), 120).join("\n"));
+    assert!(filtered.contains("Running"), "{filtered}");
+    shell.panel_input(&panel_key_with_modifiers(
+        crossterm::event::KeyCode::Char('f'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    let filtered = strip_terminal_sequences(&render_shell(&shell.state.borrow(), 120).join("\n"));
+    assert!(filtered.contains("Done"), "{filtered}");
 }
 
 /// Enter confirms the drill-in for the selected worker and Esc closes the
@@ -12168,17 +11912,16 @@ fn extension_presentation_hides_terminal_subagent_activities() {
 
     assert!(shell.set_subagent_presentation(Some(&snapshot("running")), true));
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
+    assert!(shell_chrome(&shell.state.borrow(), 120, Instant::now())
+        .subagents
+        .is_empty());
 
-    // Terminal extension activities settle into the transcript event rather
-    // than being cleared from the shell chrome.
+    // Terminal extension activities hide the strip but retain accounting.
     assert!(shell.set_subagent_presentation(Some(&snapshot("succeeded")), true));
     assert!(shell.state.borrow().subagent_activity.is_some());
-    assert!(shell.state.borrow().subagent_activity_block.is_some());
     assert!(
         shell_chrome(&shell.state.borrow(), 120, Instant::now())
-            .composer
+            .subagents
             .iter()
             .all(|row| !row.contains("Subagents")),
         "a settled roster never composes into pinned chrome"
@@ -12191,8 +11934,8 @@ fn extension_presentation_hides_terminal_subagent_activities() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(settled.contains("Subagents"), "{settled}");
-    assert!(settled.contains("read-diffs · using read"), "{settled}");
+    assert!(settled.contains("Subagents · 1 completed"), "{settled}");
+    assert!(!settled.contains("read-diffs · using read"), "{settled}");
     assert!(settled.contains("completed"), "{settled}");
 }
 
@@ -12436,10 +12179,7 @@ fn tool_output_tail_expands_with_global_ctrl_o_and_copy_stays_safe() {
     let collapsed = transcript(&shell);
     assert!(collapsed.contains("private result line 8"), "{collapsed}");
     assert!(!collapsed.contains("private result line 1"), "{collapsed}");
-    assert!(
-        collapsed.contains("4 earlier visual rows hidden"),
-        "{collapsed}"
-    );
+    assert!(collapsed.contains("4 output rows collapsed"), "{collapsed}");
     assert_eq!(
         shell.debug_tool_output(&id).as_deref(),
         Some(secret.as_str())
@@ -13550,7 +13290,8 @@ fn read_only_document_panel_scrolls_and_returns_to_its_owner() {
         text: (0..30)
             .map(|line| format!("transcript line {line:02}"))
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+            .into(),
         styled: false,
         scroll_from_bottom: 0,
     });
@@ -13613,7 +13354,8 @@ fn read_only_document_home_reaches_top_with_wrapped_error_and_header_chrome() {
         text: (0..40)
             .map(|line| format!("document row {line:02}"))
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+            .into(),
         styled: false,
         scroll_from_bottom: 0,
     });
@@ -13954,6 +13696,7 @@ async fn actual_read_image_reaches_live_shell_and_reopened_session() {
             display_name: None,
             protocol: Protocol::OpenAiChat,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(octet_ai::Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -14039,6 +13782,26 @@ async fn actual_read_image_reaches_live_shell_and_reopened_session() {
             assert!(!text.contains("\x1b_G"));
             assert!(!text.contains("\x1b]1337;File="));
         }
+    }
+}
+
+#[test]
+fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
+    use sexy_tui_rs::{ImageDimensions, ImageLayout, ImageProtocol};
+
+    let kitty = ImageCapabilities::forced(Some(ImageProtocol::Kitty), None);
+    let screenshot = ImageDimensions::new(320, 1280).unwrap();
+    let wide_screenshot = ImageDimensions::new(1600, 900).unwrap();
+    for width in [46, 80] {
+        let viewport = tool_image_viewport(width, kitty);
+        let layout = ImageLayout::fit(screenshot, viewport).unwrap();
+        assert_eq!(
+            (layout.columns(), layout.rows()),
+            (8, MAX_TOOL_IMAGE_RENDER_ROWS)
+        );
+        let wide = ImageLayout::fit(wide_screenshot, viewport).unwrap();
+        assert!(wide.columns() >= 40 && wide.rows() >= 10);
+        assert!(wide.columns() <= width && wide.rows() <= MAX_TOOL_IMAGE_RENDER_ROWS);
     }
 }
 
@@ -14185,18 +13948,25 @@ fn provider_retry_removes_closed_reasoning_and_text_without_removing_independent
             assert!(
                 matches!(&state.transcript[selected.anchor.block], TranscriptBlock::Notice(text) if text == "independent notice")
             );
-            let worker = state
-                .subagent_activity_block
-                .expect("independent worker survives");
             assert!(
-                matches!(&state.transcript[worker], TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some())
+                state.subagent_activity.is_some(),
+                "independent telemetry survives"
             );
+            assert!(shell_chrome(&state, 80, Instant::now())
+                .subagents
+                .is_empty());
+            assert!(state
+                .transcript
+                .iter()
+                .any(|block| matches!(block, TranscriptBlock::Subagents(_))));
         }
         shell.select_all_transcript();
         let copy = shell.copy_selected_plain_text().unwrap();
         assert!(!copy.contains("rejected"));
         assert!(!copy.contains("diagnostic-only"));
         assert!(copy.contains("independent notice"));
+        assert_eq!(copy.matches("Subagents").count(), 1);
+        assert!(!copy.contains("Read changelog"));
         if !application_viewport {
             assert!(
                 bytes
@@ -15008,6 +14778,43 @@ fn queued_follow_ups_stay_with_their_session_across_hydration() {
 }
 
 #[test]
+fn newest_joint_pending_input_wins_across_steering_and_follow_ups() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.begin_run("fixture");
+    let (_prepared, receipt) = octet_agent::PreparedSteering::new("first steering");
+    shell.queue_retractable_steering(
+        receipt,
+        "first steering".into(),
+        "first steering".into(),
+        Vec::new(),
+    );
+    shell.queue_follow_up(ComposedInput::from_text("newer follow-up".into()));
+
+    shell.edit_queued_message();
+    assert_eq!(shell.pending(), "newer follow-up");
+    assert_eq!(shell.state.borrow().steering_queue.len(), 1);
+
+    shell.clear_editor();
+    shell.edit_queued_message();
+    assert_eq!(shell.pending(), "first steering");
+    assert!(shell.state.borrow().steering_queue.is_empty());
+}
+
+#[test]
+fn refused_steering_admission_restores_the_draft_without_a_fifo_entry() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.restore_unqueued_steering("refused steering".into(), Vec::new());
+
+    assert_eq!(shell.pending(), "refused steering");
+    assert!(shell.state.borrow().steering_queue.is_empty());
+    let recomposed = shell.drain_composed();
+    assert!(matches!(
+        recomposed.parts.as_slice(),
+        [octet_agent::InputPart::Text(text)] if text == "refused steering"
+    ));
+}
+
+#[test]
 fn queued_follow_up_editing_preserves_payloads_and_never_overwrites_a_draft() {
     let mut shell = InteractiveShell::test_shell();
     shell.begin_run("fixture");
@@ -15281,9 +15088,7 @@ fn failed_tool_calls_never_warn_and_live_subagents_are_reported_under_the_outcom
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
-        // `same_presentation` deliberately ignores tool phases, elapsed clocks
-        // and call counts, so the fixture varies a field the roster actually
-        // prints to make the changed snapshot a real presentation change.
+        estimated_output_tokens: None,
         output_tokens: 10 * calls,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -15345,42 +15150,165 @@ fn failed_tool_calls_never_warn_and_live_subagents_are_reported_under_the_outcom
         "{frame:?}"
     );
     assert!(
-        frame.contains("  subagents are running; inspect them in the /subagents menu."),
+        frame.contains("Subagents · 1 running · /subagents"),
         "{frame:?}"
     );
 
-    // Worker events inside the same aggregate state never repaint the outcome:
-    // the detail line rides the roster's bounded aggregate cadence.
-    let (revision, roster_index, roster_revision) = {
-        let state = shell.state.borrow();
-        let roster_index = state
-            .subagent_activity_block
-            .expect("the roster block owns the live workers");
-        (
-            state.block_revisions[outcome_index],
-            roster_index,
-            state.block_revisions[roster_index],
-        )
-    };
+    // Worker-only telemetry does not repaint the separate outcome or row.
+    let revision = shell.state.borrow().block_revisions[outcome_index];
+    let before = shell.state.borrow().rendered_transcript(100).clone();
     publish_current_turn_roster(&mut shell, roster(worker("running", 5)));
-    assert!(
-        shell.state.borrow().block_revisions[roster_index] > roster_revision,
-        "a changed worker snapshot repaints the roster block"
-    );
+    assert_eq!(*shell.state.borrow().rendered_transcript(100), before);
+    assert!(shell_chrome(&shell.state.borrow(), 100, Instant::now())
+        .subagents
+        .is_empty());
     assert_eq!(
         shell.state.borrow().block_revisions[outcome_index],
         revision,
         "a live worker event must not touch the outcome block"
     );
 
-    // Settlement is the one aggregate transition: the line disappears.
+    // Settlement repaints only the row and leaves the outcome unchanged.
     publish_current_turn_roster(&mut shell, roster(worker("completed", 5)));
     assert!(
-        shell.state.borrow().block_revisions[outcome_index] > revision,
-        "the roster's aggregate settlement repaints the outcome block"
+        shell.state.borrow().block_revisions[outcome_index] == revision,
+        "the independent row settles without repainting the outcome block"
     );
     let frame = strip_terminal_sequences(&render_shell(&shell.state.borrow(), 100).join("\n"));
     assert!(!frame.contains("subagents are running"), "{frame:?}");
     assert!(frame.contains("✓ completed"), "{frame:?}");
     assert!(!frame.to_lowercase().contains("warning"), "{frame:?}");
+}
+
+#[test]
+fn wide_default_prose_and_prompt_use_the_available_width() {
+    let theme = crate::tui::theme::test_theme();
+    let source = (0..17).map(|_| "abcdef").collect::<Vec<_>>().join(" ");
+    assert!(source.len() > 92 && source.len() < 158);
+    let document = parse_markdown(&source);
+    let renderer = theme.rich_renderer();
+    assert_eq!(
+        renderer.render(&document, 158).plain_lines(),
+        vec![source.clone()]
+    );
+    let prompt = render_user_prompt(&source, &None, None, &renderer, &theme, 160);
+    assert_eq!(
+        prompt.len(),
+        1,
+        "wide prompt must not retain a 92-cell lane: {prompt:?}"
+    );
+    assert_eq!(strip_terminal_sequences(&prompt[0]), format!("› {source}"));
+    assert!(renderer.render(&document, 80).lines.len() > 1);
+}
+
+#[test]
+fn colored_prompt_preserves_markdown_runs_inside_its_highlight() {
+    let theme = crate::tui::theme::test_theme_for(
+        TerminalBackground::Dark,
+        crate::tui::terminal::TerminalCapabilities::test(
+            true,
+            true,
+            crate::tui::terminal::ColorDepth::TrueColor,
+        ),
+    );
+    let source = "plain **strong** and `code` [link](https://example.org)";
+    let block = TranscriptBlock::User {
+        text: source.into(),
+        model_lab: Some(ModelLab::OpenAi),
+        prompt_color: Some("#123456".into()),
+        persisted: true,
+    };
+    assert_eq!(block_copy_text(&block), source);
+    let rows = render_block(
+        None,
+        &block,
+        &theme,
+        &theme.rich_renderer(),
+        &theme.reasoning_renderer(),
+        120,
+        false,
+    );
+    let row = rows
+        .iter()
+        .position(|line| strip_terminal_sequences(line).contains("strong"))
+        .expect("rich prompt row");
+    let line = strip_terminal_sequences(&rows[row]);
+    let terminal = emulate_rows(&rows, 120);
+    let plain = terminal
+        .screen()
+        .cell(row as u16, line.find("plain").unwrap() as u16)
+        .unwrap();
+    let strong = terminal
+        .screen()
+        .cell(row as u16, line.find("strong").unwrap() as u16)
+        .unwrap();
+    let code = terminal
+        .screen()
+        .cell(row as u16, line.find("code").unwrap() as u16)
+        .unwrap();
+    let link = terminal
+        .screen()
+        .cell(row as u16, line.find("link").unwrap() as u16)
+        .unwrap();
+    assert!(strong.bold(), "strong Markdown lost its weight: {rows:?}");
+    assert_ne!(
+        code.fgcolor(),
+        plain.fgcolor(),
+        "inline code lost its color: {rows:?}"
+    );
+    assert!(
+        link.underline(),
+        "Markdown link lost its underline: {rows:?}"
+    );
+    assert_ne!(plain.bgcolor(), vt100::Color::Default);
+    for cell in [strong, code, link] {
+        assert_eq!(
+            cell.bgcolor(),
+            plain.bgcolor(),
+            "highlight dropped inside an inline span"
+        );
+    }
+}
+
+#[test]
+fn live_model_picker_refresh_preserves_filter_and_model_identity() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Select model"),
+        items: vec!["Alpha".into(), "Beta One".into()],
+        descriptions: vec![None, None],
+        selected: 0,
+        filter: "beta".into(),
+        action: PanelAction::SelectGroupedModel {
+            models: vec![ModelId("alpha".into()), ModelId("beta-one".into())],
+            providers: vec!["one".into(), "one".into()],
+        },
+    });
+    assert_eq!(shell.highlighted_panel_index(), Some(1));
+    assert!(shell.refresh_panel_models(
+        vec!["Beta Two".into(), "Alpha".into(), "Beta One".into()],
+        vec![None, None, None],
+        vec![
+            ModelId("beta-two".into()),
+            ModelId("alpha".into()),
+            ModelId("beta-one".into()),
+        ],
+        vec!["two".into(), "one".into(), "one".into()],
+    ));
+    assert_eq!(shell.highlighted_panel_index(), Some(2));
+    let state = shell.state.borrow();
+    let Some(Panel::SelectList {
+        filter,
+        selected,
+        action,
+        ..
+    }) = state.panel.as_ref()
+    else {
+        panic!("model picker was replaced");
+    };
+    assert_eq!(filter, "beta");
+    assert_eq!(*selected, 1);
+    assert!(
+        matches!(action, PanelAction::SelectGroupedModel { models, .. } if models[2].0 == "beta-one")
+    );
 }

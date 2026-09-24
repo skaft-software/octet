@@ -1,0 +1,171 @@
+flowchart TB
+  classDef file fill:#eef2ff,stroke:#4f46e5,color:#111827
+  classDef engine fill:#ecfdf5,stroke:#059669,color:#111827
+  classDef runtime fill:#f0fdf4,stroke:#16a34a,color:#111827
+  classDef external fill:#fff7ed,stroke:#ea580c,color:#111827
+  classDef risk fill:#fef2f2,stroke:#dc2626,color:#991b1b
+  classDef ignored fill:#f3f4f6,stroke:#6b7280,color:#374151
+  Dev["Developer / fresh checkout"]
+  Mac["Apple Silicon macOS<br/>aarch64-darwin"]
+  Home["$HOME<br/>/Users/achumukundan"]
+  GitHub["GitHub / Nix sources / registries"]
+  LAN["LAN SSH peers"]
+  RemoteRelay["REMOTE_RELAY_BASE_URL<br/>remote relay"]
+  Secrets["Manual secret files<br/>~/.config/env/real.env<br/>~/workspace/.env"]
+  Brew["Homebrew"]
+  Stow["GNU Stow"]
+  NixDaemon["Determinate Nix daemon"]
+  NixStore["Nix store / generations"]
+  subgraph Repo["~/.dotfiles — 26 tracked files"]
+    direction TB
+    README["README.md"]
+    GitIgnore[".gitignore"]
+    Envrc[".envrc<br/>ignored in Git"]
+    Flake["flake.nix"]
+    Lock["flake.lock"]
+    Brewfile["Brewfile"]
+    Result["result + .direnv/<br/>generated/ignored"]
+    subgraph NixFiles["nix/"]
+      Darwin["darwin.nix<br/>system packages, fonts, PostgreSQL"]
+      Defaults["defaults.nix<br/>macOS preferences"]
+      LaunchAgents["launchagents.nix<br/>no-mistakes LaunchAgent"]
+      HomeNix["home.nix<br/>Home Manager user configuration"]
+    end
+    subgraph Scripts["scripts/"]
+      Bootstrap["bootstrap.sh<br/>Homebrew + Stow fallback"]
+      Activate["activate-nix.sh<br/>nix run .#activate"]
+    end
+    subgraph References["Reference / fallback configuration"]
+      ZshRef["zsh/.zshenv<br/>zsh/.zprofile<br/>zsh/.zshrc"]
+      StarActive["starship/starship.toml"]
+      StarAlt["starship/starship-kawaii.toml<br/>starship/starship-pinkout.toml"]
+      GitRef["git/.gitconfig"]
+      SSHRef["ssh/config"]
+    end
+    subgraph GhostFiles["ghostty/themes/"]
+      Light["Vanilla-Light"]
+      Dark["Vanilla-Dark"]
+    end
+    subgraph EnvFiles["env/"]
+      BaseEnv["base.env<br/>secret template"]
+      ProxyEnv["proxy.env<br/>proxy template"]
+    end
+    subgraph RelayFiles["cloudflare/local-relay-proxy/"]
+      Package["package.json<br/>npm start → node proxy.js"]
+      PackageLock["package-lock.json"]
+      ProxyJS["proxy.js<br/>Express proxy implementation"]
+    end
+  end
+  NixInputs["Locked Nix inputs<br/>nixpkgs • nix-darwin • home-manager"]
+  NixSwitch["nix-darwin switch"]
+  Config["darwinConfigurations<br/>Achus-MacBook-Air"]
+  DevShell["devShell<br/>nixpkgs-fmt"]
+  HMGlue["Home Manager integration"]
+  HomeMgr["Home Manager evaluation"]
+  SystemState["Declarative macOS system state"]
+  HomeState["Declarative user state"]
+  Zsh["Interactive/login Zsh"]
+  Prompt["Starship prompt"]
+  GitRuntime["Git configuration"]
+  SSHRuntime["SSH configuration"]
+  Tmux["tmux"]
+  GhosttyConfig["Ghostty config + theme links"]
+  GhosttyApp["Ghostty.app<br/>Homebrew cask"]
+  Terminal["Ghostty terminal"]
+  Tools["CLI/dev tools"]
+  Node["Node.js / npm"]
+  PostgreSQL["PostgreSQL 14"]
+  Launchd["macOS launchd"]
+  NoMistakes["~/.no-mistakes/bin/no-mistakes"]
+  Docker["Docker CLI<br/>Docker daemon manual"]
+  Direnv["direnv + nix-direnv"]
+  LocalClient["Local client"]
+  LocalProxy["local-relay-proxy<br/>127.0.0.1:LOCAL_PROXY_PORT"]
+  Dev --> README
+  Dev --> Flake
+  Dev --> Bootstrap
+  Dev --> ProxyJS
+  README -->|quick start| NixSwitch
+  README -.documents.-> Flake
+  README -.documents.-> Brewfile
+  GitIgnore -.controls.-> Result
+  Envrc -->|use flake .| Direnv
+  Direnv --> DevShell
+  Lock -->|pins revisions| Flake
+  NixInputs --> Flake
+  Flake --> Config
+  Flake --> DevShell
+  Flake --> Darwin
+  Flake --> Defaults
+  Flake --> LaunchAgents
+  Flake --> HMGlue
+  HMGlue --> HomeNix
+  NixSwitch --> Config
+  NixSwitch --> NixDaemon
+  NixDaemon --> NixStore
+  Config --> SystemState
+  Config --> HomeMgr
+  Darwin --> SystemState
+  Defaults --> SystemState
+  LaunchAgents --> Launchd
+  HomeNix --> HomeMgr
+  HomeMgr --> HomeState
+  SystemState --> Mac
+  HomeState --> Home
+  SystemState --> PostgreSQL
+  HomeMgr --> Zsh
+  HomeMgr --> Prompt
+  HomeMgr --> GitRuntime
+  HomeMgr --> SSHRuntime
+  HomeMgr --> Tmux
+  HomeMgr --> GhosttyConfig
+  HomeMgr --> Tools
+  HomeMgr --> Docker
+  HomeMgr --> Direnv
+  GhosttyConfig --> Terminal
+  GhosttyApp --> Terminal
+  Light -->|home.file link| GhosttyConfig
+  Dark -->|home.file link| GhosttyConfig
+  Brewfile --> Brew
+  Brew --> GhosttyApp
+  Brew --> Node
+  Brew --> Tools
+  Terminal --> Zsh
+  Zsh --> Prompt
+  Zsh --> GitRuntime
+  Zsh --> SSHRuntime
+  Zsh --> Tmux
+  Zsh --> Tools
+  ZshRef --> Stow
+  GitRef --> Stow
+  SSHRef --> Stow
+  Stow --> Home
+  StarActive -.reference only.-> Prompt
+  StarAlt -.manual theme switch.-> Prompt
+  Bootstrap --> Stow
+  Bootstrap --> Brew
+  Bootstrap -.requires preinstalled.-> Prereqs["Homebrew + stow<br/>Starship is not installed by Brewfile"]
+  BaseEnv -.template only.-> Secrets
+  ProxyEnv -.PROXY_ENV or ./proxy.env.-> LocalProxy
+  Secrets -->|sourced by shell| Zsh
+  Launchd --> NoMistakes
+  NoMistakes --> Home
+  HomeNix -.Docker CLI only.-> Docker
+  Docker -.requires manual.-> DockerDaemon["Docker Desktop / daemon"]
+  PackageLock --> Package
+  Package --> Node
+  ProxyJS --> LocalProxy
+  Node --> LocalProxy
+  LocalClient -->|HTTP localhost| LocalProxy
+  LocalProxy -->|CF Access headers| RemoteRelay
+  SSHRuntime --> LAN
+  GitRuntime --> GitHub
+  Flake --> GitHub
+  Package --> GitHub
+  Activate -.-> Missing["ERROR: flake exposes no<br/>packages/apps.activate output"]
+  class README,GitIgnore,Envrc,Flake,Lock,Brewfile,Darwin,Defaults,LaunchAgents,HomeNix,Bootstrap,Activate,ZshRef,StarActive,StarAlt,GitRef,SSHRef,Light,Dark,BaseEnv,ProxyEnv,Package,PackageLock,ProxyJS file
+  class Result ignored
+  class NixSwitch,Config,DevShell,HMGlue,HomeMgr,SystemState,HomeState,Direnv engine
+  class Zsh,Prompt,GitRuntime,SSHRuntime,Tmux,GhosttyConfig,Terminal,Tools,Node,LocalProxy,PostgreSQL,Launchd,NoMistakes runtime
+  class Mac,Home,NixDaemon,NixStore,Brew,Stow,GitHub,LAN,RemoteRelay,Secrets external
+  class Missing,Prereqs risk

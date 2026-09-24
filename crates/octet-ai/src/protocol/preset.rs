@@ -109,8 +109,10 @@ pub(super) fn chat(model: &Model, req: &Request, body: &mut Value) -> Result<(),
                     }
                 }
                 ThinkingFormat::OpenRouter => {
-                    if let Some(effort) = &effort {
-                        body["reasoning"] = json!({"effort": effort});
+                    if enabled {
+                        if let Some(effort) = &effort {
+                            body["reasoning"] = json!({"effort": effort});
+                        }
                     }
                 }
                 ThinkingFormat::DeepSeek | ThinkingFormat::Zai => {
@@ -226,12 +228,58 @@ pub(super) fn chat(model: &Model, req: &Request, body: &mut Value) -> Result<(),
     sampling(model, req, body)
 }
 
-pub(super) fn sampling(model: &Model, _req: &Request, body: &mut Value) -> Result<(), AiError> {
+pub(super) fn sampling(model: &Model, req: &Request, body: &mut Value) -> Result<(), AiError> {
     for (name, value) in &model.spec.preset.sampling_params {
         // Named controls were defaulted before canonical validation. Never
         // overwrite their validated request values in the final body merge.
         if !matches!(name.as_str(), "temperature" | "stop") {
             body[name] = value.clone();
+        }
+    }
+    // Sampling restrictions belong to the qualified native route, never to a
+    // third-party model merely sharing an OpenAI-looking name.
+    let qualified = match model.endpoint.base_url.host_str() {
+        Some("api.openai.com") => model.endpoint.id.0 == "openai",
+        Some("chatgpt.com" | "chat.openai.com") => {
+            model.endpoint.runtime.responses_profile == crate::ResponsesRuntimeProfile::Codex
+        }
+        _ => false,
+    };
+    if qualified
+        && matches!(
+            model.spec.api_name.as_str(),
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        )
+    {
+        let effective = match req
+            .responses
+            .as_ref()
+            .and_then(|options| options.input.as_ref())
+        {
+            Some(input) => input.effective_reasoning(&req.reasoning)?,
+            None => req.reasoning.clone(),
+        };
+        if effective != ReasoningConfig::Off {
+            let invalid_sampling = ["temperature", "top_p", "top_logprobs"]
+                .iter()
+                .any(|key| body.get(*key).is_some())
+                || (model.spec.protocol == crate::Protocol::OpenAiChat
+                    && body.get("logprobs").is_some())
+                || body
+                    .get("include")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| {
+                        values
+                            .iter()
+                            .any(|value| value.as_str() == Some("message.output_text.logprobs"))
+                    });
+            if invalid_sampling {
+                return Err(ConfigError::Parse(
+                    "GPT-6 reasoning requests do not support sampling or output logprobs controls"
+                        .into(),
+                )
+                .into());
+            }
         }
     }
     Ok(())

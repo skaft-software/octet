@@ -145,6 +145,7 @@ fn fixture_model(id: &str, protocol: Protocol) -> CopilotModel {
         id,
         protocol,
         Capabilities {
+            responses_features: Default::default(),
             input_modalities: ModalitySet::none(),
             output_modalities: ModalitySet::none(),
             tools: true,

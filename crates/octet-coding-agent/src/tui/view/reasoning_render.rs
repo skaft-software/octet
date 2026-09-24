@@ -1,4 +1,4 @@
-use sexy_tui_rs::{strip_terminal_sequences, Color, RichRenderer};
+use sexy_tui_rs::{strip_terminal_sequences, visible_width, Color, RichRenderer};
 use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -6,7 +6,7 @@ use unicode_width::UnicodeWidthStr;
 use super::assistant_block::AssistantBlock;
 use super::{activity_elbow, finish_transcript_block, fit_line, subdued_text};
 use crate::tui::terminal::ColorDepth;
-use crate::tui::theme::{OctetTheme, TerminalBackground};
+use crate::tui::theme::{OctetTheme, ShimmerMode, TerminalBackground};
 
 /// The status label starts two cells after its margin dot (`• `). Keeping the
 /// dot in the same coordinate space makes the shimmer travel through it before
@@ -61,6 +61,24 @@ fn activity_cycle(label: &str) -> usize {
 /// smoothness test pins that count, so the cycle can never be shortened into a
 /// loop with no rest gap.
 const ACTIVITY_SWEEP_REST_FRAMES: usize = 2;
+
+// Physical mode treats the shimmer as a small moving light field rather than
+// as a sequence of palette steps. It is deliberately limited to known
+// backgrounds and TrueColor/ANSI256; the classic renderer remains the
+// compatibility path for ANSI16 and unknown profiles.
+const ACTIVITY_PHYS_DARK_BASE: f64 = 0.55;
+const ACTIVITY_PHYS_DARK_SWEEP: f64 = 0.99;
+const ACTIVITY_PHYS_LIGHT_BASE: f64 = 0.0085;
+const ACTIVITY_PHYS_LIGHT_SWEEP: f64 = 0.11;
+const ACTIVITY_PHYS_H_FRONT: f64 = 2.5;
+const ACTIVITY_PHYS_H_TRAIL: f64 = 5.0;
+const ACTIVITY_PHYS_CORE_HALF: f64 = 1.2;
+const ACTIVITY_PHYS_CORE_WEIGHT: f64 = 0.55;
+const ACTIVITY_PHYS_CORE_LIFT: f64 = 0.10;
+const ACTIVITY_PHYS_SPEED_TRUECOLOR: f64 = 1.6;
+const ACTIVITY_PHYS_SPEED_ANSI256: f64 = 4.0 / 3.0;
+const ACTIVITY_PHYS_REST_TICKS: usize = 2;
+
 type Rgb = (u8, u8, u8);
 const ACTIVITY_RAINBOW: [Rgb; 7] = [
     (255, 96, 96),
@@ -125,6 +143,82 @@ const ACTIVITY_MARKER_LIGHT_BASE_LUMINANCE: f64 = 0.18;
 /// the plain sweep does.
 const ACTIVITY_RAINBOW_DARK_MIN_LUMINANCE: f64 = 0.62;
 const ACTIVITY_RAINBOW_LIGHT_MAX_LUMINANCE: f64 = ACTIVITY_LIGHT_SWEEP_LUMINANCE;
+
+fn physical_shimmer(theme: &OctetTheme) -> bool {
+    theme.shimmer_mode() == ShimmerMode::Physical
+        && matches!(
+            theme.background(),
+            TerminalBackground::Dark | TerminalBackground::Light
+        )
+        && matches!(
+            theme.capabilities().color,
+            ColorDepth::TrueColor | ColorDepth::Ansi256
+        )
+}
+
+fn physical_speed(theme: &OctetTheme) -> f64 {
+    match theme.capabilities().color {
+        ColorDepth::TrueColor => ACTIVITY_PHYS_SPEED_TRUECOLOR,
+        ColorDepth::Ansi256 => ACTIVITY_PHYS_SPEED_ANSI256,
+        ColorDepth::Ansi16 | ColorDepth::None => ACTIVITY_PHYS_SPEED_TRUECOLOR,
+    }
+}
+
+fn physical_motion_ticks(label: &str, speed: f64) -> usize {
+    let traverse = (label.width() as f64 - 1.0)
+        + ACTIVITY_PHYS_H_TRAIL
+        + (-ACTIVITY_MARKER_INDEX as f64)
+        + ACTIVITY_PHYS_H_FRONT;
+    // The endpoints are both rendered positions, so at least two motion
+    // samples are required even for a very short label.
+    (traverse / speed).round().max(2.0) as usize
+}
+
+fn physical_cycle(label: &str, speed: f64) -> usize {
+    physical_motion_ticks(label, speed) + ACTIVITY_PHYS_REST_TICKS
+}
+
+/// Map a physical shimmer tick to its continuous centre position.
+///
+/// The first motion sample starts exactly at the leading support boundary and
+/// the final motion sample ends exactly at the trailing support boundary. The
+/// nominal speed determines the number of samples; the short endpoint
+/// interpolation prevents a visible jump into the explicit parked rest gap.
+fn phys_center(label: &str, frame: usize, speed: f64) -> f64 {
+    let motion_ticks = physical_motion_ticks(label, speed);
+    let cycle = motion_ticks + ACTIVITY_PHYS_REST_TICKS;
+    let phase = frame % cycle;
+    let start = ACTIVITY_MARKER_INDEX as f64 - ACTIVITY_PHYS_H_FRONT;
+    let end = label.width() as f64 - 1.0 + ACTIVITY_PHYS_H_TRAIL;
+    if phase >= motion_ticks {
+        return end;
+    }
+    start + (end - start) * (phase as f64 / (motion_ticks - 1) as f64)
+}
+
+fn raised_cosine(distance: f64, half_width: f64) -> f64 {
+    let distance = distance.abs();
+    if distance >= half_width {
+        0.0
+    } else {
+        0.5 * (1.0 + (std::f64::consts::PI * distance / half_width).cos())
+    }
+}
+
+/// Main light envelope. The leading edge is short and the trailing tail is
+/// longer, which makes the highlight read as light moving through the text.
+fn band_main(distance: f64) -> f64 {
+    let half_width = if distance < 0.0 {
+        ACTIVITY_PHYS_H_TRAIL
+    } else {
+        ACTIVITY_PHYS_H_FRONT
+    };
+    raised_cosine(distance, half_width)
+}
+
+fn band_core(distance: f64) -> f64 {
+    raised_cosine(distance, ACTIVITY_PHYS_CORE_HALF)
+}
 
 /// Which ramp an activity label carries.
 ///
@@ -512,19 +606,32 @@ fn activity_srgb_channel(linear: f64) -> u8 {
 /// per-tick advance of the ramp entry would wobble a lit cell's luminance by up
 /// to 3% of the profile's separation, a small echo of the reported
 /// "slides part way ... then loops back" jump.
-fn activity_linear_mix(source: Rgb, destination: Rgb, strength_percent: u16) -> Rgb {
-    let strength = f64::from(strength_percent.min(100)) / 100.0;
+fn activity_linear_mix_amount(source: Rgb, destination: Rgb, amount: f64) -> Rgb {
+    let amount = amount.clamp(0.0, 1.0);
+    if amount <= 0.0 {
+        return source;
+    }
+    if amount >= 1.0 {
+        return destination;
+    }
     let channel = |source: u8, destination: u8| {
         activity_srgb_channel(
             activity_linear_channel(source)
-                + (activity_linear_channel(destination) - activity_linear_channel(source))
-                    * strength,
+                + (activity_linear_channel(destination) - activity_linear_channel(source)) * amount,
         )
     };
     (
         channel(source.0, destination.0),
         channel(source.1, destination.1),
         channel(source.2, destination.2),
+    )
+}
+
+fn activity_linear_mix(source: Rgb, destination: Rgb, strength_percent: u16) -> Rgb {
+    activity_linear_mix_amount(
+        source,
+        destination,
+        f64::from(strength_percent.min(100)) / 100.0,
     )
 }
 
@@ -579,6 +686,78 @@ fn activity_color_at_most(color: Rgb, target: f64) -> Rgb {
     activity_color_to_luminance(color, target, false)
 }
 
+fn activity_hsl(color: Rgb) -> (f64, f64, f64) {
+    let channel = |value: u8| f64::from(value) / 255.0;
+    let red = channel(color.0);
+    let green = channel(color.1);
+    let blue = channel(color.2);
+    let max = red.max(green).max(blue);
+    let min = red.min(green).min(blue);
+    let spread = max - min;
+    let lightness = (max + min) / 2.0;
+    if spread <= f64::EPSILON {
+        return (0.0, 0.0, lightness);
+    }
+    let saturation = spread / (1.0 - (2.0 * lightness - 1.0).abs());
+    let hue = if max == red {
+        ((green - blue) / spread).rem_euclid(6.0)
+    } else if max == green {
+        (blue - red) / spread + 2.0
+    } else {
+        (red - green) / spread + 4.0
+    } * 60.0;
+    (hue.rem_euclid(360.0), saturation, lightness)
+}
+
+fn activity_hsl_color(hue: f64, saturation: f64, lightness: f64) -> Rgb {
+    let saturation = saturation.clamp(0.0, 1.0);
+    let lightness = lightness.clamp(0.0, 1.0);
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let sector = hue.rem_euclid(360.0) / 60.0;
+    let secondary = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match sector as usize % 6 {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let floor = lightness - chroma / 2.0;
+    let channel = |value: f64| ((value + floor) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (channel(red), channel(green), channel(blue))
+}
+
+/// Rotate and saturate a model identity in HSL, then put it back at the cell's
+/// physical luminance. The rotation is supplied by the distance envelope, not
+/// by a discrete frame-indexed palette.
+fn activity_physical_accent(
+    identity: ActivityIdentity,
+    distance_strength: f64,
+    luminance: f64,
+) -> Rgb {
+    let Some(color) = identity.color else {
+        return activity_grey_at(luminance);
+    };
+    let base = activity_hsv(color);
+    if base.saturation <= ACTIVITY_NEUTRAL_SATURATION {
+        return activity_grey_at(luminance);
+    }
+    let chromatic_weight = activity_chromatic_weight(base.saturation);
+    let (hue, saturation, lightness) = activity_hsl(color);
+    let rotation = ACTIVITY_RAMP_HUE_SPAN * distance_strength * chromatic_weight;
+    let saturation_scale = 1.0
+        + (ACTIVITY_RAMP_SATURATION_STEPS[ACTIVITY_RAMP_ENTRIES - 1] - 1.0)
+            * distance_strength
+            * chromatic_weight;
+    let shifted = activity_hsl_color(hue + rotation, saturation * saturation_scale, lightness);
+    if activity_luminance(shifted) < luminance {
+        activity_color_at_least(shifted, luminance)
+    } else {
+        activity_color_at_most(shifted, luminance)
+    }
+}
+
 /// Return a readable foreground baseline and the narrow moving sweep. Both
 /// colors are foreground-only; no status character paints a background cell.
 /// Known light/dark profiles use conservative luminance margins because a
@@ -592,21 +771,39 @@ fn activity_shimmer_palette(theme: &OctetTheme, reasoning: &AssistantBlock) -> O
         return None;
     }
     let model = theme.model_rgb(reasoning.model_lab)?;
-    let palette = match theme.background() {
-        TerminalBackground::Dark => {
-            let baseline = activity_color_at_least(model, ACTIVITY_DARK_BASE_LUMINANCE);
-            let sweep = activity_color_at_most(baseline, ACTIVITY_DARK_SWEEP_LUMINANCE);
-            (baseline, sweep)
+    let palette = if physical_shimmer(theme) {
+        match theme.background() {
+            TerminalBackground::Dark => {
+                let baseline = activity_color_at_least(model, ACTIVITY_PHYS_DARK_BASE);
+                let sweep = activity_color_at_least(baseline, ACTIVITY_PHYS_DARK_SWEEP);
+                (baseline, sweep)
+            }
+            TerminalBackground::Light => {
+                let baseline = activity_color_at_most(model, ACTIVITY_PHYS_LIGHT_BASE);
+                let sweep = activity_color_at_least(baseline, ACTIVITY_PHYS_LIGHT_SWEEP);
+                (baseline, sweep)
+            }
+            TerminalBackground::Unknown => {
+                unreachable!("physical shimmer requires a known background")
+            }
         }
-        TerminalBackground::Light => {
-            let baseline = activity_color_at_most(model, ACTIVITY_LIGHT_BASE_LUMINANCE);
-            let sweep = activity_color_at_least(baseline, ACTIVITY_LIGHT_SWEEP_LUMINANCE);
-            (baseline, sweep)
+    } else {
+        match theme.background() {
+            TerminalBackground::Dark => {
+                let baseline = activity_color_at_least(model, ACTIVITY_DARK_BASE_LUMINANCE);
+                let sweep = activity_color_at_most(baseline, ACTIVITY_DARK_SWEEP_LUMINANCE);
+                (baseline, sweep)
+            }
+            TerminalBackground::Light => {
+                let baseline = activity_color_at_most(model, ACTIVITY_LIGHT_BASE_LUMINANCE);
+                let sweep = activity_color_at_least(baseline, ACTIVITY_LIGHT_SWEEP_LUMINANCE);
+                (baseline, sweep)
+            }
+            // Unknown backgrounds cannot promise contrast against both black and
+            // white. Retain the established neutral fallback until the terminal
+            // appearance is known, rather than inventing a background fill.
+            TerminalBackground::Unknown => (theme.composer_idle_rgb(model), model),
         }
-        // Unknown backgrounds cannot promise contrast against both black and
-        // white. Retain the established neutral fallback until the terminal
-        // appearance is known, rather than inventing a background fill.
-        TerminalBackground::Unknown => (theme.composer_idle_rgb(model), model),
     };
     Some(palette)
 }
@@ -617,8 +814,97 @@ fn ramp_index<T>(ramp: &[T], index: isize, shimmer_frame: usize) -> usize {
     (index - (shimmer_frame % ramp.len()) as isize).rem_euclid(ramp.len() as isize) as usize
 }
 
+fn activity_physical_core(baseline: Rgb, sweep: Rgb) -> Rgb {
+    let baseline_luminance = activity_luminance(baseline);
+    let sweep_luminance = activity_luminance(sweep);
+    let separation = (sweep_luminance - baseline_luminance).abs();
+    if sweep_luminance >= baseline_luminance {
+        activity_color_at_least(
+            sweep,
+            (sweep_luminance + ACTIVITY_PHYS_CORE_LIFT * separation).min(1.0),
+        )
+    } else {
+        activity_color_at_most(
+            sweep,
+            (sweep_luminance - ACTIVITY_PHYS_CORE_LIFT * separation).max(0.0),
+        )
+    }
+}
+
+fn activity_physical_shimmer_color(
+    identity: ActivityIdentity,
+    baseline: Rgb,
+    sweep: Rgb,
+    label: &str,
+    index: isize,
+    shimmer_frame: usize,
+    speed: f64,
+) -> Rgb {
+    let sweep = match ActivityRamp::of(label) {
+        Some(ramp) => activity_linear_mix_amount(baseline, sweep, ramp.sweep_depth()),
+        None => sweep,
+    };
+    let center = phys_center(label, shimmer_frame, speed);
+    let distance = index as f64 - center;
+    let main = band_main(distance);
+    let mut normal = activity_linear_mix_amount(baseline, sweep, main);
+    let core = activity_physical_core(baseline, sweep);
+    normal = activity_linear_mix_amount(
+        normal,
+        core,
+        band_core(distance) * ACTIVITY_PHYS_CORE_WEIGHT,
+    );
+
+    // Hue and saturation follow the same continuous distance envelope as the
+    // light field. At rest this is exactly the baseline; at the centre the
+    // model's own HSL family gets the full narrow rotation.
+    if ActivityRamp::of(label).is_some() && main > 0.0 {
+        let accent = activity_physical_accent(identity, main, activity_luminance(normal));
+        normal = activity_linear_mix_amount(normal, accent, main);
+    }
+    normal
+}
+
+fn activity_classic_shimmer_color(
+    identity: ActivityIdentity,
+    baseline: Rgb,
+    sweep: Rgb,
+    background: TerminalBackground,
+    label: &str,
+    index: isize,
+    shimmer_frame: usize,
+) -> Rgb {
+    let sweep = match ActivityRamp::of(label) {
+        Some(ramp) => activity_blend(baseline, sweep, ramp.sweep_depth()),
+        None => sweep,
+    };
+    let cycle = activity_cycle(label);
+    let center = (shimmer_frame % cycle) as isize + ACTIVITY_SWEEP_START;
+    let sweep_strength = match (index - center).unsigned_abs() {
+        distance if distance < ACTIVITY_SWEEP_FALLOFF.len() => ACTIVITY_SWEEP_FALLOFF[distance],
+        _ => match background {
+            TerminalBackground::Unknown => 28,
+            TerminalBackground::Dark | TerminalBackground::Light => 0,
+        },
+    };
+    let normal = (
+        mix_channel(baseline.0, sweep.0, sweep_strength),
+        mix_channel(baseline.1, sweep.1, sweep_strength),
+        mix_channel(baseline.2, sweep.2, sweep_strength),
+    );
+    match ActivityRamp::of(label) {
+        Some(ramp) if background != TerminalBackground::Unknown && sweep_strength > 0 => {
+            let step = ramp_index(&ACTIVITY_RAMP_HUE_STEPS, index, shimmer_frame);
+            let accent = ramp.accent(identity, step, activity_luminance(normal));
+            activity_linear_mix(normal, accent, sweep_strength)
+        }
+        _ => normal,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn activity_shimmer_color(
+    theme: &OctetTheme,
     identity: ActivityIdentity,
     baseline: Rgb,
     sweep: Rgb,
@@ -628,63 +914,32 @@ fn activity_shimmer_color(
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> Rgb {
-    // The label's own sweep depth: both statuses share the colour identity and
-    // differ only in how far the highlight travels from the resting colour.
-    let sweep = match ActivityRamp::of(label) {
-        Some(ramp) => activity_blend(baseline, sweep, ramp.sweep_depth()),
-        None => sweep,
+    let tinted = if physical_shimmer(theme) {
+        activity_physical_shimmer_color(
+            identity,
+            baseline,
+            sweep,
+            label,
+            index,
+            shimmer_frame,
+            physical_speed(theme),
+        )
+    } else {
+        activity_classic_shimmer_color(
+            identity,
+            baseline,
+            sweep,
+            background,
+            label,
+            index,
+            shimmer_frame,
+        )
     };
-    // One terminal cell per tick. `activity_cycle` keeps the sweep inside the
-    // label for the whole traverse and leaves the ends of the cycle at rest.
-    let cycle = activity_cycle(label);
-    let center = (shimmer_frame % cycle) as isize + ACTIVITY_SWEEP_START;
-    // The falloff is deliberately wider than the old 100/78/48/0 ramp. With
-    // the increased luminance separation one lit neighbour cell used to sit at
-    // ~78% of a 0.04 move (invisible); now four trailing cells stay visibly
-    // graded (84/64/40/18) so the highlight reads as a moving sweep rather than
-    // a single blinking cell. Every step is monotone in distance, so the centre
-    // remains the most distinct cell.
-    let sweep_strength = match (index - center).unsigned_abs() {
-        distance if distance < ACTIVITY_SWEEP_FALLOFF.len() => ACTIVITY_SWEEP_FALLOFF[distance],
-        _ => match background {
-            TerminalBackground::Unknown => 28,
-            TerminalBackground::Dark | TerminalBackground::Light => 0,
-        },
-    };
-    // Known profiles keep a readable foreground at rest and move a narrow
-    // darker sweep through light text on dark profiles. Light profiles invert
-    // the relationship: the sweep is lighter, but remains a dark readable color.
-    let normal = (
-        mix_channel(baseline.0, sweep.0, sweep_strength),
-        mix_channel(baseline.1, sweep.1, sweep_strength),
-        mix_channel(baseline.2, sweep.2, sweep_strength),
-    );
-    // The status's own ramp travels with the sweep: resting cells (strength 0)
-    // keep the plain foreground, so the label never becomes a flat wash of
-    // colour. The ramp is a variation of the *model's* colour - the same
-    // identity the resting label uses - and both status labels share it
-    // exactly; only the sweep depth differs. Unknown backgrounds keep the
-    // established neutral fallback and never take a label ramp.
-    let tinted = match ActivityRamp::of(label) {
-        Some(ramp) if background != TerminalBackground::Unknown && sweep_strength > 0 => {
-            let step = ramp_index(&ACTIVITY_RAMP_HUE_STEPS, index, shimmer_frame);
-            let accent = ramp.accent(identity, step, activity_luminance(normal));
-            // Blended in linear light: both colours are pinned to the untinted
-            // cell's own luminance, so the tint contributes hue and chroma only
-            // and the cell's frame-to-frame luminance move stays exactly the
-            // plain sweep's - one falloff step at most, whatever the ramp entry
-            // does on that tick. At rest (`sweep_strength == 0`) the cell keeps
-            // the plain foreground byte-for-byte, so the rest gap is exact.
-            activity_linear_mix(normal, accent, sweep_strength)
-        }
-        _ => normal,
-    };
+
     // The max/ultra emphasis is the one deliberate exception to "one model
     // family": for two seconds after a `max`/`ultra` run starts, `Working`
-    // keeps the established whole-label rainbow, so the emphasis tints every
-    // cell rather than only the travelling centre. The gate is the caller's
-    // `rainbow_strength` (`status_rainbow_strength_at`), which is zero for every
-    // other reasoning level, so `high` and below can never reach this branch.
+    // keeps the established whole-label rainbow. The gate is the caller's
+    // `rainbow_strength`, which is zero for every other reasoning level.
     if label == "Working" && rainbow_strength > 0 {
         let rainbow = activity_rainbow_color(background, index, shimmer_frame);
         (
@@ -697,7 +952,61 @@ fn activity_shimmer_color(
     }
 }
 
+fn activity_ansi256_rgb(index: u8) -> Rgb {
+    if index >= 232 {
+        let grey = 8 + (index - 232) * 10;
+        return (grey, grey, grey);
+    }
+    if index >= 16 {
+        let levels = [0, 95, 135, 175, 215, 255];
+        let cube = usize::from(index - 16);
+        return (levels[cube / 36], levels[cube / 6 % 6], levels[cube % 6]);
+    }
+    // Physical mode never selects ANSI16, but retaining a conservative value
+    // here keeps this helper total if the palette implementation changes.
+    (0, 0, 0)
+}
+
+fn activity_light_ansi256_safe(color: Rgb) -> Rgb {
+    const SURFACE: Rgb = (224, 224, 224);
+    let contrast = |candidate: Rgb| {
+        let index =
+            sexy_tui_rs::theme::palette::nearest_ansi256(candidate.0, candidate.1, candidate.2);
+        let quantized = activity_ansi256_rgb(index);
+        let first = activity_luminance(quantized);
+        let second = activity_luminance(SURFACE);
+        (first.max(second) + 0.05) / (first.min(second) + 0.05)
+    };
+    if contrast(color) >= 4.5 {
+        return color;
+    }
+
+    // ANSI256 chooses by RGB distance, not by luminance. Darken only the
+    // physical light-profile colour until the selected palette entry clears
+    // the same representative-surface guarantee as the requested colour.
+    let mut low = 0.0;
+    let mut high = 1.0;
+    for _ in 0..20 {
+        let amount = (low + high) / 2.0;
+        let candidate = activity_blend(color, (0, 0, 0), amount);
+        if contrast(candidate) >= 4.5 {
+            high = amount;
+        } else {
+            low = amount;
+        }
+    }
+    activity_blend(color, (0, 0, 0), high)
+}
+
 fn activity_shimmer_foreground(theme: &OctetTheme, color: Rgb, text: &str) -> String {
+    let color = if physical_shimmer(theme)
+        && theme.background() == TerminalBackground::Light
+        && theme.capabilities().color == ColorDepth::Ansi256
+    {
+        activity_light_ansi256_safe(color)
+    } else {
+        color
+    };
     if theme.capabilities().color == ColorDepth::Ansi16 && color.0 == color.1 && color.1 == color.2
     {
         // RGB-nearest across all sixteen entries can turn grey into magenta:
@@ -736,6 +1045,7 @@ fn activity_shimmer_label(
     let mut index = 0;
     for grapheme in label.graphemes(true) {
         let color = activity_shimmer_color(
+            theme,
             identity,
             baseline,
             sweep,
@@ -793,6 +1103,7 @@ pub(super) fn activity_shimmer_marker(
         .map(|retry| retry.label_at(Instant::now()));
     let identity = ActivityIdentity::for_model(theme, reasoning);
     let color = activity_shimmer_color(
+        theme,
         identity,
         baseline,
         sweep,
@@ -839,11 +1150,10 @@ fn activity_status_line(
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> String {
-    let label = if label == "Working" {
-        activity_shimmer_label(theme, reasoning, label, shimmer_frame, rainbow_strength)
-    } else {
-        theme.model_fg(reasoning.model_lab, label)
-    };
+    let label = activity_shimmer_label(theme, reasoning, label, shimmer_frame, rainbow_strength);
+    if reasoning.retry_activity.is_some() {
+        return format!("{label} {}", subdued_text(theme, "(esc to interrupt)"));
+    }
     let Some(started_at) = reasoning.activity_started_at else {
         return label;
     };
@@ -857,6 +1167,16 @@ fn collapsed_reasoning_lines_at(
     reasoning: &AssistantBlock,
     shimmer_frame: usize,
     rainbow_strength: u16,
+) -> Vec<String> {
+    collapsed_reasoning_lines_sized(theme, reasoning, shimmer_frame, rainbow_strength, u16::MAX)
+}
+
+fn collapsed_reasoning_lines_sized(
+    theme: &OctetTheme,
+    reasoning: &AssistantBlock,
+    shimmer_frame: usize,
+    rainbow_strength: u16,
+    width: u16,
 ) -> Vec<String> {
     if reasoning.finished {
         return Vec::new();
@@ -899,7 +1219,19 @@ fn collapsed_reasoning_lines_at(
         0,
     )];
     if reasoning.show_reasoning_hint {
-        lines.push(reasoning_detail_line(theme, reasoning));
+        let inline_hint = if theme.unicode() {
+            " · Ctrl+O expand"
+        } else {
+            " - Ctrl+O expand"
+        };
+        if theme.is_compiled_default()
+            && reasoning.reasoning_heading.is_none()
+            && visible_width(&lines[0]) + visible_width(inline_hint) <= usize::from(width)
+        {
+            lines[0].push_str(&subdued_text(theme, inline_hint));
+        } else {
+            lines.push(reasoning_detail_line(theme, reasoning));
+        }
     }
     lines
 }
@@ -946,17 +1278,26 @@ pub(super) fn render_reasoning_on_surface_with_rainbow(
 ) -> Vec<String> {
     let non_expandable_activity = reasoning.text.is_empty() && !reasoning.show_reasoning_hint;
     if non_expandable_activity || (!reasoning.reasoning_expanded && !show_reasoning) {
-        return collapsed_reasoning_lines_at(theme, reasoning, shimmer_frame, rainbow_strength)
-            .into_iter()
-            .map(|line| {
-                let line = fit_line(&line, width);
-                if theme.capabilities().color == ColorDepth::None {
-                    strip_terminal_sequences(&line)
-                } else {
-                    line
-                }
-            })
-            .collect();
+        // The transcript now holds status rows, not this Markdown prefix.
+        // Re-expansion must establish a full body before applying tail updates.
+        reasoning.invalidate_layout();
+        return collapsed_reasoning_lines_sized(
+            theme,
+            reasoning,
+            shimmer_frame,
+            rainbow_strength,
+            width,
+        )
+        .into_iter()
+        .map(|line| {
+            let line = fit_line(&line, width);
+            if theme.capabilities().color == ColorDepth::None {
+                strip_terminal_sequences(&line)
+            } else {
+                line
+            }
+        })
+        .collect();
     }
 
     // Expanded reasoning already owns a distinct transcript inset and muted
@@ -977,6 +1318,20 @@ mod tests {
     use super::*;
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use crate::tui::theme::{self, ModelLab};
+
+    fn classic_theme_for(
+        background: TerminalBackground,
+        capabilities: TerminalCapabilities,
+    ) -> OctetTheme {
+        theme::test_theme_for_shimmer(background, capabilities, ShimmerMode::Classic)
+    }
+
+    fn physical_theme_for(
+        background: TerminalBackground,
+        capabilities: TerminalCapabilities,
+    ) -> OctetTheme {
+        theme::test_theme_for_shimmer(background, capabilities, ShimmerMode::Physical)
+    }
 
     fn render_reasoning(
         reasoning: &AssistantBlock,
@@ -1209,7 +1564,7 @@ mod tests {
                 TerminalBackground::Light,
                 TerminalBackground::Unknown,
             ] {
-                let theme = theme::test_theme_for(background, capabilities);
+                let theme = classic_theme_for(background, capabilities);
                 for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba), None] {
                     for label in ["Working", "Thinking"] {
                         let reasoning = activity_reasoning(lab, label);
@@ -1259,10 +1614,8 @@ mod tests {
             (TerminalBackground::Light, (224, 224, 224)),
         ] {
             for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
-                let theme = theme::test_theme_for(
-                    background,
-                    TerminalCapabilities::test(true, true, depth),
-                );
+                let theme =
+                    classic_theme_for(background, TerminalCapabilities::test(true, true, depth));
                 for lab in [None, Some(ModelLab::OpenAi), Some(ModelLab::Alibaba)] {
                     let reasoning = AssistantBlock::streaming_reasoning("").with_model_lab(lab);
                     for label in [
@@ -1303,11 +1656,11 @@ mod tests {
     fn activity_shimmer_sweep_follows_terminal_profile() {
         let reasoning =
             AssistantBlock::streaming_reasoning("").with_model_lab(Some(ModelLab::Alibaba));
-        let dark = theme::test_theme_for(
+        let dark = classic_theme_for(
             TerminalBackground::Dark,
             TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
         );
-        let light = theme::test_theme_for(
+        let light = classic_theme_for(
             TerminalBackground::Light,
             TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
         );
@@ -1329,6 +1682,108 @@ mod tests {
             activity_luminance(light_sweep) - activity_luminance(light_baseline) >= 0.08,
             "light sweep separation"
         );
+    }
+
+    #[test]
+    fn physical_shimmer_uses_a_smooth_asymmetric_band_and_parked_rest() {
+        assert_eq!(band_main(ACTIVITY_PHYS_H_FRONT), 0.0);
+        assert_eq!(band_main(-ACTIVITY_PHYS_H_TRAIL), 0.0);
+        assert!(band_main(-2.5) > band_main(2.5));
+        assert_eq!(band_core(ACTIVITY_PHYS_CORE_HALF), 0.0);
+        assert!((band_main(0.0) - 1.0).abs() < f64::EPSILON);
+
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            let theme = physical_theme_for(
+                TerminalBackground::Dark,
+                TerminalCapabilities::test(true, true, depth),
+            );
+            let speed = physical_speed(&theme);
+            let label = "Working";
+            let motion = physical_motion_ticks(label, speed);
+            let cycle = physical_cycle(label, speed);
+            assert_eq!(cycle, motion + ACTIVITY_PHYS_REST_TICKS);
+
+            let start = ACTIVITY_MARKER_INDEX as f64 - ACTIVITY_PHYS_H_FRONT;
+            let end = label.width() as f64 - 1.0 + ACTIVITY_PHYS_H_TRAIL;
+            assert!((phys_center(label, 0, speed) - start).abs() < 1e-9);
+            assert!((phys_center(label, motion - 1, speed) - end).abs() < 1e-9);
+            assert!((phys_center(label, motion, speed) - end).abs() < 1e-9);
+
+            let reasoning = activity_reasoning(Some(ModelLab::Alibaba), label);
+            let resting = activity_shimmer_label(&theme, &reasoning, label, 0, 0);
+            let resting_marker = activity_shimmer_marker(&theme, &reasoning, 0, 0, "•");
+            for frame in [motion, motion + 1, cycle] {
+                assert_eq!(
+                    activity_shimmer_label(&theme, &reasoning, label, frame, 0),
+                    resting,
+                    "parked physical frame {frame} must be at rest"
+                );
+                assert_eq!(
+                    activity_shimmer_marker(&theme, &reasoning, frame, 0, "•"),
+                    resting_marker,
+                    "parked marker frame {frame} must be at rest"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn physical_shimmer_moves_toward_the_profile_extreme_without_losing_contrast() {
+        for (background, surface) in [
+            (TerminalBackground::Dark, (64, 64, 64)),
+            (TerminalBackground::Light, (224, 224, 224)),
+        ] {
+            for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+                let theme =
+                    physical_theme_for(background, TerminalCapabilities::test(true, true, depth));
+                let reasoning = activity_reasoning(Some(ModelLab::Alibaba), "Working");
+                let (baseline, sweep) =
+                    activity_shimmer_palette(&theme, &reasoning).expect("physical palette");
+                let baseline_luminance = luminance(baseline);
+                let sweep_luminance = luminance(sweep);
+                assert!(
+                    sweep_luminance > baseline_luminance,
+                    "physical mode brightens both known profiles"
+                );
+                if background == TerminalBackground::Dark {
+                    assert!(baseline_luminance >= 0.50);
+                } else {
+                    assert!(baseline_luminance <= 0.02);
+                    assert!(sweep_luminance >= 0.10);
+                }
+
+                let label = "Working";
+                let speed = physical_speed(&theme);
+                let motion = physical_motion_ticks(label, speed);
+                let cycle = physical_cycle(label, speed);
+                let peak_frame = (0..motion)
+                    .min_by(|left, right| {
+                        let left_distance = (phys_center(label, *left, speed) - 0.0).abs();
+                        let right_distance = (phys_center(label, *right, speed) - 0.0).abs();
+                        left_distance.total_cmp(&right_distance)
+                    })
+                    .expect("physical motion frames");
+                let resting =
+                    rendered_foregrounds(&activity_shimmer_label(&theme, &reasoning, label, 0, 0));
+                let peak = rendered_foregrounds(&activity_shimmer_label(
+                    &theme, &reasoning, label, peak_frame, 0,
+                ));
+                assert_ne!(peak[0], resting[0]);
+                assert!(luminance(peak[0]) > luminance(resting[0]));
+
+                for frame in 0..cycle {
+                    let colors = rendered_foregrounds(&activity_shimmer_label(
+                        &theme, &reasoning, label, frame, 0,
+                    ));
+                    for color in colors {
+                        assert!(
+                            contrast_ratio(luminance(color), luminance(surface)) >= 4.5,
+                            "{background:?}/{depth:?} emitted {color:?} with insufficient contrast"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The frame at which cell `index` is the centre of the sweep.
@@ -1359,10 +1814,8 @@ mod tests {
             (TerminalBackground::Light, (224, 224, 224)),
         ] {
             for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
-                let theme = theme::test_theme_for(
-                    background,
-                    TerminalCapabilities::test(true, true, depth),
-                );
+                let theme =
+                    classic_theme_for(background, TerminalCapabilities::test(true, true, depth));
                 for lab in [Some(ModelLab::OpenAi), Some(ModelLab::Alibaba), None] {
                     for label in ["Working", "Thinking", "Compacting context"] {
                         let reasoning = activity_reasoning(lab, label);
@@ -1441,10 +1894,8 @@ mod tests {
             (TerminalBackground::Light, (224, 224, 224), 1.7),
         ] {
             for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
-                let theme = theme::test_theme_for(
-                    background,
-                    TerminalCapabilities::test(true, true, depth),
-                );
+                let theme =
+                    classic_theme_for(background, TerminalCapabilities::test(true, true, depth));
                 for lab in [
                     Some(ModelLab::OpenAi),
                     Some(ModelLab::Alibaba),
@@ -1555,7 +2006,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         for background in [TerminalBackground::Dark, TerminalBackground::Light] {
-            let theme = theme::test_theme_for(
+            let theme = classic_theme_for(
                 background,
                 TerminalCapabilities::test(true, false, ColorDepth::Ansi16),
             );
@@ -1704,10 +2155,8 @@ mod tests {
             TerminalBackground::Unknown,
         ] {
             for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
-                let theme = theme::test_theme_for(
-                    background,
-                    TerminalCapabilities::test(true, true, depth),
-                );
+                let theme =
+                    classic_theme_for(background, TerminalCapabilities::test(true, true, depth));
                 let identity = theme
                     .model_rgb(Some(lab))
                     .expect("the OpenAI lab has a source colour");
@@ -1868,7 +2317,7 @@ mod tests {
         const MIN_STATE_LUMINANCE_FRACTION: f64 = 0.15;
 
         for background in [TerminalBackground::Dark, TerminalBackground::Light] {
-            let theme = theme::test_theme_for(
+            let theme = classic_theme_for(
                 background,
                 TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
             );
@@ -2073,7 +2522,7 @@ mod tests {
         );
 
         for background in [TerminalBackground::Dark, TerminalBackground::Light] {
-            let theme = theme::test_theme_for(
+            let theme = classic_theme_for(
                 background,
                 TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
             );
@@ -2127,7 +2576,7 @@ mod tests {
     #[test]
     fn the_sweep_traverses_every_label_cell_in_order_before_it_loops() {
         for background in [TerminalBackground::Dark, TerminalBackground::Light] {
-            let theme = theme::test_theme_for(
+            let theme = classic_theme_for(
                 background,
                 TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
             );
@@ -2220,7 +2669,7 @@ mod tests {
         const TINT_ROUNDING_ALLOWANCE: f64 = 0.005;
 
         for background in [TerminalBackground::Dark, TerminalBackground::Light] {
-            let theme = theme::test_theme_for(
+            let theme = classic_theme_for(
                 background,
                 TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
             );
@@ -2330,7 +2779,7 @@ mod tests {
         const OUTSIDE_MARGIN: isize = 12;
 
         for background in [TerminalBackground::Dark, TerminalBackground::Light] {
-            let theme = theme::test_theme_for(
+            let theme = classic_theme_for(
                 background,
                 TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
             );
@@ -2355,7 +2804,8 @@ mod tests {
                                 continue;
                             }
                             let color = activity_shimmer_color(
-                                identity, baseline, sweep, background, label, index, frame, 0,
+                                &theme, identity, baseline, sweep, background, label, index, frame,
+                                0,
                             );
                             assert_eq!(
                                 color, baseline,
@@ -2410,7 +2860,7 @@ mod tests {
         }
 
         for background in [TerminalBackground::Dark, TerminalBackground::Light] {
-            let theme = theme::test_theme_for(
+            let theme = classic_theme_for(
                 background,
                 TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
             );
@@ -2559,6 +3009,7 @@ mod tests {
         let shadow = theme.composer_idle_rgb(model);
         let expected = theme.rgb_fg(
             activity_shimmer_color(
+                &theme,
                 ActivityIdentity::for_model(&theme, &reasoning),
                 shadow,
                 model,
@@ -2598,6 +3049,7 @@ mod tests {
                 activity_shimmer_marker(&theme, &reasoning, frame, 0, "•"),
                 theme.rgb_fg(
                     activity_shimmer_color(
+                        &theme,
                         ActivityIdentity::for_model(&theme, &reasoning),
                         shadow,
                         model,
@@ -2635,17 +3087,61 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_reasoning_without_a_heading_keeps_the_hint_on_the_detail_row() {
+    fn retry_status_keeps_interrupt_hint_without_run_elapsed() {
+        use super::super::assistant_block::RetryActivity;
+
+        let theme =
+            theme::test_theme_with(TerminalCapabilities::test(false, true, ColorDepth::None));
+        let now = Instant::now();
+        let mut working = AssistantBlock::streaming_reasoning("");
+        working.reasoning_heading = Some("Working".into());
+        working.show_reasoning_hint = false;
+        working.retry_activity = Some(RetryActivity {
+            operation: None,
+            attempt: 2,
+            max_attempts: Some(3),
+            delay: Duration::from_secs(5),
+            observed_at: now,
+        });
+        for started_at in [None, Some(now - Duration::from_secs(28))] {
+            working.activity_started_at = started_at;
+            for elapsed in [0, 6] {
+                let label = working
+                    .retry_activity
+                    .as_ref()
+                    .unwrap()
+                    .label_at(now + Duration::from_secs(elapsed));
+                let expected = if elapsed == 0 {
+                    "Retrying 2/3 in 5s (esc to interrupt)"
+                } else {
+                    "Retrying 2/3 (esc to interrupt)"
+                };
+                assert_eq!(
+                    activity_status_line(&theme, &working, &label, 0, 0),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_reasoning_without_a_heading_has_one_inline_hint_in_the_compiled_theme() {
         let theme = theme::test_theme();
         let renderer = theme.reasoning_renderer();
         let mut reasoning =
             AssistantBlock::streaming_reasoning("private").with_model_lab(Some(ModelLab::Alibaba));
         let live = render_reasoning(&reasoning, &renderer, &theme, 80, false);
-        assert_eq!(live.len(), 2, "{live:?}");
-        assert_eq!(strip_terminal_sequences(&live[0]), "Thinking");
-        assert_eq!(strip_terminal_sequences(&live[1]), "└ (ctrl+o to expand)");
-        assert!(!live[0].contains("\x1b[1m"), "{live:?}");
-        assert!(!live[1].contains("\x1b[3m"), "{live:?}");
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(
+            strip_terminal_sequences(&live[0]),
+            "Thinking · Ctrl+O expand"
+        );
+        assert!(live[0].contains("\x1b[1m"), "{live:?}");
+
+        let custom = theme::test_theme_from_source("");
+        let legacy = render_reasoning(&reasoning, &custom.reasoning_renderer(), &custom, 80, false);
+        assert_eq!(legacy.len(), 2, "{legacy:?}");
+        assert_eq!(strip_terminal_sequences(&legacy[1]), "└ (ctrl+o to expand)");
 
         reasoning.reasoning_elapsed = Some(Duration::from_millis(13_700));
         reasoning.finish_reasoning();

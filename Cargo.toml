@@ -38,7 +38,9 @@ codegen-units = 16
 # single codegen unit gives LLVM a complete view of each crate.
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# Worker panics must unwind into the Tokio join supervisor instead of aborting
+# the parent process; this is part of delegated-worker failure isolation.
+panic = "unwind"
 strip = "symbols"
 
 [profile.ci-test]

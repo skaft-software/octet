@@ -485,6 +485,9 @@ function AttachmentPreviewDialog({
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
+        // The app's Escape shortcut interrupts an active run when it sees no
+        // workspace overlay. Consume this viewer's dismissal before it bubbles.
+        event.stopPropagation();
         onClose();
       } else if (event.key === "+" || event.key === "=") {
         event.preventDefault();
@@ -514,8 +517,8 @@ function AttachmentPreviewDialog({
         }
       }
     };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [changeZoom, fitImage, onClose, source, zoom]);
   if (!source) return null;
   return (

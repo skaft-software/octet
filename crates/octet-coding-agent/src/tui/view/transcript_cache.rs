@@ -209,11 +209,9 @@ impl ShellState {
             let previous_line_count = cache.lines.len();
             let rainbow_strength = self.status_rainbow_strength();
             let overlay_active = self.overlay.is_some();
-            // Delegated workers that are still alive belong to the turn that
-            // most recently settled, so only the newest outcome block reports
-            // them. This is derived from the live roster here, at render time,
-            // and never baked into `RunOutcome`.
-            let running_outcome = self.subagents_running_for_outcome();
+            // The orchestration row itself owns worker liveness; aggregate
+            // outcomes must not add a second subagent notice.
+            let running_outcome = None;
             let mut first_changed = cache.lines.len();
             let rebuild =
                 cache.width != Some(width) || cache.block_revisions.len() > self.transcript.len();
@@ -321,7 +319,9 @@ impl ShellState {
                         &self.transcript[index],
                         &self.theme,
                         rich_renderer,
+                        reasoning_renderer,
                         width,
+                        self.show_tool_details(&self.transcript[index]),
                     )
                     .filter(|update| update.stable_rows <= old_length)
                     {
@@ -410,6 +410,69 @@ mod tests {
     use super::*;
     use crate::tui::view::InteractiveShell;
     use sexy_tui_rs::strip_terminal_sequences;
+
+    #[test]
+    fn expanded_reasoning_updates_only_the_tail_and_reexpands_cleanly() {
+        use super::super::AssistantBlock;
+
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_verbose_tools(true);
+        let mut state = shell.state.borrow_mut();
+        state.push_block(TranscriptBlock::Reasoning(Box::new(
+            AssistantBlock::streaming_reasoning("First thought.\n\nSecond thought.\n\nTail"),
+        )));
+        state.rendered_transcript(80);
+        for _ in 0..4 {
+            let TranscriptBlock::Reasoning(reasoning) = &mut state.transcript[0] else {
+                unreachable!()
+            };
+            reasoning.append_reasoning(" more");
+            state.touch_block(0);
+            let actual = state.rendered_transcript(80).clone();
+            let cache = state.transcript_cache.borrow();
+            let start = cache.block_starts[0];
+            assert!(
+                cache.last_update_start > start,
+                "settled prefix was repainted"
+            );
+            drop(cache);
+            let expected = render_block_planned_with_rainbow(
+                None,
+                &state.transcript[0],
+                &state.theme,
+                &state.theme.rich_renderer(),
+                &state.theme.reasoning_renderer(),
+                80,
+                true,
+                0,
+                0,
+                0,
+                false,
+            );
+            assert_eq!(&actual[start..], expected.lines);
+        }
+        drop(state);
+        shell.set_verbose_tools(false);
+        shell.state.borrow().rendered_transcript(80);
+        shell.set_verbose_tools(true);
+        let state = shell.state.borrow();
+        let actual = state.rendered_transcript(80).clone();
+        let start = state.transcript_cache.borrow().block_starts[0];
+        let expected = render_block_planned_with_rainbow(
+            None,
+            &state.transcript[0],
+            &state.theme,
+            &state.theme.rich_renderer(),
+            &state.theme.reasoning_renderer(),
+            80,
+            true,
+            0,
+            0,
+            0,
+            false,
+        );
+        assert_eq!(&actual[start..], expected.lines);
+    }
 
     #[test]
     fn welcome_prefix_replacement_reanchors_following_blocks() {

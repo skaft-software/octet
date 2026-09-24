@@ -559,8 +559,8 @@ class EventBusKernel:
             raise BusError(RESOURCE_EXHAUSTED, "message_too_large")
         if not isinstance(published_at_ms, int) or isinstance(published_at_ms, bool) or published_at_ms < 0:
             raise BusError(INVALID_PARAMS, "invalid_timestamp")
-        sequence_key = (owner, spec.topic)
-        sequence = self._sequences.get(sequence_key, 0) + 1
+        # One counter belongs to the publisher, across every declared topic.
+        sequence = self._sequences.get(owner, 0) + 1
         envelope = BusEnvelope(
             topic=spec.topic,
             publisher=owner,
@@ -581,7 +581,7 @@ class EventBusKernel:
             self._queues[(subscriber, spec.topic)].check_capacity(envelope)
         for subscriber in self.subscribers(spec.topic):
             self._queues[(subscriber, spec.topic)].push(envelope)
-        self._sequences[sequence_key] = sequence
+        self._sequences[owner] = sequence
         return envelope
 
     def deliver(
@@ -638,6 +638,7 @@ class HostEventBus:
         self._desired_interests: set = set()
         self._declared: set = set()
         self._interests: set = set()
+        self._subscribing: set = set()
         self._subscribed: dict = {}
         self._observed: dict = {}
         self._sequences: dict = {}
@@ -666,6 +667,7 @@ class HostEventBus:
             self._declared.clear()
             self._subscribed.clear()
             self._interests.clear()
+            self._subscribing.clear()
             self._sequences.clear()
             self._condition.notify_all()
         if wait:
@@ -717,6 +719,7 @@ class HostEventBus:
                     self._declared.clear()
                     self._subscribed.clear()
                     self._interests.clear()
+                    self._subscribing.clear()
                     self._observed.clear()
                     self._sequences.clear()
                     self._rebind_error = None
@@ -836,17 +839,24 @@ class HostEventBus:
         with self._condition:
             if topic in self._interests:
                 return
+            self._subscribing.add(topic)
 
         def apply(reply: dict) -> None:
             # The host can send an event immediately after this ACK. Install
             # both the active ledger and desired interest before the reader
             # dispatches that event or a replacement lifecycle notice.
             previous = self._observed.get(topic)
-            if previous is not None and reply["topic_revision"] < previous[0]:
-                raise BusError(CAPABILITY_MISMATCH, "stale_ack")
             active = reply["state"] == "active"
             if active and (not reply["publisher_instance_id"] or reply["process_generation"] <= 0 or reply["topic_revision"] <= 0):
                 raise BusError(INVALID_PARAMS, "invalid_topic_provenance")
+            principal = (reply["publisher_instance_id"], reply["process_generation"]) if active else None
+            if previous is not None and reply["topic_revision"] < previous[0]:
+                self._wake()
+                return
+            if previous is not None and reply["topic_revision"] == previous[0] and (
+                active != previous[1] or (active and principal != previous[2:])
+            ):
+                raise BusError(CAPABILITY_MISMATCH, "conflicting_topic_revision")
             self._desired_interests.add(topic)
             self._interests.add(topic)
             if active:
@@ -856,7 +866,12 @@ class HostEventBus:
             else:
                 self._subscribed.pop(topic, None)
 
-        self._rpc("bus/subscribe", {"topic": topic}, parse_bus_subscribe_result, apply)
+        try:
+            self._rpc("bus/subscribe", {"topic": topic}, parse_bus_subscribe_result, apply)
+        finally:
+            with self._condition:
+                self._subscribing.discard(topic)
+                self._condition.notify_all()
 
     def subscribe(self, topic: Any) -> TopicSpec:
         with self._operation:
@@ -864,7 +879,18 @@ class HostEventBus:
                 spec = self._registry.get(topic)
                 if topic not in self._desired_interests and len(self._desired_interests) >= self._limits.max_subscriptions:
                     raise BusError(RESOURCE_EXHAUSTED, "subscription_limit")
-            self._subscribe(topic)
+                # Register intent before the RPC: a topic_available notice may
+                # arrive before the pending ACK returns on the worker thread.
+                new_interest = topic not in self._desired_interests
+                binding = self._binding_id
+                self._desired_interests.add(topic)
+            try:
+                self._subscribe(topic)
+            except Exception:
+                with self._condition:
+                    if new_interest and binding == self._binding_id:
+                        self._desired_interests.discard(topic)
+                raise
             return spec
 
     def unsubscribe(self, topic: Any) -> None:
@@ -947,6 +973,15 @@ class HostEventBus:
             if self._closed or not self._binding_id or event.binding_id != self._binding_id:
                 raise BusError(CAPABILITY_MISMATCH, "stale_binding")
             spec = self._registry.get(event.topic)
+            # The host queues the active ACK before any delivery, but the
+            # serial reader can consume the next frame before the request
+            # thread commits that ACK. Wait only for an in-flight subscribe,
+            # never for a request response still unread on this reader.
+            if spec.topic in self._subscribing and spec.topic not in self._subscribed:
+                self._condition.wait_for(
+                    lambda: self._closed or spec.topic not in self._subscribing or spec.topic in self._subscribed,
+                    timeout=5,
+                )
             principal = self._subscribed.get(spec.topic)
             if principal is None:
                 raise BusError(CAPABILITY_MISMATCH, "not_subscribed", spec.topic)

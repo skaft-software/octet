@@ -34,6 +34,12 @@ pub const MAX_WIDGET_LINES: usize = 64;
 pub const MAX_WIDGET_LINE_BYTES: usize = 8 * 1024;
 /// Wire bound: `ui/widget_set` key bytes.
 pub const MAX_WIDGET_KEY_BYTES: usize = 64;
+/// Wire bound: working-indicator frames count.
+pub const MAX_INDICATOR_FRAMES: usize = 32;
+/// Wire bound: one working-indicator frame bytes.
+pub const MAX_INDICATOR_FRAME_BYTES: usize = 64;
+/// Wire bound: one semantic UI text field bytes.
+pub const MAX_UI_TEXT_BYTES: usize = 8 * 1024;
 /// Wire bound: terminal title bytes.
 pub const MAX_TERMINAL_TITLE_BYTES: usize = 8 * 1024;
 
@@ -77,6 +83,9 @@ pub enum ComponentSurfaceError {
     BoundsExceeded(String),
     /// More live components than the wire bound allows.
     TooManyLiveComponents,
+    /// `component_id` and `lines` were both present (or both absent where one
+    /// is required).
+    MutuallyExclusiveFields,
 }
 
 impl std::fmt::Display for ComponentSurfaceError {
@@ -87,6 +96,9 @@ impl std::fmt::Display for ComponentSurfaceError {
             }
             Self::TooManyLiveComponents => {
                 write!(f, "more than {MAX_LIVE_COMPONENTS} live components")
+            }
+            Self::MutuallyExclusiveFields => {
+                write!(f, "component_id and lines are mutually exclusive")
             }
         }
     }
@@ -531,6 +543,7 @@ pub fn mouse_wire_event(
     origin: (u16, u16),
     size: (u16, u16),
 ) -> TuiMouseWireEvent {
+    use crossterm::event::MouseButton as Button;
     use crossterm::event::MouseEventKind as Kind;
     let (origin_x, origin_y) = origin;
     let (width, height) = size;

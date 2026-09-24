@@ -38,6 +38,7 @@ fn make_model(
         display_name: None,
         protocol,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities: input,
             output_modalities: output,
             tools: true,
@@ -111,6 +112,7 @@ fn test_cross_protocol_canonical_immutability() {
     });
 
     let tool_call = ToolCall {
+        async_execution: false,
         id: ToolCallId("call_1".to_string()),
         name: "test_tool".to_string(),
         arguments_json: "{}".to_string(),
@@ -221,6 +223,7 @@ fn test_lossy_inserts_missing_tool_result_before_next_assistant() {
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call_missing".to_string()),
                         name: "lookup".to_string(),
                         arguments_json: "{}".to_string(),
@@ -373,6 +376,7 @@ fn constrained_sampling_wire_shape_across_codecs() {
     use crate::types::{ConstrainedSampling, ConstrainedSamplingStrict, GrammarVariants, ToolDef};
 
     let strict_tool = |name: &str| ToolDef {
+        async_execution: false,
         name: name.to_string(),
         description: "strict".to_string(),
         parameters: serde_json::json!({
@@ -385,6 +389,7 @@ fn constrained_sampling_wire_shape_across_codecs() {
         }),
     };
     let grammar_tool = ToolDef {
+        async_execution: false,
         name: "grammar_tool".to_string(),
         description: "grammar".to_string(),
         parameters: serde_json::json!({
@@ -420,9 +425,10 @@ fn constrained_sampling_wire_shape_across_codecs() {
         session_id: None,
     };
 
-    // Chat Completions: strict function tool + grammar `custom` tool. Chat
-    // defaults strict on; grammar tools are off until the model declares them.
+    // Chat Completions: this fixture opts into strict tools; an unknown
+    // compatible endpoint must not inherit the public OpenAI default.
     let mut chat = make_model(Protocol::OpenAiChat, false, false, false, false);
+    Arc::make_mut(&mut chat.spec).preset.supports_strict_mode = Some(true);
     Arc::make_mut(&mut chat.spec)
         .preset
         .supports_openai_grammar_tools = Some(true);
@@ -530,6 +536,7 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
     use crate::types::{ConstrainedSampling, ConstrainedSamplingStrict, GrammarVariants, ToolDef};
 
     let strict_tool = ToolDef {
+        async_execution: false,
         name: "strict_tool".to_owned(),
         description: "strict".to_owned(),
         parameters: serde_json::json!({
@@ -542,6 +549,7 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
         }),
     };
     let grammar_tool = ToolDef {
+        async_execution: false,
         name: "grammar_tool".to_owned(),
         description: "grammar".to_owned(),
         parameters: serde_json::json!({
@@ -610,9 +618,38 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
     };
     let none = |_model: &mut Model| {};
 
-    // Chat: strict on by default; grammar tools need an explicit declaration.
+    // Unknown OpenAI-compatible Chat endpoints default to non-strict tools.
     let chat = body(Protocol::OpenAiChat, vec![strict_tool.clone()], none);
-    assert_eq!(chat["tools"][0]["function"]["strict"], true);
+    assert_eq!(chat["tools"][0]["function"]["strict"], false);
+    assert!(chat["tools"][0]["function"]["parameters"]
+        .get("additionalProperties")
+        .is_none());
+    let public_openai = body(Protocol::OpenAiChat, vec![strict_tool.clone()], |model| {
+        Arc::make_mut(&mut model.endpoint).base_url =
+            Url::parse("https://api.openai.com/v1/").unwrap();
+    });
+    assert_eq!(public_openai["tools"][0]["function"]["strict"], true);
+    let declared = body(Protocol::OpenAiChat, vec![strict_tool.clone()], |model| {
+        Arc::make_mut(&mut model.spec).preset.supports_strict_mode = Some(true);
+    });
+    assert_eq!(declared["tools"][0]["function"]["strict"], true);
+    let refused = body(Protocol::OpenAiChat, vec![strict_tool.clone()], |model| {
+        Arc::make_mut(&mut model.endpoint).base_url =
+            Url::parse("https://api.openai.com/v1/").unwrap();
+        Arc::make_mut(&mut model.spec).preset.supports_strict_mode = Some(false);
+    });
+    assert_eq!(refused["tools"][0]["function"]["strict"], false);
+    let mut required_tool = strict_tool.clone();
+    required_tool.constrained_sampling = Some(ConstrainedSampling::JsonSchema {
+        strict: ConstrainedSamplingStrict::Require,
+    });
+    let unknown_chat = make_model(Protocol::OpenAiChat, false, false, false, false);
+    assert!(matches!(
+        crate::protocol::openai_chat::build_request(&unknown_chat, &request(vec![required_tool])),
+        Err(crate::AiError::Unsupported(
+            crate::UnsupportedError::ConstrainedSampling(_)
+        ))
+    ));
     let chat_grammar = body(Protocol::OpenAiChat, vec![grammar_tool.clone()], none);
     assert_eq!(chat_grammar["tools"][0]["type"], "function");
     let chat_grammar = body(Protocol::OpenAiChat, vec![grammar_tool.clone()], |model| {

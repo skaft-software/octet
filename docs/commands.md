@@ -12,8 +12,11 @@ through its normal dispatcher. For example:
 /answer Answer from the evidence already gathered. Do not use more tools.
 ```
 
-Commands run immediately when safe. Model/reasoning/session changes, compaction,
-reload, and checkout queue until active work releases ownership. `/answer`
+Commands run immediately when safe. Model/session changes, compaction, reload,
+and checkout queue until active work releases ownership. `/thinking` uses a
+noninterrupting next-response control on explicitly qualified Responses routes;
+other routes retain the idle-boundary selector. Queued effort is not provider
+acknowledgement. Unsupported explicit efforts are rejected. `/answer`
 persists a steering instruction and makes subsequent requests tool-free at the
 next safe boundary; while idle it starts a tool-free run. It is not an undo for
 already admitted effects. [Run control contract](design/octet-agent.md#commit-and-cancellation-invariants).
@@ -29,7 +32,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/model [id]` | Open the model picker or select an ID. |
 | `/fast [on\|off\|status]` | Toggle/inspect capability-gated Responses priority; active changes wait for a safe boundary. |
 | `/thinking [level]` | Inspect/change [model-supported reasoning](providers.md#reasoning). |
-| `/theme [auto\|light\|dark]` | Choose the compiled terminal appearance or open its picker. |
+| `/theme [auto\|light\|dark]` | Choose the terminal appearance; without an argument, open the picker. |
 | `/answer [instruction]` | Stop tool use at the next safe boundary and answer from gathered evidence. |
 | `/compact [instructions]` | Request compaction at the next safe boundary; bounded custom instructions apply to local summaries, not native Responses compact. |
 | `/verbose [on\|off]` | Expand/collapse retained reasoning, compaction, and bounded tool evidence. |
@@ -49,6 +52,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/export [path]` | Export the current session with redaction. |
 | `/prompt [name] [arguments]` | List/expand named templates; Pi-compatible `/<name> ...` invocation is also supported. |
 | `/skills ...` | List, search, inspect, load, unload, or reload skills; [activation](instructions.md#skills). |
+| `/skill:NAME [arguments]` | Expand an explicit skill as a user prompt at admission, not a local slash command. During a run, Enter or Ctrl+S queues a follow-up so expansion occurs at the next idle prompt boundary. |
 | `/extensions [status\|reload]` | Open installed-bundle enable/disable menu or inspect/reload state. |
 | `/settings [theme\|images on/off\|default model/reasoning\|transport\|padding]` | Show or change user-level display/default preferences. Defaults, theme, and images persist through the shared config writer; transport and editor padding are reported route/theme facts, and project trust is deliberately not a persisted setting. |
 | `/scoped-models [all\|clear\|enable\|disable\|toggle\|move]` | Manage the ordered model cycling scope. Mutations apply to Ctrl+P immediately and persist as an exact ordered pattern list (`models` in the user config); `move <id> <up\|down\|top\|bottom>` reorders it. |
@@ -57,12 +61,16 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/exit` | Exit octet. |
 
 Automatic reloads do not add success summaries, startup banners, or debounce
-bookkeeping to the transcript. Explicit `/reload` commands still acknowledge
-completion. Extension diagnostics, failures, watch-limit warnings, and work-loss
-notices remain visible. `/reload --dry-run` shows watch counts,
-poll/debounce timing, host re-exec policy, and the pending per-layer preview
-without applying changes. Re-exec confirmations and worker-detach warnings are
-not suppressed.
+bookkeeping to the transcript. Host, worker-deferral, extension, provider-catalog,
+and watch-limit problems are reported on appearance or change, and again if a
+successful check clears them before they recur. Skipping a component does not
+clear its remembered problem. Resource/bootstrap and keybinding checks use the
+same component-scoped recurrence rule. Actual work-loss events are always reported.
+Explicit `/reload` commands still show current results.
+`/reload --dry-run` shows watch counts, timing, host policy, and possible
+interruptions without applying changes. Automatic passes never open confirmation
+pickers: a replacement binary or worker detach requiring consent is deferred to
+`/reload --force`. Explicit command consent checks remain in place.
 
 ### Local shell escapes
 
@@ -77,7 +85,7 @@ call settles, so a call is never separated from its result). `--no-process` or
 The capture is bounded by `max_output_bytes` and `bash_timeout_secs`; it is not
 a persistent shell session.
 
-`/theme` changes only the compiled terminal appearance selector; it does not
+`/theme` selects a built-in Auto/Light/Dark appearance. This command does not
 load arbitrary theme files. [Theme status](themes.md).
 Additional extension commands depend on the enabled, independently trusted
 package; its README is authoritative for arguments.
@@ -123,7 +131,7 @@ extension processes stopped. [Discovery and trust](resources.md).
 | Shift+Enter | Newline when enhanced terminal key events are available. |
 | Ctrl+S | Steer at the next model boundary; in the resume picker, cycle sorting. |
 | Escape | Interrupt active work, then dispatch the oldest queued follow-up after settlement (never the draft); close/back out of a panel or slash popup first. |
-| Option+Up / Alt+Up | Move the newest queued follow-up into an empty composer for editing; no submission or interruption. |
+| Option+Up / Alt+Up | Recall the newest editable queued steering message or follow-up into an empty composer; no submission or interruption. |
 | Ctrl+C | Clear a nonempty draft; otherwise abort active work, no-op while idle. |
 | Ctrl+D | Close from any interactive input surface after active-work and child-process cleanup. |
 | Ctrl+P / Ctrl+Shift+P | Cycle models within the available resolved `--models` scope (or the available catalog without a scope); backward is Alt+P on Windows/WSL. Drafts are preserved. |
@@ -141,11 +149,14 @@ are contextual. Keyboard ownership and native mouse history are explained in
 [terminal scrolling](terminal.md#scrolling-and-rendering).
 
 Follow-ups remain local until dispatch, one per settled run in FIFO order.
-Ctrl+S is different: it admits live steering at the next model boundary and
-cannot be retracted with Option+Up. Failed runs, Ctrl+C cancellation, and close
-do not auto-dispatch follow-ups; retained entries can still be recalled while
-idle. Option+Up never overwrites a nonempty draft. Attachment/paste chips retain
-their payloads when recalled. Held-key repeats do not submit, interrupt, or pop
+Ctrl+S is different: it queues live steering for the next model boundary.
+Option+Up can retract it until the agent claims it for persistence; once that
+boundary is crossed it cannot be recalled, even before the UI displays delivery.
+The newest eligible steering message or follow-up is recalled, preserving its
+attachment/paste chips. `/answer` is not retractable because it changes the run's
+tool policy. Failed runs, Ctrl+C cancellation, and close do not auto-dispatch
+follow-ups; retained entries can still be recalled while idle. Option+Up never
+overwrites a nonempty draft. Held-key repeats do not submit, interrupt, or pop
 queue entries.
 
 ## User keybindings and transcript search

@@ -1,6 +1,8 @@
 //! Streaming assistant and reasoning block state with cached rich-text rendering.
 
+use super::renderer_model::SharedText;
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sexy_tui_rs::{
@@ -132,8 +134,12 @@ impl RetryActivity {
 #[derive(Clone, Debug)]
 pub(super) struct AssistantBlock {
     pub(super) text: String,
+    /// Immutable accepted source segments; publication never copies the prefix.
+    pub(super) render_source: SharedText,
     pub(super) markdown: StreamingMarkdown,
     pub(super) layout: RefCell<StreamingRenderCache>,
+    /// Canonical copy projection, computed only when selection requests it.
+    copy_text: RefCell<Option<String>>,
     /// Model that generated this block, for stable accent colour across
     /// model switches mid-session.
     pub(super) model_lab: Option<crate::tui::theme::ModelLab>,
@@ -160,13 +166,75 @@ pub(super) struct AssistantBlock {
 }
 
 impl AssistantBlock {
+    /// Copy only finite presentation metadata. Parser, source, copy, and row
+    /// caches remain with their owner and are never cloned for publication.
+    pub(super) fn render_metadata(&self) -> Self {
+        let mut metadata = Self::streaming("");
+        metadata.model_lab = self.model_lab.clone();
+        metadata.finished = self.finished.clone();
+        metadata.reasoning_expanded = self.reasoning_expanded.clone();
+        metadata.reasoning_started_at = self.reasoning_started_at.clone();
+        metadata.reasoning_elapsed = self.reasoning_elapsed.clone();
+        metadata.retry_activity = self.retry_activity.clone();
+        metadata.activity_started_at = self.activity_started_at.clone();
+        metadata.reasoning_heading = self.reasoning_heading.clone();
+        metadata.reasoning_heading_committed_blocks =
+            self.reasoning_heading_committed_blocks.clone();
+        metadata.show_reasoning_hint = self.show_reasoning_hint.clone();
+        metadata
+    }
+
+    pub(super) fn materialize_source(
+        &mut self,
+        source: &SharedText,
+        previous: Option<&mut Self>,
+        reasoning: bool,
+    ) {
+        let finished = self.finished;
+        let mut rendered = previous
+            .map(|old| std::mem::replace(old, Self::streaming("")))
+            .unwrap_or_else(|| {
+                if reasoning {
+                    Self::streaming_reasoning("")
+                } else {
+                    Self::streaming("")
+                }
+            });
+        let start = rendered.render_source.len();
+        source.visit_from(start, |_, segment| {
+            if reasoning {
+                rendered.append_reasoning(segment);
+            } else {
+                rendered.append(segment);
+            }
+        });
+        if finished && !rendered.finished {
+            if reasoning {
+                rendered.finish_reasoning();
+            } else {
+                rendered.finish();
+            }
+        }
+        self.text = rendered.text;
+        self.markdown = rendered.markdown;
+        self.layout = rendered.layout;
+        self.copy_text = rendered.copy_text;
+        self.render_source = source.clone();
+    }
+
     pub(super) fn streaming(text: &str) -> Self {
         let mut markdown = StreamingMarkdown::new();
         markdown.push_str(text);
+        let mut render_source = SharedText::default();
+        if !text.is_empty() {
+            render_source.push(Arc::from(text));
+        }
         Self {
             text: text.to_owned(),
+            render_source,
             markdown,
             layout: RefCell::new(StreamingRenderCache::default()),
+            copy_text: RefCell::new(None),
             model_lab: None,
             finished: false,
             reasoning_expanded: false,
@@ -191,6 +259,10 @@ impl AssistantBlock {
         let projection = reasoning_markdown_projection(text);
         let mut block = Self::streaming(&projection);
         block.text = text.to_owned();
+        block.render_source = SharedText::default();
+        if !text.is_empty() {
+            block.render_source.push(Arc::from(text));
+        }
         block.reasoning_started_at = Some(Instant::now());
         block.refresh_reasoning_heading();
         block
@@ -222,12 +294,27 @@ impl AssistantBlock {
             && self.reasoning_heading.as_deref() == Some("Working")
     }
 
+    pub(super) fn copy_text(&self) -> String {
+        self.copy_text
+            .borrow_mut()
+            .get_or_insert_with(|| parse_markdown(self.markdown.raw_text()).plain_text())
+            .clone()
+    }
+
     pub(super) fn append(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.render_source.push(Arc::from(text));
+        }
+        *self.copy_text.get_mut() = None;
         self.text.push_str(text);
         self.markdown.push_str(text);
     }
 
     pub(super) fn append_reasoning(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.render_source.push(Arc::from(text));
+        }
+        *self.copy_text.get_mut() = None;
         let repairs_boundary = reasoning_delimiter_crosses_chunk_boundary(&self.text, text);
         self.text.push_str(text);
         if repairs_boundary {
@@ -283,6 +370,7 @@ impl AssistantBlock {
         // trace after every delta.
         let projection = reasoning_markdown_projection(&self.text);
         if self.markdown.raw_text() != projection {
+            *self.copy_text.get_mut() = None;
             self.markdown = StreamingMarkdown::from_text(&projection);
             self.reasoning_heading_committed_blocks = 0;
             self.invalidate_layout();
@@ -378,6 +466,29 @@ impl AssistantBlock {
 #[cfg(test)]
 mod retry_activity_tests {
     use super::*;
+
+    #[test]
+    fn semantic_copy_cache_is_lazy_and_invalidated_by_source_changes() {
+        let mut block = AssistantBlock::streaming("**First**");
+        assert!(block.copy_text.borrow().is_none());
+        assert_eq!(block.copy_text(), "First\n");
+        assert_eq!(block.copy_text.borrow().as_deref(), Some("First\n"));
+        assert_eq!(block.copy_text(), "First\n");
+        block.append(" second");
+        assert!(block.copy_text.borrow().is_none());
+        assert_eq!(block.copy_text(), "First second\n");
+        block.finish();
+        assert_eq!(block.copy_text(), "First second\n");
+
+        let mut reasoning = AssistantBlock::streaming_reasoning("**Plan**");
+        reasoning.copy_text();
+        reasoning.append_reasoning("**Verify**");
+        assert!(reasoning.copy_text.borrow().is_none());
+        let expected = parse_markdown(reasoning.markdown.raw_text()).plain_text();
+        assert_eq!(reasoning.copy_text(), expected);
+        reasoning.finish_reasoning();
+        assert_eq!(reasoning.copy_text(), expected);
+    }
 
     #[test]
     fn branch_summary_retry_is_named_separately_from_compaction() {

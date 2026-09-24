@@ -10,6 +10,7 @@ text LICENSE
 text README.md
 text SECURITY.md
 text THIRD_PARTY_NOTICES.md
+text crates/octet-ai/docs/responses-controls.md
 text crates/octet-ai/models/SOURCES.md
 text crates/octet-ai/src/protocol/openai_responses.rs
 text crates/octet-ai/src/responses_ws.rs
@@ -176,12 +177,14 @@ text docs/benchmarks/v0.7.4-local/startup.json
 text docs/benchmarks/v0.7.4-local/startup.py
 text docs/benchmarks/v0.7.4-performance.md
 text docs/build-profiles.md
+text docs/cache-warming.md
 text docs/cli.md
 text docs/codex-context.md
 text docs/commands.md
 text docs/configuration.md
 text docs/context.md
 text docs/current-reference.md
+text docs/design/browser-computer-use-redesign.md
 text docs/design/config-diagnostics.md
 text docs/design/extension-capability-and-orchestration-boundaries.md
 text docs/design/octet-agent.md
@@ -204,6 +207,7 @@ text docs/extensions/event-bus.md
 text docs/extensions/PROTOCOL-REFERENCE.md
 text docs/extensions/legacy-authoring.md
 text docs/getting-started.md
+text docs/herdr.md
 text docs/installation.md
 text docs/instructions.md
 text docs/maintainers/README.md
@@ -307,12 +311,12 @@ text extensions/octet-browse/QUALIFICATION.md
 text extensions/octet-browse/README.md
 text extensions/octet-browse/REFERENCE.md
 text extensions/octet-import-aider/README.md
-text extensions/octet-import-cline/README.md
 text extensions/octet-import-pi/README.md
 text extensions/octet-mcp/README.md
 text extensions/octet-mcp/REFERENCE.md
 text extensions/octet-mcp/fixtures/tls/README.md
 text extensions/octet-serve/README.md
+text extensions/octet-snap-compact/README.md
 text extensions/octet-subagents/README.md
 text extensions/octet-subagents/REFERENCE.md
 text extensions/octet-web-search/README.md
@@ -340,5 +344,6 @@ text sdk/typescript/src/api_v03.ts
 text sdk/typescript/tests/api_v03_conformance.mjs
 text sdk/typescript/tests/package_conformance.mjs
 text sdk/typescript/tsconfig.json
+text third_party/licenses/GROK-MERMAID-APACHE-2.0.txt
 text third_party/licenses/PI-MIT.txt
 text third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt

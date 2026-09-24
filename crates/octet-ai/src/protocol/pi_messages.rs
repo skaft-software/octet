@@ -493,7 +493,7 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
     }
     match req.cache_retention {
         CacheRetention::None => {}
-        CacheRetention::Short => {
+        CacheRetention::Short | CacheRetention::WarmShort => {
             options.insert("cacheRetention".to_owned(), json!("short"));
         }
         CacheRetention::Long => {
@@ -916,6 +916,7 @@ pub(crate) fn decode_stream_event(
                 &mut events,
                 builder,
                 StreamEvent::ToolCallStart {
+                    async_execution: false,
                     index: canonical,
                     id: ToolCallId(id.to_owned()),
                     name: name.to_owned(),
@@ -1086,6 +1087,7 @@ mod tests {
 
     fn tools() -> Vec<ToolDef> {
         vec![ToolDef {
+            async_execution: false,
             name: "lookup".to_owned(),
             description: "Look up a city.".to_owned(),
             parameters: json!({
@@ -1251,6 +1253,7 @@ mod tests {
                     }),
                 }),
                 AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call_1".to_owned()),
                     name: "lookup".to_owned(),
                     arguments_json: r#"{"city":"Paris"}"#.to_owned(),

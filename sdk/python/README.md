@@ -92,6 +92,18 @@ The host authoring smoke must also exercise cancellation during bounded work
 and clean shutdown, not just load or inspect generated types. Longer handlers
 must poll cancellation between effects; cancellation never means rollback.
 
+## Vision compaction strategy (API 0.4)
+
+A manifest may declare `hooks = ["compaction_strategy"]` without declaring a
+tool. The host offers the matching `compaction_strategy` feature only on API
+`0.4`; select it in `supported_features` along with required
+`request_cancellation` and `content_parts`. `@ext.hook("compaction_strategy")`
+receives a bounded `{model_id, text}` payload and returns
+`{"compaction_frames": [base64_png, ...]}`. Octet selects the hook only for
+local compaction on vision routes and validates all frames before persisting a
+checkpoint. See [octet-snap-compact](../../extensions/octet-snap-compact/README.md)
+for a full renderer using the source SDK.
+
 ## Bounded event bus
 
 `octet_extension.event_bus` carries the bounded, extension-scoped bus contract:
@@ -128,3 +140,17 @@ These topic anchors preserve links from the former combined SDK README:
 - <a id="cancellation-and-progress"></a>[Cancellation and progress](legacy-runtime.md#cancellation-and-progress)
 - <a id="structured-results-and-artifacts"></a>[Structured results and artifacts](legacy-runtime.md#structured-results-and-artifacts)
 - <a id="parent-correlation-and-lifecycle"></a>[Parent correlation, input, lifecycle, policy, secrets, and shutdown](legacy-runtime.md#parent-correlation-and-lifecycle)
+
+## Host-owned worker model routing
+
+On the feature-negotiated wire, `agent_sessions` plus
+`agent_model_selection_v1` enables `list_agent_models(query=None, limit=50)`
+and `spawn_agent(..., model_selection={"provider": "…", "model": "…", "reasoning": "low"})`.
+Discovery is owner-correlated, caps query text at 128 UTF-8 bytes and limits at
+1–100, and returns `{models: [...], truncated: bool}` without credentials.
+Omit `model_selection` to inherit exactly; omitted selection keys mean `inherit`.
+Reasoning accepts `inherit`, `off`, `on`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`, and `ultra`; `on` covers binary/always-on models.
+Only the host admits configured routes and normalizes reasoning; explicit routing
+never silently falls back. Spawn/list records retain requested selection and
+`policy.resolved_model` effective provider/model plus serialized `ReasoningConfig`.

@@ -4,7 +4,7 @@ use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome, ThemeSurfaceHeading};
 
 use super::reasoning_render::activity_shimmer_marker;
 use super::surface_layout::{surface_roles, SurfacePlan};
-use super::{fit_line, SubagentStateGroup, TranscriptBlock};
+use super::{fit_line, TranscriptBlock};
 
 fn padded_to_width(line: &str, width: u16) -> String {
     let line = fit_line(line, width);
@@ -87,6 +87,16 @@ fn render_surface_content_line(
     let content = fit_line(line, plan.geometry.content_width);
     let left_padding = " ".repeat(usize::from(plan.padding));
     let right_padding = " ".repeat(usize::from(plan.padding));
+    // The compiled prompt was highlighted at its wrapped-text boundary.
+    // Padding, blank spacing, and trailing canvas must not inherit its colour.
+    // Explicit custom surfaces keep the existing full-cell/card treatment.
+    if plan.kind == "user" && theme.is_compiled_default() && prompt_color.is_some() {
+        return if content.is_empty() {
+            String::new()
+        } else {
+            format!("{left_padding}{content}{right_padding}")
+        };
+    }
     let paint_prompt = |text: String, width: u16| {
         let text = padded_to_width(&strip_terminal_sequences(&text), width);
         theme.prompt_color_cell(prompt_color, &text)
@@ -224,44 +234,20 @@ pub(super) fn event_margin_marker_with_frame(
         }
         TranscriptBlock::Reasoning(_) => None,
         TranscriptBlock::Assistant(_) if markers_enabled => Some(theme.fg("foreground", event_dot)),
-        // A live delegation roster pulses on the same spinner clock as an
-        // active tool. Its aggregate is the running group until every child has
-        // settled, so the marker can never resolve to success/error early.
+        TranscriptBlock::Subagents(summary) if markers_enabled && summary.active_count() > 0 => {
+            Some(active_phase_dot())
+        }
+        TranscriptBlock::Subagents(summary) if markers_enabled => {
+            Some(theme.settled_event_dot(summary.settled_role(), event_dot))
+        }
         TranscriptBlock::Tool(panel) if markers_enabled && !panel.finished => {
             Some(active_phase_dot())
         }
-        TranscriptBlock::Tool(panel) if markers_enabled => {
-            Some(match panel.subagent_activity.as_ref() {
-                // A settled roster resolves from the declared child states the rows
-                // print: red when any worker failed or was cancelled, neutral when
-                // work was stopped, green when every worker finished successfully.
-                Some(view) => {
-                    // The marker resolves from the declared child states, not
-                    // from the broader failure summary the panel uses for its
-                    // styling: a worker the reader *stopped* is neutral, while
-                    // only a failed/cancelled worker (or an explicit
-                    // roster-level failure that produced none) turns the event
-                    // red.
-                    let aggregate = super::subagent_activity_aggregate(view);
-                    if aggregate == Some(SubagentStateGroup::Failed)
-                        || view.failure_reason.is_some()
-                    {
-                        theme.settled_event_dot("error", event_dot)
-                    } else if aggregate == Some(SubagentStateGroup::Stopped) {
-                        theme.settled_event_dot("neutral", event_dot)
-                    } else {
-                        theme.settled_event_dot("success", event_dot)
-                    }
-                }
-                None => {
-                    if panel.is_error {
-                        theme.settled_event_dot("error", event_dot)
-                    } else {
-                        theme.settled_event_dot("success", event_dot)
-                    }
-                }
-            })
-        }
+        TranscriptBlock::Tool(panel) if markers_enabled => Some(if panel.is_error {
+            theme.settled_event_dot("error", event_dot)
+        } else {
+            theme.settled_event_dot("success", event_dot)
+        }),
         TranscriptBlock::Shell(shell) if markers_enabled && shell.running => {
             Some(active_phase_dot())
         }
@@ -283,6 +269,7 @@ pub(super) fn event_margin_marker_with_frame(
             ))
         }
         TranscriptBlock::User { .. }
+        | TranscriptBlock::Subagents(_)
         | TranscriptBlock::Outcome(_)
         | TranscriptBlock::Compaction(_)
         | TranscriptBlock::Tool(_)

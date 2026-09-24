@@ -252,16 +252,20 @@ service is available independently of the selected reasoning effort; Ultra is
 separately gated on the live provider's V2 metadata. A response may negotiate
 it only when it was offered. The service is bound after the Agent is
 constructed; calls without a bound service/resource owner fail deterministically
-with `-32002`.
+with `-32002`. When `agent_sessions` is offered, the host also offers
+`agent_model_selection_v1`; negotiating the latter requires `agent_sessions`.
+It enables bounded configured-model discovery and explicit child model selection,
+not extension-supplied provider transports or credentials.
 
 The host likewise appends `approvals` only when single-use approval issuance is
 enabled, and appends `secrets` only when a secret broker is configured and the
 manifest's exact `[capabilities].secrets` allowlist is non-empty. Negotiating
 `approvals` also requires `policy_intents`; neither conditional service may be
 returned when it was not offered. The coding product currently leaves
-approvals disabled, configures no secret broker, and supervises generic
-`policy/evaluate` requests with `deny`, so it offers neither conditional
-feature.
+approvals disabled and configures no secret broker, so it offers neither
+conditional feature. Generic `policy/evaluate` requests return `deny`; the
+working-tree `mcp.tool.call` adapter permits exact active owner-scoped MCP calls
+under full access only, as described below.
 
 Secret names are duplicate-free identifiers of at most 64 ASCII bytes. The
 first character is a letter or underscore; subsequent characters may also use
@@ -1237,8 +1241,13 @@ generation before its bounded expiry (at most five minutes). Expiry, reuse, or
 intent/parent/generation mismatch returns `deny`; a recognized mismatched token
 is consumed as well. Supplying a token without negotiated `approvals` is
 rejected with `-32602`. Approval capability state is invalidated on generation
-replacement. The coding product currently has approvals off and no domain
-policy adapter, so its policy supervisor returns `deny` without a token.
+replacement. The coding product leaves approval-token issuance off. Its
+working-tree `mcp.tool.call` adapter permits the admitted `octet-mcp` process's
+exact active, owner-scoped tool call under `unsafe_host`, including mutations.
+It verifies the generation, exact published tool identity, and arguments against
+the host-issued call; commands, ownerless/settled parents, changed targets, and
+controlled policies cannot authorize it. Generic operations still return `deny`.
+This is not an annotation-based read-only exemption or an automatic replay grant.
 
 An extension may send `$/cancelRequest` for one of its own outstanding child
 request IDs. The host also sends it automatically when the owning parent
@@ -1414,8 +1423,9 @@ explicit values are 1..=256 turns, 1..=50,000,000 microdollars, and
 5,000..=86,400,000 milliseconds. `max_tokens: null` means exact inheritance
 of the parent's optional cumulative session-token setting, so a parent with no
 ceiling produces a child with no ceiling; a non-null 1,000..=64,000 value may
-request a stricter cap. Every child starts with a fresh context while inheriting
-the parent model's context window and resolved per-request output limit. octet
+request a stricter cap. Every child starts with a fresh context using the
+selected model's context window and an output limit capped by both the parent's
+resolved per-request limit and the selected model's output capacity. octet
 freezes a detached effective tool snapshot containing only the granted tools
 (no collaboration or agent tools), applies the requested ceilings or inherits
 the parent's ceilings when they are omitted, and owns limit settlement even
@@ -1434,6 +1444,61 @@ capped at 128 KiB. Success includes `agent_id`, `agent_path`, caller-visible
 effective `policy`, host-owned `created_at_ms`/`started_at_ms`/
 `completed_at_ms`, and `deadline_at_ms`, plus the path-free extension
 `principal` and durable session `resource_owner` string.
+
+#### Child model selection (`agent_model_selection_v1`)
+
+With the feature negotiated, `policy.model_selection` accepts
+`{"provider":"inherit","model":"inherit","reasoning":"inherit"}`.
+Omitting the object (or using `null`) preserves default inheritance; each omitted
+member defaults to `"inherit"`. Explicit members are non-empty strings of at
+most 256 UTF-8 bytes without control characters; unknown members are rejected.
+An explicit provider requires an explicit model. Model/provider identifiers must
+resolve through the host's configured inventory, not an arbitrary URL, endpoint,
+or credential supplied by the extension. Supplying a non-null selection without
+negotiating the feature is rejected.
+
+The host owns reasoning parsing, compatibility checks, normalization, and child
+lowering. Same-route inheritance preserves parent reasoning; a different route
+uses the host's supported translation or rejects incompatible reasoning rather
+than silently substituting a default. Discovery's reasoning labels are choices,
+not permission to bypass that policy. Astra V2 Ultra child reasoning is lowered
+to `xhigh` by the host. Unsupported routes or reasoning fail before child
+admission. Without a configured resolver, only the inherited binding is available.
+
+Spawn and list records expose host-confirmed `resolved_model`, also included in
+effective `policy.resolved_model`, with `provider`, `model`, and `reasoning`.
+Unlike the requested reasoning string, resolved reasoning is a serialized
+`ReasoningConfig` object (for example `{"type":"off"}`). This secret-free
+metadata contains no credentials, headers, or transport URLs. The host pins
+resolved model/provider/reasoning identity for continuation and recovery; a saved
+selection that no longer resolves to that identity fails closed. This is not a
+promise to detect arbitrary transport configuration changes behind those IDs.
+
+#### `agent/models` (API `0.2`, `agent_model_selection_v1`)
+
+Requires both `agent_sessions` and `agent_model_selection_v1`. Request:
+
+```json
+{"jsonrpc":"2.0","id":"models-1","method":"agent/models",
+ "params":{"parent_request_id":2,"query":"sonnet","limit":50}}
+```
+
+The active host model-tool or declared-command parent supplies the resource
+owner; callers cannot submit an owner. Discovery is root-owner-only and retains
+the same principal, process-generation, and active-parent fences as other
+`agent/*` requests. Missing, foreign, or inactive owners fail closed.
+
+`query` is optional/null, a case-insensitive model/provider/display-name search
+of at most 128 UTF-8 bytes without control characters. `limit` is optional/null,
+defaults to 50, and must be 1..=100. Success returns
+`{"models":[...],"truncated":false}`; each row contains `model`, `provider`,
+nullable `display_name`, `reasoning` (supported string labels), `context_window`,
+and `max_output_tokens`. The host bounds discovery and marks excess matches
+with `truncated`; this is not an unbounded catalog dump. IDs are capped at 256
+bytes, display names at 512 bytes, and reasoning at 32 labels of at most 256
+bytes each. Rows are secret-free configured-route metadata, not transport or
+authentication configuration. Without a configured resolver the view contains
+only the inherited model (subject to the query).
 
 ---
 
@@ -1561,8 +1626,9 @@ Request `{ "parent_request_id": 2, "target": "agent-1" }`. Success returns
 `agent_id`, `agent_path`, `previous_status`, and `interrupt_requested`. The host
 cancels the owned descendant tree when an active interrupt is requested.
 
-All six methods share the child-request and eight-worker bounds. After a
-parseable request ID, malformed parameters return `-32602`. Unavailable
+All `agent/*` methods share the child-request bounds; child creation retains
+the eight-worker bound. After a parseable request ID, malformed parameters
+return `-32602`. Unavailable
 service/owner, invalid ownership, exhausted delegation limits, persistence
 failure, or an invalid operation return `-32002`. The extension's stable
 principal is derived from its manifest name plus a SHA-256 manifest-identity
@@ -1887,6 +1953,7 @@ reference, safety, parentage, and bound rules.
 | `dynamic_tools` | no | Transactional `tools/register`, `tools/unregister`, and revision-pinned `tool/call` |
 | `runtime_commands` | no | Initialize-time authoritative fixed command catalog for compatibility runtimes; no live mutations |
 | `agent_sessions` | conditional | Principal/owner-scoped `agent/*` child model-session service |
+| `agent_model_selection_v1` | conditional | Bounded `agent/models`, `policy.model_selection`, and host-confirmed `resolved_model`; also requires `agent_sessions` |
 | `delegation_telemetry_v1` | conditional first-party requirement | Native owner-run `AgentEvent::DelegationUpdated` child telemetry; required by `octet-subagents` when `agent_sessions` is offered |
 | `approvals` | conditional | Original-intent/active-owner-bound single-use `policy/evaluate` retry tokens; also requires `policy_intents` |
 | `secrets` | conditional | Owner-scoped `secret/get` for exact manifest-allowlisted names |

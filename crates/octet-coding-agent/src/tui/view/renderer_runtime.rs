@@ -1,6 +1,8 @@
 //! Retained renderer scheduling, shared state, and frame bookkeeping.
 
-use std::cell::RefCell;
+use super::renderer_model::{RenderModel, RenderOwner};
+use std::cell::{RefCell, RefMut};
+use std::ops::Deref;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -36,11 +38,63 @@ const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// clone of this handle and performs all expensive layout work away from the
 /// async agent/input loop.
 #[derive(Clone)]
-pub(super) struct SharedState(Arc<Mutex<ShellState>>);
+pub(super) struct SharedState(
+    Arc<Mutex<ShellState>>,
+    Arc<Mutex<Option<Arc<super::renderer_geometry::RenderedGeometry>>>>,
+);
 
 impl SharedState {
+    #[cfg(test)]
+    fn wait_at_render_gate(&self) {
+        let gate = self.borrow().render_gate.clone();
+        if let Some(gate) = gate {
+            gate.wait();
+        }
+    }
+
     pub(super) fn new(state: ShellState) -> Self {
-        Self(Arc::new(Mutex::new(state)))
+        Self(Arc::new(Mutex::new(state)), Arc::new(Mutex::new(None)))
+    }
+
+    fn frame_written(&self) {
+        let geometry = self.1.lock().expect("geometry receipt poisoned").take();
+        let Some(geometry) = geometry else {
+            return;
+        };
+        let mut state = self.0.lock().expect("shell state mutex poisoned");
+        if let Some(panel) = geometry
+            .panel
+            .as_ref()
+            .filter(|panel| panel.is_current(&state))
+        {
+            if panel.document_anchor.is_some()
+                && state.pending_panel_document_top == panel.document_anchor
+            {
+                if let (
+                    Some(scroll),
+                    Some(super::Panel::ReadOnlyDocument {
+                        scroll_from_bottom, ..
+                    }),
+                ) = (panel.document_scroll, state.panel.as_mut())
+                {
+                    *scroll_from_bottom = scroll;
+                }
+                state.pending_panel_document_top = None;
+            }
+            // This completed frame replaces the previous visible consent even
+            // if input changed the selected action while its write was blocked.
+            state.painted_panel = panel.selection_is_current(&state).then(|| panel.clone());
+        }
+        if let Some(report) = geometry
+            .report
+            .as_ref()
+            .filter(|report| report.is_current(&state))
+        {
+            state.painted_report = Some(report.clone());
+        }
+        if geometry.is_current(&state) {
+            state.render_geometry = Some(geometry);
+        }
     }
 
     pub(super) fn borrow(&self) -> MutexGuard<'_, ShellState> {
@@ -48,7 +102,9 @@ impl SharedState {
     }
 
     pub(super) fn borrow_mut(&self) -> MutexGuard<'_, ShellState> {
-        self.0.lock().expect("shell state mutex poisoned")
+        let mut state = self.0.lock().expect("shell state mutex poisoned");
+        state.render_revision = state.render_revision.wrapping_add(1);
+        state
     }
 }
 
@@ -91,7 +147,15 @@ fn render_wake_requires_frame(
     semantic_command || resized || welcome || animation_due
 }
 
-fn frame_coalesce_delay(last_render: Option<Instant>, now: Instant) -> Duration {
+fn frame_coalesce_delay(
+    last_render: Option<Instant>,
+    now: Instant,
+    input_changed: bool,
+) -> Duration {
+    // The semantic stream can wait for the next slot; a key press cannot.
+    if input_changed {
+        return Duration::ZERO;
+    }
     last_render
         .map(|last| (last + RENDER_INTERVAL).saturating_duration_since(now))
         .unwrap_or_default()
@@ -208,11 +272,21 @@ fn coalesce_render_commands(
     last_render: Option<Instant>,
     tui: &TUI<'_>,
     suspended: &mut Option<mpsc::Sender<()>>,
+    input_changed: impl Fn() -> bool,
+    animation_deadline: Duration,
 ) -> bool {
     let now = Instant::now();
-    let deadline = now + frame_coalesce_delay(last_render, now);
+    // The stream throttle never pushes a due dot/shimmer phase into a later
+    // slot. Timed frames and input remain independent of semantic traffic.
+    let deadline =
+        now + frame_coalesce_delay(last_render, now, input_changed()).min(animation_deadline);
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        // A key admitted during coalescing must also preempt the deadline.
+        let remaining = if input_changed() {
+            Duration::ZERO
+        } else {
+            deadline.saturating_duration_since(Instant::now())
+        };
         if remaining.is_zero() {
             // The frame deadline already passed: inspect exactly one slot so a
             // producer that keeps refilling it cannot starve painting.
@@ -361,6 +435,7 @@ pub(super) fn render_loop_with_terminal(
         clear_on_start,
         alternate_screen,
     } = options;
+    state.borrow_mut().render_threaded = true;
     let mut tui = TUI::new(Box::new(terminal));
     // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
     // policy in `native_scrollback` (not native history) decides which rows stay
@@ -373,7 +448,7 @@ pub(super) fn render_loop_with_terminal(
     // does not paint a separate inverted cursor cell around CURSOR_MARKER.
     // Restore visibility after panels, resize replays, and renderer resumes.
     tui.set_show_hardware_cursor(true);
-    tui.add_child(Box::new(ShellComponent::new(
+    tui.add_child(Box::new(ShellComponent::isolated(
         state.clone(),
         application_viewport,
     )));
@@ -384,8 +459,12 @@ pub(super) fn render_loop_with_terminal(
         tui.request_render_force(true);
     }
     tui.start();
+    state.frame_written();
 
     let mut last_render: Option<Instant> = None;
+    // Capture before each paint: an edit admitted during a slow terminal write
+    // still differs on the next wake, even when that write was not current.
+    let mut last_editor_revision = state.borrow().editor.revision();
     let mut animations = AnimationSchedule::new();
     // A suspend is decided by the coalescer but finalized here, where the
     // final frame and the terminal handback belong.
@@ -444,9 +523,17 @@ pub(super) fn render_loop_with_terminal(
             continue;
         }
 
-        if !coalesce_render_commands(&rx, last_render, &tui, &mut suspended) {
+        if !coalesce_render_commands(
+            &rx,
+            last_render,
+            &tui,
+            &mut suspended,
+            || state.borrow().editor.revision() != last_editor_revision,
+            animations.remaining(Instant::now()),
+        ) {
             if let Some(reply) = suspended.take() {
                 suspend_terminal(&mut tui, reply);
+                return;
             }
             break;
         }
@@ -461,15 +548,22 @@ pub(super) fn render_loop_with_terminal(
             animations.advance(&mut shell, now);
             shell.expire_transcript_scrollbar(now);
         }
+        last_editor_revision = state.borrow().editor.revision();
         tui.request_render();
+        state.frame_written();
         last_render = Some(Instant::now());
     }
 
-    // Stop may overtake a coalesced Render. Publish the latest semantic state
-    // before restoring the terminal so exit/re-exec cannot drop final notices.
+    // Stop (or channel closure) can overtake a coalesced Render. Publish the
+    // latest semantic state before restoring the terminal, not after it.
     tui.request_render();
+    state.frame_written();
     tui.stop();
 }
+
+#[cfg(test)]
+#[path = "renderer_shutdown_tests.rs"]
+mod shutdown_tests;
 
 #[cfg(test)]
 mod scheduler_tests {
@@ -784,6 +878,8 @@ mod scheduler_tests {
             Some(Instant::now()),
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
         let frame = receive
             .recv_timeout(Duration::from_millis(50))
@@ -806,6 +902,8 @@ mod scheduler_tests {
             None,
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
         assert_eq!(rx.try_iter().count(), 999);
         tx.send(RenderCommand::Stop).unwrap();
@@ -814,6 +912,8 @@ mod scheduler_tests {
             Some(Instant::now()),
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
         assert!(suspended.is_none());
         drop(tx);
@@ -822,6 +922,8 @@ mod scheduler_tests {
             None,
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
     }
 
@@ -838,6 +940,8 @@ mod scheduler_tests {
             None,
             &renderer,
             &mut suspended,
+            || false,
+            RESIZE_POLL_INTERVAL,
         ));
         let reply = suspended.take().expect("suspend is handed to the owner");
         suspend_terminal(&mut renderer, reply);
@@ -850,17 +954,72 @@ mod scheduler_tests {
     }
 
     #[test]
+    fn edit_admitted_while_coalescing_preempts_the_stream_deadline() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(RenderCommand::Render).unwrap();
+        let renderer = test_renderer();
+        let mut suspended = None;
+        let calls = std::cell::Cell::new(0);
+        // The edit occurs after the deadline was computed, before waiting.
+        assert!(coalesce_render_commands(
+            &rx,
+            Some(Instant::now()),
+            &renderer,
+            &mut suspended,
+            || {
+                calls.set(calls.get() + 1);
+                calls.get() > 1
+            },
+            RESIZE_POLL_INTERVAL,
+        ));
+        assert_eq!(calls.get(), 2, "edit must bypass the waiting branch");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn due_animation_preempts_semantic_burst_coalescing() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(RenderCommand::Render).unwrap();
+        let renderer = test_renderer();
+        let mut suspended = None;
+        assert!(coalesce_render_commands(
+            &rx,
+            Some(Instant::now()),
+            &renderer,
+            &mut suspended,
+            || false,
+            Duration::ZERO,
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "due animation paints rather than waits"
+        );
+    }
+
+    #[test]
+    fn editor_revision_tracks_text_and_cursor_during_a_render() {
+        let state = SharedState::new(ShellState::default());
+        let before = state.borrow().editor.revision();
+        state.borrow_mut().editor.set_text("key");
+        let painted = state.borrow().editor.revision();
+        assert_ne!(painted, before);
+        state.borrow_mut().editor.set_cursor(0);
+        assert_ne!(state.borrow().editor.revision(), painted);
+    }
+
+    #[test]
     fn semantic_bursts_coalesce_for_at_most_one_terminal_frame() {
         let last = Instant::now();
         assert_eq!(
-            frame_coalesce_delay(Some(last), last + Duration::from_millis(1)),
+            frame_coalesce_delay(Some(last), last + Duration::from_millis(1), false),
             Duration::from_millis(15)
         );
         assert_eq!(
-            frame_coalesce_delay(Some(last), last + Duration::from_millis(16)),
+            frame_coalesce_delay(Some(last), last + Duration::from_millis(16), false),
             Duration::ZERO
         );
-        assert_eq!(frame_coalesce_delay(None, last), Duration::ZERO);
+        assert_eq!(frame_coalesce_delay(None, last, false), Duration::ZERO);
+        assert_eq!(frame_coalesce_delay(Some(last), last, true), Duration::ZERO);
     }
 }
 
@@ -892,6 +1051,7 @@ pub(super) struct ShellFrameState {
 pub(super) struct ShellComponent {
     state: SharedState,
     frame: RefCell<ShellFrameState>,
+    owner: Option<RefCell<RenderOwner>>,
     /// Mouse capture starts in bounded semantic mode. Keyboard PageUp can
     /// request the same renderer later without changing terminal mouse policy.
     mouse_application_viewport: bool,
@@ -902,15 +1062,22 @@ impl ShellComponent {
         Self {
             state,
             frame: RefCell::new(ShellFrameState::default()),
+            owner: None,
             mouse_application_viewport: application_viewport,
         }
+    }
+
+    fn isolated(state: SharedState, application_viewport: bool) -> Self {
+        let mut component = Self::new(state, application_viewport);
+        component.owner = Some(RefCell::new(RenderOwner::default()));
+        component
     }
 
     fn uses_application_viewport(&self, state: &ShellState) -> bool {
         self.mouse_application_viewport || state.application_viewport_requested
     }
 
-    fn borrow_for_render(&self) -> MutexGuard<'_, ShellState> {
+    fn borrow_for_render(&self) -> RenderStateGuard<'_> {
         let mut state = self.state.borrow_mut();
         if !state.startup_pending {
             // Admit and materialize each diagnostic under the same shell lock:
@@ -920,7 +1087,81 @@ impl ShellComponent {
                 state.push_block(super::TranscriptBlock::Notice(message));
             }
         }
+        if let Some(owner) = &self.owner {
+            let model = RenderModel::capture(&mut state);
+            drop(state);
+            // From here through parsing, layout, diffing and terminal writes,
+            // the input owner is completely independent of renderer progress.
+            #[cfg(test)]
+            self.state.wait_at_render_gate();
+            let mut owner = owner.borrow_mut();
+            owner.accept(model);
+            RenderStateGuard::Private {
+                owner,
+                shared: &self.state,
+            }
+        } else {
+            RenderStateGuard::Inline(state)
+        }
+    }
+}
+
+enum RenderStateGuard<'a> {
+    Inline(MutexGuard<'a, ShellState>),
+    Private {
+        owner: RefMut<'a, RenderOwner>,
+        shared: &'a SharedState,
+    },
+}
+impl Deref for RenderStateGuard<'_> {
+    type Target = ShellState;
+    fn deref(&self) -> &ShellState {
+        match self {
+            Self::Inline(state) => state,
+            Self::Private { owner, .. } => &owner.state,
+        }
+    }
+}
+impl Drop for RenderStateGuard<'_> {
+    fn drop(&mut self) {
+        let Self::Private { owner, shared } = self else {
+            return;
+        };
+        let geometry = super::renderer_geometry::RenderedGeometry::capture(
+            &owner.state,
+            owner.geometry_fence.expect("accepted model"),
+        );
+        *shared.1.lock().expect("geometry receipt poisoned") = Some(geometry);
+        let mut state = shared.0.lock().expect("shell state mutex poisoned");
+        // Every mutable semantic borrow advances this fence, including input,
+        // resize, disclosure, hydration and transcript changes. Never let an
+        // old layout overwrite a newer draft/navigation decision.
+        if state.render_revision != owner.revision {
+            return;
+        }
+        state.rendered_animation_addressability = owner
+            .state
+            .active_event_blocks
+            .iter()
+            .filter_map(|index| {
+                owner
+                    .state
+                    .transcript_commit_ids
+                    .get(*index)
+                    .map(|id| (*id, owner.state.animation_block_is_addressable(*index)))
+            })
+            .collect();
         state
+            .native_animation_viewport_top
+            .set(owner.state.native_animation_viewport_top.get());
+        state.viewport_anchor.set(owner.state.viewport_anchor.get());
+        state
+            .scroll_from_bottom
+            .set(owner.state.scroll_from_bottom.get());
+        state
+            .transcript_navigation
+            .borrow_mut()
+            .apply_render_feedback(&owner.state.transcript_navigation.borrow());
     }
 }
 
@@ -1268,3 +1509,38 @@ mod commit_metadata_tests {
         assert_eq!(take_commit_metadata_visits(), 0);
     }
 }
+
+/// Per-shell gate in the actual threaded materialization/layout path. Tests
+/// observe it from another OS thread; no Tokio timeout can hide a held mutex.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RenderGate {
+    state: Mutex<(bool, bool)>,
+    changed: std::sync::Condvar,
+}
+#[cfg(test)]
+impl RenderGate {
+    fn wait(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 = true;
+        self.changed.notify_all();
+        while !state.1 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+    pub(crate) fn wait_until_entered(&self, timeout: Duration) -> bool {
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(self.state.lock().unwrap(), timeout, |state| !state.0)
+            .unwrap();
+        state.0
+    }
+    pub(crate) fn release(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+#[path = "renderer_ownership_tests.rs"]
+mod ownership_tests;

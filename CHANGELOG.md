@@ -15,14 +15,31 @@ Changes in the local 0.8.0 release candidate. This build is not published; see
 
 ### Interaction
 
+- Offer first-run setup in the order API key, supported OAuth subscription,
+  then local/self-hosted models. API keys use masked input and explicit review,
+  with recoverable owner-private storage rather than hashes or an encryption
+  claim. ChatGPT (Codex) and GitHub Copilot reuse host-owned device login;
+  configured launches and noninteractive modes do not reopen onboarding.
+
 - Silence routine session lookup/replay/fork progress during startup, including
   resumed launches. Keep input, setup, errors, and coordinated shutdown live.
   Fresh launches skip the unnecessary session-replay worker and full-config copy.
 
 - Quiet routine reload output: remove the startup arming banner, queued-path
   chatter, and automatic success summaries. Only explicit reload commands get a
-  completion summary. Watch/timing details remain available through `/reload --dry-run`;
-  failures, limits, work-loss notices, and re-exec confirmations remain visible.
+  completion summary. Host, worker-deferral, extension, provider-catalog, and
+  watch-limit problems appear once per component/condition and reappear after a
+  successful check clears them; skipped components retain their diagnostics.
+  Resource/bootstrap and keybinding checks now use the same checked-component
+  recurrence rule, without hiding explicit command diagnostics.
+  Actual work losses are always reported, counting only discarded
+  extension host requests. Automatic permission paths never open a picker or
+  probe an unconsented replacement; explicit consent remains required.
+  Watch/timing details remain available through `/reload --dry-run`.
+
+- Hide the root elapsed clock while retry status is active, including after its
+  countdown expires, while keeping the interrupt hint. Normal Working/Thinking
+  elapsed clocks are unchanged.
 
 - Ease the resting activity colours off the profile extremes: the dark theme's
   Working/Thinking label now rests at a slightly greyed off-white (about #f9
@@ -91,17 +108,17 @@ Changes in the local 0.8.0 release candidate. This build is not published; see
   prompt, theme, context-file, keybinding, settings, and extension roots in use
   plus the resolved executable (`current_exe()` re-resolved every poll) on a
   bounded 1000 ms metadata poll, and applies a pass only at the idle prompt in
-  the fixed order resources → extensions → host. Saves are debounced (200 ms,
+  the order host eligibility/consent → resources → extensions; an admitted host
+  replacement supersedes in-process rebuilding. Saves are debounced (200 ms,
   2 s hard ceiling) and coalesced; a pass is never admitted while a run owns the
   session, so evidence queued behind a busy boundary is applied at the next idle
   prompt. It is enabled silently by default; `/reload --dry-run` exposes watch
   settings and per-layer details, while automatic passes omit success summaries;
   `reload`, `reload_poll_ms`, `reload_debounce_ms`, and `reload_max_files` are
   user-level settings, `/reload --dry-run` previews a pass without changing
-  anything, and `/reload --force` takes one immediately while naming the four
-  losses (in-flight model call, in-flight tool call, an extension's in-flight
-  host request, a worker mid-call) and the durable records that survive. Plain
-  `/reload` keeps its existing transactional resource reload and re-exec path.
+  anything, and `/reload --force` takes one at the idle boundary while previewing
+  possible interruptions from currently pending host requests and workers.
+  Plain `/reload` rebuilds resources/extensions without selecting the host layer.
 - `/reload` now also reloads the **host binary**. When the executable on disk
   changed, the candidate is validated first with a side-effect-free internal
   probe (`--internal-reexec-probe`, which initializes no provider, extension,
@@ -145,15 +162,17 @@ Changes in the local 0.8.0 release candidate. This build is not published; see
 
 ### Subagents
 
-- Settle completed workers once into their owning transcript block, avoid replay
-  on later turns, and preserve history anchors while live workers update.
-- Make the transcript block the single live roster surface, without duplicate
-  pinned chrome. Fix the native scrollback regression that clipped unrelated
-  commands, results, and answers after an active roster: restore the v0.7.6 rule
-  that `live preview (result pending)` applies only to an ordinary trailing
-  pending tool, never a roster or its following conversation. Genuine historical
-  updates may still require full replay; deterministic Shell/renderer/VT checks
-  are not live-emulator qualification.
+- Keep the live worker roster in bounded pinned chrome above the composer while
+  any retained worker is active, independently of root-run activity and app-owned
+  history navigation. Hide it after settlement while retaining telemetry,
+  accounting, and the `/subagents` inspector. Metric changes do not dirty history;
+  raw first-party orchestration calls/results and worker transitions add no
+  automatic transcript or copy notices. Ordinary failures and approvals retain
+  their existing owners. Native-scroll regression coverage retains interleaved
+  commands, results, and answers exactly once, rather than clipping them into a
+  pending-tool preview.
+- Bound the strip to one third of terminal height and available space; omitted
+  rows point to `/subagents`. Native terminal scrollback cannot overlay chrome.
 - Stop truncating worker model ids: worker/state/model are mandatory columns
   that never ellipsize, optional metrics drop first, and the compact fallback
   line still prints the full model. The `/subagents` picker header is now the
@@ -183,6 +202,19 @@ Changes in the local 0.8.0 release candidate. This build is not published; see
   and 916 capability routes; preserve the [source provenance](crates/octet-ai/models/SOURCES.md).
   Builds and runtime remain offline, direct DeepSeek schedule pricing remains
   excluded/unknown, and public metadata does not establish live inference acceptance.
+- Decode OpenRouter's per-model `reasoning` object (`mandatory`,
+  `default_enabled`, `supported_efforts`, `default_effort`) instead of treating
+  the presence of a `reasoning_effort` parameter as proof that reasoning is
+  optional. A mandatory model no longer receives a disabling
+  `reasoning.effort=none`, which OpenRouter rejected with HTTP 400; it receives
+  the endpoint's default effort or an advertised exact effort, and a saved `off`
+  is clamped to a supported choice. Advertised effort strings are sent verbatim.
+
+- Share a 64 MiB / 32-file Bash spill budget per owner, including active captures;
+  evict oldest files and move disk capture/cleanup off the async path. Keep the
+  16 MiB per-stream cap and distinguish expired, partial, and complete spills.
+- Advance Responses replay/capacity projections by suffix, retain control-queue
+  reservations through delivery, and cap combined extension schemas at 4 MiB.
 
 - Decode the reasoning a provider advertises through accepted request parameters
   (`supported_parameters` containing `reasoning`, `reasoning_effort` or
@@ -244,6 +276,9 @@ Changes in the local 0.8.0 release candidate. This build is not published; see
 
 ### CLI and sessions
 
+- Remove the 64 MiB session-catalog cliff; use indexed substring search,
+  targeted lookups, and bounded maintenance batches without capping total disk.
+
 - Add `--powershell` (additive Windows `powershell` opt-in, reported inert on
   other hosts, conflicting with an exclusive `--tools`/`--no-tools` list) and
   ordered `--models` patterns that resolve a literal `provider/model`/bare-id
@@ -266,6 +301,10 @@ Changes in the local 0.8.0 release candidate. This build is not published; see
 
 ### Telemetry
 
+- Move optional JSONL writes to an ordered 256-record / 1-MiB worker with
+  observable loss/failure and bounded lifecycle drain; durable accounting stays
+  authoritative and unchanged.
+
 - Add a callback-based, vendor-neutral telemetry substrate
   (`TelemetryContext`/`TelemetrySpan`, NOOP and InMemory implementations,
   serializable typed schema and a span-assertion harness) with no global and no
@@ -279,6 +318,28 @@ Changes in the local 0.8.0 release candidate. This build is not published; see
 
 ### Editor and TUI
 
+- Make Option+Up/Alt+Up recall the newest editable pending message instead of
+  only local follow-ups: a Ctrl+S live-steering submission is now withdrawn from
+  the agent before persistence, releasing its reserved control budget, so the
+  recalled text is never also delivered. Recall is arbitrated by that
+  submission's own receipt rather than the delayed delivery event, so it fails
+  closed once the agent has claimed the input for the session. Sticky `/answer`
+  input remains deliberately non-retractable, and the pending-state hint only
+  advertises the affordance while an editable entry exists.
+
+- Render Pi-style `$…$`, `$$…$$`, `\(…\)`, and `\[…\]` math through the
+  existing LaTeX engine, preserving currency, code, incomplete expressions, and
+  unsupported source rather than displaying partial art. Broaden bounded Mermaid
+  flowcharts with upstream layout, subgraphs, reverse directions, node lists,
+  and labelled links. Unsupported diagrams retain source with a visible reason;
+  diagrams wider than the viewport show source rather than cropped art. Explicit
+  grok-mermaid oracle fixtures do not establish full Pi renderer equivalence.
+
+- Keep active inspection and consent panels inside the polling run loop. Use
+  shared semantic snapshots and renderer-private layout, with post-write
+  revision-fenced geometry and consent receipts instead of a long-held input lock.
+- Bound undo and redo to 64 snapshots / 4 MiB each, with oversized-edit barriers.
+
 - Add reusable keybinding parsing/conflict detection, editor undo/redo,
   kill/yank, word/line actions and OSC 133 zone primitives. Product key dispatch,
   user-binding loading and viewport prompt jumps remain incomplete.
@@ -286,6 +347,56 @@ Changes in the local 0.8.0 release candidate. This build is not published; see
 - Port LaTeX rendering (symbol tables, parser, fraction/operator/matrix layout)
   and add a bounded, self-contained Mermaid box-drawing engine; both fail closed
   on unsupported syntax instead of misrendering it.
+
+### Herdr integration
+
+- Report octet's agent lifecycle to [Herdr](https://herdr.dev) from the
+  interactive frontend, so a pane running octet appears as a first-class agent
+  in the sidebar, agent list, state rollups, notifications, and waits. The
+  implementation follows Herdr's official Pi integration (integration version
+  9) on the documented custom-agent surface: `pane.report_agent` for semantic
+  `idle`/`working`/`blocked` state, `pane.report_agent_session` for session
+  identity, and `pane.release_agent` on exit, with a strictly increasing `seq`
+  seeded from wall-clock milliseconds so a restarted process cannot report
+  stale sequence numbers.
+
+  State comes from the run stream itself — ready at startup, `working` from the
+  moment a prompt is accepted, `blocked` while an approval or input prompt is
+  on screen, and `idle` when the run settles — so the pane cannot disagree with
+  octet. Reporting is bounded to one 500 ms socket attempt plus one 1500 ms
+  retry, silent on every failure, and active only when `HERDR_ENV=1` with a
+  pane id and transport, so it is a complete no-op outside Herdr. A slow Herdr
+  server can add at most the bounded delivery attempts at a report boundary.
+  Only the opaque session id (never a
+  transcript path) and the bounded on-screen approval prompt leave the process;
+  display-only presentation stays with `herdr pane report-metadata`.
+
+  Transports are direct socket IPC on `HERDR_SOCKET_PATH` (Linux/macOS) and the
+  documented `HERDR_BIN_PATH` CLI wrapper (Windows), each as an argv list with
+  no shell.
+
+- Resume octet sessions in restored Herdr panes without a Herdr-side change,
+  using Herdr's documented plugin surface instead of a native agent kind. While
+  octet runs in a pane it keeps one small owner-private record (`pane id`,
+  Herdr session scope, session id, cwd, session-store root, workspace, pid) under
+  `~/.octet/herdr/panes/`, and
+  `octet herdr install-plugin` generates a manifest whose single `[[startup]]`
+  hook is `octet herdr restore` — no events, actions, panes, build steps, or
+  state outside octet's own directories. Herdr runs startup hooks after it
+  restores the session and the API socket is ready, so that pass reopens each
+  recorded pane with `octet --resume <id>` and the recorded `--session-dir` and
+  `--workspace` scope.
+
+  The pass is bounded and fails closed: records are capped, size-limited,
+  owner-private, written atomically, pruned after 14 days or when their pane is
+  gone, and only resumed when the record belongs to this Herdr session, the pane
+  still exists, it currently hosts no agent, and its directory still matches the
+  recorded one. At most 16 panes per start; every skip is reported with its
+  reason; session ids are token-validated and absolute paths are bounded and
+  shell-quoted. The pane-list response is drained concurrently and capped. The
+  record survives a Herdr server stop (`SIGHUP` to the pane, measured against
+  Herdr 0.9.0) and is dropped on a deliberate exit, so a later restore never
+  resurrects a session the user closed. See [`docs/herdr.md`](docs/herdr.md).
 
 ### Repository tooling and docs
 

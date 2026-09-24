@@ -9,6 +9,21 @@ use std::path::Path;
 
 use octet_agent::{ToolError, ToolOutput, ToolOutputMediaKind};
 
+/// First-party orchestration calls are projected through the worker roster,
+/// never through ordinary transcript tool cards.
+pub(crate) const SUBAGENT_TOOL_NAMES: [&str; 6] = [
+    "subagent_spawn",
+    "subagent_status",
+    "subagent_wait",
+    "subagent_stop",
+    "subagent_continue",
+    "subagent_models",
+];
+
+pub(crate) fn is_subagent_tool(name: &str) -> bool {
+    SUBAGENT_TOOL_NAMES.contains(&name)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolDisplay {
     pub active: String,
@@ -106,8 +121,8 @@ pub fn summarize_tool_with_workspace(
         "write" => path_tool(args, "writing", "wrote", "writing", "write", workspace),
         // `exec` is retained only as a renderer for pre-rename sessions.
         "bash" | "exec" => summarize_bash(args, workspace),
-        "subagent_spawn" | "subagent_status" | "subagent_wait" | "subagent_stop" => ToolDisplay {
-            active: "delegating to read-only workers".to_owned(),
+        name if is_subagent_tool(name) => ToolDisplay {
+            active: "delegating to workers".to_owned(),
             success: "delegation updated".to_owned(),
             failure: "delegation failed".to_owned(),
             compact_active: "delegating".to_owned(),

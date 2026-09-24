@@ -51,34 +51,38 @@ impl BedrockEventStreamDecoder {
         }
         self.buffer.extend_from_slice(chunk);
         let mut messages = Vec::new();
+        let mut consumed = 0;
         loop {
-            if self.buffer.len() < 12 {
+            let remaining = &self.buffer[consumed..];
+            if remaining.len() < 12 {
                 break;
             }
-            let total_length = read_u32(&self.buffer[..4])? as usize;
-            let headers_length = read_u32(&self.buffer[4..8])? as usize;
+            let total_length = read_u32(&remaining[..4])? as usize;
+            let headers_length = read_u32(&remaining[4..8])? as usize;
             if !(16..=MAX_EVENT_STREAM_FRAME_BYTES).contains(&total_length)
                 || headers_length > total_length.saturating_sub(16)
             {
                 return Err(invalid_frame());
             }
-            if crc32(&self.buffer[..8]) != read_u32(&self.buffer[8..12])? {
+            if crc32(&remaining[..8]) != read_u32(&remaining[8..12])? {
                 return Err(invalid_frame());
             }
-            if self.buffer.len() < total_length {
+            if remaining.len() < total_length {
                 break;
             }
-            if crc32(&self.buffer[..total_length - 4])
-                != read_u32(&self.buffer[total_length - 4..total_length])?
+            if crc32(&remaining[..total_length - 4])
+                != read_u32(&remaining[total_length - 4..total_length])?
             {
                 return Err(invalid_frame());
             }
             let header_end = 12 + headers_length;
-            let headers = parse_event_headers(&self.buffer[12..header_end])?;
-            let payload = bytes::Bytes::copy_from_slice(&self.buffer[header_end..total_length - 4]);
-            self.buffer.drain(..total_length);
+            let headers = parse_event_headers(&remaining[12..header_end])?;
+            let payload = bytes::Bytes::copy_from_slice(&remaining[header_end..total_length - 4]);
+            consumed += total_length;
             messages.push(BedrockEventStreamMessage { headers, payload });
         }
+        // Compact the incomplete suffix once, not once per frame in a burst.
+        self.buffer.drain(..consumed);
         Ok(messages)
     }
 
@@ -408,6 +412,7 @@ pub(crate) fn decode_stream_event(
                     &mut events,
                     builder,
                     StreamEvent::ToolCallStart {
+                        async_execution: false,
                         index: canonical,
                         id: ToolCallId(id),
                         name,
@@ -966,6 +971,22 @@ mod tests {
     }
 
     #[test]
+    fn frame_decoder_compacts_a_burst_and_preserves_its_partial_tail() {
+        let frame = frame(&[(":message-type", "event")], &json!({"text": "burst"}));
+        let mut burst = frame.repeat(256);
+        burst.extend_from_slice(&frame[..9]);
+        let mut decoder = BedrockEventStreamDecoder::new();
+        let messages = decoder.push(&burst).unwrap();
+        assert_eq!(messages.len(), 256);
+        assert!(messages
+            .iter()
+            .all(|message| message.payload == messages[0].payload));
+        assert_eq!(decoder.buffer, frame[..9]);
+        assert_eq!(decoder.push(&frame[9..]).unwrap().len(), 1);
+        decoder.finish().unwrap();
+    }
+
+    #[test]
     fn frame_decoder_rejects_bad_crc() {
         let mut bytes = frame(
             &[(":message-type", "event"), (":event-type", "messageStart")],
@@ -1139,6 +1160,7 @@ mod tests {
                 content: vec![UserPart::Text("hello".into())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "echo".into(),
                 description: "fixture".into(),

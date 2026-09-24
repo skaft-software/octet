@@ -71,13 +71,24 @@ class ImageCatalogRefreshTests(unittest.TestCase):
         # A route with no input modalities defaults to text, like upstream.
         self.assertEqual(catalog["models"][1]["input"], ["image"])
 
-    def test_dynamic_placeholder_is_unpriced_and_missing_rates_are_zero(self):
+    def test_dynamic_or_missing_rates_are_unpriced_but_explicit_free_rates_are_zero(self):
         catalog = refresh.image_catalog(self.payload())
-        dynamic = next(model for model in catalog["models"] if model["id"] == "d/dynamic")
-        self.assertIsNone(dynamic["cost"])
-        unpriced = next(model for model in catalog["models"] if model["id"] == "e/no-pricing")
+        for model_id in ("d/dynamic", "e/no-pricing"):
+            model = next(model for model in catalog["models"] if model["id"] == model_id)
+            self.assertIsNone(model["cost"])
+        rates = {
+            "prompt": "0.000002", "completion": "0.000012",
+            "input_cache_read": "0.0000002", "input_cache_write": "0.000000375",
+        }
+        for key in rates:
+            with self.subTest(missing=key):
+                missing = {field: value for field, value in rates.items() if field != key}
+                self.assertIsNone(refresh.model_cost(missing))
+                self.assertIsNone(refresh.model_cost({**rates, key: None}))
+                self.assertIsNone(refresh.model_cost({**rates, key: ""}))
+        self.assertIsNone(refresh.model_cost(None))
         self.assertEqual(
-            unpriced["cost"],
+            refresh.model_cost(dict.fromkeys(rates, "0")),
             {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
         )
         with self.assertRaises(ValueError):

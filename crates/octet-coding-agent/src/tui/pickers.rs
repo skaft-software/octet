@@ -12,6 +12,7 @@ use octet_agent::extension_process::{ConfirmationRequest, ExtensionInputRequest}
 use octet_agent::tool::{ToolConfirmation, ToolInputRequest};
 use octet_ai::{ModelCatalog, ModelId};
 
+use crate::app::{bootstrap::CodexContextNotes, App};
 use crate::config::ThinkingLevel;
 use crate::modes::interactive::run_blocking_lifecycle;
 use crate::presentation::{
@@ -20,8 +21,8 @@ use crate::presentation::{
 use crate::session_store::{SessionMeta, SessionStorageLifecycle, SessionStore};
 use crate::tui::view::{
     ForkMessage, InteractiveShell, MessagePicker, OrdinarySurfaceLifecycle,
-    OrdinarySurfaceMetadata, Panel, PanelAction, PanelRequest, PanelResult, PickerState,
-    SubagentGroup, SubagentPanel,
+    OrdinarySurfaceMetadata, OrdinarySurfaceStatus, Panel, PanelAction, PanelRequest, PanelResult,
+    PickerState, SubagentGroup, SubagentPanel,
 };
 
 const MAX_SECRET_INPUT_BYTES: usize = 4096;
@@ -31,10 +32,10 @@ const SUBAGENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from
 const SUBAGENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 #[derive(Default)]
-struct SecretInputBuffer(Vec<u8>);
+pub(crate) struct SecretInputBuffer(Vec<u8>);
 
 impl SecretInputBuffer {
-    fn push(&mut self, character: char) {
+    pub(crate) fn push(&mut self, character: char) {
         let mut encoded = [0; 4];
         let bytes = character.encode_utf8(&mut encoded).as_bytes();
         if self.0.len().saturating_add(bytes.len()) <= MAX_SECRET_INPUT_BYTES {
@@ -43,7 +44,7 @@ impl SecretInputBuffer {
         encoded.fill(0);
     }
 
-    fn extend_paste(&mut self, pasted: &str) {
+    pub(crate) fn extend_paste(&mut self, pasted: &str) {
         let pasted = pasted.trim_end_matches(['\r', '\n']);
         let remaining = MAX_SECRET_INPUT_BYTES.saturating_sub(self.0.len());
         let mut end = pasted.len().min(remaining);
@@ -53,7 +54,7 @@ impl SecretInputBuffer {
         self.0.extend_from_slice(&pasted.as_bytes()[..end]);
     }
 
-    fn backspace(&mut self) {
+    pub(crate) fn backspace(&mut self) {
         let Some((start, _)) = std::str::from_utf8(&self.0)
             .ok()
             .and_then(|text| text.char_indices().last())
@@ -64,7 +65,7 @@ impl SecretInputBuffer {
         self.0.truncate(start);
     }
 
-    fn take(&mut self) -> Vec<u8> {
+    pub(crate) fn take(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.0)
     }
 }
@@ -172,6 +173,7 @@ where
     shell.set_tool_input_prompt(Some(request.prompt.clone()));
     shell.render();
     let mut value = SecretInputBuffer::default();
+    let mut overflowed = false;
     loop {
         let next = tokio::select! {
             biased;
@@ -200,6 +202,12 @@ where
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match key.code {
+                    KeyCode::Enter if overflowed => {
+                        // Never return a silently truncated credential. Clear the
+                        // rejected input, then let the user paste a fresh value.
+                        value = SecretInputBuffer::default();
+                        overflowed = false;
+                    }
                     KeyCode::Enter => {
                         let bytes = value.take();
                         let answer = String::from_utf8(bytes)
@@ -224,16 +232,30 @@ where
                             KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
                         ) =>
                     {
+                        overflowed |= value.0.len().saturating_add(character.len_utf8())
+                            > MAX_SECRET_INPUT_BYTES;
                         value.push(character)
                     }
                     _ => {}
                 }
             }
-            Event::Paste(pasted) => value.extend_paste(&pasted),
+            Event::Paste(pasted) => {
+                overflowed |= value
+                    .0
+                    .len()
+                    .saturating_add(pasted.trim_end_matches(['\r', '\n']).len())
+                    > MAX_SECRET_INPUT_BYTES;
+                value.extend_paste(&pasted);
+            }
             Event::Resize(columns, rows) => shell.set_size(columns, rows),
             _ => {}
         }
-        let shown = if request.secret {
+        let shown = if overflowed {
+            format!(
+                "{} [input exceeds 4 KiB; Enter to clear, Esc to cancel]",
+                request.prompt
+            )
+        } else if request.secret {
             request.prompt.clone()
         } else {
             let entered = std::str::from_utf8(&value.0).unwrap_or_default();
@@ -540,7 +562,7 @@ where
 {
     shell.open_panel(Panel::ReadOnlyDocument {
         title: title.into(),
-        text: crate::tui::view::sanitize_for_terminal(&text),
+        text: crate::tui::view::sanitize_for_terminal(&text).into(),
         styled: false,
         scroll_from_bottom: 0,
     });
@@ -602,7 +624,7 @@ where
 {
     shell.open_panel(Panel::ReadOnlyDocument {
         title: title.into(),
-        text,
+        text: text.into(),
         styled: true,
         scroll_from_bottom: 0,
     });
@@ -1108,9 +1130,8 @@ pub async fn thinking_picker(
             }
             return Ok(None);
         };
-        if let Err(e) = crate::cli::persist_reasoning(selected.label()) {
-            shell.error(format!("failed to save thinking preference: {e}"));
-        }
+        // Selection is not acceptance: the owning idle dispatcher validates
+        // session-dependent controls before persisting the preference.
         return Ok(Some(selected));
     }
 }
@@ -1374,11 +1395,11 @@ fn model_provider_heading(catalog: &ModelCatalog, model: &octet_ai::ModelSpec) -
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ModelPickerPresentation {
-    ids: Vec<ModelId>,
-    providers: Vec<String>,
-    labels: Vec<String>,
-    descriptions: Vec<Option<String>>,
+pub(crate) struct ModelPickerPresentation {
+    pub(crate) ids: Vec<ModelId>,
+    pub(crate) providers: Vec<String>,
+    pub(crate) labels: Vec<String>,
+    pub(crate) descriptions: Vec<Option<String>>,
 }
 
 fn pad_visible_right(value: &str, width: usize) -> String {
@@ -1395,7 +1416,7 @@ fn pad_visible_left(value: &str, width: usize) -> String {
     )
 }
 
-fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPresentation {
+pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPresentation {
     let mut rows = catalog
         .models()
         .map(|model| {
@@ -1464,6 +1485,149 @@ fn mark_current_choice(labels: &mut [String], current: Option<usize>) -> usize {
         index
     } else {
         0
+    }
+}
+
+/// A deferred full inventory belongs to the idle picker owner. Dropping the
+/// handle on cancel never applies its result to a later app or selection.
+pub(crate) type DeferredModelCatalog =
+    tokio::task::JoinHandle<anyhow::Result<(ModelCatalog, CodexContextNotes)>>;
+
+/// Open the launch catalog immediately, then refresh the same panel if the
+/// deferred fleet inventory succeeds. Terminal input owns confirmation and
+/// cancellation even while provider discovery is still running.
+pub(crate) async fn optional_model_picker_live<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    app: &mut App,
+    mut pending: Option<DeferredModelCatalog>,
+) -> anyhow::Result<Option<ModelId>>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let expected_model = app.model.spec.id.clone();
+    let mut presentation = model_picker_presentation(&app.catalog);
+    if presentation.ids.is_empty() {
+        shell.error("nothing is available to select".into());
+        shell.render();
+        return Ok(None);
+    }
+    mark_current_choice(
+        &mut presentation.labels,
+        presentation.ids.iter().position(|id| *id == expected_model),
+    );
+    let mut surface = OrdinarySurfaceMetadata::with_purpose(
+        "Select model",
+        "Choose the model for subsequent prompts and the startup default",
+    );
+    if pending.is_some() {
+        surface.lifecycle = OrdinarySurfaceLifecycle::Loading(OrdinarySurfaceStatus::persistent(
+            "loading other providers",
+        ));
+    }
+    shell.open_panel(Panel::SelectList {
+        surface,
+        items: presentation.labels,
+        descriptions: presentation.descriptions,
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectGroupedModel {
+            models: presentation.ids,
+            providers: presentation.providers,
+        },
+    });
+    shell.render();
+
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                shell.close_panel();
+                return Ok(None);
+            }
+            next = input.next() => next,
+            result = async { pending.as_mut().expect("pending catalog").await }, if pending.is_some() => {
+                pending = None;
+                match result {
+                    Ok(Ok((catalog, notes))) => match app.apply_picker_catalog(&expected_model, catalog, notes) {
+                        Ok(true) => {
+                            shell.set_model_cycle(app.model_cycle());
+                            let mut presentation = model_picker_presentation(&app.catalog);
+                            mark_current_choice(
+                                &mut presentation.labels,
+                                presentation.ids.iter().position(|id| *id == expected_model),
+                            );
+                            shell.refresh_panel_models(
+                                presentation.labels,
+                                presentation.descriptions,
+                                presentation.ids,
+                                presentation.providers,
+                            );
+                        }
+                        Ok(false) => {} // The launch identity is no longer current.
+                        Err(error) => shell.set_model_picker_lifecycle(
+                            OrdinarySurfaceLifecycle::RecoverableError(
+                                OrdinarySurfaceStatus::persistent(format!(
+                                    "could not load every provider: {error}"
+                                )),
+                            ),
+                        ),
+                    },
+                    Ok(Err(error)) => shell.set_model_picker_lifecycle(
+                        OrdinarySurfaceLifecycle::RecoverableError(
+                            OrdinarySurfaceStatus::persistent(format!(
+                                "could not load every provider: {error}; showing current routes"
+                            )),
+                        ),
+                    ),
+                    Err(error) => shell.set_model_picker_lifecycle(
+                        OrdinarySurfaceLifecycle::RecoverableError(
+                            OrdinarySurfaceStatus::persistent(format!(
+                                "provider discovery stopped: {error}; showing current routes"
+                            )),
+                        ),
+                    ),
+                }
+                shell.render();
+                continue;
+            }
+        };
+        let event = match next {
+            Some(Ok(event)) => event,
+            Some(Err(error)) => {
+                shell.close_panel();
+                return Err(error.into());
+            }
+            None => {
+                shell.close_panel();
+                return Ok(None);
+            }
+        };
+        if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
+            shell.close_panel();
+            shell.request_close();
+            shell.render();
+            return Ok(None);
+        }
+        if matches!(event, Event::Mouse(_)) {
+            continue;
+        }
+        if let Some((result, action)) = shell.panel_input(&event) {
+            shell.render();
+            let selected = match (result, action) {
+                (PanelResult::Confirm(index), PanelAction::SelectGroupedModel { models, .. }) => {
+                    models.get(index).cloned()
+                }
+                _ => None,
+            };
+            if let Some(id) = &selected {
+                if let Err(error) = crate::cli::persist_model(&id.0) {
+                    shell.error(format!("failed to save model preference: {error}"));
+                }
+            }
+            return Ok(selected);
+        }
+        shell.render();
     }
 }
 
@@ -1544,6 +1708,120 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use tokio_stream::wrappers::ReceiverStream;
+
+    #[tokio::test]
+    async fn secret_input_paste_never_enters_the_composer_or_transcript() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.extension_set_editor("draft kept intact".into());
+        let request = ExtensionInputRequest {
+            parent_request_id: 0,
+            prompt: "API key (input hidden)".into(),
+            secret: true,
+        };
+        let mut input = futures_util::stream::iter([
+            Ok(Event::Paste("synthetic-private-key\r\n".into())),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+        ]);
+        let answer = extension_input_picker(&mut shell, &mut input, &request)
+            .await
+            .unwrap();
+        assert_eq!(answer.as_deref(), Some("synthetic-private-key"));
+        assert_eq!(shell.pending(), "draft kept intact");
+        let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+        assert!(!frame.contains("synthetic-private-key"));
+        assert!(!frame.contains("API key (input hidden)"));
+    }
+
+    #[tokio::test]
+    async fn secret_input_cancel_and_input_error_discard_the_answer_and_restore_editor() {
+        for end in [
+            Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+            Err(std::io::Error::other("synthetic input failure")),
+        ] {
+            let failed = end.is_err();
+            let mut shell = InteractiveShell::test_shell();
+            shell.extension_set_editor("original draft".into());
+            let request = ExtensionInputRequest {
+                parent_request_id: 0,
+                prompt: "API key (input hidden)".into(),
+                secret: true,
+            };
+            let mut input =
+                futures_util::stream::iter([Ok(Event::Paste("synthetic-private-key".into())), end]);
+            let answer = extension_input_picker(&mut shell, &mut input, &request).await;
+            if failed {
+                assert!(answer.is_err());
+            } else {
+                assert_eq!(answer.unwrap(), None);
+            }
+            assert_eq!(shell.pending(), "original draft");
+            let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+            assert!(!frame.contains("synthetic-private-key"));
+            assert!(!frame.contains("API key (input hidden)"));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_secret_input_cannot_submit_a_truncated_key() {
+        for oversized in [
+            vec![Ok(Event::Paste("x".repeat(MAX_SECRET_INPUT_BYTES + 1)))],
+            vec![
+                Ok(Event::Paste("x".repeat(MAX_SECRET_INPUT_BYTES))),
+                Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Char('y'),
+                    KeyModifiers::NONE,
+                ))),
+            ],
+        ] {
+            let mut shell = InteractiveShell::test_shell();
+            let request = ExtensionInputRequest {
+                parent_request_id: 0,
+                prompt: "API key (input hidden)".into(),
+                secret: true,
+            };
+            let mut events = oversized;
+            events.extend([
+                Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
+                Ok(Event::Paste("replacement-key".into())),
+                Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
+            ]);
+            let answer = extension_input_picker(
+                &mut shell,
+                &mut futures_util::stream::iter(events),
+                &request,
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer.as_deref(), Some("replacement-key"));
+            assert!(shell.pending_is_empty());
+        }
+    }
+
+    #[test]
+    fn secret_input_is_utf8_bounded_and_backspace_removes_one_character() {
+        let mut value = SecretInputBuffer::default();
+        value.extend_paste(&"x".repeat(MAX_SECRET_INPUT_BYTES - 1));
+        value.push('é');
+        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES - 1);
+        value.push('!');
+        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES);
+        value.backspace();
+        value.backspace();
+        value.extend_paste("é\r\n");
+        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES);
+        assert!(std::str::from_utf8(&value.0).unwrap().ends_with('é'));
+        value.backspace();
+        assert_eq!(value.0.len(), MAX_SECRET_INPUT_BYTES - 2);
+    }
 
     #[test]
     fn active_choice_is_focused_and_marked_without_reordering() {
@@ -1932,6 +2210,7 @@ mod tests {
             display_name: Some("Llama 3.1 8B".into()),
             protocol: octet_ai::Protocol::OpenAiChat,
             capabilities: octet_ai::Capabilities {
+                responses_features: Default::default(),
                 input_modalities: octet_ai::ModalitySet::none(),
                 output_modalities: octet_ai::ModalitySet::none(),
                 tools: true,
@@ -1982,6 +2261,7 @@ mod tests {
             display_name: None,
             protocol: octet_ai::Protocol::OpenAiChat,
             capabilities: octet_ai::Capabilities {
+                responses_features: Default::default(),
                 input_modalities: octet_ai::ModalitySet::none(),
                 output_modalities: octet_ai::ModalitySet::none(),
                 tools: true,
@@ -2158,5 +2438,129 @@ mod parity_session_search_tests {
             Some(("two".into(), expected))
         );
         assert!(search_picker_entries(&store, &"x".repeat(1025), &paths).is_err());
+    }
+}
+
+#[cfg(test)]
+mod deferred_model_picker_tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use tokio_stream::wrappers::ReceiverStream;
+
+    #[tokio::test]
+    async fn deferred_model_picker_applies_ready_catalog_before_later_input() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let active = app.model.spec.id.clone();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let (catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
+            app.config.offline,
+            &crate::app::bootstrap::CatalogReadiness::Fleet,
+        )
+        .unwrap();
+        let pending = tokio::spawn(async move { Ok((catalog, notes)) });
+        while !pending.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let mut input = ReceiverStream::new(receiver);
+        let mut shell = InteractiveShell::test_shell();
+        {
+            let future =
+                optional_model_picker_live(&mut shell, &mut input, &mut app, Some(pending));
+            tokio::pin!(future);
+            assert!(matches!(
+                futures_util::poll!(future.as_mut()),
+                std::task::Poll::Pending
+            ));
+            sender
+                .send(Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                ))))
+                .await
+                .unwrap();
+            assert!(future.await.unwrap().is_none());
+        }
+        assert!(app.readiness.is_fleet());
+        assert_eq!(app.model.spec.id, active);
+        assert!(!shell.has_panel());
+    }
+
+    #[tokio::test]
+    async fn deferred_model_picker_accepts_input_and_escape_before_inventory_finishes() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let initial = app.catalog.models().count();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let (release, waiting) = tokio::sync::oneshot::channel::<()>();
+        let pending = tokio::spawn(async move {
+            waiting.await.unwrap();
+            crate::app::bootstrap::model_catalog_for_readiness(
+                true,
+                &crate::app::bootstrap::CatalogReadiness::Fleet,
+            )
+        });
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let mut input = ReceiverStream::new(receiver);
+        let mut shell = InteractiveShell::test_shell();
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('g'),
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            optional_model_picker_live(&mut shell, &mut input, &mut app, Some(pending)),
+        )
+        .await
+        .expect("picker input must not wait for discovery")
+        .unwrap()
+        .is_none());
+        assert!(!app.readiness.is_fleet());
+        assert_eq!(app.catalog.models().count(), initial);
+        assert!(!shell.has_panel());
+        release.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deferred_model_picker_failure_keeps_current_routes_and_stays_cancellable() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let initial = app.catalog.models().count();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let pending = tokio::spawn(async { anyhow::bail!("inventory unavailable") });
+        while !pending.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let mut input = ReceiverStream::new(receiver);
+        let mut shell = InteractiveShell::test_shell();
+        {
+            let future =
+                optional_model_picker_live(&mut shell, &mut input, &mut app, Some(pending));
+            tokio::pin!(future);
+            assert!(matches!(
+                futures_util::poll!(future.as_mut()),
+                std::task::Poll::Pending
+            ));
+            sender
+                .send(Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                ))))
+                .await
+                .unwrap();
+            assert!(future.await.unwrap().is_none());
+        }
+        assert!(!app.readiness.is_fleet());
+        assert_eq!(app.catalog.models().count(), initial);
+        assert!(!shell.has_panel());
     }
 }

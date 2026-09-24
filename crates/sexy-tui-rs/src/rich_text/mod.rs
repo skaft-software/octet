@@ -137,6 +137,12 @@ pub enum Block {
         content: Vec<Inline>,
     },
     CodeBlock(CodeBlock),
+    /// Completed diagram with its original fenced source retained for narrow
+    /// terminals and source provenance. Layout must never wrap the drawing itself.
+    Diagram {
+        source: CodeBlock,
+        rendered: String,
+    },
     List(List),
     BlockQuote(Vec<Block>),
     Divider,
@@ -396,6 +402,12 @@ fn write_blocks_plain(blocks: &[Block], indent: usize, output: &mut String) {
                 inline_plain(content, output);
                 output.push('\n');
             }
+            Block::Diagram { rendered, .. } => {
+                output.push_str(rendered);
+                if !rendered.ends_with('\n') {
+                    output.push('\n');
+                }
+            }
             Block::CodeBlock(code) => {
                 output.push_str(&code.code);
                 if !code.code.ends_with('\n') {
@@ -471,7 +483,10 @@ fn write_blocks_plain(blocks: &[Block], indent: usize, output: &mut String) {
         if block_index + 1 < blocks.len()
             && matches!(
                 block,
-                Block::Heading { .. } | Block::CodeBlock(_) | Block::Divider
+                Block::Heading { .. }
+                    | Block::CodeBlock(_)
+                    | Block::Diagram { .. }
+                    | Block::Divider
             )
         {
             output.push('\n');

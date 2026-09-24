@@ -19,7 +19,7 @@ use super::tool_render::{
 use super::transcript_cache::{RenderedTranscriptBlock, SurfaceGeometry};
 use super::{
     activity_elbow, finish_transcript_block, fit_line, render_shell_output, render_user_prompt,
-    subdued_text, wrap_hanging, ToolPanel, TranscriptBlock, ACTIVITY_DETAIL_INDENT,
+    subdued_text, wrap_hanging, TranscriptBlock, ACTIVITY_DETAIL_INDENT,
 };
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
 
@@ -77,43 +77,36 @@ fn append_nested_tool_output(
     header.extend(nest_tool_output(rows, theme, width));
 }
 
-/// Grouped, column-aligned, bounded rows for a settled delegation event. The
-/// grouping, collapsing, column selection, and row ceiling live in
-/// `view::subagent_activity_render_rows`, so the transcript and its tests share
-/// one layout; this stays the transcript-block adapter.
-fn render_subagent_activity_panel(
-    panel: &ToolPanel,
-    theme: &OctetTheme,
-    width: u16,
-    expanded: bool,
-) -> Vec<String> {
-    let Some(view) = panel.subagent_activity.as_ref() else {
-        return Vec::new();
-    };
-    super::subagent_activity_render_rows(view, theme, width, expanded)
-}
-
 pub(super) struct RenderedTranscriptBlockUpdate {
     pub(super) stable_rows: usize,
     pub(super) replacement: Vec<String>,
     pub(super) geometry: SurfaceGeometry,
 }
 
-/// Incrementally decorate a streaming assistant tail. Stable Markdown rows and
-/// their outer surface frame remain in `TranscriptCache`; only the mutable
-/// content suffix plus trailing frame rows are rebuilt.
+/// Incrementally decorate a streaming assistant or expanded reasoning tail.
+/// Stable Markdown rows and their outer surface frame remain in
+/// `TranscriptCache`; only the mutable suffix plus trailing frame rows are rebuilt.
 pub(super) fn render_assistant_update_planned(
     previous: Option<&TranscriptBlock>,
     block: &TranscriptBlock,
     theme: &OctetTheme,
     rich_renderer: &RichRenderer,
+    reasoning_renderer: &RichRenderer,
     outer_width: u16,
+    show_reasoning: bool,
 ) -> Option<RenderedTranscriptBlockUpdate> {
-    let TranscriptBlock::Assistant(assistant) = block else {
-        return None;
+    let (assistant, renderer) = match block {
+        TranscriptBlock::Assistant(assistant) => (assistant, rich_renderer),
+        TranscriptBlock::Reasoning(reasoning)
+            if (reasoning.reasoning_expanded || show_reasoning)
+                && !(reasoning.text.is_empty() && !reasoning.show_reasoning_hint) =>
+        {
+            (reasoning, reasoning_renderer)
+        }
+        _ => return None,
     };
     let plan = compile_surface_plan(previous, block, theme, outer_width);
-    let update = assistant.render_update(rich_renderer, theme, plan.geometry.content_width)?;
+    let update = assistant.render_update(renderer, theme, plan.geometry.content_width)?;
     if update.stable_prefix == 0 {
         return None;
     }
@@ -204,6 +197,67 @@ pub(super) fn render_block_planned_with_rainbow(
             theme,
             width,
         ),
+        TranscriptBlock::Subagents(summary) => {
+            let full = summary.label();
+            let label = if visible_width(&full) <= usize::from(width) {
+                full
+            } else if usize::from(width) >= visible_width("Subagents · /subagents") {
+                "Subagents · /subagents".to_owned()
+            } else {
+                "/subagents".to_owned()
+            };
+            let label = sanitize_for_terminal(&label);
+            let role = if summary.active_count() > 0 {
+                "foreground"
+            } else {
+                summary.settled_role()
+            };
+            let label = if let Some(rest) = label.strip_prefix("Subagents") {
+                format!(
+                    "{}{}",
+                    theme.bold(&theme.fg(role, "Subagents")),
+                    theme.fg(role, rest)
+                )
+            } else {
+                theme.fg(role, &label)
+            };
+            let mut lines = vec![fit_line(&label, width)];
+            let hidden = summary
+                .active_count()
+                .saturating_sub(summary.live_workers.len());
+            for (index, worker) in summary.live_workers.iter().enumerate() {
+                let last = index + 1 == summary.live_workers.len() && hidden == 0;
+                let branch = if theme.unicode() {
+                    if last {
+                        "└─"
+                    } else {
+                        "├─"
+                    }
+                } else if last {
+                    "`-"
+                } else {
+                    "|-"
+                };
+                let name = sanitize_for_terminal(&worker.name);
+                let estimate = if worker.output_estimated { "~" } else { "" };
+                let text = format!(
+                    "{name} · ↑{} ↓{estimate}{}",
+                    worker.input_tokens, worker.output_tokens
+                );
+                lines.push(fit_line(
+                    &theme.fg("muted", &format!("  {branch} {text}")),
+                    width,
+                ));
+            }
+            if hidden > 0 && !summary.live_workers.is_empty() {
+                let branch = if theme.unicode() { "└─" } else { "`-" };
+                lines.push(fit_line(
+                    &theme.fg("muted", &format!("  {branch} +{hidden} more")),
+                    width,
+                ));
+            }
+            finish_transcript_block(lines)
+        }
         TranscriptBlock::Assistant(assistant) => finish_transcript_block(
             assistant.render_on_surface(rich_renderer, theme, width, content_background),
         ),
@@ -217,18 +271,6 @@ pub(super) fn render_block_planned_with_rainbow(
             status_shimmer_frame,
             rainbow_strength,
         ),
-        TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some() => {
-            // Single surface: this transcript block is the only place a
-            // delegation roster is rendered. It stays a live, in-place-updating
-            // log entry while any child is active and freezes once it settles,
-            // so there is deliberately no roster strip in `shell_chrome`.
-            finish_transcript_block(render_subagent_activity_panel(
-                panel,
-                theme,
-                width,
-                verbose_tools,
-            ))
-        }
         TranscriptBlock::Tool(panel) => {
             let compact_bash = matches!(panel.name.as_str(), "bash" | "exec")
                 && panel.display.shell_command.is_some();

@@ -1,5 +1,8 @@
 //! The agent: configuration, the procedural run loop, and run control.
 
+mod background_tools;
+mod native_steering;
+
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -11,19 +14,21 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use octet_ai::{
     AiClient, AiError, AssistantMessage, AssistantPart, AudioPayload, CacheRetention,
-    CompatibilityMode, Cost, DecodeError, ImageSource, Media, Message, Model, OutputFormat,
-    OutputModalities, Protocol, ReasoningConfig, ReasoningMode, Request, ResponsesCompactRequest,
-    ResponsesInput, ResponsesOptions, ResponsesReplayItem, ServiceTier, StopReason, StreamEvent,
-    ToolCall, ToolCallArgumentError, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage,
-    UserMessage, UserPart, PICODOLLARS_PER_MICRODOLLAR,
+    CompatibilityMode, Cost, DecodeError, ImageInputError, ImageInputLimits, ImageSource, Media,
+    Message, Modality, Model, OutputFormat, OutputModalities, Protocol, ReasoningConfig,
+    ReasoningMode, Request, ResponsesCompactRequest, ResponsesInput, ResponsesOptions,
+    ResponsesReplayItem, ServiceTier, StopReason, StreamEvent, ToolCall, ToolCallArgumentError,
+    ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
+    PICODOLLARS_PER_MICRODOLLAR,
 };
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 
 use crate::compaction::{
     build_handoff_message, build_turn_prefix_handoff_message, choose_first_kept_by_tokens,
-    finish_handoff, prepare_handoff, HandoffPreparation, DEFAULT_KEEP_RECENT_TOKENS,
-    SUMMARIZATION_SYSTEM_PROMPT, SUMMARY_OUTPUT_TOKENS, TURN_PREFIX_OUTPUT_TOKENS,
+    finish_handoff_bounded, prepare_handoff, serialize_conversation, HandoffPreparation,
+    DEFAULT_KEEP_RECENT_TOKENS, MAX_COMPACTION_HANDOFF_BYTES, SUMMARIZATION_SYSTEM_PROMPT,
+    SUMMARY_OUTPUT_TOKENS, TURN_PREFIX_OUTPUT_TOKENS,
 };
 use crate::context::{ContextBreakdown, ContextSnapshot, ContextTracker};
 use crate::delegation::{
@@ -34,21 +39,23 @@ use crate::effect::{
     EffectBroker, EffectIntent, EffectReservation, ToolEffect, ToolPolicyDenialCode,
 };
 use crate::events::{
-    AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control, DeferredRunResumed,
-    DeferredRunSuspended, DelegationTelemetrySnapshot, FinishReason, OutputChannel,
-    QueueDeliveryMode, ToolPolicyDecision,
+    AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control as UnreservedControl,
+    DeferredRunResumed, DeferredRunSuspended, DelegationTelemetrySnapshot, FinishReason,
+    OutputChannel, QueueDeliveryMode, ToolPolicyDecision,
 };
 use crate::extension::{
-    AssistantPersistenceContext, EventObserver, ExtensionHost, ProviderRetryAdvice,
-    ProviderRetryContext, ProviderRetryHook, ProviderRetryKind, RegisteredPersistenceMetadataHook,
-    ToolCallHook, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY, MAX_REFUSED_ACTIVE_TOOL_NAMES,
+    AssistantPersistenceContext, CompactionStrategy, EventObserver, ExtensionHost,
+    ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook, ProviderRetryKind,
+    RegisteredPersistenceMetadataHook, ToolCallHook, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+    MAX_REFUSED_ACTIVE_TOOL_NAMES,
 };
 use crate::extension_process::{ExtensionProcess, EXTENSION_FEATURE_AGENT_SESSIONS};
-use crate::input::UserInput;
+use crate::input::{InputPart, UserInput};
 use crate::sandbox::SandboxConfig;
 use crate::session::{
     now_unix_millis, DelegatedUsage, EntryId, EntryMetadata, EntryValue, ExtensionEntryMetadata,
-    ExtensionMetadataProvenance, Session, SessionError, SessionRunOutcome, UsageRecordKind,
+    ExtensionMetadataProvenance, Session, SessionError, SessionRunOutcome, SnapcompactCheckpoint,
+    UsageRecordKind,
 };
 use crate::telemetry::{
     schema::{
@@ -94,6 +101,15 @@ pub enum AgentError {
     /// Session persistence failed.
     #[error("session error: {0}")]
     Session(#[from] SessionError),
+    /// Inline user image could not be safely prepared before persistence.
+    #[error("image input: {0}")]
+    ImageInput(#[from] ImageInputError),
+    /// Aggregate image preparation exceeded the bounded per-input budget.
+    #[error("image input exceeds 8 images or 20 MiB of encoded image data")]
+    ImageInputBatchLimit,
+    /// The blocking image preparation worker could not complete.
+    #[error("image input preparation worker failed")]
+    ImagePreparationFailed,
     /// The inference layer failed.
     #[error("ai error: {0}")]
     Ai(#[from] AiError),
@@ -153,6 +169,18 @@ pub enum AgentError {
     IncompleteResponse {
         /// Provider termination reason.
         stop_reason: String,
+    },
+    /// Provider-visible tool schemas exceeded the configured byte budget.
+    #[error(
+        "tool schema budget exceeded: {actual_bytes} bytes for {tool_count} definitions > {max_bytes} bytes; no tool definitions were sent"
+    )]
+    ToolSchemaBudgetExceeded {
+        /// Exact serialized JSON byte count for the full tool-definition array.
+        actual_bytes: usize,
+        /// Number of definitions that would have been sent.
+        tool_count: usize,
+        /// Configured hard byte limit.
+        max_bytes: usize,
     },
     /// The next billable request's conservative token reservation would cross
     /// the configured session token ceiling.
@@ -245,6 +273,10 @@ pub enum AgentError {
     /// A control message was sent after the run finished.
     #[error("the run has already finished")]
     RunEnded,
+    /// Input was not accepted because the run's queued count or byte budget
+    /// (including inputs awaiting durable delivery) is exhausted.
+    #[error("the run control queue is full; input was not accepted")]
+    ControlQueueFull,
 }
 
 /// Format an agent failure for a public frontend.
@@ -611,10 +643,14 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
         AgentError::DeferredSuspensionRefused { .. } => Some("deferred suspension"),
         AgentError::DeferredSuspended { .. } => None,
         AgentError::Session(_)
+        | AgentError::ImageInput(_)
+        | AgentError::ImageInputBatchLimit
+        | AgentError::ImagePreparationFailed
         | AgentError::DuplicateTool(_)
         | AgentError::ExtensionMetadataNamespace(_)
         | AgentError::Delegation(_)
         | AgentError::Workspace(_)
+        | AgentError::ToolSchemaBudgetExceeded { .. }
         | AgentError::TokenLimit { .. }
         | AgentError::CostLimit { .. }
         | AgentError::CostUnavailable { .. }
@@ -626,7 +662,8 @@ fn provider_failure_phase(error: &AgentError) -> Option<&'static str> {
         | AgentError::NetworkWaitLimit { .. }
         | AgentError::UnknownActiveTools(_)
         | AgentError::ActiveToolSetRefused(_)
-        | AgentError::RunEnded => None,
+        | AgentError::RunEnded
+        | AgentError::ControlQueueFull => None,
     }
 }
 
@@ -781,6 +818,8 @@ pub struct Agent {
     reasoning: ReasoningConfig,
     reasoning_mode: ReasoningMode,
     cache_retention: CacheRetention,
+    /// Hard limit for the exact JSON schemas exposed to a provider request.
+    tool_schema_budget_bytes: usize,
     /// Optional provider route used for autonomous context summaries.
     /// Defaults to the active model when unset.
     compaction_model: Option<Model>,
@@ -789,6 +828,7 @@ pub struct Agent {
     compaction_keep_recent_tokens: u64,
     session_id: String,
     resource_owner: String,
+    bash_owner: BashOwnerLease,
     tool_scope: String,
     completion_policy: CompletionPolicy,
     output_modalities: OutputModalities,
@@ -823,12 +863,46 @@ pub struct Agent {
     /// parent even when they do not carry a nested delegation binding.
     ultra_observation_managed: bool,
     delegation: Option<DelegationBinding>,
+    delegation_model_resolver: Option<Arc<dyn crate::delegation::AgentModelResolver>>,
     last_run_lifecycle: Option<Arc<RunLifecycle>>,
     /// Explicit, caller-owned span observer for the run/turn/provider/tool
     /// boundaries. Inert by default: dropping to
     /// [`NOOP_TELEMETRY_CONTEXT`](crate::telemetry::spans::NOOP_TELEMETRY_CONTEXT)
     /// loses observations, never accounting.
     telemetry: TelemetryContext,
+}
+
+// Embedders can reopen the same durable session before dropping the old Agent.
+// Retire Bash retention only after the last live Agent with that owner leaves.
+static BASH_OWNER_LEASES: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct BashOwnerLease(String);
+
+impl BashOwnerLease {
+    fn acquire(owner: &str) -> Self {
+        let mut owners = BASH_OWNER_LEASES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *owners.entry(owner.to_owned()).or_default() += 1;
+        Self(owner.to_owned())
+    }
+}
+
+impl Drop for BashOwnerLease {
+    fn drop(&mut self) {
+        let mut owners = BASH_OWNER_LEASES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let leases = owners.get_mut(&self.0).expect("live Bash owner lease");
+        *leases -= 1;
+        if *leases == 0 {
+            owners.remove(&self.0);
+            // Keep retirement serialized with acquisition; the tool offloads
+            // filesystem cleanup so no slow unlink runs under this fence.
+            crate::tools::BashTool::release_owner(&self.0);
+        }
+    }
 }
 
 impl Drop for Agent {
@@ -989,16 +1063,308 @@ impl Stream for Run<'_> {
     }
 }
 
+// Reservations follow semantic input out of the bounded ingress channel and
+// into pending steering/follow-up batches, until persistence or run termination.
+const MAX_PENDING_CONTROL_INPUTS: usize = 64;
+const MAX_PENDING_CONTROL_BYTES: usize = 64 * 1024 * 1024;
+
+struct ControlReservation {
+    _count: tokio::sync::OwnedSemaphorePermit,
+    _bytes: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct ReservedPayload {
+    input: UserInput,
+    // None only for a prepared steering input not yet submitted.
+    reservation: Option<ControlReservation>,
+}
+
+enum ReservedInput {
+    Ready(ReservedPayload),
+    Retractable(PreparedSteering),
+}
+
+impl ReservedInput {
+    fn push_pending(self, pending: &mut Vec<Self>) {
+        // Recalled payloads release their permits immediately. Remove their
+        // empty queue slots before admitting more, so repeated editing cannot
+        // accumulate an unbounded backlog of receipt tombstones.
+        pending.retain(Self::is_pending);
+        if self.is_pending() {
+            pending.push(self);
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        match self {
+            Self::Ready(_) => true,
+            Self::Retractable(prepared) => prepared
+                .receipt
+                .payload
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some(),
+        }
+    }
+
+    fn claim(self) -> Option<ReservedPayload> {
+        match self {
+            Self::Ready(payload) => Some(payload),
+            Self::Retractable(prepared) => prepared
+                .receipt
+                .payload
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+        }
+    }
+}
+
+/// A single-use steering submission with a receipt available before sending.
+///
+/// Create with [`Self::new`], keep the receipt in the frontend, and move this
+/// value into [`RunControl::steer_retractable`]. Dropping the submission (including
+/// a cancelled send future) releases its input and any admission reservation.
+/// Unlike the receipt, this value cannot be cloned or submitted twice.
+pub struct PreparedSteering {
+    receipt: SteeringReceipt,
+    owner: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl PreparedSteering {
+    /// Prepares an input and its independently clonable recall receipt.
+    /// Preparation does not reserve run capacity or start asynchronous work.
+    pub fn new(input: impl Into<UserInput>) -> (Self, SteeringReceipt) {
+        let receipt = SteeringReceipt {
+            payload: Arc::new(Mutex::new(Some(ReservedPayload {
+                input: input.into(),
+                reservation: None,
+            }))),
+            recalled: CancellationToken::default(),
+        };
+        (
+            Self {
+                receipt: receipt.clone(),
+                owner: None,
+            },
+            receipt,
+        )
+    }
+}
+
+impl Drop for PreparedSteering {
+    fn drop(&mut self) {
+        self.receipt
+            .payload
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+    }
+}
+
+/// Clone-safe authority to recall one exact prepared steering input.
+/// Identical text in different submissions has independent receipts.
+#[derive(Clone)]
+pub struct SteeringReceipt {
+    payload: Arc<Mutex<Option<ReservedPayload>>>,
+    recalled: CancellationToken,
+}
+
+impl std::fmt::Debug for SteeringReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SteeringReceipt")
+            .field("pending", &self.is_pending())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SteeringReceipt {
+    /// Whether this input is still eligible for recall. This is a snapshot;
+    /// only [`Self::try_retract`] establishes that recall actually won.
+    pub fn is_pending(&self) -> bool {
+        self.payload
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
+    }
+
+    /// Removes this input before its persistence claim, returning true only
+    /// for the caller that won recall. Success guarantees no session append or
+    /// delivery event for this input and releases any admission reservation.
+    ///
+    /// Returns false once delivery has claimed the input, even if persistence
+    /// is still in progress or later fails; also returns false after an earlier
+    /// recall or after the submission is dropped. Receipt clones share this
+    /// same one-shot authority. No lock is held during filesystem persistence.
+    pub fn try_retract(&self) -> bool {
+        let payload = self
+            .payload
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if payload.is_none() {
+            return false;
+        }
+        drop(payload);
+        self.recalled.cancel();
+        true
+    }
+}
+
+enum Control {
+    SetReasoning(ReasoningConfig),
+    Steer(ReservedInput),
+    FollowUp(ReservedInput),
+    FinishNow(ReservedInput),
+    SetSteeringMode(QueueDeliveryMode),
+    SetFollowUpMode(QueueDeliveryMode),
+    Abort,
+}
+
+/// Logical retained payload bytes, including part slots, media, references and
+/// transcripts. Count inline data directly rather than allocating base64 JSON.
+fn control_input_bytes(input: &UserInput) -> usize {
+    input.parts.iter().fold(
+        input
+            .parts
+            .len()
+            .saturating_mul(std::mem::size_of::<InputPart>()),
+        |total, part| {
+            let bytes = match part {
+                InputPart::Text(text) => text.len(),
+                InputPart::Media(Media::Image(image)) => {
+                    let source = match &image.source {
+                        ImageSource::Inline(data) => data.len(),
+                        ImageSource::Url(url) => url.as_str().len(),
+                        ImageSource::ProviderRef(reference) => reference.id.len(),
+                    };
+                    source.saturating_add(
+                        image
+                            .media_type
+                            .as_ref()
+                            .map_or(0, |mime| mime.as_ref().len()),
+                    )
+                }
+                InputPart::Media(Media::Audio(audio)) => {
+                    let source = match &audio.payload {
+                        AudioPayload::Inline(data) => data.len(),
+                        AudioPayload::ProviderRef(reference) => reference.id.len(),
+                        AudioPayload::InlineWithProviderRef { data, reference } => {
+                            data.len().saturating_add(reference.id.len())
+                        }
+                    };
+                    source.saturating_add(audio.transcript.as_ref().map_or(0, String::len))
+                }
+            };
+            total.saturating_add(bytes)
+        },
+    )
+}
+
 /// Clonable control handle for an active [`Run`].
+///
+/// Steering, follow-up and FinishNow share a 64-input / 64-MiB logical payload
+/// budget, including inputs drained into pending delivery batches. Saturation
+/// returns [`AgentError::ControlQueueFull`] before acceptance. Successful sends
+/// remain reserved until durable delivery or run termination; cancellation
+/// bypasses this queue entirely.
 #[derive(Clone)]
 pub struct RunControl {
+    reasoning_model: Option<Model>,
+    ultra_observed: bool,
     admission: Arc<std::sync::Mutex<bool>>,
     tx: mpsc::Sender<Control>,
+    pending_count: Arc<tokio::sync::Semaphore>,
+    pending_bytes: Arc<tokio::sync::Semaphore>,
     abort: Arc<AbortFlag>,
 }
 
 impl RunControl {
-    async fn send(&self, control: Control) -> Result<(), AgentError> {
+    /// Queues a host-authoritative effort change without interrupting generation.
+    /// The latest pending selection applies at the next response boundary;
+    /// acceptance is not a provider acknowledgement.
+    pub async fn set_reasoning(&self, reasoning: ReasoningConfig) -> Result<(), AgentError> {
+        let model = self.reasoning_model.as_ref().ok_or_else(|| {
+            AgentError::Ai(
+                octet_ai::ConfigError::Parse(
+                    "reasoning updates require a qualified Responses route".into(),
+                )
+                .into(),
+            )
+        })?;
+        if reasoning == ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra) {
+            require_ultra_observation(&reasoning, self.ultra_observed)?;
+            octet_ai::responses::validate_responses_input(
+                model,
+                &ResponsesInput::default(),
+                &reasoning,
+                false,
+            )?;
+        } else {
+            validate_reasoning_update(model, &reasoning)?;
+        }
+        let permit = self.tx.reserve().await.map_err(|_| AgentError::RunEnded)?;
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*admission {
+            return Err(AgentError::RunEnded);
+        }
+        permit.send(Control::SetReasoning(reasoning));
+        Ok(())
+    }
+
+    fn reserve_input(&self, input: UserInput) -> Result<ReservedInput, AgentError> {
+        let reservation = self.reserve_input_capacity(&input)?;
+        Ok(ReservedInput::Ready(ReservedPayload {
+            input,
+            reservation: Some(reservation),
+        }))
+    }
+
+    fn reserve_input_capacity(&self, input: &UserInput) -> Result<ControlReservation, AgentError> {
+        let bytes = control_input_bytes(input);
+        if bytes > MAX_PENDING_CONTROL_BYTES {
+            return Err(AgentError::ControlQueueFull);
+        }
+        let count = self
+            .pending_count
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AgentError::ControlQueueFull)?;
+        let bytes = self
+            .pending_bytes
+            .clone()
+            .try_acquire_many_owned(bytes as u32)
+            .map_err(|_| AgentError::ControlQueueFull)?;
+        Ok(ControlReservation {
+            _count: count,
+            _bytes: bytes,
+        })
+    }
+
+    fn reserve_control(&self, control: UnreservedControl) -> Result<Control, AgentError> {
+        if self.tx.is_closed()
+            || !*self
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        {
+            return Err(AgentError::RunEnded);
+        }
+        Ok(match control {
+            UnreservedControl::Steer(input) => Control::Steer(self.reserve_input(input)?),
+            UnreservedControl::FollowUp(input) => Control::FollowUp(self.reserve_input(input)?),
+            UnreservedControl::FinishNow(input) => Control::FinishNow(self.reserve_input(input)?),
+            UnreservedControl::SetSteeringMode(mode) => Control::SetSteeringMode(mode),
+            UnreservedControl::SetFollowUpMode(mode) => Control::SetFollowUpMode(mode),
+            UnreservedControl::Abort => Control::Abort,
+        })
+    }
+
+    async fn send(&self, control: UnreservedControl) -> Result<(), AgentError> {
+        let control = self.reserve_control(control)?;
         let permit = self.tx.reserve().await.map_err(|_| AgentError::RunEnded)?;
         let admission = self
             .admission
@@ -1011,8 +1377,12 @@ impl RunControl {
         Ok(())
     }
 
-    fn try_send(&self, control: Control) -> Result<(), AgentError> {
-        let permit = self.tx.try_reserve().map_err(|_| AgentError::RunEnded)?;
+    fn try_send(&self, control: UnreservedControl) -> Result<(), AgentError> {
+        let control = self.reserve_control(control)?;
+        let permit = self.tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => AgentError::ControlQueueFull,
+            mpsc::error::TrySendError::Closed(_) => AgentError::RunEnded,
+        })?;
         let admission = self
             .admission
             .lock()
@@ -1027,43 +1397,129 @@ impl RunControl {
     /// Injects input into the conversation at the next model-turn boundary of
     /// the active run (persisted to the session when applied).
     pub async fn steer(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.send(Control::Steer(input.into())).await
+        self.send(UnreservedControl::Steer(input.into())).await
+    }
+
+    /// Reserves steering capacity synchronously and returns a submission plus
+    /// its receipt before asynchronous sending starts. A frontend can retain
+    /// its draft on admission failure. Send through this control (or a clone);
+    /// dropping or recalling the prepared value immediately frees capacity.
+    pub fn prepare_steer(
+        &self,
+        input: impl Into<UserInput>,
+    ) -> Result<(PreparedSteering, SteeringReceipt), AgentError> {
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*admission || self.tx.is_closed() {
+            return Err(AgentError::RunEnded);
+        }
+        let input = input.into();
+        let reservation = self.reserve_input_capacity(&input)?;
+        let (mut prepared, receipt) = PreparedSteering::new(input);
+        prepared
+            .receipt
+            .payload
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .expect("new prepared input")
+            .reservation = Some(reservation);
+        prepared.owner = Some(self.pending_count.clone());
+        Ok((prepared, receipt))
+    }
+
+    /// Submits a prepared, retractable steering input at the next safe boundary.
+    ///
+    /// The receipt can recall local intent, an in-flight send, or accepted
+    /// pending input. A recalled submission completes successfully as a no-op;
+    /// `Ok(())` is admission, not durable delivery. Normal control budgets and
+    /// run-end admission fencing still apply. Cancelling this future before
+    /// admission drops its input and releases its reservations. Submitting an
+    /// input reserved by a different run returns [`AgentError::RunEnded`].
+    pub async fn steer_retractable(&self, prepared: PreparedSteering) -> Result<(), AgentError> {
+        if prepared
+            .owner
+            .as_ref()
+            .is_some_and(|owner| !Arc::ptr_eq(owner, &self.pending_count))
+        {
+            return Err(AgentError::RunEnded);
+        }
+        if !prepared.receipt.is_pending() {
+            return Ok(());
+        }
+        if self.tx.is_closed()
+            || !*self
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        {
+            return Err(AgentError::RunEnded);
+        }
+        {
+            let mut payload = prepared
+                .receipt
+                .payload
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(payload) = payload.as_mut() else {
+                return Ok(());
+            };
+            if payload.reservation.is_none() {
+                payload.reservation = Some(self.reserve_input_capacity(&payload.input)?);
+            }
+        }
+        let permit = tokio::select! {
+            biased;
+            _ = prepared.receipt.recalled.cancelled() => return Ok(()),
+            permit = self.tx.reserve() => permit.map_err(|_| AgentError::RunEnded)?,
+        };
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*admission {
+            return Err(AgentError::RunEnded);
+        }
+        permit.send(Control::Steer(ReservedInput::Retractable(prepared)));
+        Ok(())
     }
 
     /// Attempts to enqueue steering without allowing a producer to wait behind
     /// the run's bounded control queue.
     pub(crate) fn try_steer(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.try_send(Control::Steer(input.into()))
+        self.try_send(UnreservedControl::Steer(input.into()))
     }
 
     /// Queues input for after the current run settles: when the model completes
     /// a turn without tool calls, the run continues with this input instead of
     /// finishing.
     pub async fn follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.send(Control::FollowUp(input.into())).await
+        self.send(UnreservedControl::FollowUp(input.into())).await
     }
 
     /// Requests a final answer at the next safe turn boundary. The supplied
     /// input is persisted like steering, but subsequent requests in this run
     /// expose no tools.
     pub async fn finish_now(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.send(Control::FinishNow(input.into())).await
+        self.send(UnreservedControl::FinishNow(input.into())).await
     }
 
     /// Attempts to enqueue a follow-up without allowing a producer to wait
     /// behind the run's bounded control queue.
     pub(crate) fn try_follow_up(&self, input: impl Into<UserInput>) -> Result<(), AgentError> {
-        self.try_send(Control::FollowUp(input.into()))
+        self.try_send(UnreservedControl::FollowUp(input.into()))
     }
 
     /// Changes how pending steering messages are delivered.
     pub async fn set_steering_mode(&self, mode: QueueDeliveryMode) -> Result<(), AgentError> {
-        self.send(Control::SetSteeringMode(mode)).await
+        self.send(UnreservedControl::SetSteeringMode(mode)).await
     }
 
     /// Changes how pending follow-up messages are delivered.
     pub async fn set_follow_up_mode(&self, mode: QueueDeliveryMode) -> Result<(), AgentError> {
-        self.send(Control::SetFollowUpMode(mode)).await
+        self.send(UnreservedControl::SetFollowUpMode(mode)).await
     }
 
     /// Aborts the run at the next safe boundary: the in-flight model stream is
@@ -1108,6 +1564,117 @@ impl AbortFlag {
             }
         }
     }
+}
+
+/// Fallback when the model has no declared image bounds. This is a host safety
+/// ceiling, not a claim about what any particular provider accepts.
+const FALLBACK_IMAGE_LIMITS: ImageInputLimits = ImageInputLimits {
+    max_width: 4_000,
+    max_height: 4_000,
+    max_bytes: octet_ai::MAX_USER_IMAGE_BYTES,
+};
+
+// Also bounds aggregate decode work: each of at most eight images is subject
+// to octet-ai's 16-million-pixel and bounded-resize limits.
+const MAX_IMAGES_PER_INPUT: usize = 8;
+const MAX_IMAGE_INPUT_BYTES: usize = 20 * 1024 * 1024;
+
+/// Stop a detached blocking decoder at the next image when its async owner ends.
+struct CancelBlockingImages(Arc<AtomicBool>);
+
+impl Drop for CancelBlockingImages {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Check the entire batch before spawning any decode work or appending history.
+fn image_preparation_limits(
+    input: &UserInput,
+    model: &Model,
+) -> Result<ImageInputLimits, AgentError> {
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for part in &input.parts {
+        if let InputPart::Media(Media::Image(image)) = part {
+            count += 1;
+            if let ImageSource::Inline(data) = &image.source {
+                if data.len() > octet_ai::MAX_USER_IMAGE_BYTES {
+                    return Err(ImageInputError::InputTooLarge.into());
+                }
+                bytes = bytes.saturating_add(data.len());
+            }
+            if count > MAX_IMAGES_PER_INPUT || bytes > MAX_IMAGE_INPUT_BYTES {
+                return Err(AgentError::ImageInputBatchLimit);
+            }
+        }
+    }
+    if count > 0
+        && !model
+            .spec
+            .effective_input_modalities()
+            .contains(Modality::Image)
+    {
+        return Err(AiError::Unsupported(octet_ai::UnsupportedError::Image).into());
+    }
+    let limits = model
+        .spec
+        .preset
+        .image_input_limits
+        .unwrap_or(FALLBACK_IMAGE_LIMITS);
+    if count > 0 {
+        limits.validate()?;
+    }
+    Ok(limits)
+}
+
+/// Transform canonical input off the async worker, atomically before history
+/// append. Cancellation stops between images and never commits a partial batch.
+async fn prepare_user_images(
+    mut input: UserInput,
+    model: &Model,
+    abort: Option<&AbortFlag>,
+) -> Result<UserInput, AgentError> {
+    let limits = image_preparation_limits(&input, model)?;
+    if abort.is_some_and(AbortFlag::is_set) {
+        return Err(AgentError::Cancelled);
+    }
+    if !input.parts.iter().any(|part| {
+        matches!(part,
+            InputPart::Media(Media::Image(image)) if matches!(image.source, ImageSource::Inline(_))
+        )
+    }) {
+        return Ok(input);
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = CancelBlockingImages(Arc::clone(&cancelled));
+    let worker = tokio::task::spawn_blocking(move || {
+        for part in &mut input.parts {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(AgentError::Cancelled);
+            }
+            if let InputPart::Media(Media::Image(image)) = part {
+                *image = octet_ai::prepare_user_image(image, limits)?;
+            }
+        }
+        Ok(input)
+    });
+    let result = if let Some(abort) = abort {
+        tokio::select! {
+            biased;
+            _ = abort.wait() => Err(AgentError::Cancelled),
+            result = worker => result.map_err(|_| AgentError::ImagePreparationFailed)?,
+        }
+    } else {
+        worker
+            .await
+            .map_err(|_| AgentError::ImagePreparationFailed)?
+    };
+    drop(guard);
+    if abort.is_some_and(AbortFlag::is_set) {
+        return Err(AgentError::Cancelled);
+    }
+    result
 }
 
 fn user_message(input: UserInput) -> EntryValue {
@@ -1167,6 +1734,12 @@ const MAX_NETWORK_RETRIES: usize = 5;
 /// contributions. A section that would exceed it is truncated on a character
 /// boundary, so no registered tool can enlarge a system prompt without bound.
 const MAX_TOOL_PROMPT_SECTION_BYTES: usize = 8 * 1024;
+/// Hard byte budget for the exact JSON array of provider-visible tool schemas.
+///
+/// This is intentionally independent from the prose prompt-section cap: schema
+/// parameters can be arbitrarily large JSON values. A request over the budget
+/// is refused rather than dropping or rewriting any registered tool.
+pub const DEFAULT_TOOL_SCHEMA_BUDGET_BYTES: usize = 128 * 1024;
 /// Maximum number of tools rendered into that section, in registration order.
 const MAX_TOOL_PROMPT_SECTION_TOOLS: usize = 64;
 const TERMINAL_GATE_SYSTEM: &str = r#"You gate control flow for a coding agent. Output R when the candidate is a valid response to return to the user now: a substantiated completion, an answer or plan based on supplied text or general knowledge, a necessary clarification, an honest blocker or uncertainty, or a justified refusal. Output C when autonomous work should continue: promised next action, unsupported claim about current state, or requested repository or external action not substantiated by relevant successful action evidence. Do not treat an irrelevant or failed action as evidence. Respect explicit requests not to use tools or to guess. Output exactly R or C."#;
@@ -1174,6 +1747,18 @@ const TERMINAL_GATE_CORRECTION: &str = "The candidate response was not returnabl
 const TERMINAL_GATE_ATTEMPTS: usize = 2;
 const TERMINAL_GATE_TEXT_LIMIT: usize = 3_000;
 const TERMINAL_GATE_RECEIPT_LIMIT: usize = 24;
+const TERMINAL_GATE_ARGUMENT_LIMIT: usize = 400;
+const TERMINAL_GATE_RESULT_LIMIT: usize = 600;
+// Registered names fit unchanged; also bound unknown names emitted by a provider.
+const TERMINAL_GATE_TOOL_NAME_LIMIT: usize = 256;
+// Keep the initial request and a rolling suffix. Both count and UTF-8 bytes
+// matter: empty controls must not grow the list, nor may multibyte text evade it.
+// This byte budget always fits the initial and latest 3,000-character summaries.
+const TERMINAL_GATE_REQUEST_LIMIT: usize = 8;
+const TERMINAL_GATE_REQUEST_BYTES: usize = 32 * 1024;
+// The field/count limits below fit even JSON's worst-case six bytes per char,
+// plus keys, delimiters and omission counters. This is not a context-limit bypass.
+const TERMINAL_GATE_CAPSULE_BYTES: usize = 384 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerminalGateDecision {
@@ -1181,12 +1766,74 @@ enum TerminalGateDecision {
     Continue,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct TerminalActionReceipt {
     tool: String,
     arguments: String,
     status: &'static str,
     result: String,
+}
+
+/// Lossy gate-only evidence, never the authoritative input or tool result.
+/// Natural runs have no instance and perform none of these projections.
+#[derive(Default)]
+struct TerminalGateEvidence {
+    prior_context: String,
+    requests: VecDeque<String>,
+    request_bytes: usize,
+    requests_omitted: usize,
+    receipts: VecDeque<TerminalActionReceipt>,
+    actions_omitted: usize,
+}
+
+impl TerminalGateEvidence {
+    fn for_run(
+        policy: CompletionPolicy,
+        session: &Session,
+        input: &UserInput,
+    ) -> Result<Option<Self>, SessionError> {
+        if policy != CompletionPolicy::TerminalGate {
+            return Ok(None);
+        }
+        let mut evidence = Self {
+            prior_context: recent_conversational_context(&session.context()?),
+            ..Self::default()
+        };
+        #[cfg(test)]
+        TERMINAL_GATE_INITIAL_SUMMARIES.with(|count| count.set(count.get() + 1));
+        evidence.record_request(&input.text_summary());
+        Ok(Some(evidence))
+    }
+
+    fn record_request(&mut self, summary: &str) {
+        let summary = bounded_gate_text(summary, TERMINAL_GATE_TEXT_LIMIT);
+        while self.requests.len() >= TERMINAL_GATE_REQUEST_LIMIT
+            || self.request_bytes + summary.len() > TERMINAL_GATE_REQUEST_BYTES
+        {
+            // The initial request is never evicted; the budget fits it plus
+            // the incoming latest request even at four UTF-8 bytes per char.
+            let removed = self.requests.remove(1).expect("initial and latest fit");
+            self.request_bytes -= removed.len();
+            self.requests_omitted += 1;
+        }
+        self.request_bytes += summary.len();
+        self.requests.push_back(summary);
+    }
+
+    fn record_action(&mut self, tool: &str, arguments: &str, is_error: bool, result: &str) {
+        if self.receipts.len() == TERMINAL_GATE_RECEIPT_LIMIT {
+            // Exactly the original capsule's first 12 plus rolling last 12,
+            // in delivery order, without retaining the intervening payloads.
+            let _ = self.receipts.remove(TERMINAL_GATE_RECEIPT_LIMIT / 2);
+            self.actions_omitted += 1;
+        }
+        self.receipts.push_back(TerminalActionReceipt {
+            tool: bounded_gate_text(tool, TERMINAL_GATE_TOOL_NAME_LIMIT),
+            arguments: bounded_gate_text(arguments, TERMINAL_GATE_ARGUMENT_LIMIT),
+            status: if is_error { "error" } else { "ok" },
+            result: bounded_gate_text(result, TERMINAL_GATE_RESULT_LIMIT),
+        });
+    }
 }
 
 struct CompletedToolExecution {
@@ -1463,6 +2110,16 @@ struct AdmittedParallelReadCall {
 enum ParallelReadPreparation {
     Admitted(Box<AdmittedParallelReadCall>),
     Completed(Box<ParallelReadWaveExecution>),
+}
+
+fn advertised_tool_definition(tool: &dyn Tool, model: &Model) -> ToolDef {
+    let mut definition = tool.definition();
+    // Static parallel capability permits scheduling hints, never effects.
+    // Exact argument classification and broker admission still gate dispatch.
+    if model.responses_features().async_tools && tool.concurrency() == ToolConcurrency::Parallel {
+        definition.async_execution = true;
+    }
+    definition
 }
 
 fn parallel_read_candidate(
@@ -1867,7 +2524,15 @@ async fn run_parallel_after_tool_hooks(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TERMINAL_GATE_TEXT_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TERMINAL_GATE_INITIAL_SUMMARIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn bounded_gate_text(text: &str, max_chars: usize) -> String {
+    #[cfg(test)]
+    TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.set(count.get() + 1));
     let count = text.chars().count();
     if count <= max_chars {
         return text.to_owned();
@@ -1934,37 +2599,20 @@ fn recent_conversational_context(messages: &[Message]) -> String {
     bounded_gate_text(&selected.join("\n---\n"), TERMINAL_GATE_TEXT_LIMIT)
 }
 
-fn terminal_gate_capsule(
-    prior_context: &str,
-    requests: &[String],
-    candidate: &AssistantMessage,
-    receipts: &[TerminalActionReceipt],
-) -> String {
+fn terminal_gate_capsule(evidence: &TerminalGateEvidence, candidate: &AssistantMessage) -> String {
     let candidate =
         message_visible_text(&Message::Assistant(candidate.clone())).unwrap_or_default();
-    let omitted = receipts.len().saturating_sub(TERMINAL_GATE_RECEIPT_LIMIT);
-    let receipts = if receipts.len() <= TERMINAL_GATE_RECEIPT_LIMIT {
-        receipts.iter().collect::<Vec<_>>()
-    } else {
-        let half = TERMINAL_GATE_RECEIPT_LIMIT / 2;
-        receipts[..half]
-            .iter()
-            .chain(receipts[receipts.len() - half..].iter())
-            .collect::<Vec<_>>()
-    };
-    serde_json::json!({
-        "prior_context": bounded_gate_text(prior_context, TERMINAL_GATE_TEXT_LIMIT),
-        "requests": requests.iter().map(|text| bounded_gate_text(text, TERMINAL_GATE_TEXT_LIMIT)).collect::<Vec<_>>(),
+    let capsule = serde_json::json!({
+        "prior_context": evidence.prior_context,
+        "requests": evidence.requests,
+        "requests_omitted": evidence.requests_omitted,
         "candidate": bounded_gate_text(&candidate, TERMINAL_GATE_TEXT_LIMIT),
-        "actions_omitted": omitted,
-        "actions": receipts.iter().map(|receipt| serde_json::json!({
-            "tool": receipt.tool,
-            "arguments": bounded_gate_text(&receipt.arguments, 400),
-            "status": receipt.status,
-            "result": bounded_gate_text(&receipt.result, 600),
-        })).collect::<Vec<_>>(),
+        "actions_omitted": evidence.actions_omitted,
+        "actions": evidence.receipts,
     })
-    .to_string()
+    .to_string();
+    debug_assert!(capsule.len() <= TERMINAL_GATE_CAPSULE_BYTES);
+    capsule
 }
 
 fn parse_terminal_gate(response: &octet_ai::Response) -> Option<TerminalGateDecision> {
@@ -2170,41 +2818,33 @@ fn cancelled_tool_error() -> ToolError {
 
 fn pending_tool_state(session: &Session) -> Option<(Vec<ToolCall>, HashSet<octet_ai::ToolCallId>)> {
     let mut persisted = HashSet::new();
+    let mut calls = Vec::new();
+    let mut latest_assistant = true;
     let mut cursor = session.head_ref();
     while let Some(id) = cursor {
         let entry = session.entry(id)?;
         match &entry.value {
             EntryValue::Message(Message::Assistant(assistant)) => {
-                let calls = assistant
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        AssistantPart::ToolCall(call) => Some(call.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                return (!calls.is_empty()).then_some((calls, persisted));
+                calls.extend(assistant.content.iter().filter_map(|part| match part {
+                    AssistantPart::ToolCall(call) if latest_assistant || call.async_execution => {
+                        Some(call.clone())
+                    }
+                    _ => None,
+                }));
+                latest_assistant = false;
             }
             EntryValue::Message(Message::User(user)) => {
                 for part in &user.content {
-                    let UserPart::ToolResult(result) = part else {
-                        continue;
-                    };
-                    persisted.insert(result.tool_call_id.clone());
+                    if let UserPart::ToolResult(result) = part {
+                        persisted.insert(result.tool_call_id.clone());
+                    }
                 }
             }
-            EntryValue::Compaction { .. }
-            | EntryValue::ResponsesTurn { .. }
-            | EntryValue::ResponsesCompaction { .. }
-            | EntryValue::Config { .. }
-            | EntryValue::PromptTemplateSelected { .. }
-            | EntryValue::SkillActivated { .. }
-            | EntryValue::SkillResourceRead { .. }
-            | EntryValue::SkillDeactivated { .. } => {}
+            _ => {}
         }
         cursor = entry.parent.as_ref();
     }
-    None
+    (!calls.is_empty()).then_some((calls, persisted))
 }
 
 fn tool_call_arguments_fingerprint(name: &str, args: &serde_json::Value) -> String {
@@ -2259,6 +2899,50 @@ fn assistant_has_terminal_content(assistant: &AssistantMessage) -> bool {
         AssistantPart::ToolCall(_) | AssistantPart::Media(_) => true,
         AssistantPart::Reasoning(_) | AssistantPart::ProviderMetadata(_) => false,
     })
+}
+
+/// Content-free evidence for a normally ended turn with no terminal content.
+/// Only allowlisted diagnostic codes are read, never their messages or IDs.
+fn incomplete_terminal_response_reason(
+    assistant: &AssistantMessage,
+    stop_reason: &StopReason,
+    usage: &Usage,
+    diagnostics: &[octet_ai::Diagnostic],
+    request_max_output_tokens: u64,
+) -> String {
+    let base = if assistant
+        .content
+        .iter()
+        .any(|part| matches!(part, AssistantPart::Reasoning(_)))
+    {
+        "provider returned reasoning but no answer text"
+    } else {
+        "provider returned no user-visible content"
+    };
+    let mut chat_stop_defaulted = false;
+    let mut usage_missing = false;
+    for diagnostic in diagnostics {
+        match diagnostic.code.as_str() {
+            "chat_defaulted_stop_reason" => chat_stop_defaulted = true,
+            "chat_usage_missing" => usage_missing = true,
+            _ => {}
+        }
+    }
+    let stop = match stop_reason {
+        StopReason::Other(_) => "other",
+        reason => reason.as_canonical(),
+    };
+    let usage = if usage_missing {
+        "usage=not_reported".to_owned()
+    } else {
+        format!(
+            "usage=canonical; output_tokens={}; reasoning_tokens={}",
+            usage.output_tokens, usage.reasoning_tokens
+        )
+    };
+    format!(
+        "{base} (stop={stop}; chat_stop_defaulted={chat_stop_defaulted}; {usage}; request_max_output_tokens={request_max_output_tokens}; not automatically retried)"
+    )
 }
 
 fn truncate_tool_text(text: &str, limit: usize) -> String {
@@ -2588,6 +3272,7 @@ fn close_failed_turn(session: &mut Session, model: &Model) -> Result<(), AgentEr
                 protocol: model.spec.protocol,
             })),
             Some(EntryMetadata {
+                native_steering: None,
                 local_synthetic_assistant: true,
                 ..EntryMetadata::default()
             }),
@@ -3760,6 +4445,8 @@ fn previous_message_is_user(session: &Session, entry: &crate::session::Entry) ->
             EntryValue::Compaction { .. }
             | EntryValue::ResponsesTurn { .. }
             | EntryValue::ResponsesCompaction { .. }
+            | EntryValue::ResponsesReasoning { .. }
+            | EntryValue::ResponsesSteering { .. }
             | EntryValue::Config { .. }
             | EntryValue::PromptTemplateSelected { .. }
             | EntryValue::SkillActivated { .. }
@@ -3896,6 +4583,72 @@ fn responses_replay_media_adjustment(replay: &[ResponsesReplayItem]) -> (u64, u6
     (inline_payload_bytes, semantic_tokens)
 }
 
+fn tool_schema_bytes(tools: &[ToolDef]) -> usize {
+    let mut bytes = CountingWriter::default();
+    // ToolDef is internally constructed from serializable strings and JSON
+    // values, so serialization failure would violate the provider-request
+    // invariant rather than being a recoverable user boundary.
+    serde_json::to_writer(&mut bytes, tools).expect("ToolDef serializes");
+    usize::try_from(bytes.0).unwrap_or(usize::MAX)
+}
+
+fn require_tool_schema_budget(tools: &[ToolDef], max_bytes: usize) -> Result<(), AgentError> {
+    // A zero budget intentionally permits `[]`: it advertises no callable
+    // schema, even though JSON's empty-array delimiters occupy two wire bytes.
+    if tools.is_empty() {
+        return Ok(());
+    }
+    let actual_bytes = tool_schema_bytes(tools);
+    if actual_bytes > max_bytes {
+        return Err(AgentError::ToolSchemaBudgetExceeded {
+            actual_bytes,
+            tool_count: tools.len(),
+            max_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn validate_compaction_summary_part(summary: &str) -> Result<(), AgentError> {
+    if summary.trim().is_empty() {
+        return Err(AgentError::IncompleteResponse {
+            stop_reason: "compaction summary was empty or whitespace-only".to_owned(),
+        });
+    }
+    if summary.len() > MAX_COMPACTION_HANDOFF_BYTES {
+        return Err(AgentError::IncompleteResponse {
+            stop_reason: format!(
+                "compaction summary exceeded the {MAX_COMPACTION_HANDOFF_BYTES}-byte handoff limit"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn append_compaction_turn_prefix(
+    summary: &mut String,
+    prefix_summary: &str,
+) -> Result<(), AgentError> {
+    validate_compaction_summary_part(prefix_summary)?;
+    summary.push_str("\n\n---\n\n**Turn Context (split turn):**\n\n");
+    summary.push_str(prefix_summary);
+    Ok(())
+}
+
+fn finish_validated_compaction_handoff(
+    summary: String,
+    details: &crate::compaction::CompactionDetails,
+) -> Result<String, AgentError> {
+    validate_compaction_summary_part(&summary)?;
+    finish_handoff_bounded(summary, details, MAX_COMPACTION_HANDOFF_BYTES).ok_or_else(|| {
+        AgentError::IncompleteResponse {
+            stop_reason: format!(
+                "compaction summary exceeded the {MAX_COMPACTION_HANDOFF_BYTES}-byte handoff limit"
+            ),
+        }
+    })
+}
+
 fn estimate_request_tokens(system: &str, messages: &[Message], tools: &[ToolDef]) -> u64 {
     let mut bytes = CountingWriter::default();
     if serde_json::to_writer(&mut bytes, &(system, messages, tools)).is_err() {
@@ -3912,7 +4665,7 @@ fn estimate_request_tokens(system: &str, messages: &[Message], tools: &[ToolDef]
 
 struct ExactResponsesReplay {
     input: ResponsesInput,
-    replay: Vec<ResponsesReplayItem>,
+    replay: Arc<Vec<ResponsesReplayItem>>,
     instructions: Option<String>,
 }
 
@@ -3925,7 +4678,7 @@ fn exact_responses_replay(
         return None;
     }
     let replay = session
-        .responses_replay_items(&model.endpoint.id, &model.spec.id)
+        .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
         .ok()
         .flatten()?;
     let instructions = matches!(replay.first(), Some(ResponsesReplayItem::Compacted(_)))
@@ -3935,7 +4688,8 @@ fn exact_responses_replay(
         model,
         (!system.is_empty()).then_some(system),
         &replay,
-    );
+    )
+    .ok()?;
     Some(ExactResponsesReplay {
         input,
         replay,
@@ -3971,6 +4725,80 @@ fn validate_native_compact_output(output: &octet_ai::ResponsesOutput) -> Result<
     }
 }
 
+fn validate_reasoning_update(model: &Model, reasoning: &ReasoningConfig) -> Result<(), AgentError> {
+    let update = octet_ai::ResponsesConfigurationUpdate {
+        reasoning: reasoning.clone(),
+    };
+    octet_ai::responses::validate_responses_input(
+        model,
+        &ResponsesInput::new(vec![update.to_item()]),
+        reasoning,
+        false,
+    )?;
+    Ok(())
+}
+
+fn require_ultra_observation(
+    reasoning: &ReasoningConfig,
+    observed: bool,
+) -> Result<(), AgentError> {
+    if *reasoning == ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra) && !observed {
+        return Err(AgentError::Delegation(
+            "Ultra requires an enabled child-session observation runtime".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn persist_reasoning_selection(
+    session: &mut Session,
+    model: &Model,
+    selection: &ReasoningConfig,
+) -> Result<(), AgentError> {
+    let state = session.responses_reasoning(&model.endpoint.id, &model.spec.id)?;
+    if state
+        .as_ref()
+        .is_some_and(|(_, effective)| effective == selection)
+    {
+        return Ok(());
+    }
+    let ultra = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
+    // Ultra is host orchestration, never a provider configuration_update.
+    // Crossing this boundary starts a new baseline in the same conversation;
+    // replay drops superseded effort updates, not messages or opaque outputs.
+    let rebase = selection == &ultra
+        || state
+            .as_ref()
+            .is_some_and(|(_, effective)| effective == &ultra);
+    let (baseline, update) = match state {
+        Some((baseline, _)) if !rebase => {
+            validate_reasoning_update(model, selection)?;
+            (
+                baseline,
+                Some(octet_ai::ResponsesConfigurationUpdate {
+                    reasoning: selection.clone(),
+                }),
+            )
+        }
+        _ => {
+            octet_ai::responses::validate_responses_input(
+                model,
+                &ResponsesInput::default(),
+                selection,
+                false,
+            )?;
+            (selection.clone(), None)
+        }
+    };
+    session.append(EntryValue::ResponsesReasoning {
+        endpoint: model.endpoint.id.clone(),
+        model: model.spec.id.clone(),
+        baseline,
+        update,
+    })?;
+    Ok(())
+}
+
 fn durable_responses_options(
     session: &Session,
     model: &Model,
@@ -3979,6 +4807,9 @@ fn durable_responses_options(
 ) -> Result<Option<ResponsesOptions>, AgentError> {
     let service_tier = resolve_service_tier(model, requested_service_tier)?;
     let replay = exact_responses_replay(session, model, system);
+    // A complete opaque replay carries ordered reasoning updates. Without one,
+    // the codec re-encodes canonical history and request_reasoning_for_replay
+    // selects the effective effort instead of replaying a stale baseline.
     match (replay, service_tier) {
         // No route-affine local window and no requested tier: keep the
         // historical `None`, which makes the codec fall back to canonical
@@ -3997,6 +4828,24 @@ fn durable_responses_options(
             }))
         }
     }
+}
+
+fn request_reasoning_for_replay(
+    session: &Session,
+    model: &Model,
+    responses: Option<&ResponsesOptions>,
+    selection: &ReasoningConfig,
+) -> Result<ReasoningConfig, AgentError> {
+    // Only complete route-affine replay retains the chronological updates
+    // that override the pinned baseline. Canonical fallback has no updates,
+    // so put the effective selection on the request itself.
+    let state = session.responses_reasoning(&model.endpoint.id, &model.spec.id)?;
+    let exact = responses.is_some_and(|options| options.input.is_some());
+    Ok(match state {
+        Some((baseline, _)) if exact => baseline,
+        Some((_, effective)) => effective,
+        None => selection.clone(),
+    })
 }
 
 /// Validates a requested service tier against the route that will carry it.
@@ -4034,7 +4883,7 @@ fn native_responses_options(
 ) -> Result<ResponsesOptions, AgentError> {
     let service_tier = resolve_service_tier(model, requested_service_tier)?;
     let replay = session
-        .responses_replay_items(&model.endpoint.id, &model.spec.id)?
+        .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)?
         .ok_or_else(|| {
             AgentError::InvalidCompactionPolicy(
                 "native Responses mode requires complete route-affine opaque replay before every provider request"
@@ -4045,7 +4894,7 @@ fn native_responses_options(
         model,
         (!system.is_empty()).then_some(system),
         &replay,
-    ));
+    )?);
     Ok(match service_tier {
         Some(tier) => options.with_service_tier(tier),
         None => options,
@@ -4136,6 +4985,11 @@ fn provider_context_estimate(session: &Session, model: &Model) -> Option<u64> {
     // Only the suffix after the newest usable measurement contributes. Walking
     // backwards avoids allocating/copying the entire active branch on startup,
     // context inspection, and capacity-cache rebuilds in long sessions.
+    // Advance through the ledger at most once. Index only usable records for
+    // this route/model, newest first, while retaining the constant-work common
+    // case where the head assistant has the newest measurement.
+    let mut usage_records = session.usage_records().iter().rev();
+    let mut usage_by_assistant = HashMap::new();
     let mut cursor = session.head_ref();
     while let Some(id) = cursor {
         #[cfg(test)]
@@ -4145,17 +4999,31 @@ fn provider_context_estimate(session: &Session, model: &Model) -> Option<u64> {
             EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. } => break,
             EntryValue::Message(message) => {
                 if matches!(message, Message::Assistant(_)) {
-                    if let Some(record) = session.usage_records().iter().rev().find(|record| {
-                        #[cfg(test)]
-                        PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(visits.get() + 1));
-                        matches!(
-                            &record.kind,
-                            crate::session::UsageRecordKind::AssistantTurn { assistant }
-                                if assistant == &entry.id
-                        ) && record.endpoint.as_ref() == Some(&model.endpoint.id)
-                            && record.model.as_ref() == Some(&model.spec.id)
-                            && usage_context_tokens(&record.usage) > 0
-                    }) {
+                    let measured = usage_by_assistant.get(&entry.id).copied().or_else(|| {
+                        for record in usage_records.by_ref() {
+                            #[cfg(test)]
+                            PROVIDER_CONTEXT_USAGE_VISITS
+                                .with(|visits| visits.set(visits.get() + 1));
+                            let crate::session::UsageRecordKind::AssistantTurn { assistant } =
+                                &record.kind
+                            else {
+                                continue;
+                            };
+                            let tokens = usage_context_tokens(&record.usage);
+                            if record.endpoint.as_ref() != Some(&model.endpoint.id)
+                                || record.model.as_ref() != Some(&model.spec.id)
+                                || tokens == 0
+                            {
+                                continue;
+                            }
+                            if assistant == &entry.id {
+                                return Some(tokens);
+                            }
+                            usage_by_assistant.entry(assistant).or_insert(tokens);
+                        }
+                        None
+                    });
+                    if let Some(tokens) = measured {
                         // Estimate only after finding usable usage. Sessions with
                         // no measurement must not serialize their entire history.
                         let mut trailing = 0u64;
@@ -4172,7 +5040,7 @@ fn provider_context_estimate(session: &Session, model: &Model) -> Option<u64> {
                             }
                             tail = tail_entry.parent.as_ref();
                         }
-                        return Some(usage_context_tokens(&record.usage).saturating_add(trailing));
+                        return Some(tokens.saturating_add(trailing));
                     }
                 }
             }
@@ -4765,22 +5633,46 @@ fn settle_tool_progress(
 /// Append a batch of already-queued control inputs as durable user messages
 /// and report what was delivered.
 ///
-/// Each summary is recorded for the terminal gate before its append is
-/// attempted, mirroring the original inline blocks. On append failure the
-/// context tracker is still observed (its error ignored) so observers see the
-/// partial delivery before the run ends.
-fn deliver_control_inputs(
-    queued: Vec<UserInput>,
+/// When enabled, bounded evidence is recorded for the terminal gate before
+/// its append is attempted. Frontend delivery summaries remain complete.
+/// On append failure the context tracker is still observed (its error ignored)
+/// so observers see the partial delivery before the run ends.
+async fn deliver_control_inputs(
+    queued: Vec<ReservedInput>,
     kind: ControlDeliveryKind,
     session: &mut Session,
     metadata: &EntryMetadata,
-    terminal_gate_requests: &mut Vec<String>,
+    terminal_gate_evidence: &mut Option<TerminalGateEvidence>,
     observation: &ContextObservation<'_>,
+    abort: Option<&AbortFlag>,
 ) -> ControlDelivery {
     let mut delivered = Vec::with_capacity(queued.len());
-    for input in queued {
+    for queued in queued {
+        // Linearize recall against delivery BEFORE any evidence or durable
+        // write. The payload and permits leave receipt ownership together;
+        // recall cannot succeed after this claim, including during fsync.
+        let Some(ReservedPayload { input, reservation }) = queued.claim() else {
+            continue;
+        };
+        let input = match prepare_user_images(input, observation.model, abort).await {
+            Ok(input) => input,
+            Err(error) => {
+                let event = (!delivered.is_empty())
+                    .then(|| kind.delivered_event(std::mem::take(&mut delivered)));
+                return ControlDelivery::Interrupted {
+                    event,
+                    finish: if matches!(error, AgentError::Cancelled) {
+                        FinishReason::Aborted
+                    } else {
+                        FinishReason::Failed(error)
+                    },
+                };
+            }
+        };
         let summary = input.text_summary();
-        terminal_gate_requests.push(summary.clone());
+        if let Some(evidence) = terminal_gate_evidence {
+            evidence.record_request(&summary);
+        }
         if let Err(e) = session.append_with_metadata(user_message(input), Some(metadata.clone())) {
             let event = (!delivered.is_empty())
                 .then(|| kind.delivered_event(std::mem::take(&mut delivered)));
@@ -4791,11 +5683,14 @@ fn deliver_control_inputs(
             };
         }
         delivered.push(summary);
+        // Never free admission capacity merely because ingress was drained.
+        // Both permits remain live through the successful durable append.
+        drop(reservation);
     }
     if !delivered.is_empty() {
         if let Err(error) = observation.observe(session) {
             return ControlDelivery::Interrupted {
-                event: None,
+                event: Some(kind.delivered_event(delivered)),
                 finish: FinishReason::Failed(error.into()),
             };
         }
@@ -4827,6 +5722,27 @@ fn worst_case_request_cost(
         .output
         .0
         .max(pricing.reasoning.map(|rate| rate.0).unwrap_or_default());
+    if model.spec.protocol == Protocol::AnthropicMessages {
+        for fallback in model
+            .spec
+            .preset
+            .anthropic_compat
+            .as_ref()
+            .into_iter()
+            .flat_map(|compat| &compat.allowed_fallback_models)
+        {
+            // The server may select any declared fallback, including one more
+            // expensive than the requested model. An unpriced target cannot be
+            // admitted under a hard cost ceiling.
+            let pricing = fallback.cost?.pricing()?;
+            input_rate = input_rate
+                .max(pricing.input.0)
+                .max(pricing.cache_read.0)
+                .max(pricing.cache_write_5m.0)
+                .max(pricing.input.0.checked_mul(2)?);
+            output_rate = output_rate.max(pricing.output.0);
+        }
+    }
     for tier in &pricing.tiers {
         // The implicit one-hour write price follows the active input tier,
         // not the base catalog input rate. Never reserve below that bucket.
@@ -5035,8 +5951,17 @@ fn reserve_request_cost(
     input_tokens: u64,
     output_tokens: u64,
     limit: Option<u64>,
+    retention: CacheRetention,
 ) -> Result<(), AgentError> {
-    reserve_request_cost_with_tier(session, model, input_tokens, output_tokens, limit, None)
+    reserve_request_cost_with_tier(
+        session,
+        model,
+        input_tokens,
+        output_tokens,
+        limit,
+        None,
+        retention,
+    )
 }
 
 fn reserve_request_cost_with_tier(
@@ -5046,6 +5971,7 @@ fn reserve_request_cost_with_tier(
     output_tokens: u64,
     limit: Option<u64>,
     service_tier: Option<ServiceTier>,
+    retention: CacheRetention,
 ) -> Result<(), AgentError> {
     let Some(limit) = limit else {
         return Ok(());
@@ -5055,6 +5981,21 @@ fn reserve_request_cost_with_tier(
     }
     let current = session.total_cost_microdollars();
     if session.has_unpriced_usage() {
+        return Err(AgentError::CostUnavailable { limit });
+    }
+    // Fallback quotes have no one-hour cache-write tariff. A route that can
+    // request one-hour writes cannot enforce a hard ceiling if the server
+    // chooses a fallback; do not invent a price for that bucket.
+    if retention == CacheRetention::Long
+        && model.spec.protocol == Protocol::AnthropicMessages
+        && model.spec.cache.supports_long_retention
+        && model
+            .spec
+            .preset
+            .anthropic_compat
+            .as_ref()
+            .is_some_and(|compat| !compat.allowed_fallback_models.is_empty())
+    {
         return Err(AgentError::CostUnavailable { limit });
     }
     let reserved = worst_case_request_cost(model, input_tokens, output_tokens, service_tier)
@@ -5082,10 +6023,30 @@ fn assistant_text(response: &octet_ai::Response) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+/// Preserve the prior bitmap source verbatim, separating it from each newly
+/// serialized transcript section (including a split-turn prefix).
+fn snapcompact_source(preparation: &HandoffPreparation) -> String {
+    let mut source = String::new();
+    for section in [
+        preparation.previous_summary.clone().unwrap_or_default(),
+        serialize_conversation(&preparation.messages),
+        serialize_conversation(&preparation.turn_prefix_messages),
+    ] {
+        if !section.is_empty() {
+            if !source.is_empty() {
+                source.push_str("\n\n");
+            }
+            source.push_str(&section);
+        }
+    }
+    source
+}
+
 struct CompactionContext<'a> {
     run_id: &'a str,
     resource_owner: &'a str,
     retry_hooks: &'a [Arc<dyn ProviderRetryHook>],
+    compaction_strategy: Option<&'a Arc<dyn CompactionStrategy>>,
     max_network_wait: Option<Duration>,
     provider_retries_enabled: bool,
     client: &'a AiClient,
@@ -5126,14 +6087,16 @@ struct CapacityEstimate {
 /// The first value is seeded from the exact context observation. For ordinary
 /// canonical-message appends, later values advance from the cached head using
 /// a per-message upper bound instead of serializing the complete history. A
-/// branch checkout, local compaction, tool-surface change, or Responses replay
-/// falls back to the exact estimator. The detailed category breakdown remains
+/// branch checkout, compaction, tool-surface change, or replay-mode change
+/// falls back to the exact estimator. Responses appends estimate only the new
+/// route-affine opaque replay items, not the complete unchanged prefix. The detailed category breakdown remains
 /// the on-demand telemetry path in [`context_breakdown`].
 struct ContextCapacityCache {
     head: Option<EntryId>,
     tool_generation: u64,
     structural_tokens: u64,
     provider_tokens: Option<u64>,
+    responses_items: Option<usize>,
     valid: bool,
     #[cfg(test)]
     full_rebuilds: usize,
@@ -5146,6 +6109,7 @@ impl ContextCapacityCache {
             tool_generation,
             structural_tokens: context.structural_tokens,
             provider_tokens: context.provider_tokens,
+            responses_items: None,
             valid: true,
             #[cfg(test)]
             full_rebuilds: 0,
@@ -5202,6 +6166,59 @@ impl ContextCapacityCache {
         true
     }
 
+    fn advance_for_model(&mut self, session: &Session, model: &Model) -> bool {
+        if model.spec.protocol != Protocol::OpenAiResponses {
+            return self.advance_messages(session);
+        }
+        if !self.valid {
+            return false;
+        }
+        let Ok(replay) = session.responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
+        else {
+            return false;
+        };
+        let Some(replay) = replay else {
+            return self.responses_items.is_none() && self.advance_messages(session);
+        };
+        let Some(first_new) = self.responses_items else {
+            return false;
+        };
+        // A compacted window can grow beyond the old length: length alone is
+        // not an invalidation fence. Check only the new durable ancestry.
+        let mut cursor = session.head_ref();
+        while cursor != self.head.as_ref() {
+            let Some(entry) = cursor.and_then(|id| session.entry(id)) else {
+                return false;
+            };
+            if matches!(
+                entry.value,
+                EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. }
+            ) {
+                return false;
+            }
+            cursor = entry.parent.as_ref();
+        }
+        let Some(suffix) = replay.get(first_new..) else {
+            return false;
+        };
+        if !suffix.is_empty() {
+            let Ok(input) = octet_ai::responses::encode_responses_replay(model, None, suffix)
+            else {
+                return false;
+            };
+            // Standalone framing is a conservative upper bound on appending
+            // the same opaque output/user items to the existing wire window.
+            let delta = estimate_responses_request_tokens(&input, suffix, &[], None);
+            self.structural_tokens = self.structural_tokens.saturating_add(delta);
+            if let Some(provider) = &mut self.provider_tokens {
+                *provider = provider.saturating_add(delta);
+            }
+        }
+        self.responses_items = Some(replay.len());
+        self.head = session.head();
+        true
+    }
+
     /// Replaces the cache with a route-accurate full estimate.
     fn rebuild(
         &mut self,
@@ -5217,6 +6234,15 @@ impl ContextCapacityCache {
         self.tool_generation = tool_generation;
         self.structural_tokens = estimate.structural_tokens;
         self.provider_tokens = estimate.provider_tokens;
+        self.responses_items = (model.spec.protocol == Protocol::OpenAiResponses)
+            .then(|| {
+                session
+                    .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
+                    .ok()
+                    .flatten()
+            })
+            .flatten()
+            .map(|items| items.len());
         self.valid = true;
         #[cfg(test)]
         {
@@ -5234,10 +6260,9 @@ impl ContextCapacityCache {
         tool_generation: u64,
     ) -> Result<RequestContextEstimate, SessionError> {
         let messages = session.context_ref()?;
-        let can_advance = model.spec.protocol != Protocol::OpenAiResponses
-            && self.valid
+        let can_advance = self.valid
             && self.tool_generation == tool_generation
-            && self.advance_messages(session);
+            && self.advance_for_model(session, model);
         if !can_advance {
             self.rebuild(session, model, system, &messages, tools, tool_generation);
         }
@@ -5259,8 +6284,8 @@ impl ContextCapacityCache {
     /// A zero usage report is left on the incrementally advanced estimate,
     /// matching `provider_context_estimate`'s behavior of ignoring unusable
     /// records rather than replacing a usable older measurement with zero.
-    fn observe_assistant_response(&mut self, session: &Session, usage: &Usage) {
-        if !self.advance_messages(session) {
+    fn observe_assistant_response(&mut self, session: &Session, model: &Model, usage: &Usage) {
+        if !self.advance_for_model(session, model) {
             self.invalidate();
             return;
         }
@@ -5398,6 +6423,7 @@ impl CompactionContext<'_> {
             input_tokens,
             reserved_output_tokens,
             self.max_session_cost_microdollars,
+            request.cache_retention,
         )?;
         let response = recover_auxiliary(
             AuxiliaryRecovery {
@@ -5452,15 +6478,19 @@ impl CompactionContext<'_> {
             summary_guard.finish(false);
             return Ok(None);
         }
-        let text = assistant_text(&response);
-        if text.is_some() {
-            CompletionAttributes::usage(&response.usage)
-                .with_uncertainty(self.session.has_uncertain_usage())
-                .record(&summary_request_guard.span);
-        }
+        let text = assistant_text(&response).ok_or_else(|| AgentError::IncompleteResponse {
+            stop_reason: "compaction summary was empty or whitespace-only".to_owned(),
+        })?;
+        // This is shared by autonomous compaction and explicit callers such as
+        // `/compact`; reject bad provider output before either path can merge
+        // it into a durable handoff.
+        validate_compaction_summary_part(&text)?;
+        CompletionAttributes::usage(&response.usage)
+            .with_uncertainty(self.session.has_uncertain_usage())
+            .record(&summary_request_guard.span);
         summary_request_guard.finish(false);
         summary_guard.finish(false);
-        Ok(text)
+        Ok(Some(text))
     }
 
     /// Generate a Pi-compatible structured handoff, including a dedicated
@@ -5485,6 +6515,7 @@ impl CompactionContext<'_> {
         let Some(mut summary) = history else {
             return Ok(None);
         };
+        validate_compaction_summary_part(&summary)?;
 
         if !preparation.turn_prefix_messages.is_empty() {
             let Some(prefix_summary) = self
@@ -5499,11 +6530,124 @@ impl CompactionContext<'_> {
             else {
                 return Ok(None);
             };
-            summary.push_str("\n\n---\n\n**Turn Context (split turn):**\n\n");
-            summary.push_str(&prefix_summary);
+            append_compaction_turn_prefix(&mut summary, &prefix_summary)?;
         }
 
         Ok(Some(summary))
+    }
+
+    /// Render every source character, including an earlier bitmap checkpoint.
+    /// One deadline covers all sequential chunks and their image validation;
+    /// neither timeout nor cancellation can commit a partial checkpoint.
+    async fn render_snapcompact(
+        &mut self,
+        preparation: &HandoffPreparation,
+    ) -> Result<SnapcompactCheckpoint, AgentError> {
+        const RENDER_DEADLINE: Duration = Duration::from_secs(120);
+        let deadline = tokio::time::Instant::now() + RENDER_DEADLINE;
+        let expired = || {
+            AgentError::InvalidCompactionPolicy(
+                "snapcompact rendering exceeded the 120-second deadline; history was not discarded"
+                    .into(),
+            )
+        };
+        let strategy = self.compaction_strategy.expect("selected strategy exists");
+        let source = snapcompact_source(preparation);
+        if source.trim().is_empty() || source.len() > 256 * 1024 {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "snapcompact source is empty or exceeds 256 KiB; history was not discarded".into(),
+            ));
+        }
+        let mut frames = Vec::new();
+        let mut total_bytes = 0usize;
+        let limits = self
+            .model
+            .spec
+            .preset
+            .image_input_limits
+            .unwrap_or(FALLBACK_IMAGE_LIMITS);
+        let chars: Vec<char> = source.chars().collect();
+        for chunk in chars.chunks(2048) {
+            let text: String = chunk.iter().collect();
+            let rendered = tokio::select! {
+                biased;
+                _ = self.abort.wait() => return Err(AgentError::Cancelled),
+                _ = tokio::time::sleep_until(deadline) => return Err(expired()),
+                result = strategy.render(&self.model.spec.id.0, &text, self.resource_owner) => result
+                    .map_err(|error| AgentError::InvalidCompactionPolicy(format!(
+                        "snapcompact extension failed: {error}"
+                    )))?,
+            };
+            if rendered.is_empty() {
+                return Err(AgentError::InvalidCompactionPolicy(
+                    "snapcompact returned no frames for a transcript slice".into(),
+                ));
+            }
+            // Decoding and validating up to 32 extension frames is CPU work;
+            // keep it off the async worker and within the same operation deadline.
+            let existing_frames = frames.len();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let guard = CancelBlockingImages(Arc::clone(&cancelled));
+            let worker = tokio::task::spawn_blocking(move || {
+                let mut images = Vec::with_capacity(rendered.len().min(256));
+                let mut bytes = total_bytes;
+                for frame in rendered {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(AgentError::Cancelled);
+                    }
+                    if !frame.starts_with(b"\x89PNG\r\n\x1a\n") || frame.len() > 384 * 1024 {
+                        return Err(AgentError::InvalidCompactionPolicy(
+                            "snapcompact returned an empty, invalid, or oversized PNG".into(),
+                        ));
+                    }
+                    bytes = bytes.saturating_add(frame.len());
+                    if existing_frames + images.len() >= 256 || bytes > 8 * 1024 * 1024 {
+                        return Err(AgentError::InvalidCompactionPolicy(
+                            "snapcompact exceeded 256 frames or 8 MiB; history was not discarded"
+                                .into(),
+                        ));
+                    }
+                    let image = Media::image_bytes(
+                        bytes::Bytes::from(frame),
+                        "image/png".parse().expect("static MIME"),
+                    );
+                    let Media::Image(image_data) = &image else {
+                        unreachable!("image_bytes creates image media")
+                    };
+                    let validated = octet_ai::prepare_user_image(image_data, limits)?;
+                    if !matches!((&validated.source, &image_data.source),
+                        (ImageSource::Inline(a), ImageSource::Inline(b)) if a == b)
+                    {
+                        return Err(AgentError::InvalidCompactionPolicy(
+                            "snapcompact frame exceeds model image dimensions; history was not discarded".into(),
+                        ));
+                    }
+                    images.push(image);
+                }
+                Ok((images, bytes))
+            });
+            let (images, bytes) = tokio::select! {
+                biased;
+                _ = self.abort.wait() => return Err(AgentError::Cancelled),
+                _ = tokio::time::sleep_until(deadline) => return Err(expired()),
+                result = worker => result.map_err(|_| AgentError::InvalidCompactionPolicy(
+                    "snapcompact frame validation worker failed; history was not discarded".into()
+                ))??,
+            };
+            drop(guard);
+            frames.extend(images);
+            total_bytes = bytes;
+        }
+        if self.abort.is_set() {
+            return Err(AgentError::Cancelled);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(expired());
+        }
+        Ok(SnapcompactCheckpoint {
+            source_text: source,
+            frames,
+        })
     }
 
     fn preferred_boundary(&self) -> Result<Option<EntryId>, AgentError> {
@@ -5601,14 +6745,14 @@ impl CompactionContext<'_> {
             }
             let replay = self
                 .session
-                .responses_replay_items(&self.model.endpoint.id, &self.model.spec.id)?
+                .responses_replay_snapshot(&self.model.endpoint.id, &self.model.spec.id)?
                 .ok_or_else(|| {
                     AgentError::InvalidCompactionPolicy(
                         "native Responses compaction requires complete route-affine opaque replay"
                             .to_owned(),
                     )
                 })?;
-            let input = octet_ai::responses::encode_responses_replay(self.model, None, &replay);
+            let input = octet_ai::responses::encode_responses_replay(self.model, None, &replay)?;
             let instructions = (!system.is_empty()).then_some(system);
             let request = ResponsesCompactRequest::for_model(
                 self.model,
@@ -5640,6 +6784,7 @@ impl CompactionContext<'_> {
                 input_tokens,
                 self.model.spec.limits.max_output_tokens,
                 self.max_session_cost_microdollars,
+                self.cache_retention,
             )?;
             let covered_through = self.session.head().ok_or(SessionError::EmptySession)?;
             let response = recover_auxiliary(
@@ -5774,8 +6919,34 @@ impl CompactionContext<'_> {
                         .saturating_sub(self.model.spec.limits.max_output_tokens),
                 });
             }
+            if self.compaction_strategy.is_some()
+                && self.model.spec.effective_input_modalities().contains(Modality::Image)
+            {
+                let checkpoint = self.render_snapcompact(&preparation).await?;
+                let summary = finish_validated_compaction_handoff(
+                    "Earlier conversation is encoded in the attached bitmap frames. Read each frame in order before continuing.".into(),
+                    &preparation.details,
+                )?;
+                let preview = self.session.preview_compaction_context(&first_kept, &summary, &checkpoint)?;
+                let estimate = estimate_request_tokens(system, &preview, tools);
+                let budget = self.model.spec.limits.context_window
+                    .saturating_sub(agent_compaction_reserve_tokens(self.model, self.reasoning));
+                if estimate > budget {
+                    return Err(AgentError::ContextExceeded { estimate, budget });
+                }
+                if self.abort.is_set() { return Err(AgentError::Cancelled); }
+                self.session.compact_snapcompact(summary.clone(), first_kept.clone(),
+                    preparation.details, checkpoint)?;
+                return Ok(CompactionInfo {
+                    kind: CompactionKind::Snapcompact, summary, first_kept,
+                    usage: Usage::default(), elapsed: Duration::ZERO,
+                    cost_microdollars: None,
+                });
+            }
             let summary = match self.summarize(&preparation).await? {
-                Some(summary) => finish_handoff(summary, &preparation.details),
+                Some(summary) => {
+                    finish_validated_compaction_handoff(summary, &preparation.details)?
+                }
                 None => {
                     return Err(AgentError::IncompleteResponse {
                         stop_reason: "compaction summary did not finish normally".to_owned(),
@@ -5825,6 +6996,17 @@ impl CompactionContext<'_> {
         compaction_reserve_tokens: u64,
         provider_output_ceiling: u64,
     ) -> Result<CapacityEstimate, AgentError> {
+        if !self
+            .model
+            .spec
+            .effective_input_modalities()
+            .contains(Modality::Image)
+            && self.session.has_snapcompact_context()?
+        {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "active history contains bitmap frames; switch to a vision-capable model before continuing".into(),
+            ));
+        }
         let context_window = self.model.spec.limits.context_window;
         let budget = context_window.saturating_sub(compaction_reserve_tokens);
         let threshold = ((context_window as f64) * self.threshold_fraction).floor() as u64;
@@ -5902,6 +7084,17 @@ impl CompactionContext<'_> {
         tools: &[ToolDef],
         compaction_reserve_tokens: u64,
     ) -> Result<(), AgentError> {
+        if !self
+            .model
+            .spec
+            .effective_input_modalities()
+            .contains(Modality::Image)
+            && self.session.has_snapcompact_context()?
+        {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "active history contains bitmap frames; switch to a vision-capable model before continuing".into(),
+            ));
+        }
         if self.mode == AgentCompactionMode::NativeResponses {
             let active_system = system.to_owned();
             self.compact_native_responses(&active_system, tools, CompactionReason::Overflow)
@@ -6011,6 +7204,7 @@ impl TerminalGateContext<'_> {
                 input_tokens,
                 reserved_output_tokens,
                 self.max_session_cost_microdollars,
+                request.cache_retention,
             )?;
             let response = recover_auxiliary(
                 AuxiliaryRecovery {
@@ -6220,7 +7414,7 @@ impl DeferredPollSource for AiDeferredPollSource {
                 None => {
                     return DeferredPollReply::Failed(
                         "deferred poll stream ended without a terminal response".to_owned(),
-                    )
+                    );
                 }
             }
         }
@@ -6325,6 +7519,11 @@ impl Agent {
     /// Creates a new agent: canonicalizes the sandbox workspace and validates
     /// the registered extensions (duplicate tool names are rejected).
     pub fn new(mut config: AgentConfig) -> Result<Self, AgentError> {
+        if config.extensions.duplicate_compaction_strategy {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "multiple enabled extensions declared compaction_strategy".into(),
+            ));
+        }
         if let Some(duplicate) = config.extensions.duplicate_tools.first() {
             return Err(AgentError::DuplicateTool(duplicate.clone()));
         }
@@ -6341,10 +7540,19 @@ impl Agent {
             )));
         }
         config.sandbox.workspace = workspace;
+        if config.model.responses_features().reasoning_effort_updates {
+            if let Some((_, effective)) = config
+                .session
+                .responses_reasoning(&config.model.endpoint.id, &config.model.spec.id)?
+            {
+                config.reasoning = effective;
+            }
+        }
         let resource_owner = config.session.resource_owner_key();
         let session_id = config.session_id.unwrap_or_else(|| resource_owner.clone());
         let max_output_tokens = config.model.spec.limits.max_output_tokens;
         let tool_scope = next_tool_scope();
+        let bash_owner = BashOwnerLease::acquire(&resource_owner);
         Ok(Self {
             client: config.client,
             model: config.model,
@@ -6357,12 +7565,14 @@ impl Agent {
             reasoning: config.reasoning,
             reasoning_mode: config.reasoning_mode,
             cache_retention: config.cache_retention,
+            tool_schema_budget_bytes: DEFAULT_TOOL_SCHEMA_BUDGET_BYTES,
             compaction_model: None,
             auto_compaction_mode: AgentCompactionMode::Local,
             compaction_threshold_fraction: 1.0,
             compaction_keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             session_id,
             resource_owner,
+            bash_owner,
             tool_scope,
             completion_policy: CompletionPolicy::Natural,
             output_modalities: OutputModalities::Text,
@@ -6381,6 +7591,7 @@ impl Agent {
             owner_tool_images_enabled: false,
             ultra_observation_managed: false,
             delegation: None,
+            delegation_model_resolver: None,
             last_run_lifecycle: None,
             telemetry: TelemetryContext::default(),
         })
@@ -6421,31 +7632,51 @@ impl Agent {
         {
             return Ok(None);
         }
+        if self.session.has_unsettled_native_steering() {
+            return Ok(None);
+        }
         let responses = match self.auto_compaction_mode {
-            AgentCompactionMode::NativeResponses => Some(native_responses_options(
-                &self.session,
-                &self.model,
-                &self.system,
-                self.service_tier,
-            )?),
-            AgentCompactionMode::Local | AgentCompactionMode::Disabled => {
-                durable_responses_options(
+            AgentCompactionMode::NativeResponses
+                if !self.model.responses_features().reasoning_effort_updates =>
+            {
+                Some(native_responses_options(
                     &self.session,
                     &self.model,
                     &self.system,
                     self.service_tier,
-                )?
+                )?)
             }
+            AgentCompactionMode::NativeResponses
+            | AgentCompactionMode::Local
+            | AgentCompactionMode::Disabled => durable_responses_options(
+                &self.session,
+                &self.model,
+                &self.system,
+                self.service_tier,
+            )?,
         };
+        let tools: Vec<_> = self
+            .extensions
+            .tool_snapshot()
+            .1
+            .iter()
+            .map(|tool| advertised_tool_definition(tool.as_ref(), &self.model))
+            .collect();
+        require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
         let request = Request {
             system: (!self.system.is_empty()).then(|| self.system.clone()),
             messages: self.session.context()?,
-            tools: self.extensions.tool_definitions(),
+            tools,
             tool_choice: ToolChoice::Auto,
             max_output_tokens: Some(self.max_output_tokens),
             temperature: None,
             stop: Vec::new(),
-            reasoning: self.reasoning.clone(),
+            reasoning: request_reasoning_for_replay(
+                &self.session,
+                &self.model,
+                responses.as_ref(),
+                &self.reasoning,
+            )?,
             reasoning_mode: self.reasoning_mode,
             responses,
             output_format: OutputFormat::Text,
@@ -6455,6 +7686,87 @@ impl Agent {
             session_id: Some(self.session_id.clone()),
         };
         Ok(Some((self.client.clone(), self.model.clone(), request)))
+    }
+
+    /// Attempt one opt-in, cost-reserved Anthropic prompt-cache keepalive at a
+    /// settled idle boundary. No model output or synthetic prompt is persisted.
+    /// `Off` and unsupported/early/over-budget requests make no network call.
+    /// This API is an unscheduled library building block, not an idle timer;
+    /// the coding-agent host must opt in at an actual idle boundary.
+    pub async fn warm_prompt_cache(
+        &mut self,
+        mode: crate::cache_warmer::CacheWarmMode,
+        policy: crate::cache_warmer::CacheWarmPolicy,
+    ) -> Result<crate::cache_warmer::CacheWarmOutcome, AgentError> {
+        use crate::cache_warmer::{reservation, CacheWarmOutcome};
+        if mode != crate::cache_warmer::CacheWarmMode::Idle
+            || !crate::cache_warmer::is_direct_anthropic(&self.model)
+            || self.cache_retention != CacheRetention::Short
+            || self.reasoning != ReasoningConfig::Off
+        {
+            return Ok(CacheWarmOutcome::Skipped);
+        }
+        // Existing context estimates include system/tool schema framing and
+        // provider-reconciled prefix usage. Reserve room for the synthetic
+        // suffix independently; the suffix never enters the session.
+        let input_tokens = self
+            .request_context_estimate()?
+            .input_tokens
+            .saturating_add(256);
+        let reserved = worst_case_request_cost(&self.model, input_tokens, 1, None);
+        if reservation(
+            &self.model,
+            &self.session,
+            self.cache_retention,
+            mode,
+            policy,
+            input_tokens,
+            now_unix_millis(),
+            reserved,
+        )
+        .is_none()
+        {
+            return Ok(CacheWarmOutcome::Skipped);
+        }
+        self.ensure_request_cost_capacity(&self.model, input_tokens, 1)?;
+        reserve_request_tokens(&self.session, input_tokens, 1, self.max_session_tokens)?;
+        let (_, tools) = self.extensions.tool_snapshot();
+        let tools: Vec<_> = tools
+            .iter()
+            .map(|tool| advertised_tool_definition(tool.as_ref(), &self.model))
+            .collect();
+        require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
+        let mut messages = self.session.context()?;
+        messages.push(Message::User(UserMessage {
+            content: vec![UserPart::Text("Reply with a single period.".into())],
+        }));
+        let system = self.model_visible_system(true);
+        let request = Request {
+            system: (!system.is_empty()).then_some(system),
+            messages,
+            tools,
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: Some(1),
+            temperature: None,
+            stop: Vec::new(),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: self.reasoning_mode,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: CacheRetention::WarmShort,
+            session_id: Some(self.session_id.clone()),
+        };
+        crate::cache_warmer::dispatch(
+            &self.client,
+            &self.model,
+            &mut self.session,
+            request,
+            policy.deadline,
+        )
+        .await
+        .map_err(AgentError::from)
     }
 
     /// Read-only access to the agent's session (its entries and head).
@@ -6545,6 +7857,17 @@ impl Agent {
         self.enable_v2_delegation_with_surface(config, false)
     }
 
+    /// Installs or refreshes the host-owned configured-model routing service.
+    pub fn set_delegation_model_resolver(
+        &mut self,
+        resolver: Arc<dyn crate::delegation::AgentModelResolver>,
+    ) {
+        if let Some(binding) = &self.delegation {
+            binding.set_model_resolver(resolver.clone());
+        }
+        self.delegation_model_resolver = Some(resolver);
+    }
+
     fn enable_v2_delegation_with_surface(
         &mut self,
         config: DelegationConfig,
@@ -6554,6 +7877,7 @@ impl Agent {
             return Err(DelegationError::AlreadyEnabled);
         }
         let template = DelegationTemplate {
+            model_resolver: std::sync::RwLock::new(self.delegation_model_resolver.clone()),
             client: self.client.clone(),
             model: self.model.clone(),
             base_system: std::sync::RwLock::new(self.system.clone()),
@@ -6561,7 +7885,7 @@ impl Agent {
             effect_broker: self.effect_broker.clone(),
             extensions: self.extensions.clone(),
             max_turns: self.max_turns,
-            reasoning: self.reasoning.clone(),
+            reasoning: std::sync::RwLock::new(self.reasoning.clone()),
             reasoning_mode: self.reasoning_mode,
             cache_retention: self.cache_retention,
             runtime: std::sync::RwLock::new(self.delegation_runtime_settings()),
@@ -6609,10 +7933,7 @@ impl Agent {
         &self,
         process: &ExtensionProcess,
     ) -> Result<bool, AgentError> {
-        if !process
-            .negotiated_features()
-            .contains(EXTENSION_FEATURE_AGENT_SESSIONS)
-        {
+        if !process.supports_feature(EXTENSION_FEATURE_AGENT_SESSIONS) {
             return Ok(false);
         }
         let binding = self.delegation.as_ref().ok_or_else(|| {
@@ -6646,6 +7967,7 @@ impl Agent {
             max_session_cost_microdollars: self.max_session_cost_microdollars,
             provider_retries_enabled: self.provider_retries_enabled,
             max_network_wait: self.max_network_wait,
+            tool_schema_budget_bytes: self.tool_schema_budget_bytes,
         }
     }
 
@@ -6714,6 +8036,7 @@ impl Agent {
             tool_output: None,
             tool_started_unix_ms: None,
             tool_finished_unix_ms: None,
+            native_steering: None,
             local_synthetic_assistant: false,
             extension_metadata: Default::default(),
         }
@@ -6747,6 +8070,7 @@ impl Agent {
             input_tokens,
             output_tokens,
             self.max_session_cost_microdollars,
+            self.cache_retention,
         )
     }
 
@@ -6793,6 +8117,17 @@ impl Agent {
     #[cfg(test)]
     pub(crate) fn max_network_wait(&self) -> Option<Duration> {
         self.max_network_wait
+    }
+
+    /// Sets the maximum serialized JSON bytes for provider-visible tool schemas.
+    ///
+    /// The default is [`DEFAULT_TOOL_SCHEMA_BUDGET_BYTES`]. A request that
+    /// would exceed this hard limit is refused; octet never truncates, drops,
+    /// or rewrites tool definitions to make it fit. Zero permits only an empty
+    /// tool list.
+    pub fn set_tool_schema_budget_bytes(&mut self, max_bytes: usize) {
+        self.tool_schema_budget_bytes = max_bytes;
+        self.sync_delegation_runtime_settings();
     }
 
     /// Configure the model used for autonomous context summaries. Passing
@@ -6913,7 +8248,7 @@ impl Agent {
         if mode == AgentCompactionMode::NativeResponses
             && self
                 .session
-                .responses_replay_items(&self.model.endpoint.id, &self.model.spec.id)?
+                .responses_replay_snapshot(&self.model.endpoint.id, &self.model.spec.id)?
                 .is_none()
         {
             return Err(AgentError::InvalidCompactionPolicy(
@@ -6994,25 +8329,28 @@ impl Agent {
 
     /// Complete route-affine Responses replay input for the active branch.
     ///
-    /// `None` means the active route is not Responses or a legacy/crash gap
-    /// makes exact opaque replay unavailable. Route-mismatched sidecars are
-    /// returned as an explicit session error.
+    /// `None` means the active route is not Responses or a legacy/crash gap or
+    /// different route makes exact opaque replay unavailable. Ordinary requests
+    /// use canonical context in that case; native mode remains fail-closed.
     pub fn responses_replay_input(&self) -> Result<Option<ResponsesInput>, SessionError> {
         if self.model.spec.protocol != Protocol::OpenAiResponses {
             return Ok(None);
         }
         let Some(replay) = self
             .session
-            .responses_replay_items(&self.model.endpoint.id, &self.model.spec.id)?
+            .responses_replay_snapshot(&self.model.endpoint.id, &self.model.spec.id)?
         else {
             return Ok(None);
         };
         let system = self.system.clone();
-        Ok(Some(octet_ai::responses::encode_responses_replay(
-            &self.model,
-            (!system.is_empty()).then_some(system.as_str()),
-            &replay,
-        )))
+        Ok(Some(
+            octet_ai::responses::encode_responses_replay(
+                &self.model,
+                (!system.is_empty()).then_some(system.as_str()),
+                &replay,
+            )
+            .map_err(|_| SessionError::Limit("invalid durable Responses replay".into()))?,
+        ))
     }
 
     /// Runs a tool-free summary through the same cancellable retry, hard-budget,
@@ -7064,10 +8402,9 @@ impl Agent {
                 on_event,
             )
             .await?;
-        Ok(crate::compaction::finish_branch_handoff(
-            summary,
-            &preparation.details,
-        ))
+        let handoff = crate::compaction::finish_branch_handoff(summary, &preparation.details);
+        validate_compaction_summary_part(&handoff)?;
+        Ok(handoff)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7101,6 +8438,7 @@ impl Agent {
             run_id: &self.session_id,
             resource_owner: &self.resource_owner,
             retry_hooks: &self.extensions.provider_retry_hooks,
+            compaction_strategy: self.extensions.compaction_strategy.as_ref(),
             max_network_wait: self.max_network_wait,
             provider_retries_enabled: self.provider_retries_enabled,
             client: &self.client,
@@ -7163,17 +8501,27 @@ impl Agent {
         }
         let replay = self
             .session
-            .responses_replay_items(&self.model.endpoint.id, &self.model.spec.id)?
+            .responses_replay_snapshot(&self.model.endpoint.id, &self.model.spec.id)?
             .ok_or_else(|| {
                 AgentError::InvalidCompactionPolicy(
                     "native Responses compaction requires complete route-affine opaque replay"
                         .to_owned(),
                 )
             })?;
-        let input = octet_ai::responses::encode_responses_replay(&self.model, None, &replay);
+        if replay
+            .iter()
+            .any(|item| matches!(item, ResponsesReplayItem::ConfigurationUpdate(_)))
+        {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "standalone native compact cannot preserve reasoning updates; use local compaction"
+                    .into(),
+            ));
+        }
+        let input = octet_ai::responses::encode_responses_replay(&self.model, None, &replay)?;
         let active_system = self.system.clone();
         let instructions = (!active_system.is_empty()).then_some(active_system.as_str());
         let tools = self.extensions.tool_definitions();
+        require_tool_schema_budget(&tools, self.tool_schema_budget_bytes)?;
         if replay.is_empty() {
             return Err(AgentError::InvalidCompactionPolicy(
                 "native Responses compaction requires non-empty replay".to_owned(),
@@ -7209,6 +8557,7 @@ impl Agent {
             input_tokens,
             self.model.spec.limits.max_output_tokens,
             self.max_session_cost_microdollars,
+            self.cache_retention,
         )?;
         let covered_through = self.session.head().ok_or(SessionError::EmptySession)?;
         let operation_started = std::time::Instant::now();
@@ -7801,6 +9150,7 @@ impl Agent {
             persist_pending_cancellations(&mut self.session)?;
         }
         let resource_owner = session.resource_owner_key();
+        self.bash_owner = BashOwnerLease::acquire(&resource_owner);
         self.session_id = resource_owner.clone();
         self.resource_owner = resource_owner;
         self.session = session;
@@ -7938,6 +9288,10 @@ impl Agent {
                 // A schema-rejected call was never admitted for execution in
                 // the live path; retain that fact across a restart as well.
                 Err(rejected_argument_tool_error(argument_error))
+            } else if call.async_execution {
+                Err(ToolError::new(
+                    "indeterminate background call after restart; not automatically replayed",
+                ))
             } else if call_index >= MAX_TOOL_CALLS_PER_TURN {
                 Err(ToolError::new(
                     "tool call skipped: per-turn tool-call limit reached",
@@ -7950,7 +9304,9 @@ impl Agent {
                         call.name,
                         synthesize_interruption(partial_output.as_deref()).text
                     ))),
-                    Some(tool) if tool.replay_safety() == ReplaySafety::Safe => {
+                    Some(tool)
+                        if !call.async_execution && tool.replay_safety() == ReplaySafety::Safe =>
+                    {
                         execute_recovery_call(
                             call_index,
                             Arc::clone(tool),
@@ -7993,6 +9349,34 @@ impl Agent {
         Ok(())
     }
 
+    /// Effective host-selected reasoning, distinct from a pinned request baseline.
+    pub fn reasoning(&self) -> &ReasoningConfig {
+        &self.reasoning
+    }
+
+    /// Changes reasoning on an idle agent, preserving qualified Responses caches.
+    pub fn set_reasoning(&mut self, reasoning: ReasoningConfig) -> Result<(), AgentError> {
+        require_ultra_observation(
+            &reasoning,
+            self.delegation.is_some() || self.ultra_observation_managed,
+        )?;
+        if self.model.responses_features().reasoning_effort_updates {
+            persist_reasoning_selection(&mut self.session, &self.model, &reasoning)?;
+        } else {
+            octet_ai::responses::validate_responses_input(
+                &self.model,
+                &ResponsesInput::default(),
+                &reasoning,
+                false,
+            )?;
+        }
+        self.reasoning = reasoning;
+        if let Some(binding) = &self.delegation {
+            binding.update_reasoning(self.reasoning.clone());
+        }
+        Ok(())
+    }
+
     /// Begins a run: appends the user message to the session and returns the
     /// caller-driven event stream plus its control handle.
     ///
@@ -8026,6 +9410,9 @@ impl Agent {
                 "Ultra requires an enabled child-session observation runtime".into(),
             ));
         }
+        if self.session.has_unsettled_native_steering() {
+            return Err(AiError::Config(octet_ai::ConfigError::Parse("unresolved native steering intent; automatic replay is prohibited; use a new session".into())).into());
+        }
         // Direct library callers may not have an explicit construction
         // boundary. Keep this idempotent fallback so their first owning run
         // cannot leave dynamic publishers waiting forever.
@@ -8039,13 +9426,23 @@ impl Agent {
             .take()
             .is_some_and(|lifecycle| lifecycle.dropped.load(Ordering::Acquire));
         self.recover_pending_tools(previous_run_was_dropped).await?;
-        let terminal_gate_prior_context =
-            if self.completion_policy == CompletionPolicy::TerminalGate {
-                recent_conversational_context(&self.session.context()?)
-            } else {
-                String::new()
-            };
-        let initial_request = input.text_summary();
+        // This snapshot is both the preflight boundary and the first provider
+        // request's frozen tool surface. Refusing it before the prompt append
+        // leaves a frontend free to revise and retry the same draft.
+        let (initial_tool_revision, initial_tools) = self.extensions.tool_snapshot();
+        let initial_tool_defs: Vec<ToolDef> = if tools_enabled {
+            initial_tools
+                .iter()
+                .map(|tool| advertised_tool_definition(tool.as_ref(), &self.model))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        require_tool_schema_budget(&initial_tool_defs, self.tool_schema_budget_bytes)?;
+        let completion_policy = self.completion_policy;
+        let mut terminal_gate_evidence =
+            TerminalGateEvidence::for_run(completion_policy, &self.session, &input)?;
+        let input = prepare_user_images(input, &self.model, None).await?;
         let prompt_metadata = self.prompt_entry_metadata();
         // `display_text` belongs only to the draft that started this run.
         // Steering and follow-up inputs are independent user submissions and
@@ -8055,6 +9452,9 @@ impl Agent {
             ..prompt_metadata.clone()
         };
         let observer_input = (!self.extensions.observers.is_empty()).then(|| input.clone());
+        if self.model.responses_features().reasoning_effort_updates {
+            persist_reasoning_selection(&mut self.session, &self.model, &self.reasoning)?;
+        }
         let first_entry = self
             .session
             .append_with_metadata(user_message(input), Some(prompt_metadata.clone()))?;
@@ -8080,8 +9480,16 @@ impl Agent {
         let abort = Arc::new(AbortFlag::default());
         let control_admission = Arc::new(std::sync::Mutex::new(true));
         let control = RunControl {
+            reasoning_model: self
+                .model
+                .responses_features()
+                .reasoning_effort_updates
+                .then(|| self.model.clone()),
+            ultra_observed: self.delegation.is_some() || self.ultra_observation_managed,
             admission: control_admission.clone(),
             tx: control_tx,
+            pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
+            pending_bytes: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_BYTES)),
             abort: abort.clone(),
         };
 
@@ -8097,12 +9505,6 @@ impl Agent {
         let system = self.model_visible_system(tools_enabled);
         let sandbox = self.sandbox.clone();
         let extension_host = self.extensions.clone();
-        let (initial_tool_revision, initial_tools) = extension_host.tool_snapshot();
-        let initial_tool_defs: Vec<ToolDef> = if tools_enabled {
-            initial_tools.iter().map(|tool| tool.definition()).collect()
-        } else {
-            Vec::new()
-        };
         let initial_context =
             observe_context_tracker(&context, &self.session, &model, &system, &initial_tool_defs)?;
         let initial_capacity =
@@ -8118,7 +9520,7 @@ impl Agent {
         let provider_retry_hooks = self.extensions.provider_retry_hooks.clone();
         let persistence_metadata_hooks = self.extensions.persistence_metadata_hooks.clone();
         let max_turns = self.max_turns;
-        let reasoning = self.reasoning.clone();
+        let mut reasoning = self.reasoning.clone();
         let reasoning_mode = self.reasoning_mode;
         let cache_retention = self.cache_retention;
         let session_id = self.session_id.clone();
@@ -8126,13 +9528,20 @@ impl Agent {
         let tool_scope = self.tool_scope.clone();
         let effect_broker = self.effect_broker.clone();
         let effect_run_id = format!("run:{}", first_entry.0);
-        let completion_policy = self.completion_policy;
         let output_modalities = self.output_modalities.clone();
         let provider_output_ceiling = self.max_output_tokens;
         let compaction_reserve_tokens = self.compaction_reserve_tokens();
+        let effective_reasoning = &mut self.reasoning;
         let max_session_tokens = self.max_session_tokens;
         let max_session_cost_microdollars = self.max_session_cost_microdollars;
-        let auto_compaction_mode = self.auto_compaction_mode;
+        let tool_schema_budget_bytes = self.tool_schema_budget_bytes;
+        let auto_compaction_mode = if self.model.responses_features().reasoning_effort_updates
+            && self.auto_compaction_mode == AgentCompactionMode::NativeResponses
+        {
+            AgentCompactionMode::Local
+        } else {
+            self.auto_compaction_mode
+        };
         // The caller-selected provider service tier rides on every Responses
         // request this run builds; the builder re-checks the route capability.
         let service_tier = self.service_tier;
@@ -8204,12 +9613,9 @@ impl Agent {
             let run_guard = telemetry.begin_typed::<RunSpan>(EmptyAttributes {});
             let run_context = run_guard.context();
 
-            let (mut tool_revision, tools) = extension_host.tool_snapshot();
-            let mut tool_defs: Vec<ToolDef> = if tools_enabled {
-                tools.iter().map(|tool| tool.definition()).collect()
-            } else {
-                Vec::new()
-            };
+            let mut tool_revision = initial_tool_revision;
+            let tools = initial_tools;
+            let mut tool_defs = initial_tool_defs;
             let mut tool_map: HashMap<String, Arc<dyn Tool>> =
                 HashMap::with_capacity(if tools_enabled { tools.len() } else { 0 });
             if tools_enabled {
@@ -8225,8 +9631,16 @@ impl Agent {
             let mut announced_tools: std::collections::HashSet<String> =
                 registered_tools.iter().cloned().collect();
 
-            let mut pending_steer: Vec<UserInput> = Vec::new();
-            let mut followups: VecDeque<UserInput> = VecDeque::new();
+            let mut native = native_steering::NativeState::default();
+            let (native_updates_tx, mut native_updates_rx) = mpsc::channel(128);
+            let native_enabled = model.responses_features().steering
+                && model.endpoint.transport == octet_ai::EndpointTransport::WebSocketPreferred
+                && max_session_tokens.is_none() && max_session_cost_microdollars.is_none();
+            let mut background_tools = background_tools::BackgroundTools::default();
+            let background_cancellation = abort.cancellation.clone();
+            let mut pending_reasoning = None;
+            let mut pending_steer: Vec<ReservedInput> = Vec::new();
+            let mut followups: VecDeque<ReservedInput> = VecDeque::new();
             // Preserve octet's historical defaults; frontends that expose queue
             // modes can update either mode through RunControl.
             let mut steering_mode = QueueDeliveryMode::All;
@@ -8235,8 +9649,6 @@ impl Agent {
             let mut answer_only = !tools_enabled;
             let mut finish_pending = false;
             let mut completed_turns: u64 = 0;
-            let mut terminal_gate_requests = vec![initial_request];
-            let mut terminal_action_receipts = Vec::<TerminalActionReceipt>::new();
             let mut context_retries = 0usize;
             // Shared by open/body retries, re-preparation and transport fallback.
             // Reset only on a complete successful assistant response.
@@ -8390,14 +9802,15 @@ impl Agent {
                             _ = abort.wait() => break 'run FinishReason::Aborted,
                             _ = wait_network_deadline(network_deadline) => break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown }),
                             control = control_rx.recv(), if control_open => match control {
-                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
                                 Some(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
+                                    input.push_pending(&mut pending_steer);
                                     answer_only = true;
                                     finish_pending = true;
                                     context_capacity.invalidate();
                                 }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                 Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                 Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                 Some(Control::Abort) => break 'run FinishReason::Aborted,
@@ -8413,14 +9826,15 @@ impl Agent {
                 // ── Drain control at the turn boundary ─────────────────────
                 while control_open {
                     match control_rx.try_recv() {
-                        Ok(Control::Steer(input)) => pending_steer.push(input),
+                        Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                         Ok(Control::FollowUp(input)) => followups.push_back(input),
                         Ok(Control::FinishNow(input)) => {
-                            pending_steer.push(input);
+                            input.push_pending(&mut pending_steer);
                             answer_only = true;
                             finish_pending = true;
                             context_capacity.invalidate();
                         }
+                        Ok(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                         Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
                         Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                         Ok(Control::Abort) => break 'run FinishReason::Aborted,
@@ -8432,8 +9846,21 @@ impl Agent {
                     break 'run FinishReason::Aborted;
                 }
 
+                if let Some(selection) = if native.connection.is_none() { pending_reasoning.take() } else { None } {
+                    if let Err(error) = persist_reasoning_selection(session, &model, &selection) {
+                        break 'run FinishReason::Failed(error);
+                    }
+                    reasoning = selection.clone();
+                    if let Some(binding) = &stream_delegation {
+                        binding.update_reasoning(selection.clone());
+                    }
+                    *effective_reasoning = selection;
+                    context_capacity.invalidate();
+                }
+
                 // ── Steering enters here, at the model-turn boundary ───────
-                if !pending_steer.is_empty() {
+                pending_steer.retain(ReservedInput::is_pending);
+                if native.connection.is_none() && (!pending_steer.is_empty() || pending_reasoning.is_some()) {
                     let queued = if std::mem::take(&mut finish_pending) {
                         std::mem::take(&mut pending_steer)
                     } else {
@@ -8458,9 +9885,10 @@ impl Agent {
                         ControlDeliveryKind::Steering,
                         session,
                         &control_prompt_metadata,
-                        &mut terminal_gate_requests,
+                        &mut terminal_gate_evidence,
                         &observation,
-                    ) {
+                        Some(&abort),
+                    ).await {
                         ControlDelivery::Completed { event } => {
                             if let Some(ev) = event {
                                 notify_observers(&observers, &ev);
@@ -8492,10 +9920,17 @@ impl Agent {
                 if current_revision != tool_revision {
                     tool_revision = current_revision;
                     if tools_enabled && !answer_only {
-                        tool_defs = current_tools
+                        let next_tool_defs: Vec<ToolDef> = current_tools
                             .iter()
-                            .map(|tool| tool.definition())
+                            .map(|tool| advertised_tool_definition(tool.as_ref(), &model))
                             .collect();
+                        if let Err(error) = require_tool_schema_budget(
+                            &next_tool_defs,
+                            tool_schema_budget_bytes,
+                        ) {
+                            break 'run FinishReason::Failed(error);
+                        }
+                        tool_defs = next_tool_defs;
                         tool_map.clear();
                         tool_map.reserve(current_tools.len());
                         for tool in &current_tools {
@@ -8523,6 +9958,7 @@ impl Agent {
                         run_id: &effect_run_id,
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
+                        compaction_strategy: extension_host.compaction_strategy.as_ref(),
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -8539,7 +9975,7 @@ impl Agent {
                         max_session_tokens,
                         max_session_cost_microdollars,
                         abort: &abort,
-                        mode: auto_compaction_mode,
+                        mode: if background_tools.is_empty() && native.connection.is_none() { auto_compaction_mode } else { AgentCompactionMode::Disabled },
                         threshold_fraction: compaction_threshold_fraction,
                         keep_recent_tokens: compaction_keep_recent_tokens,
                         events: &compaction_event_tx,
@@ -8560,13 +9996,14 @@ impl Agent {
                             biased;
                             _ = abort.wait() => break Err(AgentError::Cancelled),
                             control = control_rx.recv(), if control_open => match control {
-                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
                                 Some(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
+                                    input.push_pending(&mut pending_steer);
                                     answer_only = true;
                                     finish_pending = true;
                                 }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                 Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                 Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                 Some(Control::Abort) => { abort.set(); }
@@ -8595,7 +10032,8 @@ impl Agent {
                         };
                     }
                 };
-                if !pending_steer.is_empty() {
+                pending_steer.retain(ReservedInput::is_pending);
+                if native.connection.is_none() && (!pending_steer.is_empty() || pending_reasoning.is_some()) {
                     context_capacity.invalidate();
                     continue 'run;
                 }
@@ -8641,7 +10079,15 @@ impl Agent {
                     max_output_tokens: Some(request_max_output_tokens),
                     temperature: None,
                     stop: vec![],
-                    reasoning: reasoning.clone(),
+                    reasoning: match request_reasoning_for_replay(
+                        session,
+                        &model,
+                        responses.as_ref(),
+                        &reasoning,
+                    ) {
+                        Ok(selection) => selection,
+                        Err(error) => break 'run FinishReason::Failed(error),
+                    },
                     reasoning_mode,
                     responses,
                     output_format: OutputFormat::Text,
@@ -8688,6 +10134,7 @@ impl Agent {
                     reserved_output_tokens,
                     max_session_cost_microdollars,
                     request.responses.as_ref().and_then(|options| options.service_tier),
+                    request.cache_retention,
                 ) {
                     break 'run FinishReason::Failed(error);
                 }
@@ -8709,7 +10156,10 @@ impl Agent {
                 let ev = AgentEvent::TurnStarted;
                 notify_observers(&observers, &ev);
                 yield ev;
-                let qualified = qualified_inference_replacement(&model, &request);
+                let qualified = !native_enabled && qualified_inference_replacement(&model, &request);
+                let native_delta = match native_steering::required_input_request(request.clone(), session, &model) {
+                    Ok(request) => request, Err(error) => break 'run FinishReason::Failed(error),
+                };
                 let opening_client = client.track_request_dispatch();
                 let opened = tokio::select! {
                     biased;
@@ -8730,9 +10180,24 @@ impl Agent {
                         }
                         break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown });
                     },
-                    result = open_provider_stream(&opening_client, &model, request, &abort) => result,
+                    result = async {
+                        if let Some(connection) = native.connection.take() {
+                            Ok(Some(native_steering::ProviderStream::Native(connection, native_updates_tx.clone(), None)))
+                        } else if native_enabled {
+                            opening_client.steerable_responses(&model, request).await.map(|connection| Some(native_steering::ProviderStream::Native(connection, native_updates_tx.clone(), None)))
+                        } else {
+                            open_provider_stream(&opening_client, &model, request, &abort).await.map(|stream| stream.map(native_steering::ProviderStream::Ordinary))
+                        }
+                    } => result,
                 };
                 let mut response_stream = match opened {
+                    Err(error) if native_enabled => {
+                        if opening_client.request_may_have_been_sent() {
+                            if let Err(record_error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "native_steering") { break 'run FinishReason::Failed(record_error.into()); }
+                            let event = AgentEvent::ProviderUsageUncertain; notify_observers(&observers, &event); yield event;
+                        }
+                        break 'run FinishReason::Failed(error.into());
+                    }
                     Err(error) if context_retries < MAX_PROVIDER_RETRIES && looks_like_context_error(&error) => {
                         context_retries += 1;
                         let compacted = {
@@ -8740,6 +10205,7 @@ impl Agent {
                         run_id: &effect_run_id,
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
+                        compaction_strategy: extension_host.compaction_strategy.as_ref(),
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -8756,7 +10222,7 @@ impl Agent {
                                 max_session_tokens,
                                 max_session_cost_microdollars,
                                 abort: &abort,
-                                mode: auto_compaction_mode,
+                                mode: if background_tools.is_empty() && native.connection.is_none() { auto_compaction_mode } else { AgentCompactionMode::Disabled },
                                 threshold_fraction: compaction_threshold_fraction,
                                 keep_recent_tokens: compaction_keep_recent_tokens,
                                 events: &compaction_event_tx,
@@ -8776,13 +10242,14 @@ impl Agent {
                                     biased;
                                     _ = abort.wait() => break Err(AgentError::Cancelled),
                             control = control_rx.recv(), if control_open => match control {
-                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
                                 Some(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
+                                    input.push_pending(&mut pending_steer);
                                     answer_only = true;
                                     finish_pending = true;
                                 }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                 Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                 Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                 Some(Control::Abort) => { abort.set(); }
@@ -8824,6 +10291,15 @@ impl Agent {
                         s
                     },
                 };
+                if let Some(control) = response_stream.control() {
+                    if native.control.is_none() { native.begin(format!("{effect_run_id}:{completed_turns}"), control); }
+                }
+                if native.required_input && native_delta.messages.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_))))) {
+                    native.required_input = false;
+                    if let Some(control) = native.control.as_ref() {
+                        if let Err(error) = control.continue_with(native_delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
+                    }
+                }
                 // Parity 1e.2 durability half: encode the in-flight assistant
                 // message into compact frames and journal them beside the
                 // session between deltas, so a killed process can republish the
@@ -8843,6 +10319,7 @@ impl Agent {
                     Event(Option<Result<StreamEvent, AiError>>),
                     Ctl(Option<Control>),
                     Delegation(Option<DelegationTelemetrySnapshot>),
+                    Steering(octet_ai::SteeringUpdate),
                     Abort,
                 }
                 let mut attempt_saw_generation = false;
@@ -8856,6 +10333,7 @@ impl Agent {
                         biased;
                         _ = abort.wait() => Next::Abort,
                         c = control_rx.recv(), if control_open => Next::Ctl(c),
+                        Some(update) = native_updates_rx.recv() => Next::Steering(update),
                         snapshot = async {
                             match &mut delegation_telemetry {
                                 Some(receiver) => next_delegation_snapshot(receiver).await,
@@ -8864,6 +10342,30 @@ impl Agent {
                         }, if delegation_telemetry.is_some() => Next::Delegation(snapshot),
                         ev = response_stream.next() => Next::Event(ev),
                     };
+                    // Apply the selected update before subsequently queued ones;
+                    // both paths must drive required-input continuations.
+                    let next = match next {
+                        Next::Steering(update) => {
+                            if let Err(error) = native.update(update, session, &model) { break 'run FinishReason::Failed(error); }
+                            None
+                        }
+                        next => Some(next),
+                    };
+                    while let Ok(update) = native_updates_rx.try_recv() {
+                        if let Err(error) = native.update(update, session, &model) { break 'run FinishReason::Failed(error); }
+                    }
+                    if native.required_input && native_delta.messages.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_))))) {
+                        native.required_input = false;
+                        if let Some(control) = native.control.as_ref() {
+                            if let Err(error) = control.continue_with(native_delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
+                        }
+                    }
+                    match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
+                        Ok(Some(event)) => { notify_observers(&observers, &event); yield event; },
+                        Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
+                    }
+                    let Some(next) = next else { continue; };
+                    if matches!(next, Next::Event(Some(Ok(StreamEvent::Started { .. })))) { native.started(response_stream.response_id()); }
                     let next = match next {
                         Next::Event(Some(Ok(StreamEvent::Finished(response)))) => {
                             match incomplete_responses_error(&model, &response) {
@@ -8880,14 +10382,21 @@ impl Agent {
                             }
                             break Err(FinishReason::Aborted);
                         }
-                        Next::Ctl(Some(Control::Steer(input))) => pending_steer.push(input),
+                        Next::Ctl(Some(Control::Steer(input))) => {
+                            match native.submit(input, session, &model).await {
+                                Ok(Some(input)) => input.push_pending(&mut pending_steer),
+                                Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
+                            }
+                        },
+                        Next::Steering(_) => unreachable!("handled above"),
                         Next::Ctl(Some(Control::FollowUp(input))) => followups.push_back(input),
                         Next::Ctl(Some(Control::FinishNow(input))) => {
-                            pending_steer.push(input);
+                            input.push_pending(&mut pending_steer);
                             answer_only = true;
                             finish_pending = true;
                             context_capacity.invalidate();
                         }
+                        Next::Ctl(Some(Control::SetReasoning(selection))) => pending_reasoning = Some(selection),
                         Next::Ctl(Some(Control::SetSteeringMode(mode))) => steering_mode = mode,
                         Next::Ctl(Some(Control::SetFollowUpMode(mode))) => follow_up_mode = mode,
                         Next::Ctl(None) => control_open = false,
@@ -8902,6 +10411,12 @@ impl Agent {
                                 Next::Event(Some(Err(error))) => error,
                                 _ => AiError::StreamProtocol(octet_ai::StreamProtocolError::MissingFinish),
                             };
+                            if native_enabled {
+                                native.connection = response_stream.into_native();
+                                if let Err(record_error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "native_steering") { break 'run FinishReason::Failed(record_error.into()); }
+                                let event = AgentEvent::ProviderUsageUncertain; notify_observers(&observers, &event); yield event;
+                                break 'run FinishReason::Failed(error.into());
+                            }
                             // Retire the failed stream before hooks, backoff,
                             // compaction or any replacement can open a transport.
                             drop(response_stream);
@@ -8922,6 +10437,7 @@ impl Agent {
                         run_id: &effect_run_id,
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
+                        compaction_strategy: extension_host.compaction_strategy.as_ref(),
                         max_network_wait,
                         provider_retries_enabled,
                         client: &client,
@@ -8938,7 +10454,7 @@ impl Agent {
                                         max_session_tokens,
                                         max_session_cost_microdollars,
                                         abort: &abort,
-                                        mode: auto_compaction_mode,
+                                        mode: if background_tools.is_empty() && native.connection.is_none() { auto_compaction_mode } else { AgentCompactionMode::Disabled },
                                         threshold_fraction: compaction_threshold_fraction,
                                         keep_recent_tokens: compaction_keep_recent_tokens,
                                         events: &compaction_event_tx,
@@ -8958,13 +10474,14 @@ impl Agent {
                                             biased;
                                             _ = abort.wait() => break Err(AgentError::Cancelled),
                             control = control_rx.recv(), if control_open => match control {
-                                Some(Control::Steer(input)) => pending_steer.push(input),
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Some(Control::FollowUp(input)) => followups.push_back(input),
                                 Some(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
+                                    input.push_pending(&mut pending_steer);
                                     answer_only = true;
                                     finish_pending = true;
                                 }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                 Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                 Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                 Some(Control::Abort) => { abort.set(); }
@@ -9086,7 +10603,12 @@ impl Agent {
                 // and transport recovery happen within the same logical turn
                 // and must not consume the autonomous work budget.
                 completed_turns = completed_turns.saturating_add(1);
-                drop(response_stream);
+                if native.has_pending() {
+                    native.connection = response_stream.into_native();
+                } else {
+                    drop(response_stream);
+                    native.control = None;
+                }
 
                 // ── Persist the completed assistant message ────────────────
                 // StopReason is semantic control data, not parser metadata. It
@@ -9241,7 +10763,7 @@ impl Agent {
                         Err(error) => break 'run FinishReason::Failed(error.into()),
                     }
                 }
-                if let Err(error) = session.append_assistant_turn_with_metadata(
+                let assistant_entry = match session.append_assistant_turn_with_metadata(
                     assistant.clone(),
                     model.endpoint.id.clone(),
                     model.spec.id.clone(),
@@ -9251,9 +10773,16 @@ impl Agent {
                     raw_responses_output,
                     persistence_metadata,
                 ) {
-                    break 'run FinishReason::Failed(error.into());
+                    Ok(entry) => entry,
+                    Err(error) => break 'run FinishReason::Failed(error.into()),
+                };
+                if let Err(error) = native.settle_successor(session, &model, assistant_entry) { break 'run FinishReason::Failed(error); }
+                native.completed_prefix();
+                match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
+                    Ok(Some(event)) => { notify_observers(&observers, &event); yield event; },
+                    Ok(None) => {}, Err(error) => break 'run FinishReason::Failed(error),
                 }
-                context_capacity.observe_assistant_response(session, &turn_usage);
+                context_capacity.observe_assistant_response(session, &model, &turn_usage);
                 add_usage(&mut run_usage, &turn_usage);
                 let turn_cost = response.cost;
                 run_cost.add(turn_cost);
@@ -9261,25 +10790,24 @@ impl Agent {
                 let output_truncated = matches!(stop_reason, StopReason::MaxTokens);
                 let needs_continuation = output_truncated
                     || matches!(stop_reason, StopReason::PauseTurn)
+                    || (matches!(stop_reason, StopReason::Steered) && native.has_pending())
                     || matches!(&stop_reason, StopReason::Other(reason) if reason == "tool_output_locked");
-                if normal_end && calls.is_empty() && !assistant_has_terminal_content(&assistant) {
-                    // A reasoning-only completion is its own diagnosis: the model
-                    // finished normally having emitted thinking but no answer, which
-                    // is exactly what a local thinking model does when its whole
-                    // budget goes into reasoning and no final text follows.
-                    let reasoned_only = assistant
-                        .content
-                        .iter()
-                        .any(|part| matches!(part, AssistantPart::Reasoning(_)));
+                if normal_end && calls.is_empty() && background_tools.is_empty() && !assistant_has_terminal_content(&assistant) {
+                    // A normal stop without terminal content is not a completed
+                    // turn. Persist its message and usage above, then fail without
+                    // retrying; the stop alone does not establish the cause.
                     break 'run FinishReason::Failed(AgentError::IncompleteResponse {
-                        stop_reason: if reasoned_only {
-                            "provider returned reasoning but no answer text".to_owned()
-                        } else {
-                            "provider returned no user-visible content".to_owned()
-                        },
+                        stop_reason: incomplete_terminal_response_reason(
+                            &assistant,
+                            &stop_reason,
+                            &turn_usage,
+                            &response.diagnostics,
+                            request_max_output_tokens,
+                        ),
                     });
                 }
                 let gated_candidate = completion_policy == CompletionPolicy::TerminalGate
+                    && background_tools.is_empty() && !native.has_pending()
                     && calls.is_empty()
                     && normal_end;
 
@@ -9300,20 +10828,54 @@ impl Agent {
                     yield ev;
                 }
 
+                // Results from the previous response retain their original IDs.
+                // The concurrent assistant is committed first: it was generated
+                // without these results. Sync/effectful work is a strict barrier.
+                let completed_background = !background_tools.is_empty();
+                while !background_tools.is_empty() {
+                    let operation = background_tools.settle_one(session, &model, &sandbox,
+                        &stream_context, &mut run_usage, &mut terminal_gate_evidence);
+                    tokio::pin!(operation);
+                    let settled = loop {
+                        tokio::select! {
+                            biased;
+                            result = &mut operation => break result,
+                            control = control_rx.recv(), if control_open => match control {
+                                Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
+                                Some(Control::FollowUp(input)) => followups.push_back(input),
+                                Some(Control::FinishNow(input)) => {
+                                    input.push_pending(&mut pending_steer); answer_only = true; finish_pending = true;
+                                }
+                                Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
+                                Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
+                                Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
+                                Some(Control::Abort) => abort.set(),
+                                None => control_open = false,
+                            },
+                        }
+                    };
+                    match settled {
+                        Ok(events) => for event in events { notify_observers(&observers, &event); yield event; },
+                        Err(error) => break 'run FinishReason::Failed(error),
+                    }
+                    context_capacity.invalidate();
+                }
+
                 // Drain control before deciding whether a provisional candidate
                 // is terminal. New user input takes precedence over the gate.
                 {
                     let mut admission = control_admission.lock().unwrap_or_else(|error| error.into_inner());
                     while control_open {
                         match control_rx.try_recv() {
-                            Ok(Control::Steer(input)) => pending_steer.push(input),
+                            Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                             Ok(Control::FollowUp(input)) => followups.push_back(input),
                             Ok(Control::FinishNow(input)) => {
-                                pending_steer.push(input);
+                                input.push_pending(&mut pending_steer);
                                 answer_only = true;
                                 finish_pending = true;
                                 context_capacity.invalidate();
                             }
+                            Ok(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                             Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
                             Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                             Ok(Control::Abort) => {
@@ -9324,8 +10886,9 @@ impl Agent {
                             Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
                         }
                     }
-                    if !gated_candidate && calls.is_empty() && normal_end && !needs_continuation
-                        && pending_steer.is_empty() && followups.is_empty() {
+                    pending_steer.retain(ReservedInput::is_pending);
+                    if !gated_candidate && !completed_background && !native.has_pending() && calls.is_empty() && normal_end && !needs_continuation
+                        && pending_steer.is_empty() && pending_reasoning.is_none() && followups.is_empty() {
                         *admission = false;
                     }
                 }
@@ -9343,6 +10906,14 @@ impl Agent {
                     });
                 }
 
+                if native.has_pending() && calls.is_empty() {
+                    if abort.is_set() { break 'run FinishReason::Aborted; }
+                    continue 'run;
+                }
+                if completed_background && calls.is_empty() && normal_end {
+                    if abort.is_set() { break 'run FinishReason::Aborted; }
+                    continue 'run;
+                }
                 if calls.is_empty() {
                     if abort.is_set() {
                         if gated_candidate {
@@ -9370,7 +10941,8 @@ impl Agent {
                     }
                     // Steering and follow-ups make this a normal intermediate
                     // turn, so commit it without spending a gate request.
-                    if !pending_steer.is_empty() {
+                    pending_steer.retain(ReservedInput::is_pending);
+                if native.connection.is_none() && (!pending_steer.is_empty() || pending_reasoning.is_some()) {
                         if gated_candidate {
                             let session_cost = priced_session_subtotal(session, &model);
                             let ev = AgentEvent::TurnFinished {
@@ -9424,9 +10996,10 @@ impl Agent {
                             ControlDeliveryKind::FollowUp,
                             session,
                             &control_prompt_metadata,
-                            &mut terminal_gate_requests,
+                            &mut terminal_gate_evidence,
                             &observation,
-                        ) {
+                            Some(&abort),
+                        ).await {
                             ControlDelivery::Completed { event } => {
                                 if let Some(ev) = event {
                                     notify_observers(&observers, &ev);
@@ -9443,13 +11016,8 @@ impl Agent {
                         }
                         continue;
                     }
-                    if completion_policy == CompletionPolicy::TerminalGate {
-                        let capsule = terminal_gate_capsule(
-                            &terminal_gate_prior_context,
-                            &terminal_gate_requests,
-                            &assistant,
-                            &terminal_action_receipts,
-                        );
+                    if let Some(evidence) = terminal_gate_evidence.as_ref() {
+                        let capsule = terminal_gate_capsule(evidence, &assistant);
                         let decision = {
                             let mut gate = TerminalGateContext {
                                 run_id: &effect_run_id,
@@ -9476,13 +11044,14 @@ impl Agent {
                                     biased;
                                     _ = abort.wait() => break Err(AgentError::Cancelled),
                                     control = control_rx.recv(), if control_open => match control {
-                                        Some(Control::Steer(input)) => pending_steer.push(input),
+                                        Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                         Some(Control::FollowUp(input)) => followups.push_back(input),
                                         Some(Control::FinishNow(input)) => {
-                                            pending_steer.push(input);
+                                            input.push_pending(&mut pending_steer);
                                             answer_only = true;
                                             finish_pending = true;
                                         }
+                                        Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                         Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                         Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                         Some(Control::Abort) => { abort.set(); }
@@ -9522,14 +11091,15 @@ impl Agent {
                             let mut admission = control_admission.lock().unwrap_or_else(|error| error.into_inner());
                             while control_open {
                                 match control_rx.try_recv() {
-                                    Ok(Control::Steer(input)) => pending_steer.push(input),
+                                    Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                     Ok(Control::FollowUp(input)) => followups.push_back(input),
                                     Ok(Control::FinishNow(input)) => {
-                                        pending_steer.push(input);
+                                        input.push_pending(&mut pending_steer);
                                         answer_only = true;
                                         finish_pending = true;
                                         context_capacity.invalidate();
                                     }
+                                    Ok(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                     Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                     Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                     Ok(Control::Abort) => abort.set(),
@@ -9537,7 +11107,8 @@ impl Agent {
                                     Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
                                 }
                             }
-                            if return_candidate && pending_steer.is_empty() && followups.is_empty() {
+                            pending_steer.retain(ReservedInput::is_pending);
+                            if return_candidate && pending_steer.is_empty() && pending_reasoning.is_none() && followups.is_empty() {
                                 *admission = false;
                             }
                         }
@@ -9547,7 +11118,8 @@ impl Agent {
                         if decision.is_ok() {
                             // Steering and follow-ups make this a normal intermediate
                             // turn, so commit it without spending a gate request.
-                            if !pending_steer.is_empty() {
+                            pending_steer.retain(ReservedInput::is_pending);
+                if native.connection.is_none() && (!pending_steer.is_empty() || pending_reasoning.is_some()) {
                                 if gated_candidate && !return_candidate {
                                     let session_cost = priced_session_subtotal(session, &model);
                                     let ev = AgentEvent::TurnFinished {
@@ -9601,9 +11173,10 @@ impl Agent {
                                     ControlDeliveryKind::FollowUp,
                                     session,
                                     &control_prompt_metadata,
-                                    &mut terminal_gate_requests,
+                                    &mut terminal_gate_evidence,
                                     &observation,
-                                ) {
+                                    Some(&abort),
+                                ).await {
                                     ControlDelivery::Completed { event } => {
                                         if let Some(ev) = event {
                                             notify_observers(&observers, &ev);
@@ -9687,6 +11260,33 @@ impl Agent {
                     progress: ToolProgressSink::null(),
                     cancellation: CancellationToken::default(),
                 };
+                // Defer only a complete, bounded batch of independent host
+                // observations. Mixed/sync/effectful batches keep ordinary order.
+                // Hard ceilings serialize tool accounting before another request.
+                if model.responses_features().async_tools
+                    && max_session_tokens.is_none() && max_session_cost_microdollars.is_none()
+                    && calls.len() <= MAX_PARALLEL_READ_WAVE_WIDTH
+                    && !abort.is_set()
+                    && calls.iter().enumerate().all(|(index, call)| {
+                        call.async_execution
+                            && request_tool_defs.iter().any(|definition| definition.name == call.name && definition.async_execution)
+                            && parallel_read_candidate(call, index, answer_only, output_truncated, &tool_map, &classification_context)
+                    }) {
+                    for (index, call) in calls.iter().enumerate() {
+                        let invocation = match session.tool_invocation(index) {
+                            Ok(handle) => handle,
+                            Err(error) => break 'run FinishReason::Failed(error.into()),
+                        };
+                        stream_context.tool_started();
+                        let event = AgentEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args: call.arguments_value().expect("complete admitted arguments") };
+                        notify_observers(&observers, &event); yield event;
+                        background_tools.start(call.clone(), invocation, tool_map[&call.name].clone(),
+                            tool_call_hooks.clone(), effect_broker.clone(), effect_run_id.clone(), tool_revision,
+                            sandbox.clone(), tool_scope.clone(), resource_owner.clone(), parallel_active_skills.clone(),
+                            registered_tools.clone(), background_cancellation.clone());
+                    }
+                    continue 'run;
+                }
                 let mut parallel_results: VecDeque<ParallelReadWaveExecution> = VecDeque::new();
                 // Row 4.10: every finalized result of this assistant batch, in
                 // emitted order, decides the batch's termination request.
@@ -9795,14 +11395,15 @@ impl Agent {
                                         abort_observed = true;
                                     }
                                     control = control_rx.recv(), if control_open => match control {
-                                        Some(Control::Steer(input)) => pending_steer.push(input),
+                                        Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                         Some(Control::FollowUp(input)) => followups.push_back(input),
                                         Some(Control::FinishNow(input)) => {
-                                            pending_steer.push(input);
+                                            input.push_pending(&mut pending_steer);
                                             answer_only = true;
                                             finish_pending = true;
                                             context_capacity.invalidate();
                                         }
+                                        Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                         Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                         Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                         Some(Control::Abort) => {
@@ -10094,14 +11695,15 @@ impl Agent {
                                         _ = abort.wait() => break None,
                                         r = &mut operation => break Some(r),
                                         c = control_rx.recv(), if control_open => match c {
-                                            Some(Control::Steer(input)) => pending_steer.push(input),
+                                            Some(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                             Some(Control::FollowUp(input)) => followups.push_back(input),
                                             Some(Control::FinishNow(input)) => {
-                                                pending_steer.push(input);
+                                                input.push_pending(&mut pending_steer);
                                                 answer_only = true;
                                                 finish_pending = true;
                                                 context_capacity.invalidate();
                                             }
+                                            Some(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                             Some(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                             Some(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                             Some(Control::Abort) => {
@@ -10329,12 +11931,9 @@ impl Agent {
                     } else {
                         None
                     };
-                    terminal_action_receipts.push(TerminalActionReceipt {
-                        tool: call.name.clone(),
-                        arguments: call.arguments_json.clone(),
-                        status: if is_error { "error" } else { "ok" },
-                        result: text.clone(),
-                    });
+                    if let Some(evidence) = terminal_gate_evidence.as_mut() {
+                        evidence.record_action(&call.name, &call.arguments_json, is_error, &text);
+                    }
                     if let Err(e) = session.append_with_metadata(
                         EntryValue::Message(Message::User(message)),
                         details.map(|tool_output| EntryMetadata {
@@ -10464,14 +12063,15 @@ impl Agent {
                         let mut admission = control_admission.lock().unwrap_or_else(|error| error.into_inner());
                         while control_open {
                             match control_rx.try_recv() {
-                                Ok(Control::Steer(input)) => pending_steer.push(input),
+                                Ok(Control::Steer(input)) => input.push_pending(&mut pending_steer),
                                 Ok(Control::FollowUp(input)) => followups.push_back(input),
                                 Ok(Control::FinishNow(input)) => {
-                                    pending_steer.push(input);
+                                    input.push_pending(&mut pending_steer);
                                     answer_only = true;
                                     finish_pending = true;
                                     context_capacity.invalidate();
                                 }
+                                Ok(Control::SetReasoning(selection)) => pending_reasoning = Some(selection),
                                 Ok(Control::SetSteeringMode(mode)) => steering_mode = mode,
                                 Ok(Control::SetFollowUpMode(mode)) => follow_up_mode = mode,
                                 Ok(Control::Abort) => { abort.set(); break; }
@@ -10479,7 +12079,9 @@ impl Agent {
                                 Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
                             }
                         }
-                        let terminal = pending_steer.is_empty() && followups.is_empty();
+                        pending_steer.retain(ReservedInput::is_pending);
+                        let terminal = pending_steer.is_empty() && followups.is_empty()
+                            && pending_reasoning.is_none() && !native.has_pending();
                         if terminal { *admission = false; }
                         terminal
                     };
@@ -10501,7 +12103,7 @@ impl Agent {
                             tools: if answer_only { &[][..] } else { tool_defs.as_slice() },
                         };
                         match deliver_control_inputs(queued, ControlDeliveryKind::FollowUp, session,
-                            &control_prompt_metadata, &mut terminal_gate_requests, &observation) {
+                            &control_prompt_metadata, &mut terminal_gate_evidence, &observation, Some(&abort)).await {
                             ControlDelivery::Completed { event } => {
                                 if let Some(ev) = event { notify_observers(&observers, &ev); yield ev; }
                             }
@@ -10513,7 +12115,7 @@ impl Agent {
                     }
                 }
 
-                if needs_continuation {
+                if needs_continuation && !native.has_pending() {
                     let instruction = continuation_instruction(&stop_reason);
                     if let Err(e) = session.append(user_message(UserInput::from(instruction))) {
                         break 'run FinishReason::Failed(e.into());
@@ -10522,6 +12124,23 @@ impl Agent {
                 // Context reconstruction coalesces the consecutive tool-result
                 // entries into the provider-required single user message.
             };
+
+            if session.has_unsettled_native_steering() {
+                if let Err(error) = session.record_usage_uncertainty(model.endpoint.id.clone(), model.spec.id.clone(), "native_steering") { reason = FinishReason::Failed(error.into()); }
+                let event = AgentEvent::ProviderUsageUncertain; notify_observers(&observers, &event); yield event;
+            }
+            if let Err(error) = native.cancel(session, &model) { reason = FinishReason::Failed(error); }
+
+            // Every driven terminal cancels and pairs accepted background work.
+            // Run drop instead aborts task handles; restart never replays them.
+            background_cancellation.cancel();
+            while !background_tools.is_empty() {
+                match background_tools.settle_one(session, &model, &sandbox,
+                    &stream_context, &mut run_usage, &mut terminal_gate_evidence).await {
+                    Ok(events) => for event in events { notify_observers(&observers, &event); yield event; },
+                    Err(error) => { reason = FinishReason::Failed(error); break; }
+                }
+            }
 
             // Row 3.5: settle the final turn before the run boundary. A turn
             // that never opened a provider attempt is not an error; one that
@@ -10533,6 +12152,10 @@ impl Agent {
                 );
             }
             *control_admission.lock().unwrap_or_else(|error| error.into_inner()) = false;
+            control_rx.close();
+            while control_rx.try_recv().is_ok() {}
+            pending_steer.clear();
+            followups.clear();
             // A fully driven prompt always leaves an explicit durable restore
             // point, including controlled abort/max-turn/failure outcomes. A
             // dropped stream is not complete and never reaches this boundary.
@@ -10737,6 +12360,1490 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
+    use base64::Engine as _;
+
+    fn image_input_fixture(large: bool) -> InputPart {
+        let encoded = if large {
+            // Valid opaque 4002x2 PNG: the fallback resizes it to <=4000px.
+            "iVBORw0KGgoAAAANSUhEUgAAD6IAAAACCAYAAABIFvMzAAAAPUlEQVR4nO3OoQEAAAgDoP3/9EzeoIFAJ00KAAAAAAAAAAAAAAAAAAAAK9cBAAAAAAAAAAAAAAAAAAAAfhkmlU0biXxThgAAAABJRU5ErkJggg=="
+        } else {
+            "iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC"
+        };
+        InputPart::Media(Media::image_bytes(
+            bytes::Bytes::from(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+            ),
+            "image/png".parse().unwrap(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn explicit_model_image_limits_override_host_fallback() {
+        let mut model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        Arc::make_mut(&mut model.spec).preset.image_input_limits = Some(ImageInputLimits {
+            max_width: 2,
+            max_height: 2,
+            max_bytes: 1_000,
+        });
+        let prepared = prepare_user_images(
+            UserInput::from(vec![image_input_fixture(false)]),
+            &model,
+            None,
+        )
+        .await
+        .unwrap();
+        let InputPart::Media(Media::Image(image)) = &prepared.parts[0] else {
+            panic!("image expected")
+        };
+        let ImageSource::Inline(bytes) = &image.source else {
+            panic!("inline image expected")
+        };
+        assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 2);
+    }
+
+    #[tokio::test]
+    async fn user_images_are_prepared_before_history_and_invalid_batches_are_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            Session::create(directory.path().join("images.jsonl")).unwrap(),
+            ExtensionHost::new(),
+        );
+        let invalid = UserInput::from(vec![
+            image_input_fixture(false),
+            InputPart::Media(Media::image_bytes(
+                bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\ntruncated"),
+                "image/png".parse().unwrap(),
+            )),
+        ]);
+        assert!(matches!(
+            agent.prompt(invalid).await,
+            Err(AgentError::ImageInput(ImageInputError::InvalidImage))
+        ));
+        assert!(agent.session().entries().is_empty());
+        let run = agent
+            .prompt(UserInput::from(vec![
+                InputPart::Text("describe".into()),
+                image_input_fixture(true),
+            ]))
+            .await
+            .unwrap();
+        drop(run);
+        let context = agent.session().context().unwrap();
+        let Message::User(user) = &context[0] else {
+            panic!("user history expected")
+        };
+        assert!(matches!(&user.content[0], UserPart::Text(text) if text == "describe"));
+        let UserPart::Media(Media::Image(image)) = &user.content[1] else {
+            panic!("image history expected")
+        };
+        let ImageSource::Inline(bytes) = &image.source else {
+            panic!("inline image expected")
+        };
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        assert!(width <= FALLBACK_IMAGE_LIMITS.max_width);
+        assert_eq!(
+            image.media_type.as_ref().map(octet_ai::Mime::essence_str),
+            Some("image/png")
+        );
+    }
+
+    #[tokio::test]
+    async fn image_batches_are_bounded_before_decode_and_abort_before_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            Session::create(directory.path().join("bounded-images.jsonl")).unwrap(),
+            ExtensionHost::new(),
+        );
+        let many = UserInput::from(
+            (0..9)
+                .map(|_| image_input_fixture(false))
+                .collect::<Vec<_>>(),
+        );
+        assert!(matches!(
+            agent.prompt(many).await,
+            Err(AgentError::ImageInputBatchLimit)
+        ));
+        assert!(agent.session().entries().is_empty());
+        let bytes = UserInput::from(
+            (0..5)
+                .map(|_| {
+                    InputPart::Media(Media::image_bytes(
+                        bytes::Bytes::from(vec![0; 4 * 1024 * 1024 + 1]),
+                        "image/png".parse().unwrap(),
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert!(matches!(
+            agent.prompt(bytes).await,
+            Err(AgentError::ImageInputBatchLimit)
+        ));
+        assert!(agent.session().entries().is_empty());
+
+        let abort = AbortFlag::default();
+        abort.set();
+        let bounded = UserInput::from(
+            (0..8)
+                .map(|_| image_input_fixture(true))
+                .collect::<Vec<_>>(),
+        );
+        assert!(matches!(
+            prepare_user_images(bounded, &agent.model, Some(&abort)).await,
+            Err(AgentError::Cancelled)
+        ));
+        assert!(agent.session().entries().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_queued_image_never_enters_history_and_releases_reservation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("queued-images.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let tracker = ContextTracker::default();
+        let observation = ContextObservation {
+            tracker: &tracker,
+            model: &model,
+            system: "",
+            tools: &[],
+        };
+        let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        control
+            .try_steer(UserInput::from(vec![
+                image_input_fixture(false),
+                InputPart::Media(Media::image_bytes(
+                    bytes::Bytes::from_static(b"invalid"),
+                    "image/png".parse().unwrap(),
+                )),
+            ]))
+            .unwrap();
+        let Control::Steer(input) = rx.recv().await.unwrap() else {
+            panic!("steering expected")
+        };
+        let result = deliver_control_inputs(
+            vec![input],
+            ControlDeliveryKind::Steering,
+            &mut session,
+            &EntryMetadata::default(),
+            &mut None,
+            &observation,
+            None,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            ControlDelivery::Interrupted {
+                event: None,
+                finish: FinishReason::Failed(AgentError::ImageInput(ImageInputError::InvalidImage))
+            }
+        ));
+        assert!(session.entries().is_empty());
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+        assert_eq!(
+            control.pending_bytes.available_permits(),
+            MAX_PENDING_CONTROL_BYTES
+        );
+    }
+
+    fn test_run_control(byte_limit: usize) -> (RunControl, mpsc::Receiver<Control>) {
+        let (tx, rx) = mpsc::channel(8);
+        (
+            RunControl {
+                reasoning_model: None,
+                ultra_observed: false,
+                admission: Arc::new(Mutex::new(true)),
+                tx,
+                pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
+                pending_bytes: Arc::new(tokio::sync::Semaphore::new(byte_limit)),
+                abort: Arc::new(AbortFlag::default()),
+            },
+            rx,
+        )
+    }
+
+    fn gate_candidate(text: &str) -> AssistantMessage {
+        AssistantMessage {
+            content: vec![AssistantPart::Text(text.to_owned())],
+            model: octet_ai::ModelId("test".into()),
+            protocol: Protocol::OpenAiChat,
+        }
+    }
+
+    #[test]
+    fn incomplete_terminal_response_diagnostic_is_content_free_and_bounded() {
+        let hostile = "private-payload-\u{1b}[31m\n".repeat(512);
+        let assistant = AssistantMessage {
+            content: vec![
+                AssistantPart::Text(hostile.clone()),
+                AssistantPart::Reasoning(octet_ai::ReasoningPart {
+                    text: Some(hostile.clone()),
+                    state: None,
+                }),
+                AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
+                    id: octet_ai::ToolCallId(hostile.clone()),
+                    name: hostile.clone(),
+                    arguments_json: hostile.clone(),
+                    argument_error: None,
+                }),
+            ],
+            model: octet_ai::ModelId(hostile.clone()),
+            protocol: Protocol::OpenAiChat,
+        };
+        let usage = Usage {
+            output_tokens: u64::MAX,
+            reasoning_tokens: u64::MAX,
+            ..Usage::default()
+        };
+        let mut diagnostics = vec![
+            octet_ai::Diagnostic {
+                code: "chat_defaulted_stop_reason".to_owned(),
+                message: hostile.clone(),
+            },
+            octet_ai::Diagnostic {
+                code: "chat_usage_missing-untrusted-code".to_owned(),
+                message: hostile.clone(),
+            },
+        ];
+        for usage_missing in [false, true] {
+            if usage_missing {
+                diagnostics.push(octet_ai::Diagnostic {
+                    code: "chat_usage_missing".to_owned(),
+                    message: hostile.clone(),
+                });
+            }
+            let reason = incomplete_terminal_response_reason(
+                &assistant,
+                &StopReason::Other(hostile.clone()),
+                &usage,
+                &diagnostics,
+                u64::MAX,
+            );
+            assert!(reason.starts_with("provider returned reasoning but no answer text"));
+            assert!(reason.contains("stop=other; chat_stop_defaulted=true"));
+            assert_eq!(reason.contains("usage=not_reported"), usage_missing);
+            assert_eq!(reason.contains("usage=canonical"), !usage_missing);
+            assert_eq!(
+                reason.contains("; output_tokens=18446744073709551615;"),
+                !usage_missing
+            );
+            assert_eq!(
+                reason.contains("reasoning_tokens=18446744073709551615;"),
+                !usage_missing
+            );
+            assert!(reason.contains("request_max_output_tokens=18446744073709551615"));
+            assert!(reason.len() < 320);
+            let public = public_error_diagnostic(
+                &AgentError::IncompleteResponse {
+                    stop_reason: reason,
+                },
+                "test",
+                "test",
+            );
+            assert!(public.contains("not automatically retried"));
+            for forbidden in ["private-payload", "untrusted-code", "\u{1b}", "\n"] {
+                assert!(!public.contains(forbidden));
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_summary_parts_reject_empty_whitespace_and_oversize() {
+        for invalid in [
+            "".to_owned(),
+            " \n\t ".to_owned(),
+            "x".repeat(MAX_COMPACTION_HANDOFF_BYTES + 1),
+        ] {
+            assert!(matches!(
+                validate_compaction_summary_part(&invalid),
+                Err(AgentError::IncompleteResponse { .. })
+            ));
+        }
+        validate_compaction_summary_part("## Goal\ncontinue")
+            .expect("normal summaries remain valid");
+
+        let mut main = "## Goal\ncontinue".to_owned();
+        let original = main.clone();
+        assert!(matches!(
+            append_compaction_turn_prefix(&mut main, " \n\t "),
+            Err(AgentError::IncompleteResponse { .. })
+        ));
+        assert_eq!(main, original, "an invalid split prefix is never merged");
+    }
+
+    #[test]
+    fn glm_sized_default_threshold_does_not_compact_a_120k_request() {
+        let context_window = 1_310_720u64;
+        let estimate = 120_000u64;
+        let reserve = DEFAULT_COMPACTION_RESERVE_TOKENS;
+        let over_capacity = estimate > context_window.saturating_sub(reserve);
+        assert!(!over_capacity, "this case is not Overflow recovery");
+        for (fraction, expected_threshold) in [(1.0, false), (0.09, true)] {
+            let threshold = ((context_window as f64) * fraction).floor() as u64;
+            let over_threshold = estimate.saturating_add(reserve) > threshold;
+            assert_eq!(over_threshold, expected_threshold, "fraction={fraction}");
+        }
+    }
+
+    struct CompactionSummaryScript {
+        responses: Mutex<VecDeque<String>>,
+        requests: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for CompactionSummaryScript {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            request: Request,
+            _: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            assert!(
+                request.tools.is_empty(),
+                "compaction summaries are tool-free"
+            );
+            self.requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted response");
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::Started { response_id: None }),
+                Ok(StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage {
+                        content: vec![AssistantPart::Text(text)],
+                        model: model.id,
+                        protocol: model.protocol,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    cost: None,
+                    response_id: None,
+                    responses_output: None,
+                    deferred: None,
+                    diagnostics: Vec::new(),
+                })),
+            ])))
+        }
+    }
+
+    fn compaction_test_agent(
+        directory: &std::path::Path,
+        script: Arc<CompactionSummaryScript>,
+    ) -> Agent {
+        let mut session = Session::create(directory.join("compaction-guard.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("original user context".into())],
+            })))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("original assistant context".into())],
+                model: octet_ai::ModelId("test".into()),
+                protocol: Protocol::OpenAiChat,
+            })))
+            .unwrap();
+        let mut agent = active_tool_test_agent(directory, session, ExtensionHost::new());
+        agent
+            .client
+            .register_host_stream_transport(agent.model.endpoint.id.clone(), script);
+        // The tiny threshold forces the actual autonomous compaction path while
+        // retaining enough context budget for the normal successful case.
+        agent
+            .set_compaction_token_policy(true, 0.000_01, 1)
+            .unwrap();
+        agent
+    }
+
+    struct ScriptedBitmapRenderer {
+        calls: std::sync::atomic::AtomicUsize,
+        frames: Vec<Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CompactionStrategy for Arc<ScriptedBitmapRenderer> {
+        async fn render(&self, _: &str, text: &str, _: &str) -> Result<Vec<Vec<u8>>, String> {
+            assert!(text.contains("original user context"));
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.frames.clone())
+        }
+    }
+
+    fn bitmap_compaction_test_agent(
+        directory: &std::path::Path,
+        strategy: impl CompactionStrategy + 'static,
+        script: Arc<CompactionSummaryScript>,
+    ) -> Agent {
+        let mut session = Session::create(directory.join("bitmap-compaction.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("original user context".into())],
+            })))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("original assistant context".into())],
+                model: octet_ai::ModelId("test".into()),
+                protocol: Protocol::OpenAiChat,
+            })))
+            .unwrap();
+        let mut extensions = ExtensionHost::new();
+        extensions.compaction_strategy(strategy);
+        let mut agent = active_tool_test_agent(directory, session, extensions);
+        agent
+            .client
+            .register_host_stream_transport(agent.model.endpoint.id.clone(), script);
+        agent
+            .set_compaction_token_policy(true, 0.000_01, 1)
+            .unwrap();
+        agent
+    }
+
+    #[tokio::test]
+    async fn vision_compaction_bypasses_parent_summary_and_bad_frames_keep_history() {
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC")
+            .unwrap();
+        for frames in [
+            vec![png],
+            vec![b"\x89PNG\r\n\x1a\ntruncated".to_vec()],
+            vec![],
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let valid = frames.first().is_some_and(|frame| frame.len() > 30);
+            let renderer = Arc::new(ScriptedBitmapRenderer {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                frames,
+            });
+            let script = Arc::new(CompactionSummaryScript {
+                responses: Mutex::new(VecDeque::from(["normal answer".into()])),
+                requests: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut agent = bitmap_compaction_test_agent(
+                directory.path(),
+                Arc::clone(&renderer),
+                Arc::clone(&script),
+            );
+            let result = agent.complete("new task").await;
+            assert_eq!(renderer.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                script.requests.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(valid),
+                "the parent model must not receive a compaction summary request"
+            );
+            assert_eq!(result.is_ok(), valid);
+            assert_eq!(agent.session().has_snapcompact_context().unwrap(), valid);
+            if valid {
+                assert!(agent.session().context().unwrap().iter().any(|message| matches!(message,
+                    Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::Media(Media::Image(_))))
+                )));
+                Arc::make_mut(&mut agent.model.spec)
+                    .capabilities
+                    .input_modalities = octet_ai::ModalitySet::none();
+                assert!(matches!(
+                    agent.complete("text-only follow-up").await,
+                    Err(AgentError::InvalidCompactionPolicy(_))
+                ));
+                assert_eq!(script.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+            } else {
+                assert!(agent
+                    .session()
+                    .entries()
+                    .iter()
+                    .all(|entry| !matches!(entry.value, EntryValue::Compaction { .. })));
+                let original = format!("{:?}", agent.session().context().unwrap());
+                assert!(original.contains("original user context"));
+                assert!(original.contains("original assistant context"));
+            }
+        }
+    }
+
+    struct SlowBitmapRenderer(watch::Sender<usize>);
+
+    #[async_trait::async_trait]
+    impl CompactionStrategy for SlowBitmapRenderer {
+        async fn render(&self, _: &str, _: &str, _: &str) -> Result<Vec<Vec<u8>>, String> {
+            self.0.send_modify(|calls| *calls += 1);
+            tokio::time::sleep(Duration::from_secs(70)).await;
+            Ok(vec![base64::engine::general_purpose::STANDARD
+                .decode("iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC")
+                .unwrap()])
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_sequential_bitmap_chunks_share_one_deadline_and_leave_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let (tx, mut calls) = watch::channel(0usize);
+        let script = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::new()),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent =
+            bitmap_compaction_test_agent(directory.path(), SlowBitmapRenderer(tx), script);
+        agent
+            .session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("x".repeat(3_000))],
+            })))
+            .unwrap();
+        let task = tokio::spawn(async move {
+            let result = agent.complete("new task").await;
+            (agent, result)
+        });
+        calls.changed().await.unwrap();
+        tokio::time::advance(Duration::from_secs(70)).await;
+        for _ in 0..10_000 {
+            if *calls.borrow() >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*calls.borrow(), 2, "source must span at least two chunks");
+        tokio::time::advance(Duration::from_secs(50)).await;
+        let (agent, result) = task.await.unwrap();
+        assert!(
+            matches!(result, Err(AgentError::InvalidCompactionPolicy(ref error)) if error.contains("deadline"))
+        );
+        assert!(!agent.session().has_snapcompact_context().unwrap());
+        assert!(agent
+            .session()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry.value, EntryValue::Compaction { .. })));
+        assert!(
+            format!("{:?}", agent.session().context().unwrap()).contains("original user context")
+        );
+    }
+
+    #[tokio::test]
+    async fn two_bitmap_compactions_preserve_source_and_separate_transcript_sections() {
+        let directory = tempfile::tempdir().unwrap();
+        let renderer = Arc::new(ScriptedBitmapRenderer {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            frames: vec![base64::engine::general_purpose::STANDARD
+                .decode("iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC")
+                .unwrap()],
+        });
+        let script = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from([
+                "first answer".into(),
+                "second answer".into(),
+            ])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent =
+            bitmap_compaction_test_agent(directory.path(), Arc::clone(&renderer), script);
+        agent.complete("first new task").await.unwrap();
+        let first = agent
+            .session()
+            .entries()
+            .iter()
+            .find_map(|entry| match &entry.value {
+                EntryValue::Compaction {
+                    snapcompact: Some(checkpoint),
+                    ..
+                } => Some(checkpoint.source_text.clone()),
+                _ => None,
+            })
+            .expect("first bitmap checkpoint");
+        agent.complete("second new task").await.unwrap();
+        let sources = agent
+            .session()
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.value {
+                EntryValue::Compaction {
+                    snapcompact: Some(checkpoint),
+                    ..
+                } => Some(&checkpoint.source_text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sources.len(), 2);
+        assert!(sources[1].starts_with(&first));
+        assert!(
+            sources[1].contains("\n\n[User]: first new task"),
+            "{}",
+            sources[1]
+        );
+        assert_eq!(renderer.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn bitmap_source_separates_previous_full_turn_and_split_turn_prefix() {
+        let user = |text: &str| {
+            Message::User(UserMessage {
+                content: vec![UserPart::Text(text.into())],
+            })
+        };
+        let preparation = HandoffPreparation {
+            previous_summary: Some("[User]: previous".into()),
+            messages: vec![user("new full turn")],
+            turn_prefix_messages: vec![user("split prefix")],
+            details: Default::default(),
+        };
+        assert_eq!(
+            snapcompact_source(&preparation),
+            "[User]: previous\n\n[User]: new full turn\n\n[User]: split prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_only_compaction_keeps_parent_summary_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let renderer = Arc::new(ScriptedBitmapRenderer {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            frames: Vec::new(),
+        });
+        let script = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from([
+                "## Goal\nvalid checkpoint".into(),
+                "normal answer".into(),
+            ])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = bitmap_compaction_test_agent(
+            directory.path(),
+            Arc::clone(&renderer),
+            Arc::clone(&script),
+        );
+        Arc::make_mut(&mut agent.model.spec)
+            .capabilities
+            .input_modalities = octet_ai::ModalitySet::none();
+        assert!(agent.complete("new task").await.is_ok());
+        assert_eq!(renderer.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(script.requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(!agent.session().has_snapcompact_context().unwrap());
+    }
+
+    #[tokio::test]
+    async fn provider_compaction_refuses_invalid_summary_without_discarding_context() {
+        for invalid in [
+            "".to_owned(),
+            " \n\t ".to_owned(),
+            "x".repeat(MAX_COMPACTION_HANDOFF_BYTES + 1),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let script = Arc::new(CompactionSummaryScript {
+                responses: Mutex::new(VecDeque::from([invalid])),
+                requests: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut agent = compaction_test_agent(directory.path(), Arc::clone(&script));
+            let error = agent.complete("new task").await.unwrap_err();
+            assert!(matches!(error, AgentError::IncompleteResponse { .. }));
+            assert_eq!(script.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(agent
+                .session()
+                .entries()
+                .iter()
+                .all(|entry| !matches!(entry.value, EntryValue::Compaction { .. })));
+            let retained = format!("{:?}", agent.session().context().unwrap());
+            assert!(retained.contains("original user context"));
+            assert!(retained.contains("original assistant context"));
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let script = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from([
+                "## Goal\nvalid checkpoint".into(),
+                "normal answer".into(),
+            ])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = compaction_test_agent(directory.path(), Arc::clone(&script));
+        let output = agent.complete("new task").await.unwrap();
+        assert!(matches!(output.reason, FinishReason::Completed));
+        assert_eq!(
+            script.requests.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one summary request then one normal turn"
+        );
+        assert!(format!("{:?}", agent.session().context().unwrap()).contains("normal answer"));
+        assert!(agent
+            .session()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
+    }
+
+    struct ToolBudgetTransport {
+        calls: std::sync::atomic::AtomicUsize,
+        expected_tool_count: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for ToolBudgetTransport {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            request: Request,
+            _: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            assert_eq!(request.tools.len(), self.expected_tool_count);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::Started { response_id: None }),
+                Ok(StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage {
+                        content: vec![AssistantPart::Text("accepted".into())],
+                        model: model.id,
+                        protocol: model.protocol,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    cost: None,
+                    response_id: None,
+                    responses_output: None,
+                    deferred: None,
+                    diagnostics: Vec::new(),
+                })),
+            ])))
+        }
+    }
+
+    #[test]
+    fn tool_schema_budget_counts_exact_json_and_refuses_without_tool_rewriting() {
+        require_tool_schema_budget(&[], 0).expect("zero budget permits no provider tools");
+        let tools = vec![ToolDef {
+            async_execution: false,
+            name: "schema-tool".into(),
+            description: "private description must not enter the diagnostic".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"payload": {"type": "string"}}}),
+            constrained_sampling: None,
+        }];
+        let bytes = tool_schema_bytes(&tools);
+        require_tool_schema_budget(&tools, bytes).expect("exactly at budget is accepted");
+        let error = require_tool_schema_budget(&tools, bytes - 1).unwrap_err();
+        assert!(matches!(
+            &error,
+            AgentError::ToolSchemaBudgetExceeded {
+                actual_bytes,
+                tool_count: 1,
+                max_bytes,
+            } if *actual_bytes == bytes && *max_bytes == bytes - 1
+        ));
+        let diagnostic = error.to_string();
+        assert!(diagnostic.len() < 256);
+        assert!(!diagnostic.contains("private description"));
+        assert_eq!(tools[0].name, "schema-tool", "refusal never rewrites tools");
+    }
+
+    #[tokio::test]
+    async fn tool_schema_budget_preflight_refuses_without_persisting_the_prompt_or_calling_provider(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let extensions = active_tool_test_extensions(&["schema"]);
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            Session::create(directory.path().join("schema-budget.jsonl")).unwrap(),
+            extensions,
+        );
+        let tool_count = agent.registered_tool_definitions().len();
+        let budget = tool_schema_bytes(&agent.registered_tool_definitions());
+        let transport = Arc::new(ToolBudgetTransport {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            expected_tool_count: tool_count,
+        });
+        agent
+            .client
+            .register_host_stream_transport(agent.model.endpoint.id.clone(), transport.clone());
+
+        agent.set_tool_schema_budget_bytes(budget - 1);
+        assert!(matches!(
+            agent.prompt("retryable draft").await,
+            Err(AgentError::ToolSchemaBudgetExceeded { .. })
+        ));
+        assert!(agent.session().entries().is_empty());
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+
+        agent.set_tool_schema_budget_bytes(budget);
+        assert!(matches!(
+            agent.complete("accepted draft").await.unwrap().reason,
+            FinishReason::Completed
+        ));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn terminal_gate_receipts_retain_first_and_last_twelve_online() {
+        for total in [0usize, 24, 25, 10_000] {
+            let mut evidence = TerminalGateEvidence::default();
+            TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.set(0));
+            for index in 0..total {
+                evidence.record_action(
+                    &format!("tool-{index}"),
+                    &format!("args-{index}"),
+                    index % 2 == 0,
+                    &format!("result-{index}"),
+                );
+                assert_eq!(evidence.receipts.len(), (index + 1).min(24));
+                assert_eq!(evidence.actions_omitted, (index + 1).saturating_sub(24));
+            }
+            assert_eq!(
+                TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.get()),
+                3 * total
+            );
+            let expected = if total <= 24 {
+                (0..total).collect::<Vec<_>>()
+            } else {
+                (0..12).chain(total - 12..total).collect::<Vec<_>>()
+            };
+            let capsule = terminal_gate_capsule(&evidence, &gate_candidate("done"));
+            let capsule: serde_json::Value = serde_json::from_str(&capsule).unwrap();
+            assert_eq!(capsule["actions_omitted"], total.saturating_sub(24));
+            let actions = capsule["actions"].as_array().unwrap();
+            assert_eq!(actions.len(), expected.len());
+            for (action, index) in actions.iter().zip(expected) {
+                assert_eq!(action["tool"], format!("tool-{index}"));
+                assert_eq!(action["arguments"], format!("args-{index}"));
+                assert_eq!(action["result"], format!("result-{index}"));
+                assert_eq!(
+                    action["status"],
+                    if index % 2 == 0 { "error" } else { "ok" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_gate_projects_unicode_receipts_at_insertion_not_at_each_attempt() {
+        let text = "界🙂e\u{301}".repeat(2_000);
+        let mut evidence = TerminalGateEvidence::default();
+        evidence.record_action("read", &text, false, &text);
+        let receipt = &evidence.receipts[0];
+        for (projected, limit) in [
+            (&receipt.arguments, TERMINAL_GATE_ARGUMENT_LIMIT),
+            (&receipt.result, TERMINAL_GATE_RESULT_LIMIT),
+        ] {
+            let chars = text.chars().collect::<Vec<_>>();
+            let half = (limit - 32) / 2;
+            let head = chars[..half].iter().collect::<String>();
+            let tail = chars[chars.len() - half..].iter().collect::<String>();
+            assert_eq!(
+                projected,
+                &format!("{head}\n[… 8000 chars total …]\n{tail}")
+            );
+            assert!(projected.chars().count() <= limit);
+            assert!(projected.len() <= limit * 4);
+        }
+        let candidate = gate_candidate("done");
+        TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.set(0));
+        let first = terminal_gate_capsule(&evidence, &candidate);
+        for _ in 0..10 {
+            assert_eq!(terminal_gate_capsule(&evidence, &candidate), first);
+        }
+        // Repeated gate attempts project only the new candidate, never all
+        // already-projected action arguments/results or retained requests.
+        assert_eq!(TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.get()), 11);
+        let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(parsed["actions"][0]["arguments"], receipt.arguments);
+        assert_eq!(parsed["actions"][0]["result"], receipt.result);
+        assert_eq!(text.chars().count(), 8_000);
+    }
+
+    #[test]
+    fn terminal_gate_requests_bound_count_bytes_and_preserve_initial_and_latest() {
+        for unit in ["x", "🙂"] {
+            let body = unit.repeat(4_000);
+            let request = |index| format!("request-{index}: {body}");
+            let mut evidence = TerminalGateEvidence::default();
+            for index in 0..1_000 {
+                evidence.record_request(&request(index));
+                assert!(evidence.requests.len() <= TERMINAL_GATE_REQUEST_LIMIT);
+                assert!(evidence.request_bytes <= TERMINAL_GATE_REQUEST_BYTES);
+                assert_eq!(
+                    evidence.request_bytes,
+                    evidence.requests.iter().map(String::len).sum::<usize>()
+                );
+                assert_eq!(
+                    evidence.requests_omitted + evidence.requests.len(),
+                    index + 1
+                );
+            }
+            assert_eq!(evidence.requests[0], bounded_gate_text(&request(0), 3_000));
+            let retained_suffix = evidence.requests.len() - 1;
+            for (summary, index) in evidence
+                .requests
+                .iter()
+                .skip(1)
+                .zip(1_000 - retained_suffix..1_000)
+            {
+                assert_eq!(summary, &bounded_gate_text(&request(index), 3_000));
+            }
+            if unit == "🙂" {
+                assert!(evidence.requests.len() < TERMINAL_GATE_REQUEST_LIMIT);
+            } else {
+                assert_eq!(evidence.requests.len(), TERMINAL_GATE_REQUEST_LIMIT);
+            }
+        }
+        let mut empty = TerminalGateEvidence::default();
+        for _ in 0..10_000 {
+            empty.record_request("");
+        }
+        assert_eq!(empty.requests.len(), TERMINAL_GATE_REQUEST_LIMIT);
+        assert_eq!(empty.requests_omitted, 10_000 - TERMINAL_GATE_REQUEST_LIMIT);
+        assert_eq!(empty.request_bytes, 0);
+    }
+
+    #[test]
+    fn terminal_gate_capsule_stays_bounded_across_repeated_requests_and_decisions() {
+        // NUL takes six JSON bytes per character, worse than UTF-8 or quotes.
+        let text = "\0".repeat(TERMINAL_GATE_TEXT_LIMIT);
+        let candidate = gate_candidate(&text);
+        let mut evidence = TerminalGateEvidence {
+            prior_context: text.clone(),
+            ..TerminalGateEvidence::default()
+        };
+        for index in 0..512usize {
+            evidence.record_request(&text);
+            evidence.record_action(&text, &text, index % 2 == 0, &text);
+            if [23, 24, 255, 511].contains(&index) {
+                let capsule = terminal_gate_capsule(&evidence, &candidate);
+                assert!(capsule.len() <= TERMINAL_GATE_CAPSULE_BYTES);
+                let parsed: serde_json::Value = serde_json::from_str(&capsule).unwrap();
+                assert_eq!(
+                    parsed["requests_omitted"],
+                    index + 1 - evidence.requests.len()
+                );
+                assert_eq!(parsed["actions_omitted"], (index + 1).saturating_sub(24));
+                assert_eq!(
+                    parsed["requests"].as_array().unwrap().len(),
+                    evidence.requests.len()
+                );
+                assert_eq!(terminal_gate_capsule(&evidence, &candidate), capsule);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn natural_run_has_no_terminal_gate_summary_projection_or_evidence_collection() {
+        struct Script(Mutex<VecDeque<Vec<AssistantPart>>>);
+        #[async_trait::async_trait]
+        impl octet_ai::HostStreamTransport for Script {
+            async fn stream(
+                &self,
+                model: octet_ai::HostStreamModel,
+                _: Request,
+                _: Vec<octet_ai::Diagnostic>,
+            ) -> Result<octet_ai::ResponseStream, AiError> {
+                let content = self.0.lock().unwrap().pop_front().expect("scripted turn");
+                let stop_reason = if content
+                    .iter()
+                    .any(|part| matches!(part, AssistantPart::ToolCall(_)))
+                {
+                    StopReason::ToolUse
+                } else {
+                    StopReason::EndTurn
+                };
+                Ok(Box::pin(futures_util::stream::iter([
+                    Ok(StreamEvent::Started { response_id: None }),
+                    Ok(StreamEvent::Finished(octet_ai::Response {
+                        message: AssistantMessage {
+                            content,
+                            model: model.id,
+                            protocol: model.protocol,
+                        },
+                        stop_reason,
+                        usage: Usage::default(),
+                        cost: None,
+                        response_id: None,
+                        responses_output: None,
+                        deferred: None,
+                        diagnostics: Vec::new(),
+                    })),
+                ])))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut agent = active_tool_test_agent(
+            directory.path(),
+            Session::create(directory.path().join("natural-evidence.jsonl")).unwrap(),
+            ExtensionHost::new(),
+        );
+        agent.max_turns = Some(3);
+        let arguments = serde_json::json!({"payload": "x".repeat(16_000)}).to_string();
+        let script = Arc::new(Script(Mutex::new(VecDeque::from([
+            vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
+                id: octet_ai::ToolCallId("unknown-call".into()),
+                name: "unregistered".into(),
+                arguments_json: arguments.clone(),
+                argument_error: None,
+            })],
+            vec![AssistantPart::Text("done".into())],
+        ]))));
+        agent
+            .client
+            .register_host_stream_transport(agent.model.endpoint.id.clone(), script.clone());
+        let initial = UserInput::from("initial 🙂".repeat(2_000));
+        TERMINAL_GATE_INITIAL_SUMMARIES.with(|count| count.set(0));
+        TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.set(0));
+        assert!(TerminalGateEvidence::for_run(
+            CompletionPolicy::Natural,
+            agent.session(),
+            &initial
+        )
+        .unwrap()
+        .is_none());
+        let mut run = agent.prompt(initial).await.unwrap();
+        run.control().steer("steer 🙂".repeat(2_000)).await.unwrap();
+        let mut delivered = false;
+        let mut tool_finished = false;
+        let mut completed = false;
+        while let Some(event) = run.next().await {
+            match event {
+                AgentEvent::SteeringDelivered { messages } => {
+                    assert_eq!(messages, vec!["steer 🙂".repeat(2_000)]);
+                    delivered = true;
+                }
+                AgentEvent::ToolFinished { .. } => tool_finished = true,
+                AgentEvent::RunFinished { reason, .. } => {
+                    assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+                    completed = true;
+                }
+                _ => {}
+            }
+        }
+        drop(run);
+        assert!(delivered && tool_finished && completed);
+        assert!(script.0.lock().unwrap().is_empty());
+        let context = agent.session().context().unwrap();
+        assert_eq!(
+            message_visible_text(&context[0]).unwrap(),
+            "initial 🙂".repeat(2_000)
+        );
+        assert!(context.iter().any(|message| matches!(message,
+            Message::Assistant(assistant) if assistant.content.iter().any(|part| matches!(part,
+                AssistantPart::ToolCall(call) if call.arguments_json == arguments
+            ))
+        )));
+        assert_eq!(TERMINAL_GATE_INITIAL_SUMMARIES.with(|count| count.get()), 0);
+        assert_eq!(TERMINAL_GATE_TEXT_PROJECTIONS.with(|count| count.get()), 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_gate_control_evidence_preserves_delivery_and_reservations() {
+        for policy in [CompletionPolicy::Natural, CompletionPolicy::TerminalGate] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut session =
+                Session::create(directory.path().join("control-evidence.jsonl")).unwrap();
+            let model = octet_ai::ModelCatalog::builtin()
+                .unwrap()
+                .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+                .unwrap();
+            let tracker = ContextTracker::default();
+            let observation = ContextObservation {
+                tracker: &tracker,
+                model: &model,
+                system: "",
+                tools: &[],
+            };
+            let initial = UserInput::from("initial request");
+            let mut evidence = TerminalGateEvidence::for_run(policy, &session, &initial).unwrap();
+            session.append(user_message(initial)).unwrap();
+            let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+            let mut expected = vec!["initial request".to_owned()];
+            for index in 0..24 {
+                let text = format!("control-{index}: {}", "🙂".repeat(4_000));
+                let input = UserInput::from(text.clone());
+                let bytes = control_input_bytes(&input);
+                let kind = match index % 3 {
+                    0 => {
+                        control.steer(input).await.unwrap();
+                        ControlDeliveryKind::Steering
+                    }
+                    1 => {
+                        control.follow_up(input).await.unwrap();
+                        ControlDeliveryKind::FollowUp
+                    }
+                    _ => {
+                        control.finish_now(input).await.unwrap();
+                        ControlDeliveryKind::Steering
+                    }
+                };
+                let reserved = match rx.recv().await.unwrap() {
+                    Control::Steer(input)
+                    | Control::FollowUp(input)
+                    | Control::FinishNow(input) => input,
+                    _ => panic!("semantic control"),
+                };
+                assert_eq!(
+                    control.pending_count.available_permits(),
+                    MAX_PENDING_CONTROL_INPUTS - 1
+                );
+                assert_eq!(
+                    control.pending_bytes.available_permits(),
+                    MAX_PENDING_CONTROL_BYTES - bytes
+                );
+                let delivered = deliver_control_inputs(
+                    vec![reserved],
+                    kind,
+                    &mut session,
+                    &EntryMetadata::default(),
+                    &mut evidence,
+                    &observation,
+                    None,
+                )
+                .await;
+                let ControlDelivery::Completed { event: Some(event) } = delivered else {
+                    panic!("durable delivery must succeed")
+                };
+                let messages = match event {
+                    AgentEvent::SteeringDelivered { messages }
+                    | AgentEvent::FollowUpDelivered { messages } => messages,
+                    _ => panic!("delivery acknowledgement"),
+                };
+                assert_eq!(messages, vec![text.clone()]);
+                expected.push(text);
+                assert_eq!(
+                    control.pending_count.available_permits(),
+                    MAX_PENDING_CONTROL_INPUTS
+                );
+                assert_eq!(
+                    control.pending_bytes.available_permits(),
+                    MAX_PENDING_CONTROL_BYTES
+                );
+            }
+            let persisted = session
+                .context()
+                .unwrap()
+                .iter()
+                .map(|message| message_visible_text(message).expect("complete delivered input"))
+                .collect::<Vec<_>>();
+            assert_eq!(persisted, expected);
+            if let Some(evidence) = evidence {
+                assert_eq!(evidence.requests.front().unwrap(), "initial request");
+                assert_eq!(
+                    evidence.requests.back().unwrap(),
+                    &bounded_gate_text(expected.last().unwrap(), 3_000)
+                );
+                assert_eq!(
+                    evidence.requests_omitted,
+                    expected.len() - evidence.requests.len()
+                );
+                assert!(evidence.request_bytes <= TERMINAL_GATE_REQUEST_BYTES);
+                assert!(evidence.requests_omitted > 0);
+            } else {
+                assert_eq!(policy, CompletionPolicy::Natural);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn steering_receipt_claim_linearizes_before_persistence() {
+        let (control, _rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        let (prepared, receipt) = control
+            .prepare_steer("claimed but not yet persisted")
+            .unwrap();
+        let payload = ReservedInput::Retractable(prepared).claim().unwrap();
+        // The durable append has not happened, but delivery already owns this
+        // exact payload. Neither receipt clone may recall it now.
+        assert!(!receipt.is_pending());
+        assert!(!receipt.clone().try_retract());
+        assert!(!receipt.try_retract());
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS - 1
+        );
+        drop(payload);
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+    }
+
+    #[tokio::test]
+    async fn steering_receipt_racing_recall_and_claim_have_exactly_one_winner() {
+        let (control, _rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        for _ in 0..64 {
+            let (prepared, receipt) = control
+                .prepare_steer("same text, separate authority")
+                .unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                let recalled = scope.spawn(|| {
+                    barrier.wait();
+                    receipt.try_retract()
+                });
+                barrier.wait();
+                let payload = ReservedInput::Retractable(prepared).claim();
+                assert_ne!(payload.is_some(), recalled.join().unwrap());
+                drop(payload);
+            });
+            assert!(!receipt.is_pending());
+            assert_eq!(
+                control.pending_count.available_permits(),
+                MAX_PENDING_CONTROL_INPUTS
+            );
+            assert_eq!(
+                control.pending_bytes.available_permits(),
+                MAX_PENDING_CONTROL_BYTES
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_controls_stay_reserved_after_ingress_drain_until_durable_delivery() {
+        let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        let mut pending = Vec::new();
+        for index in 0..MAX_PENDING_CONTROL_INPUTS {
+            control.follow_up(format!("input-{index}")).await.unwrap();
+            let Control::FollowUp(input) = rx.recv().await.unwrap() else {
+                panic!("follow-up")
+            };
+            pending.push(input);
+        }
+        assert_eq!(control.pending_count.available_permits(), 0);
+        assert!(matches!(
+            control.steer("rejected").await,
+            Err(AgentError::ControlQueueFull)
+        ));
+        assert!(matches!(
+            control.finish_now("rejected").await,
+            Err(AgentError::ControlQueueFull)
+        ));
+        // Mode/cancellation controls do not spend semantic-input reservations.
+        control
+            .set_follow_up_mode(QueueDeliveryMode::OneAtATime)
+            .await
+            .unwrap();
+        assert!(matches!(rx.recv().await, Some(Control::SetFollowUpMode(_))));
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("controls.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let tracker = ContextTracker::default();
+        let observation = ContextObservation {
+            tracker: &tracker,
+            model: &model,
+            system: "",
+            tools: &[],
+        };
+        let mut gate = None;
+        let delivered = deliver_control_inputs(
+            pending,
+            ControlDeliveryKind::FollowUp,
+            &mut session,
+            &EntryMetadata::default(),
+            &mut gate,
+            &observation,
+            None,
+        )
+        .await;
+        let ControlDelivery::Completed {
+            event: Some(AgentEvent::FollowUpDelivered { messages }),
+        } = delivered
+        else {
+            panic!("durable delivery must be acknowledged")
+        };
+        assert_eq!(
+            messages,
+            (0..MAX_PENDING_CONTROL_INPUTS)
+                .map(|i| format!("input-{i}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(session.entries().len(), MAX_PENDING_CONTROL_INPUTS);
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+        assert_eq!(
+            control.pending_bytes.available_permits(),
+            MAX_PENDING_CONTROL_BYTES
+        );
+        control.try_steer("accepted again").unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_byte_and_ingress_saturation_are_typed_and_rollback_reservations() {
+        let input = UserInput::from(vec![InputPart::Media(Media::audio_bytes(
+            bytes::Bytes::from_static(b"audio-payload"),
+            octet_ai::AudioFormat::Wav,
+        ))]);
+        let bytes = control_input_bytes(&input);
+        assert!(bytes >= b"audio-payload".len() + std::mem::size_of::<InputPart>());
+        let (control, mut rx) = test_run_control(bytes);
+        control.try_follow_up(input).unwrap();
+        let held = rx.recv().await.unwrap();
+        assert_eq!(control.pending_bytes.available_permits(), 0);
+        assert!(matches!(
+            control.try_steer("x"),
+            Err(AgentError::ControlQueueFull)
+        ));
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS - 1
+        );
+        control.abort();
+        assert!(control.abort.is_set());
+        drop(held);
+        assert_eq!(control.pending_bytes.available_permits(), bytes);
+
+        let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        for _ in 0..8 {
+            control.try_steer("queued").unwrap();
+        }
+        let reserved = control.pending_bytes.available_permits();
+        assert!(matches!(
+            control.try_follow_up("full ingress"),
+            Err(AgentError::ControlQueueFull)
+        ));
+        assert_eq!(control.pending_bytes.available_permits(), reserved);
+        // A cancelled async admission was never accepted and frees its permit.
+        use futures_util::FutureExt;
+        assert!(control.steer("waiting").now_or_never().is_none());
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS - 8
+        );
+        rx.close();
+        assert!(matches!(
+            control.try_steer("ended"),
+            Err(AgentError::RunEnded)
+        ));
+        drop(rx);
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_control_reservations_release_on_failed_persistence_and_run_abort_or_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("failed-delivery.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let tracker = ContextTracker::default();
+        let observation = ContextObservation {
+            tracker: &tracker,
+            model: &model,
+            system: "",
+            tools: &[],
+        };
+        let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+        control.try_steer("accepted before failure").unwrap();
+        let Control::Steer(input) = rx.recv().await.unwrap() else {
+            panic!("steer")
+        };
+        // A concurrent writer makes the session's observed-length fence fail.
+        let mut other = Session::open(&path).unwrap();
+        other.append(user_message("other writer".into())).unwrap();
+        let result = deliver_control_inputs(
+            vec![input],
+            ControlDeliveryKind::Steering,
+            &mut session,
+            &EntryMetadata::default(),
+            &mut None,
+            &observation,
+            None,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            ControlDelivery::Interrupted {
+                event: None,
+                finish: FinishReason::Failed(_)
+            }
+        ));
+        assert_eq!(
+            control.pending_count.available_permits(),
+            MAX_PENDING_CONTROL_INPUTS
+        );
+        assert!(session.entries().is_empty());
+
+        for abort in [false, true] {
+            let path = directory.path().join(format!("run-{abort}.jsonl"));
+            let mut agent = active_tool_test_agent(
+                directory.path(),
+                Session::create(path).unwrap(),
+                ExtensionHost::new(),
+            );
+            let mut run = agent.prompt("start").await.unwrap();
+            let control = run.control();
+            for _ in 0..8 {
+                control.try_follow_up("accepted").unwrap();
+            }
+            if abort {
+                control.abort();
+                let mut finished = 0;
+                while let Some(event) = run.next().await {
+                    if let AgentEvent::RunFinished { reason, .. } = event {
+                        assert!(matches!(reason, FinishReason::Aborted));
+                        finished += 1;
+                        assert_eq!(
+                            control.pending_count.available_permits(),
+                            MAX_PENDING_CONTROL_INPUTS
+                        );
+                    }
+                }
+                assert_eq!(finished, 1);
+            }
+            drop(run);
+            assert!(matches!(
+                control.try_follow_up("after termination"),
+                Err(AgentError::RunEnded)
+            ));
+            assert_eq!(
+                control.pending_count.available_permits(),
+                MAX_PENDING_CONTROL_INPUTS
+            );
+        }
+    }
+
+    #[test]
+    fn bash_owner_retirement_waits_for_overlapping_agents() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owner.jsonl");
+        let first = active_tool_test_agent(
+            directory.path(),
+            Session::create(&path).unwrap(),
+            ExtensionHost::new(),
+        );
+        let owner = first.resource_owner.clone();
+        let mut second = active_tool_test_agent(
+            directory.path(),
+            Session::open(&path).unwrap(),
+            ExtensionHost::new(),
+        );
+        assert_eq!(BASH_OWNER_LEASES.lock().unwrap()[&owner], 2);
+        drop(first);
+        assert_eq!(BASH_OWNER_LEASES.lock().unwrap()[&owner], 1);
+        second
+            .replace_session_at_idle(Session::open(&path).unwrap())
+            .unwrap();
+        assert_eq!(BASH_OWNER_LEASES.lock().unwrap()[&owner], 1);
+        second
+            .replace_session_at_idle(Session::create(directory.path().join("other.jsonl")).unwrap())
+            .unwrap();
+        assert!(!BASH_OWNER_LEASES.lock().unwrap().contains_key(&owner));
+        let next_owner = second.resource_owner.clone();
+        drop(second);
+        assert!(!BASH_OWNER_LEASES.lock().unwrap().contains_key(&next_owner));
+    }
 
     struct PromptTool {
         name: &'static str,
@@ -10748,6 +13855,7 @@ mod tests {
     impl Tool for PromptTool {
         fn definition(&self) -> ToolDef {
             ToolDef {
+                async_execution: false,
                 name: self.name.to_owned(),
                 description: format!("{} tool", self.name),
                 parameters: serde_json::json!({"type": "object"}),
@@ -11034,6 +14142,7 @@ mod tests {
         let broker = EffectBroker::new(crate::effect::EffectPolicy::Controlled);
         let sensitive_argument = "sensitive-argument-marker";
         let call = ToolCall {
+            async_execution: false,
             id: octet_ai::ToolCallId("call_malformed".into()),
             name: "bash".into(),
             arguments_json: format!(r#"{{"command":"{sensitive_argument}""#),
@@ -11711,6 +14820,67 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
     }
 
     #[test]
+    fn responses_capacity_estimates_only_new_opaque_items_and_rebuilds_on_compaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session =
+            Session::create(directory.path().join("responses-capacity.jsonl")).unwrap();
+        let model = tool_media_model(Protocol::OpenAiResponses, octet_ai::ModalitySet::none());
+        session.append(user_message("prefix".into())).unwrap();
+        let baseline =
+            context_breakdown(&session, &model, "system", &session.context().unwrap(), &[]);
+        let mut cache = ContextCapacityCache::seeded(&session, 1, &baseline);
+        cache.estimate(&session, &model, "system", &[], 1).unwrap();
+        for turn in 0..32 {
+            session.append(user_message("request".into())).unwrap();
+            let output = octet_ai::ResponsesOutput::new(vec![octet_ai::ResponsesItem::new(
+                serde_json::json!({
+                    "type": "message", "id": format!("message-{turn}"),
+                    "role": "assistant", "content": [{"type": "output_text", "text": "answer"}],
+                    "opaque_future_field": "large payload".repeat(1024)
+                }),
+            )
+            .unwrap()]);
+            session
+                .append_assistant_turn(
+                    AssistantMessage {
+                        content: vec![AssistantPart::Text("answer".into())],
+                        model: model.spec.id.clone(),
+                        protocol: Protocol::OpenAiResponses,
+                    },
+                    model.endpoint.id.clone(),
+                    model.spec.id.clone(),
+                    Usage::default(),
+                    None,
+                    StopReason::EndTurn,
+                    Some(output),
+                )
+                .unwrap();
+            let incremental = cache.estimate(&session, &model, "system", &[], 1).unwrap();
+            let full = reconcile_context_estimate(
+                &session,
+                &model,
+                "system",
+                &session.context().unwrap(),
+                &[],
+            );
+            assert!(incremental.input_tokens >= full.input_tokens);
+            assert_eq!(cache.full_rebuilds(), 1);
+        }
+        let kept = session.append(user_message("kept".into())).unwrap();
+        session.compact("summary", kept).unwrap();
+        let incremental = cache.estimate(&session, &model, "system", &[], 1).unwrap();
+        let full = reconcile_context_estimate(
+            &session,
+            &model,
+            "system",
+            &session.context().unwrap(),
+            &[],
+        );
+        assert_eq!(incremental, full);
+        assert_eq!(cache.full_rebuilds(), 2);
+    }
+
+    #[test]
     fn canonical_capacity_advances_new_messages_without_rebuilding_history() {
         use octet_ai::{ModelCatalog, ModelId};
 
@@ -11827,7 +14997,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
                 None,
             )
             .unwrap();
-        cache.observe_assistant_response(&session, &usage);
+        cache.observe_assistant_response(&session, &model, &usage);
         let incremental = cache.estimate(&session, &model, system, &[], 1).unwrap();
         let full_messages = session.context().unwrap();
         let full = reconcile_context_estimate(&session, &model, system, &full_messages, &[]);
@@ -12194,7 +15364,55 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             durable_responses_options(&session, &model, "system", Some(ServiceTier::Flex))
                 .unwrap()
                 .expect("a requested tier always produces options");
+        // A baseline pin is request metadata, not an ordered input update.
+        // Legacy sessions without opaque sidecars must keep canonical replay.
+        Arc::make_mut(&mut model.endpoint)
+            .runtime
+            .responses_features
+            .reasoning_effort_updates = true;
+        Arc::make_mut(&mut model.spec)
+            .capabilities
+            .responses_features
+            .reasoning_effort_updates = true;
+        let baseline = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium);
+        session
+            .append(EntryValue::ResponsesReasoning {
+                endpoint: model.endpoint.id.clone(),
+                model: model.spec.id.clone(),
+                baseline: baseline.clone(),
+                update: None,
+            })
+            .unwrap();
+        assert!(
+            durable_responses_options(&session, &model, "system", None)
+                .unwrap()
+                .is_none(),
+            "baseline-only reasoning history remains canonically replayable"
+        );
+        session
+            .append(EntryValue::ResponsesReasoning {
+                endpoint: model.endpoint.id.clone(),
+                model: model.spec.id.clone(),
+                baseline: baseline.clone(),
+                update: Some(octet_ai::ResponsesConfigurationUpdate {
+                    reasoning: ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+                }),
+            })
+            .unwrap();
+        assert!(durable_responses_options(&session, &model, "system", None)
+            .unwrap()
+            .is_none());
+        let effective = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+        assert_eq!(
+            request_reasoning_for_replay(&session, &model, None, &baseline).unwrap(),
+            effective
+        );
+
         assert_eq!(options.service_tier, Some(ServiceTier::Flex));
+        assert_eq!(
+            request_reasoning_for_replay(&session, &model, Some(&options), &baseline).unwrap(),
+            effective
+        );
         assert!(options.input.is_none());
         assert_eq!(options.previous_response_id, None);
         assert!(!options.store);
@@ -12659,6 +15877,58 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
     }
 
     #[test]
+    fn switched_responses_route_uses_canonical_options_but_rejects_native_replay() {
+        use octet_ai::{
+            AssistantMessage, AssistantPart, Message, ModelCatalog, ModelId, Protocol,
+            ResponsesItem, ResponsesOutput,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("switch.jsonl")).unwrap();
+        let astra = ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let mut luna = astra.clone();
+        Arc::make_mut(&mut luna.spec).id = ModelId("gpt-6-luna".into());
+        session
+            .append(user_message(UserInput::from("first prompt")))
+            .unwrap();
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("astra answer".into())],
+                model: astra.spec.id.clone(),
+                protocol: Protocol::OpenAiResponses,
+            })))
+            .unwrap();
+        session
+            .append_responses_turn(
+                assistant,
+                astra.endpoint.id.clone(),
+                astra.spec.id.clone(),
+                ResponsesOutput::new(vec![ResponsesItem::new(serde_json::json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "astra answer"}]
+                }))
+                .unwrap()]),
+            )
+            .unwrap();
+        session
+            .append(user_message(UserInput::from("second prompt")))
+            .unwrap();
+
+        assert!(durable_responses_options(&session, &luna, "system", None)
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            native_responses_options(&session, &luna, "system", None),
+            Err(AgentError::InvalidCompactionPolicy(_))
+        ));
+        assert_eq!(session.context().unwrap().len(), 3);
+    }
+
+    #[test]
     fn marked_failed_turn_boundary_keeps_exact_replay_available_after_restart() {
         use octet_ai::{ModelCatalog, ModelId};
 
@@ -12684,7 +15954,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
 
         let session = Session::open(path).unwrap();
         let replay = session
-            .responses_replay_items(&model.endpoint.id, &model.spec.id)
+            .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
             .unwrap()
             .expect("explicit local provenance must not look like a missing sidecar");
         assert!(matches!(
@@ -12708,7 +15978,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         std::sync::Arc::make_mut(&mut model.spec).pricing = None;
 
         assert!(matches!(
-            reserve_request_cost(&session, &model, 1, 1, Some(10)),
+            reserve_request_cost(&session, &model, 1, 1, Some(10), CacheRetention::Short),
             Err(AgentError::CostUnavailable { limit: 10 })
         ));
     }
@@ -12980,6 +16250,65 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
         }
     }
 
+    #[test]
+    fn provider_usage_unmatched_assistants_scan_the_ledger_only_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("unmatched.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let anchor = append_usage_fixture(&mut session, &model, 1234);
+        // Preserve newest usable record semantics even with repeated accounting
+        // for one assistant and a newer zero-token record.
+        for tokens in [2345, 0] {
+            session
+                .record_assistant_usage(
+                    anchor.clone(),
+                    model.endpoint.id.clone(),
+                    model.spec.id.clone(),
+                    Usage {
+                        total_tokens: tokens,
+                        ..Usage::default()
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let mut other = model.clone();
+        Arc::make_mut(&mut other.spec).id = octet_ai::ModelId("other-model".into());
+        for history in [8, 32, 128] {
+            while session.entries().len() < history {
+                append_usage_fixture(&mut session, &other, 99);
+            }
+            PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+            assert_eq!(
+                provider_context_estimate(&session, &model),
+                provider_context_estimate_reference(&session, &model)
+            );
+            assert_eq!(
+                PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.get()),
+                session.usage_records().len()
+            );
+            // No matching model at all must also be a single ledger pass.
+            let mut absent = model.clone();
+            Arc::make_mut(&mut absent.spec).id = octet_ai::ModelId("absent".into());
+            PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+            assert_eq!(provider_context_estimate(&session, &absent), None);
+            assert_eq!(
+                PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.get()),
+                session.usage_records().len()
+            );
+        }
+        session.checkout(anchor).unwrap();
+        PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+        assert_eq!(provider_context_estimate(&session, &model), Some(2345));
+        append_usage_fixture(&mut session, &model, 3456);
+        PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.set(0));
+        assert_eq!(provider_context_estimate(&session, &model), Some(3456));
+        assert_eq!(PROVIDER_CONTEXT_USAGE_VISITS.with(|visits| visits.get()), 1);
+    }
+
     /// Offline matched microbenchmark, not provider or end-to-end launch latency.
     /// Run with: cargo test --release --offline --locked -p octet-agent --lib
     /// provider_usage_suffix_benchmark -- --ignored --nocapture --test-threads=1
@@ -13179,6 +16508,7 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             session
                 .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: octet_ai::ToolCallId(index.into()),
                         name: "read".into(),
                         arguments_json: "{}".into(),
@@ -13505,12 +16835,14 @@ number of requested output tokens. (parameter=input_tokens, value=100177)";
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: octet_ai::ToolCallId("call-alpha".into()),
                         name: "alpha".into(),
                         arguments_json: "{}".into(),
                         argument_error: None,
                     }),
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: octet_ai::ToolCallId("call-beta".into()),
                         name: "beta".into(),
                         arguments_json: "{}".into(),
@@ -13901,11 +17233,18 @@ mod inference_recovery_tests {
             Err(AgentError::UsageUncertain)
         ));
         assert!(matches!(
-            reserve_request_cost(&session, &model, 1, 1, Some(u64::MAX)),
+            reserve_request_cost(
+                &session,
+                &model,
+                1,
+                1,
+                Some(u64::MAX),
+                CacheRetention::Short
+            ),
             Err(AgentError::UsageUncertain)
         ));
         assert!(reserve_request_tokens(&session, 1, 1, None).is_ok());
-        assert!(reserve_request_cost(&session, &model, 1, 1, None).is_ok());
+        assert!(reserve_request_cost(&session, &model, 1, 1, None, CacheRetention::Short).is_ok());
         for code in [
             "usage_not_included",
             "insufficient_quota",
@@ -13998,6 +17337,7 @@ mod inference_recovery_tests {
                 .mount(&server).await;
             let directory = tempfile::tempdir().unwrap();
             let mut model = model();
+            Arc::make_mut(&mut model.endpoint).transport = octet_ai::EndpointTransport::Http;
             if hard_token_limit {
                 // HTTP uncertainty coverage needs a genuinely capped route;
                 // uncapped Codex hard ceilings now refuse before dispatch.
@@ -14043,7 +17383,16 @@ mod inference_recovery_tests {
                     "{error:?}"
                 );
             }
-            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(
+                requests.len(),
+                1,
+                "hard={hard_token_limit}: {:?}",
+                requests
+                    .iter()
+                    .map(|request| (&request.method, &request.url))
+                    .collect::<Vec<_>>()
+            );
         }
     }
 }
@@ -14383,6 +17732,93 @@ mod sustained_network_recovery_tests {
         assert_eq!(retry_after(&error, 0), Duration::from_millis(11054));
     }
     #[test]
+    fn hard_cost_reservation_covers_pricier_anthropic_server_fallbacks() {
+        use octet_ai::declarations::{
+            AnthropicCompatPreset, AnthropicFallbackCost, AnthropicFallbackModel,
+        };
+        use octet_ai::{Pricing, TokenRate};
+
+        let mut model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("claude-sonnet-4-5".into()))
+            .unwrap();
+        Arc::make_mut(&mut model.spec).pricing = Some(Pricing {
+            input: TokenRate(1_000_000),
+            output: TokenRate(1_000_000),
+            cache_read: TokenRate(1_000_000),
+            cache_write_5m: TokenRate(1_000_000),
+            cache_write_1h: None,
+            reasoning: None,
+            tiers: vec![],
+        });
+        let base = worst_case_request_cost(&model, 1_000_000, 1_000_000, None).unwrap();
+        assert_eq!(base, 3_000_000);
+        Arc::make_mut(&mut model.spec).preset.anthropic_compat = Some(AnthropicCompatPreset {
+            allowed_fallback_models: vec![AnthropicFallbackModel {
+                provider: "anthropic".into(),
+                model: "dearer".into(),
+                cost: Some(AnthropicFallbackCost {
+                    input: 5.0,
+                    output: 20.0,
+                    cache_read: 0.5,
+                    cache_write: 6.0,
+                }),
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            worst_case_request_cost(&model, 1_000_000, 1_000_000, None),
+            Some(30_000_000)
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("cost.jsonl")).unwrap();
+        assert!(matches!(
+            reserve_request_cost(
+                &session,
+                &model,
+                1_000_000,
+                1_000_000,
+                Some(base + 1),
+                CacheRetention::Short
+            ),
+            Err(AgentError::CostLimit { .. })
+        ));
+        assert!(model.spec.cache.supports_long_retention);
+        assert!(reserve_request_cost(
+            &session,
+            &model,
+            1,
+            1,
+            Some(u64::MAX),
+            CacheRetention::Short,
+        )
+        .is_ok());
+        assert!(matches!(
+            reserve_request_cost(&session, &model, 1, 1, Some(u64::MAX), CacheRetention::Long),
+            Err(AgentError::CostUnavailable { .. })
+        ));
+        assert!(reserve_request_cost(&session, &model, 1, 1, None, CacheRetention::Long,).is_ok());
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .anthropic_compat
+            .as_mut()
+            .unwrap()
+            .allowed_fallback_models[0]
+            .cost = None;
+        assert!(matches!(
+            reserve_request_cost(
+                &session,
+                &model,
+                1,
+                1,
+                Some(u64::MAX),
+                CacheRetention::Short
+            ),
+            Err(AgentError::CostUnavailable { .. })
+        ));
+    }
+
+    #[test]
     fn tier_reservation_uses_the_declared_tariff_and_blocks_unpriced_history() {
         let mut model = octet_ai::ModelCatalog::builtin()
             .unwrap()
@@ -14407,7 +17843,8 @@ mod sustained_network_recovery_tests {
                 1_000_000,
                 1_000_000,
                 Some(base + 1),
-                Some(ServiceTier::Priority)
+                Some(ServiceTier::Priority),
+                CacheRetention::Short,
             ),
             Err(AgentError::CostLimit { .. })
         ));
@@ -14425,10 +17862,17 @@ mod sustained_network_recovery_tests {
         drop(session);
         let reopened = Session::open(path).unwrap();
         assert!(matches!(
-            reserve_request_cost(&reopened, &model, 1, 1, Some(u64::MAX)),
+            reserve_request_cost(
+                &reopened,
+                &model,
+                1,
+                1,
+                Some(u64::MAX),
+                CacheRetention::Short
+            ),
             Err(AgentError::CostUnavailable { .. })
         ));
-        assert!(reserve_request_cost(&reopened, &model, 1, 1, None).is_ok());
+        assert!(reserve_request_cost(&reopened, &model, 1, 1, None, CacheRetention::Short).is_ok());
     }
 
     #[test]
@@ -14611,6 +18055,7 @@ mod sustained_network_recovery_tests {
             output,
             Some(1_000 + priority),
             Some(ServiceTier::Priority),
+            CacheRetention::Short,
         )
         .is_ok());
         // One microdollar tighter is refused with the same reservation.
@@ -14622,6 +18067,7 @@ mod sustained_network_recovery_tests {
                 output,
                 Some(1_000 + priority - 1),
                 Some(ServiceTier::Priority),
+                CacheRetention::Short,
             ),
             Err(AgentError::CostLimit {
                 current: 1_000,
@@ -14632,10 +18078,15 @@ mod sustained_network_recovery_tests {
         // The selected tier is load-bearing: the same budget admits the
         // untiered reservation used by auxiliary operations, which is exactly
         // why a priority main request must reserve the tier-aware amount.
-        assert!(
-            reserve_request_cost(&reopened, &model, input, output, Some(1_000 + priority - 1),)
-                .is_ok()
-        );
+        assert!(reserve_request_cost(
+            &reopened,
+            &model,
+            input,
+            output,
+            Some(1_000 + priority - 1),
+            CacheRetention::Short
+        )
+        .is_ok());
         // A cheap provider echo cannot reduce the reservation: the helper has
         // no echo input and always prices the requested tier.
         let reserved_again =
@@ -14667,6 +18118,7 @@ mod sustained_network_recovery_tests {
                 output,
                 Some(u64::MAX),
                 Some(ServiceTier::Priority),
+                CacheRetention::Short,
             ),
             Err(AgentError::CostUnavailable { .. })
         ));

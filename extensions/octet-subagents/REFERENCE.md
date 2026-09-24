@@ -21,10 +21,10 @@ V1 is deliberately bounded, with the parent's full standard tool scope as the de
 - at most **eight active children** and thirty-two retained workers per parent owner;
 - depth one; a recursively admitted descendant is immediately interrupted when its host path/depth is observed;
 - four predefined profiles (`explore`, `review`, `test-analysis`, `research`);
-- per-worker `provider`/`model`/`reasoning` selection, defaulting to `inherit` (the API `0.4` service still carries no per-child model field, so a selection is accepted only when this session can confirm it and is otherwise refused with `unsupported_model`/`unsupported_reasoning`);
+- per-worker `provider`/`model`/`reasoning` selection, defaulting to `inherit`, with host-resolved configured routes and reasoning;
 - requested tool scope is a non-empty duplicate-free subset of `read`, `search`, `edit`, `write`, and `bash`; the default grant is the full five-tool scope, and `tools: [read, search]` narrows a worker to hard read-only for pure investigations;
 - wall-time, turn, and cost ceilings are optional per spawn: when omitted they inherit the parent session's ceilings (an unlimited parent remains unlimited); explicit values are bounded to 5 s–24 h, 1–256 turns, and 1–50,000,000 microdollars; returned output is 512–16,384 bytes;
-- fresh child contexts inherit the parent's model, context/output limits, and optional session token ceiling exactly; an unlimited parent remains unlimited and the model-facing spawn schema has no separate token-budget field;
+- fresh child contexts use the selected model, bound inherited context/output limits by its capabilities, and inherit the optional session token ceiling exactly; an unlimited parent remains unlimited and the model-facing spawn schema has no separate token-budget field;
 - strict owner derivation from `tool/call.context.resource_owner`; no tool schema accepts an owner;
 - retry-safe spawn keys, bounded output/error retention, cooperative cancellation, explicit stop, continue (steer active / resume settled), an explicit parent wait/reattach surface, and session-scoped delegation (`orphaned` means *detached*, not dead);
 
@@ -35,7 +35,7 @@ primitives, another agent primitive, and any other tool are rejected. The
 canonical child policy keeps repository content and task text as data, not
 policy, and never grants recursion or manager-generated commands.
 
-API `0.4` creates the child with inherited model, cwd/workspace, environment,
+The service creates the child with the selected model and inherited cwd/workspace, environment,
 sandbox, approval policy, and extension policy, but `agent/spawn.policy` is the
 hard per-child boundary: octet installs a detached tool snapshot containing only
 the granted tools (never collaboration or agent primitives), applies the
@@ -77,6 +77,7 @@ octet owns:
 
 The extension calls only these SDK helpers, which map directly to API `0.4`:
 
+- `list_agent_models` → `agent/models` (requires `agent_model_selection_v1`);
 - `spawn_agent` → `agent/spawn`;
 - `list_agents` → `agent/list`;
 - `wait_agents` → `agent/wait`;
@@ -165,33 +166,36 @@ optional cumulative session-token ceiling exactly (`null` remains unlimited).
 
 ### Per-worker provider, model, and reasoning
 
-`provider`, `model`, and `reasoning` select the child's orchestration policy per
-spawn. All three default to `inherit`: the child copies the parent session's
-already-normalized selection exactly, which is the recommended default. A
-selection is validated fail-closed and never silently coerced:
+`subagent_spawn` accepts optional `provider`, `model`, and `reasoning` identifiers.
+Omitted values (or `inherit`) inherit the parent's selection. Explicit selections
+require negotiated `agent_model_selection_v1`; older hosts fail closed before
+creating a worker. The host resolves configured, credential-available routes and
+never substitutes the parent model for an unknown or unavailable route.
 
-- `provider` and `model` are accepted **only when this session can confirm them
-  as configured**. The API `0.4` service exposes neither a provider catalog nor a
-  per-child model field, and the host reports exactly one model to the extension
-  (the parent session's), so that is the only per-worker selection the extension
-  can verify. A `model` that is not the confirmed model, a malformed or
-  metacharacter-carrying id, and a `provider` supplied without a matching `model`
-  are rejected with the typed `unsupported_model` error. Confirmed requests are
-  reported as applied; nothing is claimed applied that the host did not confirm.
-- `reasoning` accepts `inherit` or `off|minimal|low|medium|high|xhigh|max|ultra`.
-  An unknown level is rejected with the typed `unsupported_reasoning` error. A
-  level above the target model's ceiling is clamped by the *mirrored* product
-  policy (`reasoning.py` reproduces `crates/octet-coding-agent/src/app/mod.rs`
-  `thinking_to_reasoning`/`supported_levels_with_subagents`, including the
-  `clamps_effort_to_model_ceiling` ladder) with an explicit note; the extension
-  never invents a second policy. The caller may declare the target model's
-  `reasoning_capability` (`ceiling`/`floor`/`ultra`); omitted means the product's
-  wire defaults (floor `minimal`, ceiling `high`).
-- The requested and effective selections are both surfaced: the live panel row
-  shows an explicit request as `model <provider>/<model>` / `reasoning <level>`
-  and marks a request the host has not confirmed, and the inspector body carries
-  an `Orchestration selection` line plus the clamp note. `inherit` renders as
-  absence (the panel never prints placeholder text for an inherited value).
+Use `subagent_models` first to discover exact identifiers and supported reasoning:
+
+```json
+{"query": "haiku", "limit": 10}
+```
+
+`query` is optional plain text (at most 128 UTF-8 bytes); `limit` defaults to 50
+and is bounded to 1–100. Results contain `models` and `truncated`; rows expose
+provider/model identifiers, display name, reasoning levels, context window and
+maximum output tokens, never credentials. Narrow the query when truncated.
+Discovery is owner-bound and read-only; it does not authenticate or start workers.
+
+Reasoning identifiers are `inherit`, `off`, `on`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, `max`, and `ultra`; use the choices returned for the target model.
+`on` supports binary/always-on models; the host remains authoritative.
+
+Supply an explicit model with an explicit provider. Unknown routes and unsupported
+reasoning fail with `unsupported_model` / `unsupported_reasoning`. The host alone
+normalizes reasoning against configured model metadata. The legacy
+`reasoning_capability` input is only a compatibility hint and cannot affect
+execution. Requested and host-confirmed effective selections stay separate in
+the inspector, survive restoration, and are preserved by continuation. Host
+`policy.resolved_model` carries effective provider/model and serialized
+`ReasoningConfig`; the extension does not guess an effective route or clamp effort.
 
 If no key is supplied, the extension derives one from the complete canonical request. Keys are scoped by octet to the extension principal and durable session owner. Identical retries return the same host-present child. Parent-turn completion does not retire live workers. If a reconstructed owner cannot yet attach a retained record, the worker is **detached**: still owned by this parent session, but not presently running in the host. The extension retains the last bounded summary/error, usage, and the complete sibling roster as recoverable evidence, reports the worker as `detached` with a reattach affordance, and reattaches it automatically when the owning session republishes the live record (see *Session-scoped delegation*). An explicit identical retry may also replace that detached cache entry and ask the host to create a new authoritative worker. Reuse with different input fails. The orchestration fingerprint is also placed in the canonical child message so a restart cannot accidentally make host-visible input equality narrower than extension input equality.
 
@@ -291,7 +295,10 @@ cross-process ownership transfer.
 
 ## Lifecycle and restart behavior
 
-Worker states are authoritative projections of `agent/list`/`agent/wait`:
+Worker states are authoritative projections of `agent/list`/`agent/wait`.
+Host list/wait observations and their reconciliation are serialized per parent
+owner; a delayed older response cannot overwrite a newer terminal snapshot.
+Other owners can still refresh independently:
 
 - `pending` → `queued`;
 - `idle` → `idle`, attached and awaiting an explicit follow-up;
@@ -299,6 +306,9 @@ Worker states are authoritative projections of `agent/list`/`agent/wait`:
 - `completed` → `done`, with bounded exact host output in detail/results;
 - `failed` → `failed`, with a bounded error;
 - `interrupted` → `cancelled`, or `stopped`/`timed_out` when the extension issued that reason;
+  reattachment with no undelivered task also settles as `interrupted`, with a host
+  diagnostic directing the caller to `subagent_continue`. The retained session
+  is not replayed automatically or presented as successfully completed;
 - `shutdown`/missing active record → `orphaned` (**detached**: still owned by this session, currently not attached to any run, reattachable);
 - an `awaiting_approval` park reported by the host → `awaiting_approval` (rendered explicitly, never resumed unattended).
 
@@ -385,12 +395,16 @@ shift on each child tool start or finish. The host returns per-worker
 structured phase/current tool, host-observed tool calls, disjoint provider token
 buckets, turn count, and priced cost. The extension places those values in
 generic activity `metrics`; it never supplies terminal rows or footer text. In
-the TUI, octet renders the complete latest owner-fenced worker roster as a
-persistent transcript event immediately above the composer from native
-`AgentEvent::DelegationUpdated` events; ordinary tool disclosure never truncates
-it. It does not poll `/subagents status` for the composer block. Worker rows are
-indented beneath **Subagents** and show `name  state · ↑input ↓output • $cost`.
-Per-worker call counts remain retained telemetry, not transcript-row text. Input
+the TUI, octet renders a bounded owner-fenced **Subagents** strip pinned above
+the composer while retained workers are active. It is chrome, not a persistent
+transcript event, and never enters semantic copy. Native
+`AgentEvent::DelegationUpdated` supplies the snapshot; the strip does not poll
+`/subagents status`. Rows show lifecycle, model, metrics, and `tools` (tool-call
+count, not model turns). Terminal groups collapse to counted summaries; Ctrl+O
+expands within the height cap. `/subagents` retains the complete roster and
+failure details after the strip hides. First-party orchestration calls/results
+and worker state/reason transitions do not append transcript notices; ordinary
+tool/run errors and approval prompts remain visible. Input
 includes the three disjoint uncached/cache-read/cache-write buckets, while
 reasoning remains a subset of output.
 

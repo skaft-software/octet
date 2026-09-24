@@ -8,6 +8,10 @@
         "var": "OPENAI_API_KEY"
       },
       "default_headers": {},
+      "transport": "web_socket_preferred",
+      "runtime": {
+        "responses_features": {"async_tools": true, "steering": true, "reasoning_effort_updates": true, "compact_reasoning_effort_updates": false}
+      },
       "timeout_secs": 900
     },
     {
@@ -106,7 +110,13 @@
             "default": "low"
           }
         },
-        "structured_output": true
+        "structured_output": true,
+        "responses_features": {
+          "async_tools": true,
+          "steering": true,
+          "reasoning_effort_updates": true,
+          "compact_reasoning_effort_updates": false
+        }
       },
       "limits": {
         "context_window": 1050000,
@@ -133,7 +143,142 @@
       },
       "cache": {
         "send_session_affinity_headers": true,
-        "session_affinity_format": "open_ai"
+        "session_affinity_format": "open_ai",
+        "supports_explicit_prompt_cache_mode": true
+      }
+    },
+    {
+      "id": "gpt-6-sol",
+      "endpoint": "openai",
+      "api_name": "gpt-6-sol",
+      "display_name": "GPT-6 Sol",
+      "protocol": "open_ai_responses",
+      "capabilities": {
+        "input_modalities": {"bits": 1},
+        "output_modalities": {"bits": 0},
+        "tools": true,
+        "parallel_tool_calls": true,
+        "reasoning": {
+          "control": "effort",
+          "exposes_text": true,
+          "preserves_state": true,
+          "effort_budgets": null,
+          "min_effort": "low",
+          "max_effort": "max",
+          "options": {
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default": "medium"
+          }
+        },
+        "structured_output": true,
+        "responses_features": {
+          "async_tools": true,
+          "steering": true,
+          "reasoning_effort_updates": true,
+          "compact_reasoning_effort_updates": false
+        }
+      },
+      "limits": {
+        "context_window": 1050000,
+        "max_output_tokens": 128000
+      },
+      "pricing": {
+        "input": 2000000,
+        "output": 10000000,
+        "cache_read": 200000,
+        "cache_write_5m": 2500000,
+        "cache_write_1h": null,
+        "reasoning": null,
+        "tiers": [
+          {
+            "min_input_tokens": 272001,
+            "input": 4000000,
+            "output": 15000000,
+            "cache_read": 400000,
+            "cache_write_5m": 5000000,
+            "cache_write_1h": null,
+            "reasoning": null
+          }
+        ]
+      },
+      "cache": {
+        "send_session_affinity_headers": true,
+        "session_affinity_format": "open_ai",
+        "supports_explicit_prompt_cache_mode": true
+      }
+    },
+    {
+      "id": "gpt-6-luna",
+      "endpoint": "openai",
+      "api_name": "gpt-6-luna",
+      "display_name": "GPT-6 Luna",
+      "protocol": "open_ai_responses",
+      "capabilities": {
+        "input_modalities": {"bits": 1},
+        "output_modalities": {"bits": 0},
+        "tools": true,
+        "parallel_tool_calls": true,
+        "reasoning": {
+          "control": "effort",
+          "exposes_text": true,
+          "preserves_state": true,
+          "effort_budgets": null,
+          "min_effort": "low",
+          "max_effort": "max",
+          "options": {
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default": "medium"
+          }
+        },
+        "structured_output": true,
+        "responses_features": {
+          "async_tools": true,
+          "steering": true,
+          "reasoning_effort_updates": true,
+          "compact_reasoning_effort_updates": false
+        }
+      },
+      "limits": {
+        "context_window": 1050000,
+        "max_output_tokens": 128000
+      },
+      "pricing": {
+        "input": 100000,
+        "output": 500000,
+        "cache_read": 10000,
+        "cache_write_5m": 125000,
+        "cache_write_1h": null,
+        "reasoning": null,
+        "tiers": [
+          {
+            "min_input_tokens": 272001,
+            "input": 200000,
+            "output": 750000,
+            "cache_read": 20000,
+            "cache_write_5m": 250000,
+            "cache_write_1h": null,
+            "reasoning": null
+          }
+        ]
+      },
+      "cache": {
+        "send_session_affinity_headers": true,
+        "session_affinity_format": "open_ai",
+        "supports_explicit_prompt_cache_mode": true
       }
     },
     {
@@ -318,6 +463,45 @@
         "cache_read": 500000,
         "cache_write_5m": 6250000,
         "cache_write_1h": 10000000,
+        "reasoning": null,
+        "tiers": []
+      }
+    },
+    {
+      "id": "claude-opus-5-5",
+      "endpoint": "anthropic",
+      "api_name": "claude-opus-5-5",
+      "display_name": "Claude Opus 5.5",
+      "protocol": "anthropic_messages",
+      "capabilities": {
+        "input_modalities": {"bits": 1},
+        "output_modalities": {"bits": 0},
+        "tools": true,
+        "parallel_tool_calls": true,
+        "reasoning": {
+          "control": "effort",
+          "exposes_text": true,
+          "preserves_state": true,
+          "effort_budgets": null,
+          "max_effort": "max",
+          "min_effort": "low",
+          "options": {
+            "values": ["low", "medium", "high", "xhigh", "max"],
+            "default": "medium"
+          }
+        },
+        "structured_output": true
+      },
+      "limits": {
+        "context_window": 1000000,
+        "max_output_tokens": 128000
+      },
+      "pricing": {
+        "input": 4000000,
+        "output": 20000000,
+        "cache_read": 200000,
+        "cache_write_5m": 5000000,
+        "cache_write_1h": 8000000,
         "reasoning": null,
         "tiers": []
       }

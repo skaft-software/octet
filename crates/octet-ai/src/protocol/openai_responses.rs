@@ -23,6 +23,9 @@ use crate::validate::{
 #[derive(Serialize)]
 struct ResponsesRequest {
     model: String,
+    // Already-owned opaque trees are inserted by into_json, not serialized
+    // through the typed metadata DTO into a second tree.
+    #[serde(skip_serializing)]
     input: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
@@ -50,6 +53,8 @@ struct ResponsesRequest {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: Option<ResponsesPromptCacheOptions>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     include: Vec<String>,
     store: bool,
@@ -59,6 +64,72 @@ struct ResponsesRequest {
     // This codec is always-streamed (there is no non-streaming Responses decode
     // path — see `decode_stream_event`), so it is unconditionally true.
     stream: bool,
+}
+
+/// The explicit cache-mode contract is distinct from legacy 24h retention.
+#[derive(Serialize)]
+struct ResponsesPromptCacheOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
+}
+
+fn supports_explicit_prompt_cache_mode(model: &crate::catalog::Model) -> bool {
+    let url = &model.endpoint.base_url;
+    // A copied model record must not assert this public-API contract for a
+    // compatible gateway, Azure, or the subscription route.
+    model.spec.cache.supports_explicit_prompt_cache_mode
+        && model.endpoint.runtime.responses_profile
+            == crate::types::ResponsesRuntimeProfile::Default
+        && url.scheme() == "https"
+        && url.host_str() == Some("api.openai.com")
+        && url.path() == "/v1/"
+}
+
+fn prompt_cache_options(
+    model: &crate::catalog::Model,
+    retention: CacheRetention,
+) -> Option<ResponsesPromptCacheOptions> {
+    if !supports_explicit_prompt_cache_mode(model) {
+        return None;
+    }
+    match retention {
+        CacheRetention::None => Some(ResponsesPromptCacheOptions {
+            // No explicit breakpoints are emitted by this route, so this
+            // disables prompt caching instead of merely omitting affinity.
+            mode: Some("explicit"),
+            ttl: None,
+        }),
+        CacheRetention::Long if model.spec.cache.supports_long_retention => {
+            Some(ResponsesPromptCacheOptions {
+                mode: None,
+                ttl: Some("30m"),
+            })
+        }
+        CacheRetention::Short | CacheRetention::WarmShort | CacheRetention::Long => None,
+    }
+}
+
+impl ResponsesRequest {
+    fn into_json(self) -> Result<serde_json::Value, AiError> {
+        let mut body = serde_json::to_value(&self)
+            .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+        body.as_object_mut()
+            .expect("the Responses request DTO serializes to an object")
+            .insert("input".to_owned(), self.input);
+        Ok(body)
+    }
+}
+
+fn into_wire_input(input: crate::responses::ResponsesInput) -> serde_json::Value {
+    serde_json::Value::Array(
+        input
+            .into_items()
+            .into_iter()
+            .map(crate::responses::ResponsesItem::into_json)
+            .collect(),
+    )
 }
 
 #[derive(Serialize)]
@@ -73,6 +144,8 @@ enum ResponsesInputItem {
         content: Vec<ResponsesContentPart>,
     },
     FunctionCall {
+        #[serde(rename = "async", skip_serializing_if = "is_false")]
+        async_execution: bool,
         call_id: String,
         name: String,
         arguments: String,
@@ -250,8 +323,14 @@ const MAX_COMPUTER_ACTION_BYTES: usize = 16 * 1024;
 /// Bounded size of one inline screenshot replayed in a `computer_call_output`.
 const MAX_COMPUTER_SCREENSHOT_BYTES: usize = 4 * 1024 * 1024;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Serialize)]
 struct ResponsesTool {
+    #[serde(rename = "async", skip_serializing_if = "is_false")]
+    async_execution: bool,
     r#type: &'static str,
     name: String,
     description: String,
@@ -269,6 +348,8 @@ struct ResponsesTool {
 /// OpenAI Responses `custom` tool constrained by a Lark/regex grammar.
 #[derive(Serialize)]
 struct ResponsesCustomTool {
+    #[serde(rename = "async", skip_serializing_if = "is_false")]
+    async_execution: bool,
     r#type: &'static str,
     name: String,
     description: String,
@@ -325,6 +406,190 @@ fn opaque_input_item(item: ResponsesInputItem) -> crate::responses::ResponsesIte
     .expect("private Responses input item is always an object")
 }
 
+fn validate_terminal_async_markers(
+    builder: &ResponseBuilder,
+    output: &[crate::ResponsesItem],
+) -> Result<(), AiError> {
+    crate::responses::validate_provider_output_items(output)?;
+    for item in output {
+        let item = item.as_json();
+        let Some(marker) = item.get("async") else {
+            continue;
+        };
+        let marker = marker
+            .as_bool()
+            .ok_or_else(|| DecodeError::InvalidProviderField("invalid async call marker".into()))?;
+        let call_id = item.get("call_id").and_then(serde_json::Value::as_str);
+        let call = builder
+            .tool_call_builders
+            .values()
+            .find(|call| Some(call.id.0.as_str()) == call_id);
+        if call.is_some_and(|call| call.async_execution != marker) || (marker && call.is_none()) {
+            return Err(DecodeError::InvalidProviderField(
+                "terminal async call marker disagrees with call start".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_async_tools(model: &crate::Model, tools: &[ToolDef]) -> Result<(), AiError> {
+    if tools.iter().any(|tool| tool.async_execution) && !model.responses_features().async_tools {
+        return Err(
+            ConfigError::Parse("async tools are not qualified for this route".into()).into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_async_input(
+    model: &crate::Model,
+    input: &crate::ResponsesInput,
+    tools: &[ToolDef],
+) -> Result<(), AiError> {
+    validate_async_tools(model, tools)?;
+    // Only the ordered walk can accept these prospective historical pairs.
+    // This index does not waive duplicate IDs or output-before-call checks.
+    let historical_results: std::collections::HashSet<&str> = input
+        .items()
+        .iter()
+        .filter_map(|item| {
+            let item = item.as_json();
+            match item.get("type").and_then(serde_json::Value::as_str) {
+                Some("function_call_output" | "custom_tool_call_output") => {
+                    item.get("call_id").and_then(serde_json::Value::as_str)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    let mut call_ids = std::collections::HashSet::new();
+    let mut invalid_pending = std::collections::HashSet::new();
+    let mut completed = std::collections::HashSet::new();
+    for item in input.items() {
+        let item = item.as_json();
+        let kind = item.get("type").and_then(serde_json::Value::as_str);
+        // Delta continuation may legitimately carry outputs for calls in the
+        // server's retained prefix. Still record every visible result, so later
+        // calls cannot reuse that identity or hide an output-before-call pair.
+        let id = item.get("call_id").and_then(serde_json::Value::as_str);
+        if matches!(
+            kind,
+            Some("function_call" | "custom_tool_call" | "computer_call")
+        ) {
+            if let Some(id) = id {
+                if !call_ids.insert(id) || completed.contains(id) {
+                    return Err(ConfigError::Parse(
+                        "duplicate or out-of-order tool call ID in Responses input".into(),
+                    )
+                    .into());
+                }
+            }
+        } else if matches!(
+            kind,
+            Some("function_call_output" | "custom_tool_call_output" | "computer_call_output")
+        ) {
+            if let Some(id) = id {
+                if !completed.insert(id) {
+                    return Err(ConfigError::Parse(
+                        "duplicate tool result in Responses input".into(),
+                    )
+                    .into());
+                }
+                invalid_pending.remove(id);
+            }
+        }
+        let Some(marker) = item.get("async") else {
+            continue;
+        };
+        let enabled = marker
+            .as_bool()
+            .ok_or_else(|| ConfigError::Parse("invalid async call marker".into()))?;
+        if !enabled {
+            continue;
+        }
+        let name = item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !model.responses_features().async_tools
+            || !matches!(kind, Some("function_call" | "custom_tool_call"))
+            || name.is_empty()
+        {
+            return Err(
+                ConfigError::Parse("unadvertised async call in Responses input".into()).into(),
+            );
+        }
+        let id = item
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ConfigError::Parse("async call requires a call_id".into()))?;
+        if historical_results.contains(id) {
+            // Retain envelope validation, but do not use a later tool schema or
+            // advertisement as authority over already completed provider work.
+            if kind == Some("custom_tool_call") {
+                item.get("input")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        ConfigError::Parse("async custom call requires string input".into())
+                    })?;
+            } else {
+                let arguments = item
+                    .get("arguments")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        ConfigError::Parse("async function call requires arguments".into())
+                    })?;
+                crate::json_repair::normalize_json_object_value(arguments)?;
+            }
+            continue;
+        }
+        if !tools
+            .iter()
+            .any(|tool| tool.async_execution && tool.name == name)
+        {
+            return Err(ConfigError::Parse(
+                "pending async call was not advertised for this tool".into(),
+            )
+            .into());
+        }
+        let arguments = if kind == Some("custom_tool_call") {
+            let property =
+                super::grammar::input_property(tools, name, super::grammar_tools_for(model))?
+                    .ok_or_else(|| {
+                        ConfigError::Parse("async custom call requires its declared grammar".into())
+                    })?;
+            let text = item
+                .get("input")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ConfigError::Parse("async custom call requires string input".into())
+                })?;
+            serde_json::json!({property: text})
+        } else {
+            let arguments = item
+                .get("arguments")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ConfigError::Parse("async function call requires arguments".into())
+                })?;
+            crate::json_repair::normalize_json_object_value(arguments)?
+        };
+        if !matches!(
+            crate::json_repair::validate_tool_arguments(name, &arguments, tools)?,
+            crate::ToolArgumentValidation::Valid
+        ) {
+            invalid_pending.insert(id);
+        }
+    }
+    if let Some(id) = invalid_pending.into_iter().next() {
+        return Err(crate::ValidationError::MissingToolResult(ToolCallId(id.to_owned())).into());
+    }
+    Ok(())
+}
+
 fn map_responses_tools(
     model: &crate::catalog::Model,
     tools: &[ToolDef],
@@ -340,6 +605,7 @@ fn map_responses_tools(
             crate::constrained_sampling::resolve_grammar(tool, super::grammar_tools_for(model))?
         {
             mapped.push(ResponsesToolWire::Custom(ResponsesCustomTool {
+                async_execution: tool.async_execution,
                 r#type: "custom",
                 name: tool.name.clone(),
                 description: tool.description.clone(),
@@ -355,6 +621,7 @@ fn map_responses_tools(
         let (parameters, strict) =
             crate::constrained_sampling::function_tool_parameters(tool, supports_strict)?;
         mapped.push(ResponsesToolWire::Function(ResponsesTool {
+            async_execution: tool.async_execution,
             r#type: "function",
             name: tool.name.clone(),
             description: tool.description.clone(),
@@ -377,13 +644,17 @@ fn map_responses_lite_tools(
         .map(|tool| {
             let (parameters, strict) =
                 crate::constrained_sampling::function_tool_parameters(tool, false)?;
-            Ok(serde_json::json!({
+            let mut value = serde_json::json!({
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
                 "strict": strict,
                 "parameters": parameters,
-            }))
+            });
+            if tool.async_execution {
+                value["async"] = true.into();
+            }
+            Ok(value)
         })
         .collect::<Result<Vec<_>, AiError>>()?;
     Ok(vec![serde_json::json!({
@@ -504,6 +775,8 @@ pub(crate) fn build_compact_request(
         return Err(crate::error::UnsupportedError::ReasoningMode.into());
     }
     validate_reasoning_selection(reasoning, &model.spec.capabilities, model.spec.protocol)?;
+    crate::responses::validate_responses_input(model, &input, reasoning, true)?;
+    validate_async_tools(model, tools)?;
     // The private ChatGPT Codex compact route accepts the same active tool and
     // generation controls as normal Responses calls. Public OpenAI compact
     // currently exposes a narrower schema and may reject these extra fields.
@@ -858,7 +1131,9 @@ fn map_assistant_input(
             AssistantPart::Text(text) => text_parts.push(text.clone()),
             AssistantPart::ToolCall(tool_call) => {
                 flush_assistant_text(&mut input, &mut text_parts);
-                pending_tool_calls.insert(tool_call.id.0.clone());
+                if !tool_call.async_execution {
+                    pending_tool_calls.insert(tool_call.id.0.clone());
+                }
                 let call_id = crate::protocol::normalize_tool_call_id(&tool_call.id.0);
                 if tool_call.name == COMPUTER_TOOL_NAME {
                     // Canonical history replays a computer call as a
@@ -873,6 +1148,7 @@ fn map_assistant_input(
                     });
                 } else {
                     input.push(ResponsesInputItem::FunctionCall {
+                        async_execution: tool_call.async_execution,
                         call_id,
                         name: tool_call.name.clone(),
                         arguments: tool_call.arguments_json.clone(),
@@ -965,7 +1241,7 @@ pub(crate) fn encode_replay_input(
     model: &crate::catalog::Model,
     system: Option<&str>,
     replay: &[crate::responses::ResponsesReplayItem],
-) -> crate::responses::ResponsesInput {
+) -> Result<crate::responses::ResponsesInput, AiError> {
     let compacted_base = matches!(
         replay.first(),
         Some(crate::responses::ResponsesReplayItem::Compacted(_))
@@ -983,6 +1259,9 @@ pub(crate) fn encode_replay_input(
     let mut computer_call_ids = std::collections::BTreeSet::new();
     for item in replay {
         match item {
+            crate::responses::ResponsesReplayItem::ConfigurationUpdate(update) => {
+                input.push(update.to_item())
+            }
             crate::responses::ResponsesReplayItem::User(user) => {
                 input.extend(
                     map_user_input(
@@ -1011,6 +1290,7 @@ pub(crate) fn encode_replay_input(
             }
             crate::responses::ResponsesReplayItem::Output(output)
             | crate::responses::ResponsesReplayItem::Compacted(output) => {
+                output.validate_provider_output()?;
                 // Authoritative provider output carries the only trustworthy
                 // computer-call provenance: recognize `computer_call` items
                 // verbatim so the caller's tool result for that `call_id` is
@@ -1035,7 +1315,7 @@ pub(crate) fn encode_replay_input(
             }
         }
     }
-    crate::responses::ResponsesInput::new(input)
+    Ok(crate::responses::ResponsesInput::new(input))
 }
 
 /// Builds the OpenAI Responses HTTP request parts.
@@ -1046,9 +1326,11 @@ pub(crate) fn build_request(
     // 1. Normalize model-gated reasoning, then run validation.
     let defaults = super::preset::request_defaults(model, req)?;
     let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);
+    let mut effective_capabilities = model.spec.capabilities.clone();
+    effective_capabilities.responses_features = model.responses_features();
     let diagnostics = validate_request(
         &req,
-        &model.spec.capabilities,
+        &effective_capabilities,
         &model.spec.limits,
         Protocol::OpenAiResponses,
         &model.spec.id,
@@ -1064,15 +1346,6 @@ pub(crate) fn build_request(
         )
         .into());
     }
-
-    // 2–3. Encode the request prompt and canonical history through the same
-    // mapper used by durable opaque replay.
-    let canonical_input = crate::responses::encode_canonical_responses_input(
-        model,
-        req.system.as_deref(),
-        &req.messages,
-        req.compatibility,
-    );
 
     // 4. Map tools & tool_choice
     let grammar_tools = super::grammar_tools_for(model);
@@ -1176,7 +1449,28 @@ pub(crate) fn build_request(
         .is_some_and(crate::responses::ResponsesInput::contains_compaction)
         .then(|| req.system.clone())
         .flatten();
-    let mut input = raw_input.cloned().unwrap_or(canonical_input);
+    // Opaque replay is authoritative: do not encode canonical history only to
+    // discard it when a raw input is present.
+    let mut input = raw_input.cloned().unwrap_or_else(|| {
+        crate::responses::encode_canonical_responses_input(
+            model,
+            req.system.as_deref(),
+            &req.messages,
+            req.compatibility,
+        )
+    });
+    crate::responses::validate_responses_input(model, &input, &req.reasoning, false)?;
+    if input.contains_configuration_updates()
+        && responses_options
+            .and_then(|options| options.context_management.as_ref())
+            .is_some()
+    {
+        return Err(ConfigError::Parse(
+            "configuration updates cannot be combined with automatic context management".into(),
+        )
+        .into());
+    }
+    validate_async_input(model, &input, &req.tools)?;
     let instructions = if responses_lite {
         input.strip_image_details_for_responses_lite();
         let mut items = responses_lite_prefix(model, refresh_instructions.as_deref(), &req.tools)?;
@@ -1186,7 +1480,7 @@ pub(crate) fn build_request(
     } else {
         refresh_instructions
     };
-    let mut wire_input = serde_json::to_value(input).expect("Responses input serializes");
+    let mut wire_input = into_wire_input(input);
     if !responses_lite {
         map_grammar_replay(
             &mut wire_input,
@@ -1195,6 +1489,7 @@ pub(crate) fn build_request(
             super::grammar_tools_for(model),
         )?;
     }
+    let explicit_cache_mode = supports_explicit_prompt_cache_mode(model);
     let responses_req = ResponsesRequest {
         model: model.spec.api_name.clone(),
         input: wire_input,
@@ -1214,38 +1509,30 @@ pub(crate) fn build_request(
                 .then_some(model.spec.capabilities.parallel_tool_calls)
         },
         max_output_tokens,
-        // Verified Astra routes reject sampling controls; all other Responses
-        // models remain unchanged. `top_p` and `logprobs` have no Responses
-        // DTO fields and remain absent.
-        temperature: if matches!(
-            model.spec.id.0.as_str(),
-            "gpt-6-astra" | "codex/gpt-6-astra"
-        ) {
-            None
-        } else {
-            req.temperature
-        },
+        temperature: req.temperature,
         reasoning: reasoning_opt,
         text: text_opt,
         service_tier,
         prompt_cache_key: prompt_cache_key(&req),
-        prompt_cache_retention: (req.cache_retention == crate::types::CacheRetention::Long
-            && model.spec.cache.supports_long_retention)
+        prompt_cache_retention: (req.cache_retention == CacheRetention::Long
+            && model.spec.cache.supports_long_retention
+            && !explicit_cache_mode)
             .then_some("24h"),
+        prompt_cache_options: prompt_cache_options(model, req.cache_retention),
         include,
         store: responses_options.is_some_and(|options| options.store),
         stream: true,
     };
 
-    let mut body = serde_json::to_value(&responses_req)
-        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let mut body = responses_req.into_json()?;
     super::preset::sampling(model, &req, &mut body)?;
     let body_bytes =
         serde_json::to_vec(&body).map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "responses")?;
 
-    let headers = responses_affinity_headers(model, cache_session_id(&req))?;
+    let mut headers = responses_affinity_headers(model, cache_session_id(&req))?;
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -1472,6 +1759,8 @@ struct ResponsesContentPartAdded {
 
 #[derive(Deserialize)]
 struct ResponsesResponseItem {
+    #[serde(default, rename = "async")]
+    async_execution: bool,
     id: String,
     r#type: String,
     #[serde(default)]
@@ -1500,6 +1789,8 @@ struct ResponsesResponseItem {
 
 #[derive(Deserialize)]
 struct ResponsesResponseItemDone {
+    #[serde(default, rename = "async")]
+    async_execution: Option<bool>,
     id: String,
     r#type: String,
     #[serde(default)]
@@ -1890,6 +2181,21 @@ pub(crate) fn decode_stream_event(
             )?;
         }
         ResponsesSseEvent::OutputItemAdded { output_index, item } => {
+            crate::responses::validate_provider_output_type(&item.r#type)?;
+            if item.async_execution
+                && (!matches!(item.r#type.as_str(), "function_call" | "custom_tool_call")
+                    || !model.responses_features().async_tools
+                    || !builder.tool_definitions.as_ref().is_some_and(|tools| {
+                        tools.iter().any(|tool| {
+                            tool.async_execution && Some(&tool.name) == item.name.as_ref()
+                        })
+                    }))
+            {
+                return Err(DecodeError::InvalidProviderField(
+                    "unadvertised async tool call".into(),
+                )
+                .into());
+            }
             if item.r#type == "custom_tool_call" {
                 let key = format!("item_{output_index}");
                 let index = get_canonical_index(builder, &key);
@@ -1908,6 +2214,7 @@ pub(crate) fn decode_stream_event(
                     &mut events,
                     builder,
                     StreamEvent::ToolCallStart {
+                        async_execution: item.async_execution,
                         index,
                         id: ToolCallId(item.call_id.unwrap_or(item.id)),
                         name,
@@ -1926,6 +2233,7 @@ pub(crate) fn decode_stream_event(
                         &mut events,
                         builder,
                         StreamEvent::ToolCallStart {
+                            async_execution: item.async_execution,
                             index: canonical_idx,
                             id: ToolCallId(call_id),
                             name,
@@ -1957,6 +2265,7 @@ pub(crate) fn decode_stream_event(
                     &mut events,
                     builder,
                     StreamEvent::ToolCallStart {
+                        async_execution: false,
                         index: canonical_idx,
                         id: ToolCallId(call_id),
                         name: COMPUTER_TOOL_NAME.to_owned(),
@@ -2182,6 +2491,20 @@ pub(crate) fn decode_stream_event(
             }
         }
         ResponsesSseEvent::OutputItemDone { output_index, item } => {
+            crate::responses::validate_provider_output_type(&item.r#type)?;
+            if let Some(marker) = item.async_execution {
+                let index = get_canonical_index(builder, &format!("item_{output_index}"));
+                if builder
+                    .tool_call_builders
+                    .get(&index)
+                    .is_none_or(|call| call.async_execution != marker)
+                {
+                    return Err(DecodeError::InvalidProviderField(
+                        "async call marker changed after call start".into(),
+                    )
+                    .into());
+                }
+            }
             if item.r#type == "custom_tool_call" {
                 let index = get_canonical_index(builder, &format!("item_{output_index}"));
                 super::grammar::finish(&mut events, builder, index, item.input.as_deref())?;
@@ -2338,6 +2661,7 @@ pub(crate) fn decode_stream_event(
             };
             builder.set_stop_reason(stop);
             if let Some(output) = response.output.filter(|output| !output.is_empty()) {
+                validate_terminal_async_markers(builder, &output)?;
                 backfill_reasoning_signatures(builder, &output)?;
                 reconcile_custom_output(&mut events, builder, &output)?;
                 builder.responses_output = Some(crate::responses::ResponsesOutput::new(output));
@@ -2359,10 +2683,12 @@ pub(crate) fn decode_stream_event(
             let stop = match response.incomplete_details.reason.as_str() {
                 "max_output_tokens" => StopReason::MaxTokens,
                 "content_filter" => StopReason::Refusal,
+                "steered" => StopReason::Steered,
                 other => StopReason::Other(other.to_string()),
             };
             builder.set_stop_reason(stop);
             if let Some(output) = response.output.filter(|output| !output.is_empty()) {
+                validate_terminal_async_markers(builder, &output)?;
                 backfill_reasoning_signatures(builder, &output)?;
                 reconcile_custom_output(&mut events, builder, &output)?;
                 builder.responses_output = Some(crate::responses::ResponsesOutput::new(output));
@@ -2502,6 +2828,7 @@ mod tests {
             display_name: None,
             protocol: Protocol::OpenAiResponses,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(crate::types::Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -2611,6 +2938,8 @@ mod tests {
         req.temperature = Some(0.7);
         assert!(build_request(&model, &req).is_err()); // Astra cannot honor Off.
         req.reasoning = ReasoningConfig::Effort(crate::types::ReasoningEffort::Low);
+        assert!(build_request(&model, &req).is_err()); // Non-none reasoning rejects sampling.
+        req.temperature = None;
         let body: serde_json::Value =
             serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
         assert_eq!(body["model"], "gpt-6-astra");
@@ -2652,6 +2981,7 @@ mod tests {
         req.system = Some("System instructions".to_owned());
         req.reasoning = ReasoningConfig::Effort(crate::types::ReasoningEffort::Ultra);
         req.tools.push(ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "read".to_owned(),
             description: "Read a file".to_owned(),
@@ -2700,6 +3030,7 @@ mod tests {
         );
         req.tools.push(ToolDef {
             name: "strict".into(),
+            async_execution: false,
             description: "required strict schema".into(),
             parameters: serde_json::json!({"type":"object", "properties":{}}),
             constrained_sampling: Some(crate::ConstrainedSampling::JsonSchema {
@@ -2731,6 +3062,7 @@ mod tests {
             CompatibilityMode::Strict,
         );
         req.tools.push(ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "read".to_owned(),
             description: "Read a file".to_owned(),
@@ -2805,7 +3137,8 @@ mod tests {
             }),
         ];
 
-        let input = crate::responses::encode_responses_replay(&model, Some("be precise"), &replay);
+        let input =
+            crate::responses::encode_responses_replay(&model, Some("be precise"), &replay).unwrap();
         let value = serde_json::to_value(input).unwrap();
         assert_eq!(value[0]["role"], "developer");
         assert_eq!(value[2], raw);
@@ -2841,7 +3174,8 @@ mod tests {
             &model,
             Some("must not be reinserted"),
             &replay,
-        );
+        )
+        .unwrap();
         let value = serde_json::to_value(input).unwrap();
         assert_eq!(value[0]["id"], "leading-preserved-output");
         assert_eq!(value[1], compacted);
@@ -2871,6 +3205,239 @@ mod tests {
         assert_eq!(body["input"][1], compacted);
         assert_eq!(body["instructions"], "current instructions");
         assert!(!body["input"].to_string().contains("current instructions"));
+    }
+
+    #[test]
+    fn owned_responses_input_moves_through_both_tree_boundaries() {
+        use crate::responses::{ResponsesInput, ResponsesItem};
+        fn allocations(value: &serde_json::Value) -> (*const u8, *const serde_json::Value) {
+            (
+                value["encrypted_content"].as_str().unwrap().as_ptr(),
+                value["future_field"].as_array().unwrap().as_ptr(),
+            )
+        }
+        for count in [1, 128] {
+            let input = ResponsesInput::new(
+                (0..count)
+                    .map(|index| {
+                        ResponsesItem::new(serde_json::json!({
+                            "type": "reasoning", "id": format!("opaque-{index}"),
+                            "encrypted_content": "opaque-🙂".repeat(1024),
+                            "future_field": [{"nested": [null, true, 42, "exact"]}]
+                        }))
+                        .unwrap()
+                    })
+                    .collect(),
+            );
+            let original_allocations: Vec<_> = input
+                .items()
+                .iter()
+                .map(|item| allocations(item.as_json()))
+                .collect();
+            let input = into_wire_input(input);
+            let array_allocation = input.as_array().unwrap().as_ptr();
+            assert_eq!(
+                input
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(allocations)
+                    .collect::<Vec<_>>(),
+                original_allocations
+            );
+            let dto = ResponsesRequest {
+                model: "model".to_owned(),
+                input,
+                instructions: None,
+                previous_response_id: None,
+                context_management: None,
+                tools: None,
+                tool_choice: None,
+                parallel_tool_calls: None,
+                max_output_tokens: None,
+                temperature: None,
+                service_tier: None,
+                reasoning: None,
+                text: None,
+                prompt_cache_key: None,
+                prompt_cache_retention: None,
+                prompt_cache_options: None,
+                include: vec![],
+                store: false,
+                stream: true,
+            };
+            // The metadata serialization must never traverse the owned input,
+            // even if the original input would subsequently overwrite a clone.
+            assert_eq!(
+                serde_json::to_value(&dto).unwrap(),
+                serde_json::json!({
+                    "model": "model", "store": false, "stream": true
+                })
+            );
+            let body = dto.into_json().unwrap();
+            assert_eq!(body.as_object().unwrap().len(), 4);
+            let items = body["input"].as_array().unwrap();
+            assert_eq!(items.as_ptr(), array_allocation);
+            assert_eq!(
+                items.iter().map(allocations).collect::<Vec<_>>(),
+                original_allocations
+            );
+        }
+    }
+
+    #[test]
+    fn raw_replay_and_lite_rebuild_without_mutating_opaque_input() {
+        use crate::responses::{ResponsesInput, ResponsesItem, ResponsesOptions};
+        let raw = vec![
+            serde_json::json!({"type":"compaction", "encrypted_content":"opaque-🙂".repeat(4096), "future":{"null":null, "array":[true, 3]}}),
+            serde_json::json!({"type":"message", "role":"user", "content":[
+                {"type":"input_image", "image_url":"https://example.com/image.png", "detail":"high", "future":[1,2]},
+                {"type":"input_text", "text":"original", "detail":"keep"}
+            ], "detail":"keep-root"}),
+            serde_json::json!({"type":"function_call_output", "call_id":"call|verbatim", "output":[
+                {"type":"input_image", "image_url":"https://example.com/result.png", "detail":"low", "future":{"keep":true}}
+            ], "future":"retain"}),
+            serde_json::json!({"type":"custom_tool_call_output", "call_id":"custom|verbatim", "output":[
+                {"type":"input_image", "image_url":"https://example.com/custom.png", "detail":"auto"}
+            ]}),
+        ];
+        for lite in [false, true] {
+            let mut model = make_test_model(true);
+            Arc::make_mut(&mut model.spec).capabilities.responses_lite = lite;
+            let mut req = user_req(
+                vec![UserPart::Text("unused canonical input".to_owned())],
+                CompatibilityMode::Strict,
+            );
+            req.system = Some("fresh instructions".to_owned());
+            req.tools.push(ToolDef {
+                async_execution: false,
+                name: "read".to_owned(),
+                description: "read".to_owned(),
+                parameters: serde_json::json!({"type":"object"}),
+                constrained_sampling: None,
+            });
+            req.responses = Some(ResponsesOptions::full_replay(ResponsesInput::new(
+                raw.iter()
+                    .cloned()
+                    .map(|item| ResponsesItem::new(item).unwrap())
+                    .collect(),
+            )));
+            let original_request = serde_json::to_value(&req).unwrap();
+            let first = build_request(&model, &req).unwrap();
+            let second = build_request(&model, &req).unwrap();
+            assert_eq!(first.body, second.body);
+            assert_eq!(serde_json::to_value(&req).unwrap(), original_request);
+            let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+            let mut expected = raw.clone();
+            if lite {
+                expected[1]["content"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("detail");
+                expected[2]["output"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("detail");
+                expected[3]["output"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("detail");
+                assert_eq!(&body["input"].as_array().unwrap()[2..], expected.as_slice());
+                assert_eq!(body["input"][0]["type"], "additional_tools");
+                assert_eq!(body["input"][1]["content"][0]["text"], "fresh instructions");
+                assert_eq!(body["reasoning"]["context"], "all_turns");
+                assert_eq!(body["parallel_tool_calls"], false);
+                assert!(body.get("instructions").is_none());
+                assert!(body.get("tools").is_none());
+            } else {
+                assert_eq!(body["input"], serde_json::Value::Array(expected));
+                assert_eq!(body["instructions"], "fresh instructions");
+                assert_eq!(body["tools"][0]["name"], "read");
+                assert_eq!(body["parallel_tool_calls"], true);
+            }
+            assert_eq!(body["store"], false);
+            assert_eq!(body["stream"], true);
+            for omitted in [
+                "previous_response_id",
+                "max_output_tokens",
+                "temperature",
+                "text",
+                "service_tier",
+            ] {
+                assert!(body.get(omitted).is_none(), "{omitted}");
+            }
+        }
+    }
+
+    #[test]
+    fn moved_input_keeps_canonical_and_opaque_grammar_replay_distinct() {
+        use crate::responses::{ResponsesInput, ResponsesItem, ResponsesOptions};
+        let mut model = make_test_model(false);
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .supports_openai_grammar_tools = Some(true);
+        let mut req = user_req(
+            vec![UserPart::Text("go".to_owned())],
+            CompatibilityMode::Strict,
+        );
+        req.tools.push(ToolDef {
+            async_execution: false,
+            name: "language".to_owned(), description: "grammar".to_owned(),
+            parameters: serde_json::json!({"type":"object", "properties":{"source":{"type":"string"}}, "required":["source"], "additionalProperties":false}),
+            constrained_sampling: Some(crate::types::ConstrainedSampling::Grammar {
+                variants: crate::types::GrammarVariants { openai_lark: Some("start: /.+/".to_owned()), openai_regex: None },
+            }),
+        });
+        let source = "println(\"🙂\")\n";
+        req.messages
+            .push(Message::Assistant(crate::types::AssistantMessage {
+                content: vec![AssistantPart::ToolCall(crate::types::ToolCall {
+                    async_execution: false,
+                    id: ToolCallId("call_canonical".to_owned()),
+                    name: "language".to_owned(),
+                    arguments_json: serde_json::json!({"source":source}).to_string(),
+                    argument_error: None,
+                })],
+                model: model.spec.id.clone(),
+                protocol: Protocol::OpenAiResponses,
+            }));
+        req.messages.push(Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(crate::types::ToolResult {
+                tool_call_id: ToolCallId("call_canonical".to_owned()),
+                content: vec![ToolResultPart::Text("ok".to_owned())],
+                is_error: false,
+                added_tool_names: None,
+            })],
+        }));
+        let original = serde_json::to_value(&req).unwrap();
+        let first = build_request(&model, &req).unwrap();
+        assert_eq!(first.body, build_request(&model, &req).unwrap().body);
+        assert_eq!(serde_json::to_value(&req).unwrap(), original);
+        let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(body["input"][1]["type"], "custom_tool_call");
+        assert_eq!(body["input"][1]["input"], source);
+        assert!(body["input"][1].get("arguments").is_none());
+        assert_eq!(body["input"][2]["type"], "custom_tool_call_output");
+
+        let mut raw = vec![
+            serde_json::json!({"type":"function_call", "name":"language", "call_id":"function|exact", "arguments":"{\"source\":\"unchanged\"}", "future":true}),
+            serde_json::json!({"type":"custom_tool_call", "name":"language", "call_id":"custom|exact", "input":source, "future":[null, true]}),
+            serde_json::json!({"type":"function_call_output", "call_id":"custom|exact", "output":"ok", "future":{"keep":true}}),
+            serde_json::json!({"type":"function_call_output", "call_id":"function|exact", "output":"unconverted"}),
+        ];
+        req.responses = Some(ResponsesOptions::full_replay(ResponsesInput::new(
+            raw.iter()
+                .cloned()
+                .map(|item| ResponsesItem::new(item).unwrap())
+                .collect(),
+        )));
+        let original = serde_json::to_value(&req).unwrap();
+        let first = build_request(&model, &req).unwrap();
+        assert_eq!(first.body, build_request(&model, &req).unwrap().body);
+        assert_eq!(serde_json::to_value(&req).unwrap(), original);
+        let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+        raw[2]["type"] = "custom_tool_call_output".into();
+        assert_eq!(body["input"], serde_json::Value::Array(raw));
     }
 
     #[test]
@@ -3125,6 +3692,35 @@ mod tests {
     }
 
     #[test]
+    fn opencode_responses_session_header_is_independent_of_cache_retention() {
+        let mut model = make_test_model(false);
+        Arc::make_mut(&mut model.endpoint).id = crate::EndpointId("opencode".into());
+        Arc::make_mut(&mut model.spec)
+            .cache
+            .send_session_affinity_headers = true;
+        let mut req = user_req(
+            vec![UserPart::Text("hello".into())],
+            CompatibilityMode::Strict,
+        );
+        req.session_id = Some("stable-session".into());
+        req.cache_retention = CacheRetention::None;
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(parts.headers["x-opencode-session"], "stable-session");
+        assert!(parts.headers.get("x-client-request-id").is_none());
+
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .headers
+            .insert("X-OpenCode-Session".into(), "caller-value".into());
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+        req.session_id = None;
+        Arc::make_mut(&mut model.spec).preset.headers.clear();
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+    }
+
+    #[test]
     fn responses_codex_affinity_uses_the_request_session_id() {
         let mut model = make_test_model(false);
         let cache = &mut Arc::make_mut(&mut model.spec).cache;
@@ -3173,6 +3769,7 @@ mod tests {
                 content: vec![UserPart::Text("hello".to_string())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "lookup".to_string(),
                 description: "lookup data".to_string(),
@@ -3228,6 +3825,7 @@ mod tests {
             CompatibilityMode::Strict,
         );
         req.tools = vec![crate::types::ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "lookup".to_string(),
             description: "lookup data".to_string(),
@@ -3515,6 +4113,7 @@ mod tests {
         // The declaration composes with ordinary function tools.
         let mut req = computer_use_req();
         req.tools = vec![ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),
@@ -3578,6 +4177,7 @@ mod tests {
         let model = make_test_model(true);
         Message::Assistant(crate::types::AssistantMessage {
             content: vec![AssistantPart::ToolCall(crate::types::ToolCall {
+                async_execution: false,
                 id: ToolCallId("call_comp_1".to_owned()),
                 name: COMPUTER_TOOL_NAME.to_owned(),
                 arguments_json: arguments_json.to_owned(),
@@ -3733,6 +4333,7 @@ mod tests {
                 }),
             ],
         );
+        let input = input.unwrap();
         let rendered = serde_json::to_string(input.items()).unwrap();
         assert!(
             rendered.contains("\"type\":\"computer_call\""),
@@ -3929,6 +4530,7 @@ mod fixture_tests {
     async fn schema_mismatch_is_marked_before_tool_call_end() {
         let model = harness::model(Protocol::OpenAiResponses, None);
         let tools = [ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),
@@ -4455,3 +5057,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output
         assert_eq!(raw.matches("\"type\":\"click\"").count(), 1, "{raw}");
     }
 }
+
+#[cfg(test)]
+#[path = "openai_responses_gpt6_tests.rs"]
+mod gpt6_tests;

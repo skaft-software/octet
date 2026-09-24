@@ -10035,6 +10035,8 @@ fn project_entry(
         | EntryValue::PromptTemplateSelected { .. }
         | EntryValue::SkillActivated { .. }
         | EntryValue::SkillResourceRead { .. }
+        | EntryValue::ResponsesSteering { .. }
+        | EntryValue::ResponsesReasoning { .. }
         | EntryValue::SkillDeactivated { .. } => {}
     }
     Ok(items)
@@ -15090,6 +15092,7 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(octet_ai::ToolCall {
+                    async_execution: false,
                     id: ToolCallId(call_id.to_owned()),
                     name: name.to_owned(),
                     arguments_json: serde_json::to_string(&arguments).unwrap(),
@@ -15540,6 +15543,7 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         created_session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(octet_ai::ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call-write-replaced".into()),
                     name: "write".into(),
                     arguments_json: serde_json::to_string(&replaced.arguments).unwrap(),
@@ -16713,6 +16717,7 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(octet_ai::ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call-hostile-historical-text".into()),
                     name: "bash".into(),
                     arguments_json: serde_json::to_string(&serde_json::json!({
@@ -17131,6 +17136,7 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(octet_ai::ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call-legacy-semantic".into()),
                     name: "bash".into(),
                     arguments_json: serde_json::to_string(&arguments).unwrap(),
@@ -17208,6 +17214,7 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(octet_ai::ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call-semantic-replay".into()),
                     name: "bash".into(),
                     arguments_json: serde_json::to_string(&arguments).unwrap(),

@@ -6,7 +6,7 @@ use crate::presentation::{format_duration, RunOutcome};
 use super::outcome_render::{bounded_outcome_detail, completion_text};
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{bounded_tool_failure_reason, looks_like_diff};
-use super::{subagent_activity_copy_text, ShellState, TranscriptBlock};
+use super::{ShellState, TranscriptBlock};
 
 /// Durable transcript coordinate. It deliberately names a semantic block and
 /// an offset in that block's clean copy text, never a terminal row. Reflow,
@@ -30,6 +30,7 @@ pub(super) struct TranscriptSelection {
 /// composer text, or footer text.
 pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
     match block {
+        TranscriptBlock::Subagents(summary) => summary.label(),
         TranscriptBlock::User { text, .. } | TranscriptBlock::Notice(text) => {
             sanitize_for_terminal(text)
         }
@@ -40,19 +41,8 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
             sanitize_for_terminal(&compaction.label),
             sexy_tui_rs::parse_markdown(&compaction.summary).plain_text()
         ),
-        TranscriptBlock::Assistant(markdown) => {
-            sexy_tui_rs::parse_markdown(&markdown.text).plain_text()
-        }
-        TranscriptBlock::Reasoning(reasoning) => {
-            sexy_tui_rs::parse_markdown(reasoning.markdown.raw_text()).plain_text()
-        }
-        TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some() => {
-            sanitize_for_terminal(&subagent_activity_copy_text(
-                panel
-                    .subagent_activity
-                    .as_ref()
-                    .expect("subagent activity guard just matched"),
-            ))
+        TranscriptBlock::Assistant(markdown) | TranscriptBlock::Reasoning(markdown) => {
+            markdown.copy_text()
         }
         TranscriptBlock::Tool(panel) => {
             let summary = if panel.finished {
@@ -226,7 +216,9 @@ fn visual_cell_to_copy_offset(
         | TranscriptBlock::Compaction(_) => {
             wrapped_line_col_offset(copy_text, local_row, col, usize::from(width).max(1))
         }
-        TranscriptBlock::Outcome(_) => visual_col_to_offset(copy_text, usize::from(col)),
+        TranscriptBlock::Outcome(_) | TranscriptBlock::Subagents(_) => {
+            visual_col_to_offset(copy_text, usize::from(col))
+        }
         TranscriptBlock::Tool(_) => {
             let indent = if width < 60 { 7 } else { 8 };
             let col_in_text = col.saturating_sub(indent);
@@ -292,7 +284,7 @@ fn copy_offset_to_visual_row(
             usize::from(width.saturating_sub(2)).max(1),
             trailing_affinity,
         ),
-        TranscriptBlock::Outcome(_) => 0,
+        TranscriptBlock::Outcome(_) | TranscriptBlock::Subagents(_) => 0,
         TranscriptBlock::Tool(_) => newline_offset_to_line(copy_text, offset, trailing_affinity),
     }
 }
@@ -301,10 +293,24 @@ pub(super) fn visual_line_for_transcript_position(
     state: &ShellState,
     position: TranscriptPosition,
 ) -> Option<usize> {
-    let cache = state.transcript_cache.borrow();
-    let start = *cache.block_starts.get(position.block)?;
-    let total_rows = *cache.block_lengths.get(position.block)?;
-    let geometry = *cache.block_geometries.get(position.block)?;
+    let (start, total_rows, geometry) = if state.render_threaded {
+        let block = state
+            .retained_render_geometry()?
+            .blocks
+            .iter()
+            .find(|block| block.index == position.block)?;
+        if state.transcript_commit_ids.get(block.index) != Some(&block.id) {
+            return None;
+        }
+        (block.start, block.rows, block.surface)
+    } else {
+        let cache = state.transcript_cache.borrow();
+        (
+            *cache.block_starts.get(position.block)?,
+            *cache.block_lengths.get(position.block)?,
+            *cache.block_geometries.get(position.block)?,
+        )
+    };
     let content_rows = total_rows
         .saturating_sub(geometry.transition_rows)
         .saturating_sub(geometry.leading_rows)
@@ -312,8 +318,6 @@ pub(super) fn visual_line_for_transcript_position(
     if content_rows == 0 {
         return None;
     }
-    drop(cache);
-
     let block = state.transcript.get(position.block)?;
     let copy_text = block_copy_text(block);
     let content_row = copy_offset_to_visual_row(
@@ -337,21 +341,39 @@ pub(super) fn selection_position_for_visual_cell(
     visual_line: usize,
     col: u16,
 ) -> Option<TranscriptPosition> {
-    let cache = state.transcript_cache.borrow();
-    let block = cache
-        .block_starts
-        .partition_point(|start| *start <= visual_line)
-        .checked_sub(1)?;
-    let local_row = visual_line.checked_sub(cache.block_starts[block])?;
-    let total_rows = *cache.block_lengths.get(block)?;
-    let geometry = *cache.block_geometries.get(block)?;
+    let (block, local_row, total_rows, geometry) = if state.render_threaded {
+        let block = state
+            .retained_render_geometry()?
+            .blocks
+            .iter()
+            .find(|block| visual_line >= block.start && visual_line < block.start + block.rows)?;
+        if state.transcript_commit_ids.get(block.index) != Some(&block.id) {
+            return None;
+        }
+        (
+            block.index,
+            visual_line - block.start,
+            block.rows,
+            block.surface,
+        )
+    } else {
+        let cache = state.transcript_cache.borrow();
+        let block = cache
+            .block_starts
+            .partition_point(|start| *start <= visual_line)
+            .checked_sub(1)?;
+        (
+            block,
+            visual_line.checked_sub(cache.block_starts[block])?,
+            *cache.block_lengths.get(block)?,
+            *cache.block_geometries.get(block)?,
+        )
+    };
     if local_row >= total_rows {
         return None;
     }
     let content_row = geometry.content_row(local_row, total_rows)?;
     let content_col = geometry.content_col(col);
-    drop(cache);
-
     let transcript_block = state.transcript.get(block)?;
     let text = block_copy_text(transcript_block);
     let offset = visual_cell_to_copy_offset(

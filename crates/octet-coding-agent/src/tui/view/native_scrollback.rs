@@ -10,14 +10,14 @@ use super::transcript_commit::transcript_pinned_frame;
 use super::viewport::{overlay_lines, transcript_lines};
 use super::{ShellState, TranscriptBlock};
 
-/// Live tool output is replaceable telemetry, not a final result. Keep only an
-/// ordinary trailing pending call wholly addressable until its result arrives.
-/// The preview must never start at an earlier active roster: everything after
-/// that roster includes independent answers and tool results, not its progress.
-/// Clipping that suffix removes real conversation from native history.
+/// Keep only an ordinary trailing pending call wholly addressable until its
+/// authoritative result arrives. A tall preview must not push its mutable
+/// heading into saved lines. Final results use the normal disclosure policy.
 ///
-/// Historical live calls/rosters still use the renderer's full replay path for
-/// real updates. The source cache alone cannot stand in for emitted scrollback.
+/// A non-trailing tool cannot own the rest of the transcript:
+/// clipping that suffix would hide unrelated answers and completed results.
+/// Those blocks retain their canonical rows, and real historical updates take
+/// Pi's visible repaint or saved-line clear/replay path rather than being frozen.
 fn pending_tool_tail(
     state: &ShellState,
     chrome: &ShellChrome,
@@ -27,7 +27,7 @@ fn pending_tool_tail(
     let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
         return None;
     };
-    if panel.finished || panel.subagent_activity.is_some() {
+    if panel.finished {
         return None;
     }
     let cache = state.transcript_cache.borrow();
@@ -92,6 +92,7 @@ fn native_viewport_surface(state: &ShellState, chrome: &ShellChrome) -> bool {
         || state.panel.is_some()
         || !state.editor.is_empty()
         || state.tool_input_prompt.is_some()
+        || !chrome.subagents.is_empty()
         || !chrome.pending.is_empty()
         || !chrome.suggestions.is_empty()
         || !chrome.error.is_empty()

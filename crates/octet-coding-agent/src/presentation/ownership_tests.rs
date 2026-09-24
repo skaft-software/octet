@@ -463,6 +463,7 @@ fn tool_turn_displays_latest_request_and_excludes_tool_wall_time() {
             .accepted
     );
     let first_call = ToolCall {
+        async_execution: false,
         id: ToolCallId("call-1".to_owned()),
         name: "write".to_owned(),
         arguments_json: json!({"path": "src/lib.rs"}).to_string(),
@@ -645,7 +646,23 @@ fn model_tool_and_duration_presentation_are_stable_boundaries() {
         resolve_model_display_name(Some("Configured"), "unknown", "unknown"),
         "Configured"
     );
-    assert_eq!(model_display_name_variants("GPT-4o")[0], "GPT-4o");
+    assert_eq!(model_display_name_variants("GPT-4o"), vec!["GPT-4o"]);
+    assert_eq!(
+        model_display_name_variants("Claude Sonnet 4.6"),
+        vec!["Claude Sonnet 4.6", "Claude Sonnet", "Claude"]
+    );
+    assert_eq!(
+        super::model::footer_model_name(
+            "Anthropic: Claude Sonnet 4.6",
+            "anthropic/claude-sonnet-4-6"
+        ),
+        "Anthropic: Claude Sonnet 4.6",
+        "a configured provider prefix is not catalogue-owned",
+    );
+    assert_eq!(
+        super::model::footer_model_name("Local tuned Qwen", "local/qwen3.6-27b"),
+        "Local tuned Qwen",
+    );
     assert_eq!(format_duration(Duration::from_millis(1_250)), "1.3s");
 
     let summary = summarize_tool("write", &json!({"path": "src/lib.rs"}));

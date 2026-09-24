@@ -33,6 +33,7 @@ pub struct WriteTool;
 impl Tool for WriteTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "write".to_string(),
             description: "Create or fully replace one file. Creates missing parent \

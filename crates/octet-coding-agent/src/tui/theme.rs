@@ -178,6 +178,34 @@ pub(crate) enum TerminalBackground {
     Unknown,
 }
 
+/// The activity shimmer implementation used by the renderer.
+///
+/// Physical mode is the default for terminals with a known background and
+/// TrueColor/ANSI256 output. Classic remains available for A/B comparisons and
+/// is also the safe fallback for unknown backgrounds and ANSI16 terminals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShimmerMode {
+    Classic,
+    Physical,
+}
+
+impl ShimmerMode {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "classic" => Some(Self::Classic),
+            "physical" => Some(Self::Physical),
+            _ => None,
+        }
+    }
+
+    fn from_environment() -> Self {
+        std::env::var("OCTET_SHIMMER")
+            .ok()
+            .and_then(|value| Self::parse(&value))
+            .unwrap_or(Self::Physical)
+    }
+}
+
 /// The three terminal-appearance choices exposed by the interactive TUI.
 /// These are selectors for the compiled theme, not filesystem theme names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +281,7 @@ pub struct OctetTheme {
     inner: SexyTheme,
     capabilities: TerminalCapabilities,
     background: TerminalBackground,
+    shimmer: ShimmerMode,
     semantic_styles: BTreeMap<String, TextStyle>,
     glyphs: BTreeMap<String, String>,
     ascii_glyphs: BTreeMap<String, String>,
@@ -499,6 +528,7 @@ impl OctetTheme {
             inner,
             capabilities,
             background,
+            shimmer: ShimmerMode::from_environment(),
             semantic_styles: BTreeMap::new(),
             glyphs: default_glyphs(),
             ascii_glyphs: default_ascii_glyphs(),
@@ -564,6 +594,10 @@ impl OctetTheme {
     #[allow(dead_code)]
     pub(crate) fn background(&self) -> TerminalBackground {
         self.background
+    }
+
+    pub(crate) fn shimmer_mode(&self) -> ShimmerMode {
+        self.shimmer
     }
 
     /// Return a theme glyph with deterministic ASCII fallback. Theme files can
@@ -756,6 +790,59 @@ impl OctetTheme {
             TextStyle::plain()
                 .foreground(foreground)
                 .background(Color::Rgb(color.red, color.green, color.blue)),
+            text,
+        )
+    }
+
+    /// Only the compiled prompt body opts into compact, provenance-coloured
+    /// highlights. Unknown backgrounds use an unpainted, readable foreground;
+    /// limited palettes use the existing contrast-tested surface treatment.
+    pub(crate) fn prompt_text_highlight(&self, color: Option<&str>, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        let Some(source) = color.and_then(parse_hex_color) else {
+            return text.to_owned();
+        };
+        if self.capabilities.color == ColorDepth::None
+            || self.background == TerminalBackground::Unknown
+        {
+            return text.to_owned();
+        }
+        if self.capabilities.color != ColorDepth::TrueColor {
+            return self.prompt_color_cell(color, text);
+        }
+        let (background, foreground) = match self.background {
+            TerminalBackground::Dark => (
+                balance_to_luminance(source, 0.10),
+                Rgb {
+                    red: 0xe6,
+                    green: 0xe6,
+                    blue: 0xeb,
+                },
+            ),
+            TerminalBackground::Light => (
+                balance_to_luminance(source, 0.88),
+                Rgb {
+                    red: 0x20,
+                    green: 0x23,
+                    blue: 0x27,
+                },
+            ),
+            TerminalBackground::Unknown => unreachable!("handled above"),
+        };
+        self.inner.apply_style(
+            TextStyle::plain()
+                .foreground(Color::Rgb(
+                    foreground.red,
+                    foreground.green,
+                    foreground.blue,
+                ))
+                .background(Color::Rgb(
+                    background.red,
+                    background.green,
+                    background.blue,
+                )),
             text,
         )
     }
@@ -957,6 +1044,7 @@ impl OctetTheme {
                 syntax_highlighting: true,
                 tables: true,
                 stable_block_geometry: true,
+                prose_width: None,
                 unordered_list_marker: UnorderedListMarker::Dash,
                 ..RenderOptions::default()
             },
@@ -1407,9 +1495,13 @@ pub(crate) fn balance_background(source: &str, background: TerminalBackground) -
         TerminalBackground::Light => 0.95,
         TerminalBackground::Unknown => UNIVERSAL_TARGET_LUMINANCE,
     };
+    hex_color(balance_to_luminance(source, target_luminance))
+}
+
+fn balance_to_luminance(source: Rgb, target_luminance: f64) -> Rgb {
     let source_luminance = relative_luminance(source);
     if (source_luminance - target_luminance).abs() <= 0.002 {
-        return hex_color(source);
+        return source;
     }
     let lighten = source_luminance < target_luminance;
     let destination = if lighten {
@@ -1441,7 +1533,7 @@ pub(crate) fn balance_background(source: &str, background: TerminalBackground) -
             low = amount;
         }
     }
-    hex_color(blend(source, destination, high))
+    blend(source, destination, high)
 }
 
 fn balance_foreground(source: &str, background: TerminalBackground) -> String {
@@ -1582,6 +1674,14 @@ fn default_theme_for(
         &standard_surface("#202630", "#f1f5f4", background),
     );
     theme.override_token("md_code_inline_bg", "default");
+    theme.override_token(
+        "tool_output",
+        match background {
+            TerminalBackground::Dark => "#bec2c6",
+            TerminalBackground::Light => "#50585c",
+            TerminalBackground::Unknown => "default",
+        },
+    );
     apply_required_surfaces(&mut theme, background);
     apply_standard_technical_palette(&mut theme, background);
     // There is no model before the startup picker. Use octet green until the
@@ -1620,6 +1720,17 @@ pub(crate) fn test_theme_for(
     capabilities: TerminalCapabilities,
 ) -> OctetTheme {
     default_theme_for(background, capabilities)
+}
+
+#[cfg(test)]
+pub(crate) fn test_theme_for_shimmer(
+    background: TerminalBackground,
+    capabilities: TerminalCapabilities,
+    shimmer: ShimmerMode,
+) -> OctetTheme {
+    let mut theme = default_theme_for(background, capabilities);
+    theme.shimmer = shimmer;
+    theme
 }
 
 #[cfg(test)]
@@ -2335,6 +2446,17 @@ mod tests {
     }
 
     #[test]
+    fn shimmer_mode_accepts_only_the_documented_values() {
+        assert_eq!(ShimmerMode::parse("classic"), Some(ShimmerMode::Classic));
+        assert_eq!(
+            ShimmerMode::parse(" PHYSICAL "),
+            Some(ShimmerMode::Physical)
+        );
+        assert_eq!(ShimmerMode::parse("legacy"), None);
+        assert_eq!(ShimmerMode::parse(""), None);
+    }
+
+    #[test]
     fn project_theme_is_discovered_loaded_and_names_are_deduplicated() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = config(directory.path().to_owned());
@@ -2370,7 +2492,7 @@ mod tests {
         let names = available_themes(&config);
         assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
         assert!(load_named_theme(DEFAULT_THEME_NAME, &config).is_ok());
-        for name in ["legacy-theme", "custom"] {
+        for name in ["legacy-theme", "custom", "compact"] {
             assert!(
                 load_named_theme(name, &config).is_err(),
                 "unexpected theme availability for {name}"
@@ -2389,11 +2511,19 @@ mod tests {
                 .is_compiled_default()
         );
 
-        configured.theme = Some("legacy-theme".to_owned());
-        assert!(
-            load_theme_for_background(&configured, TerminalBackground::Unknown)
-                .is_compiled_default()
-        );
+        for name in ["legacy-theme", "compact"] {
+            configured.theme = Some(name.to_owned());
+            for background in [
+                TerminalBackground::Unknown,
+                TerminalBackground::Dark,
+                TerminalBackground::Light,
+            ] {
+                let theme = load_theme_for_background(&configured, background);
+                assert!(theme.is_compiled_default());
+                assert_eq!(theme.background(), background);
+                assert!(theme.layout_for_width(80).show_footer);
+            }
+        }
     }
 
     #[test]
@@ -2964,6 +3094,7 @@ mod tests {
             Some(TerminalThemeChoice::Light)
         );
         assert_eq!(TerminalThemeChoice::parse("custom"), None);
+        assert_eq!(TerminalThemeChoice::parse("compact"), None);
 
         let directory = tempfile::tempdir().unwrap();
         let mut config = config(directory.path().to_owned());

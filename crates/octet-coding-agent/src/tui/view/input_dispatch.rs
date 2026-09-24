@@ -135,13 +135,6 @@ impl InteractiveShell {
     pub fn reload_keybindings(&mut self) {
         self.input_dispatch.bindings.reload();
         self.input_dispatch.jump_forward = None;
-        let conflicts = self.input_dispatch.bindings.get_conflicts();
-        if !conflicts.is_empty() {
-            self.state.borrow_mut().error = Some(format!(
-                "{} conflicting user keybinding(s); /hotkeys shows resolved actions",
-                conflicts.len()
-            ));
-        }
     }
 
     /// Ordered, available model ids supplied by the App's scoped catalog. A

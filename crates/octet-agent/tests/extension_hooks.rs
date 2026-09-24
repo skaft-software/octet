@@ -90,6 +90,7 @@ fn persistence_metadata_rejects_invalid_shapes_and_forged_provenance_at_durable_
     }
     let metadata = persist(EntryMetadata {
         display_text: Some("forged-content".into()),
+        native_steering: None,
         local_synthetic_assistant: true,
         extension_metadata: BTreeMap::from([(
             "valid.name".into(),

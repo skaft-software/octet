@@ -340,6 +340,8 @@ async fn omitted_output_caps_refuse_every_hard_ceiling_consumer_before_dispatch(
                 Arc::make_mut(&mut agent.model.endpoint).base_url =
                     url::Url::parse(&format!("{}/", server.uri())).unwrap();
                 Arc::make_mut(&mut agent.model.endpoint).auth = octet_ai::Auth::bearer("test");
+                Arc::make_mut(&mut agent.model.endpoint).transport =
+                    octet_ai::EndpointTransport::Http;
                 let spec = Arc::make_mut(&mut agent.model.spec);
                 spec.limits.max_output_tokens = 4096;
                 if codex {
@@ -428,6 +430,7 @@ async fn capped_main_and_gate_reservations_match_the_actual_wire_fields() {
     Arc::make_mut(&mut agent.model.endpoint).base_url =
         url::Url::parse(&format!("{}/", server.uri())).unwrap();
     Arc::make_mut(&mut agent.model.endpoint).auth = octet_ai::Auth::bearer("test");
+    Arc::make_mut(&mut agent.model.endpoint).transport = octet_ai::EndpointTransport::Http;
     Arc::make_mut(&mut agent.model.spec)
         .limits
         .max_output_tokens = 4096;

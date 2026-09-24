@@ -242,7 +242,11 @@ impl Client {
             .expect("validated ASCII authorization")
             .strip_prefix("Bearer ")
             .expect("host-owned Bearer authorization");
-        parse_models(inventory, [github_token, inference_token])
+        parse_models(
+            inventory,
+            [github_token, inference_token],
+            session.endpoint.base_url().host_str() == Some("api.individual.githubcopilot.com"),
+        )
     }
 }
 
@@ -369,11 +373,16 @@ struct Inventory {
     data: Vec<serde_json::Value>,
 }
 
-fn parse_models(inventory: Inventory, secrets: [&str; 2]) -> Result<Vec<CopilotModel>, Error> {
+fn parse_models(
+    inventory: Inventory,
+    secrets: [&str; 2],
+    individual: bool,
+) -> Result<Vec<CopilotModel>, Error> {
     if inventory.data.len() > 128 {
         return Err(Error::TooManyModels);
     }
     let mut models = Vec::new();
+    let mut individual_fallback = Vec::new();
     for value in inventory.data {
         // Validate each record before filtering, so a malformed sibling cannot
         // turn a failed inventory into a partially advertised one.
@@ -385,10 +394,7 @@ fn parse_models(inventory: Inventory, secrets: [&str; 2]) -> Result<Vec<CopilotM
         {
             return Err(Error::InvalidModelMetadata);
         }
-        if !model.model_picker_enabled
-            || model.policy.state != "enabled"
-            || model.capabilities.kind != "chat"
-        {
+        if model.policy.state != "enabled" || model.capabilities.kind != "chat" {
             continue;
         }
         let protocol = if model
@@ -410,13 +416,14 @@ fn parse_models(inventory: Inventory, secrets: [&str; 2]) -> Result<Vec<CopilotM
         let supports = model.capabilities.supports;
         // A bare reasoning flag is not an effort/control contract. Leave these
         // models out rather than fabricate controls or strip reasoning semantics.
-        if supports.reasoning {
+        if supports.reasoning || !supports.tool_calls {
             continue;
         }
         let mut metadata = CopilotModel::new(
             model.id,
             protocol,
             Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: supports.tool_calls,
@@ -437,7 +444,17 @@ fn parse_models(inventory: Inventory, secrets: [&str; 2]) -> Result<Vec<CopilotM
         if let Some(name) = model.name {
             metadata = metadata.with_display_name(name);
         }
-        models.push(metadata);
+        if model.model_picker_enabled {
+            models.push(metadata);
+        } else if individual {
+            // An Individual inventory can omit picker entries while still
+            // explicitly enabling models in policy. Never apply this fallback
+            // to Business/Enterprise or an unscoped inference authority.
+            individual_fallback.push(metadata);
+        }
+    }
+    if models.is_empty() && individual {
+        models = individual_fallback;
     }
     if models.is_empty() {
         return Err(Error::NoEligibleModels);
@@ -482,4 +499,96 @@ struct Supports {
 struct Limits {
     max_context_window_tokens: u64,
     max_output_tokens: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn model(id: &str, picker: bool) -> Value {
+        json!({
+            "id": id, "name": id, "model_picker_enabled": picker,
+            "policy": {"state": "enabled"},
+            "supported_endpoints": ["/chat/completions"],
+            "capabilities": {
+                "type": "chat",
+                "supports": {"tool_calls": true, "parallel_tool_calls": true},
+                "limits": {"max_context_window_tokens": 32000, "max_output_tokens": 4096}
+            }
+        })
+    }
+
+    fn parse(data: Vec<Value>, individual: bool) -> Result<Vec<CopilotModel>, Error> {
+        parse_models(
+            Inventory { data },
+            ["oauth-secret", "inference-secret"],
+            individual,
+        )
+    }
+
+    #[test]
+    fn tool_incapable_models_never_enter_either_inventory_path() {
+        let mut no_tools = model("no-tools", true);
+        no_tools["capabilities"]["supports"]["tool_calls"] = json!(false);
+        no_tools["capabilities"]["supports"]["parallel_tool_calls"] = json!(false);
+        assert_eq!(
+            parse(vec![no_tools.clone()], false).unwrap_err(),
+            Error::NoEligibleModels
+        );
+        no_tools["model_picker_enabled"] = json!(false);
+        assert_eq!(
+            parse(vec![no_tools.clone()], true).unwrap_err(),
+            Error::NoEligibleModels
+        );
+        let selected = parse(vec![no_tools, model("with-tools", false)], true).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id(), "with-tools");
+    }
+
+    #[test]
+    fn individual_fallback_requires_empty_picker_and_enabled_policy() {
+        let mut disabled = model("disabled", false);
+        disabled["policy"]["state"] = json!("disabled");
+        let mut reasoning = model("reasoning", false);
+        reasoning["capabilities"]["supports"]["reasoning"] = json!(true);
+        let mut unsupported = model("anthropic-only", false);
+        unsupported["supported_endpoints"] = json!(["/v1/messages"]);
+        let fallback = model("policy-only", false);
+
+        assert_eq!(
+            parse(vec![fallback.clone()], false).unwrap_err(),
+            Error::NoEligibleModels,
+            "Business/Enterprise and unscoped origins cannot use Individual policy"
+        );
+        let selected = parse(
+            vec![disabled, reasoning, unsupported, fallback.clone()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id(), "policy-only");
+        assert_eq!(selected[0].protocol(), Protocol::OpenAiChat);
+        assert!(selected[0].capabilities().tools);
+
+        let selected = parse(vec![fallback, model("picker", true)], true).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].id(),
+            "picker",
+            "picker inventory remains authoritative"
+        );
+    }
+
+    #[test]
+    fn malformed_sibling_invalidates_individual_fallback_inventory() {
+        assert_eq!(
+            parse(
+                vec![model("policy-only", false), json!({"id": "broken"})],
+                true
+            )
+            .unwrap_err(),
+            Error::InvalidModelMetadata
+        );
+    }
 }

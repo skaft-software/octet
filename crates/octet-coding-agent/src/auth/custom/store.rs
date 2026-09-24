@@ -529,6 +529,27 @@ impl CredentialStore {
         write_private(&path, bytes).with_context(|| format!("writing {}", path.display()))
     }
 
+    /// A background refresh may publish only over the exact cache it observed
+    /// before discovery. A newer setup or refresh must never be rolled back.
+    pub(crate) fn save_model_cache_if_unchanged_for(
+        &self,
+        provider_id: &str,
+        expected: &[u8],
+        bytes: &[u8],
+    ) -> Result<bool> {
+        let path = self.model_cache_path_for(provider_id);
+        match octet_agent::secure_fs::write_private_atomic_if_unchanged(
+            &path,
+            Some(expected),
+            bytes,
+            MAX_MODEL_CACHE_BYTES,
+        ) {
+            Ok(()) => Ok(true),
+            Err(octet_agent::secure_fs::SecureFileError::Changed) => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
+        }
+    }
+
     /// Compatibility cache accessor for the original single endpoint.
     #[cfg(test)]
     pub(crate) fn save_model_cache(&self, bytes: &[u8]) -> Result<()> {
@@ -1108,6 +1129,25 @@ mod tests {
         store.delete().unwrap();
         assert!(store.load_model_cache_for("apple-fm").unwrap().is_none());
         assert!(store.load_model_cache_for("home-server").unwrap().is_none());
+    }
+
+    #[test]
+    fn background_model_cache_refresh_cannot_overwrite_a_newer_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("credentials/custom.json"));
+        store.save_model_cache_for("fixture", b"old").unwrap();
+        let old = store.load_model_cache_for("fixture").unwrap().unwrap();
+        assert!(store
+            .save_model_cache_if_unchanged_for("fixture", &old, b"refreshed")
+            .unwrap());
+        store.save_model_cache_for("fixture", b"newer").unwrap();
+        assert!(!store
+            .save_model_cache_if_unchanged_for("fixture", &old, b"late")
+            .unwrap());
+        assert_eq!(
+            store.load_model_cache_for("fixture").unwrap().unwrap(),
+            b"newer"
+        );
     }
 
     #[test]

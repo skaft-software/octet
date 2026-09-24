@@ -1034,6 +1034,7 @@ mod tests {
     #[test]
     fn validates_repaired_arguments_against_tool_schema() {
         let tools = vec![crate::types::ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "read".to_owned(),
             description: "Read a file".to_owned(),
@@ -1075,12 +1076,14 @@ mod tests {
     fn rejects_ambiguous_or_unbounded_tool_schemas() {
         let duplicate = vec![
             crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "same".to_owned(),
                 description: String::new(),
                 parameters: serde_json::json!({"type": "object"}),
             },
             crate::types::ToolDef {
+                async_execution: false,
                 constrained_sampling: None,
                 name: "same".to_owned(),
                 description: String::new(),
@@ -1089,6 +1092,7 @@ mod tests {
         ];
         assert!(validate_tool_definitions(&duplicate).is_err());
         assert!(validate_tool_definitions(&[crate::types::ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "unsupported".to_owned(),
             description: String::new(),
@@ -1103,6 +1107,7 @@ mod tests {
     #[test]
     fn value_validation_work_exhaustion_is_fatal_and_secret_free() {
         let tools = [crate::types::ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "bounded".to_owned(),
             description: String::new(),
@@ -1139,6 +1144,7 @@ mod tests {
             schema = serde_json::json!({"type": "object", "properties": {"next": schema}});
         }
         let error = validate_tool_definitions(&[crate::types::ToolDef {
+            async_execution: false,
             constrained_sampling: None,
             name: "deep".to_owned(),
             description: String::new(),

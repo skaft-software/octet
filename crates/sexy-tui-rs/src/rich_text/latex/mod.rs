@@ -73,6 +73,7 @@
 //! running under Node with its real `visibleWidth`, so wide and combining
 //! glyphs are measured identically.
 
+pub(crate) mod markdown;
 mod tables;
 
 use crate::width::display_width;
@@ -121,6 +122,11 @@ const COMBINING_LONG_SOLIDUS: char = '\u{338}';
 /// somewhere between 300 and 500 levels of input on a 2 MiB stack, so the cap
 /// keeps a wide margin.
 pub const MAX_LATEX_NESTING_DEPTH: usize = 64;
+
+// Matrix padding multiplies row count by the widest value in every column.
+// Reject the layout before allocating its padded rectangle; callers retain the
+// original literal expression through the existing unsupported-math fallback.
+const MAX_MATRIX_LAYOUT_BYTES: usize = 256 * 1024;
 
 /// Render a basic LaTeX math expression as terminal-friendly Unicode text.
 ///
@@ -731,11 +737,10 @@ impl<'nodes> LatexParser<'nodes> {
             if character == '\\' {
                 let command = self.parse_command();
                 if command == NEGATIVE_SPACE {
-                    let mut trimmed = result.trim_end().to_owned();
-                    if trimmed.ends_with(NAMED_OPERATOR_END) {
-                        trimmed.truncate(trimmed.len() - NAMED_OPERATOR_END.len_utf8());
+                    result.truncate(result.trim_end().len());
+                    if result.ends_with(NAMED_OPERATOR_END) {
+                        result.truncate(result.len() - NAMED_OPERATOR_END.len_utf8());
                     }
-                    result = trimmed;
                 } else {
                     result.push_str(&command);
                 }
@@ -743,8 +748,7 @@ impl<'nodes> LatexParser<'nodes> {
             }
             if character == '^' || character == '_' {
                 self.position += 1;
-                let trimmed = result.trim_end().to_owned();
-                result = trimmed;
+                result.truncate(result.trim_end().len());
                 let argument = self.parse_required_argument(false);
                 let script = format_script(
                     &argument,
@@ -769,8 +773,10 @@ impl<'nodes> LatexParser<'nodes> {
                 continue;
             }
             if character == '=' || character == '<' || character == '>' {
-                let trimmed = result.trim_end().to_owned();
-                result = format!("{trimmed} {character} ");
+                result.truncate(result.trim_end().len());
+                result.push(' ');
+                result.push(character);
+                result.push(' ');
                 self.position += 1;
                 continue;
             }
@@ -1327,6 +1333,12 @@ impl<'nodes> LatexParser<'nodes> {
             .filter(|row: &Vec<String>| row.iter().any(|cell| !cell.is_empty()))
             .collect();
         let column_count = matrix.iter().map(|row| row.len()).max().unwrap_or(0);
+        // Bound the rectangular work as well as its eventual text: ragged rows
+        // must not make the width pass visit an enormous mostly-empty grid.
+        if matrix.len().saturating_mul(column_count) > MAX_MATRIX_LAYOUT_BYTES / 8 {
+            self.supported = false;
+            return String::new();
+        }
         let column_widths: Vec<usize> = (0..column_count)
             .map(|column| {
                 matrix
@@ -1336,6 +1348,19 @@ impl<'nodes> LatexParser<'nodes> {
                     .unwrap_or(0)
             })
             .collect();
+        let content_bytes: usize = matrix.iter().flatten().map(String::len).sum();
+        let padding_per_row = column_widths
+            .iter()
+            .sum::<usize>()
+            .saturating_mul(PROTECTED_SPACE.len_utf8())
+            .saturating_add(column_count.saturating_mul(" │ ".len()))
+            .saturating_add(16); // delimiters and line ending
+        if content_bytes.saturating_add(matrix.len().saturating_mul(padding_per_row))
+            > MAX_MATRIX_LAYOUT_BYTES
+        {
+            self.supported = false;
+            return String::new();
+        }
         let rows: Vec<String> = matrix
             .iter()
             .map(|row| {
@@ -1495,4 +1520,29 @@ fn starts_with_case_keyword(condition: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_relations_preserve_spacing() {
+        let source = "x=".repeat(1024) + "y";
+        assert_eq!(
+            render_latex(&source, RenderLatexOptions::default()),
+            Some("x = ".repeat(1024) + "y")
+        );
+    }
+
+    #[test]
+    fn amplified_matrix_falls_back_before_padding() {
+        let source = format!(
+            "\\begin{{matrix}}{}{}\\end{{matrix}}",
+            "x".repeat(4096),
+            "\\\\y".repeat(128)
+        );
+        assert!(source.len() < super::super::markdown::MAX_DIAGRAM_FENCE_BYTES);
+        assert_eq!(render_latex(&source, RenderLatexOptions::display()), None);
+    }
 }

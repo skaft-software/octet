@@ -69,7 +69,7 @@ fn first_branded_frame_waits_for_identity_workspace_and_appearance() {
         assert_eq!(state.model_lab, Some(ModelLab::Google));
         let accent = state.theme.model_rgb(state.model_lab).unwrap();
         assert!(accent.1 > accent.0 && accent.1 > accent.2, "Gemma is green");
-        let wordmark = state.theme.fg("model_accent", "octet");
+        let wordmark = state.theme.bold("octet");
         assert!(update
             .replacement
             .iter()
@@ -199,7 +199,7 @@ fn readiness_inserts_one_welcome_prefix_into_a_warm_cache() {
     );
     assert!(!text.contains("selecting model"), "{text}");
     assert_eq!(state.transcript_cache.borrow().last_update_start, 0);
-    assert_eq!(state.transcript_cache.borrow().block_starts, [8]);
+    assert_eq!(state.transcript_cache.borrow().block_starts, [7]);
 }
 
 #[test]

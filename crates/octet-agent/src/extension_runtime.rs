@@ -26,6 +26,10 @@ use crate::extension_process::{
 use crate::secure_fs::read_regular_file_bounded;
 
 const MAX_CATALOG_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CATALOG_PACKAGE_FILES: usize = 256;
+const MAX_CATALOG_PACKAGE_ENTRIES: usize = 1024;
+const MAX_CATALOG_PACKAGE_DEPTH: usize = 8;
+const MAX_CATALOG_PACKAGE_BYTES: usize = 16 * 1024 * 1024;
 const ESTIMATED_PROCESS_FDS: usize = 4;
 const SUPERVISOR_POLL: Duration = Duration::from_millis(100);
 fn lock<T>(value: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -266,7 +270,7 @@ pub struct ExtensionRuntimeCatalogDiagnostic {
 pub struct ExtensionRuntimeCatalogEntry {
     /// The validated selected manifest and explicit activation policy.
     pub descriptor: DiscoveredExtension,
-    /// Digest of the manifest and resolved local entrypoint content.
+    /// Digest of the manifest, local entrypoint, and bounded local Python packages.
     pub content_digest: ExtensionContentDigest,
     /// Whether the entrypoint content was directly verified. Workspace sharing
     /// requires this to be true; isolated legacy execution remains compatible
@@ -371,6 +375,57 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+// Conservatively bind Python's local import surface, including vendored and
+// namespace packages. Scan every local .py below the entrypoint rather than
+// guessing which conditional/dynamic imports will execute at runtime.
+fn python_package_sources(root: &Path) -> Result<Vec<PathBuf>, String> {
+    fn visit(
+        directory: &Path,
+        depth: usize,
+        sources: &mut Vec<PathBuf>,
+        entries: &mut usize,
+    ) -> Result<(), String> {
+        if depth > MAX_CATALOG_PACKAGE_DEPTH {
+            return Err("extension package depth exceeds source bound".into());
+        }
+        let listing = std::fs::read_dir(directory)
+            .map_err(|_| "extension package directory cannot be verified".to_owned())?;
+        for entry in listing {
+            let entry =
+                entry.map_err(|_| "extension package directory cannot be verified".to_owned())?;
+            *entries += 1;
+            if *entries > MAX_CATALOG_PACKAGE_ENTRIES {
+                return Err("extension package entries exceed source bound".into());
+            }
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|_| "extension package entry cannot be verified".to_owned())?;
+            if path.extension().is_some_and(|extension| extension == "py") {
+                // Keep symlink/special candidates in the list so secure reads
+                // reject them rather than silently omitting imported modules.
+                sources.push(path);
+                if sources.len() > MAX_CATALOG_PACKAGE_FILES {
+                    return Err("extension package files exceed source bound".into());
+                }
+            } else if file_type.is_dir() {
+                visit(&path, depth + 1, sources, entries)?;
+            } else if file_type.is_symlink() {
+                // A package directory may itself be a symlink. We cannot
+                // safely enumerate its imported modules without following it.
+                return Err("extension package directory cannot be verified".into());
+            }
+        }
+        Ok(())
+    }
+
+    let mut sources = Vec::new();
+    let mut entries = 0;
+    visit(root, 0, &mut sources, &mut entries)?;
+    sources.sort();
+    Ok(sources)
+}
+
 fn catalog_content_digest(
     descriptor: &DiscoveredExtension,
 ) -> Result<(ExtensionContentDigest, bool), String> {
@@ -401,7 +456,33 @@ fn catalog_content_digest(
     match read_regular_file_bounded(&local, MAX_CATALOG_SOURCE_BYTES) {
         Ok(bytes) => {
             hasher.update(b"\0source\0");
+            let python_entrypoint = local.extension().is_some_and(|extension| extension == "py")
+                || bytes
+                    .split(|byte| *byte == b'\n')
+                    .next()
+                    .is_some_and(|line| {
+                        line.starts_with(b"#!") && line.windows(6).any(|part| part == b"python")
+                    });
             hasher.update(bytes);
+            if python_entrypoint {
+                let root = local
+                    .parent()
+                    .ok_or("extension package root cannot be located")?;
+                let mut total = 0usize;
+                for source in python_package_sources(root)? {
+                    let relative = source
+                        .strip_prefix(root)
+                        .map_err(|_| "extension package path cannot be verified".to_owned())?;
+                    let remaining = MAX_CATALOG_PACKAGE_BYTES.saturating_sub(total);
+                    let content = read_regular_file_bounded(&source, remaining)
+                        .map_err(|_| "extension package source cannot be verified".to_owned())?;
+                    total += content.len();
+                    hasher.update(b"\0package\0");
+                    hasher.update(relative.to_string_lossy().as_bytes());
+                    hasher.update(b"\0");
+                    hasher.update(content);
+                }
+            }
             Ok((
                 ExtensionContentDigest(format!("{:x}", hasher.finalize())),
                 true,
@@ -2584,6 +2665,131 @@ done
                 trust: ExtensionTrust::Trusted,
             },
         }
+    }
+
+    #[cfg(unix)]
+    fn python_descriptor(root: &Path, name: &str) -> DiscoveredExtension {
+        let mut selected = descriptor(root, name, ExtensionLifecycleProfile::WorkspaceService);
+        let directory = selected.manifest_path.parent().unwrap();
+        let package = directory.join("localpkg");
+        fs::create_dir(&package).unwrap();
+        fs::write(package.join("__init__.py"), "").unwrap();
+        fs::write(package.join("helper.py"), "START_TEXT = 'started'\n").unwrap();
+        write_script(
+            &directory.join("runner.py"),
+            r#"#!/usr/bin/env python3
+import os
+import sys
+sys.path.insert(0, os.environ['OCTET_EXTENSION_DIR'])
+from localpkg.helper import START_TEXT
+with open(os.path.join(os.environ['OCTET_WORKSPACE'], 'starts'), 'a') as output:
+    output.write(START_TEXT)
+for line in sys.stdin:
+    if '"method":"initialize"' in line:
+        print('{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.2","tools":[],"commands":[],"protocol":{"version":"0.2","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}', flush=True)
+    if '"method":"shutdown"' in line:
+        print('{"jsonrpc":"2.0","id":2,"result":{}}', flush=True)
+        break
+"#,
+        );
+        selected.manifest.entrypoint.command = "runner.py".into();
+        fs::write(
+            &selected.manifest_path,
+            toml::to_string(&selected.manifest).unwrap(),
+        )
+        .unwrap();
+        selected
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn imported_python_helper_edit_fences_start_and_retires_live_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = python_descriptor(temporary.path(), "workspace-service");
+        let helper = selected
+            .manifest_path
+            .parent()
+            .unwrap()
+            .join("localpkg/helper.py");
+        let initial = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        assert!(initial.get("workspace-service").unwrap().source_verified);
+        let manager = ExtensionRuntimeManager::new(
+            ExtensionRuntimeDomain::ordinary(temporary.path()).unwrap(),
+        );
+        manager.replace_catalog(initial).await;
+        fs::write(&helper, "START_TEXT = 'changed'\n").unwrap();
+        let binding = manager.bind_session("session-a").unwrap();
+        assert!(matches!(
+            binding
+                .activate(
+                    "workspace-service",
+                    ExtensionRuntimeConfig::new(temporary.path())
+                )
+                .await,
+            Err(ExtensionRuntimeManagerError::StaleSource)
+        ));
+        assert!(!temporary.path().join("starts").exists());
+
+        let updated = ExtensionRuntimeCatalog::from_descriptors([selected]);
+        manager.replace_catalog(updated).await;
+        binding
+            .activate(
+                "workspace-service",
+                ExtensionRuntimeConfig::new(temporary.path()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(temporary.path().join("starts")).unwrap(),
+            "changed"
+        );
+        fs::write(&helper, "START_TEXT = 'changed-again'\n").unwrap();
+        assert!(matches!(
+            manager.reload("workspace-service").await.as_slice(),
+            [Err(ExtensionRuntimeManagerError::StaleSource)]
+        ));
+        assert_eq!(manager.usage(), ExtensionRuntimeUsage::default());
+        binding.release().await;
+        manager.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn python_package_digest_binds_vendored_modules_and_rejects_unverified_sources() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = python_descriptor(temporary.path(), "python-service");
+        let directory = selected.manifest_path.parent().unwrap();
+        let initial = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        let initial_digest = initial
+            .get("python-service")
+            .unwrap()
+            .content_digest
+            .clone();
+        let vendor = directory.join("vendor/octet_extension");
+        fs::create_dir_all(&vendor).unwrap();
+        fs::write(vendor.join("__init__.py"), "").unwrap();
+        let module = vendor.join("extension.py");
+        fs::write(&module, "VALUE = 1\n").unwrap();
+        let added = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        let added_digest = added.get("python-service").unwrap().content_digest.clone();
+        assert_ne!(initial_digest, added_digest);
+        fs::write(&module, "VALUE = 2\n").unwrap();
+        let edited = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        assert_ne!(
+            added_digest,
+            edited.get("python-service").unwrap().content_digest
+        );
+        fs::remove_file(&module).unwrap();
+        let removed = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        assert_ne!(
+            added_digest,
+            removed.get("python-service").unwrap().content_digest
+        );
+        use std::os::unix::fs::symlink;
+        symlink(directory.join("localpkg/helper.py"), &module).unwrap();
+        let unverified = ExtensionRuntimeCatalog::from_descriptors([selected]);
+        assert!(!unverified.get("python-service").unwrap().source_verified);
+        assert!(!unverified.diagnostics().is_empty());
     }
 
     #[test]

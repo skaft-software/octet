@@ -15,6 +15,7 @@ pub(super) struct ShellChrome {
     pub(super) extension_below: Vec<String>,
     pub(super) panel: Vec<String>,
     pub(super) pending: Vec<String>,
+    pub(super) subagents: Vec<String>,
     pub(super) suggestions: Vec<String>,
     pub(super) error: Vec<String>,
     pub(super) transcript_rows: usize,
@@ -149,14 +150,6 @@ fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<Stri
     (above, below)
 }
 
-// The delegation roster is a chronological transcript event, not pinned
-// chrome: `TranscriptBlock::Tool(panel)` with `panel.subagent_activity` is the
-// single live surface for a roster, rendered by `transcript_render` exactly
-// where the delegation happened. There is deliberately no strip above the
-// composer, so one frame can never show the roster twice; the block stays a
-// live, in-place-updating log entry while it is on screen and freezes once it
-// scrolls out of view or settles.
-
 pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> ShellChrome {
     let rows = usize::from(state.size.1.max(5));
     let header = render_shell_header(state, width);
@@ -229,6 +222,7 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
             extension_above: Vec::new(),
             extension_below: Vec::new(),
             pending: Vec::new(),
+            subagents: Vec::new(),
             suggestions: Vec::new(),
         };
     }
@@ -300,6 +294,10 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
     let pending = render_pending_steering(state, width, pending_limit);
     remaining = remaining.saturating_sub(pending.len());
 
+    // The one orchestration lifecycle is part of the semantic transcript,
+    // never duplicated in pinned composer-adjacent chrome.
+    let subagents = Vec::new();
+
     ShellChrome {
         header,
         extension_above,
@@ -307,6 +305,7 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         extension_below,
         panel,
         pending,
+        subagents,
         suggestions,
         error,
         transcript_rows: remaining,
@@ -334,6 +333,7 @@ pub(super) fn append_viewport_chrome(lines: &mut Vec<String>, chrome: ShellChrom
     lines.extend(chrome.pending);
     lines.extend(chrome.panel);
     lines.extend(chrome.extension_above);
+    lines.extend(chrome.subagents);
     lines.extend(chrome.composer);
     lines.extend(chrome.suggestions);
     lines.extend(chrome.extension_below);
@@ -360,6 +360,7 @@ pub(super) fn append_chrome(
     lines.extend(chrome.pending);
     lines.extend(chrome.panel);
     lines.extend(chrome.extension_above);
+    lines.extend(chrome.subagents);
     lines.extend(chrome.composer);
     // Keep autocomplete adjacent to the composer in terminal-owned mode as
     // well as in the application-owned viewport above.
@@ -374,6 +375,7 @@ pub(super) fn shell_chrome_rows(chrome: &ShellChrome) -> usize {
         .saturating_add(chrome.extension_above.len())
         .saturating_add(chrome.error.len())
         .saturating_add(chrome.pending.len())
+        .saturating_add(chrome.subagents.len())
         .saturating_add(chrome.suggestions.len())
         .saturating_add(chrome.panel.len())
         .saturating_add(chrome.composer.len())

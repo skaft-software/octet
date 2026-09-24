@@ -717,6 +717,8 @@ fn hydrate_entries_with_image_budget(
             | EntryValue::SkillActivated { .. }
             | EntryValue::PromptTemplateSelected { .. }
             | EntryValue::SkillResourceRead { .. }
+            | EntryValue::ResponsesSteering { .. }
+            | EntryValue::ResponsesReasoning { .. }
             | EntryValue::SkillDeactivated { .. } => {}
         }
     }
@@ -950,6 +952,7 @@ mod tests {
                 active_skills: Vec::new(),
                 skill_resources: Vec::new(),
                 details: Default::default(),
+                snapcompact: None,
             })
             .unwrap();
         drop(session);
@@ -1078,6 +1081,7 @@ mod tests {
                     display_text: None,
                     run_outcome: None,
                     local_synthetic_assistant: false,
+                    native_steering: None,
                     tool_output: None,
                     tool_started_unix_ms: None,
                     tool_finished_unix_ms: None,
@@ -1102,6 +1106,7 @@ mod tests {
                     display_text: None,
                     run_outcome: None,
                     local_synthetic_assistant: false,
+                    native_steering: None,
                     tool_output: None,
                     tool_started_unix_ms: None,
                     tool_finished_unix_ms: None,
@@ -1190,6 +1195,42 @@ mod tests {
     }
 
     #[test]
+    fn responses_steering_metadata_does_not_duplicate_the_applied_prompt() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("steering.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let input = UserMessage {
+            content: vec![UserPart::Text("steered instruction".into())],
+        };
+        session
+            .append(EntryValue::ResponsesSteering {
+                endpoint: octet_ai::EndpointId("fixture".into()),
+                model: ModelId("fixture".into()),
+                operation: "fixture-operation".into(),
+                local_id: 1,
+                input: Some(input.clone()),
+                state: None,
+                completed: None,
+            })
+            .unwrap();
+        assert!(hydrate_transcript(&session).unwrap().is_empty());
+        session
+            .append_with_metadata(
+                EntryValue::Message(Message::User(input)),
+                Some(EntryMetadata {
+                    native_steering: Some(("fixture-operation".into(), 1)),
+                    ..EntryMetadata::default()
+                }),
+            )
+            .unwrap();
+        drop(session);
+        let resumed = Session::open_read_only(&path).unwrap();
+        let items = hydrate_transcript(&resumed).unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], TranscriptItem::User { .. }));
+    }
+
+    #[test]
     fn maps_tool_call_and_result_parts() {
         let directory = tempfile::tempdir().unwrap();
         let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
@@ -1197,6 +1238,7 @@ mod tests {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call-1".into()),
                     name: "read".into(),
                     arguments_json: r#"{"path":"x"}"#.into(),
@@ -1246,6 +1288,7 @@ mod tests {
         let assistant = session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call-responses".into()),
                     name: "read".into(),
                     arguments_json: r#"{"path":"x"}"#.into(),
@@ -1308,6 +1351,7 @@ mod tests {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("interrupted-call".into()),
                     name: "read".into(),
                     arguments_json: r#"{"path":"x"}"#.into(),
@@ -1345,6 +1389,7 @@ mod tests {
             session
                 .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("reused".into()),
                         name: name.into(),
                         arguments_json: "{}".into(),
@@ -1386,12 +1431,14 @@ mod tests {
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("duplicate".into()),
                         name: "first".into(),
                         arguments_json: "{}".into(),
                         argument_error: None,
                     }),
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("duplicate".into()),
                         name: "second".into(),
                         arguments_json: "{}".into(),

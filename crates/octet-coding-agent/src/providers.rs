@@ -34,9 +34,11 @@ pub fn builtin_provider_definitions() -> Vec<ProviderDefinition> {
         .collect()
 }
 
+#[cfg(test)]
+pub(crate) use auth::resolve_environment_with;
 pub(crate) use auth::{
-    aws_bedrock_auth, aws_bedrock_base_url, aws_bedrock_region, environment_discovery_headers,
-    resolve_environment, EnvironmentCredential,
+    aws_bedrock_auth, aws_bedrock_base_url, aws_bedrock_region, environment_auth,
+    environment_discovery_headers, resolve_environment, EnvironmentCredential,
 };
 pub(crate) use catalog::{
     public_headers, register_discovered_model, register_discovered_model_at_route,
