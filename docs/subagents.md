@@ -168,9 +168,13 @@ session directory. It carries each worker's id, name, task, child-session
 reference, status, and consumed budget, so the owning session can reattach it on
 a later turn and a restarted process can reconstruct it without losing it
 silently. Matching legacy `fleet.json` snapshots are read-only migration sources;
-new scoped snapshots take precedence. Execution caps do not drift up across that
-boundary: reattachment takes a slot per record and leaves the excess visibly
-detached.
+new scoped snapshots take precedence. An observer denied the fleet lease can
+inspect but cannot admit mutations or start a worker. On later takeover it
+reloads the current authoritative roster under its new claim before any
+admission or roster write; an absent or stale claim refuses new work rather
+than acknowledging a worker without a durable record. Execution caps do not
+drift up across that boundary: reattachment takes a slot per runnable record
+and leaves the excess visibly detached.
 
 The restart roster remains bounded to 256 KiB. When completed/limit-reached
 output would exceed that budget, the roster retains explicitly marked output
@@ -179,7 +183,10 @@ Approval reasons and failure diagnostics are not shortened by this output budget
 and oversized metadata still fails closed.
 
 Initial tasks and accepted follow-ups persist their payload, random delivery
-identity, and failed-delivery count before acknowledgement. Restart reconciliation
+identity, and failed-delivery count before acknowledgement. Accepted direct
+steering also keeps its payload and delivery identity in the durable FIFO until
+the child session confirms delivery, including while a channel notification or
+an uncommitted prompt holds a process-local attempt. Restart reconciliation
 uses delivery identities on the child session's active ancestry, not matching
 text: identical requests remain distinct work. Explicit resume drains older
 accepted work before the new follow-up; process-local commands only wake that

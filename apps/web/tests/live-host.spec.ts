@@ -124,6 +124,34 @@ async function sessionSnapshot(
 
 test.describe.configure({ mode: "serial" });
 
+test("accepts and completes the first prompt on a production Tokio worker", async ({
+  context,
+  page,
+}) => {
+  const host = await LiveHostHarness.create();
+  try {
+    const { origin, launchUrl } = await host.start();
+    const exchanged = await context.request.get(launchUrl, { maxRedirects: 0 });
+    expect(exchanged.status()).toBe(303);
+    await page.goto(origin);
+
+    const request = await completePrompt(
+      page,
+      host,
+      "E2E_FIRST_PROMPT_STACK",
+      "E2E_ASSISTANT_E2E_FIRST_PROMPT_STACK",
+    );
+    expectDeterministicRequest(request);
+    host.provider.assertHealthy();
+  } catch (error) {
+    throw new Error(`Production host diagnostics:\n${host.diagnostics()}`, {
+      cause: error,
+    });
+  } finally {
+    await host.close();
+  }
+});
+
 test("runs the authenticated production host lifecycle end to end", async ({
   context,
   page,

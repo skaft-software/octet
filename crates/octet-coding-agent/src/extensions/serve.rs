@@ -6413,10 +6413,42 @@ fn resource_store_service_error(error: octet_serve_backend::ResourceStoreError) 
     }
 }
 
+// A run nests the agent's provider stream under the long-lived Serve worker.
+// Keep the full run state machine on the heap, rather than adding its poll frame
+// to the worker's stack on every prompt.
+#[allow(clippy::too_many_arguments)]
+fn start_and_drive_run<'a>(
+    app: &'a mut App,
+    input: RunPromptInput,
+    branch_provenance: Option<ConversationBranchProvenance>,
+    goal_driver: Option<&'a GoalDriver>,
+    goal_source: GoalTurnSource,
+    plan: &'a WorkerPlan,
+    projection: &'a mut ProjectionState,
+    commands: &'a mut mpsc::Receiver<WorkerMessage>,
+    events: &'a mpsc::Sender<TimestampedEvent>,
+    admission: Option<oneshot::Sender<Result<DriverCommandOutcome, ServiceError>>>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<RunDriveOutcome, ServiceError>> + Send + 'a>,
+> {
+    Box::pin(start_and_drive_run_inner(
+        app,
+        input,
+        branch_provenance,
+        goal_driver,
+        goal_source,
+        plan,
+        projection,
+        commands,
+        events,
+        admission,
+    ))
+}
+
 // Run orchestration keeps its independently borrowed actor state and channels
 // visible rather than hiding them behind a mutable catch-all context.
 #[allow(clippy::too_many_arguments)]
-async fn start_and_drive_run(
+async fn start_and_drive_run_inner(
     app: &mut App,
     input: RunPromptInput,
     branch_provenance: Option<ConversationBranchProvenance>,

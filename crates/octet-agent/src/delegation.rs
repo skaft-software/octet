@@ -1570,10 +1570,10 @@ pub(crate) struct DelegationManager {
     /// delegation is enabled. Inert unless the host installed one; it never
     /// participates in worker accounting, admission or budgeting.
     span_context: RwLock<TelemetryContext>,
-    /// Session-scoped durable fleet roster. `None` disables persistence (unit
-    /// tests that never reopen the manager). When present it is the
-    /// authoritative record that lets a later turn or a restarted process
-    /// reconstruct workers that outlived the run that spawned them.
+    /// Session-scoped durable fleet roster. Without one, mutating admission
+    /// fails closed. When present it is the authoritative record that lets a
+    /// later turn or a restarted process reconstruct workers that outlived
+    /// the run that spawned them.
     roster_path: Option<PathBuf>,
     /// Root session path recorded in the roster so a foreign roster file is
     /// rejected instead of being trusted.
@@ -1679,7 +1679,10 @@ struct AgentRecord {
     command_tx: mpsc::Sender<WorkerCommand>,
     shutdown: crate::CancellationToken,
     interrupt_requested: bool,
+    /// Accepted messages stay in the durable queue while a process-local
+    /// channel or prompt holds a delivery attempt.
     pending_messages: VecDeque<DirectedMessage>,
+    inflight_message_ids: BTreeSet<String>,
     reserved_messages: QueueUsage,
     queued_follow_ups: QueueUsage,
     /// Accepted follow-ups remain here until the child session confirms their
@@ -2847,6 +2850,19 @@ impl DelegationManager {
             .is_some()
     }
 
+    /// Verify an existing claim without acquiring ownership while state is locked.
+    fn verify_held_fleet_lease(&self) -> Result<(), String> {
+        self.lease
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .ok_or_else(|| {
+                self.lease_refusal_reason()
+                    .unwrap_or_else(|| "this session does not hold the durable fleet lease".into())
+            })?
+            .is_current()
+    }
+
     /// Claim this manager holds, when it holds one.
     fn current_claim(&self) -> Option<DurableFleetClaim> {
         self.lease
@@ -2868,11 +2884,16 @@ impl DelegationManager {
     /// run. Retrying here is what lets a rebuilt or restarted session take the
     /// fleet over from a previous owner that has since released it.
     fn ensure_fleet_lease(&self) -> Result<(), String> {
-        if self.lease_held() {
-            return Ok(());
+        if let Some(lease) = self
+            .lease
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            return lease.is_current();
         }
         let Some(roster_path) = self.roster_path.clone() else {
-            return Ok(());
+            return Err("this session has no durable fleet roster or lease".into());
         };
         let session_directory = roster_path
             .parent()
@@ -2882,17 +2903,49 @@ impl DelegationManager {
             .lease
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lease.is_some() {
-            return Ok(());
+        if let Some(held) = lease.as_ref() {
+            return held.is_current();
         }
         match FleetLease::try_acquire(&session_directory, &self.root_session) {
             Ok(acquired) => {
+                // The observer's construction-time snapshot can be arbitrarily
+                // old. Validate and load the owner's latest roster while the
+                // newly acquired lock excludes every other writer.
+                let fleet = match self.read_durable_fleet() {
+                    Ok(Some(fleet)) => fleet,
+                    Ok(None) => DurableFleet {
+                        version: FLEET_ROSTER_VERSION,
+                        root_session: self.root_session.clone(),
+                        records: Vec::new(),
+                        next_mailbox_delivery: 1,
+                        root_mailbox: VecDeque::new(),
+                        root_mailbox_delivery: None,
+                    },
+                    Err(reason) => {
+                        drop(acquired);
+                        drop(lease);
+                        *self
+                            .lease_refusal
+                            .write()
+                            .unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
+                        return Err(reason);
+                    }
+                };
                 *lease = Some(acquired);
                 drop(lease);
                 *self
                     .lease_refusal
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                self.restore_durable_fleet_from(fleet, true);
+                if let Some(error) = &self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .persistence_error
+                {
+                    return Err(format!("could not persist reclaimed fleet: {error}"));
+                }
                 Ok(())
             }
             Err(reason) => {
@@ -2955,6 +3008,10 @@ impl DelegationManager {
             return;
         };
         if state.persistence_error.is_some() || !self.lease_held() {
+            return;
+        }
+        if let Err(reason) = self.verify_held_fleet_lease() {
+            self.fail_persistence_locked(state, &io::Error::other(reason));
             return;
         }
         let fleet = DurableFleet {
@@ -3030,6 +3087,7 @@ impl DelegationManager {
             shutdown: crate::CancellationToken::default(),
             interrupt_requested: false,
             pending_messages: durable.pending_messages,
+            inflight_message_ids: BTreeSet::new(),
             reserved_messages: QueueUsage::default(),
             queued_follow_ups: durable.queued_follow_ups.iter().fold(
                 QueueUsage::default(),
@@ -3145,33 +3203,61 @@ impl DelegationManager {
     /// a silently-forgotten worker. A malformed, oversized, foreign, or
     /// unreadable roster is ignored entirely (fail closed) rather than
     /// partially trusted.
-    fn restore_durable_fleet(&self) {
+    fn read_durable_fleet(&self) -> Result<Option<DurableFleet>, String> {
         let Some(path) = self.roster_path.as_ref() else {
-            return;
+            return Ok(None);
         };
-        let bytes = match secure_fs::read_private_file_bounded(path, MAX_FLEET_ROSTER_BYTES) {
-            Ok(bytes) => bytes,
-            // Existing rosters are read-only migration sources. Their root
-            // fence below must match; all future writes use the scoped path.
-            Err(SecureFileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-                let legacy = self.config.session_directory.join(FLEET_ROSTER_FILE);
-                let Ok(bytes) =
-                    secure_fs::read_private_file_bounded(&legacy, MAX_FLEET_ROSTER_BYTES)
-                else {
-                    return;
-                };
-                bytes
-            }
-            Err(_) => return,
-        };
-        let Ok(fleet) = serde_json::from_slice::<DurableFleet>(&bytes) else {
-            return;
-        };
+        let (bytes, from_legacy) =
+            match secure_fs::read_private_file_bounded(path, MAX_FLEET_ROSTER_BYTES) {
+                Ok(bytes) => (bytes, false),
+                // Legacy rosters are read-only migration sources. New scoped
+                // snapshots always take precedence, even when unreadable.
+                Err(SecureFileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    let legacy = self.config.session_directory.join(FLEET_ROSTER_FILE);
+                    match secure_fs::read_private_file_bounded(&legacy, MAX_FLEET_ROSTER_BYTES) {
+                        Ok(bytes) => (bytes, true),
+                        Err(SecureFileError::Io(error))
+                            if error.kind() == io::ErrorKind::NotFound =>
+                        {
+                            return Ok(None);
+                        }
+                        Err(error) => {
+                            return Err(format!("durable fleet roster is unavailable: {error}"));
+                        }
+                    }
+                }
+                Err(error) => return Err(format!("durable fleet roster is unavailable: {error}")),
+            };
+        let fleet: DurableFleet = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("durable fleet roster is invalid: {error}"))?;
+        if from_legacy && fleet.root_session != self.root_session {
+            return Ok(None);
+        }
         if !matches!(fleet.version, 1 | FLEET_ROSTER_VERSION)
             || fleet.root_session != self.root_session
         {
-            return;
+            return Err("durable fleet roster has an incompatible version or owner".into());
         }
+        Ok(Some(fleet))
+    }
+
+    fn restore_durable_fleet(&self) {
+        match self.read_durable_fleet() {
+            Ok(Some(fleet)) => self.restore_durable_fleet_from(fleet, false),
+            Ok(None) => {}
+            Err(reason) if self.lease_held() => {
+                // A claimed but unreadable roster is not an empty fleet. Never
+                // admit a new worker that would overwrite unknown accepted work.
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                self.fail_persistence_locked(&mut state, &io::Error::other(reason));
+            }
+            Err(_) => {} // A lease-refused observer has no authority to repair it.
+        }
+    }
+
+    /// A new lease must replace the observer's old projection, including
+    /// counters and mailboxes, before any admission or roster write.
+    fn restore_durable_fleet_from(&self, fleet: DurableFleet, replace: bool) {
         let effective_tool_policy = self
             .template
             .sandbox
@@ -3183,12 +3269,18 @@ impl DelegationManager {
         if state.shutting_down || state.persistence_error.is_some() {
             return;
         }
+        if replace {
+            state.records.clear();
+            state.total_agents = 1;
+            state.next_agent_number = 1;
+            state.root_mailbox.clear();
+            state.root_mailbox_delivery = None;
+        }
         state.next_mailbox_delivery = fleet.next_mailbox_delivery.max(1);
         state.root_mailbox = fleet.root_mailbox.into_iter().map(Into::into).collect();
         state.root_mailbox_delivery = fleet.root_mailbox_delivery;
-        let capacity = self.config.limits.max_total_agents.saturating_sub(1);
         let refusal = self.lease_refusal_reason();
-        for durable in fleet.records.into_iter().take(capacity) {
+        for durable in fleet.records {
             if state.records.contains_key(&durable.agent_id) {
                 continue;
             }
@@ -3641,6 +3733,7 @@ impl DelegationManager {
                     .journal_order
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let owns_lease = self.ensure_fleet_lease().is_ok();
                 let mut state = self
                     .state
                     .lock()
@@ -3662,10 +3755,12 @@ impl DelegationManager {
                 // again at this new owning-run boundary.
                 state.session_owner_released = false;
                 let before = state.records.len();
-                state.records.retain(|_, record| {
-                    !matches!(record.status, DelegatedAgentStatus::Shutdown)
-                        || record.detached_commands.is_some()
-                });
+                if owns_lease {
+                    state.records.retain(|_, record| {
+                        !matches!(record.status, DelegatedAgentStatus::Shutdown)
+                            || record.detached_commands.is_some()
+                    });
+                }
                 if state.records.len() != before {
                     state.total_agents = state
                         .total_agents
@@ -3853,6 +3948,7 @@ impl DelegationManager {
                 .journal_order
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.ensure_fleet_lease()?;
             let mut state = self
                 .state
                 .lock()
@@ -3996,6 +4092,7 @@ impl DelegationManager {
                     shutdown: shutdown.clone(),
                     interrupt_requested: false,
                     pending_messages: VecDeque::new(),
+                    inflight_message_ids: BTreeSet::new(),
                     reserved_messages: QueueUsage::default(),
                     queued_follow_ups: QueueUsage::default(),
                     pending_follow_ups: VecDeque::new(),
@@ -5395,6 +5492,10 @@ impl DelegationManager {
         record.live_task = false;
         // The crashed receiver is gone; an explicit follow-up must reopen this
         // session rather than publishing into the dead process-local channel.
+        // Its delivery attempts are gone too, but their durable payloads remain
+        // available for the replacement worker after session reconciliation.
+        record.inflight_message_ids.clear();
+        record.reserved_messages = QueueUsage::default();
         record.detached = true;
         record.status = DelegatedAgentStatus::Failed {
             error: bounded_text(&format!("delegated {cause}; worker settled by supervisor")),
@@ -5632,6 +5733,7 @@ impl DelegationManager {
             }
             if matches!(record.status, DelegatedAgentStatus::Shutdown) {
                 record.pending_messages.clear();
+                record.inflight_message_ids.clear();
                 record.reserved_messages = QueueUsage::default();
                 record.queued_follow_ups = QueueUsage::default();
             }
@@ -5730,6 +5832,7 @@ impl DelegationManager {
             record.shutdown.cancel();
             let _ = record.command_tx.try_send(WorkerCommand::shutdown());
             record.pending_messages.clear();
+            record.inflight_message_ids.clear();
             record.reserved_messages = QueueUsage::default();
             record.queued_follow_ups = QueueUsage::default();
             if record.status.is_running() {
@@ -5790,6 +5893,7 @@ impl DelegationManager {
                 .pending_messages
                 .len()
                 .saturating_add(record.reserved_messages.messages)
+                .saturating_sub(record.inflight_message_ids.len())
         })
     }
 
@@ -5887,8 +5991,16 @@ impl DelegationManager {
             .records
             .get_mut(target)
             .map(|record| {
-                let messages = record.pending_messages.drain(..).collect::<Vec<_>>();
+                let messages = record
+                    .pending_messages
+                    .iter()
+                    .filter(|message| !record.inflight_message_ids.contains(&message.delivery_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 for message in &messages {
+                    record
+                        .inflight_message_ids
+                        .insert(message.delivery_id.clone());
                     record
                         .reserved_messages
                         .add(directed_message_bytes(message));
@@ -5908,11 +6020,16 @@ impl DelegationManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(record) = state.records.get_mut(target) {
             for message in messages {
+                record.inflight_message_ids.remove(&message.delivery_id);
                 record.reserved_messages.remove(QueueUsage {
                     messages: 1,
                     bytes: directed_message_bytes(message),
                 });
+                record
+                    .pending_messages
+                    .retain(|pending| pending.delivery_id != message.delivery_id);
             }
+            self.persist_durable_fleet_locked(&mut state);
         }
     }
 
@@ -5924,28 +6041,15 @@ impl DelegationManager {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let persistence_available = state.persistence_error.is_none();
         if let Some(record) = state.records.get_mut(target) {
-            if persistence_available && !record.shutdown.is_cancelled() {
-                // These messages were removed from the front immediately
-                // before an attempted prompt append. Their reservations kept
-                // the queue capacity occupied while delivery was provisional;
-                // restore them ahead of later commands.
-                for message in messages.into_iter().rev() {
-                    record.reserved_messages.remove(QueueUsage {
-                        messages: 1,
-                        bytes: directed_message_bytes(&message),
-                    });
-                    debug_assert!(record_can_accept_pending_message(record, &message));
-                    record.pending_messages.push_front(message);
-                }
-            } else {
-                for message in messages {
-                    record.reserved_messages.remove(QueueUsage {
-                        messages: 1,
-                        bytes: directed_message_bytes(&message),
-                    });
-                }
+            // The durable FIFO never gave up ownership during prompt delivery.
+            // Only the process-local attempt/reservation needs to be released.
+            for message in messages {
+                record.inflight_message_ids.remove(&message.delivery_id);
+                record.reserved_messages.remove(QueueUsage {
+                    messages: 1,
+                    bytes: directed_message_bytes(&message),
+                });
             }
         }
         drop(state);
@@ -5961,13 +6065,11 @@ impl DelegationManager {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let persistence_available = state.persistence_error.is_none();
         if let Some(record) = state.records.get_mut(target) {
+            record.inflight_message_ids.remove(&message.delivery_id);
             record.reserved_messages.remove(usage);
-            if !record.shutdown.is_cancelled() && persistence_available {
-                debug_assert!(record_can_accept_pending_message(record, &message));
-                record.pending_messages.push_back(message);
-            }
+            // This command only woke the worker; the accepted payload already
+            // occupies its durable position in pending_messages.
         }
         drop(state);
         self.changed.notify_waiters();
@@ -5979,10 +6081,15 @@ impl DelegationManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(record) = state.records.get_mut(target) {
+            record.inflight_message_ids.remove(&message.delivery_id);
             record.reserved_messages.remove(QueueUsage {
                 messages: 1,
                 bytes: directed_message_bytes(message),
             });
+            record
+                .pending_messages
+                .retain(|pending| pending.delivery_id != message.delivery_id);
+            self.persist_durable_fleet_locked(&mut state);
         }
     }
 
@@ -6103,6 +6210,7 @@ impl DelegationManager {
                 .journal_order
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.ensure_fleet_lease()?;
             let (target_id, delivery, encoded, command_permit) = {
                 let mut state = self
                     .state
@@ -6217,13 +6325,15 @@ impl DelegationManager {
                         // do not resurrect it after its provenance record.
                         return Err("delegation team is shutting down".into());
                     };
+                    record.pending_messages.push_back(candidate.clone());
                     if let Some(permit) = command_permit {
+                        record
+                            .inflight_message_ids
+                            .insert(candidate.delivery_id.clone());
                         record
                             .reserved_messages
                             .add(directed_message_bytes(&candidate));
                         permit.send(WorkerCommand::message(candidate));
-                    } else {
-                        record.pending_messages.push_back(candidate);
                     }
                 }
                 self.persist_durable_fleet_locked(&mut state);
@@ -6257,6 +6367,7 @@ impl DelegationManager {
                 .journal_order
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.ensure_fleet_lease()?;
             let (
                 target_id,
                 target_path,
@@ -6311,10 +6422,6 @@ impl DelegationManager {
                 let extension_policy = record.extension_policy.clone();
                 let shutdown = record.shutdown.clone();
                 let claim = if suspended {
-                    // Retry the durable claim at this boundary too: a rebuilt or
-                    // restarted session may take the fleet over after the turn
-                    // that created this manager.
-                    let _ = self.ensure_fleet_lease();
                     Some(self.fresh_claim_for(record)?)
                 } else {
                     None
@@ -6594,6 +6701,7 @@ impl DelegationManager {
             if state.root_mailbox.is_empty() {
                 None
             } else {
+                self.verify_held_fleet_lease()?;
                 if state.root_mailbox_delivery.is_some() {
                     return Err(
                         "a root mailbox delivery is already awaiting durable acknowledgement"
@@ -6613,6 +6721,7 @@ impl DelegationManager {
             if record.mailbox.is_empty() {
                 None
             } else {
+                self.verify_held_fleet_lease()?;
                 if record.mailbox_delivery.is_some() {
                     return Err(
                         "an agent mailbox delivery is already awaiting durable acknowledgement"
@@ -6651,6 +6760,9 @@ impl DelegationManager {
     }
 
     fn resolve_mailbox_delivery(&self, owner_id: &str, delivery_id: u64, delivered: bool) {
+        if self.verify_held_fleet_lease().is_err() {
+            return;
+        }
         let mut state = self
             .state
             .lock()
@@ -6703,6 +6815,7 @@ impl DelegationManager {
                 .journal_order
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.ensure_fleet_lease()?;
             let (target_id, path, status, requested, encoded) = {
                 let mut state = self
                     .state
@@ -7642,9 +7755,18 @@ fn record_can_accept_pending_message(record: &AgentRecord, message: &DirectedMes
         .pending_messages
         .len()
         .saturating_add(record.reserved_messages.messages)
+        .saturating_sub(record.inflight_message_ids.len())
         < MAX_PENDING_MESSAGES
         && pending_bytes
             .saturating_add(record.reserved_messages.bytes)
+            .saturating_sub(
+                record
+                    .pending_messages
+                    .iter()
+                    .filter(|item| record.inflight_message_ids.contains(&item.delivery_id))
+                    .map(directed_message_bytes)
+                    .sum::<usize>(),
+            )
             .saturating_add(directed_message_bytes(message))
             <= MAX_PENDING_MESSAGE_BYTES
 }
@@ -10548,6 +10670,260 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn admitted_running_steering_and_drained_prompt_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let manager = writable_manager(root);
+        Session::create(manager.team_directory.join("child.jsonl")).unwrap();
+        let (child, mut commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        manager.persist_durable_fleet_locked(&mut manager.state.lock().unwrap());
+
+        manager
+            .send_message(&root_identity(), &child.id, "identical".into())
+            .await
+            .unwrap();
+        manager
+            .send_message(&root_identity(), &child.id, "identical".into())
+            .await
+            .unwrap();
+        let first = commands.recv().await.unwrap();
+        assert!(matches!(first.kind, WorkerCommandKind::Message(_)));
+        // Simulate the worker taking one notification and draining its pending
+        // prompt without ever committing it to the child session.
+        if let WorkerCommandKind::Message(message) = first.kind {
+            manager.queue_reserved_message(&child.id, message);
+        }
+        let drained = manager.take_pending_messages(&child.id);
+        assert_eq!(
+            drained
+                .iter()
+                .map(|m| m.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["identical"]
+        );
+        // A concurrent status update can refresh the roster before this prompt
+        // commits; the in-flight payload must still survive that snapshot.
+        manager.persist_durable_fleet_locked(&mut manager.state.lock().unwrap());
+        let durable: DurableFleet =
+            serde_json::from_slice(&std::fs::read(manager.roster_path.as_ref().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(durable.records[0].pending_messages.len(), 2);
+        let ids = durable.records[0]
+            .pending_messages
+            .iter()
+            .map(|m| m.delivery_id.clone())
+            .collect::<Vec<_>>();
+        assert_ne!(
+            ids[0], ids[1],
+            "identical steering text is distinct accepted work"
+        );
+        drop(commands);
+        drop(manager);
+
+        let restarted = writable_manager(root);
+        restarted.restore_durable_fleet();
+        let state = restarted.state.lock().unwrap();
+        let messages = &state.records[&child.id].pending_messages;
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["identical", "identical"]
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.delivery_id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        assert!(state.records[&child.id].inflight_message_ids.is_empty());
+        drop(state);
+        drop(restarted);
+
+        // If the child session committed only the first envelope before the
+        // next crash, ancestry reconciliation removes exactly that delivery.
+        let mut session = Session::open(root.join("child.jsonl")).unwrap();
+        session
+            .append(crate::EntryValue::Message(octet_ai::Message::User(
+                octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text(format_direct_message(&drained[0]))],
+                },
+            )))
+            .unwrap();
+        drop(session);
+        let reconciled = writable_manager(root);
+        reconciled.restore_durable_fleet();
+        let state = reconciled.state.lock().unwrap();
+        let messages = &state.records[&child.id].pending_messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].delivery_id, ids[1]);
+        assert_eq!(messages[0].message, "identical");
+    }
+
+    #[tokio::test]
+    async fn observer_cannot_admit_spawn_and_reloads_newer_owner_changes_on_takeover() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let owner = writable_manager(root);
+        Session::create(owner.team_directory.join("child.jsonl")).unwrap();
+        let (child, _commands) = insert_test_record(
+            &owner,
+            DelegatedAgentStatus::Completed {
+                output: "done".into(),
+            },
+        );
+        owner.persist_durable_fleet_locked(&mut owner.state.lock().unwrap());
+        let observer = writable_manager(root);
+        observer.restore_durable_fleet();
+        assert!(observer.lease_refusal_reason().is_some());
+        let before = std::fs::read(owner.roster_path.as_ref().unwrap()).unwrap();
+        let refusal = observer
+            .spawn(
+                &root_identity(),
+                SpawnRequest {
+                    task_name: "unowned".into(),
+                    display_task_name: None,
+                    message: "do not start".into(),
+                    extension_policy: None,
+                    extension_provenance: None,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            refusal.contains("another live session owner holds"),
+            "{refusal}"
+        );
+        assert_eq!(
+            std::fs::read(owner.roster_path.as_ref().unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(observer.state.lock().unwrap().records.len(), 1);
+        assert!(!observer.team_directory.join("0001-unowned.jsonl").exists());
+
+        // The observer opened before these admissions, so its snapshot is old.
+        owner
+            .send_message(&root_identity(), &child.id, "newer input".into())
+            .await
+            .unwrap();
+        owner
+            .send_message(&root_identity(), ROOT_AGENT_ID, "newer mailbox".into())
+            .await
+            .unwrap();
+        let second_session = owner.team_directory.join("second.jsonl");
+        Session::create(&second_session).unwrap();
+        insert_durable_detached_record(
+            &owner,
+            "agent-2",
+            "/root/second",
+            second_session,
+            DelegatedAgentStatus::Completed {
+                output: "newer record".into(),
+            },
+        );
+        owner.persist_durable_fleet_locked(&mut owner.state.lock().unwrap());
+        let authoritative: DurableFleet =
+            serde_json::from_slice(&std::fs::read(owner.roster_path.as_ref().unwrap()).unwrap())
+                .unwrap();
+        let delivery_id = authoritative.records[0].pending_messages[0]
+            .delivery_id
+            .clone();
+        let old_generation = owner.current_claim().unwrap().generation;
+        drop(owner);
+        observer.prepare_owning_run(&root_identity()).unwrap();
+        let state = observer.state.lock().unwrap();
+        let recovered = &state.records[&child.id];
+        assert_eq!(recovered.pending_messages[0].message, "newer input");
+        assert_eq!(recovered.pending_messages[0].delivery_id, delivery_id);
+        assert_eq!(state.root_mailbox[0].message, "newer mailbox");
+        assert_eq!(
+            state.next_mailbox_delivery,
+            authoritative.next_mailbox_delivery
+        );
+        assert_eq!(state.records.len(), 2);
+        assert!(matches!(
+            state.records["agent-2"].status,
+            DelegatedAgentStatus::Completed { .. }
+        ));
+        assert_eq!(state.next_agent_number, 3);
+        assert_eq!(
+            recovered.status,
+            DelegatedAgentStatus::Completed {
+                output: "done".into()
+            }
+        );
+        drop(state);
+        let persisted: DurableFleet =
+            serde_json::from_slice(&std::fs::read(observer.roster_path.as_ref().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(
+            persisted.records[0].pending_messages[0].delivery_id,
+            delivery_id
+        );
+        assert!(observer.current_claim().unwrap().generation > old_generation);
+    }
+
+    #[tokio::test]
+    async fn stale_fleet_claim_refuses_admission_without_touching_the_roster() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let roster = manager.roster_path.as_ref().unwrap();
+        let (lock_path, lease_path) = fleet_lease_paths(directory.path(), Path::new(""));
+        assert!(lock_path.exists());
+        let before = std::fs::read(&lease_path).unwrap();
+        let mut claim: DurableFleetLease = serde_json::from_slice(&before).unwrap();
+        claim.generation += 1;
+        std::fs::write(&lease_path, serde_json::to_vec(&claim).unwrap()).unwrap();
+        let error = manager
+            .spawn(
+                &root_identity(),
+                SpawnRequest {
+                    task_name: "stale".into(),
+                    display_task_name: None,
+                    message: "no unowned worker".into(),
+                    extension_policy: None,
+                    extension_provenance: None,
+                },
+            )
+            .unwrap_err();
+        assert!(error.contains("newer owner"), "{error}");
+        assert!(manager.state.lock().unwrap().records.is_empty());
+        assert!(!manager.team_directory.join("0001-stale.jsonl").exists());
+        assert!(!roster.exists());
+    }
+
+    #[tokio::test]
+    async fn unreadable_claimed_roster_cannot_be_overwritten_by_spawn() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let roster = manager.roster_path.as_ref().unwrap();
+        std::fs::write(roster, b"corrupt authoritative roster").unwrap();
+        manager.restore_durable_fleet();
+        let error = manager
+            .spawn(
+                &root_identity(),
+                SpawnRequest {
+                    task_name: "blocked".into(),
+                    display_task_name: None,
+                    message: "do not replace the roster".into(),
+                    extension_policy: None,
+                    extension_provenance: None,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("delegation persistence is unavailable"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(roster).unwrap(),
+            b"corrupt authoritative roster"
+        );
+        assert!(!manager.team_directory.join("0001-blocked.jsonl").exists());
+    }
+
     /// A second claimant of the same session's durable fleet is refused by
     /// name; it never starts a worker the first owner is already running.
     #[tokio::test]
@@ -12315,12 +12691,12 @@ mod tests {
             let mut state = manager.state.lock().unwrap();
             let pending = &mut state.records.get_mut(&child.id).unwrap().pending_messages;
             pending.push_back(DirectedMessage {
-                delivery_id: "test-delivery".into(),
+                delivery_id: "test-delivery-a".into(),
                 from: "older-a".into(),
                 message: "first".into(),
             });
             pending.push_back(DirectedMessage {
-                delivery_id: "test-delivery".into(),
+                delivery_id: "test-delivery-b".into(),
                 from: "older-b".into(),
                 message: "second".into(),
             });
@@ -12331,7 +12707,7 @@ mod tests {
             let record = state.records.get_mut(&child.id).unwrap();
             assert_eq!(record.reserved_messages.messages, 2);
             record.pending_messages.push_back(DirectedMessage {
-                delivery_id: "test-delivery".into(),
+                delivery_id: "test-delivery-c".into(),
                 from: "newer".into(),
                 message: "third".into(),
             });
@@ -13297,6 +13673,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aborted_worker_releases_steering_attempts_without_losing_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let (child, commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .records
+            .get_mut(&child.id)
+            .unwrap()
+            .live_task = true;
+        manager
+            .send_message(&root_identity(), &child.id, "retain after abort".into())
+            .await
+            .unwrap();
+        assert_eq!(manager.pending_message_count(&child.id), 1);
+        drop(commands);
+        manager.mark_worker_aborted(&child.id, None, 0, "worker task panicked");
+        {
+            let state = manager.state.lock().unwrap();
+            let record = &state.records[&child.id];
+            assert!(record.inflight_message_ids.is_empty());
+            assert_eq!(record.reserved_messages, QueueUsage::default());
+            assert_eq!(record.pending_messages.len(), 1);
+        }
+        // A replacement worker must be able to take the retained input rather
+        // than treating an attempt owned by the dead receiver as still live.
+        let retained = manager.take_pending_messages(&child.id);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].message, "retain after abort");
+    }
+
+    #[tokio::test]
     async fn stale_supervisor_cannot_settle_a_same_claim_replacement_worker() {
         let directory = tempfile::tempdir().unwrap();
         let manager = writable_manager(directory.path());
@@ -13446,13 +13856,14 @@ mod tests {
         {
             let state = manager.state.lock().unwrap();
             let record = &state.records[&child.id];
-            assert!(record.pending_messages.is_empty());
+            assert_eq!(record.pending_messages.len(), MAX_PENDING_MESSAGES);
             assert_eq!(record.reserved_messages.messages, MAX_PENDING_MESSAGES);
             assert!(!record_can_accept_pending_message(record, &candidate));
         }
 
         manager.release_prompt_message_reservations(&child.id, &leased);
         let state = manager.state.lock().unwrap();
+        assert!(state.records[&child.id].pending_messages.is_empty());
         assert_eq!(
             state.records[&child.id].reserved_messages,
             QueueUsage::default()
