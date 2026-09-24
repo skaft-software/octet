@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use octet_ai::{AssistantPart, Cost, ToolDef, Usage, PICODOLLARS_PER_MICRODOLLAR};
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,8 @@ const ROOT_AGENT_ID: &str = "root";
 const ROOT_AGENT_PATH: &str = "/root";
 const COMMAND_CHANNEL_CAPACITY: usize = 32;
 const MAX_TELEMETRY_FAILURE_BYTES: usize = 4 * 1024;
+/// Coalesce streaming progress so a chatty provider cannot flood the root UI.
+const STREAMED_OUTPUT_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 /// Rolling per-child tool-activity entries retained for owner inspection.
 const MAX_CHILD_TOOL_ACTIVITY: usize = 6;
 /// Bounded single-line summary of one child tool call's arguments.
@@ -1624,6 +1626,8 @@ struct AgentRecord {
     active_tools: BTreeMap<String, String>,
     recent_tools: VecDeque<ChildToolActivity>,
     usage: Usage,
+    /// Process-local provisional generation; never part of durable/billable usage.
+    streamed_output_bytes: u64,
     usage_uncertain: bool,
     cost: Option<Cost>,
     cost_microdollars: Option<u64>,
@@ -2499,6 +2503,11 @@ impl DelegationManager {
                     cache_read_tokens: record.usage.cache_read_tokens,
                     cache_write_tokens: record.usage.cache_write_tokens,
                     output_tokens: record.usage.output_tokens,
+                    estimated_output_tokens: (record.streamed_output_bytes > 0).then(|| {
+                        record.usage.output_tokens.saturating_add(
+                            record.streamed_output_bytes.div_ceil(4),
+                        )
+                    }),
                     reasoning_tokens: record.usage.reasoning_tokens,
                     total_tokens: record.usage.total_tokens,
                     cost: if record.usage_uncertain {
@@ -2960,6 +2969,7 @@ impl DelegationManager {
             active_tools: BTreeMap::new(),
             recent_tools: VecDeque::new(),
             usage: durable.usage,
+            streamed_output_bytes: 0,
             usage_uncertain: durable.usage_uncertain,
             cost: durable.cost,
             cost_microdollars: durable.cost_microdollars,
@@ -3926,6 +3936,7 @@ impl DelegationManager {
                     active_tools: BTreeMap::new(),
                     recent_tools: VecDeque::new(),
                     usage: Usage::default(),
+                    streamed_output_bytes: 0,
                     usage_uncertain: false,
                     cost: (extension_policy.is_some() && resolved.model.spec.pricing.is_some())
                         .then_some(Cost::default()),
@@ -4800,6 +4811,7 @@ impl DelegationManager {
             .and_then(|policy| policy.max_turns)
             .or(self.template.max_turns);
         let mut turns_completed = 0_u64;
+        let mut last_stream_update = None;
         let mut commands_open = true;
         enum Next {
             Event(Option<AgentEvent>),
@@ -4932,6 +4944,17 @@ impl DelegationManager {
                     };
                     self.update_agent_tool_finished(&identity.id, &id.0, is_error);
                 }
+                Next::Event(Some(AgentEvent::OutputDelta { text, .. })) => {
+                    self.update_agent_streamed_output(
+                        &identity.id,
+                        text.len(),
+                        &mut last_stream_update,
+                    );
+                }
+                Next::Event(Some(AgentEvent::ProviderRetry { .. })) => {
+                    self.clear_agent_streamed_output(&identity.id);
+                    last_stream_update = None;
+                }
                 Next::Event(Some(AgentEvent::ProviderUsageUncertain)) => {
                     self.mark_agent_usage_uncertain(&identity.id);
                 }
@@ -4941,6 +4964,7 @@ impl DelegationManager {
                     ..
                 })) => {
                     self.update_agent_usage(&identity.id, usage, session_cost_microdollars, false);
+                    last_stream_update = None;
                 }
                 Next::Event(Some(AgentEvent::TurnFinished {
                     message,
@@ -4949,6 +4973,7 @@ impl DelegationManager {
                     ..
                 })) => {
                     self.update_agent_usage(&identity.id, usage, session_cost_microdollars, true);
+                    last_stream_update = None;
                     turns_completed = turns_completed.saturating_add(1);
                     if extension_policy.is_some_and(|policy| {
                         policy
@@ -5088,6 +5113,48 @@ impl DelegationManager {
         self.publish_telemetry(None, None);
     }
 
+    fn update_agent_streamed_output(
+        &self,
+        id: &str,
+        bytes: usize,
+        last_update: &mut Option<Instant>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = state.records.get_mut(id) else {
+            return;
+        };
+        let previous = record.streamed_output_bytes.div_ceil(4);
+        record.streamed_output_bytes = record
+            .streamed_output_bytes
+            .saturating_add(bytes as u64);
+        let changed = record.streamed_output_bytes.div_ceil(4) != previous;
+        drop(state);
+        let now = Instant::now();
+        if changed && last_update.is_none_or(|last| now.duration_since(last) >= STREAMED_OUTPUT_UPDATE_INTERVAL) {
+            *last_update = Some(now);
+            self.publish_telemetry(None, None);
+        }
+    }
+
+    fn clear_agent_streamed_output(&self, id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = state.records.get_mut(id) else {
+            return;
+        };
+        let changed = record.streamed_output_bytes != 0;
+        record.streamed_output_bytes = 0;
+        drop(state);
+        if changed {
+            self.publish_telemetry(None, None);
+        }
+    }
+
     fn update_agent_usage(
         &self,
         id: &str,
@@ -5106,6 +5173,7 @@ impl DelegationManager {
             record.turn_count = record.turn_count.saturating_add(1);
         }
         record.usage = usage;
+        record.streamed_output_bytes = 0;
         if !record.usage_uncertain && cost_microdollars.is_some() {
             record.cost_microdollars = cost_microdollars;
         }
@@ -5133,6 +5201,7 @@ impl DelegationManager {
             return;
         };
         record.usage = usage;
+        record.streamed_output_bytes = 0;
         record.cost = aggregate_cost;
         record.usage_uncertain = session.has_uncertain_usage();
         record.cost_microdollars = if record.usage_uncertain {
@@ -12582,6 +12651,57 @@ mod tests {
             .unwrap_err()
             .contains("different input"));
         assert_eq!(manager.state.lock().unwrap().records.len(), 1);
+    }
+
+    #[test]
+    fn streamed_output_progress_is_throttled_and_separate_from_reported_usage() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+        let mut telemetry = manager.attach_telemetry();
+        let usage = Usage {
+            input_tokens: 10,
+            cache_read_tokens: 20,
+            cache_write_tokens: 5,
+            output_tokens: 4,
+            total_tokens: 39,
+            ..Usage::default()
+        };
+        manager.update_agent_usage(&identity.id, usage, Some(7), true);
+        telemetry.borrow_and_update();
+
+        let mut last_update = None;
+        manager.update_agent_streamed_output(&identity.id, 40, &mut last_update);
+        {
+            let snapshot = telemetry.borrow_and_update();
+            let live = &snapshot.as_ref().unwrap().children[0];
+            assert_eq!(live.output_tokens, 4);
+            assert_eq!(live.estimated_output_tokens, Some(14));
+            assert_eq!(live.total_tokens, 39);
+            assert_eq!(live.cost_microdollars, Some(7));
+        }
+        manager.update_agent_streamed_output(&identity.id, 40, &mut last_update);
+        assert!(!telemetry.has_changed().unwrap(), "stream updates are coalesced");
+        last_update = Some(Instant::now() - STREAMED_OUTPUT_UPDATE_INTERVAL);
+        manager.update_agent_streamed_output(&identity.id, 4, &mut last_update);
+        assert_eq!(
+            telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
+            Some(25)
+        );
+
+        manager.clear_agent_streamed_output(&identity.id);
+        assert_eq!(
+            telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
+            None,
+            "a retry must discard provisional generation"
+        );
+        manager.update_agent_streamed_output(&identity.id, 20, &mut None);
+        manager.update_agent_usage(&identity.id, usage, Some(7), true);
+        let snapshot = telemetry.borrow();
+        let settled = &snapshot.as_ref().unwrap().children[0];
+        assert_eq!(settled.estimated_output_tokens, None);
+        assert_eq!(settled.output_tokens, 4);
+        assert_eq!(manager.state.lock().unwrap().records[&identity.id].usage, usage);
     }
 
     #[test]

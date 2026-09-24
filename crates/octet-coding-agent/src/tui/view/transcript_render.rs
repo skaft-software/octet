@@ -237,22 +237,11 @@ pub(super) fn render_block_planned_with_rainbow(
                     "|-"
                 };
                 let name = sanitize_for_terminal(&worker.name);
-                let activity = sanitize_for_terminal(&worker.activity);
-                let tokens = if worker.tokens < 10_000 {
-                    worker.tokens.to_string()
-                } else if worker.tokens < 1_000_000 {
-                    format!("{}K", worker.tokens / 1_000)
-                } else {
-                    format!("{:.1}M", worker.tokens as f64 / 1_000_000.0)
-                };
-                let detail = format!("{name} · {activity} · {tokens} tok");
-                let compact = format!("{name} · {tokens} tok");
-                let text =
-                    if visible_width(&detail) + 3 + visible_width(branch) <= usize::from(width) {
-                        detail
-                    } else {
-                        compact
-                    };
+                let estimate = if worker.output_estimated { "~" } else { "" };
+                let text = format!(
+                    "{name} · ↑{} ↓{estimate}{}",
+                    worker.input_tokens, worker.output_tokens
+                );
                 lines.push(fit_line(
                     &theme.fg("muted", &format!("  {branch} {text}")),
                     width,

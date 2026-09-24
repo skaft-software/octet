@@ -458,6 +458,7 @@ fn worker(id: &str) -> octet_agent::DelegationTelemetryChild {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 20,
         reasoning_tokens: 0,
         total_tokens: 120,

@@ -10612,10 +10612,29 @@ fn live_subagent_heading_is_bold_and_worker_metadata_is_terminal_safe() {
     );
     let plain = strip_terminal_sequences(&rows.join("\n"));
     assert!(
-        plain.contains("└─ audit · using read · 5.6M tok"),
+        plain.contains("└─ audit · ↑5600000 ↓3900"),
         "{plain}"
     );
     assert!(!plain.contains("SECRET"), "{plain}");
+}
+
+#[test]
+fn live_subagent_output_progress_is_marked_as_estimated_until_usage_settles() {
+    let mut shell = InteractiveShell::test_shell();
+    let mut view = subagent_transcript_test_view(true);
+    view.telemetry[0].estimated_output_tokens = Some(4_021);
+    shell.state.borrow_mut().set_subagent_activity(view.clone());
+    let live = strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
+    assert!(live.contains("audit · ↑5600000 ↓~4021"), "{live}");
+    assert_eq!(view.telemetry[0].output_tokens, 3_900);
+    assert_eq!(view.telemetry[0].total_tokens, 5_603_900);
+
+    view.telemetry[0].output_tokens = 4_010;
+    view.telemetry[0].estimated_output_tokens = None;
+    shell.state.borrow_mut().set_subagent_activity(view);
+    let settled = strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
+    assert!(settled.contains("audit · ↑5600000 ↓4010"), "{settled}");
+    assert!(!settled.contains("↓~"), "{settled}");
 }
 
 #[test]
@@ -10683,6 +10702,7 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
             cache_read_tokens: 800,
             cache_write_tokens: 0,
             output_tokens: 220,
+            estimated_output_tokens: None,
             reasoning_tokens: 60,
             total_tokens: 13_020,
             cost: None,
@@ -10725,7 +10745,7 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         "{block}"
     );
     assert!(
-        block.contains("Read release history · using read · 13K tok"),
+        block.contains("Read release history · ↑12800 ↓220"),
         "{block}"
     );
     assert!(
@@ -10902,6 +10922,7 @@ fn subagent_transcript_test_view(native: bool) -> SubagentActivityView {
             input_tokens: 5_500_000,
             cache_read_tokens: 80_000,
             cache_write_tokens: 20_000,
+            estimated_output_tokens: None,
             output_tokens: 3_900,
             reasoning_tokens: 1_000,
             total_tokens: 5_603_900,
@@ -11027,6 +11048,7 @@ fn hydrating_a_replacement_session_clears_subagent_activity() {
             input_tokens: 100,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            estimated_output_tokens: None,
             output_tokens: 10,
             reasoning_tokens: 0,
             total_tokens: 110,
@@ -11077,6 +11099,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11223,6 +11246,7 @@ fn live_workers_for_a_later_turn_open_a_new_transcript_row() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11322,6 +11346,7 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11438,6 +11463,7 @@ fn subagent_lifecycle_retains_one_row_without_republishing() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11572,6 +11598,7 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11688,6 +11715,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10,
         reasoning_tokens: 0,
         total_tokens: 110,
@@ -11732,7 +11760,7 @@ fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
         "{compact}"
     );
     assert!(
-        compact.contains("Read release history · using read · 110 tok"),
+        compact.contains("Read release history · ↑100 ↓10"),
         "{compact}"
     );
     assert!(compact.contains("+1 more"), "{compact}");
@@ -14969,6 +14997,7 @@ fn failed_tool_calls_never_warn_and_live_subagents_are_reported_under_the_outcom
         input_tokens: 100,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 10 * calls,
         reasoning_tokens: 0,
         total_tokens: 110,

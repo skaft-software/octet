@@ -180,8 +180,9 @@ enum NoticeTone {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SubagentWorkerLine {
     name: String,
-    activity: String,
-    tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    output_estimated: bool,
 }
 
 /// One UI-only tool-like lifecycle block. Spend and full worker detail remain
@@ -261,11 +262,12 @@ impl SubagentTranscript {
             .take(4)
             .map(|child| SubagentWorkerLine {
                 name: child.task_name.clone(),
-                activity: child.current_tool.as_ref().map_or_else(
-                    || child.phase.replace('_', " "),
-                    |tool| format!("using {tool}"),
-                ),
-                tokens: child.total_tokens,
+                input_tokens: child
+                    .input_tokens
+                    .saturating_add(child.cache_read_tokens)
+                    .saturating_add(child.cache_write_tokens),
+                output_tokens: child.estimated_output_tokens.unwrap_or(child.output_tokens),
+                output_estimated: child.estimated_output_tokens.is_some(),
             })
             .collect();
         summary

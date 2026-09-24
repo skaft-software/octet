@@ -14,6 +14,7 @@ fn child() -> octet_agent::DelegationTelemetryChild {
         input_tokens: 12_000,
         cache_read_tokens: 800,
         cache_write_tokens: 0,
+        estimated_output_tokens: None,
         output_tokens: 220,
         reasoning_tokens: 60,
         total_tokens: 13_020,

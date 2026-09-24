@@ -53,9 +53,14 @@ tool, and worker identity.
 
 Subagent orchestration occupies one tool-like transcript block. Its bold
 heading shows state counts and `/subagents`; while workers run, up to four
-indented child lines show task, current phase/tool, and latest reported token
-use, with an overflow count for the rest. Token totals advance on provider
-usage reports, not every streamed token. The marker blinks and the block
+indented child lines show task and `↑input ↓output` token counts, with an
+overflow count for the rest. Input includes uncached, cache-read, and
+cache-write tokens and advances when the provider reports usage. Output
+advances from settled provider usage, plus a `~`-marked, throttled estimate
+from streamed text/reasoning deltas while generating; retries discard the
+provisional estimate. Neither estimate nor UI refresh changes billed usage,
+budgets, or cost. Providers without streamed deltas cannot provide live token
+progress. The marker blinks and the block
 remains the mutable tail; later parent output is placed above it. Once the
 workers settle, the child lines disappear and the same block fixes in its
 completion position with a green marker for all success, red for all failure,
