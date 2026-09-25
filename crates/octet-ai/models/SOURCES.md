@@ -114,7 +114,7 @@ Cerebras contracts. Their fixture provenance is recorded in
 
 The final 2026-09-25 release refresh pins public
 `https://models.dev/api.json` source SHA-256
-`60962c86906f86526c36a798493f27088fcb13161ebd9ab31e0739c0edcc92ea`.
+`327d2b8c05123a62f44cd11b4c1a0247647987305615fedeada17c75b88a12f6`.
 The earlier 2026-09-24 candidate used
 `4ad860a1415fa0bcfb44076931d413d4fa72de06ecd1df1ee971073691cd94af`;
 the review checkpoints below retain that historical context.
@@ -168,6 +168,11 @@ quotes $0.26/$3.50/$0.25 and its output limit increases to 943,718 inside its
 provider tariffs. Names, modalities and capability flags are unchanged; direct
 DeepSeek schedule pricing remains excluded. The historical quotes above are
 superseded only for these exact routes.
+
+A subsequent CI freshness check changed only OpenRouter DeepSeek V4 Pro to
+$0.799356/$1.598712/$0.066613 per million input/output/cache-read tokens.
+No names, capability records or route inventory changed. This supersedes that
+route's preceding quote without changing direct DeepSeek's unpriced status.
 
 The four checked-in outputs include the source receipt and these differences
 relative to the v0.7.6 snapshots:
