@@ -27,7 +27,7 @@ class ProtocolVersionTests(unittest.TestCase):
         schema = json.loads((extension_dir.parents[1] / "protocol" / "extension-api-v0.3.schema.json").read_text())
         self.assertEqual(schema["api_version"], "0.3")  # Never retag canonical as legacy 0.4.
         params = {
-            "api_version": manifest_api, "octet_version": "0.8.0",
+            "api_version": manifest_api, "octet_version": "0.8.1-rc.1",
             "extension": {"name": "octet-computer-use"}, "workspace": str(extension_dir),
             "capabilities": {}, "contributes": {"tools": ["computer_use"]},
             "flag_values": [], "host": {},

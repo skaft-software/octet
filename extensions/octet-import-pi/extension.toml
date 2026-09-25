@@ -1,7 +1,7 @@
 name = "octet-import-pi"
 version = "0.1.0"
 api_version = "0.3"
-requires_octet = "=0.8.0"
+requires_octet = "=0.8.1-rc.1"
 description = "Read-only Pi migration adapter using octet's typed import implementation"
 
 [entrypoint]

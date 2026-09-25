@@ -8,6 +8,8 @@
 - Show the active session name in the terminal window title and keep it
   synchronized with session changes.
 - Prevent Kitty inline images from advancing the cursor into the composer.
+- Pin source extension manifests to this RC host; the published 0.8.0 bundles
+  remain unchanged and are not compatible with the RC binary.
 
 This candidate is built for local dogfooding; it is not a published release.
 

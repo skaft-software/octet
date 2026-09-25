@@ -27,7 +27,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(manifest["name"], "octet-subagents")
         self.assertEqual(manifest["version"], "0.8.0")
         self.assertEqual(manifest["api_version"], "0.4")
-        self.assertEqual(manifest["requires_octet"], "=0.8.0")
+        self.assertEqual(manifest["requires_octet"], "=0.8.1-rc.1")
         self.assertEqual(manifest["entrypoint"]["command"], "octet-subagents")
         self.assertEqual(manifest["capabilities"]["filesystem"], "none")
         self.assertFalse(manifest["capabilities"]["process"])

@@ -236,10 +236,11 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The four official executable bundles and the separate Serve application must
-match the running host exactly. Current source packages are `0.8.0` with
-`requires_octet = "=0.8.0"`. The
-[0.8.0 release](https://github.com/skaft-software/octet/releases/tag/v0.8.0)
+The four published executable bundles and separate Serve application remain
+version-pinned to the running host exactly. The published 0.8.0 source bundles
+require `=0.8.0`; this unpublished checkout's source manifests instead require
+`=0.8.1-rc.1` for local dogfooding. The RC package assets are not published.
+The [0.8.0 release](https://github.com/skaft-software/octet/releases/tag/v0.8.0)
 records signed assets and public-install evidence. Catalog forms below require
 verified published assets matching the running host version:
 

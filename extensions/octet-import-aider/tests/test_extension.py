@@ -32,7 +32,7 @@ def initialize_request(request_id=1):
         "method": "initialize",
         "params": {
             "api_version": "0.3",
-            "octet_version": "0.8.0",
+            "octet_version": "0.8.1-rc.1",
             "extension": {"name": "qualification-host"},
             "workspace": str(FIXTURES.resolve()),
             "capabilities": {},

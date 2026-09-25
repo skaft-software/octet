@@ -1,8 +1,11 @@
 # Aider migration adapter
 
-This directory contains a bounded, source-only Aider import adapter for extension
-API 0.3. It reads only the host-authorized `source_root` and returns the shared
-migration shapes; the host owns persistence, conflict handling, and idempotence.
+This is a bounded, source-only Aider import adapter for extension API `0.3`.
+This source checkout pins the adapter manifest to Octet `0.8.1-rc.1` for local
+dogfooding. Launch the candidate with `--extension-dir ./extensions`; the
+published 0.8.0 bundles are not compatible with this RC host. It reads only the
+host-authorized `source_root` and returns the shared migration shapes; the host
+owns persistence, conflict handling, and idempotence.
 
 The manifest requests workspace filesystem access only. The adapter does not
 request secrets or environment values, launch processes, access the network, or

@@ -4,7 +4,9 @@ Source-only API 0.3 entry point, scoped policy boundary, and a **trusted-local,
 mocked-native macOS composition**. This is not an installed/native-qualified
 computer-use product. Standalone startup remains inert.
 
-The host stages the executable separately from its sibling Python modules.
+This extension source manifest is pinned to Octet `0.8.1-rc.1` in the local
+candidate checkout. Use `--extension-dir ./extensions` with the matching RC
+binary; the published 0.8.0 bundles remain version-locked to the stable host.
 `main.py` resolves those modules through the host-provided `OCTET_EXTENSION_DIR`,
 falling back to its own directory only for direct source execution. Successful
 API negotiation does not install a desktop backend or grant native-input authority.

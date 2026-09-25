@@ -49,7 +49,7 @@ class ReleaseAndFixtureTests(unittest.TestCase):
             'name = "octet-web-search"',
             'version = "0.8.0"',
             'api_version = "0.4"',
-            'requires_octet = "=0.8.0"',
+            'requires_octet = "=0.8.1-rc.1"',
             'command = "extension.py"',
             'tools = ["web_search", "web_fetch", "web_find"]',
             'commands = ["web-search"]',

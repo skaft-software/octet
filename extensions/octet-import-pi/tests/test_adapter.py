@@ -54,7 +54,7 @@ class PiAdapterPackageTests(unittest.TestCase):
 
     def initialize(self):
         return ("initialize", {
-            "api_version": "0.3", "octet_version": "0.8.0",
+            "api_version": "0.3", "octet_version": "0.8.1-rc.1",
             "extension": {"name": self.manifest["name"], "version": self.manifest["version"]},
             "workspace": str(self.root), "capabilities": self.manifest["capabilities"],
             "contributes": self.manifest["contributes"], "flag_values": [],
@@ -88,7 +88,7 @@ class PiAdapterPackageTests(unittest.TestCase):
     def test_manifest_and_typed_read_only_round_trip(self):
         self.assertEqual("octet-import-pi", self.manifest["name"])
         self.assertEqual("0.3", self.manifest["api_version"])
-        self.assertEqual("=0.8.0", self.manifest["requires_octet"])
+        self.assertEqual("=0.8.1-rc.1", self.manifest["requires_octet"])
         self.assertFalse(self.manifest["capabilities"]["process"])
         self.assertFalse(self.manifest["capabilities"]["network"])
         self.assertEqual([], self.manifest["contributes"]["tools"])

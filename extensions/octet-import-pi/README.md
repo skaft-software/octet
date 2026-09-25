@@ -3,9 +3,10 @@
 A thin source package for API `0.3` `migration/detect` and `migration/import`.
 The launcher replaces itself with `octet migrate adapter pi`; it does not
 reimplement parsing, protocol negotiation, credential filtering or ingestion.
-Requires macOS/Linux, `/bin/sh`, and **octet 0.8.0** on the launcher's `PATH`.
-Use the same reviewed host installation for both the parent and the launcher.
-There are no npm/Python runtime dependencies and no install scripts.
+The source manifest requires exactly octet `0.8.1-rc.1` in this local candidate
+checkout. Published bundle version `0.8.0` remains pinned to octet `0.8.0`; those
+published assets are not compatible with this RC host. Use
+`--extension-dir ./extensions` when launching the candidate.
 
 ## Use
 

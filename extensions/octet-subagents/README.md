@@ -3,8 +3,10 @@
 **Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
 Use the [version-matched installation](../../docs/installation.md) and the
 [0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
-public-install evidence. Reviewed source checkouts and local archives remain
-separate installation options.
+public-install evidence. **This local RC checkout's `extension.toml` instead
+requires `=0.8.1-rc.1`; run it from the repository with
+`--extension-dir ./extensions`.** The published bundle remains at distribution
+`0.8.0` for host `0.8.0`.
 
 Delegate a bounded task to a background worker while the parent continues other
 work. octet owns the child conversations, permissions, persistence, limits, and
@@ -65,9 +67,15 @@ octet extension install octet-subagents
 octet --enable-extension octet-subagents
 ```
 
-For source testing with a locally built octet 0.8.0 and reviewed local
-archive, use `octet extension install --path ./octet-subagents-0.8.0.tar.gz`.
-Python 3.9+ is required. Installation has no hook or third-party dependency and
+For local testing with the `0.8.1-rc.1` source tree, run from the repository
+root:
+
+```console
+octet --extension-dir ./extensions --enable-extension octet-subagents
+```
+
+Do not install the published `0.8.0` bundle into the RC host. Python 3.9+ is
+required. Installation has no hook or third-party dependency and
 starts nothing; the bundle stays disabled until explicitly enabled. Default full
 access (`unsafe_host`) implicitly trusts it without saving a grant. Optional
 `--trust-extension` or source-bound `trusted_extensions` grants never enable it.
@@ -148,10 +156,11 @@ output/error, terminal status, and completion time independently of attachment.
 
 ## Reference
 
-This source bundle has distribution version `0.8.0` and uses API `0.4`, with an
-exact runtime requirement of octet `0.8.0`. The detailed
-contract is a bundled-runtime reference, not a general extension SDK tutorial.
-
+This published source bundle has distribution version `0.8.0` and uses API
+`0.4`, with an exact runtime requirement of octet `0.8.0`. In this local RC
+source checkout, the manifest instead pins `=0.8.1-rc.1`; use the repository's
+source extension directory for dogfooding. The detailed contract is a
+bundled-runtime reference, not a general extension SDK tutorial.
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact grants, ceilings, ownership, and accounting.
 - <a id="kernel-boundary"></a>[Kernel boundary](REFERENCE.md#kernel-boundary): host service ownership.
 - <a id="install-enable-and-trust"></a>[Install, enable, and trust](REFERENCE.md#install-enable-and-trust): local rebuild and inactive skill discovery.

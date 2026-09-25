@@ -3,8 +3,9 @@
 **Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
 Use the [version-matched installation](../../docs/installation.md) and the
 [0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
-public-install evidence. Reviewed source checkouts and local archives remain
-separate installation options.
+public-install evidence. **This local RC checkout's `extension.toml` instead
+requires `=0.8.1-rc.1`; use `--extension-dir ./extensions` with the candidate.**
+The published bundle remains at distribution `0.8.0` for host `0.8.0`.
 
 Use a visible, isolated Chromium window to inspect pages and perform bounded
 browser actions. Sign in manually; octet Browse never uses your normal browser

@@ -70,9 +70,10 @@ or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.8.0. Check `octet --version` and use matching
-executable bundles; a source build is not a signed release artifact and does not
-replace an installed binary.
+This checkout targets octet 0.8.1-rc.1 for local dogfooding. Check
+`octet --version` and use matching source extension manifests from this checkout;
+stable published bundles still target 0.8.0. This source build is not a signed
+release artifact and does not replace an installed binary.
 
 On macOS or GNU/Linux, install Rust 1.86+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep). From the source checkout:
@@ -91,10 +92,11 @@ they do not refresh the catalog over the network. Continue with
 
 ## Optional packages
 
-The four official executable bundles and the separate Serve application must
-match the running octet version exactly. Current source packages are `0.8.0`
-and require octet `=0.8.0`. Catalog installation requires verified matching
-published assets and never substitutes another host version:
+The published extension bundles and separate Serve application remain
+version-pinned to octet `0.8.0`. In this unpublished `0.8.1-rc.1` checkout,
+local source extension manifests require the RC host; run with
+`--extension-dir ./extensions` rather than installing the published 0.8.0
+bundles. No RC package assets are published.
 
 ```sh
 octet extension install octet-web-search
@@ -121,12 +123,13 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
-The four executable bundles in the working tree declare API `0.4`, distribution
-version `0.8.0`, and `requires_octet = "=0.8.0"`. These are independent version
-boundaries; an API number does not bypass the exact host pin. See
-[current authoring](extensions.md) for the Python
-API 0.4 process recipe and retained API 0.3 conformance example; generated
-contract bindings alone are not a process runtime.
+The four published executable bundles declare API `0.4`, distribution version
+`0.8.0`, and require octet `=0.8.0`. The local RC source manifests instead pin
+`=0.8.1-rc.1`; these candidate files are not published. Distribution and host
+versions are independent boundaries; an API number does not bypass the exact
+host pin. See [current authoring](extensions.md) for the Python API 0.4 process
+recipe and retained API 0.3 conformance example; generated contract bindings
+alone are not a process runtime.
 
 ## Container
 

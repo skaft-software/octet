@@ -3,8 +3,9 @@
 **Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
 Use the [version-matched installation](../../docs/installation.md) and the
 [0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
-public-install evidence. Reviewed source checkouts and local archives remain
-separate installation options.
+public-install evidence. **This local RC checkout's `extension.toml` instead
+requires `=0.8.1-rc.1`; use `--extension-dir ./extensions` with the candidate.**
+The published bundle remains at distribution `0.8.0` for host `0.8.0`.
 
 Search the public web and retrieve pages with stable citations. Choose
 [Brave Search](https://brave.com/search/api/) or a configured
@@ -87,7 +88,9 @@ keeps the process stopped even with explicit grants: executable startup still
 requires `unsafe_host`. An admitted extension has your OS authority; manifest
 consent metadata is not a sandbox. Skill loading remains independent.
 
-The source bundle `0.8.0` requires exactly octet `0.8.0` and uses API `0.4`.
+The source bundle `0.8.0` is the published release and requires exactly octet
+`0.8.0`. In this unpublished source checkout, the manifest is pinned to octet
+`0.8.1-rc.1` for local dogfooding; select it with `--extension-dir ./extensions`.
 The following is a bundled-runtime reference, not a general SDK authoring tutorial.
 
 - <a id="install-and-opt-in"></a>[Install and opt in](REFERENCE.md#install-and-opt-in): public catalog installation and persistent activation.
