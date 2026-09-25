@@ -60,7 +60,7 @@ fs2 = "0.4"
 url = "2"
 percent-encoding = "2"
 # Reuse the renderer's pinned CommonMark parser for script-free session exports.
-pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 http = "1"
 unicode-width = "0.2"
 unicode-segmentation = "1.12.0"
