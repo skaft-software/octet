@@ -318,7 +318,11 @@ without replaying missed frames; coalescing has a fixed deadline so incoming
 notifications cannot postpone painting indefinitely. Animation changes style
 rather than text or geometry and invalidates only the active status block.
 The `Working` and `Thinking` labels share a foreground-only moving sweep, with
-`Thinking` travelling a shallower luminance range; activity and reasoning dots
+`Thinking` travelling a shallower luminance range. They also share one
+monotonic status clock, so the sweep phase continues across the transition
+instead of restarting or stalling: the two labels can neither shimmer
+differently nor freeze mid-row. Retry, compaction, and the provider lifecycle
+labels keep their timer without a sweep. Activity and reasoning dots
 keep a solid glyph while their foreground pulses with the label. The known
 Dark/Light TrueColor and ANSI256 physical field parks briefly after crossing
 the label. Elapsed and countdown text update independently; grapheme clusters
@@ -361,7 +365,8 @@ identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning
 and activity dots keep a solid, fixed-size glyph whose foreground pulses with
 the activity-label sweep. `Working` and `Thinking` shimmer in the foreground
-where supported; reduced-motion and no-color paths remain static.
+where supported, from that one shared clock; reduced-motion and no-color paths
+remain static.
 Assistant-response dots remain steady; active tool and shell dots may pulse
 through foreground and muted tones rather than changing size.
 Successful completed event dots use green,

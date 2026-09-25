@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+- Fix Serve’s Ultra slider label and purple transition after rainbow Max.
+  Expand the bounded model catalog from 256 to 4,096 entries so large provider
+  inventories no longer hide models at the old cutoff; retain capability gates
+  and bootstrap byte limits.
+
 ## [0.8.1-rc.1] — local dogfood only (unpublished)
 
 - Add in-session `/setup` provider configuration while preserving the active
@@ -10,6 +17,12 @@
 - Prevent Kitty inline images from advancing the cursor into the composer.
 - Pin source extension manifests to this RC host; the published 0.8.0 bundles
   remain unchanged and are not compatible with the RC binary.
+- Fix Shift+Tab thinking cycling: the idle and active-run paths now share one
+  ascending, total rule, so the gesture always advances instead of silently
+  doing nothing on a token-budget or no-longer-advertised selection.
+- Give the `Working` and `Thinking` activity labels one shared shimmer clock so
+  they cannot shimmer differently or freeze mid-row; retry, compaction, and
+  provider lifecycle labels stay timer-only.
 
 This candidate is built for local dogfooding; it is not a published release.
 

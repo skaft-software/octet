@@ -1063,13 +1063,7 @@ fn activity_shimmer_label(
 }
 
 fn activity_label(reasoning: &AssistantBlock) -> &str {
-    if reasoning.is_working_activity() {
-        "Working"
-    } else if reasoning.text.is_empty() && !reasoning.show_reasoning_hint {
-        reasoning.reasoning_heading.as_deref().unwrap_or("Thinking")
-    } else {
-        "Thinking"
-    }
+    reasoning.activity_label()
 }
 
 /// Render the margin dot in the same shimmer coordinate space as the status

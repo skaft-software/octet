@@ -1976,6 +1976,12 @@ pub struct ActiveRunInspection {
     resource_owner: String,
     model: Model,
     catalog: octet_ai::ModelCatalog,
+    /// The committed reasoning selection for this run.
+    ///
+    /// Captured so the thinking cycle can advance from the typed selection
+    /// instead of the footer's display string, which cannot round-trip a token
+    /// budget or a normalized effort.
+    reasoning: ReasoningConfig,
     sessions: crate::session_store::SessionStore,
     /// The launch sandbox policy, so a local shell escape applies the same
     /// process/shell gates and limits as the model `bash` tool.
@@ -2017,6 +2023,7 @@ impl ActiveRunInspection {
             resource_owner: app.agent.session().resource_owner_key(),
             model: app.model.clone(),
             catalog: app.catalog.clone(),
+            reasoning: app.reasoning.clone(),
             sandbox: app.config.sandbox.clone(),
             effect_policy: app.config.effect_policy,
             catalog_is_narrowed: !app.readiness.is_fleet(),
@@ -3683,15 +3690,23 @@ where
                     InputAction::CycleThinking => {
                         if inspection.model.responses_features().reasoning_effort_updates {
                             let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
-                            let current = pending_reasoning.as_ref().map(reasoning_label)
-                                .unwrap_or_else(|| shell.selected_identity().1.trim_end_matches(" (queued)").to_owned());
-                            if let Some(index) = levels.iter().position(|level| level.label() == current) {
-                                match requested_thinking_to_reasoning(
-                                    levels[(index + 1) % levels.len()], &inspection.model, inspection.subagents_available,
+                            // Cycle from the selection this run would actually
+                            // apply: a queued reasoning update when one is
+                            // pending, otherwise the committed selection. Both
+                            // are typed configs, so a budget, a normalized
+                            // effort, or a label the model no longer lists
+                            // still advances instead of matching nothing.
+                            let current = pending_reasoning
+                                .clone()
+                                .or_else(|| Some(inspection.reasoning.clone()));
+                            match next_thinking_level(&levels, current.as_ref(), &inspection.model) {
+                                Ok(level) => match requested_thinking_to_reasoning(
+                                    level, &inspection.model, inspection.subagents_available,
                                 ) {
                                     Ok(reasoning) => pending_reasoning = Some(reasoning),
                                     Err(error) => shell.error(format!("thinking unchanged: {error}")),
-                                }
+                                },
+                                Err(error) => shell.error(format!("thinking unchanged: {error}")),
                             }
                         } else {
                             push_pending_action(pending_actions, PendingIdleAction::CycleThinking);
@@ -5256,17 +5271,44 @@ async fn extension_management_menu(
     }
 }
 
-fn next_thinking_level(app: &App) -> anyhow::Result<ThinkingLevel> {
-    let levels = supported_levels_with_subagents(&app.model, app.subagents_available());
-    let current = level_from_reasoning(&app.reasoning, &app.model)?;
-    let index = levels
-        .iter()
-        .position(|level| *level == current)
-        .unwrap_or(0);
-    levels
-        .get((index + 1) % levels.len())
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("no thinking levels are available"))
+/// The next thinking level when the user presses the cycle gesture.
+///
+/// One total, typed rule serves both the idle and the active-run paths. It
+/// takes the *current selection* as an optional `ReasoningConfig` and always
+/// returns a level the active model advertises, so:
+/// - a press always advances, including from a selection the model no longer
+///   lists or that has no portable level (an unmapped value starts at the first
+///   advertised level);
+/// - the walk is strictly ascending through the advertised levels and wraps
+///   from the last one back to the first; and
+/// - no lookup can fail, because an unmappable current value is a start
+///   position rather than an error.
+///
+/// The earlier implementations diverged: the active path matched a display
+/// string, so a token-budget or otherwise unlabelled selection silently matched
+/// nothing and never cycled, while the idle path propagated a translation
+/// failure out of the interactive loop.
+fn next_thinking_level(
+    levels: &[ThinkingLevel],
+    current: Option<&ReasoningConfig>,
+    model: &octet_ai::Model,
+) -> anyhow::Result<ThinkingLevel> {
+    let Some(first) = levels.first().copied() else {
+        anyhow::bail!("no thinking levels are available");
+    };
+    // A selection with no portable level is not an error: treat it as "not
+    // positioned yet" so the press lands on the first advertised level.
+    let index = current
+        .and_then(|reasoning| level_from_reasoning(reasoning, model).ok())
+        .and_then(|current| levels.iter().position(|level| *level == current));
+    Ok(match index {
+        Some(index) => levels[(index + 1) % levels.len()],
+        None => first,
+    })
+}
+
+fn app_thinking_levels(app: &App) -> Vec<ThinkingLevel> {
+    supported_levels_with_subagents(&app.model, app.subagents_available())
 }
 
 async fn thinking_configuration_picker(
@@ -6321,7 +6363,11 @@ async fn apply_pending_actions(
                 app = select_thinking(app, shell, input, reasoning, None).await?;
             }
             PendingIdleAction::CycleThinking => {
-                let level = next_thinking_level(&app)?;
+                let level = next_thinking_level(
+                    &app_thinking_levels(&app),
+                    Some(&app.reasoning),
+                    &app.model,
+                )?;
                 let reasoning =
                     requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
                 app = select_thinking(app, shell, input, reasoning, None).await?;
@@ -9599,7 +9645,11 @@ async fn run_interactive_once(
                 }
             }
             Idle::CycleThinking => {
-                let level = next_thinking_level(&app)?;
+                let level = next_thinking_level(
+                    &app_thinking_levels(&app),
+                    Some(&app.reasoning),
+                    &app.model,
+                )?;
                 let reasoning =
                     requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
                 app = select_thinking(app, &mut shell, &mut input, reasoning, None).await?;
@@ -13744,6 +13794,7 @@ mod tests {
                 resource_owner: "fixture-owner".into(),
                 model: scripted_model("http://127.0.0.1:1"),
                 catalog: octet_ai::ModelCatalog::default(),
+                reasoning: octet_ai::ReasoningConfig::Off,
                 sessions: crate::session_store::SessionStore::new(&missing, &missing),
                 sandbox: SandboxPolicy::default(),
                 effect_policy: octet_agent::EffectPolicy::UnsafeHost,
@@ -13787,6 +13838,7 @@ mod tests {
             resource_owner,
             model: scripted_model("http://127.0.0.1:1"),
             catalog: octet_ai::ModelCatalog::default(),
+            reasoning: octet_ai::ReasoningConfig::Off,
             sessions: crate::session_store::SessionStore::for_directory(dir, dir),
             sandbox: SandboxPolicy::default(),
             effect_policy: octet_agent::EffectPolicy::UnsafeHost,
@@ -14774,6 +14826,77 @@ mod tests {
             .responses_features
             .reasoning_effort_updates = true;
         model
+    }
+
+    /// The cycle gesture walks the advertised levels in ascending order and
+    /// wraps from the last one back to the first.
+    #[test]
+    fn thinking_cycle_walks_the_advertised_levels_in_ascending_order() {
+        let model = reasoning_control_model("http://127.0.0.1:1");
+        let levels = supported_levels_with_subagents(&model, false);
+        assert_eq!(
+            levels,
+            vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High]
+        );
+
+        // From the first level the walk ascends one step per press and wraps.
+        // `levels[0]` is the current level, so the first press yields
+        // `levels[1]`, and the press after the last returns to `levels[0]`.
+        let mut current = Some(octet_ai::ReasoningConfig::Off);
+        let mut visited = Vec::new();
+        for _ in 0..levels.len() {
+            let level = next_thinking_level(&levels, current.as_ref(), &model).unwrap();
+            visited.push(level);
+            current = Some(requested_thinking_to_reasoning(level, &model, false).unwrap());
+        }
+        let mut expected = levels.clone();
+        expected.rotate_left(1);
+        assert_eq!(visited, expected, "each press advances ascending");
+        // `visited` ends on the first level, so the walk wrapped from the last
+        // advertised level rather than stalling at the top.
+        assert_eq!(
+            visited.last().copied(),
+            Some(levels[0]),
+            "the walk must wrap past the last level"
+        );
+    }
+
+    /// A selection with no portable level is a start position, not a failure.
+    ///
+    /// The active path used to compare the footer's display string, so a token
+    /// budget matched nothing and the press silently did nothing; the idle path
+    /// propagated the translation error out of the interactive loop.
+    #[test]
+    fn thinking_cycle_advances_from_a_selection_without_a_portable_level() {
+        let model = reasoning_control_model("http://127.0.0.1:1");
+        let levels = supported_levels_with_subagents(&model, false);
+
+        // `Off` on an effort-only model has a level, so it advances normally.
+        assert_eq!(
+            next_thinking_level(&levels, Some(&octet_ai::ReasoningConfig::Off), &model).unwrap(),
+            ThinkingLevel::Low
+        );
+        // An absent selection starts at the first advertised level.
+        assert_eq!(
+            next_thinking_level(&levels, None, &model).unwrap(),
+            levels[0]
+        );
+        // A budget this model does not publish has no portable level. The press
+        // must still land on an advertised level instead of erroring or
+        // matching nothing.
+        let budget = octet_ai::ReasoningConfig::Budget(999_999);
+        assert_eq!(
+            next_thinking_level(&levels, Some(&budget), &model).unwrap(),
+            levels[0]
+        );
+        // A level the model no longer advertises behaves the same way.
+        let unlisted = octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
+        assert_eq!(
+            next_thinking_level(&levels, Some(&unlisted), &model).unwrap(),
+            levels[0]
+        );
+        // A model with no levels at all still reports the single honest error.
+        assert!(next_thinking_level(&[], None, &model).is_err());
     }
 
     #[tokio::test]

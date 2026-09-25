@@ -2438,8 +2438,16 @@ impl ShellState {
         )
     }
 
+    /// Gate the shared status shimmer on the *rendered* label rather than on the
+    /// pre-delta `Working` row alone.
+    ///
+    /// The clock used to start only while `is_working_activity()` held, so the
+    /// first reasoning delta froze it: `Thinking` kept rendering the sweep
+    /// from a stalled frame, and the two labels could not share a phase. Gating
+    /// on the label makes `Working` and `Thinking` one continuous sweep, while
+    /// retry, compaction, and provider lifecycle labels stay timer-only.
     fn status_shimmer_active(&self, reasoning: &AssistantBlock) -> bool {
-        reasoning.is_working_activity() && reasoning.retry_activity.is_none()
+        reasoning.is_shimmering_activity()
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {

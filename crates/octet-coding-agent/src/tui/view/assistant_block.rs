@@ -286,6 +286,34 @@ impl AssistantBlock {
         self
     }
 
+    /// The status label this row renders in its activity slot.
+    ///
+    /// This is the single source of truth for the label: the renderer paints
+    /// from it and the animation clock gates on it, so the two can never
+    /// disagree about which row is `Working` and which is `Thinking`.
+    pub(super) fn activity_label(&self) -> &str {
+        if self.is_working_activity() {
+            "Working"
+        } else if self.text.is_empty() && !self.show_reasoning_hint {
+            self.reasoning_heading.as_deref().unwrap_or("Thinking")
+        } else {
+            "Thinking"
+        }
+    }
+
+    /// Whether this row's label runs the shared foreground shimmer sweep.
+    ///
+    /// `Working` and `Thinking` are the two documented sweep labels, so both
+    /// animate off the one monotonic status clock and the transition between
+    /// them never restarts or stalls the phase. Every other activity label -
+    /// retry, compaction, and the provider lifecycle labels - keeps its
+    /// timer-only behaviour, and an expired row never animates.
+    pub(super) fn is_shimmering_activity(&self) -> bool {
+        !self.finished
+            && self.retry_activity.is_none()
+            && matches!(self.activity_label(), "Working" | "Thinking")
+    }
+
     pub(super) fn is_working_activity(&self) -> bool {
         !self.finished
             && self.text.is_empty()

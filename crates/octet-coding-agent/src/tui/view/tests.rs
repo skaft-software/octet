@@ -7425,11 +7425,47 @@ fn activity_shimmer_clock_can_cross_long_labels() {
     }
 }
 
+/// `Working` and `Thinking` share one shimmer: the same sweep, on the same
+/// monotonic phase, continuing across the transition between them.
+///
+/// The clock used to be gated on the pre-delta `Working` row alone, so the
+/// first reasoning delta froze it and `Thinking` rendered a stalled sweep.
 #[test]
-fn collapsed_thinking_keeps_a_static_label_and_marker() {
+fn collapsed_thinking_shimmers_on_the_shared_working_phase() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "high");
     let run_id = shell.begin_run("codex");
+
+    let row = |shell: &InteractiveShell, label: &str| {
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(80)
+            .iter()
+            .find(|line| strip_terminal_sequences(line).contains(label))
+            .cloned()
+            .unwrap_or_else(|| panic!("{label} status row"))
+    };
+    let marker_prefix = |line: &str| {
+        let marker = line.find('•').expect("reasoning margin marker");
+        line[..marker + '•'.len_utf8()].to_owned()
+    };
+
+    // Before any delta the row is `Working` and the clock is running.
+    let working = row(&shell, "Working");
+    assert!(
+        strip_terminal_sequences(&working).starts_with("• Working ("),
+        "{working:?}"
+    );
+    {
+        let mut state = shell.state.borrow_mut();
+        assert!(state.has_active_status_shimmer());
+        state.advance_status_shimmer_by(4);
+    }
+    let working = row(&shell, "Working");
+
+    // The first reasoning delta turns the same row into `Thinking`. The clock
+    // must keep running, and the label must move.
     shell.on_run_event(
         run_id,
         &AgentEvent::OutputDelta {
@@ -7437,47 +7473,48 @@ fn collapsed_thinking_keeps_a_static_label_and_marker() {
             text: "private trace".into(),
         },
     );
-    let raw = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(80)
-            .iter()
-            .find(|line| strip_terminal_sequences(line).contains("Thinking"))
-            .cloned()
-            .expect("reasoning status row")
-    };
-    let before = raw(&shell);
+    let thinking = row(&shell, "Thinking");
     assert!(
-        strip_terminal_sequences(&before).starts_with("• Thinking ("),
-        "{before:?}"
+        strip_terminal_sequences(&thinking).starts_with("• Thinking ("),
+        "{thinking:?}"
     );
-    let marker_prefix = |line: &str| {
-        let marker = line.find('•').expect("reasoning margin marker");
-        line[..marker + '•'.len_utf8()].to_owned()
-    };
     {
         let mut state = shell.state.borrow_mut();
-        assert!(!event_dot_animating(&state));
-        assert!(!state.has_active_status_shimmer());
-        assert_eq!(state.active_event_blocks, vec![0]);
-        state.advance_status_shimmer();
+        assert!(
+            state.has_active_status_shimmer(),
+            "Thinking must keep the shared status clock running"
+        );
+        let before = state.status_shimmer_frame;
+        state.advance_status_shimmer_by(1);
+        assert_eq!(
+            state.status_shimmer_frame,
+            before + 1,
+            "the phase must advance instead of freezing"
+        );
     }
-    let after = raw(&shell);
+    let thinking = row(&shell, "Thinking");
+
+    // Both labels paint a foreground-only sweep that shares the one phase, and
+    // the margin marker stays a solid glyph on either row.
+    assert_ne!(thinking, working, "the Thinking label must sweep");
     assert!(
-        strip_terminal_sequences(&after).starts_with("• Thinking ("),
-        "{after:?}"
-    );
-    assert_eq!(after, before, "Thinking must not shimmer");
-    assert_eq!(
-        marker_prefix(&after),
-        marker_prefix(&before),
-        "the Thinking marker must remain steady"
+        !thinking.contains("\x1b[48;"),
+        "status shimmer must stay foreground-only: {thinking:?}"
     );
     assert!(
-        !after.contains("\x1b[48;"),
-        "status shimmer must stay foreground-only"
+        !thinking.contains("\x1b[2m"),
+        "the sweep must not dim the label: {thinking:?}"
     );
+    // The marker is a single solid glyph on both labels; it is not part of the
+    // label's text run and never gains a background or a dim attribute.
+    for (label, line) in [("Working", &working), ("Thinking", &thinking)] {
+        let marker = marker_prefix(line);
+        assert!(marker.ends_with('•'), "{label} marker: {marker:?}");
+        assert!(
+            !marker.contains("\x1b[48;") && !marker.contains("\x1b[2m"),
+            "{label} marker must stay a plain foreground glyph: {marker:?}"
+        );
+    }
 }
 
 #[test]
