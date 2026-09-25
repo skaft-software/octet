@@ -13,14 +13,27 @@ published bundle or API 0.3 process.
 ## Build and enable
 
 The renderer is a separate Rust package because `oxi-snapcompact` 0.64.0
-requires Rust **1.96+** (octet's main workspace declares 1.86). Build it once:
+requires Rust **1.96+** (octet's main workspace declares 1.86). Build it once,
+outside the extension directory:
 
 ```sh
-cargo build --release --locked --manifest-path extensions/octet-snap-compact/renderer/Cargo.toml
+SNAP_RENDERER_TARGET="${TMPDIR:-/tmp}/octet-snap-compact-renderer"
+cargo build --release --locked --target-dir "$SNAP_RENDERER_TARGET" \
+  --manifest-path extensions/octet-snap-compact/renderer/Cargo.toml
+install -D "$SNAP_RENDERER_TARGET/release/octet-snap-renderer" \
+  extensions/octet-snap-compact/renderer/target/release/octet-snap-renderer
 python3 -m pip install ./sdk/python  # if the source SDK is not importable
 cargo build -p octet-coding-agent --bins
 ./target/debug/octet --extension-dir ./extensions --enable-extension octet-snap-compact
 ```
+
+Do not leave a cargo `target/` tree inside the extension directory. The host
+verifies an extension's source by hashing a bounded walk of its directory
+(1,024 entries); a full build tree exceeds the bound, the source is marked
+unverified, and the extension parks with "extension source changed before
+activation" after each catalog refresh. Only the built binary belongs under
+`renderer/target/release/`. If an earlier build left `renderer/target/` full
+of build artifacts, remove it first (`rm -rf extensions/octet-snap-compact/renderer/target`).
 
 `extension.py` is executable and finds the SDK directly when run from this
 checkout. For a copied standalone directory, install the checkout's source SDK
@@ -56,7 +69,8 @@ extension, omit `--enable-extension` on the next launch to disable it.
 ## Checks
 
 ```sh
-cargo test --manifest-path extensions/octet-snap-compact/renderer/Cargo.toml --locked
+cargo test --locked --target-dir "${TMPDIR:-/tmp}/octet-snap-compact-renderer" \
+  --manifest-path extensions/octet-snap-compact/renderer/Cargo.toml
 python3 -m unittest discover -s extensions/octet-snap-compact -p 'test_*.py'
 cargo test -p octet-agent --lib compaction_strategy
 cargo test -p octet-agent --lib vision_compaction_bypasses_parent_summary_and_bad_frames_keep_history

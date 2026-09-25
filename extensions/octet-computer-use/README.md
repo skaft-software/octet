@@ -1,117 +1,122 @@
-# octet computer-use extension
+# octet computer-use
 
-Source-only API 0.3 entry point, scoped policy boundary, and a **trusted-local,
-mocked-native macOS composition**. This is not an installed/native-qualified
-computer-use product. Standalone startup remains inert.
+**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
+public-install evidence. **This local RC checkout's `extension.toml` instead
+requires `=0.8.1-rc.1`; use `--extension-dir ./extensions` with the candidate.**
 
-This extension source manifest is pinned to Octet `0.8.1-rc.1` in the local
-candidate checkout. Use `--extension-dir ./extensions` with the matching RC
-binary; the published 0.8.0 bundles remain version-locked to the stable host.
-`main.py` resolves those modules through the host-provided `OCTET_EXTENSION_DIR`,
-falling back to its own directory only for direct source execution. Successful
-API negotiation does not install a desktop backend or grant native-input authority.
+Operate native desktop applications on **macOS, Windows, and Linux** through a
+locally installed [Cua Driver](https://github.com/trycua/cua), the MIT-licensed
+open-source computer-use driver. This bundle provisions the driver on request,
+connects to it over local stdio MCP, and republishes a reviewed subset of its
+tools as octet tools.
 
-Read [CONTRACT.md](CONTRACT.md) before embedding. The exact extension wire is
-[API 0.3](../../docs/extensions/API-0.4-REFERENCE.md); capability ownership and
-process trust remain governed by [extensions](../../docs/extensions.md) and
-[security](../../SECURITY.md).
+The driver is a separate open-source project. This bundle does not vendor it,
+does not fork it, and does not include any part of OpenAI's CUA runtime. It
+installs the published `cua-driver` Python distribution, the same way
+`octet-browse` provisions its pinned Playwright runtime.
 
-## Authority boundary
-
-The manifest remains opt-in and declares no filesystem, process or network
-capability. Those declarations are consent metadata, not OS containment.
-API 0.3 currently has **no negotiated automation policy, approval, target-picker,
-or trusted stop/takeover service**. The separate native protocol-1 controlled
-host does not start executable extensions. This implementation does not invent
-those services or downgrade to API 0.2.
-
-A trusted embedding may supply `ComputerUseExtension(..., runtime=...)`, where
-`MacOSRuntime` requires all of:
-
-- explicit `enabled=True`;
-- a host-derived `OwnerIdentity` (session, extension instance, process generation);
-- an exact host-selected native bundle/PID/window/process-start identity;
-- a `PolicyGate` with a matching, bounded, expiring `Scope`; and
-- a lazy owner-local backend factory. There is no default native factory.
-
-The gate requires a trusted local `evaluate_action(binding, *, parent_request_id,
-approval_token)` implementation. **This is not a JSON-RPC method.** Legacy
-`evaluate(intent)` adapters are refused: their intent omits exact arguments and
-observation evidence. The embedding must derive active request identity and
-approval decisions itself; the extension cannot qualify a supplied callback.
-
-Bindings include the exact operation, capability/effect, owner, session, target,
-origin where applicable, scope, process/frame generation, private argument
-digest, observation digest and native-identity digest. Grants are registered
-locally, short-lived, one-use and parent-request-bound. Scope expiry uses the
-gate's monotonic millisecond clock (or the explicitly injected clock), not Unix
-time. Revocation is terminal. ASK retries require the exact issued token and
-binding; no prompt, native permission flag, or cooperative confirmation is allow.
-Credential/authentication classes and protected native controls remain manual.
-Provider credentials, headers, leases and transport authority never enter the
-backend interface.
-
-## Bounded composition
-
-`runtime.py` connects the entry point, existing lifecycle, exact policy gate and
-macOS backend for these operations only:
-
-| Operation | Arguments / constraints |
-| --- | --- |
-| `observe` | `{}`; selected window, value-free bounded AX tree; no screenshot |
-| `click` | `x` and `y`, or `coordinates: {x, y}`; left button; exactly one observed AX node center |
-| `keypress` | One lifecycle navigation `key`; Arrow names map to native navigation keys |
-| `type` | Bounded `text`; exactly one focused editable non-sensitive control |
-| `scroll` | Bounded integer `delta_x`/`delta_y`; native restrictions still apply |
-
-Coordinates are AX screen-space points, not screenshot pixels or an arbitrary
-click surface. API 0.3 inputs are portable integers; fractional inspection values
-are decimal text, never rounded input coordinates. Fractional window dimensions
-are refused by this composition. Native identity and full observation evidence
-stay private; model-returned copies never replace them. Input is revalidated
-after policy, then the native backend rechecks permission, foreground, window
-identity/geometry and AX content/focus after its separate confirmation boundary.
-The final scoped one-use authorization callback runs after those native checks,
-immediately before input, so time spent revalidating cannot extend a grant.
-
-The entry point retains its source tool operation catalog. `start`,
-`double_click`, `drag`, `move`, `wait` and `screenshot` are explicitly denied by
-this composition; they are not silently approximated. The Windows backend and
-screenshot artifact modules remain independent tested source, not integrated
-production dispatch. API 0.3 media projection is deferred. No screenshot bytes,
-arbitrary paths or model-code operations are admitted here.
-
-## Lifetime and qualification
-
-One runtime has one owner/target and serial bounded calls. Trusted local
-`stop()`/`takeover()`, process EOF/shutdown, cancellation and lost response
-transport revoke admission, settle the lifecycle, clear observations and request
-input release. Stop/takeover are not model tools. Late observation completion
-cannot revive settled evidence. Unknown input acknowledgement never permits
-replay; successful input/reobservation is not verified task success.
-
-Cleanup requires an explicit boolean acknowledgement. A missing, truthy-object,
-failed or stuck release is degraded, not success or rollback. The retained
-`MacOSNative.release_all` is best-effort and does not yet supply that qualified
-acknowledgement. The mock fixture does. Physical takeover detection, hard
-process-loss release and real macOS/Windows qualification remain outstanding.
-
-`CodeRuntime.execute`, `ProcessSandbox` and sandbox selection fail closed:
-primitive availability, claimed capability flags and injected objects cannot
-enable model-code execution. No qualified launcher exists. The Linux prototype
-inherited host memory/FDs and did not establish current-process PID/capability
-isolation; its process dispatch has been removed rather than called contained.
-No model source reaches a worker or a supplied sandbox callback.
-
-## Deterministic checks
-
-From this extension directory:
+## Install and use
 
 ```console
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 -m py_compile main.py octet_computer_use/*.py
+octet extension install octet-computer-use
+octet --enable-extension octet-computer-use
 ```
 
-The suites use synthetic native fixtures only. They never open user applications,
-request permissions, run a code worker or contact a provider. These checks
-do not establish Windows/macOS installed-package or native-host qualification.
+Then provision the driver and check its health:
+
+```console
+/computer-use
+```
+
+or ask the agent to run `computer_use_setup` once. The bundle stores the
+provisioned driver under `~/.octet/computer-use` and never touches your Python
+environment or any global install.
+
+`computer_use_status` reports whether the driver is present, its version, its
+self-check, and your operating system's permission state. It never prompts.
+
+## Grant operating-system permissions
+
+The driver needs permission to observe and control the desktop. **This bundle
+never grants an operating-system permission for you.** Grant it yourself:
+
+- **macOS** — Accessibility **and** Screen Recording, granted to the CuaDriver
+  helper app. `cua-driver permissions grant` launches the helper so the system
+  dialogs attribute correctly. The bundle only *reports* status.
+- **Windows** — the driver runs as your user; some stacks need the process to
+  be interactive (an unlocked, visible session).
+- **Linux** — a live display session plus AT-SPI 2 accessibility. X11/XWayland
+  routes more widely than native Wayland.
+
+Until the permission is granted, observation and action calls fail. That is
+expected, and `computer_use_status` will say so.
+
+## What the agent can do
+
+| Tool | Driver tool | Notes |
+| --- | --- | --- |
+| `computer_use_status` | local | Provisioning, version, permissions, self-check. |
+| `computer_use_setup` | local | Install the driver from the package index. |
+| `computer_use_installed_apps` | `list_apps` | Read-only. |
+| `computer_use_windows` | `list_windows` | Read-only. |
+| `computer_use_window_state` | `get_window_state` | Read-only. Accessibility tree + screenshot. |
+| `computer_use_desktop_state` | `get_desktop_state` | Read-only. Full-screen capture. |
+| `computer_use_click` | `click` | **Confirmation required.** |
+| `computer_use_type_text` | `type_text` | **Confirmation required.** |
+| `computer_use_press_key` | `press_key` | **Confirmation required.** |
+| `computer_use_scroll` | `scroll` | **Confirmation required.** |
+| `computer_use_launch_app` | `launch_app` | **Confirmation required.** |
+| `computer_use_start_session` | `start_session` | **Confirmation required.** |
+| `computer_use_end_session` | `end_session` | **Confirmation required.** |
+
+The driver publishes a much larger catalog (58 tools on macOS at the time of
+writing). This bundle republishes a small, reviewed subset so octet's tool
+catalog stays stable across upstream releases. Only reviewed arguments are
+forwarded; an unrecognised argument is dropped rather than passed through.
+
+## Safety model
+
+- **Confirmation on effect.** Every driver action that is not annotated
+  `readOnlyHint: true` requires an explicit user confirmation before it is
+  dispatched. A declined, cancelled, or unavailable confirmation denies the
+  call — the agent never proceeds on assumption. A tool the driver has not
+  described is treated as effectful.
+- **Read-only means read-only.** Only `list_apps`, `list_windows`,
+  `get_window_state`, and `get_desktop_state` run without a prompt.
+- **Least environment.** The driver child receives only reviewed, non-secret
+  desktop session variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
+  and the documented equivalents). Provider tokens, `PATH` overrides, and
+  arbitrary ambient variables are not forwarded.
+- **No secrets, no silent installs.** The bundle never types credentials for
+  you and never downloads a driver outside the standard package install you
+  trigger. OS permissions are always yours to grant.
+- **Re-snapshot before acting.** Element indices are replaced by the next
+  window snapshot, so read state before each indexed action. The bundled skill
+  documents the full observe-act-verify loop.
+
+## Relationship to octet-browse
+
+`octet-browse` is [deprecated but still installable](../octet-browse/README.md#deprecation).
+It drives an isolated, Octet-owned Chromium with manual authentication, which
+remains the safer surface for authenticated page work. This bundle drives your
+actual desktop, so it can see anything you can see — including a browser you
+already have open. Prefer Browse for anything involving a login or a saved
+session.
+
+## Tests
+
+The suite runs without a driver; the integration tests skip automatically when
+no local driver is present.
+
+```console
+PYTHONPATH=.:vendor:tests python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+To include the live driver tests, point at an installed binary:
+
+```console
+PYTHONPATH=.:vendor:tests OCTET_CUA_DRIVER_BINARY=/path/to/cua-driver \
+  python3 -m unittest discover -s tests -p 'test_*.py'
+```

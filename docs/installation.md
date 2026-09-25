@@ -118,7 +118,8 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | Package | Canonical setup and limits |
 | --- | --- |
 | `octet-web-search` | [Brave Search (recommended) or SearXNG](../extensions/octet-web-search/README.md); public search/fetch, not a browser. |
-| `octet-browse` | [Visible isolated browser](../extensions/octet-browse/README.md); authentication is manual. |
+| `octet-browse` | **Deprecated**, still installable. [Visible isolated browser](../extensions/octet-browse/README.md); authentication is manual. Prefer the computer-use extension for new automation; see [deprecation notes](../extensions/octet-browse/README.md#deprecation). |
+| `octet-computer-use` | [Native desktop control](../extensions/octet-computer-use/README.md) (macOS/Windows/Linux) via a locally installed MIT-licensed Cua Driver; provisioning is explicit, OS permissions are yours to grant. |
 | `octet-mcp` | [MCP bridge](../extensions/octet-mcp/README.md); local stdio is supported, remote Streamable HTTP is blocked by default. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |

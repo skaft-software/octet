@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Deprecated
+
+- Deprecate this bundle in favour of the computer-use extension, which drives a
+  locally installed MIT-licensed Cua Driver for native desktop control on
+  macOS, Windows, and Linux. Browse remains published, installable, and
+  unchanged in behavior: it is retained because its visible, isolated,
+  Octet-owned Chromium profile and manual-authentication boundary are a safety
+  property the computer-use path does not provide. No removal date is set; it
+  will be retired only after that path demonstrably covers the isolated-browser
+  case. See [deprecation](README.md#deprecation).
+
 - Request non-activating creation for tool-created isolated tabs, matching the exact target and cleaning up cancelled creation without a foreground fallback. Chromium remains visible; initial-launch and page-popup focus are not yet resolved or physically qualified. See [qualification](QUALIFICATION.md).
 - Document [native Firefox/Safari connector prerequisites](CONNECTORS.md#native-firefoxsafari-prerequisites-378) and test the existing fail-closed native/identity/ownership boundary; native operation remains unsupported.
 

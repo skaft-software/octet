@@ -1,16 +1,58 @@
 name = "octet-computer-use"
-version = "0.1.0"
-api_version = "0.3"
+version = "0.8.0"
+api_version = "0.4"
 requires_octet = "=0.8.1-rc.1"
-description = "A source-only, host-authorized computer-use policy boundary"
+description = "Native computer use on macOS, Windows, and Linux through a locally installed MIT-licensed Cua Driver, with confirmation on every effectful action"
 
 [entrypoint]
-command = "main.py"
+command = "extension.py"
 
 [capabilities]
-filesystem = "none"
-process = false
-network = false
+# Provisioning installs the MIT-licensed `cua-driver` distribution from the
+# configured package index into octet-owned state under ~/.octet/computer-use.
+# The driver is then launched as a child process to read the desktop and to act
+# on it, which necessarily requires filesystem and process authority.
+filesystem = "unrestricted"
+process = true
+network = true
+# The driver reaches the interactive desktop session only through these
+# reviewed, non-secret session variables. None is a credential, and none is
+# forwarded unless the host and the bundle both declare it. The bundle strips
+# everything else, so provider tokens and arbitrary ambient variables never
+# reach the child.
+environment = [
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+  "XDG_RUNTIME_DIR",
+  "XDG_SESSION_TYPE",
+  "XDG_DATA_HOME",
+  "XDG_DATA_DIRS",
+  "XDG_CONFIG_HOME",
+  "DBUS_SESSION_BUS_ADDRESS",
+  "XAUTHORITY",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "USERPROFILE",
+  "SYSTEMROOT",
+  "WINDIR",
+]
 
 [contributes]
-tools = ["computer_use"]
+tools = [
+  "computer_use_status",
+  "computer_use_setup",
+  "computer_use_installed_apps",
+  "computer_use_windows",
+  "computer_use_window_state",
+  "computer_use_desktop_state",
+  "computer_use_click",
+  "computer_use_type_text",
+  "computer_use_press_key",
+  "computer_use_scroll",
+  "computer_use_launch_app",
+  "computer_use_start_session",
+  "computer_use_end_session",
+]
+commands = ["computer-use"]
+ui = ["status"]
+confirmations = true

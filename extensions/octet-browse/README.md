@@ -11,6 +11,32 @@ Use a visible, isolated Chromium window to inspect pages and perform bounded
 browser actions. Sign in manually; octet Browse never uses your normal browser
 profile.
 
+<a id="deprecation"></a>
+
+## Deprecation
+
+**This bundle is deprecated. It still works and remains installable, but new
+automation should not be built on it.**
+
+The replacement is the computer-use extension, which drives a locally installed
+[Cua Driver](https://github.com/trycua/cua) (MIT) to operate native
+applications on macOS, Windows, and Linux.
+
+Browse is being kept rather than removed because it still provides a safety
+property the replacement does not: a **visible, isolated, Octet-owned Chromium
+profile with a manual-authentication boundary**. The agent never touches your
+real browser, its cookies, or your logged-in sessions. The computer-use path
+drives your actual desktop, including any browser you already have open, so
+authenticated page work there carries a materially different risk profile.
+
+Practical guidance:
+
+- **New, unauthenticated automation** — prefer the computer-use extension.
+- **Anything involving a login, account, or saved session** — Browse is still the
+  safer choice today.
+- Browse is not scheduled for removal. It will be retired only after the
+  computer-use path demonstrably covers the isolated-browser case.
+
 <a id="start-from-a-reviewed-checkout"></a>
 
 ## Install the bundle

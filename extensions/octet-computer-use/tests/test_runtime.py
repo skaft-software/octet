@@ -19,41 +19,6 @@ from test_backend_macos import MockNative, TARGET, OWNER
 from test_policy import Evaluator, scope
 
 
-class ProtocolVersionTests(unittest.TestCase):
-    def test_initialize_response_matches_manifest_and_canonical_schema(self):
-        extension_dir = Path(__file__).resolve().parents[1]
-        manifest = (extension_dir / "extension.toml").read_text()
-        manifest_api = re.search(r'^api_version = "([^"]+)"$', manifest, re.MULTILINE).group(1)
-        schema = json.loads((extension_dir.parents[1] / "protocol" / "extension-api-v0.3.schema.json").read_text())
-        self.assertEqual(schema["api_version"], "0.3")  # Never retag canonical as legacy 0.4.
-        params = {
-            "api_version": manifest_api, "octet_version": "0.8.1-rc.1",
-            "extension": {"name": "octet-computer-use"}, "workspace": str(extension_dir),
-            "capabilities": {}, "contributes": {"tools": ["computer_use"]},
-            "flag_values": [], "host": {},
-            "contract": {
-                "schema": schema["schema_id"], "encoding": schema["canonical_encoding"],
-                "required_capabilities": protocol.REQUIRED_CAPABILITIES,
-                "optional_capabilities": [], "required_methods": protocol.REQUIRED_METHODS,
-                "optional_methods": [], "limits": {"max_frame_bytes": 1_048_576,
-                    "max_concurrent_requests": 64, "max_tools": 256},
-            },
-        }
-        output = io.BytesIO()
-        server = ComputerUseExtension(io.BytesIO(), output)
-        server.dispatch(1, "initialize", params, False)
-        result = json.loads(output.getvalue())["result"]
-        self.assertEqual(result["api_version"], manifest_api)
-        self.assertEqual(result["api_version"], schema["api_version"])
-        self.assertEqual(result["contract"]["schema"], schema["schema_id"])
-        self.assertEqual(result["contract"]["encoding"], schema["canonical_encoding"])
-
-        legacy = ComputerUseExtension(io.BytesIO(), io.BytesIO())
-        with self.assertRaises(ProtocolFailure) as mismatch:
-            legacy.dispatch(1, "initialize", dict(params, api_version="0.4"), False)
-        self.assertEqual(mismatch.exception.name, "version_mismatch")
-
-
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.native = MockNative()

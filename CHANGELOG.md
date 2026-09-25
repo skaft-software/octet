@@ -6,6 +6,13 @@
   Expand the bounded model catalog from 256 to 4,096 entries so large provider
   inventories no longer hide models at the old cutoff; retain capability gates
   and bootstrap byte limits.
+- Add the `octet-computer-use` bundle to the official release catalog. It drives
+  native desktop applications on macOS, Windows, and Linux through a locally
+  installed MIT-licensed Cua Driver, provisioning the driver on request and
+  requiring an explicit user confirmation for every effectful action.
+- Deprecate `octet-browse`. It remains published, installable, and unchanged, and
+  is retained because its isolated, Octet-owned Chromium profile with a manual-auth
+  boundary is a safety property the computer-use path does not provide.
 
 ## [0.8.1-rc.1] — local dogfood only (unpublished)
 
