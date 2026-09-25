@@ -1,14 +1,14 @@
 # octet-subagents reference
 
-**Source distribution: 0.8.0 (release candidate).** This checkout and local
-archives require exactly octet 0.8.0. Catalog commands below require matching
-published assets; no 0.8.0 publication is claimed. Use a
-[source-built host](../../docs/installation.md#build-from-a-checkout) with a
-reviewed source checkout or local archive until matching assets are published.
+**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
+public-install evidence. Reviewed source checkouts and local archives remain
+separate installation options.
 
 [Usage guide](README.md). This is the bundled API `0.4` runtime contract, not a
 general extension-authoring tutorial. Source distribution `0.8.0` requires
-exactly octet `0.8.0`; it does not announce a public bundle release.
+exactly octet `0.8.0`; API versions remain independent.
 
 The executable launches named, single-purpose child conversations through the
 host-owned `agent_sessions` service. It is not an agent team, graph/recipe runtime,
@@ -92,7 +92,7 @@ use the graph/recipe spike, built-in team mailboxes, or another scheduler.
 ## Install, enable, and trust
 
 The source bundle requires local octet 0.8.0 and has one root directory named
-`octet-subagents`. With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout)
+`octet-subagents`. With [octet 0.8.0](../../docs/installation.md)
 and verified version-matched published assets, use the catalog command:
 
 ```console

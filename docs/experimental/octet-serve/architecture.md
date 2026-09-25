@@ -1,6 +1,6 @@
 # Architecture
 
-Maintainer reference for experimental Serve in the octet 0.8.0 RC source, not a
+Maintainer reference for experimental Serve in octet 0.8.0, not a
 release-qualification result. Start with the [Serve guide](README.md) for local
 use and version-matched package availability.
 LAN pairing and production live previews are unavailable. The graphical protocol described here is separate from extension

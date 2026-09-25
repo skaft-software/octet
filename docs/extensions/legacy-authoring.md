@@ -11,8 +11,8 @@ wires or make every low-level service a supported coding-product feature.
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
 The source SDK distributions and four official executable bundles are version
-`0.8.0`; independent examples keep their own versions. The host source is a
-local 0.8.0 RC, not a published release. This is not SDK registry publication; see
+`0.8.0`; independent examples keep their own versions. Native publication does
+not publish SDK registries; see
 [installation and availability](../installation.md).
 
 The [legacy protocol reference](PROTOCOL-REFERENCE.md) retains complete API
@@ -728,8 +728,8 @@ does not merge permissions, resource ownership, failure policy, or tool semantic
 ## Installable extension bundles
 
 Catalog commands select the package matching the running host version. For
-octet 0.7.6 availability, signed assets, and public-install verification, consult
-the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
+octet 0.8.0 availability, signed assets, and public-install verification, consult
+the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0).
 Use a reviewed source or local archive when matching publication has not been
 verified.
 

@@ -15,10 +15,10 @@ the [extension guide](extensions.md).
 
 ## Handshake
 
-The example uses this checkout's **0.8.0 RC** SDK version, not evidence of native
-publication. Validate the version reported by the actual host. For source builds
-and historical published assets, see [installation](installation.md); current
-release scope is in the [candidate notes](releases/v0.8.0.md).
+The example uses the **0.8.0** SDK version. Validate the version reported by
+the actual host. See [installation](installation.md) and the
+[release notes](releases/v0.8.0.md) for version-matched native assets; SDK
+registries remain unpublished.
 
 Send `hello` and validate the response before accepting work, including when the
 application uses a configured host path:
@@ -90,7 +90,7 @@ run calling its provider.
 
 ### Host-owned GitHub Copilot
 
-The unreleased coding-host adapter accepts `octet --login copilot [--headless]`
+The coding-host adapter accepts `octet --login copilot [--headless]`
 and `--logout copilot` (`github-copilot` is an alias). Its private OAuth store can
 supply eligible Copilot models to the shared online catalog, including NDJSON
 `models` and catalog-backed `run`. Offline catalog construction adds none. NDJSON

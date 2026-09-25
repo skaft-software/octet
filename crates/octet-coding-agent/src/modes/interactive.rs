@@ -79,6 +79,7 @@ enum ControlIntent {
 }
 
 type ControlFuture = Pin<Box<dyn Future<Output = Result<(), AgentError>>>>;
+type SubagentStop = Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>;
 
 /// The narrow broadcast seam that brackets one frontend-owned host dialog with
 /// exactly one `dialog/started`/`dialog/settled` pair, whatever its outcome.
@@ -1926,6 +1927,9 @@ pub struct ActiveRunInspection {
     workspace: PathBuf,
     invocation_cwd: PathBuf,
     session_path: PathBuf,
+    /// Captured host authorization namespace; stop admission must not re-read a
+    /// potentially large live transcript on the input thread.
+    resource_owner: String,
     model: Model,
     catalog: octet_ai::ModelCatalog,
     sessions: crate::session_store::SessionStore,
@@ -1966,6 +1970,7 @@ impl ActiveRunInspection {
             workspace: app.config.workspace.clone(),
             invocation_cwd: app.config.invocation_cwd.clone(),
             session_path: app.agent.session().path().to_path_buf(),
+            resource_owner: app.agent.session().resource_owner_key(),
             model: app.model.clone(),
             catalog: app.catalog.clone(),
             sandbox: app.config.sandbox.clone(),
@@ -2888,6 +2893,17 @@ fn open_active_subagent_document(
     }
 }
 
+fn show_active_subagent_stop_result(shell: &mut InteractiveShell, result: anyhow::Result<String>) {
+    match result {
+        Ok(output) => shell.show_extension_output(
+            "subagents",
+            format!("Stop request responded; terminal settlement is not confirmed. Check /subagents.\n\n{output}"),
+        ),
+        Err(error) => shell.error(format!("subagent stop not confirmed: {error}; check /subagents")),
+    }
+    shell.render();
+}
+
 /// Drive one active frozen-Agent run. Control sends are queued locally, and
 /// their bounded sends are polled alongside input and the run stream. Channel
 /// admission is not a delivery acknowledgement; only SteeringDelivered is.
@@ -2943,6 +2959,13 @@ where
     let mut subagent_refresh: Option<Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>> =
         None;
     let mut subagent_refresh_error = None::<String>;
+    // Each accepted control keeps its owned extension request until its response
+    // arrives, even if the root finishes first. Never spawn a detached mutation.
+    let mut subagent_stops = VecDeque::<SubagentStop>::new();
+    let mut subagent_stop: Option<SubagentStop> = None;
+    // Retain the root outcome while owned stop requests finish, using this same
+    // input/event loop rather than a blocking drain or a detached mutation task.
+    let mut settled_outcome = None;
     let mut update_check: Option<
         Pin<Box<dyn Future<Output = anyhow::Result<crate::update::UpdateStatus>>>>,
     > = None;
@@ -2951,6 +2974,21 @@ where
     modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        if settled_outcome.is_some() {
+            // Ctrl+C can arrive after root settlement while a stop response is
+            // pending. It must still revoke previously armed follow-up dispatch.
+            if aborting && !dispatch_queued {
+                shell.settle_queued_follow_ups(false);
+            }
+            if subagent_stop.is_none() && subagent_stops.is_empty() {
+                return Ok(settled_outcome.take().expect("settled root outcome"));
+            }
+            if *quit_requested || shell.close_requested() {
+                shell.error("subagent stop response interrupted by shutdown; check /subagents after restart".into());
+                shell.render();
+                return Ok(HostRunOutcome::shutdown());
+            }
+        }
         if aborting || shell.close_requested() {
             clipboard = None;
             clipboard_gesture = None;
@@ -2999,6 +3037,9 @@ where
         if aborting {
             pending_reasoning = None;
             reasoning_send = None;
+        }
+        if subagent_stop.is_none() {
+            subagent_stop = subagent_stops.pop_front();
         }
 
         tokio::select! {
@@ -3068,6 +3109,12 @@ where
                     }
                 }
                 shell.render();
+            }
+            result = futures_util::future::OptionFuture::from(subagent_stop.as_mut().map(|future| future.as_mut())), if subagent_stop.is_some() => {
+                subagent_stop = None;
+                if let Some(result) = result {
+                    show_active_subagent_stop_result(shell, result);
+                }
             }
             result = futures_util::future::OptionFuture::from(subagent_refresh.as_mut().map(|future| future.as_mut())), if subagent_refresh.is_some() => {
                 subagent_refresh = None;
@@ -3480,6 +3527,28 @@ where
                             shell.render();
                             continue;
                         }
+                        if let Command::Unknown(text) = &command {
+                            if let Some(target) = live_subagents_stop_target(text) {
+                                if subagent_stops.len() + usize::from(subagent_stop.is_some()) >= 8 {
+                                    shell.error("subagent stop queue is full; retry after a response".into());
+                                } else if aborting || *quit_requested || shell.close_requested() {
+                                    shell.error("subagent stop not admitted while closing".into());
+                                } else {
+                                    let result = executable_extensions.subagent_stop_control(
+                                        target.to_owned(), &inspection.resource_owner,
+                                    );
+                                    match result {
+                                        Ok(stop) => {
+                                            subagent_stops.push_back(stop);
+                                            shell.notice("subagent stop queued; waiting for the owner-bound response (not terminal settlement)");
+                                        }
+                                        Err(error) => shell.error(format!("subagent stop not admitted: {error}")),
+                                    }
+                                }
+                                shell.render();
+                                continue;
+                            }
+                        }
                         let context = run.context_snapshot();
                         if let Err(error) = handle_active_command(
                             shell,
@@ -3607,7 +3676,7 @@ where
                     ),
                 }
             }
-            event = run.next() => match event {
+            event = run.next(), if settled_outcome.is_none() => match event {
                 Some(event) => {
                     if matches!(&event, AgentEvent::TurnStarted) && inspection.model.responses_features().reasoning_effort_updates {
                         if let Ok(session) = inspection.read_only_session() {
@@ -3722,7 +3791,7 @@ where
                         let (endpoint, model) = shell
                             .current_run_route()
                             .unwrap_or_else(|| ("unknown".to_owned(), "unknown".to_owned()));
-                        return Ok(HostRunOutcome::from_finish_reason(
+                        settled_outcome = Some(HostRunOutcome::from_finish_reason(
                             &reason,
                             &endpoint,
                             &model,
@@ -3737,7 +3806,7 @@ where
                     shell.restore_queued_steering();
                     shell.fail_run(run_id, RUN_STREAM_LOST_MESSAGE);
                     shell.render();
-                    return Ok(HostRunOutcome::stream_lost());
+                    settled_outcome = Some(HostRunOutcome::stream_lost());
                 }
             },
         }
@@ -5389,6 +5458,16 @@ fn refresh_subagent_snapshot<'a, 'extensions>(
             },
         }
     })
+}
+
+/// Admit only the exact stop verb and one target. Other extension commands
+/// retain the active dispatcher's ordinary unknown-command behavior.
+fn live_subagents_stop_target(text: &str) -> Option<&str> {
+    let mut parts = text.split_whitespace();
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("/subagents"), Some("stop"), Some(target), None) => Some(target),
+        _ => None,
+    }
 }
 
 /// Whether an unknown-command text is the bare `/subagents` live view owned
@@ -13201,6 +13280,7 @@ mod tests {
                 workspace: missing.clone(),
                 invocation_cwd: missing.clone(),
                 session_path: missing.join("session.jsonl"),
+                resource_owner: "fixture-owner".into(),
                 model: scripted_model("http://127.0.0.1:1"),
                 catalog: octet_ai::ModelCatalog::default(),
                 sessions: crate::session_store::SessionStore::new(&missing, &missing),
@@ -13237,11 +13317,13 @@ mod tests {
                 },
             )))
             .expect("inspection fixture prompt");
+        let resource_owner = created.resource_owner_key();
         drop(created);
         ActiveRunInspection {
             workspace: dir.to_path_buf(),
             invocation_cwd: dir.to_path_buf(),
             session_path,
+            resource_owner,
             model: scripted_model("http://127.0.0.1:1"),
             catalog: octet_ai::ModelCatalog::default(),
             sessions: crate::session_store::SessionStore::for_directory(dir, dir),
@@ -13531,6 +13613,229 @@ mod tests {
                 self.remaining = self.remaining.saturating_sub(1);
             }
             event
+        }
+    }
+
+    /// A real registered first-party command goes through the active dispatcher,
+    /// not the idle extension dispatcher, while the root provider is held.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn active_subagent_stops_are_owned_and_survive_root_completion() {
+        for (target, owner_mode) in [
+            ("all", "owned"),
+            ("worker-one", "owned"),
+            ("all", "slow"),
+            ("all", "cancel"),
+            ("all", "after-completion-abort"),
+            ("all", "missing"),
+            ("all", "wrong"),
+            ("all", "impostor"),
+            ("all extra", "owned"),
+            ("inspect worker-one", "owned"),
+        ] {
+            let (server, started, release) = HeldApi::start(text_turn()).await;
+            let (_agent_dir, mut agent) =
+                scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
+            let mut inspection = test_run_inspection().clone();
+            inspection.session_path = agent.session().path().to_path_buf();
+            let owner = agent.session().resource_owner_key();
+            inspection.resource_owner = owner.clone();
+            let fixture_dir = tempfile::tempdir().unwrap();
+            let (mut extensions, process, log) =
+                crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
+                    fixture_dir.path(),
+                    match owner_mode {
+                        "missing" => None,
+                        "wrong" => Some("another-session"),
+                        _ => Some(&owner),
+                    },
+                    if owner_mode == "impostor" {
+                        "other-extension"
+                    } else {
+                        "octet-subagents"
+                    },
+                    match owner_mode {
+                        "slow" => 6,
+                        "after-completion-abort" => 2,
+                        _ => 1,
+                    },
+                )
+                .await;
+            let command = if target.starts_with("inspect ") {
+                format!("/subagents {target}")
+            } else {
+                format!("/subagents stop {target}")
+            };
+            let events = vec![
+                Event::Paste(command),
+                Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                )),
+            ];
+            let after_completion_abort = owner_mode == "after-completion-abort";
+            let owned = matches!(target, "all" | "worker-one")
+                && matches!(
+                    owner_mode,
+                    "owned" | "slow" | "cancel" | "after-completion-abort"
+                );
+            let (sender, receiver) = tokio::sync::mpsc::channel(128);
+            let (handled_tx, handled) = tokio::sync::oneshot::channel();
+            let mut input = ProbedInput {
+                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+                remaining: events.len()
+                    + 1
+                    + usize::from(owner_mode == "cancel")
+                    + 2 * usize::from(after_completion_abort),
+                handled: Some(handled_tx),
+            };
+            let mut shell = InteractiveShell::test_shell();
+            let run_id = shell.begin_run("test");
+            let run_active = shell.test_run_active_probe();
+            let mut run = agent.prompt("held turn").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut made_tool_call = false;
+            let mut deadline = None;
+            let driver = drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut deadline,
+            );
+            let producer = async {
+                let mut release = Some(release);
+                started.await.unwrap();
+                for event in events {
+                    sender.send(Ok(event)).await.unwrap();
+                }
+                if owned {
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        while !log.exists() {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("stop request reached the registered extension");
+                }
+                sender
+                    .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                        KeyCode::Char('x'),
+                        KeyModifiers::NONE,
+                    ))))
+                    .await
+                    .unwrap();
+                if owner_mode == "cancel" {
+                    sender
+                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                            KeyCode::Esc,
+                            KeyModifiers::NONE,
+                        ))))
+                        .await
+                        .unwrap();
+                }
+                if after_completion_abort {
+                    sender
+                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                            KeyCode::Enter,
+                            KeyModifiers::NONE,
+                        ))))
+                        .await
+                        .unwrap();
+                    release.take().unwrap().send(true).unwrap();
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        while run_active() {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("root settled before stop response and Ctrl+C");
+                    sender
+                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                            KeyCode::Char('c'),
+                            KeyModifiers::CONTROL,
+                        ))))
+                        .await
+                        .unwrap();
+                }
+                tokio::time::timeout(Duration::from_millis(500), handled)
+                    .await
+                    .expect("input/cancel stays responsive while stop response is pending")
+                    .expect("input handler completed while waiting for the stop response");
+                if let Some(release) = release {
+                    let _ = release.send(true);
+                }
+            };
+            let (ended, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+                tokio::join!(driver, producer)
+            })
+            .await
+            .expect("active run and stop should settle");
+            drop(run);
+            assert_eq!(
+                ended.unwrap(),
+                if owner_mode == "cancel" {
+                    HostRunOutcome::Aborted
+                } else {
+                    HostRunOutcome::Completed
+                }
+            );
+            if after_completion_abort {
+                assert!(shell.pending().is_empty());
+                assert_eq!(shell.queued_follow_up_len(), 1);
+                assert!(
+                    shell.take_ready_follow_up().is_none(),
+                    "Ctrl+C must revoke dispatch after root settlement"
+                );
+            } else {
+                assert_eq!(shell.pending(), "x");
+            }
+            assert!(!quit);
+            assert!(pending.is_empty());
+            let wire = std::fs::read_to_string(&log).unwrap_or_default();
+            if owned {
+                let commands: Vec<serde_json::Value> = wire
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(
+                    commands.len(),
+                    1,
+                    "{owner_mode} {target}: {wire}; error={:?}; frame={:?}; transcript={}",
+                    shell.debug_error(),
+                    shell.dump_rendered_frame().await,
+                    shell.debug_snapshot()
+                );
+                assert_eq!(
+                    commands[0]["params"]["arguments"],
+                    serde_json::json!(["stop", target])
+                );
+                assert_eq!(
+                    commands[0]["params"]["context"]["resource_owner"]["session_id"],
+                    owner
+                );
+                let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+                assert!(frame.contains("not settled"), "{target}: {frame}");
+                assert!(!shell.debug_snapshot().contains("unknown command"));
+            } else {
+                assert!(
+                    wire.is_empty(),
+                    "unexpected command for {owner_mode} {target}: {wire}"
+                );
+            }
+            assert!(process.shutdown().await);
         }
     }
 

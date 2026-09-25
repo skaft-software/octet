@@ -203,7 +203,9 @@ Generic presentation snapshots do not create persistent chrome. First-party
 subagent activity occupies one mutable tool-like **Subagents** transcript block,
 including between root turns. Its bold heading counts worker states and points
 to `/subagents`; up to four active child lines show task and `↑input ↓output`
-tokens. Input includes uncached, cache-read, and cache-write usage; streamed
+tokens, compacted with `K`/`M`/`B`/`T` suffixes. An inline
+`/subagents stop all` heading hint is shown only for live activity. Input includes
+uncached, cache-read, and cache-write usage; streamed
 output estimates carry `~` until provider usage settles. Later parent output
 is placed above this tail, and settlement fixes the summary in place without
 per-worker notices. Ctrl+O retains disclosure; `/subagents` exposes the
@@ -499,7 +501,11 @@ bounded actionable reason.
 - Ctrl+D requests a coordinated close from every input owner, including
   pickers, tool prompts, lifecycle waits, and local shell commands. Active work
   is aborted and settled before the process exits.
-- Safe presentation commands execute immediately.
+- Safe presentation commands execute immediately. First-party
+  `/subagents stop <name-or-id|all>` also dispatches during an active run through
+  its registered, owner-bound extension command; arbitrary extension commands
+  do not gain active-run admission. Input and run events remain responsive, and
+  a stop acknowledgement does not claim terminal worker settlement.
 - Model, reasoning, session, compaction, and reload work is queued in
   order and applied after the active `Run` releases its Agent borrow.
 

@@ -4,10 +4,10 @@
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers 0.1/0.2/0.3/0.4 do not imply aliases for old Ygg wire names or
 imports. The source SDK distributions and four official executable bundles are
-version `0.8.0`; independent examples keep their own versions. This is a local
-0.8.0 RC, not native or SDK registry publication. Published 0.7.6 assets and
-public-install verification remain historical evidence in the
-[v0.7.6 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
+version `0.8.0`; independent examples keep their own versions. Native assets and
+public-install verification are recorded in the
+[v0.8.0 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0).
+Native publication does not publish SDK registries.
 
 > **Version scope:** API `0.4` is current and uses the feature-negotiated wire
 > retained from supported API `0.2`; API `0.1` stays frozen. Versioned examples

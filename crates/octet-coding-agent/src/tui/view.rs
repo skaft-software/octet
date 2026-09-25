@@ -2632,7 +2632,7 @@ pub(crate) fn semantic_separator(theme: &OctetTheme) -> &str {
 pub(crate) const ACTIVITY_DETAIL_INDENT: &str = "  ";
 
 /// A shared continuation mark for transient activity details. Keep steering
-/// and collapsed thinking visually aligned without repurposing tree glyphs.
+/// and collapsed thinking/subagents visually aligned without repurposing tree glyphs.
 pub(crate) fn activity_elbow(theme: &OctetTheme) -> &'static str {
     if theme.unicode() {
         "└"
@@ -2999,6 +2999,13 @@ impl InteractiveShell {
             // the test process inherits one.
             herdr: crate::herdr::PaneReporter::disabled(),
         }
+    }
+
+    /// Observe authoritative shell settlement while a driver owns `&mut Self`.
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_run_active_probe(&self) -> impl Fn() -> bool {
+        let state = self.state.clone();
+        move || state.borrow().run.is_active()
     }
 
     /// Real renderer thread with a deterministic layout gate. The caller must

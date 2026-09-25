@@ -1,10 +1,10 @@
 # octet-web-search reference
 
-**Source distribution: 0.8.0 (release candidate).** This checkout and local
-archives require exactly octet 0.8.0. Catalog commands below require matching
-published assets; no 0.8.0 publication is claimed. Use a
-[source-built host](../../docs/installation.md#build-from-a-checkout) with a
-reviewed source checkout or local archive until matching assets are published.
+**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
+public-install evidence. Reviewed source checkouts and local archives remain
+separate installation options.
 
 [Usage guide](README.md). This describes the bundled API `0.4` implementation,
 not a general extension-authoring tutorial. Bundle `0.8.0` requires exactly octet `0.8.0`.
@@ -25,7 +25,7 @@ visible consent metadata, not a sandbox.
 
 ## Install and opt in
 
-With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout) and verified
+With [octet 0.8.0](../../docs/installation.md) and verified
 matching published assets, the catalog path is:
 
 ```console
@@ -244,13 +244,13 @@ settles with JSON-RPC `-32800`; it does not claim rollback or emit a second tool
 result. Progress is request-scoped, monotonic, bounded, and contains only
 provider/stage/count/byte information—not queries, URLs, or retrieved text.
 
-**Unreleased source fix:** TCP connect, TLS handshake, headers, body reads, and
+**Changed in 0.8.0:** TCP connect, TLS handshake, headers, body reads, and
 post-HTTP normalization/result return share the request deadline across
 addresses and redirects. Nonblocking socket waits check cancellation at
 intervals of at most 100 ms; a quiet interval neither ends the request nor
 replays it. Slow responses within the budget can succeed, while stalled or
 continuously trickling responses still respect that budget. This does not
-change the published `0.7.6` bundle.
+alter historical bundle versions.
 
 The optional status contribution is compact and passive:
 

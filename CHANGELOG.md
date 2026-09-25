@@ -1,9 +1,8 @@
 # Changelog
 
-## [0.8.0] - Release candidate
+## [0.8.0] - 2026-09-25
 
-Changes in the local 0.8.0 release candidate. This build is not published; see
-[release notes](docs/releases/v0.8.0.md) for availability and current limits.
+See [release notes](docs/releases/v0.8.0.md) for changes, availability and current limits.
 
 ### Release safety
 
@@ -14,6 +13,11 @@ Changes in the local 0.8.0 release candidate. This build is not published; see
 - Retain Rust 1.86 compatibility in process event-bus response admission.
 
 ### Interaction
+
+- Accept owner-bound `/subagents stop <name|all>` during active responses without
+  blocking input or mistaking interruption acknowledgement for worker settlement.
+  Show compact K/M/B/T token counts, visible stop guidance, and continuation rows
+  aligned with Thinking, while preserving exact accounting and native scrollback.
 
 - Offer first-run setup in the order API key, supported OAuth subscription,
   then local/self-hosted models. API keys use masked input and explicit review,

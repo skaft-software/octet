@@ -7,15 +7,15 @@
 ## Install native binaries
 
 Native release packages target macOS Apple silicon/Intel and GNU/Linux x86-64.
-See the [v0.7.6 notes](releases/v0.7.6.md) for changes; availability, signed
+See the [v0.8.0 notes](releases/v0.8.0.md) for changes; availability, signed
 assets and public-install verification are recorded on the version-pinned
 GitHub release. Install using the matching installer from the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6):
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.7.6/install-octet.sh | sh
-octet --version   # octet 0.7.6
+  https://github.com/skaft-software/octet/releases/download/v0.8.0/install-octet.sh | sh
+octet --version   # octet 0.8.0
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
@@ -70,9 +70,9 @@ or the command to the model.
 
 ## Build from a checkout
 
-This checkout is a local 0.8.0 RC, not a published release. Check `octet --version`
-and use matching executable bundles; source builds do not establish signed
-publication or replace an installed binary.
+This checkout targets octet 0.8.0. Check `octet --version` and use matching
+executable bundles; a source build is not a signed release artifact and does not
+replace an installed binary.
 
 On macOS or GNU/Linux, install Rust 1.86+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep). From the source checkout:
@@ -93,9 +93,8 @@ they do not refresh the catalog over the network. Continue with
 
 The four official executable bundles and the separate Serve application must
 match the running octet version exactly. Current source packages are `0.8.0`
-and require octet `=0.8.0`; published `0.7.6` packages retain their historical
-compatibility. Catalog installation requires verified matching published assets
-and never substitutes another host version. After that publication gate:
+and require octet `=0.8.0`. Catalog installation requires verified matching
+published assets and never substitutes another host version:
 
 ```sh
 octet extension install octet-web-search
@@ -124,8 +123,8 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 
 The four executable bundles in the working tree declare API `0.4`, distribution
 version `0.8.0`, and `requires_octet = "=0.8.0"`. These are independent version
-boundaries; an API number does not bypass the exact host pin. No matching RC
-catalog publication is claimed. See [current authoring](extensions.md) for the Python
+boundaries; an API number does not bypass the exact host pin. See
+[current authoring](extensions.md) for the Python
 API 0.4 process recipe and retained API 0.3 conformance example; generated
 contract bindings alone are not a process runtime.
 

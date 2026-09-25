@@ -112,10 +112,13 @@ Cerebras contracts. Their fixture provenance is recorded in
 
 ## Reviewed metadata refresh (v0.8.0)
 
-The 2026-09-24 release-candidate refresh pins public
+The final 2026-09-25 release refresh pins public
 `https://models.dev/api.json` source SHA-256
-`4ad860a1415fa0bcfb44076931d413d4fa72de06ecd1df1ee971073691cd94af`.
-Relative to the preceding candidate, this adds 10 canonical names, 34 priced
+`60962c86906f86526c36a798493f27088fcb13161ebd9ab31e0739c0edcc92ea`.
+The earlier 2026-09-24 candidate used
+`4ad860a1415fa0bcfb44076931d413d4fa72de06ecd1df1ee971073691cd94af`;
+the review checkpoints below retain that historical context.
+Relative to the preceding candidate, the initial review adds 10 canonical names, 34 priced
 routes and 35 capability records; removes three OpenRouter routes absent from
 the source; and updates 32 price records and 28 capability records. The removed
 routes are `anthropic/claude-opus-4`, `inclusionai/ling-3.0-flash-vl:free` and
@@ -155,16 +158,27 @@ direct DeepSeek schedule. OpenRouter GLM-5.1's output limit increased from
 65,536/32,768 to 131,072/40,960. Names, modalities and capability flags were
 unchanged in this delta; explicit endpoint assertions still take precedence.
 
+The final release freshness gate caught six further OpenRouter quote changes.
+DeepSeek V4 Pro now quotes $0.806142/$1.612284/$0.067179 per million
+input/output/cache-read tokens; V4.1 Flash returns to $0.15/$0.60/$0.003.
+Kimi K3 and `~moonshotai/kimi-latest` cache reads are $0.33/M.
+`~deepseek/deepseek-flash-latest` output is $0.49/M; `~deepseek/deepseek-pro-latest`
+quotes $0.26/$3.50/$0.25 and its output limit increases to 943,718 inside its
+1,048,576-token context. These are exact aggregator-route records, not direct
+provider tariffs. Names, modalities and capability flags are unchanged; direct
+DeepSeek schedule pricing remains excluded. The historical quotes above are
+superseded only for these exact routes.
+
 The four checked-in outputs include the source receipt and these differences
 relative to the v0.7.6 snapshots:
 
 | Snapshot | Current records | Added | Removed | Changed |
 | --- | ---: | ---: | ---: | ---: |
-| Provider-scoped pricing routes | 923 | 130 | 5 | 42 |
+| Provider-scoped pricing routes | 923 | 130 | 5 | 41 |
 | Canonical names | 395 | 14 | 1 | 0 |
 | Capability routes | 945 | 130 | 7 | 60 |
 
-Across that release baseline, changed quotes cover 40 OpenRouter routes, one
+Across that release baseline, changed quotes cover 39 OpenRouter routes, one
 Fireworks route and one OpenCode route. Catalog additions do not prove route
 availability. The refresh preserves the existing unsupported-route exclusions,
 Baseten text-only corrections, subscription allowlists and unverified-pricing

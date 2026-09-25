@@ -69,8 +69,18 @@ the inspector, survive restoration, and are preserved by continuation. Host
 | `/subagents inspect <name-or-id>` | Cached detail for one worker. |
 | `/subagents wait <name-or-id>` | Explicit parent wait; also the owner-bound reattach pass. |
 | `/subagents reattach <name-or-id>` | Alias for the reattachment pass. |
-| `/subagents stop <name-or-id\|all>` | Owner-bound interruption. |
+| `/subagents stop <name-or-id\|all>` | Owner-bound interruption, including while the parent is running. |
 | `/subagents open-all tmux\|herdr` | Reopen the parent and every running worker as interactive sessions, one pane each. |
+
+To stop every worker owned by this session, enter `/subagents stop all`; to
+stop one, use `/subagents stop <name-or-id>`. In the worker list, press Escape
+to return to the composer first. The live roster and worker list show a stop
+hint. Acceptance requests interruption, not immediate settlement: a worker may
+briefly remain `stopping`. Cancelling a wait does not stop its worker.
+
+Live roster token counts use rounded `K`, `M`, `B`, and `T` suffixes (for example,
+`284K`, `1.2M`, and `1.5B`). A `~` still marks an output estimate; compact labels
+do not change exact usage, budgets, or costs.
 
 The model-facing equivalents are `subagent_models`, `subagent_spawn`, `subagent_status`,
 `subagent_wait`, `subagent_stop`, and `subagent_continue`.

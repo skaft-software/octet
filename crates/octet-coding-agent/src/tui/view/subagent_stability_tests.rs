@@ -80,14 +80,7 @@ fn subagent_live_lines_update_without_invalidating_earlier_history() {
                 assert!(frame.contains("/subagents"), "{width}: {frame}");
                 if width >= 46 {
                     assert!(frame.contains("inspect-markdown"), "{frame}");
-                    assert!(
-                        frame.contains(&format!(
-                            "↑{} ↓{}",
-                            child.input_tokens + child.cache_read_tokens + child.cache_write_tokens,
-                            child.output_tokens
-                        )),
-                        "{frame}"
-                    );
+                    assert!(frame.contains("↑12.8K ↓220"), "{frame}");
                 }
             }
             for status in ["completed", "running", "completed"] {
@@ -199,12 +192,19 @@ fn subagent_animation_never_invalidates_transcript_history() {
     }
     publish(&mut shell, &child());
     let baseline = shell.state.borrow().rendered_transcript(80).clone();
+    let roster_row = baseline
+        .iter()
+        .position(|row| row.contains("Subagents"))
+        .unwrap();
     let revisions = shell.state.borrow().block_revisions.clone();
     let generation = shell.state.borrow().transcript_cache.borrow().generation;
     for _ in 0..12 {
         shell.state.borrow_mut().advance_event_dot_animation();
         let rows = shell.state.borrow().rendered_transcript(80).clone();
-        assert_eq!(&rows[..baseline.len() - 2], &baseline[..baseline.len() - 2]);
+        // Only the roster marker may animate; do not infer its row from a
+        // fixed child/hint count or accidentally exclude earlier history.
+        assert_eq!(&rows[..roster_row], &baseline[..roster_row]);
+        assert_eq!(&rows[roster_row + 1..], &baseline[roster_row + 1..]);
         assert_eq!(
             &shell.state.borrow().block_revisions[..revisions.len() - 1],
             &revisions[..revisions.len() - 1]

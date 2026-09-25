@@ -76,7 +76,7 @@ available; this does not clear historical usage uncertainty.
 
 ## Provider setup
 
-In the unreleased interactive first-run flow, an empty catalog with no explicit
+In the interactive first-run flow, an empty catalog with no explicit
 model selection opens **Add an API key** first, then **Sign in with ChatGPT /
 other supported OAuth subscriptions**, **Local/self-hosted models**, and
 **Continue without a provider**. API-key entry is masked and saved only after
@@ -96,13 +96,13 @@ octet setup --endpoint URL [--api-key-env VAR] [--model ID|--manual-model ID] [-
 ```
 
 `--headless` prints the device verification URL/code without opening a browser.
-The unreleased Copilot candidate accepts `--login copilot [--headless]` and
+The Copilot integration accepts `--login copilot [--headless]` and
 `--logout copilot`, also under the alias `github-copilot`. It uses only its private
 OAuth store, not environment or editor credentials. Online shared catalogs can
 then discover eligible `github-copilot/<id>` models; offline adds none. First-run
 subscription setup also offers this device flow, but TUI slash auth commands
 are not yet integrated. Native-host protocol 1 gains no auth command or
-credential field. [Candidate limits and unrun qualification](providers.md#github-copilot-unreleased-candidate).
+credential field. [Limits and unrun live qualification](providers.md#github-copilot-unreleased-candidate).
 
 Setup reviews without writing by default. `--yes` commits only the reviewed
 transaction; `--cancel` leaves the registry unchanged. An explicit `--preset
@@ -233,9 +233,9 @@ octet extension list
 
 The four official executable bundles and the separate Serve application must
 match the running host exactly. Current source packages are `0.8.0` with
-`requires_octet = "=0.8.0"`; no matching RC publication is claimed. The
-[historical 0.7.6 release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
-retains its signed-asset and public-install evidence. Catalog forms below require
+`requires_octet = "=0.8.0"`. The
+[0.8.0 release](https://github.com/skaft-software/octet/releases/tag/v0.8.0)
+records signed assets and public-install evidence. Catalog forms below require
 verified published assets matching the running host version:
 
 ```text

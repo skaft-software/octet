@@ -2,8 +2,7 @@
 
 Maintainer acceptance criteria, **not a current test result**. The web-first gate
 requires observed evidence for every applicable item below. For the octet 0.8.0
-source, see the [candidate notes](../../releases/v0.8.0.md); no publication is
-claimed. Historical [0.7.6](../../releases/v0.7.6.md) and
+release, see the [release notes](../../releases/v0.8.0.md). Historical [0.7.6](../../releases/v0.7.6.md) and
 [0.7.4](../../releases/v0.7.4.md) release records retain their signed-asset and
 public-install results, not a 0.8.0 pass. Package smoke and historical fixtures do not establish every manual
 journey, actual-terminal/SSH behavior, private-LAN access, or endurance.

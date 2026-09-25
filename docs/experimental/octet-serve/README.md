@@ -1,7 +1,7 @@
 # Experimental `octet serve`
 
-This guide describes the experimental Serve source in octet **0.8.0 RC**, not a
-published package. From a reviewed source checkout:
+This guide describes experimental Serve in octet **0.8.0**. Install the
+[version-matched package](#install-or-update-a-package), or use a reviewed source checkout:
 
 ```console
 cargo run --features serve -- serve --port 0
@@ -9,14 +9,14 @@ cargo run --features serve -- serve --port 0
 
 A reviewed local package must match the source-built host exactly; see
 [package installation](#install-or-update-a-package). Catalog installation
-requires verified matching published assets, which are not claimed here.
+requires verified matching published assets from the version-pinned release.
 
 This starts a headless host for the launch workspace and opens its local web
 client. `--port 0` requests an available port. Add `--no-open` to skip opening the
 browser; `--web-root <directory>` selects a development asset directory.
 
-The [0.8.0 candidate notes](../../releases/v0.8.0.md) describe current source
-changes. Historical [0.7.6](../../releases/v0.7.6.md) and
+The [0.8.0 release notes](../../releases/v0.8.0.md) describe changes and link
+current signed-asset and public-install evidence. Historical [0.7.6](../../releases/v0.7.6.md) and
 [0.7.4](../../releases/v0.7.4.md) release records retain their signed-asset and
 public-install evidence; those results do not qualify 0.8.0. Serve remains
 experimental. Live-provider and

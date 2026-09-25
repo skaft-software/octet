@@ -4226,6 +4226,132 @@ impl ExecutableExtensions {
         Ok(Some(blocks.join("\n")))
     }
 
+    /// Own the first-party stop request independently of the active Agent borrow.
+    /// No confirmation can be silently approved and no extension context may be
+    /// injected. The extension and host remain responsible for owner validation
+    /// and for reporting terminal settlement after the stop acknowledgement.
+    pub(crate) fn subagent_stop_control(
+        &self,
+        target: String,
+        expected_owner: &str,
+    ) -> anyhow::Result<Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>> {
+        anyhow::ensure!(
+            !expected_owner.is_empty() && self.resource_owner.as_deref() == Some(expected_owner),
+            "subagent stop requires the active session owner"
+        );
+        anyhow::ensure!(
+            self.command_owner("subagents").as_deref() == Some(SUBAGENTS_EXTENSION_NAME),
+            "first-party subagent command is unavailable"
+        );
+        let process = self
+            .processes
+            .iter()
+            .find(|process| {
+                process.descriptor().manifest.name == SUBAGENTS_EXTENSION_NAME
+                    && process.is_running()
+                    && process
+                        .contributions()
+                        .commands
+                        .iter()
+                        .any(|command| command.name == "subagents")
+            })
+            .ok_or_else(|| anyhow::anyhow!("first-party subagent command is not running"))?
+            .clone();
+        let context = extension_execution_context(&process, self.resource_owner.as_deref());
+        Ok(Box::pin(async move {
+            let mut diagnostics = BoundedDiagnostics::default();
+            // Use the extension runtime's normal command deadline, just like
+            // idle dispatch. A shorter UI timeout can cancel stop-all halfway
+            // through its owner-checked sequence of interrupts.
+            let output = execute_headless_command(
+                &process,
+                "subagents",
+                vec!["stop".into(), target],
+                context,
+                0,
+                &mut diagnostics,
+            )
+            .await?;
+            anyhow::ensure!(
+                output.context.is_empty(),
+                "subagent stop attempted context injection"
+            );
+            anyhow::ensure!(!output.text.contains("failed closed"), "{}", output.text);
+            Ok(output.text)
+        }))
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) async fn test_subagent_stop_fixture(
+        workspace: &Path,
+        owner: Option<&str>,
+        name: &str,
+        delay_seconds: u64,
+    ) -> (Self, ExtensionProcess, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let script = workspace.join("subagent-stop-fixture.sh");
+        let log = workspace.join("subagent-stop-fixture.jsonl");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+request_id() {{ sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }}
+IFS= read -r initialize
+id=$(printf '%s' "$initialize" | request_id)
+printf '{{"jsonrpc":"2.0","id":%s,"result":{{"api_version":"0.4","tools":[],"commands":[{{"name":"subagents","description":"Test owner-bound stop"}}],"protocol":{{"version":"0.4","features":["request_cancellation","content_parts","terminal_handoff"],"limits":{{"max_concurrent_requests":1}}}}}}}}\n' "$id"
+while IFS= read -r request; do
+  case "$request" in
+    *'"method":"command/execute"'*)
+      printf '%s\n' "$request" >> "$OCTET_WORKSPACE/subagent-stop-fixture.jsonl"
+      id=$(printf '%s' "$request" | request_id)
+      case "$request" in *'"stop"'*) sleep {} ;; esac
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"text":"interrupt requested; state stopping (not settled)","notifications":[],"context":[]}}}}\n' "$id"
+      ;;
+    *'"method":"shutdown"'*)
+      id=$(printf '%s' "$request" | request_id)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+                delay_seconds
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest = ExtensionManifest::parse(&format!(
+            r#"name = {name:?}
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "subagent-stop-fixture.sh"
+[contributes]
+commands = ["subagents"]
+"#
+        ))
+        .unwrap();
+        let process = ExtensionProcess::start(
+            DiscoveredExtension {
+                manifest,
+                manifest_path: workspace.join("extension.toml"),
+                source: ExtensionSource::Explicit,
+                activation: octet_agent::extension_process::ExtensionActivation {
+                    enabled: true,
+                    trust: ExtensionTrust::Trusted,
+                },
+            },
+            ExtensionRuntimeConfig::new(workspace),
+        )
+        .await
+        .unwrap();
+        let mut extensions = Self::default();
+        extensions.resource_owner = owner.map(str::to_owned);
+        extensions.receivers.push(process.subscribe());
+        extensions.processes.push(process.clone());
+        (extensions, process, log)
+    }
+
     /// An owned, single-flight observation request for the active modal loop.
     /// Only the first-party status command is admitted, without consent or
     /// context-injection authority. Persistent receivers still own snapshots.

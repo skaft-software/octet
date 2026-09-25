@@ -8,11 +8,9 @@ lane, verify it with a read-only request, and only then allow edits or commands.
 Shell commands are in `sh` blocks; text in `text` blocks is entered inside the
 interactive Octet UI, not in your shell.
 
-> **Version boundary.** The published release is 0.7.6, while this checkout can
-> contain candidate changes. Check `octet --version` and `octet --help` for the
-> binary you will run. The `octet setup` contract below is verified against this
-> checkout; do not assume a published binary has a candidate-only flag unless
-> its own help lists it. Source builds are not signed release artifacts.
+> **Version boundary.** This guide targets octet 0.8.0. Check `octet --version`
+> and `octet --help` for the binary you will run. Source builds are not signed
+> release artifacts, and older binaries may not include these options.
 
 ## 1. Choose an installation lane
 
@@ -23,11 +21,11 @@ x86-64. Install from the version-pinned release, then check the version:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.7.6/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.8.0/install-octet.sh | sh
 octet --version
 ```
 
-Expected output includes `octet 0.7.6`. The release page is authoritative for
+Expected output includes `octet 0.8.0`. The release page is authoritative for
 signed assets and availability; npm, Homebrew, crates.io, and SDK registries are
 separate unpublished channels.
 
@@ -86,9 +84,11 @@ enabling it, trusting it, configuring it, and verifying its capability are
 separate actions. Never put a credential value in a prompt, URL, repository file,
 shell command, history, or session fixture.
 
-### Interactive setup (unreleased)
+<a id="interactive-setup-unreleased"></a>
 
-For an unconfigured source-candidate installation, start without `--model`:
+### Interactive setup
+
+For an unconfigured octet 0.8.0 installation, start without `--model`:
 
 ```sh
 octet --safe-mode
@@ -176,7 +176,7 @@ octet --safe-mode --model 'MODEL_ID'
 an unavailable model. `--offline` can use fresh cached/fallback metadata but does
 not verify live availability or make inference local.
 
-For GitHub Copilot in the source candidate, use the same first-run subscription
+For GitHub Copilot, use the same first-run subscription
 menu or the CLI device flow:
 
 ```sh
@@ -186,7 +186,7 @@ octet --safe-mode --model 'github-copilot/MODEL_ID'
 
 Select only an eligible model discovered for your account. Offline startup adds
 no Copilot models; unsupported routes are not advertised. See the
-[Copilot candidate limits](providers.md#github-copilot-unreleased-candidate).
+[Copilot limits](providers.md#github-copilot-unreleased-candidate).
 
 ### C. LM Studio or another local compatible server
 
@@ -288,7 +288,7 @@ shell calls.
 
 | Symptom | Recovery |
 | --- | --- |
-| No configured provider/model | In the source candidate, start interactively without `--model` and choose API key, supported subscription, or local/self-hosted setup. CLI alternatives are provider environment variables, `--login codex` / `--login copilot`, and explicit local `octet setup`; print/RPC never open a picker. |
+| No configured provider/model | Start interactively without `--model` and choose API key, supported subscription, or local/self-hosted setup. CLI alternatives are provider environment variables, `--login codex` / `--login copilot`, and explicit local `octet setup`; print/RPC never open a picker. |
 | Codex credential missing, expired, or without a usable refresh token | Run `octet --login codex` again; use `--headless` when browser opening is unavailable. Select only an ID shown by the refreshed account inventory. |
 | OpenRouter is absent or returns authentication failure | Set `OPENROUTER_API_KEY` through the secret manager, restart Octet, and choose a model listed for the account. `--offline` is not a credential repair. |
 | Local endpoint is unreachable | Start the server and model, then check the exact explicit `/v1/` URL. No scan or retry of other endpoints occurs. A manual offline setup can save metadata, but inference still needs the server. |

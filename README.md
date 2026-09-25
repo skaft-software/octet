@@ -6,7 +6,7 @@
 
 **A high-performance coding agent.**
 
-[![Release: 0.7.6](https://img.shields.io/badge/release-0.7.6-536dfe?style=flat-square)](docs/releases/v0.7.6.md)
+[![Release: 0.8.0](https://img.shields.io/badge/release-0.8.0-536dfe?style=flat-square)](docs/releases/v0.8.0.md)
 
 octet reads code, edits files, and runs commands from your terminal. It has a
 native Rust core, supports cloud and local models, saves resumable sessions,
@@ -18,8 +18,8 @@ and host-owned subagents remain optional integrations; Serve is a separate
 graphical application. The host keeps authority over sessions, approvals,
 lifecycle, and resource limits.
 
-The source tree is a local **0.8.0 release candidate**, not a published release.
-The installation links below remain pinned to 0.7.6.
+This is **octet 0.8.0**. See the [release notes](docs/releases/v0.8.0.md)
+for changes and supported installation channels.
 
 [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
@@ -29,12 +29,12 @@ The installation links below remain pinned to 0.7.6.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.7.6/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.8.0/install-octet.sh | sh
 ```
 
 Availability, signed assets and public-install results are tracked on the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
-See [release notes](docs/releases/v0.7.6.md) and
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0).
+See [release notes](docs/releases/v0.8.0.md) and
 [installation](docs/installation.md) for scope, prerequisites and channel availability.
 When moving from Ygg, install octet afresh: older installations and data remain
 separate; no automatic migration is performed.

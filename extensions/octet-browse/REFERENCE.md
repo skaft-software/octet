@@ -1,10 +1,10 @@
 # octet Browse reference
 
-**Source distribution: 0.8.0 (release candidate).** This checkout and local
-archives require exactly octet 0.8.0. Catalog commands below require matching
-published assets; no 0.8.0 publication is claimed. Use a
-[source-built host](../../docs/installation.md#build-from-a-checkout) with a
-reviewed source checkout or local archive until matching assets are published.
+**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
+public-install evidence. Reviewed source checkouts and local archives remain
+separate installation options.
 
 [Usage guide](README.md). This reference describes the bundled API `0.4`
 implementation, not a general extension-authoring tutorial. Distribution `0.8.0` requires
@@ -18,9 +18,9 @@ pairs with, copies, discovers, or launches a normal Chrome/Chromium profile.
 
 Bundle installation only copies inert files. It does **not** run Python, install Playwright, download a browser, create a profile, or start this extension.
 
-With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout) and verified
-matching published assets, use the catalog commands below. Until publication,
-use a reviewed checkout or local archive; see the [guide](README.md#install-the-bundle).
+With [octet 0.8.0](../../docs/installation.md) and verified
+matching published assets, use the catalog commands below. For a reviewed
+checkout or local archive instead, see the [guide](README.md#install-the-bundle).
 
 ```console
 octet extension install octet-browse

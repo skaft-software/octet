@@ -1,9 +1,8 @@
 # @skaft-software/octet-extension-api-v03
 
-This checkout's source distribution is **0.8.0 (release candidate)**, not a
-claim of SDK registry or native release publication. See the
-[0.8.0 candidate notes](../../docs/releases/v0.8.0.md); published 0.7.6 assets
-and installation evidence remain in the [historical release record](../../docs/releases/v0.7.6.md).
+This SDK's source distribution is **0.8.0**. Native assets and installation
+evidence are recorded in the [0.8.0 release notes](../../docs/releases/v0.8.0.md).
+Native publication does not publish SDK packages to PyPI or npm.
 
 Schema-generated ESM runtime and TypeScript declarations for the canonical octet
 extension API `0.3` contract, which remains supported alongside current API

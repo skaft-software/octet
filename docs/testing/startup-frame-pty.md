@@ -39,7 +39,9 @@ The expected normalized contracts and row fixtures are in
 `crates/octet-coding-agent/tests/fixtures/startup-frame-pty/`. The harness is
 `crates/octet-coding-agent/tests/startup_frame_pty.rs`.
 
-## Model-discovery startup regression (unreleased)
+<a id="model-discovery-startup-regression-unreleased"></a>
+
+## Model-discovery startup regression
 
 The discovery tests hold a loopback `/models` response open while the real binary
 starts, in both mouse modes. Before releasing the response they require:

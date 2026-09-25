@@ -1,9 +1,8 @@
 # Legacy Python extension runtime
 
-This checkout's source distribution is **0.8.0 (release candidate)**, not a
-claim of SDK registry or native release publication. See the
-[0.8.0 candidate notes](../../docs/releases/v0.8.0.md); published 0.7.6 assets
-and installation evidence remain in the [historical release record](../../docs/releases/v0.7.6.md).
+This SDK's source distribution is **0.8.0**. Native assets and installation
+evidence are recorded in the [0.8.0 release notes](../../docs/releases/v0.8.0.md).
+Native publication does not publish SDK packages to PyPI or npm.
 
 This is the retained **API `0.1`/`0.2` maintenance reference** for
 `octet_extension.Extension`, not a current-API quickstart. New authoring uses

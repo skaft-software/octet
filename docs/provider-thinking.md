@@ -18,7 +18,7 @@ live-provider availability or acceptance.
   enabled choice; absent usable reasoning metadata stays Off without inventing
   wire controls. Explicit choices and resumed-session precedence remain intact.
   Serve catalog defaults follow the same rule. This is an
-  [unreleased product fix](providers.md#defaults-unreleased), not a change to
+  [octet 0.8.0 product fix](providers.md#defaults-unreleased), not a change to
   core `ReasoningConfig::Off` or native-host protocol 1 defaults.
 - Exact sets preserve holes: `low, high` does not imply `medium`. Off is distinct
   from Minimal, and an always-on contract has only On.
@@ -37,7 +37,9 @@ live-provider availability or acceptance.
 - Genuine provider display names are preserved. A missing label is not persisted
   as a fabricated raw-ID label that overrides the built-in display-name registry.
 
-## Mid-conversation changes (unreleased)
+<a id="mid-conversation-changes-unreleased"></a>
+
+## Mid-conversation changes
 
 On a Responses route whose **model and endpoint** explicitly qualify reasoning
 updates, `/thinking` queues the exact advertised choice without cancelling the

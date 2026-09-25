@@ -1428,7 +1428,7 @@ def render_docs(schema: dict[str, Any], source_hash: str) -> str:
         f"<!-- Source: protocol/extension-api-v0.3.schema.json (sha256: {source_hash}) -->",
         "# octet Extension API 0.4 Reference",
         "",
-        "API `0.4` is the current working-tree extension API version, using the feature-negotiated JSON-RPC wire retained from API `0.2`. Extensions add tools and bounded host-shaped integrations to a small coding host; this is not a promise of Pi execution parity or a general extension platform. Exact host offers and frontend bindings determine product availability. The local 0.8.0 RC is not a published release.",
+        "API `0.4` is the current working-tree extension API version, using the feature-negotiated JSON-RPC wire retained from API `0.2`. Extensions add tools and bounded host-shaped integrations to a small coding host; this is not a promise of Pi execution parity or a general extension platform. Exact host offers and frontend bindings determine product availability. This reference targets octet 0.8.0; native publication does not publish SDK registries.",
         "",
         "## Version policy",
         "",

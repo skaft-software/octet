@@ -10631,7 +10631,7 @@ fn live_subagent_heading_is_bold_and_worker_metadata_is_terminal_safe() {
         "{heading:?}"
     );
     let plain = strip_terminal_sequences(&rows.join("\n"));
-    assert!(plain.contains("└─ audit · ↑5600000 ↓3900"), "{plain}");
+    assert!(plain.contains("  └ audit · ↑5.6M ↓3.9K"), "{plain}");
     assert!(!plain.contains("SECRET"), "{plain}");
 }
 
@@ -10643,7 +10643,7 @@ fn live_subagent_output_progress_is_marked_as_estimated_until_usage_settles() {
     view.telemetry[0].estimated_output_tokens = Some(4_021);
     shell.state.borrow_mut().set_subagent_activity(view.clone());
     let live = strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
-    assert!(live.contains("audit · ↑5600000 ↓~4021"), "{live}");
+    assert!(live.contains("audit · ↑5.6M ↓~4K"), "{live}");
     assert_eq!(view.telemetry[0].output_tokens, 3_900);
     assert_eq!(view.telemetry[0].total_tokens, 5_603_900);
 
@@ -10652,8 +10652,140 @@ fn live_subagent_output_progress_is_marked_as_estimated_until_usage_settles() {
     shell.state.borrow_mut().set_subagent_activity(view);
     let settled =
         strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
-    assert!(settled.contains("audit · ↑5600000 ↓4010"), "{settled}");
+    assert!(settled.contains("audit · ↑5.6M ↓4K"), "{settled}");
     assert!(!settled.contains("↓~"), "{settled}");
+}
+
+#[test]
+fn subagent_rows_share_thinking_indent_and_elbow() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+
+    for unicode in [false, true] {
+        for width in [32, 46, 80, 120] {
+            let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
+                true,
+                unicode,
+                ColorDepth::None,
+            ));
+            let mut shell = InteractiveShell::test_shell_with_theme(theme);
+            let run_id = shell.begin_run("test");
+            shell.on_run_event(
+                run_id,
+                &AgentEvent::OutputDelta {
+                    channel: OutputChannel::Reasoning,
+                    text: "## Editing docs\n\n".into(),
+                },
+            );
+            let mut view = subagent_transcript_test_view(true);
+            let worker = view.telemetry[0].clone();
+            view.telemetry = (0..5)
+                .map(|index| {
+                    let mut child = worker.clone();
+                    child.child_id = format!("worker-{index}");
+                    child.task_name = format!("worker-{index}");
+                    child
+                })
+                .collect();
+            shell.state.borrow_mut().set_subagent_activity(view);
+            let frame = strip_terminal_sequences(
+                &shell.state.borrow().rendered_transcript(width).join("\n"),
+            );
+            let prefix = if unicode { "  └ " } else { "  `- " };
+            let thinking = frame
+                .lines()
+                .find(|line| line.contains("Editing docs"))
+                .unwrap();
+            assert!(thinking.starts_with(prefix), "{width}: {frame}");
+            let workers: Vec<_> = frame
+                .lines()
+                .filter(|line| line.contains("worker-"))
+                .collect();
+            assert_eq!(workers.len(), 4, "{width}: {frame}");
+            assert!(
+                workers.iter().all(|line| line.starts_with(prefix)),
+                "{width}: {frame}"
+            );
+            assert!(
+                frame.lines().any(|line| line == format!("{prefix}+1 more")),
+                "{width}: {frame}"
+            );
+            assert!(
+                !frame.contains("└─") && !frame.contains("├─"),
+                "{width}: {frame}"
+            );
+        }
+    }
+}
+
+#[test]
+fn subagent_token_labels_are_compact_without_changing_usage() {
+    for (tokens, label) in [
+        (0, "0"),
+        (999, "999"),
+        (1_000, "1K"),
+        (1_050, "1.1K"),
+        (1_371, "1.4K"),
+        (2_020, "2K"),
+        (20_992, "21K"),
+        (40_582, "40.6K"),
+        (99_950, "100K"),
+        (215_552, "216K"),
+        (284_364, "284K"),
+        (999_499, "999K"),
+        (999_500, "1M"),
+        (5_600_000, "5.6M"),
+        (999_500_000, "1B"),
+        (1_500_000_000, "1.5B"),
+        (999_500_000_000, "1T"),
+        (1_200_000_000_000, "1.2T"),
+        (u64::MAX, "18446744T"),
+    ] {
+        let shell = InteractiveShell::test_shell();
+        let mut view = subagent_transcript_test_view(true);
+        view.telemetry.truncate(1);
+        let child = &mut view.telemetry[0];
+        child.task_name = "audit".into();
+        child.input_tokens = tokens;
+        child.cache_read_tokens = 0;
+        child.cache_write_tokens = 0;
+        child.output_tokens = tokens;
+        child.total_tokens = tokens.saturating_mul(2);
+        for estimated in [false, true] {
+            view.telemetry[0].estimated_output_tokens = estimated.then_some(tokens);
+            shell.state.borrow_mut().set_subagent_activity(view.clone());
+            let state = shell.state.borrow();
+            let frame = strip_terminal_sequences(&state.rendered_transcript(80).join("\n"));
+            let marker = if estimated { "~" } else { "" };
+            assert!(
+                frame.contains(&format!("audit · ↑{label} ↓{marker}{label}")),
+                "{tokens}: {frame}"
+            );
+            assert_eq!(
+                state.subagent_activity.as_ref().unwrap().telemetry,
+                view.telemetry
+            );
+        }
+    }
+}
+
+#[test]
+fn subagent_stop_hint_is_visible_only_while_workers_are_active() {
+    for width in [32, 46, 80, 120] {
+        let shell = InteractiveShell::test_shell();
+        let mut view = subagent_transcript_test_view(true);
+        shell.state.borrow_mut().set_subagent_activity(view.clone());
+        let live =
+            strip_terminal_sequences(&shell.state.borrow().rendered_transcript(width).join("\n"));
+        assert!(live.contains("/subagents stop all"), "{width}: {live}");
+        view.telemetry[0].state = "completed".into();
+        shell.state.borrow_mut().set_subagent_activity(view);
+        let settled =
+            strip_terminal_sequences(&shell.state.borrow().rendered_transcript(width).join("\n"));
+        assert!(
+            !settled.contains("/subagents stop all"),
+            "{width}: {settled}"
+        );
+    }
 }
 
 #[test]
@@ -10764,7 +10896,7 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
         "{block}"
     );
     assert!(
-        block.contains("Read release history · ↑12800 ↓220"),
+        block.contains("Read release history · ↑12.8K ↓220"),
         "{block}"
     );
     assert!(

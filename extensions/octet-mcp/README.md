@@ -1,10 +1,10 @@
 # octet-mcp
 
-**Source distribution: 0.8.0 (release candidate).** This checkout and local
-archives require exactly octet 0.8.0. Catalog commands below require matching
-published assets; no 0.8.0 publication is claimed. Use a
-[source-built host](../../docs/installation.md#build-from-a-checkout) with a
-reviewed source checkout or local archive until matching assets are published.
+**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
+public-install evidence. Reviewed source checkouts and local archives remain
+separate installation options.
 
 Connect explicitly configured [MCP](https://modelcontextprotocol.io/) tool servers
 to octet. Start with a local stdio server you have reviewed and installed
@@ -33,7 +33,7 @@ paths with your reviewed local paths. Protect the file with `chmod 600`.
 }
 ```
 
-With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout), Python 3.9+
+With [octet 0.8.0](../../docs/installation.md), Python 3.9+
 on `PATH`, and verified matching published assets, the catalog path is:
 
 ```console

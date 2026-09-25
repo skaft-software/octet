@@ -7,7 +7,7 @@ Octet still selects the retained history boundary, validates the output and
 context budget, persists the checkpoint, and replays the images as an ordinary
 synthetic user message. On text-only models without a bitmap checkpoint, the
 normal parent-model summarizer remains in use. `native-responses` is not
-replaced. This is source-checkout functionality for the local 0.8.0 RC, not a
+replaced. This is source-checkout functionality for octet 0.8.0, not a
 published bundle or API 0.3 process.
 
 ## Build and enable

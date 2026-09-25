@@ -15,8 +15,8 @@ from octet_release_identity import CANONICAL_REPOSITORY, LEGACY_RELEASE_COMMIT, 
 
 SCRIPTS = Path(__file__).resolve().parent
 LEGACY_REPOSITORY = "skaft-software/ygg"
-# Keep publication independent of the workspace's local release candidate.
-PUBLISHED_NATIVE_VERSION = "0.7.6"
+# Explicitly promoted native release; SDK/registry publication stays independent.
+PUBLISHED_NATIVE_VERSION = "0.8.0"
 
 
 def load_script(name):
@@ -222,8 +222,9 @@ class ReleaseDocumentationTests(unittest.TestCase):
         version = re.search(r'^version = "([^"]+)"$',
                             (SCRIPTS.parent / "Cargo.toml").read_text(), re.MULTILINE).group(1)
         self.assertIn(f"/releases/tag/v{PUBLISHED_NATIVE_VERSION}", text)
-        self.assertIn(f"**{version} (release candidate)**", text)
-        self.assertIn("not a publication claim", " ".join(text.split()))
+        self.assertIn(f"distribution is **{version}**", text)
+        self.assertIn("does not change independent API and schema versions", " ".join(text.split()))
+        self.assertIn("npm, Homebrew, crates.io and SDK registries remain separate, unpublished channels.", text)
 
 
 if __name__ == "__main__":

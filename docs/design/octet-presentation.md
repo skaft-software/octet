@@ -53,9 +53,14 @@ tool, and worker identity.
 
 Subagent orchestration occupies one tool-like transcript block. Its bold
 heading shows state counts (queued separately from running) and `/subagents`;
-while workers are queued or running, up to four indented child lines show task
-and `↑input ↓output` token counts, with an
-overflow count for the rest. Input includes uncached, cache-read, and
+while workers are queued or running, up to four child lines show task and
+`↑input ↓output` token counts, rounded with `K`, `M`, `B`, and `T` suffixes.
+Child and overflow rows share Thinking's column-2 `└` continuation marker
+(with the same ASCII fallback), rather than adding a deeper tree indent. There
+is an overflow count for the rest. An inline `/subagents stop all` hint remains
+in the existing heading while workers are active and disappears on settlement
+or hydration; narrow headings compact without adding a transcript row.
+Input includes uncached, cache-read, and
 cache-write tokens and advances when the provider reports usage. Output
 advances from settled provider usage, plus a `~`-marked, throttled estimate
 from streamed text/reasoning deltas while generating; retries discard the

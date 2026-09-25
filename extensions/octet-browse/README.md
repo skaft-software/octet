@@ -1,10 +1,10 @@
 # octet Browse
 
-**Source distribution: 0.8.0 (release candidate).** This checkout and local
-archives require exactly octet 0.8.0. Catalog commands below require matching
-published assets; no 0.8.0 publication is claimed. Use a
-[source-built host](../../docs/installation.md#build-from-a-checkout) with a
-reviewed source checkout or local archive until matching assets are published.
+**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
+public-install evidence. Reviewed source checkouts and local archives remain
+separate installation options.
 
 Use a visible, isolated Chromium window to inspect pages and perform bounded
 browser actions. Sign in manually; octet Browse never uses your normal browser
@@ -14,7 +14,7 @@ profile.
 
 ## Install the bundle
 
-With [octet 0.8.0](../../docs/installation.md#build-from-a-checkout) and verified
+With [octet 0.8.0](../../docs/installation.md) and verified
 matching published assets, the catalog path is:
 
 ```console

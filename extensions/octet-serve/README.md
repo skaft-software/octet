@@ -2,12 +2,10 @@
 
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
-Serve remains experimental. This checkout's source distribution is **0.8.0 RC**;
-packages must match the host exactly. The [candidate notes](../../docs/releases/v0.8.0.md)
-do not claim publication. The [historical 0.7.6 release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
-retains its publication and installation evidence, not qualification of this
-candidate. These implementation contracts do not imply complete feature or
-live-provider acceptance.
+Serve remains experimental. Its distribution is **0.8.0**; packages must match
+the host exactly. The [release notes](../../docs/releases/v0.8.0.md) link signed
+assets and public-install evidence. These implementation contracts do not imply
+complete feature or live-provider acceptance.
 
 ## Focused checks
 

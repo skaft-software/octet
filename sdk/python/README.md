@@ -1,14 +1,13 @@
 # octet-extension-sdk
 
-This checkout's source distribution is **0.8.0 (release candidate)**, not a
-claim of SDK registry or native release publication. See the
-[0.8.0 candidate notes](../../docs/releases/v0.8.0.md); published 0.7.6 assets
-and installation evidence remain in the [historical release record](../../docs/releases/v0.7.6.md).
+This SDK's source distribution is **0.8.0**. Native assets and installation
+evidence are recorded in the [0.8.0 release notes](../../docs/releases/v0.8.0.md).
+Native publication does not publish SDK packages to PyPI or npm.
 
 For new tools, `octet_extension.Extension` supports the current working-tree
 **API `0.4`** feature-negotiated JSON-RPC wire, alongside retained `0.1`/`0.2`.
 Use an exact `api_version="0.4"` constructor and matching manifest. This is
-source support for the local 0.8.0 RC, not SDK registry or release qualification.
+source SDK support for octet 0.8.0, not a claim of SDK registry availability.
 Extensions add bounded tools/integrations; the SDK does not grant host policy,
 frontend ownership, or Pi execution parity.
 

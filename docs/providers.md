@@ -55,7 +55,9 @@ price-dependent ceilings fail closed.
 > availability remains account- and endpoint-specific; deterministic checks do
 > not qualify every live provider.
 
-## Endpoint capability self-description (unreleased)
+<a id="endpoint-capability-self-description-unreleased"></a>
+
+## Endpoint capability self-description
 
 An unchanged build can consume new models on **already declared Chat/Responses
 routes** when the selected endpoint includes an `octet_capabilities` v1 object in
@@ -108,7 +110,9 @@ persisting synthesized fields. Custom normalized caches advance to version 9 so
 old sparse results cannot hide self-descriptions. These are deterministic source
 contracts, not evidence that any public provider currently emits the extension.
 
-## First-run setup (unreleased)
+<a id="first-run-setup-unreleased"></a>
+
+## First-run setup
 
 When an interactive launch has no available models and no explicit model
 selection, the setup menu offers, in order:
@@ -147,8 +151,8 @@ endpoint configuration and are not offered as one-field API-key setup; use their
 documented configuration below.
 
 See [Getting started](getting-started.md#3-choose-one-provider-lane) and
-[CLI alternatives](cli.md#provider-setup). This describes the source candidate,
-not a claim that published 0.7.6 includes this menu.
+[CLI alternatives](cli.md#provider-setup). This menu is included in octet 0.8.0;
+older installations may not provide it.
 
 ## Cloud setup
 
@@ -331,9 +335,11 @@ This requires a live owner-bound child-session service. An installed bundle can
 be rebuilt/replaced with `./scripts/reinstall-octet-subagents.sh`; `cargo run`
 does not update `~/.octet/extensions`. See the
 [subagents package](../extensions/octet-subagents/README.md), including its API
-0.2 implementation boundary. Catalog installation is [publication-gated](installation.md#optional-packages).
+0.4 exact-version boundary. Catalog installation is [publication-gated](installation.md#optional-packages).
 
-## GitHub Copilot (unreleased candidate)
+<a id="github-copilot-unreleased-candidate"></a>
+
+## GitHub Copilot
 
 ```sh
 octet --login copilot --headless
@@ -364,7 +370,9 @@ does not gain login/logout commands or OAuth payload fields. Rust embedders reta
 This describes source integration, not live-provider or native-client
 qualification.
 
-## Native Mistral Conversations (unreleased codec)
+<a id="native-mistral-conversations-unreleased-codec"></a>
+
+## Native Mistral Conversations (experimental codec)
 
 The native Conversations codec passes its deterministic request/SSE fixtures,
 including rejection of credential-bearing or non-TLS destinations before
@@ -529,14 +537,16 @@ there is no parallel native root collaboration tool surface. See
 [legacy Pro configuration](configuration.md#compatibility-inputs),
 [context budgeting](context.md), and [reasoning display](terminal.md#reasoning-and-progress).
 
-### Defaults (unreleased)
+<a id="defaults-unreleased"></a>
+
+### Defaults
 
 In this checkout, a new CLI session with no reasoning preference uses the selected
 model's advertised default, including an advertised Off. Without a default, a
 known reasoning contract uses its first supported enabled choice; no usable
 contract leaves octet's selection Off without guessing a reasoning parameter.
 The same defaults appear in Serve's model catalog. This fixes startup overriding
-model defaults with Off; it is **not included in published 0.7.6**.
+model defaults with Off in octet 0.8.0.
 
 An explicit CLI, environment, or configuration choice still wins over the model
 default. Resume keeps the saved choice (including Off), unless `--reasoning`

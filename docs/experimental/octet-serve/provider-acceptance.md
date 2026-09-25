@@ -1,11 +1,11 @@
 # Configured-provider acceptance
 
 Maintainer reference for provider routes and acceptance procedures in the
-octet 0.8.0 RC source. For usage, see the [Serve guide](README.md). Optional
+octet 0.8.0. For usage, see the [Serve guide](README.md). Optional
 live-provider/native-host audio checks are **NOT RUN** in this source review.
 Graphical media, recovery, and capture work remains separately tracked. The
 [historical 0.7.6 release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
-retains its own publication evidence, not qualification of this candidate.
+retains its own publication evidence, not qualification of this release.
 Source contracts are not live-provider or model-capability qualification.
 
 The retained [v0.4.0 record](#release-record) is historical Ygg evidence, not a

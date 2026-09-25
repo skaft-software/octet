@@ -2,7 +2,7 @@
 <!-- Source: protocol/extension-api-v0.3.schema.json (sha256: ad1ceaa458ed6fd67f0c20fb6e0e1a4ca3afeb06bbc012d407e4eab937e65ac3) -->
 # octet Extension API 0.4 Reference
 
-API `0.4` is the current working-tree extension API version, using the feature-negotiated JSON-RPC wire retained from API `0.2`. Extensions add tools and bounded host-shaped integrations to a small coding host; this is not a promise of Pi execution parity or a general extension platform. Exact host offers and frontend bindings determine product availability. The local 0.8.0 RC is not a published release.
+API `0.4` is the current working-tree extension API version, using the feature-negotiated JSON-RPC wire retained from API `0.2`. Extensions add tools and bounded host-shaped integrations to a small coding host; this is not a promise of Pi execution parity or a general extension platform. Exact host offers and frontend bindings determine product availability. This reference targets octet 0.8.0; native publication does not publish SDK registries.
 
 ## Version policy
 

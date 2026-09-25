@@ -7,7 +7,8 @@ and the separate Serve application through `octet extension`. See
 [executable bundle setup](installation.md#optional-packages) for the tool
 integrations. The application-package format on this page is specifically for
 `octet-serve`; Serve is not an executable-extension activation target.
-The local 0.8.0 RC does not imply matching published packages.
+The [0.8.0 release record](releases/v0.8.0.md) records matching signed packages
+and public-install verification.
 
 ## Commands
 

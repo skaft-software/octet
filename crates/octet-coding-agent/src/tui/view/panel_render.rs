@@ -6,12 +6,10 @@ use std::time::{Duration, Instant, SystemTime};
 use sexy_tui_rs::{visible_width, wrap_text_with_ansi, CURSOR_MARKER};
 use unicode_segmentation::UnicodeSegmentation;
 
-#[cfg(test)]
-use super::OrdinarySurfaceMetadata;
 use super::{
     fit_line, fit_prioritized_footer, join_ordinary_metadata, render_ordinary_status, subdued_text,
-    FooterSegment, ForkMessage, MessagePicker, OrdinarySurfaceLifecycle, Panel, PanelAction,
-    PickerScope, PickerSort, PickerState, ShellState,
+    FooterSegment, ForkMessage, MessagePicker, OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata,
+    Panel, PanelAction, PickerScope, PickerSort, PickerState, ShellState,
 };
 use crate::tui::fuzzy::{fuzzy_match, parse_search_query, SearchMode, TokenKind};
 use crate::tui::layout::{PickerLayout, PresentationLayout, MAX_APPROVAL_DETAIL_ROWS};
@@ -1787,7 +1785,9 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
                 .subagent_panel()
                 .map(|_| searched_indices_for_action(items, descriptions, action, filter));
             let body = filtered.len().max(1);
-            let show_purpose = !confirmation && surface.purpose.is_some() && max_panel >= 4;
+            let show_purpose = !confirmation
+                && select_list_purpose(surface, action, width).is_some()
+                && max_panel >= 4;
             let border_min_rows = if show_purpose { 6 } else { 5 };
             let border_rows = usize::from(
                 !confirmation
@@ -1898,6 +1898,23 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
     }
 }
 
+fn select_list_purpose<'a>(
+    surface: &'a OrdinarySurfaceMetadata,
+    action: &PanelAction,
+    width: u16,
+) -> Option<&'a str> {
+    surface.purpose.as_deref().or_else(|| {
+        action.subagent_panel().map(|_| {
+            let full = "Stop: esc, then /subagents stop <name|all>";
+            if usize::from(width) >= visible_width(full) + 2 {
+                full
+            } else {
+                "esc, then /subagents stop all"
+            }
+        })
+    })
+}
+
 #[cfg(test)]
 pub(super) fn render_panel(state: &ShellState, width: u16) -> Vec<String> {
     render_panel_with_limit(state, width, panel_rows(state, width))
@@ -1977,7 +1994,8 @@ fn render_panel_output_with_limit(
             // Preserve a selected body row before optional explanatory chrome.
             // At three rows the title, filter, and focusable item are the
             // minimum usable picker; purpose yields until a fourth row exists.
-            let show_purpose = !confirmation && surface.purpose.is_some() && max_rows >= 4;
+            let purpose = select_list_purpose(surface, action, width);
+            let show_purpose = !confirmation && purpose.is_some() && max_rows >= 4;
             let border_min_rows = if show_purpose { 6 } else { 5 };
             let show_borders = !confirmation
                 && state.theme.layout_for_width(width).show_panel_borders
@@ -1994,7 +2012,7 @@ fn render_panel_output_with_limit(
                 lines.push(filter_line);
             }
             if show_purpose {
-                if let Some(purpose) = surface.purpose.as_deref() {
+                if let Some(purpose) = purpose {
                     lines.push(fit_line(
                         &format!(
                             "{content_inset}{}",
@@ -2580,6 +2598,7 @@ mod subagent_surface_tests {
             assert!(plain.contains("audit-auth"), "{plain}");
             assert!(plain.contains("running"), "{plain}");
             assert!(plain.contains("enter inspect"), "{plain}");
+            assert!(plain.contains("esc, then /subagents stop"), "{plain}");
             assert!(!plain.contains("state · elapsed"), "{plain}");
             assert!(rows.len() <= 20);
             assert!(rows
@@ -2594,6 +2613,21 @@ mod subagent_surface_tests {
                 assert!(!rows[worker].contains("running"));
             } else {
                 assert!(rows[worker].contains("running"));
+            }
+            for height in 3..=12 {
+                let rows = render_panel_with_limit(&state, width, height);
+                let plain = super::super::strip_terminal_sequences(&rows.join("\n"));
+                assert!(plain.contains("audit-auth"), "{width}x{height}: {plain}");
+                assert!(rows.len() <= height, "{width}x{height}: {plain}");
+                assert!(rows
+                    .iter()
+                    .all(|row| visible_width(row) <= usize::from(width)));
+                if height >= 4 {
+                    assert!(
+                        plain.contains("esc, then /subagents stop"),
+                        "{width}x{height}: {plain}"
+                    );
+                }
             }
         }
     }

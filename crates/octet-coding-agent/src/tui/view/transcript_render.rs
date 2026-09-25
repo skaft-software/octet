@@ -23,6 +23,35 @@ use super::{
 };
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
 
+/// Round display-only token counts; the telemetry and accounting remain exact.
+fn compact_subagent_tokens(tokens: u64) -> String {
+    let tokens = u128::from(tokens);
+    let units = [
+        (1_000, "K"),
+        (1_000_000, "M"),
+        (1_000_000_000, "B"),
+        (1_000_000_000_000, "T"),
+    ];
+    let Some(mut index) = units.iter().rposition(|(scale, _)| tokens >= *scale) else {
+        return tokens.to_string();
+    };
+    loop {
+        let (scale, suffix) = units[index];
+        // Keep one decimal below 100 units and whole units above it.
+        let precision = if tokens < 100 * scale { 10 } else { 1 };
+        let rounded = (tokens * precision + scale / 2) / scale;
+        if rounded >= 1_000 * precision && index + 1 < units.len() {
+            index += 1;
+            continue;
+        }
+        return if precision == 10 && rounded % 10 != 0 {
+            format!("{}.{}{suffix}", rounded / 10, rounded % 10)
+        } else {
+            format!("{}{suffix}", rounded / precision)
+        };
+    }
+}
+
 fn nest_tool_output(rows: Vec<String>, theme: &OctetTheme, width: u16) -> Vec<String> {
     let mut first_content_row = true;
     rows.into_iter()
@@ -199,9 +228,26 @@ pub(super) fn render_block_planned_with_rainbow(
         ),
         TranscriptBlock::Subagents(summary) => {
             let full = summary.label();
-            let label = if visible_width(&full) <= usize::from(width) {
+            let fits = |label: &str| visible_width(label) <= usize::from(width);
+            // Keep the hint in the existing heading row: adding a row pushes
+            // the mutable roster above the native viewport in short terminals.
+            let stop_label = (!summary.hydrated && summary.active_count() > 0)
+                .then(|| {
+                    [
+                        format!("{full} · stop: /subagents stop all"),
+                        format!("{full} stop all"),
+                        "Subagents /subagents stop all".to_owned(),
+                        "/subagents stop all".to_owned(),
+                    ]
+                    .into_iter()
+                    .find(|label| fits(label))
+                })
+                .flatten();
+            let label = if let Some(label) = stop_label {
+                label
+            } else if fits(&full) {
                 full
-            } else if usize::from(width) >= visible_width("Subagents · /subagents") {
+            } else if fits("Subagents · /subagents") {
                 "Subagents · /subagents".to_owned()
             } else {
                 "/subagents".to_owned()
@@ -225,34 +271,24 @@ pub(super) fn render_block_planned_with_rainbow(
             let hidden = summary
                 .active_count()
                 .saturating_sub(summary.live_workers.len());
-            for (index, worker) in summary.live_workers.iter().enumerate() {
-                let last = index + 1 == summary.live_workers.len() && hidden == 0;
-                let branch = if theme.unicode() {
-                    if last {
-                        "└─"
-                    } else {
-                        "├─"
-                    }
-                } else if last {
-                    "`-"
-                } else {
-                    "|-"
-                };
+            for worker in &summary.live_workers {
+                let elbow = activity_elbow(theme);
                 let name = sanitize_for_terminal(&worker.name);
                 let estimate = if worker.output_estimated { "~" } else { "" };
                 let text = format!(
                     "{name} · ↑{} ↓{estimate}{}",
-                    worker.input_tokens, worker.output_tokens
+                    compact_subagent_tokens(worker.input_tokens),
+                    compact_subagent_tokens(worker.output_tokens)
                 );
                 lines.push(fit_line(
-                    &theme.fg("muted", &format!("  {branch} {text}")),
+                    &theme.fg("muted", &format!("{elbow} {text}")),
                     width,
                 ));
             }
             if hidden > 0 && !summary.live_workers.is_empty() {
-                let branch = if theme.unicode() { "└─" } else { "`-" };
+                let elbow = activity_elbow(theme);
                 lines.push(fit_line(
-                    &theme.fg("muted", &format!("  {branch} +{hidden} more")),
+                    &theme.fg("muted", &format!("{elbow} +{hidden} more")),
                     width,
                 ));
             }
