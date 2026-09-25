@@ -32,7 +32,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/model [id]` | Open the model picker or select an ID. |
 | `/fast [on\|off\|status]` | Toggle/inspect capability-gated Responses priority; active changes wait for a safe boundary. |
 | `/thinking [level]` | Inspect/change [model-supported reasoning](providers.md#reasoning). |
-| `/theme [auto\|light\|dark]` | Choose the terminal appearance; without an argument, open the picker. |
+| `/theme [auto\|light\|dark\|name]` | Choose a built-in appearance or a discovered TOML theme; without an argument, open the filterable picker. |
 | `/answer [instruction]` | Stop tool use at the next safe boundary and answer from gathered evidence. |
 | `/compact [instructions]` | Request compaction at the next safe boundary; bounded custom instructions apply to local summaries, not native Responses compact. |
 | `/verbose [on\|off]` | Expand/collapse retained reasoning, compaction, and bounded tool evidence. |
@@ -91,8 +91,9 @@ call settles, so a call is never separated from its result). `--no-process` or
 The capture is bounded by `max_output_bytes` and `bash_timeout_secs`; it is not
 a persistent shell session.
 
-`/theme` selects a built-in Auto/Light/Dark appearance. This command does not
-load arbitrary theme files. [Theme status](themes.md).
+`/theme` previews and selects built-in Auto/Light/Dark appearances or valid
+TOML files in the trusted theme discovery roots. Cancelling leaves the current
+theme and session unchanged. [Theme discovery and format](themes.md).
 Additional extension commands depend on the enabled, independently trusted
 package; its README is authoritative for arguments.
 

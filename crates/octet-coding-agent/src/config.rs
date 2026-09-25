@@ -437,15 +437,14 @@ pub struct Config {
     /// Host-owned admission policy for model-requested tool effects.
     pub effect_policy: EffectPolicy,
     pub sandbox: SandboxPolicy,
-    /// Built-in terminal appearance selector: auto, light, or dark. Other
-    /// legacy names remain compatibility inputs and fall back to default.
+    /// Built-in appearance (auto, light, dark) or a discovered TOML theme name.
+    /// Unrecognized or malformed names fall back to the compiled default.
     pub theme: Option<String>,
     /// Explicit system prompt override. `None` uses composed built-in
     /// instructions, while `Some("")` intentionally blanks the system
     /// prompt.
     pub system_prompt: Option<String>,
-    /// Legacy explicit theme directories; the current runtime always uses the compiled default.
-    #[allow(dead_code)]
+    /// Additional theme directories or individual TOML files for discovery.
     pub theme_paths: Vec<PathBuf>,
     pub color: ColorMode,
     /// Whether octet owns mouse scrolling and cross-viewport selection.

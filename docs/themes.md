@@ -13,7 +13,7 @@ custom surfaces, composer frames, and loaded theme colours/geometry keep their
 own styling.
 Unknown-background and no-colour terminals retain an unpainted readable prompt.
 
-The built-in theme picker offers:
+The first-run appearance picker offers:
 
 - `Auto (recommended)` detects the terminal background through reliable
   environment or terminal capability signals and uses a readable neutral
@@ -23,23 +23,31 @@ The built-in theme picker offers:
 
 Moving through the picker previews each appearance without saving it. Confirming
 persists `theme = "auto"`, `theme = "light"`, or `theme = "dark"` in the
-user config without replacing unrelated settings.
-Use `/theme` later to revisit it. Cancelling
-`/theme` restores the previous appearance; dismissing first-run onboarding uses
-Auto. Existing configured installations do not reopen onboarding, and
+user config without replacing unrelated settings. Dismissing first-run onboarding
+uses Auto. Existing configured installations do not reopen onboarding, and
 print/plain/RPC, redirected, and `TERM=dumb` sessions never open it.
 
-The built-in choices also work with `--theme` and `OCTET_THEME`. Other theme
-names, `--theme-dir`, and arbitrary theme files are accepted only through the
-bounded file loader: a name that resolves through normal resource discovery
-(global `~/.octet/themes`, a trusted project `.octet/themes`, or `--theme-dir`)
-is loaded at startup when named by `--theme`/`OCTET_THEME`, while the
-interactive `/theme` command accepts only `auto`, `light`, and `dark`.
-There is no theme marketplace, and an unrecognized or malformed name falls back
-to the compiled default. An explicit
-`OCTET_COLOR_SCHEME` is also treated as an existing terminal-appearance choice,
-so automation and already-configured shells do not get interrupted by
-onboarding.
+Use `/theme` later to browse the built-in choices **and** valid `.toml` files
+from normal resource discovery (global `~/.octet/themes`, a trusted project
+`.octet/themes`, and directories or files passed with `--theme-dir`). The list
+shows the file stem and optional metadata name/description; typing filters it.
+Selecting a file previews its appearance and confirming persists its file stem
+as `theme = "mine"` in the user config, keeping other settings intact.
+`/theme mine` (or `/theme mine.toml`) selects a discovered, valid file directly.
+Cancelling restores the active theme without modifying the config or session.
+The first-run picker still shows only Auto, Light, and Dark.
+
+Discovery follows global < trusted project < explicit path precedence; duplicate
+file stems show only the winning file, even when that file is invalid. Files that
+fail bounded reads or schema validation are omitted from the interactive list.
+In the interactive picker, file stems `auto`, `light`, `dark`, and `default`
+are reserved for built-in selectors and do not appear as file choices. The
+built-in choices also work with `--theme` and `OCTET_THEME`; named files may be
+loaded at startup by those selectors. There is no theme marketplace. An
+unrecognized or malformed theme name at startup falls back to the compiled
+default. An explicit `OCTET_COLOR_SCHEME` is also treated as an existing
+terminal-appearance choice, so automation and already-configured shells do not
+get interrupted by onboarding.
 
 ## Activity status contrast
 

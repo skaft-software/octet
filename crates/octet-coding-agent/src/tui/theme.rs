@@ -253,6 +253,7 @@ impl TerminalThemeChoice {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn index(self) -> usize {
         match self {
             Self::Auto => 0,
@@ -1759,6 +1760,10 @@ pub(crate) fn test_theme_source_with(
     .expect("renderer test theme should compile")
 }
 
+pub(crate) fn is_reserved_theme_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(DEFAULT_THEME_NAME) || TerminalThemeChoice::parse(name).is_some()
+}
+
 fn theme_file_name(name: &str) -> Option<String> {
     let name = name.trim();
     if name.is_empty()
@@ -1778,7 +1783,6 @@ fn theme_file_name(name: &str) -> Option<String> {
     })
 }
 
-#[cfg(any(test, feature = "serve"))]
 fn discover_themes(config: &Config) -> crate::resource_resolver::ResourceSnapshot {
     let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
     resolver.discover(ResourceKind::Theme, &config.theme_paths)
@@ -2171,10 +2175,11 @@ pub(crate) fn load_named_theme_for_background(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let capabilities = TerminalCapabilities::detect(config.color, config.plain);
-    if theme_file_name(name)
-        .as_deref()
-        .and_then(|file_name| file_name.strip_suffix(".toml"))
-        .is_some_and(|resource_name| resource_name.eq_ignore_ascii_case(DEFAULT_THEME_NAME))
+    let selector = name.trim();
+    if is_reserved_theme_name(selector)
+        || selector
+            .strip_suffix(".toml")
+            .is_some_and(|stem| stem.eq_ignore_ascii_case(DEFAULT_THEME_NAME))
     {
         return Ok(default_theme_for(background, capabilities));
     }
@@ -2217,6 +2222,30 @@ pub(crate) fn load_theme_for_background(
 /// to octet's default token set instead of affecting launch/print mode.
 pub fn load_theme(config: &Config) -> OctetTheme {
     load_theme_for_background(config, terminal_background())
+}
+
+/// Load picker previews from the same precedence-selected, trusted roots as
+/// startup. Invalid files are omitted instead of presenting a broken choice;
+/// a shadowed lower-precedence file is never substituted for an invalid winner.
+pub(crate) fn selectable_file_themes(
+    config: &Config,
+    background: TerminalBackground,
+) -> Vec<(String, OctetTheme)> {
+    let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
+    let capabilities = TerminalCapabilities::detect(config.color, config.plain);
+    discover_themes(config)
+        .resources()
+        .iter()
+        .filter(|resource| {
+            !is_reserved_theme_name(&resource.name) && !resource.name.ends_with(".toml")
+        })
+        .filter_map(|resource| {
+            let source = resolver.read_text(resource).ok()?;
+            let theme =
+                load_resolved_theme_for(&resource.path, &source, capabilities, background).ok()?;
+            Some((resource.name.clone(), theme))
+        })
+        .collect()
 }
 
 /// Return the compiled default and all safe names selected by the shared
@@ -2486,12 +2515,93 @@ mod tests {
     }
 
     #[test]
+    fn picker_loads_only_valid_winning_theme_files_and_reserves_builtin_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().to_owned());
+        let project = config.workspace.join(".octet/themes");
+        let explicit = directory.path().join("explicit-themes");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&explicit).unwrap();
+        std::fs::write(project.join("picker-valid.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(project.join("picker-shared.toml"), "accent = '#111111'").unwrap();
+        std::fs::write(project.join("picker-shadowed.toml"), "accent = '#222222'").unwrap();
+        std::fs::write(explicit.join("picker-shared.toml"), "accent = '#abcdef'").unwrap();
+        std::fs::write(explicit.join("picker-shadowed.toml"), "[invalid").unwrap();
+        std::fs::write(explicit.join("picker-invalid.toml"), "[invalid").unwrap();
+        std::fs::write(explicit.join("dark.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(explicit.join("default.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(
+            explicit.join("picker-double.toml.toml"),
+            "accent = '#123456'",
+        )
+        .unwrap();
+        std::fs::write(
+            explicit.join("picker-too-large.toml"),
+            vec![b' '; MAX_THEME_BYTES as usize + 1],
+        )
+        .unwrap();
+        let standalone = directory.path().join("picker-standalone.toml");
+        std::fs::write(&standalone, "accent = '#654321'").unwrap();
+        config.theme_paths.push(explicit.clone());
+        config.theme_paths.push(standalone);
+
+        let options = selectable_file_themes(&config, TerminalBackground::Dark);
+        let names: Vec<_> = options.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"picker-valid"));
+        assert!(names.contains(&"picker-shared"));
+        assert!(names.contains(&"picker-standalone"));
+        for hidden in [
+            "picker-shadowed",
+            "picker-invalid",
+            "picker-too-large",
+            "dark",
+            "default",
+            "picker-double.toml",
+        ] {
+            assert!(
+                !names.contains(&hidden),
+                "unexpected picker option {hidden}"
+            );
+        }
+        let shared = &options
+            .iter()
+            .find(|(name, _)| name == "picker-shared")
+            .unwrap()
+            .1;
+        assert_eq!(
+            shared.source_path(),
+            Some(
+                explicit
+                    .canonicalize()
+                    .unwrap()
+                    .join("picker-shared.toml")
+                    .as_path()
+            )
+        );
+        assert_eq!(
+            shared.resolve::<String>("accent").as_deref(),
+            Some("#abcdef")
+        );
+        config.theme = Some("dark".into());
+        assert!(
+            load_theme_for_background(&config, TerminalBackground::Unknown).is_compiled_default()
+        );
+        assert_eq!(
+            load_theme_for_background(&config, TerminalBackground::Unknown).background(),
+            TerminalBackground::Dark
+        );
+    }
+
+    #[test]
     fn missing_and_legacy_names_keep_the_compiled_default_fallback() {
         let directory = tempfile::tempdir().unwrap();
         let config = config(directory.path().to_owned());
         let names = available_themes(&config);
         assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
         assert!(load_named_theme(DEFAULT_THEME_NAME, &config).is_ok());
+        assert!(load_named_theme("default.toml", &config)
+            .unwrap()
+            .is_compiled_default());
         for name in ["legacy-theme", "custom", "compact"] {
             assert!(
                 load_named_theme(name, &config).is_err(),
@@ -2594,6 +2704,11 @@ mod tests {
 
         assert!(theme_path("untrusted-project", &config).is_none());
         assert!(!available_themes(&config).contains(&"untrusted-project".to_owned()));
+        assert!(
+            !selectable_file_themes(&config, TerminalBackground::Unknown)
+                .iter()
+                .any(|(name, _)| name == "untrusted-project")
+        );
         assert!(theme_discovery_diagnostics(&config)
             .iter()
             .any(|diagnostic| { diagnostic.message.contains("workspace is not trusted") }));
@@ -2626,6 +2741,11 @@ mod tests {
         let names = available_themes(&config);
         assert!(!names.contains(&"linked".to_owned()));
         assert!(!names.contains(&"pipe".to_owned()));
+        assert!(
+            !selectable_file_themes(&config, TerminalBackground::Unknown)
+                .iter()
+                .any(|(name, _)| name == "linked" || name == "pipe")
+        );
         assert!(theme_path("linked", &config).is_none());
         assert!(theme_path("pipe", &config).is_none());
         assert!(theme_discovery_diagnostics(&config)

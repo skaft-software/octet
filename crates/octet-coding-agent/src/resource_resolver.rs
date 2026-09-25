@@ -534,7 +534,7 @@ fn resource_candidate(
     Ok(Some((name, entrypoint)))
 }
 
-fn valid_resource_name(name: &str) -> bool {
+pub(crate) fn valid_resource_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."

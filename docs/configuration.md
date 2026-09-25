@@ -46,7 +46,7 @@ runtime defaults.
 | `reasoning` | Model-supported choice, example `"high"`; `"off"` is an explicit preference. Unset uses [model-aware defaults](providers.md#defaults-unreleased), after session restoration. [Levels and budgets](providers.md#reasoning). |
 | `system_prompt` | Replace all composed system instructions, including with `""`; example `"You are a careful and concise reviewer."`. AGENTS/context/skill instructions are ignored while set. |
 | `cache_retention` | Provider prompt-cache retention selection; example `"short"`. |
-| `theme` | Built-in `"auto"`, `"light"`, or `"dark"`. Auto adapts to the terminal background; light/dark override detection. |
+| `theme` | Built-in `"auto"`, `"light"`, or `"dark"`, or the file stem of a discovered TOML theme (e.g. `"mine"`). Auto adapts to the terminal background; light/dark override detection. [Theme discovery](themes.md). |
 | `color` | Terminal color selection; example `"auto"`, with terminal-capability fallbacks. |
 | `mouse` | Default `"auto"`; `auto`, `terminal`, and `off` preserve native selection/history; `app` selects the captured semantic viewport. |
 | `plain` | Chronological frontend; example `false`. |
@@ -76,6 +76,10 @@ runtime defaults.
 | `enabled_extensions` | Default `[]`: installed executable extensions stay disabled until explicitly enabled. Full access does not change activation. |
 | `trusted_extensions` | Default `[]`: optional persistent source-bound grants. Full access implicitly trusts selected extensions without adding grants; safe mode removes implicit trust and blocks executable startup even with explicit grants. [Resource rules](resources.md#locations-and-precedence). |
 
+`--theme-dir` adds a theme directory or TOML file to bounded discovery. Named
+files from global, trusted project, or explicit roots can be loaded at startup
+and selected interactively with `/theme`. [Themes](themes.md).
+
 Reload cap reports show **at least** the known skipped paths, not an exact total:
 unread directory contents are unknown. Failed directory entries also consume the
 enumeration allowance. Fully scanned directories retain deterministic ordering;
@@ -91,7 +95,7 @@ baseline. Executable sampling remains independent of these resource-tree limits.
 | `OCTET_EFFECT_POLICY` | Effect profile. |
 | `OCTET_SYSTEM_PROMPT` | System-instruction replacement; see [precedence](#precedence). |
 | `OCTET_CACHE_RETENTION` | Cache retention. |
-| `OCTET_COLOR`, `OCTET_MOUSE`, `OCTET_THEME`, `OCTET_COLOR_SCHEME` | Terminal presentation; `OCTET_THEME` accepts `auto`, `light`, or `dark`, while `OCTET_COLOR_SCHEME` remains a background-detection override. |
+| `OCTET_COLOR`, `OCTET_MOUSE`, `OCTET_THEME`, `OCTET_COLOR_SCHEME` | Terminal presentation; `OCTET_THEME` accepts `auto`, `light`, `dark`, or a discovered TOML theme name, while `OCTET_COLOR_SCHEME` remains a background-detection override. |
 | `OCTET_SHOW_IMAGES` | `1` opts in to inline tool-result display, not media upload. |
 | `OCTET_WORKSPACE`, `OCTET_SESSION_DIR` | Workspace and session-storage roots. |
 | `OCTET_MAX_TURNS` | Turn bound. |
@@ -126,7 +130,6 @@ make these logs sensitive even when telemetry is secret-safe.
 - `[compaction] enabled = true` and `OCTET_AUTO_COMPACT=true` select `local`.
 - `reasoning_mode = "pro"`, `OCTET_REASONING_MODE=pro`, and `--reasoning-mode pro` only load legacy config/sessions. They migrate to `reasoning = "ultra"` only with complete current Ultra/V2 support; otherwise octet removes the obsolete mode, retains independently selected supported effort, and warns. New config uses `reasoning` alone.
 - `--safe` is a hidden alias of `--safe-mode`; `--yolo` and its config/environment forms are rejected.
-- `--theme-dir` and arbitrary theme names remain compatibility inputs and never load filesystem themes. The built-in `theme` choices are documented in [Theme status](themes.md).
 
 Compatibility inputs do not imply Ygg command aliases, old-root discovery, or an
 automatic first-party migration.

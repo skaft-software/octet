@@ -57,7 +57,8 @@ use crate::tui::pickers::{
 use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
-    background_from_terminal_rgb, load_theme, load_theme_for_background, TerminalBackground,
+    background_from_terminal_rgb, is_reserved_theme_name, load_named_theme_for_background,
+    load_theme, load_theme_for_background, selectable_file_themes, TerminalBackground,
     TerminalThemeChoice,
 };
 use crate::tui::view::{
@@ -8319,35 +8320,95 @@ fn terminal_theme_picker_data() -> (Vec<String>, Vec<Option<String>>) {
     (items, descriptions)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ThemeSelection {
+    Builtin(TerminalThemeChoice),
+    File(String),
+}
+
+impl ThemeSelection {
+    fn key(&self) -> &str {
+        match self {
+            Self::Builtin(choice) => choice.key(),
+            Self::File(name) => name,
+        }
+    }
+
+    fn label(&self) -> &str {
+        match self {
+            Self::Builtin(choice) => choice.label(),
+            Self::File(name) => name,
+        }
+    }
+}
+
 async fn pick_terminal_theme<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
     config: &Config,
     onboarding: bool,
-) -> anyhow::Result<Option<TerminalThemeChoice>>
+) -> anyhow::Result<Option<ThemeSelection>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    let (items, descriptions) = terminal_theme_picker_data();
-    let current = TerminalThemeChoice::from_config(config).unwrap_or(TerminalThemeChoice::Auto);
+    let (mut items, mut descriptions) = terminal_theme_picker_data();
+    let mut choices: Vec<_> = TerminalThemeChoice::all()
+        .into_iter()
+        .map(ThemeSelection::Builtin)
+        .collect();
     let original = shell.theme();
     let mut preview_config = config.clone();
     preview_config.theme = Some(TerminalThemeChoice::Auto.key().to_owned());
-    // Preserve Auto's already-resolved background, including an earlier OSC
-    // response. Otherwise use environment detection/fallback once; never query
-    // the terminal while the picker owns its input stream.
-    let auto = match current {
-        TerminalThemeChoice::Auto => original.clone(),
-        _ => load_theme(&preview_config),
+    // Preserve an already-resolved Auto background (including OSC 11). For
+    // other active themes, preview the compiled Auto palette against the same
+    // resolved background; never query while the picker owns terminal input.
+    let auto = if TerminalThemeChoice::from_config(config) == Some(TerminalThemeChoice::Auto)
+        && original.is_compiled_default()
+    {
+        original.clone()
+    } else {
+        load_theme_for_background(&preview_config, original.background())
     };
-    let previews = TerminalThemeChoice::all().map(|choice| {
-        if choice == TerminalThemeChoice::Auto {
-            auto.clone()
-        } else {
-            preview_config.theme = Some(choice.key().to_owned());
-            load_theme_for_background(&preview_config, auto.background())
+    let mut previews: Vec<_> = TerminalThemeChoice::all()
+        .into_iter()
+        .map(|choice| {
+            if choice == TerminalThemeChoice::Auto {
+                auto.clone()
+            } else {
+                preview_config.theme = Some(choice.key().to_owned());
+                load_theme_for_background(&preview_config, auto.background())
+            }
+        })
+        .collect();
+    if !onboarding {
+        for (name, theme) in selectable_file_themes(config, original.background()) {
+            let metadata = theme.metadata();
+            items.push(if metadata.name.is_empty() || metadata.name == name {
+                name.clone()
+            } else {
+                format!("{name} — {}", metadata.name)
+            });
+            descriptions
+                .push((!metadata.description.is_empty()).then(|| metadata.description.clone()));
+            choices.push(ThemeSelection::File(name));
+            previews.push(theme);
         }
-    });
+    }
+    let current = config
+        .theme
+        .as_deref()
+        .and_then(|key| {
+            let key = TerminalThemeChoice::parse(key)
+                .map(TerminalThemeChoice::key)
+                .unwrap_or_else(|| key.strip_suffix(".toml").unwrap_or(key));
+            choices.iter().position(|choice| choice.key() == key)
+        })
+        .unwrap_or(0);
+    if let Some(ThemeSelection::File(_)) = choices.get(current) {
+        if previews[current].source_path() == original.source_path() {
+            previews[current] = original.clone();
+        }
+    }
     let title = if onboarding {
         "Choose terminal appearance"
     } else {
@@ -8360,7 +8421,7 @@ where
         OrdinarySurfaceMetadata::new(title),
         items,
         descriptions,
-        current.index(),
+        current,
         action,
         |shell, index| {
             let theme = index.map_or(&original, |index| &previews[index]);
@@ -8374,7 +8435,20 @@ where
         shell.set_theme(original);
         shell.render();
     }
-    selected.map(|index| index.map(|index| TerminalThemeChoice::all()[index]))
+    selected.map(|index| index.map(|index| choices[index].clone()))
+}
+
+fn requested_file_theme(
+    name: &str,
+    config: &Config,
+    background: TerminalBackground,
+) -> Option<(String, OctetTheme)> {
+    let theme = load_named_theme_for_background(name, config, background).ok()?;
+    let name = theme.source_path()?.file_stem()?.to_str()?;
+    if is_reserved_theme_name(name) || name.ends_with(".toml") {
+        return None;
+    }
+    Some((name.to_owned(), theme))
 }
 
 async fn configure_terminal_theme<S>(
@@ -8384,39 +8458,54 @@ async fn configure_terminal_theme<S>(
     requested: Option<String>,
     onboarding: bool,
     extensions: Option<&mut crate::extensions::ExecutableExtensions>,
-) -> anyhow::Result<Option<TerminalThemeChoice>>
+) -> anyhow::Result<Option<ThemeSelection>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let used_picker = requested.is_none();
+    let mut requested_theme = None;
     let selected = match requested {
-        Some(value) => match TerminalThemeChoice::parse(&value) {
-            Some(choice) => Some(choice),
-            None => {
+        Some(value) => {
+            if let Some(choice) = TerminalThemeChoice::parse(&value) {
+                Some(ThemeSelection::Builtin(choice))
+            } else if let Some((name, theme)) =
+                requested_file_theme(&value, config, shell.theme().background())
+            {
+                requested_theme = Some(theme);
+                Some(ThemeSelection::File(name))
+            } else {
                 shell.error(format!(
-                    "invalid terminal appearance {value:?}; use /theme auto, /theme light, or /theme dark"
+                    "invalid theme {value:?}; use auto, light, dark, or a discovered valid theme name"
                 ));
                 shell.render();
                 return Ok(None);
             }
-        },
+        }
         None => pick_terminal_theme(shell, input, config, onboarding).await?,
     };
     // A first-run dismissal still commits the recommended default, so a user
     // who leaves from the picker is not forced through the same onboarding on
     // every launch. The caller still honors a pending close request.
-    let Some(choice) = selected.or_else(|| onboarding.then_some(TerminalThemeChoice::Auto)) else {
+    let dismissed = selected.is_none();
+    let Some(choice) = selected
+        .or_else(|| onboarding.then_some(ThemeSelection::Builtin(TerminalThemeChoice::Auto)))
+    else {
         return Ok(None);
     };
 
     config.theme = Some(choice.key().to_owned());
     shell.set_runtime_config(config.clone());
-    // A confirmed picker already installed the compiled appearance. Retain it
-    // so confirming Auto does not discard its cached background resolution.
-    if !used_picker || selected.is_none() {
-        shell.set_theme(load_theme(config));
+    // A confirmed picker already installed its preview. Do not discard the
+    // resolved background or reread a selected file after confirmation.
+    if let Some(theme) = requested_theme {
+        shell.set_theme(theme);
+    } else if !used_picker || dismissed {
+        shell.set_theme(load_theme_for_background(
+            config,
+            shell.theme().background(),
+        ));
     }
-    if choice == TerminalThemeChoice::Auto {
+    if matches!(&choice, ThemeSelection::Builtin(TerminalThemeChoice::Auto)) {
         apply_detected_terminal_background(shell, input, config).await;
     }
     if let Err(error) = persist_configuration(extensions, || {
@@ -8424,9 +8513,14 @@ where
     })
     .await
     {
-        shell.error(format!("failed to save terminal appearance: {error}"));
+        shell.error(format!("failed to save theme: {error}"));
     } else if !onboarding {
-        shell.notice(format!("terminal appearance: {}", choice.label()));
+        let prefix = if matches!(&choice, ThemeSelection::Builtin(_)) {
+            "terminal appearance"
+        } else {
+            "theme"
+        };
+        shell.notice(format!("{prefix}: {}", choice.label()));
     }
     shell.render();
     Ok(Some(choice))
@@ -10444,7 +10538,7 @@ mod tests {
                 pick_terminal_theme(&mut shell, &mut input, &config, false)
                     .await
                     .unwrap(),
-                Some(choice)
+                Some(ThemeSelection::Builtin(choice))
             );
             assert_eq!(
                 shell.theme().background(),
@@ -10463,6 +10557,187 @@ mod tests {
             assert_eq!(config.theme.as_deref(), Some("auto"));
             assert!(!shell.has_panel());
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_theme_picker_filters_file_metadata_and_preserves_active_theme_until_confirmed(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config = terminal_theme_test_config(directory.path().to_owned());
+        let themes = config.workspace.join(".octet/themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        let path = themes.join("picker-amber.toml");
+        std::fs::write(
+            &path,
+            "[metadata]\nname = 'Golden Hour'\ndescription = 'warm orange palette'\n[colors]\naccent = '#aabbcc'\n",
+        )
+        .unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        let original = shell.theme();
+        let mut events: Vec<_> = "warm orange"
+            .chars()
+            .map(|key| theme_picker_key(KeyCode::Char(key)))
+            .collect();
+        events.push(theme_picker_key(KeyCode::Enter));
+        let mut input = tokio_stream::iter(events);
+        assert_eq!(
+            pick_terminal_theme(&mut shell, &mut input, &config, false)
+                .await
+                .unwrap(),
+            Some(ThemeSelection::File("picker-amber".into()))
+        );
+        assert_eq!(
+            shell.theme().source_path(),
+            Some(path.canonicalize().unwrap().as_path())
+        );
+        assert_eq!(
+            shell.theme().resolve::<String>("accent").as_deref(),
+            Some("#aabbcc")
+        );
+        assert!(config.theme.is_none(), "preview must not commit config");
+        assert!(!shell.has_panel());
+
+        let mut selected_config = config.clone();
+        selected_config.theme = Some("picker-amber".into());
+        let prior = shell.theme();
+        std::fs::write(&path, "accent = '#abcdef'").unwrap();
+        let mut input = tokio_stream::iter([theme_picker_key(KeyCode::Enter)]);
+        assert_eq!(
+            pick_terminal_theme(&mut shell, &mut input, &selected_config, false)
+                .await
+                .unwrap(),
+            Some(ThemeSelection::File("picker-amber".into()))
+        );
+        assert_eq!(
+            shell.theme().resolve::<String>("accent"),
+            prior.resolve::<String>("accent")
+        );
+        assert_eq!(selected_config.theme.as_deref(), Some("picker-amber"));
+
+        let mut input = tokio_stream::iter([
+            theme_picker_key(KeyCode::Home),
+            theme_picker_key(KeyCode::Enter),
+        ]);
+        assert_eq!(
+            pick_terminal_theme(&mut shell, &mut input, &selected_config, false)
+                .await
+                .unwrap(),
+            Some(ThemeSelection::Builtin(TerminalThemeChoice::Auto))
+        );
+        assert!(shell.theme().is_compiled_default());
+        assert_eq!(shell.theme().background(), original.background());
+    }
+
+    #[tokio::test]
+    async fn terminal_theme_file_preview_cancel_and_onboarding_keep_the_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = terminal_theme_test_config(directory.path().to_owned());
+        config.theme = Some("light".into());
+        let themes = config.workspace.join(".octet/themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(themes.join("picker-custom.toml"), "accent = '#aabbcc'").unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        let original = shell.theme();
+        let mut events: Vec<_> = "picker-custom"
+            .chars()
+            .map(|key| theme_picker_key(KeyCode::Char(key)))
+            .collect();
+        events.push(theme_picker_key(KeyCode::Esc));
+        let mut input = EventStream::from_stream(tokio_stream::iter(events));
+        assert_eq!(
+            configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(shell.theme().source_path(), original.source_path());
+        assert_eq!(
+            shell.theme().role_rgb("foreground"),
+            original.role_rgb("foreground")
+        );
+        assert_eq!(config.theme.as_deref(), Some("light"));
+        assert!(!shell.has_panel());
+
+        let mut events: Vec<_> = "picker-custom"
+            .chars()
+            .map(|key| theme_picker_key(KeyCode::Char(key)))
+            .collect();
+        events.push(theme_picker_key(KeyCode::Enter));
+        events.push(theme_picker_key(KeyCode::Esc));
+        let mut input = tokio_stream::iter(events);
+        assert_eq!(
+            pick_terminal_theme(&mut shell, &mut input, &config, true)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(shell.theme().source_path(), original.source_path());
+    }
+
+    #[test]
+    fn direct_theme_name_loads_only_valid_selectable_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = terminal_theme_test_config(directory.path().to_owned());
+        let themes = config.workspace.join(".octet/themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(themes.join("picker-custom.toml"), "accent = '#aabbcc'").unwrap();
+        std::fs::write(themes.join("picker-broken.toml"), "[invalid").unwrap();
+        std::fs::write(themes.join("dark.toml"), "accent = '#123456'").unwrap();
+        for name in ["picker-custom", "picker-custom.toml"] {
+            let (key, loaded) =
+                requested_file_theme(name, &config, TerminalBackground::Dark).unwrap();
+            assert_eq!(key, "picker-custom");
+            assert_eq!(
+                loaded.resolve::<String>("accent").as_deref(),
+                Some("#aabbcc")
+            );
+            config.theme = Some(key);
+            assert_eq!(
+                load_theme_for_background(&config, TerminalBackground::Dark).source_path(),
+                loaded.source_path()
+            );
+        }
+        for name in [
+            "picker-broken",
+            "missing",
+            "../picker-custom",
+            "dark.toml",
+            "default",
+        ] {
+            assert!(
+                requested_file_theme(name, &config, TerminalBackground::Dark).is_none(),
+                "accepted {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_direct_theme_selection_keeps_current_config_and_appearance() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = terminal_theme_test_config(directory.path().to_owned());
+        config.theme = Some("light".into());
+        let mut shell = InteractiveShell::test_shell();
+        let original = shell.theme();
+        let mut input = EventStream::from_stream(tokio_stream::empty());
+        assert_eq!(
+            configure_terminal_theme(
+                &mut shell,
+                &mut input,
+                &mut config,
+                Some("missing-theme".into()),
+                false,
+                None,
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        assert_eq!(config.theme.as_deref(), Some("light"));
+        assert_eq!(shell.theme().source_path(), original.source_path());
+        assert_eq!(
+            shell.theme().role_rgb("foreground"),
+            original.role_rgb("foreground")
+        );
     }
 
     #[tokio::test]

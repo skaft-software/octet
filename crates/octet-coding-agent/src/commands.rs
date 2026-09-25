@@ -274,8 +274,8 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     ),
     slash!(
         "theme",
-        "/theme [auto|light|dark]",
-        "choose terminal appearance",
+        "/theme [auto|light|dark|name]",
+        "choose terminal appearance or a discovered theme",
         true
     ),
     slash!(
