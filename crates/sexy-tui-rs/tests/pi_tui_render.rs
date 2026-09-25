@@ -6,9 +6,9 @@ use std::process::Command;
 use std::rc::Rc;
 
 use sexy_tui_rs::{
-    CellPixelSize, ColorDepth, Component, ImageCapabilities, ImageId, ImageLimits, ImagePlanner,
-    ImageProtocol, ImageViewport, Terminal, TerminalCapabilities, TerminalImage, TerminalInput,
-    CURSOR_MARKER, TUI,
+    CellPixelSize, ColorDepth, Component, ImageAnchor, ImageCapabilities, ImageId, ImageLayout,
+    ImageLimits, ImagePlanner, ImageProtocol, ImageViewport, Terminal, TerminalCapabilities,
+    TerminalImage, TerminalInput, CURSOR_MARKER, TUI,
 };
 
 const PI_SYNC_BEGIN: &str = "\x1b[?2026h";
@@ -469,6 +469,48 @@ fn kitty_image(id: u32, rows: usize, payload: &str) -> String {
 
 fn delete_kitty_image(id: u32) -> String {
     format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\")
+}
+
+#[test]
+fn pi_image_insert_clears_stale_separator_and_status_from_reserved_rows() {
+    let mut harness = Harness::new(
+        80,
+        28,
+        vec![
+            "Read image.png".into(),
+            "STALE SEPARATOR".into(),
+            "STALE STATUS".into(),
+            "OLD FOOTER".into(),
+        ],
+    );
+    harness.start();
+    harness.clear_writes();
+    let anchor = ImageAnchor::new(
+        ImageProtocol::Kitty,
+        ImageId::new(9).unwrap(),
+        ImageLayout::new(30, 16).unwrap(),
+    )
+    .marker();
+    let mut lines = vec!["Read image.png".into(), anchor];
+    lines.extend(vec![String::new(); 15]);
+    lines.extend(["Thinking".into(), "composer".into(), "NEW FOOTER".into()]);
+    *harness.lines.borrow_mut() = lines;
+    harness.render();
+    let viewport = harness.viewport();
+    for stale in ["STALE SEPARATOR", "STALE STATUS", "OLD FOOTER"] {
+        assert!(
+            !viewport.iter().any(|row| row.contains(stale)),
+            "stale {stale:?} remained after image insertion: {viewport:?}"
+        );
+    }
+    assert_eq!(
+        viewport
+            .iter()
+            .filter(|row| row.contains("NEW FOOTER"))
+            .count(),
+        1,
+        "{viewport:?}"
+    );
 }
 
 #[test]

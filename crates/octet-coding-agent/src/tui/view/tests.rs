@@ -13940,6 +13940,41 @@ async fn actual_read_image_reaches_live_shell_and_reopened_session() {
 }
 
 #[test]
+fn default_tool_image_reservation_keeps_following_rows_physically_empty() {
+    use sexy_tui_rs::{ImageAnchor, ImageId, ImageLayout, ImageProtocol};
+
+    let theme = crate::tui::theme::test_theme();
+    let args = serde_json::json!({"path": "comparison-home.png"});
+    let block = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("read-image".into()),
+        "read".into(),
+        args.to_string(),
+        summarize_tool("read", &args),
+        String::new(),
+        true,
+        false,
+        None,
+        None,
+    )));
+    let plan = compile_surface_plan(None, &block, &theme, 80);
+    let anchor = ImageAnchor::new(
+        ImageProtocol::Kitty,
+        ImageId::new(1).unwrap(),
+        ImageLayout::new(30, 16).unwrap(),
+    )
+    .marker();
+    let mut content = vec![anchor.clone()];
+    content.extend(vec![String::new(); 15]);
+    let rows = super::surface_frame::decorate_surface_with_frame(
+        content, &plan, &theme, 80, None, false, None,
+    );
+    let start = rows.iter().position(|row| row.contains(&anchor)).unwrap();
+    for (offset, row) in rows[start + 1..start + 16].iter().enumerate() {
+        assert_eq!(visible_width(row), 0, "reserved row {offset}: {row:?}");
+    }
+}
+
+#[test]
 fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
     use sexy_tui_rs::{ImageDimensions, ImageLayout, ImageProtocol};
 
