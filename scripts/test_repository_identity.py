@@ -165,6 +165,23 @@ class SourceDistributionVersionTests(unittest.TestCase):
         self.assertIn(f"text {name}", (self.root / "docs/package-assets.txt").read_text().splitlines())
 
 
+class ReleaseToolchainTests(unittest.TestCase):
+    def test_workspace_packaging_installs_its_explicit_toolchain(self):
+        ci = (SCRIPTS.parent / ".github/workflows/ci.yml").read_text()
+        quality = ci.split("\n  quality:\n", 1)[1].split("\n  first-party-extension-tests:\n", 1)[0]
+        install = "rustup toolchain install 1.90.0 --profile minimal --no-self-update"
+        package = "cargo +1.90.0 package --workspace --exclude octet-coding-agent --locked --no-verify"
+        self.assertIn(install, quality)
+        self.assertIn(package, quality)
+        self.assertLess(quality.index(install), quality.index(package))
+        # This immutable action is generated for 1.86, not the configurable action.
+        self.assertNotRegex(
+            ci,
+            r"uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a"
+            r"\n\s+with:\n\s+toolchain:",
+        )
+
+
 class ReleaseDocumentationTests(unittest.TestCase):
     """Keep candidate and published installation guidance distinct and versioned.
 

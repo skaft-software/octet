@@ -54,9 +54,9 @@ pub struct SteeringUpdate {
 }
 
 /// One operation event; canonical response boundaries are never flattened.
-#[expect(
+#[allow(
     clippy::large_enum_variant,
-    reason = "Preserve StreamEvent's inline layout rather than allocating once per streamed event"
+    reason = "Keep StreamEvent inline without per-event allocation; size lint differs across supported compilers"
 )]
 #[derive(Debug)]
 pub enum SteeringEvent {

@@ -383,10 +383,10 @@ impl<'a> Builder<'a> {
         {
             self.next_math += 1;
         }
-        if !self
+        if self
             .math
             .get(self.next_math)
-            .is_some_and(|token| token.range.start < range.end)
+            .is_none_or(|token| token.range.start >= range.end)
         {
             for inline in split_bare_urls(text) {
                 self.append_inline(inline);

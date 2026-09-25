@@ -1140,8 +1140,8 @@
   },
   "cerebras/qwen-3.8-27b": {
     "limit": {
-      "context": 65536,
-      "output": 32768
+      "context": 131072,
+      "output": 40960
     },
     "modalities": {
       "input": [
@@ -20082,7 +20082,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 128000
+      "output": 131072
     },
     "modalities": {
       "input": [

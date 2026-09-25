@@ -2277,11 +2277,18 @@ impl ExtensionSessionBinding {
                 // registering the waiter so a removed/reselected key cannot
                 // commit an earlier reservation into the new generation.
                 let invalidated = Arc::clone(&reservation.notify).notified_owned();
-                if self.manager.inner.shutdown.load(Ordering::Acquire) {
-                    return Err(ExtensionRuntimeManagerError::ManagerClosed);
-                }
-                if !reservation.is_current(&lock(&self.manager.inner.state)) {
-                    return Err(ExtensionRuntimeManagerError::StaleSource);
+                {
+                    let state = lock(&self.manager.inner.state);
+                    // Shutdown removes starting reservations under this lock.
+                    // Check closure and currency together so shutdown cannot
+                    // remove our reservation between the two checks and be
+                    // misreported as a catalog/source change.
+                    if self.manager.inner.shutdown.load(Ordering::Acquire) {
+                        return Err(ExtensionRuntimeManagerError::ManagerClosed);
+                    }
+                    if !reservation.is_current(&state) {
+                        return Err(ExtensionRuntimeManagerError::StaleSource);
+                    }
                 }
                 return tokio::select! {
                     biased;
@@ -2864,26 +2871,48 @@ for line in sys.stdin:
         let binding = manager.bind_session("session-a").unwrap();
         let workspace = temporary.path().to_owned();
         let mut pending = tokio::task::JoinSet::new();
+        let mut ready = Vec::new();
+        // Spawn real waiters and confirm that each has registered its executor
+        // waker before shutdown; observing Starting alone only proves that one
+        // of the eight callers has reached the startup reservation.
         for _ in 0..8 {
             let binding = binding.clone();
             let workspace = workspace.clone();
+            let (signal, received) = tokio::sync::oneshot::channel();
+            ready.push(received);
             pending.spawn(async move {
-                binding
-                    .activate("lazy-runtime", ExtensionRuntimeConfig::new(workspace))
-                    .await
+                let mut activation = Box::pin(
+                    binding.activate("lazy-runtime", ExtensionRuntimeConfig::new(workspace)),
+                );
+                let mut signal = Some(signal);
+                std::future::poll_fn(|cx| {
+                    let polled = std::future::Future::poll(activation.as_mut(), cx);
+                    if let Some(signal) = signal.take() {
+                        let readiness = match &polled {
+                            std::task::Poll::Pending => Ok(()),
+                            std::task::Poll::Ready(Err(error)) => {
+                                Err(format!("activation completed before shutdown: {error:?}"))
+                            }
+                            std::task::Poll::Ready(Ok(_)) => {
+                                Err("activation launched a child before shutdown".to_owned())
+                            }
+                        };
+                        let _ = signal.send(readiness);
+                    }
+                    polled
+                })
+                .await
             });
         }
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !manager
-                .statuses()
-                .iter()
-                .any(|status| status.state == ExtensionManagedRuntimeState::Starting)
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("one activation must own the pending startup");
+        let readiness = tokio::time::timeout(Duration::from_secs(1), join_all(ready))
+            .await
+            .expect("all activations must be polled before shutdown");
+        for received in readiness {
+            received
+                .expect("activation dropped its readiness signal")
+                .expect("activation must remain pending while the startup slot is held");
+        }
+        assert_eq!(lock(&manager.inner.state).starting.len(), 1);
         assert!(manager
             .statuses()
             .iter()
@@ -2892,14 +2921,28 @@ for line in sys.stdin:
         manager.shutdown().await;
         tokio::time::timeout(Duration::from_secs(1), async {
             while let Some(result) = pending.join_next().await {
-                assert!(matches!(
-                    result.unwrap(),
-                    Err(ExtensionRuntimeManagerError::ManagerClosed)
-                ));
+                match result.unwrap() {
+                    Err(ExtensionRuntimeManagerError::ManagerClosed) => {}
+                    Err(error) => panic!("shutdown returned {error:?} instead of ManagerClosed"),
+                    Ok(_) => panic!("shutdown admitted a runtime"),
+                }
             }
         })
         .await
         .expect("shutdown must wake both the startup owner and coalesced activations");
+        assert!(matches!(
+            binding
+                .activate(
+                    "lazy-runtime",
+                    ExtensionRuntimeConfig::new(temporary.path())
+                )
+                .await,
+            Err(ExtensionRuntimeManagerError::ManagerClosed)
+        ));
+        assert!(matches!(
+            manager.bind_session("session-b"),
+            Err(ExtensionRuntimeManagerError::ManagerClosed)
+        ));
         drop(permit);
         assert!(!temporary.path().join("starts").exists());
     }

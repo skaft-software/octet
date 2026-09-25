@@ -114,16 +114,16 @@ Cerebras contracts. Their fixture provenance is recorded in
 
 The 2026-09-24 release-candidate refresh pins public
 `https://models.dev/api.json` source SHA-256
-`859a1e410438d95b4777d7229b6f2652ca4db2123be59c11b841b8b7c6d3089d`.
+`4ad860a1415fa0bcfb44076931d413d4fa72de06ecd1df1ee971073691cd94af`.
 Relative to the preceding candidate, this adds 10 canonical names, 34 priced
 routes and 35 capability records; removes three OpenRouter routes absent from
-the source; and updates 29 price records and 26 capability records. The removed
+the source; and updates 32 price records and 28 capability records. The removed
 routes are `anthropic/claude-opus-4`, `inclusionai/ling-3.0-flash-vl:free` and
 `kwaipilot/kat-coder-pro-v2`. Existing canonical display names are unchanged.
 
 Additions include the exact public Sol/Luna, Opus 5.5, Grok 4.7 and MiMo 2.6
 routes reported by already-supported providers. This is not new provider or
-protocol support. All 29 changed quotes in this refresh belong to OpenRouter;
+protocol support. All 32 changed quotes in this refresh belong to OpenRouter;
 for example, `deepseek/deepseek-v4-pro-0813` now quotes $0.462/$1.386/$0.0154
 per million input/output/cache-read tokens, and `moonshotai/kimi-k3` quotes
 $0.8845/$10.5346/$0.30. These are provider-scoped catalog quotes, not direct DeepSeek or
@@ -142,20 +142,29 @@ A final freshness check caught an upstream update during qualification. The
 reviewed refresh above includes five additional OpenRouter price changes and
 Qwen3 VL 30B A3B Instruct's output limit decreasing from 32,768 to 16,384;
 no model identity, modality or capability flag changed in that final delta.
-The exact OpenRouter DeepSeek V4 Pro quote is now $0.836418/$1.672836/$0.069702
+The exact OpenRouter DeepSeek V4 Pro quote is now $0.833112/$1.666224/$0.069426
 per million input/output/cache-read tokens. These are still route-specific
 catalog quotes, not a direct-provider tariff or live acceptance claim.
+
+The CI follow-up freshness review caught four further OpenRouter quote changes:
+DeepSeek V4 Pro's quote above, GLM-5.1 at $0.9646/$3.0316/$0.17914, GLM-4.7 at
+$0.60/$2.20/$0.11, and DeepSeek V4.1 Flash at $0.30/$1.20/$0.006. The latter is
+twice its previous route-specific input/output/cache-read quote, not a reviewed
+direct DeepSeek schedule. OpenRouter GLM-5.1's output limit increased from
+128,000 to 131,072. Cerebras Qwen3.8 27B's context/output limits increased from
+65,536/32,768 to 131,072/40,960. Names, modalities and capability flags were
+unchanged in this delta; explicit endpoint assertions still take precedence.
 
 The four checked-in outputs include the source receipt and these differences
 relative to the v0.7.6 snapshots:
 
 | Snapshot | Current records | Added | Removed | Changed |
 | --- | ---: | ---: | ---: | ---: |
-| Provider-scoped pricing routes | 923 | 130 | 5 | 39 |
+| Provider-scoped pricing routes | 923 | 130 | 5 | 42 |
 | Canonical names | 395 | 14 | 1 | 0 |
-| Capability routes | 945 | 130 | 7 | 58 |
+| Capability routes | 945 | 130 | 7 | 60 |
 
-Across that release baseline, changed quotes cover 37 OpenRouter routes, one
+Across that release baseline, changed quotes cover 40 OpenRouter routes, one
 Fireworks route and one OpenCode route. Catalog additions do not prove route
 availability. The refresh preserves the existing unsupported-route exclusions,
 Baseten text-only corrections, subscription allowlists and unverified-pricing

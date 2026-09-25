@@ -3441,10 +3441,12 @@ async fn resumed_ultra_override_binds_observation_before_selection() {
     let low = ReasoningConfig::Effort(ReasoningEffort::Low);
     let mut process_config = config(directory.path(), Some(model_id));
     process_config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
-    process_config.extension_paths = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../extensions/octet-subagents")
+    // Extension roots contain named bundle directories; discovery scans their direct children.
+    let extension_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions")
         .canonicalize()
-        .unwrap()];
+        .unwrap();
+    process_config.extension_paths = vec![extension_root.clone()];
     process_config.enabled_extensions = vec!["octet-subagents".into()];
     process_config.invocation_trusted_extensions = vec!["octet-subagents".into()];
     process_config.resume = ResumeSelector::Continue;
@@ -3509,6 +3511,17 @@ async fn resumed_ultra_override_binds_observation_before_selection() {
         app.executable_extensions.has_agent_session_service(),
         "{}",
         app.executable_extensions.inspect_text()
+    );
+    // An installed global copy must not hide a broken source-fixture root.
+    let subagents = app
+        .executable_extensions
+        .summaries()
+        .into_iter()
+        .find(|summary| summary.name == "octet-subagents")
+        .expect("the source bundle is discovered");
+    assert_eq!(
+        subagents.manifest_path,
+        extension_root.join("octet-subagents/extension.toml")
     );
     assert!(app.agent.delegation_team_directory().is_some());
     assert_eq!(app.agent.reasoning(), &ultra);
@@ -5703,8 +5716,8 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
     // The scoped snapshot names Cerebras' inventory row and, because the
     // endpoint publishes no limit at all, supplies that row's documented
     // window. Reasoning still comes only from the source contract.
-    assert_eq!(model.context_window, Some(65_536));
-    assert_eq!(model.max_output_tokens, Some(32_768));
+    assert_eq!(model.context_window, Some(131_072));
+    assert_eq!(model.max_output_tokens, Some(40_960));
     assert_eq!(model.display_name.as_deref(), Some("Qwen3.8 27B"));
     assert_eq!(model.reasoning_metadata.supported, None);
     assert!(model.reasoning_metadata.options.is_none());
@@ -5738,11 +5751,11 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
     let registered = catalog
         .resolve(&ModelId("cerebras/qwen-3.8-27b".into()))
         .unwrap();
-    // Registration now uses this model's documented row (65K context / 32K
+    // Registration uses this model's documented row (128K context / 40K
     // output) instead of the generic 128K/64K placeholder, because the endpoint
     // publishes no limit for it.
-    assert_eq!(registered.spec.limits.context_window, 65_536);
-    assert_eq!(registered.spec.limits.max_output_tokens, 32_768);
+    assert_eq!(registered.spec.limits.context_window, 131_072);
+    assert_eq!(registered.spec.limits.max_output_tokens, 40_960);
     assert_eq!(
         registered.spec.capabilities.reasoning.as_ref(),
         Some(&reasoning)

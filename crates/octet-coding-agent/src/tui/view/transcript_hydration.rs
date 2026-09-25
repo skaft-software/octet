@@ -168,38 +168,36 @@ pub(super) fn append_hydrated_items(
                             panel.duration = duration_ms.map(Duration::from_millis);
                         }
                     }
-                } else {
-                    if state.tool_panels.contains_key(&id) {
-                        let registered_images = state.register_tool_images(images);
-                        if let Some(panel) = state.tool_output_mut(&id) {
-                            apply_hydrated_tool_result(panel, &text, is_error);
-                            panel.images = registered_images;
-                            panel.duration = duration_ms.map(Duration::from_millis);
-                        }
-                    } else {
-                        let model_lab = state.model_lab;
-                        let registered_images = state.register_tool_images(images);
-                        let mut panel = ToolPanel::new(
-                            id.clone(),
-                            "tool result".into(),
-                            String::new(),
-                            summarize_tool("tool result", &serde_json::Value::Null),
-                            sanitize_for_terminal(&text),
-                            true,
-                            is_error,
-                            is_error.then(|| {
-                                tool_failure_reason(
-                                    "tool result",
-                                    &Err(octet_agent::ToolError::new(text.clone())),
-                                )
-                                .unwrap_or_else(|| "tool failed".into())
-                            }),
-                            model_lab,
-                        );
+                } else if let Some(index) = state.tool_panels.get(&id).copied() {
+                    let registered_images = state.register_tool_images(images);
+                    if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get_mut(index) {
+                        apply_hydrated_tool_result(panel, &text, is_error);
                         panel.images = registered_images;
-                        let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
-                        state.tool_panels.insert(id, index);
+                        panel.duration = duration_ms.map(Duration::from_millis);
                     }
+                } else {
+                    let model_lab = state.model_lab;
+                    let registered_images = state.register_tool_images(images);
+                    let mut panel = ToolPanel::new(
+                        id.clone(),
+                        "tool result".into(),
+                        String::new(),
+                        summarize_tool("tool result", &serde_json::Value::Null),
+                        sanitize_for_terminal(&text),
+                        true,
+                        is_error,
+                        is_error.then(|| {
+                            tool_failure_reason(
+                                "tool result",
+                                &Err(octet_agent::ToolError::new(text.clone())),
+                            )
+                            .unwrap_or_else(|| "tool failed".into())
+                        }),
+                        model_lab,
+                    );
+                    panel.images = registered_images;
+                    let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
+                    state.tool_panels.insert(id, index);
                 }
             }
             TranscriptItem::CompactionMarker { summary } => {

@@ -113,8 +113,8 @@ mod tests {
 
         let routed = model_pricing("openrouter", "deepseek/deepseek-v4-pro")
             .expect("provider-specific snapshot price");
-        assert_eq!(routed.input, TokenRate(836_418));
-        assert_eq!(routed.output, TokenRate(1_672_836));
+        assert_eq!(routed.input, TokenRate(833_112));
+        assert_eq!(routed.output, TokenRate(1_666_224));
         assert_eq!(routed.reasoning, None);
         assert!(model_pricing("openai", "gpt-5.6").is_none());
         assert!(model_pricing("openai", "gpt-5.6-sol").is_some());

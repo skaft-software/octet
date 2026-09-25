@@ -99,7 +99,7 @@ pub(super) fn render_assistant_update_planned(
         TranscriptBlock::Assistant(assistant) => (assistant, rich_renderer),
         TranscriptBlock::Reasoning(reasoning)
             if (reasoning.reasoning_expanded || show_reasoning)
-                && !(reasoning.text.is_empty() && !reasoning.show_reasoning_hint) =>
+                && (!reasoning.text.is_empty() || reasoning.show_reasoning_hint) =>
         {
             (reasoning, reasoning_renderer)
         }
