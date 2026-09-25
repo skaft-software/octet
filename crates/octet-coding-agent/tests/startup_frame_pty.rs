@@ -490,10 +490,7 @@ impl PtyOctet {
                 break status;
             }
             if started.elapsed() >= SHUTDOWN_TIMEOUT {
-                unsafe {
-                    let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-                }
-                let _ = self.child.wait();
+                terminate_child(&mut self.child, &mut self.pty);
                 panic!(
                     "octet did not stop after input {input:?} within {SHUTDOWN_TIMEOUT:?}; transcript: {}",
                     visible_bytes(&self.pty.output)
@@ -518,15 +515,70 @@ impl PtyOctet {
     }
 }
 
+fn terminate_child(child: &mut Child, pty: &mut Pty) {
+    let _ = child.kill();
+    // Like setup_tui_acceptance's failure cleanup, keep draining while the
+    // killed controlling-terminal owner exits. On macOS a blocking wait()
+    // with unread PTY output can deadlock even after SIGKILL, hiding the
+    // original assertion failure and holding the suite's shared test lock.
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    let mut buffer = [0u8; 8192];
+    loop {
+        for _ in 0..8 {
+            match pty.master.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "killed startup PTY child did not settle"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 impl Drop for PtyOctet {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            unsafe {
-                let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-            }
-            let _ = self.child.wait();
+            terminate_child(&mut self.child, &mut self.pty);
         }
     }
+}
+
+#[test]
+fn startup_failure_cleanup_drains_a_full_pty_and_reaps_the_child() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let octet = PtyOctet::spawn_at(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        MouseMode::Auto,
+        None,
+        true,
+        (180, 24),
+        (2, false, false),
+        StartupFixture::Setup,
+    );
+    // Leave the wide first frame unread, as it would be during assertion
+    // unwinding. On macOS even a killed controlling-terminal owner needs its
+    // queued output drained before it can exit and be reaped.
+    thread::sleep(Duration::from_millis(200));
+    let pid = octet.child.id() as libc::pid_t;
+    let started = Instant::now();
+    drop(octet);
+    assert!(started.elapsed() < SHUTDOWN_TIMEOUT);
+    assert_eq!(
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
 }
 
 struct ShutdownCapture {
