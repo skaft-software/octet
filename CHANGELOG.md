@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.1-rc.1] — local dogfood only (unpublished)
+
+- Add in-session `/setup` provider configuration while preserving the active
+  model and session.
+- Discover user-defined TOML themes in `/theme`.
+- Show the active session name in the terminal window title and keep it
+  synchronized with session changes.
+- Prevent Kitty inline images from advancing the cursor into the composer.
+
+This candidate is built for local dogfooding; it is not a published release.
+
 ## [0.8.0] - 2026-09-25
 
 See [release notes](docs/releases/v0.8.0.md) for changes, availability and current limits.

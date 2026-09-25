@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "octet-agent"
-version = "0.8.0"
+version = "0.8.1-rc.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "octet-ai"
-version = "0.8.0"
+version = "0.8.1-rc.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "octet-serve-backend"
-version = "0.8.0"
+version = "0.8.1-rc.1"
 dependencies = [
  "async-trait",
  "axum",
