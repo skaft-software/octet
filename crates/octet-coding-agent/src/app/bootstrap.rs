@@ -3782,7 +3782,7 @@ fn merge_declaration_inventory(
     let mut diagnostics = crate::output::DiagnosticCheck::new(
         crate::output::DiagnosticComponent::Bootstrap(format!("provider-merge:{}", declaration.id)),
     );
-    let result = (|| match outcome {
+    match outcome {
         Ok(Ok(provider_catalog)) => {
             if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
                 diagnostics.problem(format!(
@@ -3799,9 +3799,8 @@ fn merge_declaration_inventory(
             "warning: {} unavailable: model discovery thread panicked",
             declaration.name
         )),
-    })();
+    }
     diagnostics.finish(true);
-    result
 }
 
 /// Initialize one declaration's inventory on the readiness path.
@@ -3826,7 +3825,7 @@ fn register_declaration_inventory(
             return;
         }
     }
-    match bootstrap_check(
+    if let Ok(handle) = bootstrap_check(
         format!("provider-spawn:{}", declaration.id),
         spawn_declaration_inventory(declaration),
         |error| {
@@ -3836,8 +3835,7 @@ fn register_declaration_inventory(
             )
         },
     ) {
-        Ok(handle) => merge_declaration_inventory(catalog, declaration, handle.join()),
-        Err(_) => {}
+        merge_declaration_inventory(catalog, declaration, handle.join());
     }
 }
 
@@ -3890,7 +3888,7 @@ fn register_configured_presets_parallel(catalog: &mut ModelCatalog) {
                 continue;
             }
         }
-        match bootstrap_check(
+        if let Ok(handle) = bootstrap_check(
             format!("provider-spawn:{}", declaration.id),
             spawn_declaration_inventory(declaration),
             |error| {
@@ -3900,8 +3898,7 @@ fn register_configured_presets_parallel(catalog: &mut ModelCatalog) {
                 )
             },
         ) {
-            Ok(handle) => jobs.push((declaration, handle)),
-            Err(_) => {}
+            jobs.push((declaration, handle));
         }
     }
 
@@ -4592,21 +4589,18 @@ fn register_custom_openai_endpoints_from_store(
                 };
                 let label = provider.label.trim();
                 let label = if label.is_empty() { provider_id } else { label };
-                match bootstrap_check(format!("custom-provider:{provider_id}"), result, |error| {
-                    format!("warning: custom provider {label:?} unavailable: {error}")
-                }) {
-                    Ok(provider_catalog) => {
-                        let _ = bootstrap_check(
-                            format!("custom-merge:{provider_id}"),
-                            merge_provider_catalog(catalog, provider_catalog),
-                            |error| {
-                                format!(
-                                    "warning: custom provider {provider_id:?} unavailable: {error}"
-                                )
-                            },
-                        );
-                    }
-                    Err(_) => {}
+                if let Ok(provider_catalog) =
+                    bootstrap_check(format!("custom-provider:{provider_id}"), result, |error| {
+                        format!("warning: custom provider {label:?} unavailable: {error}")
+                    })
+                {
+                    let _ = bootstrap_check(
+                        format!("custom-merge:{provider_id}"),
+                        merge_provider_catalog(catalog, provider_catalog),
+                        |error| {
+                            format!("warning: custom provider {provider_id:?} unavailable: {error}")
+                        },
+                    );
                 }
             }
         });
@@ -4720,14 +4714,12 @@ fn register_custom_openai_provider(
     let cache_fingerprint =
         custom_model_cache_fingerprint(&custom_credential_fingerprint, &configured);
     let cached = if cred.auto_discover {
-        match bootstrap_check(
+        bootstrap_check(
             format!("custom-cache:{provider_id}"),
             load_custom_model_cache_for(store, provider_id, &cred.base_url, &cache_fingerprint),
             |error| format!("warning: custom provider model cache unavailable: {error}"),
-        ) {
-            Ok(models) => models,
-            Err(_) => None,
-        }
+        )
+        .unwrap_or_default()
     } else {
         None
     };
@@ -5002,9 +4994,8 @@ fn discover_models_blocking(
                 Ok(value) => value,
                 Err(_) => {
                     if report_errors {
-                        diagnostics.problem(format!(
-                            "warning: invalid endpoint capability self-description"
-                        ));
+                        diagnostics
+                            .problem("warning: invalid endpoint capability self-description");
                     }
                     continue;
                 }
@@ -5062,9 +5053,8 @@ fn discover_models_blocking(
             };
             if apply_discovered_reasoning(entry, &mut model).is_err() {
                 if report_errors {
-                    diagnostics.problem(format!(
-                        "warning: model discovery contains invalid reasoning metadata"
-                    ));
+                    diagnostics
+                        .problem("warning: model discovery contains invalid reasoning metadata");
                 }
                 continue;
             }
@@ -5938,7 +5928,7 @@ fn codex_context_resolve_for_registration(
     let mut diagnostics = crate::output::DiagnosticCheck::new(
         crate::output::DiagnosticComponent::Bootstrap(format!("codex-context:{}", model.id)),
     );
-    let result = (|| match resolve_codex_context_window(
+    let result = match resolve_codex_context_window(
         &model.id,
         tier,
         model.default_context_window,
@@ -5961,7 +5951,7 @@ fn codex_context_resolve_for_registration(
             )
             .expect("resolving a Codex context window without a user override cannot fail")
         }
-    })();
+    };
     diagnostics.finish(true);
     result
 }

@@ -45,6 +45,7 @@ impl NativeReplay {
         }
     }
 
+    #[track_caller]
     fn render(&mut self, stable: bool) -> String {
         self.shell.render();
         let bytes = std::mem::take(&mut *self.bytes.lock().unwrap());
@@ -52,7 +53,8 @@ impl NativeReplay {
         if stable {
             assert!(
                 !output.contains("\x1b[3J"),
-                "saved-history clear: {output:?}"
+                "saved-history clear at {}: {output:?}",
+                std::panic::Location::caller()
             );
             assert!(
                 !output.contains("NATIVE-HISTORY-"),
@@ -685,7 +687,7 @@ fn native_active_roster_preserves_parent_answers_results_and_authoritative_updat
             assert!(replay.frame().contains("Subagents"));
             if !completed && height >= 18 {
                 assert!(replay.frame().contains("LIVE-WORKER"));
-                assert!(replay.frame().contains("1087 tok"));
+                assert!(replay.frame().contains("↑100 ↓987"));
                 assert_eq!(
                     replay
                         .shell
@@ -1188,13 +1190,72 @@ fn native_late_reference_finalization_repairs_history_once_then_stays_quiet() {
 
 #[test]
 fn native_active_roster_preserves_interleaved_answers_and_tool_results_in_history() {
+    // A mutable roster moved behind new parent output can cause ED3. At every
+    // such transition, check both the semantic source and the saved VT tape;
+    // the final-frame check alone could hide a temporarily omitted result.
+    fn assert_replayed_parent_history(
+        replay: &NativeReplay,
+        update: &str,
+        completed: usize,
+        current: Option<(usize, bool, bool)>,
+    ) {
+        if !update.contains("\x1b[3J") {
+            return;
+        }
+        let semantic = strip_terminal_sequences(
+            &replay
+                .shell
+                .state
+                .borrow()
+                .rendered_transcript(replay.width)
+                .join("\n"),
+        );
+        let physical = replay.history();
+        for text in [&semantic, &physical] {
+            assert_eq!(text.matches("NATIVE-HISTORY-00").count(), 1, "{text}");
+            let mut previous = None;
+            for index in 0..completed {
+                for prefix in ["COMMAND", "TOOL-RESULT", "ANSWER"] {
+                    let marker = format!("{prefix}-{index:02}");
+                    assert_eq!(text.matches(&marker).count(), 1, "{marker}: {text}");
+                    let position = text.find(&marker).unwrap();
+                    if let Some(prior) = previous {
+                        assert!(prior < position, "{marker} is out of order: {text}");
+                    }
+                    previous = Some(position);
+                }
+            }
+            if let Some((index, result, answer)) = current {
+                for (prefix, accepted) in [
+                    ("COMMAND", true),
+                    ("TOOL-RESULT", result),
+                    ("ANSWER", answer),
+                ] {
+                    if !accepted {
+                        continue;
+                    }
+                    let marker = format!("{prefix}-{index:02}");
+                    assert_eq!(text.matches(&marker).count(), 1, "{marker}: {text}");
+                    let position = text.find(&marker).unwrap();
+                    if let Some(prior) = previous {
+                        assert!(prior < position, "{marker} is out of order: {text}");
+                    }
+                    previous = Some(position);
+                }
+            }
+        }
+    }
     for (width, height) in [(80, 8), (80, 24), (120, 40)] {
         for settled in [false, true] {
             let mut replay = NativeReplay::with_size(width, height);
             let run = replay.shell.begin_run("openai");
             let mut children = vec![worker("BACKGROUND-WORKER")];
             publish_workers(&mut replay, children.clone());
-            replay.render(true);
+            // The first worker row can displace the saved tail of the initial
+            // 30-row history; validate the rebuilt physical tape below.
+            let update = replay.render(false);
+            replay.assert_canonical_transcript();
+            assert_replayed_parent_history(&replay, &update, 0, None);
             for index in 0..12 {
                 let id = ToolCallId(format!("interleaved-{index}"));
                 replay.shell.on_run_event(
@@ -1205,7 +1266,15 @@ fn native_active_roster_preserves_interleaved_answers_and_tool_results_in_histor
                         args: serde_json::json!({"command": format!("COMMAND-{index:02}")}),
                     },
                 );
-                replay.render(true);
+                // Moving the mutable worker row behind each newly started
+                // parent tool may require replay above the saved viewport.
+                let update = replay.render(false);
+                assert_replayed_parent_history(
+                    &replay,
+                    &update,
+                    index,
+                    Some((index, false, false)),
+                );
                 replay.shell.on_run_event(
                     run,
                     &AgentEvent::ToolProgress {
@@ -1216,7 +1285,13 @@ fn native_active_roster_preserves_interleaved_answers_and_tool_results_in_histor
                         },
                     },
                 );
-                replay.render(true);
+                let update = replay.render(false);
+                assert_replayed_parent_history(
+                    &replay,
+                    &update,
+                    index,
+                    Some((index, false, false)),
+                );
                 replay.shell.on_run_event(
                     run,
                     &AgentEvent::ToolFinished {
@@ -1227,7 +1302,9 @@ fn native_active_roster_preserves_interleaved_answers_and_tool_results_in_histor
                         duration: Duration::from_millis(10),
                     },
                 );
-                replay.render(true);
+                let update = replay.render(false);
+                replay.assert_canonical_transcript();
+                assert_replayed_parent_history(&replay, &update, index, Some((index, true, false)));
                 replay.shell.on_run_event(
                     run,
                     &AgentEvent::OutputDelta {
@@ -1235,7 +1312,9 @@ fn native_active_roster_preserves_interleaved_answers_and_tool_results_in_histor
                         text: format!("ANSWER-{index:02}\n\n"),
                     },
                 );
-                replay.render(true);
+                let update = replay.render(false);
+                replay.assert_canonical_transcript();
+                assert_replayed_parent_history(&replay, &update, index, Some((index, true, true)));
             }
             // A real historical telemetry update must retain the complete
             // conversation on replay, not replace it with a viewport-sized
@@ -1245,10 +1324,14 @@ fn native_active_roster_preserves_interleaved_answers_and_tool_results_in_histor
                 children[0].state = "completed".into();
             }
             publish_workers(&mut replay, children);
-            replay.render(false);
+            let update = replay.render(false);
+            replay.assert_canonical_transcript();
+            assert_replayed_parent_history(&replay, &update, 12, None);
             replay.render(true);
             let physical = replay.history();
+            let mut prior_answer = None;
             for index in 0..12 {
+                let mut positions = Vec::new();
                 for prefix in ["COMMAND", "TOOL-RESULT", "ANSWER"] {
                     let marker = format!("{prefix}-{index:02}");
                     assert_eq!(
@@ -1256,7 +1339,16 @@ fn native_active_roster_preserves_interleaved_answers_and_tool_results_in_histor
                         1,
                         "{width}x{height}, settled={settled}, {marker}: {physical}"
                     );
+                    positions.push(physical.find(&marker).unwrap());
                 }
+                assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+                if let Some(previous) = prior_answer {
+                    assert!(
+                        previous < positions[0],
+                        "parent tool/answer order changed: {physical}"
+                    );
+                }
+                prior_answer = Some(positions[2]);
             }
             assert_eq!(
                 physical.matches("BACKGROUND-WORKER").count(),

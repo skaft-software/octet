@@ -96,17 +96,18 @@ generation, and negotiated features. The packaged skill is separately opt-in wit
 ## Inspect the work
 
 `/subagents` opens the host-owned worker list. Use Up/Down to select, Enter for a
-scrollable read-only transcript, and Escape or Left to return. A bounded
-**Subagents** strip is pinned above the composer while any retained worker is
-active, including between root turns. It shows state, token usage, and cost, with
-an optional `tools` column for tool-call counts (not model turns). Ctrl+O expands
-counted groups within the strip's height cap; `/subagents` exposes all retained
-workers (up to 32), exact outcomes, and reasons after the strip hides. Prompts,
-tool arguments/results, and running model prose stay out of the roster.
+scrollable read-only transcript, and Escape or Left to return. A bounded,
+tool-like **Subagents** transcript block updates in place while workers are
+active, including between root turns. Its heading counts worker states; up to
+four active child lines show task and input/output tokens. Ctrl+O retains
+disclosure; `/subagents` exposes all retained workers (up to 32), exact outcomes,
+models, tool-call counts (not model turns), cost, and reasons after the block
+settles. Prompts, tool arguments/results, and running model prose stay out of
+the roster.
 
-The strip is not a transcript event. Worker state/reason transitions and raw
-first-party orchestration results (including errors) append no automatic
-transcript or semantic-copy notices, live or on replay. Actual failed/stopped or
+Worker state/reason transitions and raw first-party orchestration results
+(including errors) append no automatic per-worker transcript or semantic-copy
+notices, live or on replay. Actual failed/stopped or
 approval-parked states, model-visible errors, durable results, and accounting are
 unchanged; ordinary tool/run failures and approval prompts remain visible.
 Serve inspection is also owner-bound and read-only; inspection cannot send a

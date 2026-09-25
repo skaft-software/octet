@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import re
 import stat
 import subprocess
 import sys
@@ -30,8 +31,8 @@ def initialize_request(request_id=1):
         "id": request_id,
         "method": "initialize",
         "params": {
-            "api_version": "0.4",
-            "octet_version": "0.7.6",
+            "api_version": "0.3",
+            "octet_version": "0.8.0",
             "extension": {"name": "qualification-host"},
             "workspace": str(FIXTURES.resolve()),
             "capabilities": {},
@@ -78,6 +79,19 @@ def snapshot(root):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_initialize_version_matches_manifest_and_canonical_schema(self):
+        manifest = (EXTENSION_DIR / "extension.toml").read_text()
+        manifest_api = re.search(r'^api_version = "([^"]+)"$', manifest, re.MULTILINE).group(1)
+        schema = json.loads((EXTENSION_DIR.parents[1] / "protocol" / "extension-api-v0.3.schema.json").read_text())
+        request = initialize_request()
+        response = run_protocol([request])[0]["result"]
+        self.assertEqual(schema["api_version"], "0.3")  # Not the legacy 0.4 wire.
+        self.assertEqual(request["params"]["api_version"], manifest_api)
+        self.assertEqual(response["api_version"], manifest_api)
+        self.assertEqual(response["api_version"], schema["api_version"])
+        self.assertEqual(response["contract"]["schema"], schema["schema_id"])
+        self.assertEqual(request["params"]["contract"]["schema"], schema["schema_id"])
+
     def test_detect_import_and_shutdown_are_canonical_and_source_only(self):
         source = FIXTURES / "basic"
         before = snapshot(source)

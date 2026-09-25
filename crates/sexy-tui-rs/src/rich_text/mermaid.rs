@@ -211,7 +211,9 @@ fn split_statements(line: &str) -> Vec<&str> {
     segments
 }
 
-fn parse(source: &str) -> Result<(Direction, Vec<Node>, Vec<Edge>, Vec<Group>), MermaidError> {
+type ParsedGraph = (Direction, Vec<Node>, Vec<Edge>, Vec<Group>);
+
+fn parse(source: &str) -> Result<ParsedGraph, MermaidError> {
     let mut direction: Option<Direction> = None;
     let mut nodes: Vec<Node> = Vec::new();
     let mut edges: Vec<Edge> = Vec::new();

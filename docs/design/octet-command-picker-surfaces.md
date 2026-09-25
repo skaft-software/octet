@@ -226,4 +226,5 @@ dedicated regressions.
 widths when height permits, side by side on wide terminals. It has no synthetic
 column legend over its variable metadata. Enter is labelled `inspect`; the
 finished-group toggle names its current action (`show all` or `hide finished`).
-The bounded pinned roster retains its existing live-chrome layout and lifecycle.
+The bounded **Subagents** transcript block remains a mutable tail, not pinned
+chrome; the inspector does not change its lifecycle.

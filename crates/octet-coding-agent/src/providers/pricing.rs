@@ -204,7 +204,7 @@ fn cloudflare_ai_gateway_pricing(model_id: &str) -> Option<Pricing> {
 /// Return octet-owned pricing overrides for provider/model routes whose live
 /// inventory APIs do not publish rates. Special cases such as long-context
 /// tiers remain here; the declaration-aware [`pricing_for`] wrapper falls back to the
-/// checked-in models.dev snapshot for other routes.
+/// checked-in models.dev snapshot only for non-subscription routes.
 fn legacy_model_pricing(profile: PricingProfile, model_id: &str) -> Option<Pricing> {
     let rates = match profile {
         PricingProfile::OpenAi => return openai_pricing(model_id),
@@ -343,13 +343,13 @@ fn subscription_pricing(model_id: &str) -> Option<Pricing> {
 /// Provider-specific overrides preserve octet's special cases (for example
 /// OpenAI long-context tiers). The checked-in models.dev snapshot fills in
 /// newly released and discovered routes, so discovery can provide trusted
-/// pricing without another hand-maintained model match arm.
+/// pricing without another hand-maintained model match arm. Subscription
+/// inventory is account-scoped and never inherits public API quotes: only the
+/// reviewed subscription allowlist can establish a price.
 pub(crate) fn pricing_for(provider: &ProviderDeclaration, model_id: &str) -> Option<Pricing> {
-    legacy_model_pricing(provider.pricing, model_id).or_else(|| {
-        let reference_provider = match provider.pricing {
-            PricingProfile::Subscription => "openai",
-            _ => provider.id,
-        };
-        octet_ai::model_metadata::model_pricing(reference_provider, model_id)
-    })
+    let reviewed = legacy_model_pricing(provider.pricing, model_id);
+    if provider.pricing == PricingProfile::Subscription {
+        return reviewed;
+    }
+    reviewed.or_else(|| octet_ai::model_metadata::model_pricing(provider.id, model_id))
 }

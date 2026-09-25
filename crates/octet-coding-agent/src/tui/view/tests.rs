@@ -10619,7 +10619,7 @@ fn subagent_chrome_renders_live_metrics_and_rolls_cost_into_footer_once() {
 
 #[test]
 fn live_subagent_heading_is_bold_and_worker_metadata_is_terminal_safe() {
-    let mut shell = InteractiveShell::test_shell();
+    let shell = InteractiveShell::test_shell();
     let mut view = subagent_transcript_test_view(true);
     view.telemetry[0].task_name = "audit\x1b]52;c;SECRET\x07".into();
     shell.state.borrow_mut().set_subagent_activity(view);
@@ -10637,8 +10637,9 @@ fn live_subagent_heading_is_bold_and_worker_metadata_is_terminal_safe() {
 
 #[test]
 fn live_subagent_output_progress_is_marked_as_estimated_until_usage_settles() {
-    let mut shell = InteractiveShell::test_shell();
+    let shell = InteractiveShell::test_shell();
     let mut view = subagent_transcript_test_view(true);
+    view.telemetry[0].task_name = "audit".into();
     view.telemetry[0].estimated_output_tokens = Some(4_021);
     shell.state.borrow_mut().set_subagent_activity(view.clone());
     let live = strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
@@ -10833,7 +10834,7 @@ fn native_subagent_telemetry_renders_failure_and_hides_generic_spawn_tools() {
 #[test]
 fn settled_subagent_attention_is_quiet_with_inspector_retention() {
     for terminal in ["failed", "stopped", "awaiting_approval"] {
-        let mut shell = InteractiveShell::test_shell();
+        let shell = InteractiveShell::test_shell();
         let mut view = subagent_transcript_test_view(true);
         view.telemetry.truncate(1);
         let notices = |shell: &InteractiveShell| {
@@ -14770,7 +14771,7 @@ fn queued_follow_ups_stay_with_their_session_across_hydration() {
         "first session only"
     );
     shell.hydrate(&second).unwrap();
-    shell.edit_queued_follow_up();
+    shell.edit_queued_message();
     assert_eq!(
         shell.drain_composed().transcript_text,
         "second session only"
@@ -14825,11 +14826,11 @@ fn queued_follow_up_editing_preserves_payloads_and_never_overwrites_a_draft() {
     let display = composed.display_text.clone();
     shell.queue_follow_up(composed);
     shell.apply_edit(EditAction::Paste("local draft".into()));
-    shell.edit_queued_follow_up();
+    shell.edit_queued_message();
     assert_eq!(shell.pending(), "local draft");
     assert_eq!(shell.state.borrow().follow_up_queue.len(), 2);
     shell.clear_editor();
-    shell.edit_queued_follow_up();
+    shell.edit_queued_message();
     assert_eq!(shell.pending(), display);
     assert_eq!(shell.state.borrow().follow_up_queue.len(), 1);
     assert!(shell.take_ready_follow_up().is_none());
@@ -15158,7 +15159,14 @@ fn failed_tool_calls_never_warn_and_live_subagents_are_reported_under_the_outcom
     let revision = shell.state.borrow().block_revisions[outcome_index];
     let before = shell.state.borrow().rendered_transcript(100).clone();
     publish_current_turn_roster(&mut shell, roster(worker("running", 5)));
-    assert_eq!(*shell.state.borrow().rendered_transcript(100), before);
+    let after = shell.state.borrow().rendered_transcript(100).clone();
+    assert_eq!(after.len(), before.len());
+    for (old, new) in before.iter().zip(&after) {
+        if !old.contains("inspect-markdown") {
+            assert_eq!(new, old, "only the live worker metric row may change");
+        }
+    }
+    assert!(strip_terminal_sequences(&after.join("\n")).contains("↓50"));
     assert!(shell_chrome(&shell.state.borrow(), 100, Instant::now())
         .subagents
         .is_empty());

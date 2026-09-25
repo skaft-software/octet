@@ -564,6 +564,20 @@ class HostEventBusClientTests(unittest.TestCase):
             for thread in reader:
                 thread.join(timeout=2)
 
+    def test_close_discards_acked_desired_declarations_and_interests(self) -> None:
+        bus = self.make_bus("beta")
+        self.addCleanup(bus.close)
+        spec = bus.declare(name="progress", fields=(FieldSpec.boolean("ready"),))
+        bus.subscribe("bus.alpha.status")
+        self.assertEqual({spec.topic}, set(bus._desired_declarations))
+        self.assertEqual({"bus.alpha.status"}, bus._desired_interests)
+        bus.close()
+        self.assertFalse(bus._desired_declarations)
+        self.assertFalse(bus._desired_interests)
+        self.assertFalse(bus.accept_lifecycle({"kind": "binding", "binding_id": "new-binding",
+            "binding_revision": 2}))
+        self.assertEqual(["bus/declare", "bus/subscribe"], [method for method, _ in self.calls])
+
     def test_declare_is_namespaced_to_the_extension(self) -> None:
         bus = self.make_bus("alpha")
         spec = bus.declare(name="progress", fields=(FieldSpec.integer("percent", minimum=0, maximum=100),))
@@ -763,23 +777,74 @@ class HostEventBusOrderingTests(unittest.TestCase):
             "topic": self.topic, "topic_revision": 2,
             "publisher_instance_id": "instance-alpha", "process_generation": 1})
         reply.respond(self.active_ack())
+        # A superseded ACK is not active. Preserve the desired interest for a
+        # fresh ACK, just as a pending ACK preserves it until availability.
+        self.assertEqual([], self.bus.snapshot()["subscribed"])
+        with self.assertRaisesRegex(BusError, "not_subscribed"):
+            self.bus.accept_event(self.event())
+        self.assertIsInstance(self.finish(worker, reply, outcome), TopicSpec)
+        self.assertEqual({self.topic}, self.bus._desired_interests)
+
+        retry = self.requests.get(timeout=2)
+        self.addCleanup(retry.release.set)
+        self.assertEqual("bus/subscribe", retry.method)
+        retry.respond({"state": "pending", "binding_id": BINDING_ID, "topic_revision": 2})
+        retry.release.set()
+        self.assertTrue(self.bus.wait_rebound())
+        self.assertEqual([self.topic], self.bus.snapshot()["pending"])
+        with self.assertRaisesRegex(BusError, "not_subscribed"):
+            self.bus.accept_event(self.event())
+
+        self.bus.accept_lifecycle({"kind": "topic_available", "binding_id": BINDING_ID,
+            "topic": self.topic, "topic_revision": 3,
+            "publisher_instance_id": "new-instance", "process_generation": 2})
+        retry = self.requests.get(timeout=2)
+        self.addCleanup(retry.release.set)
+        self.assertEqual("bus/subscribe", retry.method)
+        with self.assertRaisesRegex(BusError, "not_subscribed"):
+            self.bus.accept_event(self.event(publisher_instance_id="new-instance", process_generation=2))
+        retry.respond(self.active_ack(topic_revision=3, publisher_instance_id="new-instance", process_generation=2))
+        with self.assertRaisesRegex(BusError, "stale_publisher"):
+            self.bus.accept_event(self.event())
+        self.assertEqual(1, self.bus.accept_event(
+            self.event(publisher_instance_id="new-instance", process_generation=2)).sequence)
+        retry.release.set()
+        self.assertTrue(self.bus.wait_rebound())
+
+    def test_ack_after_binding_change_cannot_activate_but_replays_interest(self):
+        worker, reply, outcome = self.start(self.bus.subscribe)
+        bind(self.bus, "replacement-binding", 2)
+        reply.respond(self.active_ack())
+        self.assertIsInstance(self.finish(worker, reply, outcome), BusError)
+        self.assertEqual([], self.bus.snapshot()["subscribed"])
+        self.assertEqual({self.topic}, self.bus._desired_interests)
+        with self.assertRaisesRegex(BusError, "stale_binding"):
+            self.bus.accept_event(self.event())
+
+        retry = self.requests.get(timeout=2)
+        self.addCleanup(retry.release.set)
+        self.assertEqual("replacement-binding", retry.params["binding_id"])
+        with self.assertRaisesRegex(BusError, "not_subscribed"):
+            self.bus.accept_event(self.event(binding_id="replacement-binding"))
+        retry.respond(self.active_ack(binding_id="replacement-binding",
+            publisher_instance_id="replacement-instance"))
+        with self.assertRaisesRegex(BusError, "stale_publisher"):
+            self.bus.accept_event(self.event(binding_id="replacement-binding"))
+        self.assertEqual(1, self.bus.accept_event(self.event(
+            binding_id="replacement-binding", publisher_instance_id="replacement-instance")).sequence)
+        retry.release.set()
+        self.assertTrue(self.bus.wait_rebound())
+
+    def test_ack_after_close_cannot_activate_or_retain_intent(self):
+        worker, reply, outcome = self.start(self.bus.subscribe)
+        self.bus.close(wait=False)
+        reply.respond(self.active_ack())
         self.assertIsInstance(self.finish(worker, reply, outcome), BusError)
         self.assertEqual([], self.bus.snapshot()["subscribed"])
         self.assertFalse(self.bus._desired_interests)
-
-    def test_ack_after_binding_change_or_close_cannot_activate(self):
-        for close in (False, True):
-            with self.subTest(close=close):
-                worker, reply, outcome = self.start(self.bus.subscribe)
-                binding = reply.params["binding_id"]
-                if close:
-                    self.bus.close(wait=False)
-                else:
-                    bind(self.bus, "replacement-binding", 2)
-                reply.respond(self.active_ack(binding_id=binding))
-                self.assertIsInstance(self.finish(worker, reply, outcome), BusError)
-                self.assertEqual([], self.bus.snapshot()["subscribed"])
-                self.assertFalse(self.bus._desired_interests)
+        with self.assertRaisesRegex(BusError, "stale_binding"):
+            self.bus.accept_event(self.event())
+        self.assertTrue(self.requests.empty())
 
 
 class ContractStatusTests(unittest.TestCase):

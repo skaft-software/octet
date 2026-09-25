@@ -174,6 +174,7 @@ fn physical_motion_ticks(label: &str, speed: f64) -> usize {
     (traverse / speed).round().max(2.0) as usize
 }
 
+#[cfg(test)]
 fn physical_cycle(label: &str, speed: f64) -> usize {
     physical_motion_ticks(label, speed) + ACTIVITY_PHYS_REST_TICKS
 }
@@ -1481,7 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_reasoning_uses_static_thinking_and_moves_heading_to_detail() {
+    fn collapsed_reasoning_shimmers_thinking_and_moves_heading_to_detail() {
         let theme = theme::test_theme();
         let reasoning = AssistantBlock::streaming_reasoning("## Verifying `implementation`")
             .with_model_lab(Some(ModelLab::Alibaba));
@@ -1493,9 +1494,14 @@ mod tests {
             strip_terminal_sequences(&first[1]),
             "└ Verifying implementation (ctrl+o to expand)"
         );
-        assert!(!first[0].contains("\x1b[1m"), "{first:?}");
+        assert!(first[0].contains("\x1b[1m"), "{first:?}");
         assert!(!first[1].contains("\x1b[3m"), "{first:?}");
-        assert_eq!(first[0], next[0], "Thinking must remain static");
+        assert_eq!(strip_terminal_sequences(&next[0]), "Thinking");
+        assert_eq!(first[1], next[1], "the detail must not shimmer");
+        assert_ne!(
+            first[0], next[0],
+            "the activity label should sweep in foreground"
+        );
         assert!(first[0].contains("38;2;"), "{first:?}");
         assert!(
             !first[0].contains(";48;2;"),

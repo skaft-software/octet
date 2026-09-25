@@ -2220,7 +2220,7 @@ async fn drive_run(
     let mut eof = false;
     enum Ready {
         Input(Option<RpcInput>),
-        Event(Option<AgentEvent>),
+        Event(Option<Box<AgentEvent>>),
         Waiting,
     }
     let finish = loop {
@@ -2250,7 +2250,7 @@ async fn drive_run(
                 tokio::select! {
                     _ = std::future::ready(()), if admissions.is_empty() && !waiting.is_empty() => Ready::Waiting,
                     inbound = input.recv(), if !eof && waiting.len() < 64 => Ready::Input(inbound),
-                    event = run.next() => Ready::Event(event),
+                    event = run.next() => Ready::Event(event.map(Box::new)),
                 }
             } => ready,
         };
@@ -2310,7 +2310,7 @@ async fn drive_run(
                     translator.settle(outcome.clone(), output)?;
                     break outcome;
                 };
-                if let Some(reason) = translator.observe(event, output, queue)? {
+                if let Some(reason) = translator.observe(*event, output, queue)? {
                     break reason;
                 }
             }
@@ -2834,7 +2834,7 @@ async fn run_rpc_loop(
     let mut eof = false;
     // Keep bounded spill files available between RPC commands and clean them
     // up when this frontend owner exits.
-    let bash_tool = Arc::new(BashTool::default());
+    let bash_tool = Arc::new(BashTool);
 
     while !eof {
         let inbound = if let Some(command) = deferred.pop_front() {
@@ -3168,95 +3168,106 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn rpc_output_failure_accounts_and_discards_each_ephemeral_run() {
+    #[test]
+    fn rpc_output_failure_accounts_and_discards_each_ephemeral_run() {
         let _exclusive_ephemeral = crate::session_store::EPHEMERAL_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let accounting_root = tempfile::tempdir().unwrap();
-        for index in 0..2 {
-            let (directory, mut app) = rpc_loopback_app_with_session("http://127.0.0.1:9", true);
-            let workspace = app.config.workspace.clone();
-            let transcript_root = directory.path().join("rpc-ephemeral");
-            let transcript = app.agent.session().path().to_path_buf();
-            app.agent
-                .session_mut()
-                .record_terminal_gate_usage(
-                    octet_ai::EndpointId("custom".into()),
-                    ModelId("probe".into()),
-                    Usage {
-                        input_tokens: 10 + index,
-                        output_tokens: 2,
-                        total_tokens: 12 + index,
-                        ..Usage::default()
-                    },
-                    Some(Cost {
-                        total: 7 + index,
-                        ..Cost::default()
-                    }),
-                    Some(true),
-                )
-                .unwrap();
-            crate::session_store::begin_ephemeral_run(
-                transcript_root.clone(),
-                accounting_root.path().to_path_buf(),
-                workspace.clone(),
-            );
-            let (tx, input) = mpsc::channel(1);
-            tx.send(RpcInput::Value(json!({"type": "get_state"})))
-                .await
-                .unwrap();
-            drop(tx);
-
-            let result = if index == 0 {
-                finish_rpc_accounting(
-                    run_rpc_loop(
-                        app,
-                        input,
-                        RpcOutput {
-                            stdout: Box::new(BrokenPipe),
-                            delta_only: false,
+        // Keep the process-wide fixture lock outside the async body. The test
+        // still exercises the same single-threaded Tokio scheduling.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let accounting_root = tempfile::tempdir().unwrap();
+            for index in 0..2 {
+                let (directory, mut app) =
+                    rpc_loopback_app_with_session("http://127.0.0.1:9", true);
+                let workspace = app.config.workspace.clone();
+                let transcript_root = directory.path().join("rpc-ephemeral");
+                let transcript = app.agent.session().path().to_path_buf();
+                app.agent
+                    .session_mut()
+                    .record_terminal_gate_usage(
+                        octet_ai::EndpointId("custom".into()),
+                        ModelId("probe".into()),
+                        Usage {
+                            input_tokens: 10 + index,
+                            output_tokens: 2,
+                            total_tokens: 12 + index,
+                            ..Usage::default()
                         },
+                        Some(Cost {
+                            total: 7 + index,
+                            ..Cost::default()
+                        }),
+                        Some(true),
                     )
-                    .await,
-                )
-            } else {
-                let capture = RpcCapture::default();
-                let result =
-                    finish_rpc_accounting(run_rpc_loop(app, input, capture.output(false)).await);
-                assert_eq!(capture.frames()[0]["success"], true);
-                result
-            };
-            if index == 0 {
-                let error = result.unwrap_err();
-                assert!(
-                    error.chain().any(|cause| {
-                        cause
-                            .downcast_ref::<std::io::Error>()
-                            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
-                            || cause
-                                .downcast_ref::<serde_json::Error>()
-                                .is_some_and(|json| {
-                                    json.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe)
-                                })
-                    }),
-                    "unexpected RPC error: {error:#}"
+                    .unwrap();
+                crate::session_store::begin_ephemeral_run(
+                    transcript_root.clone(),
+                    accounting_root.path().to_path_buf(),
+                    workspace.clone(),
                 );
-            } else {
-                result.unwrap();
+                let (tx, input) = mpsc::channel(1);
+                tx.send(RpcInput::Value(json!({"type": "get_state"})))
+                    .await
+                    .unwrap();
+                drop(tx);
+
+                let result = if index == 0 {
+                    finish_rpc_accounting(
+                        run_rpc_loop(
+                            app,
+                            input,
+                            RpcOutput {
+                                stdout: Box::new(BrokenPipe),
+                                delta_only: false,
+                            },
+                        )
+                        .await,
+                    )
+                } else {
+                    let capture = RpcCapture::default();
+                    let result = finish_rpc_accounting(
+                        run_rpc_loop(app, input, capture.output(false)).await,
+                    );
+                    assert_eq!(capture.frames()[0]["success"], true);
+                    result
+                };
+                if index == 0 {
+                    let error = result.unwrap_err();
+                    assert!(
+                        error.chain().any(|cause| {
+                            cause
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+                                || cause
+                                    .downcast_ref::<serde_json::Error>()
+                                    .is_some_and(|json| {
+                                        json.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe)
+                                    })
+                        }),
+                        "unexpected RPC error: {error:#}"
+                    );
+                } else {
+                    result.unwrap();
+                }
+                assert!(!transcript.exists(), "ephemeral transcript must be removed");
+                assert!(!transcript_root.exists(), "temporary root must be removed");
+                assert!(crate::session_store::finish_ephemeral_run()
+                    .unwrap()
+                    .is_none());
+                let store =
+                    crate::session_store::SessionStore::new(accounting_root.path(), &workspace);
+                let summary = store.ephemeral_accounting_summary().unwrap();
+                assert_eq!(summary.runs, 1);
+                assert_eq!(summary.usage_records, 1);
+                assert_eq!(summary.input_tokens, 10 + index);
+                assert_eq!(summary.total_cost_microdollars, 7 + index);
             }
-            assert!(!transcript.exists(), "ephemeral transcript must be removed");
-            assert!(!transcript_root.exists(), "temporary root must be removed");
-            assert!(crate::session_store::finish_ephemeral_run()
-                .unwrap()
-                .is_none());
-            let store = crate::session_store::SessionStore::new(accounting_root.path(), &workspace);
-            let summary = store.ephemeral_accounting_summary().unwrap();
-            assert_eq!(summary.runs, 1);
-            assert_eq!(summary.usage_records, 1);
-            assert_eq!(summary.input_tokens, 10 + index);
-            assert_eq!(summary.total_cost_microdollars, 7 + index);
-        }
+        });
     }
 
     #[test]

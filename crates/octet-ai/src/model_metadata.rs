@@ -113,8 +113,8 @@ mod tests {
 
         let routed = model_pricing("openrouter", "deepseek/deepseek-v4-pro")
             .expect("provider-specific snapshot price");
-        assert_eq!(routed.input, TokenRate(422_298));
-        assert_eq!(routed.output, TokenRate(844_596));
+        assert_eq!(routed.input, TokenRate(836_418));
+        assert_eq!(routed.output, TokenRate(1_672_836));
         assert_eq!(routed.reasoning, None);
         assert!(model_pricing("openai", "gpt-5.6").is_none());
         assert!(model_pricing("openai", "gpt-5.6-sol").is_some());
@@ -126,7 +126,7 @@ mod tests {
         let flash = model_capability_metadata("deepseek", "deepseek-flash").unwrap();
         assert_eq!(flash["name"], "DeepSeek V4.1 Flash");
         assert_eq!(flash["limit"]["context"], 1_000_000);
-        assert_eq!(flash["limit"]["output"], 384_000);
+        assert_eq!(flash["limit"]["output"], 393_216);
         assert_eq!(
             flash["reasoning_options"][1]["values"],
             serde_json::json!(["low", "high", "max"])

@@ -2319,7 +2319,8 @@ struct WorkerLiveness {
 struct ReattachPlan {
     id: String,
     session: Session,
-    initial_permit: OwnedSemaphorePermit,
+    // A transcript with no undelivered task is settled without using a slot.
+    initial_permit: Option<OwnedSemaphorePermit>,
     claim: DurableFleetClaim,
 }
 
@@ -3468,22 +3469,6 @@ impl DelegationManager {
                         continue;
                     }
                 };
-                let permit = match self.current_permits().try_acquire_owned() {
-                    Ok(permit) => permit,
-                    // The bound is authoritative: a record that cannot acquire
-                    // a slot stays visibly detached instead of oversubscribing.
-                    Err(_) => {
-                        let reason = "no free execution slot is available for reattachment";
-                        if let Some(record) = state.records.get_mut(&id) {
-                            record.detached = true;
-                            record.durable_diagnostic = Some(bounded_text(&format!(
-                                "worker was not reattached: {reason}"
-                            )));
-                        }
-                        refused.push((id, reason.to_owned()));
-                        continue;
-                    }
-                };
                 let session = match self.reopen_child_session(&record.session_path) {
                     Ok(session) => session,
                     Err(error) => {
@@ -3506,6 +3491,30 @@ impl DelegationManager {
                     refused.push((id, reason));
                     continue;
                 }
+                // A delivered task needs no execution slot. Otherwise many
+                // interrupted transcripts can starve a later runnable child.
+                let permit = if record.pending_initial_task.is_some()
+                    || !record.pending_follow_ups.is_empty()
+                {
+                    match self.current_permits().try_acquire_owned() {
+                        Ok(permit) => Some(permit),
+                        // The bound is authoritative: a record that cannot acquire
+                        // a slot stays visibly detached instead of oversubscribing.
+                        Err(_) => {
+                            let reason = "no free execution slot is available for reattachment";
+                            if let Some(record) = state.records.get_mut(&id) {
+                                record.detached = true;
+                                record.durable_diagnostic = Some(bounded_text(&format!(
+                                    "worker was not reattached: {reason}"
+                                )));
+                            }
+                            refused.push((id, reason.to_owned()));
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
                 // Keep receivers and liveness on the records until the entire
                 // batch's provenance is committed. A failed reopen only refuses
                 // this child; a journal failure leaves all unstarted receivers
@@ -3519,13 +3528,18 @@ impl DelegationManager {
                 });
             }
         }
-        // Reattachment is idle, not pending: no task has been accepted for
-        // execution. Publish that status and the explicit reattachment boundary.
-        for id in &reattached {
+        // Journal the reattachment boundary before publishing runnable tasks
+        // or settling delivered-only transcripts as interrupted.
+        for plan in &plans {
+            let status = if plan.initial_permit.is_some() {
+                DelegatedAgentStatus::Pending
+            } else {
+                DelegatedAgentStatus::Interrupted
+            };
             let event = ProvenanceEvent::AgentStatus {
                 timestamp_ms: timestamp_ms(),
-                agent_id: id,
-                status: &DelegatedAgentStatus::Idle,
+                agent_id: &plan.id,
+                status: &status,
             };
             if let Err(error) = self.journal.append(&event) {
                 let mut state = self
@@ -3634,7 +3648,9 @@ impl DelegationManager {
                         session: plan.session,
                         commands,
                         shutdown: record.shutdown.clone(),
-                        initial_permit: plan.initial_permit,
+                        initial_permit: plan
+                            .initial_permit
+                            .expect("runnable reattachment reserved a slot"),
                         extension_policy: record.extension_policy.clone(),
                         deadline: record.deadline_at_ms.map(wall_deadline_instant),
                         deadline_ms: record.deadline_at_ms,
@@ -9958,7 +9974,11 @@ mod tests {
         let reattached = state
             .records
             .values()
-            .filter(|record| !record.detached && record.status == DelegatedAgentStatus::Idle)
+            .filter(|record| {
+                !record.detached
+                    && record.status == DelegatedAgentStatus::Pending
+                    && record.live_task
+            })
             .count();
         let still_detached = state
             .records
@@ -9980,6 +10000,65 @@ mod tests {
             .and_then(|record| record.durable_diagnostic.as_deref())
             .expect("the bounded-out record names its refusal");
         assert!(refused.contains("no free execution slot"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn delivered_only_records_do_not_reserve_slots_a_runnable_sibling_needs() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = writable_manager(directory.path());
+        for index in 1..=4 {
+            let session_path = manager
+                .team_directory
+                .join(format!("delivered-{index}.jsonl"));
+            Session::create(&session_path).unwrap();
+            insert_durable_detached_record(
+                &manager,
+                &format!("agent-{index}"),
+                &format!("/root/delivered-{index}"),
+                session_path,
+                DelegatedAgentStatus::Detached,
+            );
+        }
+        let session_path = manager.team_directory.join("undelivered.jsonl");
+        Session::create(&session_path).unwrap();
+        insert_durable_detached_record(
+            &manager,
+            "agent-5",
+            "/root/undelivered",
+            session_path,
+            DelegatedAgentStatus::Detached,
+        );
+        let QueuedTask::Initial(task) = QueuedTask::initial("new work".into()) else {
+            unreachable!()
+        };
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .records
+            .get_mut("agent-5")
+            .unwrap()
+            .pending_initial_task = Some(task);
+        manager.prepare_owning_run(&root_identity()).unwrap();
+        let state = manager.state.lock().unwrap();
+        assert!(state.records["agent-5"].live_task);
+        assert_eq!(
+            state.records["agent-5"].status,
+            DelegatedAgentStatus::Pending
+        );
+        assert_eq!(manager.current_permits().available_permits(), 2);
+        for index in 1..=4 {
+            let record = &state.records[&format!("agent-{index}")];
+            assert_eq!(record.status, DelegatedAgentStatus::Interrupted);
+            assert!(!record.live_task);
+        }
+        drop(state);
+        let events =
+            std::fs::read_to_string(manager.team_directory.join("provenance.jsonl")).unwrap();
+        assert!(events.contains("\"state\":\"pending\""), "{events}");
+        assert!(events.contains("\"state\":\"interrupted\""), "{events}");
+        assert!(!events.contains("\"state\":\"idle\""), "{events}");
+        manager.request_shutdown_descendants(ROOT_AGENT_ID);
     }
 
     #[tokio::test]
@@ -10037,6 +10116,15 @@ mod tests {
                 DelegatedAgentStatus::Detached,
             );
         }
+        // Only an undelivered task starts a recovered worker. A transcript
+        // with no remaining work is interrupted for explicit continuation.
+        for record in manager.state.lock().unwrap().records.values_mut() {
+            record.pending_initial_task =
+                Some(match QueuedTask::initial("uncommitted work".into()) {
+                    QueuedTask::Initial(task) => task,
+                    _ => unreachable!(),
+                });
+        }
         manager.prepare_owning_run(&root_identity()).unwrap();
         {
             let state = manager.state.lock().unwrap();
@@ -10046,14 +10134,14 @@ mod tests {
             assert!(!failed.command_tx.is_closed());
             let healthy = &state.records["agent-2"];
             assert!(healthy.live_task);
-            assert_eq!(healthy.status, DelegatedAgentStatus::Idle);
+            assert_eq!(healthy.status, DelegatedAgentStatus::Pending);
             assert!(!healthy.command_tx.is_closed());
         }
         let roster: Value =
             serde_json::from_slice(&std::fs::read(manager.roster_path.as_ref().unwrap()).unwrap())
                 .unwrap();
         assert_eq!(roster["records"][0]["status"]["state"], "detached");
-        assert_eq!(roster["records"][1]["status"]["state"], "idle");
+        assert_eq!(roster["records"][1]["status"]["state"], "pending");
         // Exercise the later receiver, not just its pre-start liveness flag.
         let interrupted = manager
             .interrupt(&root_identity(), "agent-2")
@@ -10078,7 +10166,10 @@ mod tests {
         manager.prepare_owning_run(&root_identity()).unwrap();
         let state = manager.state.lock().unwrap();
         assert!(state.records["agent-1"].live_task);
-        assert_eq!(state.records["agent-1"].status, DelegatedAgentStatus::Idle);
+        assert_eq!(
+            state.records["agent-1"].status,
+            DelegatedAgentStatus::Pending
+        );
         assert_eq!(
             state.records["agent-2"].status,
             DelegatedAgentStatus::Interrupted
@@ -10189,7 +10280,13 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn reattachment_enforces_the_persisted_wall_deadline_while_idle() {
+    async fn reattachment_enforces_the_persisted_wall_deadline_for_undelivered_work() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+            .mount(&server)
+            .await;
         for remaining_ms in [0, 1_000] {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path();
@@ -10197,7 +10294,7 @@ mod tests {
             Session::create(&session_path).unwrap();
             let absolute_deadline = u64::try_from(timestamp_ms()).unwrap() + remaining_ms;
             {
-                let manager = writable_manager(root);
+                let manager = continuation_test_manager(root, &server);
                 insert_durable_detached_record(
                     &manager,
                     "agent-1",
@@ -10206,21 +10303,33 @@ mod tests {
                     DelegatedAgentStatus::Detached,
                 );
                 let mut state = manager.state.lock().unwrap();
-                state.records.get_mut("agent-1").unwrap().deadline_at_ms = Some(absolute_deadline);
+                let record = state.records.get_mut("agent-1").unwrap();
+                record.deadline_at_ms = Some(absolute_deadline);
+                record.pending_initial_task =
+                    Some(match QueuedTask::initial("uncommitted task".into()) {
+                        QueuedTask::Initial(task) => task,
+                        _ => unreachable!(),
+                    });
                 manager.persist_durable_fleet_locked(&mut state);
             }
-            let manager = writable_manager(root);
+            let manager = continuation_test_manager(root, &server);
             manager.restore_durable_fleet();
             manager.prepare_owning_run(&root_identity()).unwrap();
-            tokio::task::yield_now().await;
             if remaining_ms > 0 {
                 assert_eq!(
                     manager.state.lock().unwrap().records["agent-1"].status,
-                    DelegatedAgentStatus::Idle
+                    DelegatedAgentStatus::Pending
                 );
             }
             tokio::time::advance(Duration::from_millis(remaining_ms + 1)).await;
-            tokio::task::yield_now().await;
+            for _ in 0..100 {
+                if manager.state.lock().unwrap().records["agent-1"].status
+                    == DelegatedAgentStatus::TimedOut
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
             {
                 let state = manager.state.lock().unwrap();
                 let record = &state.records["agent-1"];
@@ -10228,7 +10337,12 @@ mod tests {
                 assert!(record.live_task);
                 assert_eq!(record.deadline_at_ms, Some(absolute_deadline));
                 assert_eq!(record.turn_count, 0);
-                assert!(Session::open(&session_path).unwrap().entries().is_empty());
+                assert!(!Session::open(&session_path).unwrap().entries().iter().any(
+                    |entry| matches!(
+                        entry.value,
+                        crate::EntryValue::Message(octet_ai::Message::Assistant(_))
+                    )
+                ));
             }
             manager.request_shutdown_descendants(ROOT_AGENT_ID);
             tokio::task::yield_now().await;
@@ -10236,7 +10350,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn reattached_follow_up_times_out_while_waiting_for_an_execution_slot() {
+    async fn reattached_follow_up_requires_a_free_execution_slot_before_acceptance() {
         let directory = tempfile::tempdir().unwrap();
         let manager = writable_manager(directory.path());
         let session_path = manager.team_directory.join("queued.jsonl");
@@ -10248,6 +10362,7 @@ mod tests {
             session_path.clone(),
             DelegatedAgentStatus::Detached,
         );
+        let deadline = u64::try_from(timestamp_ms()).unwrap() + 1_000;
         manager
             .state
             .lock()
@@ -10255,12 +10370,35 @@ mod tests {
             .records
             .get_mut("agent-1")
             .unwrap()
-            .deadline_at_ms = Some(u64::try_from(timestamp_ms()).unwrap() + 1_000);
+            .deadline_at_ms = Some(deadline);
         manager.prepare_owning_run(&root_identity()).unwrap();
-        tokio::task::yield_now().await;
-        // The restored idle worker releases its startup slot. Occupy all
-        // slots so the accepted continuation has to wait for capacity.
-        let _slots = manager.current_permits().try_acquire_many_owned(3).unwrap();
+        {
+            let state = manager.state.lock().unwrap();
+            let record = &state.records["agent-1"];
+            assert_eq!(record.status, DelegatedAgentStatus::Interrupted);
+            assert_eq!(record.deadline_at_ms, Some(deadline));
+        }
+        // An interrupted, restored worker has no live receiver. Claiming all
+        // slots must reject an explicit follow-up *before* journaling or queueing.
+        let slots = manager.current_permits().try_acquire_many_owned(3).unwrap();
+        let error = manager
+            .follow_up(
+                &root_identity(),
+                FollowUpRequest {
+                    target: "agent-1".into(),
+                    message: "continue under the original budget".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("no free execution slot"), "{error}");
+        assert!(manager.state.lock().unwrap().records["agent-1"]
+            .pending_follow_ups
+            .is_empty());
+        assert!(Session::open(&session_path).unwrap().entries().is_empty());
+        drop(slots);
+        // A later explicit continuation is admitted, retaining the original
+        // deadline rather than silently extending its wall budget.
         let result = manager
             .follow_up(
                 &root_identity(),
@@ -10272,20 +10410,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["delivery"], "new_run");
-        tokio::task::yield_now().await;
-        assert_eq!(
-            manager.state.lock().unwrap().records["agent-1"].status,
-            DelegatedAgentStatus::Pending
-        );
-        tokio::time::advance(Duration::from_secs(2)).await;
-        tokio::task::yield_now().await;
         let state = manager.state.lock().unwrap();
-        assert_eq!(
-            state.records["agent-1"].status,
-            DelegatedAgentStatus::TimedOut
-        );
-        assert!(state.records["agent-1"].live_task);
-        assert!(Session::open(&session_path).unwrap().entries().is_empty());
+        assert_eq!(state.records["agent-1"].deadline_at_ms, Some(deadline));
+        assert_eq!(state.records["agent-1"].pending_follow_ups.len(), 1);
         drop(state);
         manager.request_shutdown_descendants(ROOT_AGENT_ID);
     }
@@ -10381,6 +10508,11 @@ mod tests {
             record.extension_policy = Some(policy.clone());
             record.turn_limit = policy.max_turns;
             record.deadline_at_ms = Some(original_deadline);
+            record.pending_initial_task =
+                Some(match QueuedTask::initial("uncommitted work".into()) {
+                    QueuedTask::Initial(task) => task,
+                    _ => unreachable!(),
+                });
         }
         manager.prepare_owning_run(&root_identity()).unwrap();
         if !expired {
@@ -11237,6 +11369,7 @@ mod tests {
             .unwrap()
         };
         let first = create(&root);
+        Session::create(first.team_directory.join("child.jsonl")).unwrap();
         insert_test_record(
             &first,
             DelegatedAgentStatus::Completed {
@@ -12941,10 +13074,9 @@ mod tests {
             .unwrap();
         // No await has yielded to the spawned task: acknowledgement itself is
         // evidence that the initial payload/identity and zero attempts are safe.
-        let fleet: DurableFleet = serde_json::from_slice(
-            &std::fs::read(fleet_roster_path(&root, Path::new(""))).unwrap(),
-        )
-        .unwrap();
+        let fleet: DurableFleet =
+            serde_json::from_slice(&std::fs::read(fleet_roster_path(root, Path::new(""))).unwrap())
+                .unwrap();
         let initial = fleet.records[0].pending_initial_task.as_ref().unwrap();
         assert_eq!(initial.task, "durable initial payload");
         assert_eq!(initial.attempts, 0);
@@ -12993,9 +13125,25 @@ mod tests {
                     attempts
                 );
                 manager.prepare_owning_run(&root_identity()).unwrap();
+                // A settled failure is never autonomously replayed on a new
+                // owner. Explicit continuation retries the retained initial
+                // input ahead of the new follow-up in the same child session.
+                manager
+                    .follow_up(
+                        &root_identity(),
+                        FollowUpRequest {
+                            target: "agent-1".into(),
+                            message: format!("explicit retry {attempts}"),
+                        },
+                    )
+                    .await
+                    .unwrap();
             }
         }
-        assert!(manager.restored_tasks("agent-1").is_empty());
+        assert!(manager
+            .restored_tasks("agent-1")
+            .iter()
+            .all(|task| !matches!(task, QueuedTask::Initial(_))));
     }
 
     #[test]
@@ -13049,7 +13197,7 @@ mod tests {
                 usize::from(abandoned)
             );
             let fleet: DurableFleet = serde_json::from_slice(
-                &std::fs::read(fleet_roster_path(&root, Path::new(""))).unwrap(),
+                &std::fs::read(fleet_roster_path(root, Path::new(""))).unwrap(),
             )
             .unwrap();
             assert_eq!(fleet.records[0].pending_initial_task.is_some(), abandoned);
@@ -13154,7 +13302,7 @@ mod tests {
             assert!(server.received_requests().await.unwrap().is_empty());
             assert_eq!(std::fs::read(&session_path).unwrap(), before);
             let fleet: DurableFleet = serde_json::from_slice(
-                &std::fs::read(fleet_roster_path(&root, Path::new(""))).unwrap(),
+                &std::fs::read(fleet_roster_path(root, Path::new(""))).unwrap(),
             )
             .unwrap();
             assert_eq!(fleet.records[0].status, DelegatedAgentStatus::Interrupted);
@@ -13308,7 +13456,7 @@ mod tests {
                     .contains("could not be reopened"));
                 assert!(server.received_requests().await.unwrap().is_empty());
                 let fleet: DurableFleet = serde_json::from_slice(
-                    &std::fs::read(fleet_roster_path(&root, Path::new(""))).unwrap(),
+                    &std::fs::read(fleet_roster_path(root, Path::new(""))).unwrap(),
                 )
                 .unwrap();
                 let retained = &fleet.records[0];

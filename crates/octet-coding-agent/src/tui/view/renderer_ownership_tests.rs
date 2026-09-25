@@ -513,21 +513,23 @@ fn published_panels_and_reports_share_immutable_bodies() {
         ordinary_surface::OrdinarySurfaceMetadata, ReportBody, ReportOverlay, ShellOverlay,
     };
     let text: Arc<str> = "large report body\n".repeat(100_000).into();
-    let mut state = ShellState::default();
-    state.panel = Some(Panel::ReadOnlyDocument {
-        title: "shared document".into(),
-        text: text.clone(),
-        styled: false,
-        scroll_from_bottom: 0,
-    });
-    state.overlay = Some(ShellOverlay::Report(ReportOverlay {
-        surface: OrdinarySurfaceMetadata::new("report"),
-        body: ReportBody::Text {
+    let mut state = ShellState {
+        panel: Some(Panel::ReadOnlyDocument {
+            title: "shared document".into(),
             text: text.clone(),
             styled: false,
-        },
-        scroll_from_top: 0,
-    }));
+            scroll_from_bottom: 0,
+        }),
+        overlay: Some(ShellOverlay::Report(ReportOverlay {
+            surface: OrdinarySurfaceMetadata::new("report"),
+            body: ReportBody::Text {
+                text: text.clone(),
+                styled: false,
+            },
+            scroll_from_top: 0,
+        })),
+        ..Default::default()
+    };
     let mut owner = RenderOwner::default();
     owner.accept(RenderModel::capture(&mut state));
     let Some(Panel::ReadOnlyDocument {

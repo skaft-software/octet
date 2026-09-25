@@ -7251,7 +7251,7 @@ fn bash_probe_harness(
     // Deliberately register an arbitrary sequential implementation named bash,
     // with no tool hooks that could suppress an unsafe streaming fast path.
     extensions.tool(DurableBashProbe {
-        bash: octet_agent::BashTool::default(),
+        bash: octet_agent::BashTool,
         effect,
         effect_calls: Arc::clone(&effect_calls),
         executions: Arc::clone(&executions),

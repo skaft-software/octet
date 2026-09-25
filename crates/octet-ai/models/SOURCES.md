@@ -112,39 +112,58 @@ Cerebras contracts. Their fixture provenance is recorded in
 
 ## Reviewed metadata refresh (v0.8.0)
 
-The release-candidate refresh pins public `https://models.dev/api.json` source
-SHA-256 `c22e96f4bd6e4f238806c3ac8ef3c4971b1701d26957ef6f035350fcd5c11c98`.
-The CI freshness refreshes remove three OpenCode Jev routes absent from
-upstream (`jev-1.13`, `jev-1.13-free`, and `jev-latest`), update eight OpenRouter
-price records, and change two output ceilings. Canonical names stay identical.
-OpenRouter `deepseek/deepseek-v4-pro-0813` now reports 393,216 output tokens and
-`~z-ai/glm-flash-latest` reports 943,718. The `~deepseek/deepseek-pro-latest`
-OpenRouter quote is $0.528/$1.584/$0.0168 per million input/output/cache-read
-tokens; this is not direct DeepSeek pricing. A final freshness recheck changed
-only this latest-alias quote and `deepseek/deepseek-v4-pro-0813`. Other refreshed
-quotes cover V4 Flash, Qwen 3.6 35B and 3.8 27B, Tencent HY3, and GLM 5.3/latest.
-Earlier candidate refreshes lowered Muse Glimmer input/output quotes to
-$0.30/$1.20 per million and its output limit to 16,384. Mistral Small 3.1 asserts
-tools in the saved source; snapshot tool flags do not grant runtime tool capability.
-The four checked-in outputs include this source record and the following
-reviewed changes relative to the v0.7.6 snapshots:
+The 2026-09-24 release-candidate refresh pins public
+`https://models.dev/api.json` source SHA-256
+`859a1e410438d95b4777d7229b6f2652ca4db2123be59c11b841b8b7c6d3089d`.
+Relative to the preceding candidate, this adds 10 canonical names, 34 priced
+routes and 35 capability records; removes three OpenRouter routes absent from
+the source; and updates 29 price records and 26 capability records. The removed
+routes are `anthropic/claude-opus-4`, `inclusionai/ling-3.0-flash-vl:free` and
+`kwaipilot/kat-coder-pro-v2`. Existing canonical display names are unchanged.
+
+Additions include the exact public Sol/Luna, Opus 5.5, Grok 4.7 and MiMo 2.6
+routes reported by already-supported providers. This is not new provider or
+protocol support. All 29 changed quotes in this refresh belong to OpenRouter;
+for example, `deepseek/deepseek-v4-pro-0813` now quotes $0.462/$1.386/$0.0154
+per million input/output/cache-read tokens, and `moonshotai/kimi-k3` quotes
+$0.8845/$10.5346/$0.30. These are provider-scoped catalog quotes, not direct DeepSeek or
+Moonshot tariffs. Direct DeepSeek schedule pricing remains excluded and unknown.
+
+Reviewed capability changes include the direct DeepSeek output limit moving
+from 384,000 to 393,216, direct Kimi K3 output increasing to 1,048,576, and
+OpenRouter Sonnet 4 context decreasing to 200,000. Other changes affect exact
+route limits and source reasoning assertions. Snapshot reasoning/tool flags
+still do not grant runtime capabilities or override endpoint assertions. New
+public Sol/Luna quotes also exercise the subscription-pricing boundary: only the
+reviewed Codex allowlist can establish a subscription quote; newly cataloged
+public API rates cannot price an otherwise unknown Codex route.
+
+A final freshness check caught an upstream update during qualification. The
+reviewed refresh above includes five additional OpenRouter price changes and
+Qwen3 VL 30B A3B Instruct's output limit decreasing from 32,768 to 16,384;
+no model identity, modality or capability flag changed in that final delta.
+The exact OpenRouter DeepSeek V4 Pro quote is now $0.836418/$1.672836/$0.069702
+per million input/output/cache-read tokens. These are still route-specific
+catalog quotes, not a direct-provider tariff or live acceptance claim.
+
+The four checked-in outputs include the source receipt and these differences
+relative to the v0.7.6 snapshots:
 
 | Snapshot | Current records | Added | Removed | Changed |
 | --- | ---: | ---: | ---: | ---: |
-| Provider-scoped pricing routes | 892 | 97 | 3 | 37 |
-| Canonical names | 385 | 5 | 2 | 0 |
-| Capability routes | 913 | 97 | 6 | 44 |
+| Provider-scoped pricing routes | 923 | 130 | 5 | 39 |
+| Canonical names | 395 | 14 | 1 | 0 |
+| Capability routes | 945 | 130 | 7 | 58 |
 
-Price changes cover 35 OpenRouter routes, one Fireworks route, and one opencode
-route. Additions primarily belong to already-supported Qwen-plan, Baseten, and
-Fireworks providers; catalog additions do not introduce new provider protocols
-or prove route availability. Direct DeepSeek schedule pricing remains deliberately
-excluded and unknown; no flat quote or schedule accounting is inferred.
+Across that release baseline, changed quotes cover 37 OpenRouter routes, one
+Fireworks route and one OpenCode route. Catalog additions do not prove route
+availability. The refresh preserves the existing unsupported-route exclusions,
+Baseten text-only corrections, subscription allowlists and unverified-pricing
+policy; no flat direct DeepSeek quote or schedule accounting is inferred.
 
-Six offline metadata-tooling tests passed via
-`python3 scripts/test_refresh_models_dev_metadata.py`. Reproduce or validate
-using the saved-source commands below with a response matching the new digest.
-Normal builds and runtime continue to consume checked-in metadata without
+Six offline metadata-tooling tests and 13 release-gate tests passed. Reproduce
+or validate using the saved-source commands below with a response matching the
+new digest. Normal builds and runtime consume checked-in metadata without
 fetching models.dev. This is reviewed public metadata, not live inference
 acceptance; endpoint assertions and explicit configured pricing retain precedence.
 

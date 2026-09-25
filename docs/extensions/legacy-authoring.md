@@ -375,12 +375,14 @@ untrusted data do not belong in status labels, titles, provenance, or reconnect
 state. Actions name commands already declared by that manifest.
 
 Generic extension state stays out of persistent chrome. The coding TUI's one
-first-party observed exception is `octet-subagents`: during an owning root run
-with workers it renders owner-fenced `subagent` activities as a persistent
-transcript event above the composer from native `AgentEvent::DelegationUpdated`
-telemetry. The complete bounded roster is never truncated by `Ctrl+O`. The
-host-owned footer adds live priced child spend while active, then durable
-root-session delegated usage after settlement, never an extension footer string.
+first-party observed exception is `octet-subagents`: it updates one bounded,
+tool-like **Subagents** transcript block in place from native
+`AgentEvent::DelegationUpdated` telemetry while workers are active, including
+between root turns. Its heading counts worker states and up to four active child
+lines show tasks and input/output tokens; `/subagents` retains the complete
+roster. Ctrl+O retains disclosure. The host-owned footer adds live priced child
+spend while active, then durable root-session delegated usage after settlement,
+never an extension footer string.
 
 `/extensions` opens the installed-bundle management menu. Enter toggles ordinary
 bundles or opens the enabled first-party web-search provider picker; activation

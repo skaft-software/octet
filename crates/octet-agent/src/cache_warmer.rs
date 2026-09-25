@@ -78,6 +78,12 @@ pub fn is_direct_anthropic(model: &Model) -> bool {
 /// Check eligibility without performing provider I/O. `estimated_input` must
 /// include the full prefix, schemas, system and synthetic suffix. Return the
 /// conservative reservation for the caller's existing session ceiling checks.
+// The preflight deliberately accepts the same explicit inputs as the agent's
+// billing guard, so no estimated cost or timestamp is inferred a second time.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit cache and billing preflight inputs"
+)]
 pub(crate) fn reservation(
     model: &Model,
     session: &Session,

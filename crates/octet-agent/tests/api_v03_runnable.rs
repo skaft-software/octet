@@ -254,11 +254,8 @@ for line in sys.stdin:
 #[tokio::test]
 async fn bundled_canonical_extensions_negotiate_with_the_real_host() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
-    for name in [
-        "octet-computer-use",
-        "octet-import-aider",
-        "octet-import-cline",
-    ] {
+    // The Cline importer was retired; qualify the retained canonical sources.
+    for name in ["octet-computer-use", "octet-import-aider"] {
         let manifest_path = repository
             .join(name)
             .join(EXTENSION_MANIFEST_FILENAME)

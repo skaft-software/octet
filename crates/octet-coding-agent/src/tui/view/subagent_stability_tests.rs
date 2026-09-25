@@ -81,7 +81,11 @@ fn subagent_live_lines_update_without_invalidating_earlier_history() {
                 if width >= 46 {
                     assert!(frame.contains("inspect-markdown"), "{frame}");
                     assert!(
-                        frame.contains(&format!("{}K tok", child.total_tokens / 1_000)),
+                        frame.contains(&format!(
+                            "↑{} ↓{}",
+                            child.input_tokens + child.cache_read_tokens + child.cache_write_tokens,
+                            child.output_tokens
+                        )),
                         "{frame}"
                     );
                 }
@@ -389,7 +393,7 @@ fn mixed_session_rosters_stay_out_of_transcript_and_account_only_new_spend() {
         shell.on_prompt_submitted("first prompt");
         publish_roster(&mut shell, native, &[named_worker("OLD-WORKER", "running")]);
         let old = named_worker("OLD-WORKER", "completed");
-        publish_roster(&mut shell, native, &[old.clone()]);
+        publish_roster(&mut shell, native, std::slice::from_ref(&old));
         shell.on_run_event(
             run,
             &AgentEvent::RunFinished {
@@ -566,7 +570,23 @@ fn active_roster_does_not_hold_back_transcript_commit_boundaries() {
             Instant::now(),
             &mut frame,
         );
-        assert_eq!(update.stable_prefix, transcript_len);
+        if native {
+            // The live row follows the notices, so usage updates repaint only
+            // the trailing roster while preserving all prior history.
+            assert!(update.stable_prefix < transcript_len);
+            assert!(update
+                .replacement
+                .iter()
+                .any(|row| row.contains("LIVE-WORKER")));
+            assert!(!update
+                .replacement
+                .iter()
+                .any(|row| row.contains("filler-39")));
+        } else {
+            // The extension projection retains the updated usage in the
+            // inspector without rendering its counters into the transcript.
+            assert_eq!(update.stable_prefix, transcript_len);
+        }
         assert_eq!(frame.pending_tool_start, None);
         let pinned = render_shell_update(
             &shell.state.borrow(),
@@ -1066,7 +1086,7 @@ fn orchestration_is_one_blinking_tail_row_then_settles_in_place() {
     let mut shell = InteractiveShell::test_shell();
     shell.notice("parent before");
     let first = named_worker("worker-a", "running");
-    publish_roster(&mut shell, true, &[first.clone()]);
+    publish_roster(&mut shell, true, std::slice::from_ref(&first));
     {
         let state = shell.state.borrow();
         assert!(

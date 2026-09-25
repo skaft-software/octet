@@ -108,7 +108,7 @@ async fn bash_truncated_output_spills_the_full_stream_to_a_readable_path() {
     let mut f = fixture();
     f.sandbox.max_output_bytes = 4096;
 
-    let tool = BashTool::default();
+    let tool = BashTool;
     let output = tool
         .execute(
             json!({"command": "i=0; while [ $i -lt 400 ]; do printf 'line-%04d-payload\\n' $i; i=$((i+1)); done"}),
@@ -132,20 +132,27 @@ async fn bash_truncated_output_spills_the_full_stream_to_a_readable_path() {
     assert!(!output.text.contains("spill_error=true"), "{}", output.text);
     // The advertised description names the path field the model can follow.
     assert!(
-        BashTool::default()
+        BashTool
             .definition()
             .description
             .contains("full_output_path"),
         "{}",
-        BashTool::default().definition().description
+        BashTool.definition().description
     );
-    drop(tool);
-    assert!(!spill.exists(), "tool must own spill cleanup");
+    assert!(spill.exists(), "spill must survive the tool call");
+    BashTool::release_owner("parity-tools");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while spill.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retiring the resource owner must clean spills");
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn shell_wrappers_retain_spills_until_the_wrapper_is_dropped() {
+async fn shell_wrappers_retain_spills_until_the_resource_owner_retires() {
     let _serial = serial().await;
     let mut f = fixture();
     f.sandbox.max_output_bytes = 1024;
@@ -157,8 +164,9 @@ async fn shell_wrappers_retain_spills_until_the_wrapper_is_dropped() {
             RecordingCheckpointSink::new(),
         )),
     ];
+    let mut paths = Vec::new();
     for tool in tools {
-        let mut paths = Vec::new();
+        let first = paths.len();
         for _ in 0..2 {
             let output = tool.execute(
                 json!({"command": "i=0; while [ $i -lt 1000 ]; do printf 'payload\\n'; printf 'error-payload\\n' >&2; i=$((i+1)); done"}),
@@ -174,22 +182,30 @@ async fn shell_wrappers_retain_spills_until_the_wrapper_is_dropped() {
             paths.extend(spills);
         }
         assert_eq!(
-            std::fs::read_to_string(&paths[0]).unwrap(),
+            std::fs::read_to_string(&paths[first]).unwrap(),
             "payload\n".repeat(1000)
         );
         assert_eq!(
-            std::fs::read_to_string(&paths[1]).unwrap(),
+            std::fs::read_to_string(&paths[first + 1]).unwrap(),
             "error-payload\n".repeat(1000)
         );
         assert!(paths.iter().all(|path| path.exists()));
         drop(tool);
-        assert!(paths.iter().all(|path| !path.exists()));
+        assert!(paths.iter().all(|path| path.exists()));
     }
+    BashTool::release_owner("parity-tools");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while paths.iter().any(|path| path.exists()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retiring the resource owner must clean wrapper spills");
 }
 
 #[cfg(windows)]
 #[tokio::test]
-async fn powershell_wrappers_retain_spills_until_the_wrapper_is_dropped() {
+async fn powershell_wrappers_retain_spills_until_the_resource_owner_retires() {
     let mut f = fixture();
     f.sandbox.max_output_bytes = 1024;
     let tools: Vec<Box<dyn Tool>> = vec![
@@ -198,6 +214,7 @@ async fn powershell_wrappers_retain_spills_until_the_wrapper_is_dropped() {
             ShellSessionEnvironment::default,
         )),
     ];
+    let mut paths = Vec::new();
     for tool in tools {
         let output = tool
             .execute(
@@ -217,9 +234,18 @@ async fn powershell_wrappers_retain_spills_until_the_wrapper_is_dropped() {
             std::fs::read_to_string(&path).unwrap().lines().count(),
             1000
         );
+        paths.push(path);
         drop(tool);
-        assert!(!path.exists());
+        assert!(paths.iter().all(|path| path.exists()));
     }
+    BashTool::release_owner("parity-tools");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while paths.iter().any(|path| path.exists()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retiring the resource owner must clean PowerShell spills");
 }
 
 #[cfg(unix)]
@@ -227,7 +253,7 @@ async fn powershell_wrappers_retain_spills_until_the_wrapper_is_dropped() {
 async fn bash_untruncated_output_leaks_no_spill_path() {
     let _serial = serial().await;
     let f = fixture();
-    let output = BashTool::default()
+    let output = BashTool
         .execute(json!({"command": "printf 'small\\n'"}), &f.ctx())
         .await
         .unwrap();
@@ -369,7 +395,7 @@ async fn powershell_is_opt_in_and_never_a_bash_fallback() {
     assert_eq!(PowerShellTool::default().definition().name, "powershell");
     assert_eq!(
         PowerShellTool::default().definition().parameters,
-        BashTool::default().definition().parameters
+        BashTool.definition().parameters
     );
 
     let f = fixture();
@@ -718,7 +744,7 @@ fn batch_termination_requires_unanimous_finalized_results() {
 fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
     use octet_agent::tool::collect_tool_prompt_contributions;
 
-    let bash = BashTool::default();
+    let bash = BashTool;
     let tools: Vec<&dyn Tool> = vec![&bash, &ReadTool, &EditTool, &WriteTool, &SearchTool];
     let contributions = collect_tool_prompt_contributions(tools);
     let by_name = |name: &str| {

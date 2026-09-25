@@ -9,7 +9,7 @@ use crate::tui::terminal::TerminalInput as EventStream;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use octet_agent::extension_process::{ConfirmationRequest, ExtensionInputRequest};
-use octet_agent::tool::{ToolConfirmation, ToolInputRequest};
+use octet_agent::tool::ToolConfirmation;
 use octet_ai::{ModelCatalog, ModelId};
 
 use crate::app::{bootstrap::CodexContextNotes, App};
@@ -73,89 +73,6 @@ impl SecretInputBuffer {
 impl Drop for SecretInputBuffer {
     fn drop(&mut self) {
         self.0.fill(0);
-    }
-}
-
-/// Give one running tool exclusive ownership of terminal input. The answer is
-/// sent directly to its reply channel and never enters the ordinary editor.
-pub async fn tool_input_picker<S>(
-    shell: &mut InteractiveShell,
-    input: &mut S,
-    request: &ToolInputRequest,
-) -> anyhow::Result<bool>
-where
-    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
-{
-    shell.set_tool_input_prompt(Some(request.prompt.clone()));
-    shell.render();
-    let mut secret = SecretInputBuffer::default();
-    loop {
-        let next = tokio::select! {
-            biased;
-            _ = crate::tui::terminal::wait_for_shutdown_signal() => None,
-            next = input.next() => next,
-        };
-        let event = match next {
-            Some(Ok(event)) => event,
-            Some(Err(error)) => {
-                request.cancel();
-                shell.set_tool_input_prompt(None);
-                shell.render();
-                return Err(error.into());
-            }
-            None => {
-                request.cancel();
-                shell.set_tool_input_prompt(None);
-                shell.render();
-                return Ok(false);
-            }
-        };
-        if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
-            request.cancel();
-            shell.set_tool_input_prompt(None);
-            shell.request_close();
-            shell.render();
-            return Ok(false);
-        }
-        match event {
-            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                match key.code {
-                    KeyCode::Enter => {
-                        request.respond(secret.take());
-                        shell.set_tool_input_prompt(None);
-                        shell.render();
-                        return Ok(true);
-                    }
-                    KeyCode::Esc => {
-                        request.cancel();
-                        shell.set_tool_input_prompt(None);
-                        shell.render();
-                        return Ok(false);
-                    }
-                    KeyCode::Backspace => secret.backspace(),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        request.cancel();
-                        shell.set_tool_input_prompt(None);
-                        shell.render();
-                        return Ok(false);
-                    }
-                    KeyCode::Char(character)
-                        if !key.modifiers.intersects(
-                            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
-                        ) =>
-                    {
-                        secret.push(character)
-                    }
-                    _ => {}
-                }
-            }
-            Event::Paste(pasted) => secret.extend_paste(&pasted),
-            Event::Resize(columns, rows) => shell.set_size(columns, rows),
-            _ => {}
-        }
-        // Re-rendering is safe: only the fixed prompt and cursor are visible;
-        // secret bytes never influence frame contents.
-        shell.render();
     }
 }
 

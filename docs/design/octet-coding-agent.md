@@ -267,11 +267,13 @@ child-override orchestration provenance; they never expose paths, environment
 values, approval material, extension identities, or model arguments.
 During an active interactive run, the product schedules one nonblocking
 owner-scoped subagent status refresh every 250 ms, reduces the resulting fenced
-semantic snapshot, and renders the complete bounded worker roster as one
-persistent transcript event above the composer. Ordinary tool disclosure never
-truncates that event. It temporarily adds structured priced child cost to the
-host-owned footer; after `octet-agent` mirrors the settled child usage into root
-`delegated_agent` records, the idle footer reads only the durable session total.
+semantic snapshot, and updates one bounded tool-like **Subagents** transcript
+block in place, including between root turns. Its heading counts worker states
+and up to four active child lines show tasks and input/output tokens; `/subagents`
+retains the complete roster and cost. Ctrl+O retains disclosure. Structured
+priced child cost temporarily augments the host-owned footer; after
+`octet-agent` mirrors the settled child usage into root `delegated_agent`
+records, the idle footer reads only the durable session total.
 
 ## Skills
 

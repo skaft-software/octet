@@ -389,22 +389,21 @@ Snapshots contain:
 - declared inspect, stop, and stop-all actions routed only to the manifest command.
 
 Prompts, tool arguments/results, and running model prose never appear in the
-worker list or composer-adjacent activity block. Transient tool identities and
-phases also stay out of compact summaries so the lifecycle/usage columns do not
-shift on each child tool start or finish. The host returns per-worker
-structured phase/current tool, host-observed tool calls, disjoint provider token
-buckets, turn count, and priced cost. The extension places those values in
-generic activity `metrics`; it never supplies terminal rows or footer text. In
-the TUI, octet renders a bounded owner-fenced **Subagents** strip pinned above
-the composer while retained workers are active. It is chrome, not a persistent
-transcript event, and never enters semantic copy. Native
-`AgentEvent::DelegationUpdated` supplies the snapshot; the strip does not poll
-`/subagents status`. Rows show lifecycle, model, metrics, and `tools` (tool-call
-count, not model turns). Terminal groups collapse to counted summaries; Ctrl+O
-expands within the height cap. `/subagents` retains the complete roster and
-failure details after the strip hides. First-party orchestration calls/results
-and worker state/reason transitions do not append transcript notices; ordinary
-tool/run errors and approval prompts remain visible. Input
+worker list or live transcript block. Transient tool identities and phases also
+stay out of compact summaries so lifecycle and usage remain legible. The host
+returns per-worker structured phase/current tool, host-observed tool calls,
+disjoint provider token buckets, turn count, and priced cost. The extension
+places those values in generic activity `metrics`; it never supplies terminal
+rows or footer text. In the TUI, octet updates one bounded owner-fenced,
+tool-like **Subagents** transcript block in place while workers are active,
+including between root turns. Its heading counts worker states; up to four
+active child lines show task and input/output tokens. Native
+`AgentEvent::DelegationUpdated` supplies the snapshot; the block does not poll
+`/subagents status`. Ctrl+O retains disclosure. `/subagents` retains the complete
+roster, model, `tools` (tool-call count, not model turns), cost, and failure
+details after the block settles. First-party orchestration calls/results and
+worker state/reason transitions do not append automatic per-worker transcript
+notices; ordinary tool/run errors and approval prompts remain visible. Input
 includes the three disjoint uncached/cache-read/cache-write buckets, while
 reasoning remains a subset of output.
 

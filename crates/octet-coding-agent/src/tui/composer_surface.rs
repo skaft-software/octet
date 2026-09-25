@@ -931,17 +931,6 @@ fn append_status_footer(
     }
 }
 
-/// Format a token count compactly: `1.2k`, `856`, `1.0m`.
-pub(crate) fn compact_token_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}m", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------

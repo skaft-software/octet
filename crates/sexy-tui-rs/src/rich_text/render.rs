@@ -2331,7 +2331,7 @@ impl AppendCodeText {
             self.column = column;
             let cells = renderer.options.width.grapheme_width(grapheme, column);
             if grapheme == "\t" {
-                self.text.extend(std::iter::repeat(' ').take(cells));
+                self.text.extend(std::iter::repeat_n(' ', cells));
                 stats.copied_bytes += cells as u64;
             } else {
                 self.text.push_str(grapheme);

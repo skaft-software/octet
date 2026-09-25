@@ -118,8 +118,13 @@ the callback. This ordering installs subscription acknowledgement fences before
 a following event can be delivered. The serial reader never waits for an RPC
 response; a separate cancellable worker performs rebinding, so a replacement binding
 clears the declaration/subscription/sequence ledger and re-establishes only the
-bounded desired set. Missing or invalid lifecycle control fails the participant
-closed instead of continuing on an apparently current stale ledger.
+bounded desired set. An ACK older than an observed topic revision cannot activate
+a subscription; desired interest survives for a fresh subscribe ACK. An ACK for a
+replaced binding is rejected and never admits events: the old request is not
+replayed under the new binding, but bounded desired declarations and interests
+are reconciled with new requests. `close()` cancels work and clears desired intent;
+there is no replay after shutdown. Missing or invalid lifecycle control fails the
+participant closed instead of continuing on an apparently current stale ledger.
 
 The SDK's legacy `Extension` runtime does **not** become an API `0.3` runtime;
 wire these helpers to an ordinary canonical API `0.3` process loop. Recreating a helper

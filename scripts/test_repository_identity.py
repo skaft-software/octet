@@ -127,7 +127,7 @@ class SourceDistributionVersionTests(unittest.TestCase):
         self.version = re.search(r'^version = "([^"]+)"$',
                                  (self.root / "Cargo.toml").read_text(), re.MULTILINE).group(1)
 
-    def test_first_party_source_manifests_and_published_package_pins(self):
+    def test_first_party_source_manifests_and_installer_pins(self):
         for name in ("Cargo.lock", "extensions/octet-serve/Cargo.lock"):
             entries = re.findall(r'name = "(octet-[^"]+)"\nversion = "([^"]+)"',
                                  (self.root / name).read_text())
@@ -143,15 +143,17 @@ class SourceDistributionVersionTests(unittest.TestCase):
             self.assertEqual(set(versions), {self.version}, name)
         self.assertIn(f'\nversion = "{self.version}"\n',
                       (self.root / "extensions/octet-serve/Cargo.toml").read_text())
-        self.assertIn(f'\nversion = "{PUBLISHED_NATIVE_VERSION}"\n',
+        # Source package/installer versions follow the candidate. Public download
+        # links are checked separately against the preceding published release.
+        self.assertIn(f'\nversion = "{self.version}"\n',
                       (self.root / "sdk/python/pyproject.toml").read_text())
         self.assertEqual(json.loads((self.root / "sdk/typescript/package.json").read_text())["version"],
-                         PUBLISHED_NATIVE_VERSION)
-        self.assertIn(f'\nversion="{PUBLISHED_NATIVE_VERSION}"\n', (SCRIPTS / "install.sh").read_text())
+                         self.version)
+        self.assertIn(f'\nversion="{self.version}"\n', (SCRIPTS / "install.sh").read_text())
         for package in ("octet-browse", "octet-mcp", "octet-subagents", "octet-web-search"):
             manifest = (self.root / "extensions" / package / "extension.toml").read_text()
             with self.subTest(package=package):
-                self.assertIn(f'\nversion = "{PUBLISHED_NATIVE_VERSION}"\n', manifest)
+                self.assertIn(f'\nversion = "{self.version}"\n', manifest)
                 self.assertIn(f'\nrequires_octet = "={self.version}"\n', manifest)
                 self.assertIn('\napi_version = "0.4"\n', manifest)
 
@@ -177,7 +179,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
                             (root / "Cargo.toml").read_text(), re.MULTILINE).group(1)
         notes = (root / "docs/releases" / f"v{version}.md").read_text()
         self.assertEqual(notes.splitlines()[0], f"# octet {version}")
-        self.assertIn("local release candidate — not published", notes.lower())
+        normalized = " ".join(notes.lower().split())
         self.assertRegex(notes, r"(?m)^## (Fixed|Added|Changed|Highlights)$")
         changelog = (root / "CHANGELOG.md").read_text()
         candidate = f"## [{version}] - Release candidate" in changelog.splitlines()
@@ -187,7 +189,8 @@ class ReleaseDocumentationTests(unittest.TestCase):
             self.assertEqual(releases[0], version)
             self.assertGreater(len(releases), 1)
             install_version = releases[1]
-            self.assertIn("not published", normalized)
+            self.assertIn("unreleased source candidate", normalized)
+            self.assertEqual(install_version, PUBLISHED_NATIVE_VERSION)
         for name in ("README.md", "docs/installation.md"):
             with self.subTest(path=name):
                 guide = (root / name).read_text()
@@ -199,9 +202,11 @@ class ReleaseDocumentationTests(unittest.TestCase):
 
     def test_distribution_notes_keep_candidate_and_publication_distinct(self):
         text = (SCRIPTS.parent / "docs/distribution.md").read_text()
-        self.assertIn("Last published native", text)
-        self.assertIn("Local source candidate", text)
-        self.assertIn(f"`{PUBLISHED_NATIVE_VERSION}`", text)
+        version = re.search(r'^version = "([^"]+)"$',
+                            (SCRIPTS.parent / "Cargo.toml").read_text(), re.MULTILINE).group(1)
+        self.assertIn(f"/releases/tag/v{PUBLISHED_NATIVE_VERSION}", text)
+        self.assertIn(f"**{version} (release candidate)**", text)
+        self.assertIn("not a publication claim", " ".join(text.split()))
 
 
 if __name__ == "__main__":

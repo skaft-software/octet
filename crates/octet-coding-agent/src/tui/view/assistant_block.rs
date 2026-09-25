@@ -170,17 +170,16 @@ impl AssistantBlock {
     /// caches remain with their owner and are never cloned for publication.
     pub(super) fn render_metadata(&self) -> Self {
         let mut metadata = Self::streaming("");
-        metadata.model_lab = self.model_lab.clone();
-        metadata.finished = self.finished.clone();
-        metadata.reasoning_expanded = self.reasoning_expanded.clone();
-        metadata.reasoning_started_at = self.reasoning_started_at.clone();
-        metadata.reasoning_elapsed = self.reasoning_elapsed.clone();
+        metadata.model_lab = self.model_lab;
+        metadata.finished = self.finished;
+        metadata.reasoning_expanded = self.reasoning_expanded;
+        metadata.reasoning_started_at = self.reasoning_started_at;
+        metadata.reasoning_elapsed = self.reasoning_elapsed;
         metadata.retry_activity = self.retry_activity.clone();
-        metadata.activity_started_at = self.activity_started_at.clone();
+        metadata.activity_started_at = self.activity_started_at;
         metadata.reasoning_heading = self.reasoning_heading.clone();
-        metadata.reasoning_heading_committed_blocks =
-            self.reasoning_heading_committed_blocks.clone();
-        metadata.show_reasoning_hint = self.show_reasoning_hint.clone();
+        metadata.reasoning_heading_committed_blocks = self.reasoning_heading_committed_blocks;
+        metadata.show_reasoning_hint = self.show_reasoning_hint;
         metadata
     }
 

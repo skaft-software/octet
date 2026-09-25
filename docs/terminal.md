@@ -130,10 +130,11 @@ the run settles; tool admission replaces it with the tool lifecycle. Retry statu
 keeps the interrupt hint but omits the run-elapsed counter, including after its
 backoff countdown reaches zero, so two clocks do not compete on the same row.
 
-While reasoning is active, the fixed two-row status has a quiet, static `Thinking`
-header and the latest explicit ATX or standalone-bold Markdown heading, followed
-by a subdued expansion hint. Ordinary reasoning body text is never promoted to
-a label; without a heading, only the hint appears on the second row.
+While reasoning is active, the bold `Thinking` label shimmers more quietly than
+`Working` on supported terminals. It shows the latest explicit ATX or
+standalone-bold Markdown heading with a subdued expansion hint. Ordinary
+reasoning body text is never promoted to a label; without a heading, only the
+hint appears.
 
 ```text
 • Thinking
@@ -160,17 +161,17 @@ by a count of hidden command lines. Ctrl+O expands the complete retained command
 and collapses it again; this does not alter the executed command or the separate
 output preview.
 
-Worker activity appears in a bounded **Subagents** strip pinned above the
-composer while any retained worker is active, even between root turns or during
-application-owned history navigation. It is not a transcript event and does not
-enter semantic copy. Rows retain state, model, and available metrics; the `tools`
-column counts tool calls, not model turns. Terminal groups collapse to counted
-summaries; Ctrl+O expands within the strip's height cap, and `/subagents` exposes
-the complete retained roster (up to 32) and failure details on demand.
+Worker activity appears in a bounded, tool-like **Subagents** transcript block
+while workers are active. The block updates in place rather than staying pinned
+above the composer; its heading counts worker states, and up to four child lines
+show active tasks with input/output tokens. Ctrl+O retains disclosure, and
+`/subagents` exposes the complete roster (up to 32) and failure details on
+demand. Its list rows retain state, model, and available metrics; the `tools`
+column counts tool calls, not model turns.
 Host `limit_reached` belongs to the failed group; `interrupted`, `shutdown`,
 `detached`, and `awaiting_approval` belong to the stopped display group.
 Detached/approval-parked workers remain recoverable, not successful; their exact
-states and reasons remain inspectable after the strip hides. Raw first-party
+states and reasons remain inspectable after the block settles. Raw first-party
 orchestration calls and results, including errors, stay out of the interactive
 transcript during live execution and replay. Worker state/reason transitions do
 not append automatic notices. This presentation policy does not change worker
@@ -197,11 +198,13 @@ Final structured tool results are persisted/provider-visible when needed to
 continue the tool protocol. Live progress is neither persisted nor sent to the
 model. [Tool presentation contract](design/octet-tui.md#tool-presentation).
 
-Generic extension state is on demand. The subagents exception keeps an owner-scoped
-bounded pinned roster above the composer while any retained worker is active:
-lifecycle, tool calls, disjoint input/cache and output totals, and priced spend.
-Transient phases and tool identities remain in the inspector.
-The nonblocking 250 ms refresh retains its last fenced snapshot on failure.
+Generic extension state is on demand. The subagents exception updates an
+owner-scoped bounded transcript block while workers are active: state counts,
+active tasks, and input/output tokens. Input sums uncached, cache-read, and
+cache-write usage; output estimates are marked until usage settles. Tool-call
+counts, priced spend, transient phases, and tool identities remain in the
+inspector. The nonblocking 250 ms refresh retains its last fenced snapshot on
+failure.
 `/subagents` opens an arrow-key list; Enter opens a scrollable read-only child
 transcript. No extension replaces the cumulative footer. Completed child usage
 is mirrored once into the root ledger before settlement, including later cost

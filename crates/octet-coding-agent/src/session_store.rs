@@ -1955,7 +1955,8 @@ impl SessionStore {
         self.search_entries_with(query, limit, index_session_entries)
     }
 
-    /// The current entry-index revision, for callers that poll for changes.
+    /// Inspect the entry-index revision while testing batch reconciliation.
+    #[cfg(test)]
     pub fn entry_index_revision(&self) -> anyhow::Result<i64> {
         let catalog = SessionCatalog::open_recovering(&self.dir)?;
         catalog.entry_revision()

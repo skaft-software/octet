@@ -687,6 +687,7 @@ impl ExtensionRescanReport {
 }
 
 impl ExtensionReloadReport {
+    #[cfg(test)]
     fn into_notices(self) -> Vec<String> {
         self.processes
             .into_iter()
@@ -4975,6 +4976,9 @@ impl ExecutableExtensions {
         let _ = block_on_runtime(self.shutdown());
     }
 
+    // Compatibility convenience for in-crate lifecycle tests; production
+    // callers retain typed reload outcomes and report problems separately.
+    #[cfg(test)]
     pub async fn reload(&mut self) -> Vec<String> {
         self.reload_report().await.into_notices()
     }

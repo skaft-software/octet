@@ -794,6 +794,19 @@ test("matches the settled desktop workbench shell", async ({
   );
   await page.evaluate(() => document.fonts.ready);
 
+  // The current header includes shortcut help and the persisted dock controls;
+  // keep these semantic checks alongside the strict visual baseline.
+  await expect(
+    page.locator('.session-header-actions summary[aria-label="Keyboard shortcuts"]'),
+  ).toBeVisible();
+  for (const name of [
+    "Split dock into two panes",
+    "Move the first dock pane right",
+    "Move the second dock pane left",
+  ]) {
+    await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  }
+
   await expect(page.locator(".app-shell")).toHaveScreenshot(
     "workbench-shell-settled.png",
     {

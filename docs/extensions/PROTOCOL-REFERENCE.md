@@ -1068,14 +1068,15 @@ and active resource owner, ignores or diagnoses stale updates, and retains the
 latest accepted replacement for explicit TUI views, Serve, and bounded headless
 fallbacks. Generic snapshots do not become ambient chrome. The coding TUI
 recognizes owner-fenced `octet-subagents` activities as a first-party observed
-surface, renders the complete bounded roster and its structured metrics in a
-persistent transcript event above the composer during the owning run from
-native `AgentEvent::DelegationUpdated` events, and does not poll a status
-command; the extension cannot supply footer text or terminal rows. It
-clears stale state on owner/process replacement; Serve action identity includes
-the instance fence, generation, and revision before routing the selected
-manifest process's command. The notification never invokes an action, repeats
-work, mutates a tool result, or grants authority.
+surface and updates one bounded tool-like **Subagents** transcript block in place
+from native `AgentEvent::DelegationUpdated` events, including between root turns.
+Its heading counts worker states and up to four active child lines show tasks and
+input/output tokens; `/subagents` retains the complete roster, metrics, and cost.
+The TUI does not poll a status command, and the extension cannot supply footer
+text or terminal rows. It clears stale state on owner/process replacement; Serve
+action identity includes the instance fence, generation, and revision before
+routing the selected manifest process's command. The notification never invokes
+an action, repeats work, mutates a tool result, or grants authority.
 
 ---
 

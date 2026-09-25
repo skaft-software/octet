@@ -1861,7 +1861,6 @@ Environment:
             "LICENSE",
             "extensions/octet-browse/REFERENCE.md",
             "extensions/octet-subagents/REFERENCE.md",
-            "docs/reference/pi-compat/profiles/0.84.4.json",
             "crates/octet-ai/src/responses_ws.rs",
             "sdk/typescript/src/api_v03.ts",
             "sdk/typescript/src/api_v03.mjs",
@@ -1874,6 +1873,8 @@ Environment:
             "extensions/octet-browse/extension.toml",
             "extensions/octet-browse/extension.py",
             "crates/octet-coding-agent/src/main.rs",
+            // The retired parity inventory is not part of the public package.
+            "docs/reference/pi-compat/profiles/0.84.4.json",
             "docs/private.md",
             "sdk/private.so",
         ] {

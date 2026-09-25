@@ -314,6 +314,38 @@
     "structured_output": true,
     "tool_call": true
   },
+  "anthropic/claude-opus-5-5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Opus 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "anthropic/claude-sonnet-4-5": {
     "limit": {
       "context": 1000000,
@@ -1142,7 +1174,7 @@
     },
     "limit": {
       "context": 1000000,
-      "output": 384000
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -1177,7 +1209,7 @@
     },
     "limit": {
       "context": 1000000,
-      "output": 384000
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -1212,7 +1244,7 @@
     },
     "limit": {
       "context": 1000000,
-      "output": 384000
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -1247,7 +1279,7 @@
     },
     "limit": {
       "context": 1000000,
-      "output": 384000
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -1266,6 +1298,7 @@
       {
         "type": "effort",
         "values": [
+          "low",
           "high",
           "max"
         ]
@@ -1442,6 +1475,45 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/models/ember-1": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ember-1",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "min": 1024,
+        "type": "budget_tokens"
+      }
+    ],
     "tool_call": true
   },
   "fireworks/accounts/fireworks/models/glm-5p2": {
@@ -3995,6 +4067,33 @@
     "structured_output": true,
     "tool_call": true
   },
+  "huggingface/tencent/Hy4-preview": {
+    "limit": {
+      "context": 1000000,
+      "output": 64000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Hy4 preview",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "huggingface/thinkingmachines/Inkling": {
     "limit": {
       "context": 1048576,
@@ -4409,7 +4508,7 @@
   },
   "minimax/MiniMax-M3": {
     "limit": {
-      "context": 1048576,
+      "context": 1000000,
       "output": 512000
     },
     "modalities": {
@@ -4513,7 +4612,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 1048576
     },
     "modalities": {
       "input": [
@@ -7587,6 +7686,74 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openai/gpt-6-luna": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6 Luna",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openai/gpt-6-sol": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6 Sol",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openai/gpt-image-1": {
     "limit": {
       "context": 0,
@@ -8224,6 +8391,37 @@
       ]
     },
     "name": "Claude Opus 5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "opencode/claude-opus-5-5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Opus 5.5",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -9692,6 +9890,74 @@
     "structured_output": true,
     "tool_call": true
   },
+  "opencode/gpt-6-luna": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6 Luna",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "opencode/gpt-6-sol": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6 Sol",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode/grok-4.5": {
     "limit": {
       "context": 500000,
@@ -9736,6 +10002,37 @@
       ]
     },
     "name": "Grok 4.6",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "opencode/grok-4.7": {
+    "limit": {
+      "context": 500000,
+      "output": 500000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Grok 4.7 (30% Off)",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -10243,6 +10540,30 @@
       ]
     },
     "name": "MiMo V2.5 Free",
+    "reasoning": true,
+    "reasoning_options": [],
+    "tool_call": true
+  },
+  "opencode/mimo-v2.6-flash-free": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 200000,
+      "output": 32000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiMo-V2.6-Flash Free",
     "reasoning": true,
     "reasoning_options": [],
     "tool_call": true
@@ -10781,6 +11102,41 @@
     "reasoning_options": [],
     "tool_call": true
   },
+  "opencode/space-bunny-free": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "input": 524288,
+      "output": 524288
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Space Bunny Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "opencode/trinity-large-preview-free": {
     "limit": {
       "context": 131072,
@@ -10885,6 +11241,62 @@
     "name": "Aion-3.0-Mini",
     "reasoning": true,
     "reasoning_options": [],
+    "structured_output": false,
+    "tool_call": true
+  },
+  "openrouter/aion-labs/aion-3.5": {
+    "limit": {
+      "context": 262144,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Aion 3.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": false,
+    "tool_call": true
+  },
+  "openrouter/aion-labs/aion-3.5-mini": {
+    "limit": {
+      "context": 262144,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Aion 3.5 Mini",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
     "structured_output": false,
     "tool_call": true
   },
@@ -11133,31 +11545,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/anthropic/claude-opus-4": {
-    "limit": {
-      "context": 200000,
-      "output": 32000
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Claude Opus 4",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/anthropic/claude-opus-4.1": {
     "limit": {
       "context": 200000,
@@ -11350,9 +11737,41 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/anthropic/claude-sonnet-4": {
+  "openrouter/anthropic/claude-opus-5.5": {
     "limit": {
       "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Opus 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/anthropic/claude-sonnet-4": {
+    "limit": {
+      "context": 200000,
       "output": 64000
     },
     "modalities": {
@@ -11743,6 +12162,30 @@
     "structured_output": true,
     "tool_call": false
   },
+  "openrouter/cohere/command-a-plus": {
+    "limit": {
+      "context": 192000,
+      "output": 64000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Command A+",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/cohere/command-r-08-2024": {
     "limit": {
       "context": 128000,
@@ -12076,7 +12519,7 @@
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
     "limit": {
       "context": 1048576,
-      "output": 262144
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -12141,7 +12584,7 @@
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 384000
     },
     "modalities": {
       "input": [
@@ -12172,7 +12615,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -12220,6 +12663,38 @@
     "reasoning_options": [
       {
         "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/fireworks/ember-1": {
+    "limit": {
+      "context": 1048576,
+      "output": 943718
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ember-1",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
       }
     ],
     "structured_output": true,
@@ -13269,7 +13744,7 @@
   },
   "openrouter/inclusionai/ling-3.0-flash-vl": {
     "limit": {
-      "context": 131072,
+      "context": 262144,
       "output": 32768
     },
     "modalities": {
@@ -13290,31 +13765,6 @@
       }
     ],
     "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/inclusionai/ling-3.0-flash-vl:free": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Ling 3.0 Flash VL (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
     "tool_call": true
   },
   "openrouter/inference-net/schematron-v2-small": {
@@ -13352,24 +13802,6 @@
     "reasoning": false,
     "structured_output": true,
     "tool_call": false
-  },
-  "openrouter/kwaipilot/kat-coder-pro-v2": {
-    "limit": {
-      "context": 262144,
-      "output": 144000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "KAT-Coder-Pro V2",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
   },
   "openrouter/kwaipilot/kat-coder-pro-v2.5": {
     "limit": {
@@ -13840,7 +14272,7 @@
   "openrouter/minimax/minimax-01": {
     "limit": {
       "context": 1000192,
-      "output": 900172
+      "output": 40000
     },
     "modalities": {
       "input": [
@@ -13885,7 +14317,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 131072
+      "output": 176947
     },
     "modalities": {
       "input": [
@@ -14136,6 +14568,26 @@
       ]
     },
     "name": "Mistral Large 2407",
+    "reasoning": false,
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/mistralai/mistral-large-2512": {
+    "limit": {
+      "context": 262144,
+      "output": 209715
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Mistral Large 3",
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
@@ -14922,7 +15374,7 @@
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -16193,6 +16645,140 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/openai/gpt-6-luna": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6 Luna",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/openai/gpt-6-luna-pro": {
+    "limit": {
+      "context": 1050000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "pdf",
+        "image",
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6 Luna Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/openai/gpt-6-sol": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6 Sol",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/openai/gpt-6-sol-pro": {
+    "limit": {
+      "context": 1050000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "pdf",
+        "image",
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6 Sol Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/openai/gpt-audio": {
     "limit": {
       "context": 128000,
@@ -16284,7 +16870,7 @@
   "openrouter/openai/gpt-oss-20b": {
     "limit": {
       "context": 131072,
-      "output": 117964
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -17111,7 +17697,7 @@
   "openrouter/qwen/qwen3-30b-a3b-instruct-2507": {
     "limit": {
       "context": 262144,
-      "output": 32000
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -17325,7 +17911,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -17343,7 +17929,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-thinking": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -17401,7 +17987,7 @@
   "openrouter/qwen/qwen3-vl-30b-a3b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -17698,7 +18284,7 @@
   "openrouter/qwen/qwen3.6-27b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 262140
     },
     "modalities": {
       "input": [
@@ -18048,6 +18634,67 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/qwen/qwen3.8-max-prime": {
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen 3.8 Max Prime",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/qwen/qwen3.8-omni-flash": {
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 Omni Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/rekaai/reka-edge": {
     "limit": {
       "context": 16384,
@@ -18294,6 +18941,38 @@
     "reasoning": false,
     "structured_output": true,
     "tool_call": false
+  },
+  "openrouter/stealth/space-bunny-alpha": {
+    "limit": {
+      "context": 1000000,
+      "output": 524288
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Space Bunny Alpha",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": false,
+    "tool_call": true
   },
   "openrouter/stepfun/step-3.5-flash": {
     "limit": {
@@ -18730,6 +19409,38 @@
     "structured_output": true,
     "tool_call": false
   },
+  "openrouter/upstage/solar-mini4": {
+    "limit": {
+      "context": 524288,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Solar Mini 4",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/upstage/solar-pro-3": {
     "limit": {
       "context": 131072,
@@ -18958,6 +19669,37 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/x-ai/grok-4.7": {
+    "limit": {
+      "context": 500000,
+      "output": 450000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Grok 4.7",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/x-ai/grok-build-0.1": {
     "limit": {
       "context": 256000,
@@ -19025,6 +19767,84 @@
       ]
     },
     "name": "MiMo-V2.5-Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/xiaomi/mimo-v2.6-flash": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiMo-V2.6-Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/xiaomi/mimo-v2.6-pro": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiMo-V2.6-Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/xiaomi/mimo-v2.6-pro-ultraspeed": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiMo-V2.6-Pro-UltraSpeed",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -19348,7 +20168,7 @@
   "openrouter/z-ai/glm-5.3": {
     "limit": {
       "context": 1310720,
-      "output": 131072
+      "output": 943717
     },
     "modalities": {
       "input": [
@@ -19419,6 +20239,34 @@
       ]
     },
     "name": "GLM 5.3 FlashX",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": false,
+    "tool_call": true
+  },
+  "openrouter/z-ai/glm-5.3-prime": {
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.3 Prime",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -19533,9 +20381,6 @@
     "name": "Claude Opus Latest",
     "reasoning": true,
     "reasoning_options": [
-      {
-        "type": "toggle"
-      },
       {
         "type": "effort",
         "values": [
@@ -19973,7 +20818,7 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "limit": {
       "context": 1310720,
-      "output": 943718
+      "output": 128000
     },
     "modalities": {
       "input": [
@@ -21616,7 +22461,7 @@
   },
   "together/MiniMaxAI/MiniMax-M2.7": {
     "limit": {
-      "context": 202752,
+      "context": 196608,
       "output": 131072
     },
     "modalities": {
@@ -21892,7 +22737,7 @@
       "field": "reasoning_content"
     },
     "limit": {
-      "context": 1000000,
+      "context": 1048576,
       "output": 384000
     },
     "modalities": {
@@ -22392,7 +23237,7 @@
       "field": "reasoning_content"
     },
     "limit": {
-      "context": 512000,
+      "context": 1048575,
       "output": 164000
     },
     "modalities": {
@@ -22648,6 +23493,37 @@
     "structured_output": true,
     "tool_call": true
   },
+  "xai/grok-4.7": {
+    "limit": {
+      "context": 500000,
+      "output": 500000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Grok 4.7",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "xai/grok-build-0.1": {
     "limit": {
       "context": 256000,
@@ -22686,6 +23562,26 @@
       ]
     },
     "name": "Grok Imagine Image",
+    "reasoning": false,
+    "tool_call": false
+  },
+  "xai/grok-imagine-image-quality": {
+    "limit": {
+      "context": 16000,
+      "output": 0
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "image",
+        "pdf"
+      ]
+    },
+    "name": "Grok Imagine Image Quality",
     "reasoning": false,
     "tool_call": false
   },
@@ -22878,6 +23774,90 @@
       ]
     },
     "name": "MiMo-V2.5-Pro-UltraSpeed",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "tool_call": true
+  },
+  "xiaomi/mimo-v2.6-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiMo-V2.6-Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "tool_call": true
+  },
+  "xiaomi/mimo-v2.6-pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiMo-V2.6-Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "tool_call": true
+  },
+  "xiaomi/mimo-v2.6-pro-ultraspeed": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiMo-V2.6-Pro-UltraSpeed",
     "reasoning": true,
     "reasoning_options": [
       {

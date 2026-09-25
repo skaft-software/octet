@@ -237,11 +237,11 @@ impl SubagentTranscript {
                 .collect()
         };
         for (id, group, queued) in groups {
-            if group == SubagentStateGroup::Running || (previous.is_some() && !known.contains(&id))
+            if (group == SubagentStateGroup::Running
+                || (previous.is_some() && !known.contains(&id)))
+                && !summary.worker_ids.contains(&id)
             {
-                if !summary.worker_ids.contains(&id) {
-                    summary.worker_ids.push(id.clone());
-                }
+                summary.worker_ids.push(id.clone());
             }
             if !summary.worker_ids.contains(&id) {
                 continue;
@@ -3329,7 +3329,6 @@ impl InteractiveShell {
                 failure_class: snapshot.failure_class.clone(),
                 failure_reason: snapshot.failure_reason.clone(),
                 include_cost_in_session_total: true,
-                ..SubagentActivityView::default()
             });
         }
     }
@@ -4092,11 +4091,6 @@ impl InteractiveShell {
         invalidate_editor_autocomplete(&mut state);
     }
 
-    /// Existing callers recall from the same joint pending-input order.
-    pub fn edit_queued_follow_up(&mut self) {
-        self.edit_queued_message();
-    }
-
     /// Keep nonretractable steering (notably sticky `/answer`) pending until
     /// the Agent reports durable delivery at the next model-turn boundary.
     pub fn queue_steering(&mut self, composed: &ComposedInput) {
@@ -4483,7 +4477,6 @@ impl InteractiveShell {
                 failure_class: None,
                 failure_reason: None,
                 include_cost_in_session_total,
-                ..SubagentActivityView::default()
             })
         });
         let mut state = self.state.borrow_mut();
@@ -4516,7 +4509,6 @@ impl InteractiveShell {
                     failure_class: snapshot.failure_class.clone(),
                     failure_reason: snapshot.failure_reason.clone(),
                     include_cost_in_session_total,
-                    ..SubagentActivityView::default()
                 },
             )
         });

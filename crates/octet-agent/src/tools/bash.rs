@@ -711,7 +711,7 @@ impl CheckpointedBashTool {
         interval: Duration,
     ) -> Self {
         Self {
-            bash: BashTool::default(),
+            bash: BashTool,
             checkpoints: BashCheckpoints::new(sink, interval),
         }
     }
@@ -1480,7 +1480,7 @@ mod tests {
     fn effect_validates_capabilities_and_arguments_before_approval() {
         let f = fixture();
         assert_eq!(
-            BashTool::default()
+            BashTool
                 .effect(&json!({"command": "printf ok"}), &f.ctx())
                 .unwrap(),
             ToolEffect::HostProcess
@@ -1494,11 +1494,11 @@ mod tests {
             json!({"command": "bad\0command"}),
         ] {
             assert!(
-                BashTool::default().effect(&arguments, &f.ctx()).is_err(),
+                BashTool.effect(&arguments, &f.ctx()).is_err(),
                 "{arguments}"
             );
         }
-        assert!(BashTool::default()
+        assert!(BashTool
             .effect(
                 &json!({"command": "x".repeat(MAX_BASH_COMMAND_BYTES + 1)}),
                 &f.ctx(),
@@ -1507,7 +1507,7 @@ mod tests {
 
         let mut disabled = fixture();
         disabled.sandbox.allow_shell = false;
-        let error = BashTool::default()
+        let error = BashTool
             .effect(&json!({"command": "printf ok"}), &disabled.ctx())
             .unwrap_err();
         assert!(error.message.contains("allow_shell=true"));
@@ -1518,7 +1518,7 @@ mod tests {
 
         disabled.sandbox.allow_shell = true;
         disabled.sandbox.allow_process = false;
-        let error = BashTool::default()
+        let error = BashTool
             .effect(&json!({"command": "printf ok"}), &disabled.ctx())
             .unwrap_err();
         assert!(error.message.contains("allow_process=true"));
@@ -1531,7 +1531,7 @@ mod tests {
     #[tokio::test]
     async fn every_command_uses_bash_semantics() {
         let f = fixture();
-        let out = BashTool::default()
+        let out = BashTool
             .execute(
                 json!({"command": "printf '%s\\n' brace-{one,two} \"$BASH_VERSION\""}),
                 &f.ctx(),
@@ -1567,7 +1567,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
         f.sandbox.shell_path = Some(shell);
-        let out = BashTool::default()
+        let out = BashTool
             .execute(json!({"command": "printf 'command-output\\n'"}), &f.ctx())
             .await
             .unwrap();
@@ -1578,7 +1578,7 @@ mod tests {
     #[tokio::test]
     async fn successful_command_without_descendants_releases_its_registry_entry() {
         let f = fixture();
-        BashTool::default()
+        BashTool
             .execute(json!({"command": "printf '%s' $$ > leader.pid"}), &f.ctx())
             .await
             .unwrap();
@@ -1610,7 +1610,7 @@ mod tests {
             resource_owner: "bash-detached-descendant-test",
         };
 
-        let output = BashTool::default()
+        let output = BashTool
             .execute(
                 json!({
                     "command": r#"printf '%s' $$ > leader.pid
@@ -1684,7 +1684,7 @@ rm descendant.ready"#
             "python3 -c 'print(1)'",
             "env /bin/sh -c true",
         ] {
-            let err = BashTool::default()
+            let err = BashTool
                 .execute(json!({"command": command}), &ctx)
                 .await
                 .unwrap_err();
@@ -1707,7 +1707,7 @@ rm descendant.ready"#
             execution_scope: "bash-permission-test",
             resource_owner: "bash-permission-test",
         };
-        let err = BashTool::default()
+        let err = BashTool
             .execute(json!({"command": "true"}), &ctx)
             .await
             .unwrap_err();
@@ -1717,7 +1717,7 @@ rm descendant.ready"#
     #[tokio::test]
     async fn nonzero_exit_and_stderr_are_reported_as_an_error() {
         let f = fixture();
-        let error = BashTool::default()
+        let error = BashTool
             .execute(json!({"command": "echo oops >&2; exit 3"}), &f.ctx())
             .await
             .unwrap_err();
@@ -1743,7 +1743,7 @@ rm descendant.ready"#
             execution_scope: "bash-shared-budget-test",
             resource_owner: "bash-shared-budget-test",
         };
-        let out = BashTool::default()
+        let out = BashTool
             .execute(
                 json!({"command": "i=0; while [ $i -lt 150 ]; do printf 'abcdefghij\\n'; i=$((i+1)); done"}),
                 &ctx,
@@ -1760,19 +1760,19 @@ rm descendant.ready"#
     async fn cwd_is_workspace_bounded() {
         let f = fixture();
         std::fs::create_dir(f.workspace.join("sub")).unwrap();
-        let out = BashTool::default()
+        let out = BashTool
             .execute(json!({"command": "pwd", "cwd": "sub"}), &f.ctx())
             .await
             .unwrap();
         assert!(out.text.contains("/sub"), "{}", out.text);
 
-        let err = BashTool::default()
+        let err = BashTool
             .execute(json!({"command": "pwd", "cwd": "../"}), &f.ctx())
             .await
             .unwrap_err();
         assert!(err.message.contains(".."), "{err}");
 
-        let err = BashTool::default()
+        let err = BashTool
             .execute(json!({"command": "pwd", "cwd": "missing"}), &f.ctx())
             .await
             .unwrap_err();
@@ -1796,7 +1796,7 @@ rm descendant.ready"#
             cancellation: Default::default(),
         };
 
-        let out = BashTool::default()
+        let out = BashTool
             .execute(
                 json!({"command": "pwd", "cwd": outside.path().to_string_lossy()}),
                 &ctx,
@@ -1826,7 +1826,7 @@ rm descendant.ready"#
             execution_scope: "bash-output-test",
             resource_owner: "bash-output-test",
         };
-        let out = BashTool::default()
+        let out = BashTool
             .execute(
                 json!({"command": "i=0; while [ $i -lt 2000 ]; do echo \"line $i\"; i=$((i+1)); done"}),
                 &ctx,
@@ -1865,7 +1865,7 @@ rm descendant.ready"#
             resource_owner: "bash-timeout-test",
         };
         let started = std::time::Instant::now();
-        let err = BashTool::default()
+        let err = BashTool
             .execute(
                 json!({"command": "printf 'partial-before-timeout\\n'; sleep 30"}),
                 &ctx,
@@ -1899,7 +1899,7 @@ rm descendant.ready"#
             resource_owner: "bash-per-call-timeout-test",
         };
         let started = std::time::Instant::now();
-        let err = BashTool::default()
+        let err = BashTool
             .execute(json!({"command": "sleep 30", "timeout_ms": 200}), &ctx)
             .await
             .unwrap_err();
@@ -1926,7 +1926,7 @@ rm descendant.ready"#
             resource_owner: "bash-escaped-pipe-test",
         };
         let started = std::time::Instant::now();
-        let error = BashTool::default()
+        let error = BashTool
             .execute(
                 json!({"command": "python3 -c 'import os,time; os.setsid(); open(\"escaped.pid\", \"w\").write(str(os.getpid())); time.sleep(30)' & sleep 30"}),
                 &ctx,
@@ -1963,7 +1963,7 @@ rm descendant.ready"#
 
         {
             let ctx = f.ctx();
-            let tool = BashTool::default();
+            let tool = BashTool;
             let bash = tool.execute(args, &ctx);
             tokio::pin!(bash);
             let _ = tokio::time::timeout(Duration::from_millis(500), &mut bash).await;

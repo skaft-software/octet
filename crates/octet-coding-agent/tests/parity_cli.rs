@@ -1002,8 +1002,8 @@ fn sparse_provider_inventory_inherits_documented_image_input_for_the_real_cli() 
         "the documented 1M context must be reported, not 128K: {flash_row}"
     );
     assert!(
-        fields.contains(&"384000"),
-        "the documented 384K output cap must be reported: {flash_row}"
+        fields.contains(&"393216"),
+        "the refreshed documented 393,216-token output cap must be reported: {flash_row}"
     );
     assert_eq!(
         fields.last(),

@@ -13790,7 +13790,7 @@ enum AgentSessionOperation {
         fingerprint: Option<String>,
         message: String,
         idempotency_key: String,
-        policy: ExtensionAgentSessionPolicy,
+        policy: Box<ExtensionAgentSessionPolicy>,
     },
     Message {
         target: String,
@@ -13831,7 +13831,7 @@ async fn execute_agent_session_operation(
                 fingerprint,
                 message,
                 idempotency_key,
-                policy,
+                policy: *policy,
             },
         ),
         AgentSessionOperation::Message { target, message } => {
@@ -15999,7 +15999,7 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                         fingerprint: request.fingerprint,
                         message: request.message,
                         idempotency_key: request.idempotency_key,
-                        policy,
+                        policy: Box::new(policy),
                     },
                 )?;
             }
@@ -24689,9 +24689,10 @@ command = "schema-budget.py"
         .await
         .expect("bounded catalog mutation completion");
         assert_eq!(host.tool_definitions().len(), 6);
-        let connection = read_std_lock(&process.inner.connection);
-        assert_eq!(connection.catalog_revision.load(Ordering::Acquire), 6);
-        drop(connection);
+        {
+            let connection = read_std_lock(&process.inner.connection);
+            assert_eq!(connection.catalog_revision.load(Ordering::Acquire), 6);
+        }
         assert!(process.shutdown().await);
     }
 

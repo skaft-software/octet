@@ -705,6 +705,10 @@ impl ResponsesWsPool {
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Operation entry keeps endpoint, request, startup/resume, and steering policies explicit"
+    )]
     pub(crate) async fn request_operation(
         &self,
         key: Option<&str>,

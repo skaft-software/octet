@@ -4418,7 +4418,7 @@ async fn apply_live_reload_plan(
     if workers > 0 {
         for notice in reload.checked_problems(
             crate::reload::ReloadComponent::Workers,
-            vec![format!("reload deferred: {} host worker task(s) remain attached; finish or stop the work, then exit and resume to replace the owning host", workers)],
+            vec![format!("reload refused: {} host worker task(s) remain attached; finish or stop the work, then exit and resume to replace the owning host", workers)],
             false,
         ) {
             shell.notice(notice);

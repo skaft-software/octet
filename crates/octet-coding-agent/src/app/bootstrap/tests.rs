@@ -1904,6 +1904,13 @@ fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
         )
         .is_none());
     }
+    // Reviewed subscription prices still apply to explicitly allowlisted models,
+    // but even a known public API quote must not price an unreviewed OAuth route.
+    let astra = crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6-astra").unwrap();
+    assert_eq!(astra.input, TokenRate(10_000_000));
+    assert_eq!(astra.output, TokenRate(50_000_000));
+    assert!(crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-4o-mini").is_some());
+    assert!(crate::providers::pricing_for(&crate::providers::CODEX, "gpt-4o-mini").is_none());
 }
 
 #[test]
@@ -4947,7 +4954,7 @@ fn direct_grok_4_7_uses_its_own_inventory_route_and_long_context_tariff() {
     let model = catalog.resolve(&ModelId("xai/grok-4.7".into())).unwrap();
     assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
     assert_eq!(model.spec.limits.context_window, 500_000);
-    assert_eq!(model.spec.limits.max_output_tokens, 32_768); // no official output ceiling
+    assert_eq!(model.spec.limits.max_output_tokens, 500_000); // refreshed xAI snapshot limit
     assert!(model
         .spec
         .capabilities
@@ -5479,10 +5486,10 @@ fn pinned_metadata_enriches_discovered_display_only() {
     );
     // A sparse endpoint publishes no limits, so the pinned provider record
     // supplies its documented window (DeepSeek V4.1 Flash is 1M context /
-    // 384K output) instead of the generic 128K/64K placeholder that used to
+    // 393,216 output) instead of the generic 128K/64K placeholder that used to
     // truncate this model. The endpoint still wins whenever it says anything.
     assert_eq!(model.spec.limits.context_window, 1_000_000);
-    assert_eq!(model.spec.limits.max_output_tokens, 384_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 393_216);
     // The existing sparse tools default is independent of the supplement, and
     // every pinned field except the asserted input modalities and a documented
     // limit the endpoint refused to publish stays out of the authority boundary
@@ -5607,8 +5614,8 @@ fn pinned_metadata_preserves_endpoint_assertions_and_unknowns() {
         // publishes none, so the documented window applies and reasoning still
         // refuses to be invented from the snapshot.
         assert_eq!(model.context_window, Some(1_000_000));
-        assert_eq!(model.max_output_tokens, Some(384_000));
-        assert_eq!(deepseek_discovered_limits(&model), (1_000_000, 384_000));
+        assert_eq!(model.max_output_tokens, Some(393_216));
+        assert_eq!(deepseek_discovered_limits(&model), (1_000_000, 393_216));
     }
     for reasoning in [
         serde_json::json!("yes"),
@@ -6004,15 +6011,15 @@ fn pinned_metadata_production_deepseek_alias_follows_admitted_inventory_and_conf
         assert_eq!(legacy.spec.api_name, api_name);
         // Legacy V4 and the current Flash alias have different source defaults
         // and controls; matching display names must not conflate their contracts.
-        // Both aliases now carry the documented V4 window from the pinned row
+        // Both aliases now carry the refreshed pinned 1M/393,216 limits
         // because the endpoint publishes none; their reasoning contracts still
         // differ and must not be conflated.
         let (context, output, values, default) = if api_name == "deepseek-flash" {
-            (1_000_000, 384_000, vec!["none", "low", "high", "max"], None)
+            (1_000_000, 393_216, vec!["none", "low", "high", "max"], None)
         } else {
             (
                 1_000_000,
-                384_000,
+                393_216,
                 vec!["none", "high", "xhigh"],
                 Some("high"),
             )

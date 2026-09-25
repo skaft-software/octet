@@ -161,7 +161,7 @@ impl Extension for CoreTools {
         host.tool(ReadTool);
         host.tool(EditTool);
         host.tool(WriteTool);
-        host.tool(BashTool::default());
+        host.tool(BashTool);
         // The coding product disables this redundant schema by default, while
         // keeping it available to embedders and explicit tool allowlists.
         host.tool(SearchTool);

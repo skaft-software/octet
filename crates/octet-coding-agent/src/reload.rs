@@ -141,9 +141,11 @@ pub const MAX_INSPECTIONS_PER_POLL: usize = 4096;
 pub const MAX_SCAN_DEPTH: usize = 2;
 /// Paths named per layer in a report; the rest become an overflow count.
 pub const MAX_REPORTED_PATHS_PER_LAYER: usize = 4;
-/// Caller-supplied notes retained per layer.
+/// Caller-supplied notes retained per layer when a consumer adds annotations.
+#[allow(dead_code)] // The current production frontend does not add notes.
 pub const MAX_LAYER_NOTES: usize = 8;
 /// Caller-supplied detached/reattached labels retained per layer.
+#[allow(dead_code)] // The current production frontend has no detach labels.
 pub const MAX_LAYER_LABELS: usize = 8;
 /// Bytes retained per rendered note. Sized so a note naming every reported
 /// path of a layer still fits without being cut.
@@ -283,7 +285,10 @@ impl ReloadLoss {
         Self::WorkerCall,
     ];
 
-    /// Bounded, secret-free description.
+    /// Bounded, secret-free description of each documented loss. The current
+    /// frontend renders the short label; keep this detail available for
+    /// supervisor clients without adding it to automatic notices.
+    #[allow(dead_code)] // Public supervisor description; current frontend displays the short label.
     pub fn description(self) -> &'static str {
         match self {
             Self::ModelCall => {
@@ -1308,6 +1313,7 @@ impl ReloadReport {
 
     /// Keep failures, limits, losses and caller diagnostics visible, without
     /// successful layer/path and detach/reattach bookkeeping.
+    #[allow(dead_code)] // Structured diagnostics for consumers of the supervisor.
     pub fn diagnostics(&self) -> Vec<String> {
         self.collect_notices(false)
     }
@@ -1465,6 +1471,7 @@ impl ReloadPlan {
 
     /// Record a borrowed note for a layer (bounded and control-character free
     /// once rendered).
+    #[allow(dead_code)] // Optional report annotation; currently exercised by tests.
     pub fn note(&mut self, layer: ReloadLayer, note: impl AsRef<str>) -> bool {
         let note = sanitize_note(note.as_ref());
         match self.line_mut(layer) {
@@ -1477,6 +1484,7 @@ impl ReloadPlan {
     }
 
     /// Record names detached by this reload.
+    #[allow(dead_code)] // Optional report annotation; currently exercised by tests.
     pub fn detached(
         &mut self,
         layer: ReloadLayer,
@@ -1487,6 +1495,7 @@ impl ReloadPlan {
     }
 
     /// Record names that will be reattached.
+    #[allow(dead_code)] // Optional report annotation; currently exercised by tests.
     pub fn reattached(
         &mut self,
         layer: ReloadLayer,
@@ -1496,6 +1505,7 @@ impl ReloadPlan {
         self.record_labels(layer, names, false)
     }
 
+    #[allow(dead_code)] // Shared bound for optional detached/reattached labels.
     fn record_labels(&mut self, layer: ReloadLayer, names: Vec<String>, detached: bool) -> bool {
         match self.line_mut(layer) {
             Some(line) => {

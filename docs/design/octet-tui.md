@@ -127,9 +127,10 @@ reset, not a physical emulator's reflow, paint, or native selection.
 This covers the tested pending → progress → result/error case, not every historical update.
 Real updates to historical concurrent tools or aggregate run outcomes,
 retrospective Markdown changes, resize, and other structural transitions can
-still take the replay path below. Arbitrary worker-roster metric updates do not
-mutate transcript history. Do not suppress that path without an emitted-history
-policy that preserves real results. Maintainer-reported Terminal.app, Ghostty and
+still take the replay path below. Worker-roster metric updates revise only the
+mutable orchestration tail, not earlier parent rows; moving that tail behind new
+parent output can still require a full replay above the native viewport. Do not
+suppress that path without an emitted-history policy that preserves real results. Maintainer-reported Terminal.app, Ghostty and
 Ghostty → SSH acceptance preceded 0.7.4 publication, but a subsequent model-switch
 regression showed stale splash
 rows. Acceptance of one journey does not qualify every reader/selection path.
@@ -198,19 +199,21 @@ same title/purpose/status/footer vocabulary as ordinary pickers. They occupy a
 temporary viewport surface rather than transcript history, start at their first
 semantic body row, and support Up/Down, PageUp/PageDown, Home, and End scrolling;
 Escape or Left returns to the composer.
-Generic presentation snapshots do not create persistent chrome. The first-party
-subagents exception renders a bounded **Subagents** strip above the composer
-while any retained worker is active, independently of root-run activity and
-application-owned history navigation. Rows show state, model, available token
-usage and cost, and tool-call counts. Ctrl+O expands groups within the height
-cap; `/subagents` retains the complete roster, exact outcomes/reasons, and
-read-only child transcripts after the strip hides. Metric changes do not dirty
-transcript history. Raw first-party orchestration calls/results, including
-errors, stay out of the interactive transcript and semantic copy, live and on
-replay. Worker state/reason transitions add no automatic notices. This does not
+Generic presentation snapshots do not create persistent chrome. First-party
+subagent activity occupies one mutable tool-like **Subagents** transcript block,
+including between root turns. Its bold heading counts worker states and points
+to `/subagents`; up to four active child lines show task and `↑input ↓output`
+tokens. Input includes uncached, cache-read, and cache-write usage; streamed
+output estimates carry `~` until provider usage settles. Later parent output
+is placed above this tail, and settlement fixes the summary in place without
+per-worker notices. Ctrl+O retains disclosure; `/subagents` exposes the
+complete roster, exact outcomes/reasons, model, tools, cost, and read-only child
+transcripts. Neither estimates nor UI refresh change billed usage or budgets.
+Raw first-party orchestration calls/results, including errors, stay out of the
+interactive transcript and semantic copy, live and on replay. This does not
 change model-visible errors, durable results, accounting, ordinary tool/run
 failures, or approval prompts. Native `DelegationUpdated` events feed the view;
-no slash-command polling is needed.
+no slash-command polling is needed. [Presentation contract](octet-presentation.md#information-layers).
 
 Live child cost is added to the host-owned cumulative footer only until root
 settlement persists matching `delegated_agent` usage records; idle rendering
@@ -301,8 +304,8 @@ arbitrary text cannot alter the decision set.
 ## Reasoning presentation
 
 Every accepted run opens a `Working` row immediately. After the provider emits
-an actual reasoning delta, collapsed reasoning uses a fixed bold `Thinking`
-header with the same model-adaptive shimmer as `Working`. A real semantic ATX
+an actual reasoning delta, collapsed reasoning uses a bold `Thinking` activity
+label with a quieter model-adaptive shimmer than `Working`. A real semantic ATX
 or standalone-bold heading occupies the aligned detail row with a subdued
 `Ctrl+O` hint. Without a heading, the compiled default puts the hint on the
 activity row when it fits, retaining a detail row on narrow terminals. Ordinary
@@ -312,11 +315,13 @@ independent of semantic-event frequency. Late frames select the current phase
 without replaying missed frames; coalescing has a fixed deadline so incoming
 notifications cannot postpone painting indefinitely. Animation changes style
 rather than text or geometry and invalidates only the active status block.
-Only the word `Working` shimmers, at one cell per 80 ms of active time; its
-marker, elapsed time, and interrupt hint retain steady styling. `Thinking`,
-retry, provider readiness, and `Compacting context` labels stay static while
-independent elapsed/countdown timers still update. Grapheme clusters stay
-intact and reduced-motion/no-color rendering remains static.
+The `Working` and `Thinking` labels share a foreground-only moving sweep, with
+`Thinking` travelling a shallower luminance range; activity and reasoning dots
+keep a solid glyph while their foreground pulses with the label. The known
+Dark/Light TrueColor and ANSI256 physical field parks briefly after crossing
+the label. Elapsed and countdown text update independently; grapheme clusters
+stay intact. ANSI16, unknown-background, reduced-motion, and no-color paths
+retain their compatibility/static behavior.
 Before any model delta, an opted-in endpoint readiness update may temporarily
 replace `Working` with `Provider queued`, `Loading Provider`, or `Provider
 ready`, plus bounded sanitized detail. It reuses the active status block rather
@@ -352,9 +357,9 @@ raw provider envelopes or headers.
 Tool calls expose deterministic intent and lifecycle rows. Event-margin dots
 identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning
-and activity dots keep a solid, fixed-size, steady glyph. Only the `Working`
-label carries the foreground shimmer; reduced-motion and no-color paths keep
-that label static too.
+and activity dots keep a solid, fixed-size glyph whose foreground pulses with
+the activity-label sweep. `Working` and `Thinking` shimmer in the foreground
+where supported; reduced-motion and no-color paths remain static.
 Assistant-response dots remain steady; active tool and shell dots may pulse
 through foreground and muted tones rather than changing size.
 Successful completed event dots use green,

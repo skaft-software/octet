@@ -174,7 +174,10 @@ reloads the current authoritative roster under its new claim before any
 admission or roster write; an absent or stale claim refuses new work rather
 than acknowledging a worker without a durable record. Execution caps do not
 drift up across that boundary: reattachment takes a slot per runnable record
-and leaves the excess visibly detached.
+and leaves the excess visibly detached. Records with no undelivered task settle
+without reserving execution slots, so they cannot starve runnable siblings.
+A follow-up to a recovered, settled worker needs a free slot before acceptance;
+if capacity is full it is rejected without queuing or extending its deadline.
 
 The restart roster remains bounded to 256 KiB. When completed/limit-reached
 output would exceed that budget, the roster retains explicitly marked output

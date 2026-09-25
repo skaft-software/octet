@@ -81,7 +81,7 @@ impl BashTool {
         resolve: impl Fn() -> ShellSessionEnvironment + Send + Sync + 'static,
     ) -> SessionShellTool {
         SessionShellTool {
-            bash: BashTool::default(),
+            bash: BashTool,
             resolve: Arc::new(resolve),
             command_prefix: None,
             powershell: false,
@@ -94,7 +94,7 @@ impl PowerShellTool {
         resolve: impl Fn() -> ShellSessionEnvironment + Send + Sync + 'static,
     ) -> SessionShellTool {
         SessionShellTool {
-            bash: BashTool::default(),
+            bash: BashTool,
             resolve: Arc::new(resolve),
             command_prefix: None,
             powershell: true,

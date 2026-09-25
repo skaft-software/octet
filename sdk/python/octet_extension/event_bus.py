@@ -664,6 +664,8 @@ class HostEventBus:
         with self._condition:
             self._closed = True
             self._cancelled.set()
+            self._desired_declarations.clear()
+            self._desired_interests.clear()
             self._declared.clear()
             self._subscribed.clear()
             self._interests.clear()
@@ -851,6 +853,8 @@ class HostEventBus:
                 raise BusError(INVALID_PARAMS, "invalid_topic_provenance")
             principal = (reply["publisher_instance_id"], reply["process_generation"]) if active else None
             if previous is not None and reply["topic_revision"] < previous[0]:
+                # A newer notice supersedes this ACK. Keep the desired interest
+                # but require a fresh ACK before admitting any events.
                 self._wake()
                 return
             if previous is not None and reply["topic_revision"] == previous[0] and (
@@ -888,6 +892,8 @@ class HostEventBus:
                 self._subscribe(topic)
             except Exception:
                 with self._condition:
+                    # A replacement binding still needs to replay this intent;
+                    # only an error on the same incarnation withdraws it.
                     if new_interest and binding == self._binding_id:
                         self._desired_interests.discard(topic)
                 raise

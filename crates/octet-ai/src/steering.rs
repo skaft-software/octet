@@ -54,6 +54,10 @@ pub struct SteeringUpdate {
 }
 
 /// One operation event; canonical response boundaries are never flattened.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Preserve StreamEvent's inline layout rather than allocating once per streamed event"
+)]
 #[derive(Debug)]
 pub enum SteeringEvent {
     /// A canonical event belonging to exactly one independently billed response.
