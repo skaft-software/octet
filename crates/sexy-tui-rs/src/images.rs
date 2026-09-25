@@ -2417,8 +2417,10 @@ where
 }
 
 fn kitty_transmit_header(id: ImageId, layout: ImageLayout, more: bool) -> String {
+    // The TUI reserves image rows itself; Kitty otherwise advances the cursor by
+    // the placement rectangle after displaying the image.
     format!(
-        "\x1b_Ga=T,t=d,f=100,i={},q=2,c={},r={},m={};",
+        "\x1b_Ga=T,t=d,f=100,i={},q=2,c={},r={},C=1,m={};",
         id.get(),
         layout.columns(),
         layout.rows(),
@@ -3028,7 +3030,7 @@ mod tests {
         assert_eq!(command.encoded_len(), wire.len());
         assert!(command.payload_chunks() > 1);
         let wire = String::from_utf8(wire).unwrap();
-        assert!(wire.starts_with("\x1b_Ga=T,t=d,f=100,i=9,q=2,c=2,r=3,m=1;"));
+        assert!(wire.starts_with("\x1b_Ga=T,t=d,f=100,i=9,q=2,c=2,r=3,C=1,m=1;"));
         assert!(wire.ends_with("\x1b\\"));
         let sequences = wire
             .split("\x1b\\")
