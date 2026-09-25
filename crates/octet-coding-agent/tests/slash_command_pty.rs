@@ -21,6 +21,9 @@ const COLUMNS: u16 = 96;
 const ROWS: u16 = 18;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+// Match the disambiguated keyboard mode requested by the real terminal. A bare
+// Escape followed quickly by Ctrl-D can instead arrive as one Alt+Ctrl-D key.
+const PICKER_ESCAPE: &[u8] = b"\x1b[27u";
 
 struct Pty {
     master: fs::File,
@@ -186,8 +189,12 @@ impl PtyOctet {
         }
     }
 
-    fn shutdown(mut self) {
-        self.pty.write_input(b"\x04");
+    fn shutdown(self) {
+        self.shutdown_with_input(b"\x04");
+    }
+
+    fn shutdown_with_input(mut self, input: &[u8]) {
+        self.pty.write_input(input);
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         let status = loop {
             self.pty.read_available();
@@ -572,7 +579,7 @@ fn real_octet_slash_thinking_opens_the_effort_menu_while_a_response_is_streaming
 
     // Escape cancels the picker without changing the preference, then the
     // withheld response tail settles the still-active run.
-    octet.pty.write_input(b"\x1b");
+    octet.pty.write_input(PICKER_ESCAPE);
     api.release();
     octet.pty.wait_for(TAIL_MARKER);
     octet.shutdown();
@@ -593,10 +600,20 @@ fn real_octet_slash_model_opens_the_picker_while_a_response_is_streaming() {
 
     // Escape cancels the picker without changing the model, then the withheld
     // response tail settles the still-active run.
-    octet.pty.write_input(b"\x1b");
+    octet.pty.write_input(PICKER_ESCAPE);
     api.release();
     octet.pty.wait_for(TAIL_MARKER);
     octet.shutdown();
+}
+
+#[test]
+fn real_octet_picker_escape_and_shutdown_remain_separate_keys() {
+    let mut octet = PtyOctet::spawn(Path::new(env!("CARGO_BIN_EXE_octet")));
+    octet.pty.wait_for(b"custom/probe");
+    octet.pty.write_input(b"/model\r");
+    octet.pty.wait_for(b"Select model");
+    // Exercise the same-read boundary directly instead of relying on OS timing.
+    octet.shutdown_with_input(&[PICKER_ESCAPE, b"\x04"].concat());
 }
 
 #[test]
