@@ -6,6 +6,7 @@ struct NativeReplay {
     bytes: Arc<Mutex<Vec<u8>>>,
     terminal: vt100::Parser,
     replay_frames: Vec<(u16, u16, Vec<u8>)>,
+    frozen_activity_start: Instant,
     width: u16,
     height: u16,
 }
@@ -40,6 +41,7 @@ impl NativeReplay {
             bytes,
             terminal: vt100::Parser::new(height, width, 2048),
             replay_frames: Vec::new(),
+            frozen_activity_start: Instant::now() + Duration::from_secs(3_600),
             width,
             height,
         }
@@ -47,6 +49,16 @@ impl NativeReplay {
 
     #[track_caller]
     fn render(&mut self, stable: bool) -> String {
+        // These probes compare separate renderer/semantic snapshots exactly.
+        // Keep the activity clock at zero (elapsed saturates before this future
+        // instant), without removing its row or weakening history assertions.
+        for block in &mut self.shell.state.borrow_mut().transcript {
+            if let TranscriptBlock::Reasoning(reasoning) = block {
+                reasoning.activity_started_at = reasoning
+                    .activity_started_at
+                    .map(|_| self.frozen_activity_start);
+            }
+        }
         self.shell.render();
         let bytes = std::mem::take(&mut *self.bytes.lock().unwrap());
         let output = String::from_utf8(bytes.clone()).unwrap();
@@ -129,6 +141,17 @@ impl NativeReplay {
         }
         physical
     }
+}
+
+#[test]
+fn native_canonical_transcript_snapshot_is_independent_of_wall_clock() {
+    let mut replay = NativeReplay::new();
+    replay.shell.begin_run("openai");
+    publish_workers(&mut replay, vec![worker("CLOCK-WORKER")]);
+    replay.render(false);
+    assert!(replay.frame().contains("Working (0s • esc to interrupt)"));
+    std::thread::sleep(Duration::from_millis(1_100));
+    replay.assert_canonical_transcript();
 }
 
 #[test]
