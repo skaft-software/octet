@@ -323,9 +323,27 @@ fn coalesce_render_commands(
     }
 }
 
-/// Flush the retained final frame, restore the process terminal through the
-/// same idempotent lifecycle path used by exit and panic, and acknowledge once.
-/// The caller (not this thread) re-enters on resume.
+/// Send OSC 2 only after startup resolved the session, and only when the
+/// desired title differs from this renderer instance's last write.
+fn sync_window_title(tui: &mut TUI<'_>, state: &SharedState, last_title: &mut Option<String>) {
+    let title = {
+        let shell = state.borrow();
+        if shell.startup_pending {
+            return;
+        }
+        shell
+            .session_name
+            .as_deref()
+            .map_or_else(|| "octet".to_owned(), |name| format!("octet · {name}"))
+    };
+    if last_title.as_deref() != Some(title.as_str()) {
+        tui.set_window_title(&title);
+        *last_title = Some(title);
+    }
+}
+
+/// Flush the retained final frame, restore the process terminal, and
+/// acknowledge once. The caller re-enters with a new renderer on resume.
 fn suspend_terminal(tui: &mut TUI<'_>, acknowledged: mpsc::Sender<()>) {
     tui.request_render();
     tui.stop();
@@ -460,6 +478,10 @@ pub(super) fn render_loop_with_terminal(
     }
     tui.start();
     state.frame_written();
+    // Startup waits for resolved session metadata; a newly resumed renderer
+    // writes its title once even if the semantic name has not changed.
+    let mut last_title = None;
+    sync_window_title(&mut tui, &state, &mut last_title);
 
     let mut last_render: Option<Instant> = None;
     // Capture before each paint: an edit admitted during a slow terminal write
@@ -494,6 +516,7 @@ pub(super) fn render_loop_with_terminal(
             break;
         }
         if let Some(RenderCommand::Suspend(reply)) = command {
+            sync_window_title(&mut tui, &state, &mut last_title);
             suspend_terminal(&mut tui, reply);
             return;
         }
@@ -532,6 +555,7 @@ pub(super) fn render_loop_with_terminal(
             animations.remaining(Instant::now()),
         ) {
             if let Some(reply) = suspended.take() {
+                sync_window_title(&mut tui, &state, &mut last_title);
                 suspend_terminal(&mut tui, reply);
                 return;
             }
@@ -549,6 +573,7 @@ pub(super) fn render_loop_with_terminal(
             shell.expire_transcript_scrollbar(now);
         }
         last_editor_revision = state.borrow().editor.revision();
+        sync_window_title(&mut tui, &state, &mut last_title);
         tui.request_render();
         state.frame_written();
         last_render = Some(Instant::now());
@@ -556,6 +581,7 @@ pub(super) fn render_loop_with_terminal(
 
     // Stop (or channel closure) can overtake a coalesced Render. Publish the
     // latest semantic state before restoring the terminal, not after it.
+    sync_window_title(&mut tui, &state, &mut last_title);
     tui.request_render();
     state.frame_written();
     tui.stop();
@@ -564,6 +590,9 @@ pub(super) fn render_loop_with_terminal(
 #[cfg(test)]
 #[path = "renderer_shutdown_tests.rs"]
 mod shutdown_tests;
+#[cfg(test)]
+#[path = "renderer_title_tests.rs"]
+mod title_tests;
 
 #[cfg(test)]
 mod scheduler_tests {

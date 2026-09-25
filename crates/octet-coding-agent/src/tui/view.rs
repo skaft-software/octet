@@ -1355,6 +1355,9 @@ pub(crate) struct ShellState {
     pub(crate) price_display: PriceDisplay,
     pub(crate) latest_compaction_summary: Option<String>,
     pub(crate) reasoning: String,
+    /// The foreground session's validated, user-assigned name, independent of
+    /// model identity and transcript chrome.
+    pub(crate) session_name: Option<String>,
     /// Non-agent work such as compaction or sign-in. Agent runs never use this
     /// field; their phase always comes from `run`.
     pub(crate) run_label: String,
@@ -4412,6 +4415,23 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         state.file_index = None;
         state.path_selection = 0;
+    }
+
+    /// Update the foreground session name shown in the terminal window title.
+    /// Unnamed sessions use the default `octet` title.
+    pub fn set_session_name(&mut self, name: Option<&str>) {
+        let mut state = self.state.borrow_mut();
+        if state.session_name.as_deref() == name {
+            return;
+        }
+        state.session_name = name.map(str::to_owned);
+        drop(state);
+        self.render();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_session_name(&self) -> Option<String> {
+        self.state.borrow().session_name.clone()
     }
 
     pub fn set_workspace(&mut self, root: PathBuf) {

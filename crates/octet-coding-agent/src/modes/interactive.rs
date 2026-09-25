@@ -2263,10 +2263,13 @@ where
         Command::Name(name) => match inspection.session_id() {
             Some(id) => match name {
                 Some(name) => match inspection.sessions.rename(id, &name) {
-                    Ok(metadata) => shell.notice(format!(
-                        "session named {}",
-                        metadata.name.as_deref().unwrap_or("(unnamed)")
-                    )),
+                    Ok(metadata) => {
+                        shell.set_session_name(metadata.name.as_deref());
+                        shell.notice(format!(
+                            "session named {}",
+                            metadata.name.as_deref().unwrap_or("(unnamed)")
+                        ));
+                    }
                     Err(error) => shell.error(error.to_string()),
                 },
                 None => match inspection.sessions.load_metadata(id) {
@@ -3880,7 +3883,22 @@ fn status_context_estimate(app: &App) -> u64 {
     estimate_next_request_tokens(app, &[])
 }
 
+fn update_session_title(
+    shell: &mut InteractiveShell,
+    store: &crate::session_store::SessionStore,
+    session: &Session,
+) {
+    let name = session
+        .path()
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|id| store.load_metadata(id).ok())
+        .and_then(|metadata| metadata.name);
+    shell.set_session_name(name.as_deref());
+}
+
 fn update_status(shell: &mut InteractiveShell, app: &App) {
+    update_session_title(shell, &app.sessions, app.agent.session());
     let context_estimate = status_context_estimate(app);
     let cache_stats = analyze_session_cache_stats(app.agent.session());
     let endpoint_label = app
@@ -3934,6 +3952,7 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
         .executable_extensions
         .apply_session_host_requests(&mut app.agent, &app.sessions)
     {
+        update_session_title(shell, &app.sessions, app.agent.session());
         shell.notice("extension updated the session metadata");
     }
     let _ = app.executable_extensions.sync_semantic_ui(shell);
@@ -7572,6 +7591,7 @@ async fn run_idle_command(
             match name {
                 Some(name) => {
                     let metadata = app.sessions.rename(&id, &name)?;
+                    shell.set_session_name(metadata.name.as_deref());
                     shell.notice(format!(
                         "session named {}",
                         metadata.name.as_deref().unwrap_or("(unnamed)")
@@ -8559,6 +8579,7 @@ async fn run_interactive_without_model(
     shell.set_workspace(workspace.clone());
     shell.set_input_modalities(octet_ai::ModalitySet::none());
     shell.set_session_telemetry(&session, None);
+    update_session_title(shell, &boot.sessions, &session);
     shell.hydrate(&session)?;
     shell.notice("No configured model. Use /setup or /model; prompts are disabled.");
     // Keep onboarding and model-less prompt/template behavior unchanged, but
@@ -13358,6 +13379,112 @@ mod tests {
         assert!(shell.has_overlay(), "export did not render a report");
         assert!(output.exists(), "export did not write {}", output.display());
         assert_eq!(shell.debug_error(), None);
+    }
+
+    #[tokio::test]
+    async fn active_name_updates_the_foreground_title_without_waiting_for_run_settlement() {
+        let session_dir = tempfile::tempdir().unwrap();
+        let inspection = test_run_inspection_with_session(session_dir.path());
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        let (queue, quit_requested) = run_active_command(
+            &mut shell,
+            Command::Name(Some("Release audit".into())),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty());
+        assert!(!quit_requested);
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+
+        // Read-only `/name` does not rename, and a refused rename cannot
+        // replace the title already shown for the current session.
+        run_active_command(&mut shell, Command::Name(None), &inspection).await;
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+        run_active_command(&mut shell, Command::Name(Some("\x07".into())), &inspection).await;
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+        assert_eq!(
+            inspection
+                .sessions
+                .load_metadata("session")
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("Release audit")
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_title_tracks_idle_name_new_resume_fork_and_clear() {
+        let (_workspace, app) = crate::compaction::tests::app_for_estimate();
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = EventStream::from_stream(futures_util::stream::pending());
+        let mut app = transition(app, &mut shell, &mut input, Reconfig::NewSession)
+            .await
+            .unwrap();
+        assert_eq!(shell.debug_session_name(), None);
+        let named_path = app.agent.session().path().to_owned();
+        let named_id = named_path.file_stem().unwrap().to_str().unwrap().to_owned();
+        let mut goal_deadline = None;
+        let mut idle_input = EventStream::new();
+        let mut reload =
+            crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
+        let outcome = run_idle_command(
+            app,
+            &mut shell,
+            &mut idle_input,
+            Command::Name(Some("Release audit".into())),
+            &mut goal_deadline,
+            None,
+            &mut reload,
+        )
+        .await
+        .unwrap();
+        let IdleCommandOutcome::Continue(next) = outcome else {
+            panic!("name command must keep the current app");
+        };
+        app = *next;
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+
+        app = transition(app, &mut shell, &mut input, Reconfig::NewSession)
+            .await
+            .unwrap();
+        assert_eq!(
+            shell.debug_session_name(),
+            None,
+            "a new session must clear the old name"
+        );
+        app = transition(
+            app,
+            &mut shell,
+            &mut input,
+            Reconfig::Resume(named_path.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+
+        let head = app.agent.session().head();
+        let fork_path = app.sessions.new_path("fork-title");
+        fork_active_session(&app.sessions, &named_path, fork_path.clone(), head.as_ref()).unwrap();
+        app = transition(app, &mut shell, &mut input, Reconfig::Resume(fork_path))
+            .await
+            .unwrap();
+        assert_eq!(
+            shell.debug_session_name(),
+            None,
+            "forks do not inherit the name"
+        );
+
+        app.sessions.rename(&named_id, "").unwrap();
+        let _ = transition(app, &mut shell, &mut input, Reconfig::Resume(named_path))
+            .await
+            .unwrap();
+        assert_eq!(
+            shell.debug_session_name(),
+            None,
+            "a cleared name restores the default"
+        );
     }
 
     #[tokio::test]

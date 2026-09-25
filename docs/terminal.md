@@ -41,6 +41,9 @@ welcome card and saved conversation appear at readiness. Setup prompts, errors,
 and cancellation/shutdown diagnostics remain visible. Fresh sessions skip the
 replay worker entirely; resumed sessions still restore their history. `--models`
 inventory discovery also runs after the shell owns input, not before first paint.
+After session resolution, the interactive renderer sets the terminal window title
+to `octet` or `octet · <user-assigned session name>` via OSC 2. It updates on
+rename and session changes without placing controls in plain, print, or RPC output.
 
 ## Input and active work
 

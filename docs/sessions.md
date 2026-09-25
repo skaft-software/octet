@@ -36,6 +36,11 @@ startup; bare `--fork` opens the picker.
 | `/name [name]` | Show or change the readable name. |
 | `/export [path]` | Redacted portable export. |
 
+In the interactive TUI, a user-assigned name appears in the terminal window
+as `octet · <name>`. Unnamed sessions use `octet`; renaming the current session,
+resuming another session, or starting a new one updates the title. Plain, print,
+and RPC frontends do not set a window title.
+
 The resume picker supports fuzzy, quoted-phrase, and `re:` regex filtering,
 named-only filtering, recent/title/message-count sorting, and optional paths.
 Tab toggles current/all-workspace scope; Ctrl+S cycles ordering, Ctrl+N filters
