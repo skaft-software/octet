@@ -38,6 +38,7 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/verbose [on\|off]` | Expand/collapse retained reasoning, compaction, and bounded tool evidence. |
 | `/reload` | Reload user keybindings, instructions, prompts, skills, and enabled extensions at a safe boundary. Host re-exec is **opt-in**: it happens only on `/reload --force` (or an executable change with `reload_host = true`), and a moved/replaced binary is confirmed before it is probed. Refused while a model turn, tool call, shell child, effect approval, in-flight session write, or delegated worker is active. |
 | `/login [provider]` | Sign in to a subscription provider. |
+| `/setup` | Open the provider setup wizard at any time to add/replace a built-in API key, sign in with a supported subscription, or configure a local endpoint. While a run is active, waits for the idle boundary; the current model/session are not switched. |
 | `/logout [provider]` | Remove its stored credential. |
 | `/status` | Active model, context, capabilities, and diagnostics. |
 | `/session [info]` | Read-only session identity, file, branch, checkpoints and accounting. |
@@ -59,6 +60,11 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/subagents` | With the trusted, enabled subagents package live, browse workers and read-only transcripts. |
 | `/help [command]` | Local command help and self-documentation. |
 | `/exit` | Exit octet. |
+
+Type `/log…` or `/setu…` in the composer to see both `/login` and
+`/setup` in command suggestions; choose the intended command with Up/Down and
+Enter. An ambiguous partial match does not Tab-complete automatically. Exact
+`/login` and `/setup` retain their separate actions.
 
 Automatic reloads do not add success summaries, startup banners, or debounce
 bookkeeping to the transcript. Host, worker-deferral, extension, provider-catalog,

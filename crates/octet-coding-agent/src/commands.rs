@@ -22,6 +22,7 @@ use octet_ai::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Login(Option<String>),
+    Setup,
     Logout(Option<String>),
     Model(Option<String>),
     Thinking(Option<String>),
@@ -314,6 +315,12 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         false
     ),
     slash!("login", "/login [provider]", "sign in to a provider", true),
+    slash!(
+        "setup",
+        "/setup",
+        "add an API key or set up a provider",
+        false
+    ),
     slash!(
         "logout",
         "/logout [provider]",
@@ -697,10 +704,20 @@ pub fn slash_suggestions(input: &str) -> Vec<&'static SlashCommandSuggestion> {
     if query.contains(char::is_whitespace) || query.contains('\n') {
         return Vec::new();
     }
-    slash_commands()
+    let direct = slash_commands()
         .iter()
-        .filter(|command| command.name.starts_with(query))
-        .collect()
+        .filter(|command| command.name.starts_with(query));
+    // Keep the user's typed command first: Enter selects the highlighted row.
+    // The related auth/setup action is discoverable, but never steals the
+    // default selection from a direct prefix match.
+    let related = slash_commands().iter().filter(|command| {
+        matches!(command.name, "login" | "setup")
+            && !command.name.starts_with(query)
+            && ["login", "setup"]
+                .iter()
+                .any(|name| name.starts_with(query) && *name != query)
+    });
+    direct.chain(related).collect()
 }
 
 /// Complete a unique command-name prefix. Argument-taking commands receive a
@@ -914,6 +931,7 @@ pub fn parse(input: &str) -> Command {
 
     match full_name {
         "login" => Command::Login(argument),
+        "setup" if argument.is_none() => Command::Setup,
         "logout" => Command::Logout(argument),
         "model" => Command::Model(argument),
         "thinking" => Command::Thinking(argument),
@@ -2269,6 +2287,9 @@ mod tests {
     #[test]
     fn parses_the_complete_v1_command_grammar() {
         assert_eq!(parse("/login"), Command::Login(None));
+        assert_eq!(parse("/setup"), Command::Setup);
+        assert_eq!(parse("/setu"), Command::Setup);
+        assert!(matches!(parse("/setup key"), Command::Unknown(_)));
         assert_eq!(
             parse("/logout openai-codex"),
             Command::Logout(Some("openai-codex".into()))
@@ -2388,6 +2409,39 @@ mod tests {
     fn slash_suggestions_filter_and_tab_complete_unique_prefixes() {
         assert_eq!(slash_suggestions("/").len(), SLASH_COMMANDS.len());
         assert_eq!(slash_suggestions("/mod")[0].usage, "/model [id]");
+        for prefix in ["/log", "/logi", "/setu"] {
+            let names = slash_suggestions(prefix)
+                .iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>();
+            assert!(
+                names.contains(&"login") && names.contains(&"setup"),
+                "{prefix}: {names:?}"
+            );
+            assert_eq!(
+                names[0],
+                if prefix.starts_with("/log") {
+                    "login"
+                } else {
+                    "setup"
+                }
+            );
+            assert_eq!(complete_slash_command(prefix), None);
+        }
+        assert_eq!(
+            slash_suggestions("/login")
+                .iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>(),
+            ["login"]
+        );
+        assert_eq!(
+            slash_suggestions("/setup")
+                .iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>(),
+            ["setup"]
+        );
         assert_eq!(slash_suggestions("/th").len(), 2);
         assert!(slash_suggestions("/model ").is_empty());
         assert_eq!(complete_slash_command("/mod"), Some("/model ".to_owned()));

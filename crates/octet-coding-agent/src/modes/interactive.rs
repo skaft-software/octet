@@ -222,6 +222,7 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingIdleAction {
     Login(Option<String>),
+    Setup,
     Logout(Option<String>),
     ChangeModel(ModelId),
     Fast(bool),
@@ -846,6 +847,7 @@ fn answer_now_input(instruction: Option<String>) -> ComposedInput {
 fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> anyhow::Result<()> {
     let action = match command {
         Command::Login(provider) => PendingIdleAction::Login(provider),
+        Command::Setup => PendingIdleAction::Setup,
         Command::Logout(provider) => PendingIdleAction::Logout(provider),
         Command::Model(Some(id)) => PendingIdleAction::ChangeModel(ModelId(id)),
         Command::Model(None) => PendingIdleAction::PickModel,
@@ -1711,6 +1713,47 @@ async fn login_codex(app: &mut App, shell: &mut InteractiveShell) -> anyhow::Res
         shell.render();
     }
     Ok(())
+}
+
+/// Reuse the first-run wizard at an idle boundary without replacing the
+/// current session, model selection, or user default.
+async fn setup_provider(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+) -> anyhow::Result<App> {
+    let Some(result) = onboarding::configure(shell, input, &app.config, false).await? else {
+        return Ok(app);
+    };
+    let active_route_updated = result.configured_endpoint == Some(app.model.endpoint.id.0.as_str())
+        || result.model.as_ref() == Some(&app.model.spec.id);
+    let selected = result.model.clone();
+    if let Err(error) = app.apply_provider_setup_catalog(result.catalog, result.notes) {
+        shell.error(format!(
+            "Provider saved, but models could not be loaded: {error}"
+        ));
+        shell.render();
+        return Ok(app);
+    }
+    shell.set_model_cycle(app.model_cycle());
+    shell.clear_error();
+    if active_route_updated {
+        shell.notice(format!(
+            "Provider saved. Reselect /model {} to use the updated credentials; the current session is unchanged.",
+            app.model.spec.id.0
+        ));
+    } else if let Some(model) = selected {
+        shell.notice(format!(
+            "Provider saved. Use /model to select {} (current model unchanged).",
+            model.0
+        ));
+    } else {
+        shell.notice(
+            "Provider saved. Use /model to select one of its models (current model unchanged).",
+        );
+    }
+    shell.render();
+    Ok(app)
 }
 
 /// Remove the octet-owned credential and catalog entries together. If the active
@@ -6230,6 +6273,9 @@ async fn apply_pending_actions(
                 Ok(_) => unreachable!(),
                 Err(e) => shell.error(e.to_string()),
             },
+            PendingIdleAction::Setup => {
+                app = setup_provider(app, shell, input).await?;
+            }
             PendingIdleAction::Logout(provider) => match validate_provider(provider.as_deref()) {
                 Ok("codex") => {
                     app = logout_codex(app, shell, input).await?;
@@ -7688,6 +7734,9 @@ async fn run_idle_command(
             Ok(_) => unreachable!(),
             Err(e) => shell.error(e.to_string()),
         },
+        Command::Setup => {
+            app = setup_provider(app, shell, input).await?;
+        }
         Command::Logout(provider) => match validate_provider(provider.as_deref()) {
             Ok("codex") => {
                 app = logout_codex(app, shell, input).await?;
@@ -8417,9 +8466,7 @@ async fn run_interactive_without_model(
     shell.set_input_modalities(octet_ai::ModalitySet::none());
     shell.set_session_telemetry(&session, None);
     shell.hydrate(&session)?;
-    shell.notice(
-        "No configured model. Use /login, /model, or /reload to configure one; prompts are disabled until then.",
-    );
+    shell.notice("No configured model. Use /setup or /model; prompts are disabled.");
     // Keep onboarding and model-less prompt/template behavior unchanged, but
     // honor a positional read-only command once the session is ready.
     if boot.config.prompt_template.is_none()
@@ -8536,6 +8583,13 @@ async fn run_interactive_without_model(
                     )
                     .await?;
                 }
+                Command::Setup => {
+                    onboarding::run_setup(shell, input, &mut boot).await?;
+                    if boot.catalog.models().next().is_some() {
+                        shell.notice("Restart octet to start chatting with a configured model");
+                        shell.render();
+                    }
+                }
                 Command::Login(provider) => match validate_provider(provider.as_deref()) {
                     Ok("codex") => {
                         if let Some(catalog) = login_codex_catalog(shell).await? {
@@ -8560,7 +8614,7 @@ async fn run_interactive_without_model(
                 Command::Model(model) => {
                     if boot.catalog.models().next().is_none() {
                         shell.notice(
-                            "no configured models are available; use /login or edit the custom provider, then /reload",
+                            "no configured models are available; use /setup, /login or edit the custom provider, then /reload",
                         );
                     } else {
                         let selected = match model {
@@ -8698,12 +8752,13 @@ fn valid_guided_manual_model(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
 }
 
-/// First-run interactive onboarding for an explicitly selected compatible
-/// endpoint. Every path before `commit_and_rebuild` is in-memory only.
+/// Interactive setup for an explicitly selected compatible endpoint. Every
+/// path before `commit_and_rebuild` is in-memory only.
 async fn guided_provider_setup(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     config: &crate::config::Config,
+    persist_default_model: bool,
 ) -> anyhow::Result<Option<CompletedSetup>> {
     let mut replace_existing = false;
     'setup: loop {
@@ -9067,11 +9122,13 @@ async fn guided_provider_setup(
                 .await
                 {
                     Ok(completed) => {
-                        if let Err(error) = crate::cli::persist_model(&completed.model.0) {
-                            shell.error(format!(
-                                "provider saved, but the selected model preference could not be saved: {error}"
-                            ));
-                            shell.render();
+                        if persist_default_model {
+                            if let Err(error) = crate::cli::persist_model(&completed.model.0) {
+                                shell.error(format!(
+                                    "provider saved, but the selected model preference could not be saved: {error}"
+                                ));
+                                shell.render();
+                            }
                         }
                         return Ok(Some(completed));
                     }
@@ -11134,9 +11191,11 @@ mod tests {
     fn command_queue_parses_reconfiguration_values() {
         let mut queue = VecDeque::new();
         queue_command(Command::Login(None), &mut queue).unwrap();
+        queue_command(Command::Setup, &mut queue).unwrap();
         queue_command(Command::Thinking(Some("high".into())), &mut queue).unwrap();
         queue_command(Command::Resume(Some("id".into())), &mut queue).unwrap();
         assert_eq!(queue.pop_front(), Some(PendingIdleAction::Login(None)));
+        assert_eq!(queue.pop_front(), Some(PendingIdleAction::Setup));
         assert!(matches!(
             queue.pop_front(),
             Some(PendingIdleAction::ChangeThinkingLevel(ThinkingLevel::High))

@@ -145,6 +145,10 @@ impl Bootstrap {
         self.codex_context_notes.note_for(model)
     }
 
+    pub(crate) fn merge_catalog_notes(&mut self, notes: CodexContextNotes) {
+        self.codex_context_notes.merge(notes);
+    }
+
     /// Starts only provider-capable API 0.3 extensions when their declarations
     /// are required to resolve an otherwise unknown initial model.
     ///

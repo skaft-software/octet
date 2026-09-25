@@ -1806,6 +1806,27 @@ fn refreshing_unchanged_slash_catalog_preserves_selection() {
 }
 
 #[test]
+fn login_and_setup_are_discoverable_from_either_partial_query() {
+    for query in ["/logi", "/setu"] {
+        let mut shell = InteractiveShell::test_shell();
+        for character in query.chars() {
+            shell.apply_edit(EditAction::Char(character));
+        }
+        let popup = render_slash_suggestions(&shell.state.borrow(), 120, 100).join("\n");
+        assert!(
+            popup.contains("/login") && popup.contains("/setup"),
+            "{query}: {popup}"
+        );
+        shell.complete_slash_command();
+        assert_eq!(
+            shell.pending(),
+            query,
+            "ambiguous completion must not choose for the user"
+        );
+    }
+}
+
+#[test]
 fn slash_command_menu_lists_commands_and_tab_completes_a_unique_prefix() {
     let mut shell = InteractiveShell::test_shell();
     shell.apply_edit(EditAction::Char('/'));

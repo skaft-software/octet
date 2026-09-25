@@ -128,8 +128,14 @@ selection, the setup menu offers, in order:
    custom registry change.
 4. **Continue without a provider** — leave setup without saving provider data.
 
-Existing available models and explicit model selections are not replaced by this
-menu. Print/RPC do not open it. Subscription sign-in requires an online launch;
+Existing available models and explicit model selections do not trigger this
+menu automatically. Once inside the TUI, use `/setup` to open the same wizard
+on demand—even with a configured provider. A saved provider refreshes the model
+catalog, but keeps the current session, active model and default model unchanged;
+use `/model` to switch. If you replace the active route's stored key, reselect
+that model to rebuild its current credential. A credential environment variable
+still takes precedence, and the wizard warns before saving a fallback key.
+Print/RPC do not open the wizard. Subscription sign-in requires an online launch;
 `--offline` is not a local-inference guarantee. After saving a credential, the
 catalog is refreshed and model selection uses the ordinary picker. Saving is
 not a successful inference check, and a discovery failure can leave the saved

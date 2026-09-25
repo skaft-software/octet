@@ -687,6 +687,35 @@ impl App {
         Ok(true)
     }
 
+    /// Install a reviewed in-TUI provider setup without replacing the active
+    /// session or silently switching models. Extension routes are reprojected
+    /// onto the rebuilt catalog before it becomes visible to the picker.
+    pub(crate) fn apply_provider_setup_catalog(
+        &mut self,
+        mut catalog: ModelCatalog,
+        notes: crate::app::bootstrap::CodexContextNotes,
+    ) -> anyhow::Result<()> {
+        self.executable_extensions
+            .rescan_post_mutation_resources(&self.config);
+        self.executable_extensions
+            .synchronize_provider_catalog(&mut catalog, &self.client);
+        if !catalog_route_matches_active_model(&catalog, &self.model) {
+            anyhow::bail!(
+                "the active model {} route changed during provider setup; restart octet to load the saved provider",
+                self.model.spec.id.0
+            );
+        }
+        self.catalog = catalog;
+        self.codex_context_notes.merge(notes);
+        self.readiness = crate::app::bootstrap::CatalogReadiness::Fleet;
+        if self.executable_extensions.has_agent_session_service() {
+            self.agent.set_delegation_model_resolver(Arc::new(
+                delegation_models::CodingAgentModelResolver::new(self.catalog.clone()),
+            ));
+        }
+        Ok(())
+    }
+
     /// Current provider-visible tool schema reserve, including live extension
     /// catalog changes published after application bootstrap.
     pub fn current_tool_schema_tokens(&self) -> u64 {
