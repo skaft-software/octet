@@ -43,14 +43,15 @@ runtime defaults.
 | Setting | Meaning and documented value |
 | --- | --- |
 | `model` | Model ID; examples include `claude-sonnet-4-6` and legacy `custom/Qwen3 Coder Next`. Prefer [provider-qualified custom IDs](providers.md#custom-registry) for new registry entries. |
-| `reasoning` | Model-supported effort, example `"high"`; [levels and budgets](providers.md#reasoning). |
+| `reasoning` | Model-supported choice, example `"high"`; `"off"` is an explicit preference. Unset uses [model-aware defaults](providers.md#defaults-unreleased), after session restoration. [Levels and budgets](providers.md#reasoning). |
 | `system_prompt` | Replace all composed system instructions, including with `""`; example `"You are a careful and concise reviewer."`. AGENTS/context/skill instructions are ignored while set. |
 | `cache_retention` | Provider prompt-cache retention selection; example `"short"`. |
-| `theme` | Compiled terminal appearance: `"auto"`, `"light"`, or `"dark"`; explicit light/dark choices override detection. |
+| `theme` | Built-in `"auto"`, `"light"`, or `"dark"`. Auto adapts to the terminal background; light/dark override detection. |
 | `color` | Terminal color selection; example `"auto"`, with terminal-capability fallbacks. |
 | `mouse` | Default `"auto"`; `auto`, `terminal`, and `off` preserve native selection/history; `app` selects the captured semantic viewport. |
 | `plain` | Chronological frontend; example `false`. |
 | `show_images` | Default `false`; `true` opts in to bounded inline tool-result images on compatible interactive terminals. This controls display, not upload or explicit input-attachment consent. Equivalent flag: `--show-images`. [Display limits](terminal.md#tool-evidence-and-worker-activity). |
+| `models` | Optional user-level ordered model scope written by `/scoped-models` as one comma-separated pattern string (e.g. `"openai/*:high,custom/alpha-model"`). Interactive Ctrl+P cycling only: headless modes ignore it, `--models` wins when both are present, and a trusted project layer can never override it. |
 | `effect_policy` | Default `"unsafe_host"`; alternatives `"controlled"`, `"controlled_bash_approval"`. [Authority profiles](tools.md#authority-profiles). |
 | `allow_external_paths` | Default `true` in full-access CLI launches. Set `false` for workspace-local built-in file admission; safe mode forces false. This does not contain shell commands or extension processes. |
 | `allow_edit`, `allow_write` | Independent mutation capabilities; example `true` for both. `--no-edit` removes both tools. |
@@ -62,6 +63,10 @@ runtime defaults.
 | `context_files` | Include instruction/context files; example `true`, project inputs still require trust. |
 | `offline` | Example `false`; `true` skips optional model discovery and remote reads, not inference. |
 | `strict_config` | Default behavior warns about unknown keys; `true` makes them errors, as does `--strict-config`. |
+| `reload` | Default `true`: the interactive prompt silently arms the live-reload supervisor and applies reloads only at the idle prompt. `/reload --dry-run` shows watch counts, timing, and host re-exec policy; incomplete watch coverage still warns. `false` disables sampling for good. User level only; a trusted project layer may not arm it. |
+| `reload_poll_ms` | Default `1000`; interval between filesystem samples, clamped to `50..=300000`. Sampling covers the skill/prompt/theme/context/extension roots in use plus the resolved executable. |
+| `reload_debounce_ms` | Default `200`; save-burst debounce, clamped to `2000` maximum so a burst always flushes. |
+| `reload_max_files` | Default `512`; metadata inspections per poll, clamped to `1..=4096`. Directory enumeration shares a separate allowance of the same size, plus at most one overflow entry; entries are bounded before collection/sorting. Partially scanned layers are reported as capped, never as changes or removals. |
 | `session_dir` | Session-storage root; equivalent CLI option `--session-dir PATH`. [Storage and recovery](sessions.md). |
 | `max_turns` | Bound model turns; equivalent CLI option `--max-turns N`. |
 | `max_cost_microdollars` | Optional session cost guardrail; example `500000`, integer microdollars. |
@@ -70,6 +75,13 @@ runtime defaults.
 | `[compaction]` | `mode = "local"`, `threshold_fraction = 1.0`, optional `max_active_tokens` (zero/unset uses model limit), `keep_recent_tokens = 20000`, optional `compact_model = "provider/model"`. [Exact budgeting and caveats](context.md#settings). |
 | `enabled_extensions` | Default `[]`: installed executable extensions stay disabled until explicitly enabled. Full access does not change activation. |
 | `trusted_extensions` | Default `[]`: optional persistent source-bound grants. Full access implicitly trusts selected extensions without adding grants; safe mode removes implicit trust and blocks executable startup even with explicit grants. [Resource rules](resources.md#locations-and-precedence). |
+
+Reload cap reports show **at least** the known skipped paths, not an exact total:
+unread directory contents are unknown. Failed directory entries also consume the
+enumeration allowance. Fully scanned directories retain deterministic ordering;
+capped layers neither replace their baseline nor infer changes from an arbitrary
+filesystem-order prefix. The first complete scan establishes that layer's
+baseline. Executable sampling remains independent of these resource-tree limits.
 
 ## Environment variables
 

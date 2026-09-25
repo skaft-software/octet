@@ -4,6 +4,32 @@
 
 ### Added
 
+- `/subagents open-all tmux|herdr` remains **Partial**: bounded opaque-handle
+  plans and fresh owner-bound host status are retained, but every worker and the
+  current parent stay blocked. Even a launchable non-live snapshot cannot
+  authorize execution: atomic host writer claim/settlement is unavailable.
+  Product open-all has zero pane effects, including repeated calls. Direct
+  multiplexer adapter tests retain herdr preflight and honest partial-failure
+  reporting; no fake lease or new host ownership API is introduced.
+- Per-worker `provider`, `model`, and `reasoning` spawn inputs
+  (`octet_subagents/reasoning.py`, `model.py`), defaulting to `inherit`. The
+  selection is validated fail-closed with typed errors and is never silently
+  coerced: a model this session cannot confirm as configured is refused with
+  `unsupported_model`, an unknown reasoning level with `unsupported_reasoning`, a
+  provider must accompany a matching model, and a level above the model's ceiling
+  is clamped by a mirror of the coding agent's own policy
+  (`clamps_effort_to_model_ceiling`/`supported_levels_gate_on_ceiling`). The panel
+  and inspector surface the requested **and** effective selection.
+- Session-scoped delegation (extension half): a worker whose host record the
+  owning run retired is now explicitly **detached, not dead** — `detached`,
+  `reattachable`, `detached_at_ms`, `reattach_count`, and `last_reattached_at_ms`
+  are tracked, captured summaries/errors/usage and the complete sibling roster are
+  retained, the owning session reattaches automatically when the host republishes
+  the live record, `/subagents wait|reattach <name-or-id>` is an explicit
+  owner-bound reattach surface, and a host-parked worker renders a bounded
+  `awaiting_approval` state that `subagent_continue` refuses
+  (`worker_awaiting_approval`) rather than mutating unattended.
+
 - Live worker activity in the `/subagents` list: the host now exposes a
   bounded rolling `recent_tools` array (last six tool calls with flattened
   argument summaries, timing, and an error flag) on each `agent/list` record.
@@ -23,6 +49,14 @@
   proposes, and spawn schema/skill/README guidance were updated.
 - Terminal-gate rejections now carry cumulative session cost so per-worker cost
   tracks token usage between accepted turns.
+- `orphaned` no longer reads as terminal. The label is now `detached` ("still
+  owned by the session, currently detached from any run"), it maps to the generic
+  `degraded` state instead of `unavailable`, detached workers are counted
+  separately in the panel, and the `subagent_continue` rejection code is the
+  stable `detached` rather than `orphaned`.
+- Per-worker policy is no longer described as "inherited model only": the spawn
+  schema, tool descriptions, README, and reference document the optional
+  provider/model/reasoning selection and its fail-closed validation.
 
 ## [0.2.0]
 

@@ -1,0 +1,16 @@
+name = "api-v03-minimal"
+version = "0.1.0"
+api_version = "0.3"
+requires_octet = "=0.8.0"
+description = "A minimal ordinary-process API 0.3 extension"
+
+[entrypoint]
+command = "extension.py"
+
+[capabilities]
+filesystem = "none"
+process = false
+network = false
+
+[contributes]
+tools = ["echo"]

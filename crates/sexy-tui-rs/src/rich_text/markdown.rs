@@ -1,12 +1,160 @@
 //! CommonMark/GFM parsing into the reusable rich-document model.
+//!
+//! Completed fences whose info string explicitly names a diagram language are
+//! rendered through the self-contained diagram renderers: `latex` through
+//! [`super::latex::render_latex`] (display mode) and `mermaid`/`graph`/
+//! `flowchart` through [`super::mermaid::render_mermaid`]. Every other fence —
+//! and every diagram body the renderer rejects, renders to nothing, is too
+//! large, or is not terminated by a closing fence — stays the original
+//! [`CodeBlock`] source; Mermaid errors also show their reason. Supported Mermaid
+//! retains source alongside art for width-aware layout, so oversized art is never
+//! wrapped into a misleading diagram. Unsupported input degrades to a plain code block
+//! instead of an empty or partial diagram. See [`MAX_DIAGRAM_FENCE_BYTES`].
+//!
+//! Rendering happens here, at parse time, and only for a *complete* fenced
+//! block: the streaming layer shows an open fence as its raw growing source (it
+//! builds that preview itself) and publishes the diagram once, when the closing
+//! fence arrives, so a partially received body is never half-drawn. A body line
+//! that merely *looks* like a closer (four-space indentation, trailing text)
+//! does not terminate the block — [`fence_is_closed`] mirrors the parser's own
+//! CommonMark closure rules.
 
 use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use super::{
+    latex::{
+        markdown::{protect, MathToken},
+        render_latex, RenderLatexOptions,
+    },
+    mermaid::render_mermaid,
     Block, CodeBlock, Document, Inline, List, ListItem, ListKind, Table, TableAlignment, TableCell,
 };
+
+/// Largest fenced body eligible for diagram rendering.
+///
+/// Larger bodies stay plain code blocks: a fence must never turn into an
+/// unbounded layout, and neither renderer is a general-purpose typesetter.
+/// Mermaid additionally bounds its own source and output size
+/// (`mermaid::MAX_MERMAID_*`).
+pub const MAX_DIAGRAM_FENCE_BYTES: usize = 16 * 1024;
+
+/// Render a completed fence into diagram text when its info string explicitly
+/// names a supported diagram language. `None` keeps the original code block —
+/// for every other language, for oversized bodies, and whenever the renderer
+/// fails closed.
+fn render_diagram_fence(info: &str, code: &str) -> Result<Option<String>, String> {
+    if code.len() > MAX_DIAGRAM_FENCE_BYTES {
+        return Ok(None);
+    }
+    let name = info
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut rendered = match name.as_str() {
+        "latex" => match render_latex(code.trim(), RenderLatexOptions::display()) {
+            Some(text) => text,
+            None => return Ok(None),
+        },
+        "mermaid" => render_mermaid(code)
+            .map_err(|error| error.to_string())?
+            .plain(),
+        // ```` ```graph TD ```` / ```` ```flowchart LR ```` fences carry the
+        // diagram header in the info string; the body is the graph. A body that
+        // already starts with its own header is left alone.
+        "graph" | "flowchart" => {
+            let body = if code.trim_start().starts_with("graph")
+                || code.trim_start().starts_with("flowchart")
+            {
+                code.to_owned()
+            } else {
+                format!("{info}\n{code}")
+            };
+            render_mermaid(&body)
+                .map_err(|error| error.to_string())?
+                .plain()
+        }
+        _ => return Ok(None),
+    };
+    // A renderer that succeeds but produces nothing — an empty expression,
+    // `{}`, a header-only graph — is a failed render: the fence must keep its
+    // original source rather than collapse into an empty block.
+    if rendered.trim().is_empty() {
+        return Ok(None);
+    }
+    rendered.push('\n');
+    Ok(Some(rendered))
+}
+
+/// Whether the fenced block at `range` is terminated by a valid closing fence
+/// line. An unterminated fence at end of input stays literal, matching the
+/// streaming preview.
+///
+/// `End(CodeBlock)` alone is not enough: pulldown also emits it when an open
+/// fence hits end of input. The closing line must therefore satisfy CommonMark's
+/// rules that the parser itself enforces — and this check has to mirror them,
+/// because a body line that merely *looks* like a fence must not turn into a
+/// partial render (see `pseudo_closing_fences_never_render_partial_art`).
+fn fence_is_closed(source: &str, range: &Range<usize>) -> bool {
+    let Some(slice) = source.get(range.clone()) else {
+        return false;
+    };
+    let mut lines = slice.lines();
+    let Some(opening) = lines.next().and_then(fence_marker) else {
+        return false;
+    };
+    let Some(closing) = lines.next_back().and_then(fence_marker) else {
+        return false;
+    };
+    closing.marker == opening.marker
+        && closing.count >= opening.count
+        // A closing fence may be followed only by spaces or tabs; a line like
+        // ```` ``` not a close ```` (or ```` ```latex ````) is body text.
+        && closing.rest.trim_matches([' ', '\t']).is_empty()
+        // ...and may be indented at most three columns relative to the opening
+        // fence: `    ``` ` inside a zero-indented fence is body text too. The
+        // comparison is relative because both lines carry the same container
+        // prefixes (blockquote `>`, list indentation) verbatim in the range.
+        && closing.indent <= opening.indent + 3
+}
+
+/// One fence line: marker character, marker run length, indentation relative to
+/// its container prefix and the text after the run.
+struct FenceLine<'a> {
+    marker: char,
+    count: usize,
+    indent: usize,
+    rest: &'a str,
+}
+
+/// The fence marker of a line, after any blockquote `>` prefixes and
+/// indentation. Pulldown reports a container-nested block's range with the
+/// surrounding container syntax still attached, so the raw line is stripped
+/// here rather than in the caller. Trailing text after the marker run is
+/// returned as [`FenceLine::rest`] for the caller to judge: an info string is
+/// legal on the opening line, illegal on the closing one.
+fn fence_marker(line: &str) -> Option<FenceLine<'_>> {
+    let mut rest = line;
+    let indent = loop {
+        let candidate = rest.trim_start_matches([' ', '\t']);
+        let Some(after) = candidate.strip_prefix('>') else {
+            let indent = rest.len() - candidate.len();
+            rest = candidate;
+            break indent;
+        };
+        rest = after.strip_prefix(' ').unwrap_or(after);
+    };
+    let marker = rest.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let count = rest.chars().take_while(|c| *c == marker).count();
+    (count >= 3).then_some(FenceLine {
+        marker,
+        count,
+        indent,
+        rest: &rest[count..],
+    })
+}
 
 /// Parser options chosen for rich terminal prose. Footnotes and raw HTML
 /// semantics are intentionally not enabled; HTML-like input remains visible
@@ -21,15 +169,24 @@ pub fn parser_options() -> Options {
 /// Parse Markdown into semantic content. Input is retained as text values and
 /// is sanitized only when rendered, so logging/debugging can keep the original.
 pub fn parse(source: &str) -> Document {
-    let parser = Parser::new_ext(source, parser_options());
-    Builder::new().build(parser)
+    let (protected, math) = protect(source);
+    let parser = Parser::new_ext(&protected, parser_options()).into_offset_iter();
+    Builder::new(source, &math).build(parser)
 }
 
 /// Top-level block starts used by the bounded streaming parser.
 pub(crate) fn top_level_block_starts(source: &str) -> Vec<usize> {
     let mut starts = Vec::new();
     let mut block_depth = 0usize;
-    for (event, range) in Parser::new_ext(source, parser_options()).into_offset_iter() {
+    let (protected, math) = protect(source);
+    for (event, mut range) in Parser::new_ext(&protected, parser_options()).into_offset_iter() {
+        let index = math.partition_point(|token| token.range.end <= range.start);
+        if let Some(token) = math
+            .get(index)
+            .filter(|token| token.range.contains(&range.start))
+        {
+            range.start = token.range.start;
+        }
         match event {
             Event::Start(tag) if is_block_tag(&tag) => {
                 if block_depth == 0 {
@@ -101,6 +258,8 @@ enum Frame {
     Heading(u8, Vec<Inline>),
     Quote(Vec<Block>),
     Code {
+        /// Full info string (empty for indented blocks).
+        info: String,
         language: Option<String>,
         code: String,
     },
@@ -141,25 +300,31 @@ enum InlineKind {
     Strikethrough,
 }
 
-struct Builder {
+struct Builder<'a> {
     stack: Vec<Frame>,
+    source: &'a str,
+    math: &'a [MathToken],
+    next_math: usize,
 }
 
-impl Builder {
-    fn new() -> Self {
+impl<'a> Builder<'a> {
+    fn new(source: &'a str, math: &'a [MathToken]) -> Self {
         Self {
             stack: vec![Frame::Root(Vec::new())],
+            source,
+            math,
+            next_math: 0,
         }
     }
 
-    fn build<'a>(mut self, parser: impl Iterator<Item = Event<'a>>) -> Document {
-        for event in parser {
-            self.event(event);
+    fn build<'p>(mut self, parser: impl Iterator<Item = (Event<'p>, Range<usize>)>) -> Document {
+        for (event, range) in parser {
+            self.event(event, Some(range));
         }
         // Pulldown guarantees balanced events, but keeping this recovery path
         // makes the adapter robust to future parser extensions.
         while self.stack.len() > 1 {
-            self.close_top();
+            self.close_top(None);
         }
         match self.stack.pop() {
             Some(Frame::Root(blocks)) => Document::new(blocks),
@@ -167,17 +332,15 @@ impl Builder {
         }
     }
 
-    fn event(&mut self, event: Event<'_>) {
+    fn event(&mut self, event: Event<'_>, range: Option<Range<usize>>) {
         match event {
             Event::Start(tag) => self.start(tag),
-            Event::End(_) => self.close_top(),
+            Event::End(_) => self.close_top(range),
             Event::Text(text) => {
                 if let Some(Frame::Code { code, .. } | Frame::Html(code)) = self.stack.last_mut() {
                     code.push_str(&text);
                 } else {
-                    for inline in split_bare_urls(&text) {
-                        self.append_inline(inline);
-                    }
+                    self.text(&text, range);
                 }
             }
             Event::Code(code) => self.append_inline(Inline::Code(code.into_string())),
@@ -193,7 +356,12 @@ impl Builder {
             Event::FootnoteReference(label) => {
                 self.append_inline(Inline::Raw(format!("[^{}]", label)))
             }
-            Event::SoftBreak => self.append_inline(Inline::SoftBreak),
+            Event::SoftBreak => {
+                if !matches!(self.stack.last(), Some(Frame::Paragraph(content)) if content.is_empty())
+                {
+                    self.append_inline(Inline::SoftBreak);
+                }
+            }
             Event::HardBreak => self.append_inline(Inline::HardBreak),
             Event::Rule => self.append_block(Block::Divider),
             Event::TaskListMarker(checked) => {
@@ -207,21 +375,80 @@ impl Builder {
         }
     }
 
+    fn text(&mut self, text: &str, range: Option<Range<usize>>) {
+        let Some(range) = range else {
+            return;
+        };
+        while self.next_math < self.math.len() && self.math[self.next_math].range.end <= range.start
+        {
+            self.next_math += 1;
+        }
+        if self
+            .math
+            .get(self.next_math)
+            .is_none_or(|token| token.range.start >= range.end)
+        {
+            for inline in split_bare_urls(text) {
+                self.append_inline(inline);
+            }
+            return;
+        }
+        let mut cursor = range.start;
+        while let Some(token) = self
+            .math
+            .get(self.next_math)
+            .filter(|token| token.range.start < range.end)
+        {
+            if token.range.start > cursor {
+                let prefix = &text[cursor - range.start..token.range.start - range.start];
+                for inline in split_bare_urls(prefix) {
+                    self.append_inline(inline);
+                }
+            }
+            let rendered = token.render(self.source);
+            let end = token.range.end;
+            if token.display && matches!(self.stack.last(), Some(Frame::Paragraph(_))) {
+                // The mask makes display math a whole paragraph, not inline prose.
+                if let Some(Frame::Paragraph(mut content)) = self.stack.pop() {
+                    while matches!(content.last(), Some(Inline::SoftBreak)) {
+                        content.pop();
+                    }
+                    if !content.is_empty() {
+                        self.append_block(Block::Paragraph(content));
+                    }
+                }
+                self.append_block(Block::Plain(rendered));
+                self.stack.push(Frame::Paragraph(Vec::new()));
+            } else {
+                self.append_inline(Inline::Raw(rendered));
+            }
+            cursor = end.min(range.end);
+            self.next_math += 1;
+        }
+        if cursor < range.end {
+            for inline in split_bare_urls(&text[cursor - range.start..]) {
+                self.append_inline(inline);
+            }
+        }
+    }
+
     fn start(&mut self, tag: Tag<'_>) {
         let frame = match tag {
             Tag::Paragraph => Frame::Paragraph(Vec::new()),
             Tag::Heading { level, .. } => Frame::Heading(heading_level(level), Vec::new()),
             Tag::BlockQuote(_) => Frame::Quote(Vec::new()),
             Tag::CodeBlock(kind) => {
-                let language = match kind {
-                    CodeBlockKind::Indented => None,
-                    CodeBlockKind::Fenced(info) => info
-                        .split_whitespace()
-                        .next()
-                        .filter(|language| !language.is_empty())
-                        .map(str::to_owned),
+                let info = match kind {
+                    CodeBlockKind::Indented => String::new(),
+                    CodeBlockKind::Fenced(info) => info.trim().to_owned(),
                 };
+                let language = info
+                    .split_whitespace()
+                    .next()
+                    .filter(|language| !language.is_empty())
+                    .map(str::to_owned);
                 Frame::Code {
+                    info,
                     language,
                     code: String::new(),
                 }
@@ -276,17 +503,61 @@ impl Builder {
         self.stack.push(frame);
     }
 
-    fn close_top(&mut self) {
+    fn close_top(&mut self, end_range: Option<Range<usize>>) {
         let Some(frame) = self.stack.pop() else {
             return;
         };
         match frame {
             Frame::Root(blocks) => self.stack.push(Frame::Root(blocks)),
-            Frame::Paragraph(content) => self.append_block(Block::Paragraph(content)),
+            Frame::Paragraph(content) => {
+                if !content.is_empty() {
+                    self.append_block(Block::Paragraph(content));
+                }
+            }
             Frame::Heading(level, content) => self.append_block(Block::Heading { level, content }),
             Frame::Quote(blocks) => self.append_block(Block::BlockQuote(blocks)),
-            Frame::Code { language, code } => {
-                self.append_block(Block::CodeBlock(CodeBlock { language, code }))
+            Frame::Code {
+                info,
+                language,
+                mut code,
+            } => {
+                // Only a complete fence whose info string names a diagram
+                // language is rendered; every other case (unknown language,
+                // oversized body, renderer failure or empty render,
+                // unterminated fence) keeps the original source as a plain
+                // code block.
+                let diagram = if end_range
+                    .as_ref()
+                    .is_some_and(|range| fence_is_closed(self.source, range))
+                {
+                    render_diagram_fence(&info, &code)
+                } else {
+                    Ok(None)
+                };
+                match diagram {
+                    Ok(Some(rendered))
+                        if language
+                            .as_deref()
+                            .is_some_and(|name| !name.eq_ignore_ascii_case("latex")) =>
+                    {
+                        self.append_block(Block::Diagram {
+                            source: CodeBlock { language, code },
+                            rendered,
+                        });
+                    }
+                    Ok(rendered) => {
+                        if let Some(rendered) = rendered {
+                            code = rendered;
+                        }
+                        self.append_block(Block::CodeBlock(CodeBlock { language, code }));
+                    }
+                    Err(error) => {
+                        self.append_block(Block::CodeBlock(CodeBlock { language, code }));
+                        self.append_block(Block::Plain(format!(
+                            "Mermaid diagram not rendered: {error}"
+                        )));
+                    }
+                }
             }
             Frame::Html(html) => self.append_block(Block::Plain(html)),
             Frame::List { kind, items } => self.append_block(Block::List(List { kind, items })),

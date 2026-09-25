@@ -1,8 +1,8 @@
 //! Host-owned GitHub Copilot provider integration.
 //!
-//! GitHub OAuth/device state belongs to the embedding application, not the octet
-//! CLI credential store. This module only retains a short-lived inference
-//! session in memory behind `octet_ai::Auth::Dynamic`; no OAuth token, exchange
+//! GitHub OAuth/device state belongs to the embedding application (the opt-in
+//! coding-host adapter lives in `auth::copilot`). This module retains only a
+//! short-lived session behind `octet_ai::Auth::Dynamic`; no OAuth token, exchange
 //! response, or dynamic header is part of a provider definition, catalog,
 //! diagnostic, or persistence format.
 
@@ -48,6 +48,12 @@ const COPILOT_ROUTES: &[ProviderRoute] = &[
             responses_profile: ResponsesRuntimeProfile::Default,
             openai_chat_profile: OpenAiChatRuntimeProfile::Default,
             lifecycle_feedback: false,
+            responses_features: octet_ai::ResponsesFeatures {
+                async_tools: false,
+                steering: false,
+                reasoning_effort_updates: false,
+                compact_reasoning_effort_updates: false,
+            },
         },
     },
     ProviderRoute {
@@ -61,6 +67,12 @@ const COPILOT_ROUTES: &[ProviderRoute] = &[
             responses_profile: ResponsesRuntimeProfile::Default,
             openai_chat_profile: OpenAiChatRuntimeProfile::Default,
             lifecycle_feedback: false,
+            responses_features: octet_ai::ResponsesFeatures {
+                async_tools: false,
+                steering: false,
+                reasoning_effort_updates: false,
+                compact_reasoning_effort_updates: false,
+            },
         },
     },
 ];
@@ -505,7 +517,9 @@ impl CopilotEndpoint {
 #[async_trait::async_trait]
 pub trait CopilotHost: Send + Sync {
     /// Return whether the host currently has enough authenticated state to
-    /// exchange a Copilot inference session.
+    /// exchange or reuse a Copilot inference session. The resolver checks this
+    /// before returning even a fresh cached credential; bound hosts must reject
+    /// a deleted/replaced login rather than silently changing accounts.
     async fn availability(&self) -> Result<(), CopilotAvailabilityError>;
 
     /// Start a device authorization and return only user-displayable data.
@@ -540,7 +554,25 @@ pub struct CopilotProvider {
     definition: ProviderDefinition,
 }
 
+/// Opt-in coding-host registration. Offline or absent credentials contribute
+/// nothing; the generic provider/bootstrap remains opt-in and credential-free.
+pub async fn register_available_models(
+    catalog: &mut octet_ai::ModelCatalog,
+    offline: bool,
+) -> anyhow::Result<()> {
+    crate::auth::copilot::register_available_models(catalog, offline).await
+}
+
 impl CopilotProvider {
+    /// Invoke the coding-host adapter through the already-exported provider type.
+    /// This does not change embedding-host registration or add a CLI preset.
+    pub async fn register_available_models(
+        catalog: &mut octet_ai::ModelCatalog,
+        offline: bool,
+    ) -> anyhow::Result<()> {
+        register_available_models(catalog, offline).await
+    }
+
     /// Bind a host-owned Copilot lifecycle to one explicit endpoint authority.
     pub fn new(
         host: Arc<dyn CopilotHost>,
@@ -582,16 +614,12 @@ impl CopilotProvider {
 
     /// Exchange host authentication for an in-memory short-lived session.
     pub async fn exchange(&self) -> Result<(), CopilotAvailabilityError> {
-        let session = self.host.exchange().await?;
-        self.resolver.install(session).await;
-        Ok(())
+        self.resolver.replace_session(false).await
     }
 
     /// Refresh the current in-memory short-lived session explicitly.
     pub async fn refresh(&self) -> Result<(), CopilotAvailabilityError> {
-        let session = self.host.refresh().await?;
-        self.resolver.install(session).await;
-        Ok(())
+        self.resolver.replace_session(true).await
     }
 
     /// Discard the in-memory inference session.
@@ -672,8 +700,20 @@ impl CopilotResolver {
         }
     }
 
-    async fn install(&self, session: CopilotSession) {
-        *self.session.lock().await = Some(session);
+    async fn replace_session(&self, refresh: bool) -> Result<(), CopilotAvailabilityError> {
+        // Share the resolve/invalidate lock across transport and installation.
+        // Failure or cancellation leaves no reusable old credential, and a
+        // waiting invalidation clears the replacement instead of being undone.
+        let mut session = self.session.lock().await;
+        *session = None;
+        self.host.availability().await?;
+        let replacement = if refresh {
+            self.host.refresh().await?
+        } else {
+            self.host.exchange().await?
+        };
+        *session = Some(replacement);
+        Ok(())
     }
 
     async fn invalidate(&self) {
@@ -689,6 +729,12 @@ impl CredentialResolver for CopilotResolver {
         // cancellation-safe: dropping a canceled resolve releases it and no
         // token is persisted.
         let mut session = self.session.lock().await;
+        // A fresh inference token is not proof that its host login still exists
+        // or belongs to the account bound by this resolver.
+        if self.host.availability().await.is_err() {
+            *session = None;
+            return Err(octet_ai::AuthError::Resolve);
+        }
         if let Some(current) = session.as_ref().filter(|current| current.is_fresh()) {
             return Ok(current.resolved_credential());
         }
@@ -874,6 +920,12 @@ mod tests {
     const DYNAMIC_TOKEN: &str = "copilot-dynamic-header-token";
     const REFRESHED_TOKEN: &str = "copilot-refreshed-token";
 
+    #[derive(Default)]
+    struct SessionGate {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
     struct FakeHost {
         availability: Option<CopilotAvailabilityError>,
         device_login: CopilotDeviceLogin,
@@ -883,9 +935,18 @@ mod tests {
         models: Vec<CopilotModel>,
         exchange_calls: AtomicUsize,
         refresh_calls: AtomicUsize,
+        session_gate: Mutex<Option<Arc<SessionGate>>>,
     }
 
     impl FakeHost {
+        async fn wait_session_gate(&self) {
+            let gate = self.session_gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+        }
+
         fn with_state(
             availability: Option<CopilotAvailabilityError>,
             exchanges: Vec<CopilotSession>,
@@ -910,6 +971,7 @@ mod tests {
                 models,
                 exchange_calls: AtomicUsize::new(0),
                 refresh_calls: AtomicUsize::new(0),
+                session_gate: Mutex::new(None),
             }
         }
     }
@@ -943,6 +1005,7 @@ mod tests {
 
         async fn exchange(&self) -> Result<CopilotSession, CopilotAvailabilityError> {
             self.exchange_calls.fetch_add(1, Ordering::SeqCst);
+            self.wait_session_gate().await;
             self.exchanges
                 .lock()
                 .unwrap()
@@ -952,6 +1015,7 @@ mod tests {
 
         async fn refresh(&self) -> Result<CopilotSession, CopilotAvailabilityError> {
             self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+            self.wait_session_gate().await;
             self.refreshes
                 .lock()
                 .unwrap()
@@ -979,6 +1043,93 @@ mod tests {
         .unwrap()
     }
 
+    async fn cached_replacement_fixture() -> (Arc<FakeHost>, CopilotProvider) {
+        let host = Arc::new(FakeHost::with_state(
+            None,
+            vec![
+                fake_session(PRIMARY_TOKEN, Duration::from_secs(600)),
+                fake_session(REFRESHED_TOKEN, Duration::from_secs(600)),
+            ],
+            vec![fake_session(REFRESHED_TOKEN, Duration::from_secs(600))],
+            vec![],
+        ));
+        let provider = CopilotProvider::new(
+            host.clone(),
+            CopilotEndpoint::new(url::Url::parse("https://api.example.test/").unwrap()).unwrap(),
+        )
+        .unwrap();
+        provider.exchange().await.unwrap();
+        assert!(provider.resolver.resolve().await.is_ok());
+        (host, provider)
+    }
+
+    #[tokio::test]
+    async fn explicit_replacement_failure_discards_even_a_fresh_cached_session() {
+        for refresh in [false, true] {
+            let (host, provider) = cached_replacement_fixture().await;
+            host.exchanges.lock().unwrap().clear();
+            host.refreshes.lock().unwrap().clear();
+            let result = if refresh {
+                provider.refresh().await
+            } else {
+                provider.exchange().await
+            };
+            assert!(result.is_err());
+            assert!(
+                provider.resolver.session.lock().await.is_none(),
+                "refresh={refresh}"
+            );
+            assert!(provider.resolver.resolve().await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_replacement_serializes_invalidation_and_clears_cancelled_cache() {
+        for refresh in [false, true] {
+            for cancel in [false, true] {
+                let (host, provider) = cached_replacement_fixture().await;
+                let gate = Arc::new(SessionGate::default());
+                *host.session_gate.lock().unwrap() = Some(Arc::clone(&gate));
+                let mut replacement = Box::pin(async {
+                    if refresh {
+                        provider.refresh().await
+                    } else {
+                        provider.exchange().await
+                    }
+                });
+                tokio::select! {
+                    _ = gate.entered.notified() => {},
+                    result = &mut replacement => panic!("replacement bypassed the gate: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("replacement did not enter"),
+                }
+                if cancel {
+                    drop(replacement);
+                } else {
+                    let mut invalidation = Box::pin(provider.invalidate_session());
+                    std::future::poll_fn(|cx| {
+                        assert!(
+                            std::future::Future::poll(invalidation.as_mut(), cx).is_pending(),
+                            "invalidation must serialize with the in-flight replacement"
+                        );
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
+                    gate.release.notify_one();
+                    let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                        tokio::join!(replacement, invalidation)
+                    })
+                    .await
+                    .expect("replacement and invalidation must settle");
+                    result.unwrap();
+                }
+                assert!(
+                    provider.resolver.session.lock().await.is_none(),
+                    "refresh={refresh}, cancel={cancel}"
+                );
+            }
+        }
+    }
+
     fn fake_model(id: &str, protocol: Protocol) -> CopilotModel {
         CopilotModel::new(
             id,
@@ -993,6 +1144,7 @@ mod tests {
                 agent_delegation: None,
                 structured_output: protocol != Protocol::OpenAiChat,
                 deferred_tool_loading: false,
+                responses_features: Default::default(),
             },
             ModelLimits {
                 context_window: 128_000,

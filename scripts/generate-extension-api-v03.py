@@ -172,7 +172,7 @@ def validate_schema(schema: dict[str, Any]) -> None:
         "schema_format", "api_version", "schema_id", "canonical_encoding",
         "canonical_profile", "legacy_adapters", "version_policy", "bounds",
         "capabilities", "methods", "errors", "dispositions", "models",
-        "envelopes", "fixtures", "negative_fixtures",
+        "envelopes", "fixtures", "negative_fixtures", "theme_selection",
     }
     missing = sorted(required - set(schema))
     if missing:
@@ -228,19 +228,20 @@ def validate_schema(schema: dict[str, Any]) -> None:
         raise ValueError("max_portable_json_integer must be the portable JSON integer maximum")
 
     policy = schema["version_policy"]
-    if not isinstance(policy, list) or len(policy) != 3:
-        raise ValueError("version_policy must declare API 0.1, 0.2, and 0.3 exactly once")
+    if not isinstance(policy, list) or len(policy) != 4:
+        raise ValueError("version_policy must declare API 0.1, 0.2, 0.3, and 0.4 exactly once")
     expected_policy = [
         ("0.1", "frozen", "legacy-json-rpc", "supported", "unavailable"),
         ("0.2", "supported", "legacy-json-rpc", "supported", "supported"),
-        ("0.3", "current", "canonical-json-rpc", "supported", "supported"),
+        ("0.3", "supported", "canonical-json-rpc", "supported", "supported"),
+        ("0.4", "current", "legacy-json-rpc", "supported", "supported"),
     ]
     actual_policy = [
         (entry.get("version"), entry.get("status"), entry.get("wire"), entry.get("runtime"), entry.get("bundles"))
         for entry in policy
     ]
     if actual_policy != expected_policy:
-        raise ValueError("version_policy must explicitly preserve API 0.1/0.2 and installable API 0.2/0.3")
+        raise ValueError("version_policy must explicitly preserve API 0.1/0.2/0.3 and the current API 0.4")
     adapters = schema["legacy_adapters"]
     if [(entry.get("version"), entry.get("status"), entry.get("wire")) for entry in adapters] != [
         ("0.1", "frozen", "legacy-json-rpc"), ("0.2", "supported", "legacy-json-rpc"),
@@ -368,6 +369,49 @@ def validate_schema(schema: dict[str, Any]) -> None:
         if (method.get("params"), method.get("result"), method.get("terminal"), method.get("notification")) != semantics:
             raise ValueError(f"foundation method {name} semantics must remain explicit")
 
+    theme = schema["theme_selection"]
+    if not isinstance(theme, dict) or set(theme) != {
+        "capability", "method", "params_model", "result_model", "namespace",
+        "scopes", "roles", "trust_values", "rejections",
+    }:
+        raise ValueError("theme_selection must declare exactly the generated policy keys")
+    if theme["capability"] not in capability_names:
+        raise ValueError("theme_selection references an unknown capability")
+    theme_methods = [method for method in schema["methods"] if method["name"] == theme["method"]]
+    if len(theme_methods) != 1 or theme_methods[0]["capability"] != theme["capability"]:
+        raise ValueError("theme_selection method must reference its capability exactly once")
+    if theme_methods[0]["params"] != theme["params_model"] or theme_methods[0]["result"] != theme["result_model"]:
+        raise ValueError("theme_selection method models must match the policy models")
+    if theme["namespace"] != "extension" or theme["scopes"] != ["extension"]:
+        raise ValueError("theme_selection must stay scoped to the requesting extension")
+    if (
+        not isinstance(theme["roles"], list) or not theme["roles"]
+        or not all(isinstance(role, str) and role for role in theme["roles"])
+        or len(set(theme["roles"])) != len(theme["roles"])
+    ):
+        raise ValueError("theme_selection roles must be unique non-empty strings")
+    if not isinstance(theme["trust_values"], list) or not theme["trust_values"] or not all(isinstance(value, str) and value for value in theme["trust_values"]):
+        raise ValueError("theme_selection trust_values must be non-empty strings")
+    if theme["namespace"] in theme["trust_values"]:
+        raise ValueError("theme_selection trust vocabulary must not overlap the extension namespace")
+    rejection_names = {"namespace_mismatch", "unknown_theme", "unknown_role", "trust_widening"}
+    allowed_error_names = {entry["name"] for entry in schema["errors"]}
+    if not isinstance(theme["rejections"], dict) or set(theme["rejections"]) != rejection_names or any(code not in allowed_error_names for code in theme["rejections"].values()):
+        raise ValueError("theme_selection rejections must map the four rejections to generated error semantics")
+    model_by_name = {model["name"]: model for model in schema["models"]}
+    params_model = model_by_name.get(theme["params_model"])
+    result_model = model_by_name.get(theme["result_model"])
+    if params_model is None or result_model is None or result_model.get("kind") == "tagged_union":
+        raise ValueError("theme_selection policy models must be existing records")
+    params_fields = {field["name"]: field for field in params_model["fields"]}
+    for field_name in ("namespace", "theme_id", "role", "scope"):
+        if params_fields.get(field_name, {}).get("type") != "string":
+            raise ValueError(f"theme_selection params model needs a {field_name} string field")
+    if params_fields["role"].get("values", []) != theme["roles"]:
+        raise ValueError("theme_selection roles must match the params role enum exactly")
+    if params_fields["scope"].get("values", []) != theme["scopes"]:
+        raise ValueError("theme_selection scopes must match the params scope enum exactly")
+
     error_names = names(schema["errors"], "errors")
     if set(error_names) != {
         "parse_error", "invalid_request", "unknown_method", "invalid_params", "internal_error",
@@ -442,6 +486,86 @@ def rust_field_type(field: dict[str, Any]) -> str:
     if is_optional(field) or field.get("nullable", False):
         return f"Option<{value}>"
     return value
+
+
+def render_theme_policy_rust(schema: dict[str, Any]) -> list[str]:
+    """Render the host-mediated theme-selection policy for the generated host surface.
+
+    The policy is fail-closed: unknown namespaces, themes, and roles are rejected,
+    and a theme whose host-resolved trust is not non-widening is refused so a
+    selection can never widen project trust.  The host supplies the catalog, so
+    the generated surface never invents host trust state.
+    """
+    theme = schema["theme_selection"]
+    rejections = theme["rejections"]
+    params_validator = f"validate_{snake(theme['params_model'])}"
+    result_validator = f"validate_{snake(theme['result_model'])}"
+    return [
+        "",
+        f"pub const THEME_ROLES: &[&str] = &[{rust_array(theme['roles'])}];",
+        f"pub const THEME_TRUST_VALUES: &[&str] = &[{rust_array(theme['trust_values'])}];",
+        "",
+        "#[derive(Clone, Copy, Debug, PartialEq, Eq)]",
+        "pub enum ThemeSelectionRejection { NamespaceMismatch, UnknownTheme, UnknownRole, TrustWidening }",
+        "impl ThemeSelectionRejection {",
+        "    pub fn error_name(self) -> &'static str {",
+        "        match self {",
+        f"            Self::NamespaceMismatch => {rust_string(rejections['namespace_mismatch'])},",
+        f"            Self::UnknownTheme => {rust_string(rejections['unknown_theme'])},",
+        f"            Self::UnknownRole => {rust_string(rejections['unknown_role'])},",
+        f"            Self::TrustWidening => {rust_string(rejections['trust_widening'])},",
+        "        }",
+        "    }",
+        "    pub fn error(self, detail: &str) -> ContractError { ContractError::named(self.error_name(), detail) }",
+        "}",
+        "",
+        f"pub fn {params_validator}(params: &{theme['params_model']}) -> Result<(), ContractError> {{ let value = serialized_value(params)?; validate_model_value({rust_string(theme['params_model'])}, &value) }}",
+        f"pub fn {result_validator}(result: &{theme['result_model']}) -> Result<(), ContractError> {{ let value = serialized_value(result)?; validate_model_value({rust_string(theme['result_model'])}, &value) }}",
+        "pub fn theme_role_is_known(role: &str) -> bool { THEME_ROLES.contains(&role) }",
+        "pub fn theme_trust_is_non_widening(trust: &str) -> bool { THEME_TRUST_VALUES.contains(&trust) }",
+        f"pub fn resolve_theme_selection(params: &{theme['params_model']}, requesting_namespace: &str, catalog: &[(&str, &str)]) -> Result<{theme['result_model']}, ContractError> {{",
+        f"    {params_validator}(params)?;",
+        "    if params.namespace != requesting_namespace { return Err(ThemeSelectionRejection::NamespaceMismatch.error(\"theme namespace does not match the requesting extension\")); }",
+        "    if !theme_role_is_known(&params.role) { return Err(ThemeSelectionRejection::UnknownRole.error(\"unknown theme role\")); }",
+        "    let Some((_theme_id, trust)) = catalog.iter().find(|(theme_id, _trust)| *theme_id == params.theme_id.as_str()) else {",
+        "        return Err(ThemeSelectionRejection::UnknownTheme.error(\"unknown theme id\"));",
+        "    };",
+        "    if !theme_trust_is_non_widening(trust) { return Err(ThemeSelectionRejection::TrustWidening.error(\"theme would widen presentation trust\")); }",
+        f"    let result = {theme['result_model']} {{ status: \"selected\".to_owned(), theme_id: Some(params.theme_id.clone()), reason: None }};",
+        f"    {result_validator}(&result)?;",
+        "    Ok(result)",
+        "}",
+        "",
+    ]
+
+
+def render_theme_policy_python(schema: dict[str, Any]) -> list[str]:
+    """Render the same host-mediated theme-selection policy for the Python SDK."""
+    theme = schema["theme_selection"]
+    rejections = theme["rejections"]
+    params_validator = f"validate_{snake(theme['params_model'])}"
+    result_validator = f"validate_{snake(theme['result_model'])}"
+    return [
+        "",
+        f"THEME_ROLES = {tuple(theme['roles'])!r}",
+        f"THEME_TRUST_VALUES = {tuple(theme['trust_values'])!r}",
+        "",
+        f"def {params_validator}(value: {theme['params_model']}) -> None: value.to_wire()",
+        f"def {result_validator}(value: {theme['result_model']}) -> None: value.to_wire()",
+        "def theme_role_is_known(role: str) -> bool: return role in THEME_ROLES",
+        "def theme_trust_is_non_widening(trust: str) -> bool: return trust in THEME_TRUST_VALUES",
+        f"def resolve_theme_selection(params: {theme['params_model']}, requesting_namespace: str, catalog: Mapping[str, str]) -> {theme['result_model']}:",
+        f"    {params_validator}(params)",
+        f"    if params.namespace != requesting_namespace: raise ContractError({rejections['namespace_mismatch']!r}, 'theme namespace does not match the requesting extension')",
+        f"    if not theme_role_is_known(params.role): raise ContractError({rejections['unknown_role']!r}, 'unknown theme role')",
+        "    trust = catalog.get(params.theme_id)",
+        f"    if trust is None: raise ContractError({rejections['unknown_theme']!r}, 'unknown theme id')",
+        f"    if not theme_trust_is_non_widening(trust): raise ContractError({rejections['trust_widening']!r}, 'theme would widen presentation trust')",
+        f"    result = {theme['result_model']}(status='selected', theme_id=params.theme_id, reason=None)",
+        f"    {result_validator}(result)",
+        "    return result",
+        "",
+    ]
 
 
 def render_rust(schema: dict[str, Any], source_hash: str) -> str:
@@ -649,7 +773,7 @@ def render_rust(schema: dict[str, Any], source_hash: str) -> str:
         f"    validate_exact_host_offer(&required_methods, &[{rust_array(required_methods)}], \"required method\")?;",
         f"    validate_optional_host_offer(&optional_methods, &[{rust_array(optional_methods)}], \"method\")?;",
         "    let methods = required_methods.union(&optional_methods).cloned().collect::<BTreeSet<_>>(); validate_available_methods(&methods)?; validate_method_capabilities(&capabilities, &methods)?; validate_limits(&offer.limits) }",
-        "pub fn validate_selection(selection: &ContractSelection) -> Result<(), ContractError> { if selection.schema != SCHEMA_ID { return Err(ContractError::named(\"version_mismatch\", format!(\"expected schema {SCHEMA_ID}, received {}\", selection.schema))); }\n    if selection.encoding != CANONICAL_ENCODING { return Err(ContractError::named(\"invalid_params\", format!(\"expected encoding {CANONICAL_ENCODING}, received {}\", selection.encoding))); } let capabilities = validate_named_list(&selection.capabilities, MAX_CAPABILITIES, MAX_CAPABILITY_NAME_BYTES, \"capability\", |name| capability_spec(name).is_some())?; let methods = validate_named_list(&selection.methods, MAX_METHODS, MAX_METHOD_NAME_BYTES, \"method\", |name| method_spec(name).is_some())?; validate_available_capabilities(&capabilities)?; validate_available_methods(&methods)?; validate_method_capabilities(&capabilities, &methods)?; validate_limits(&selection.limits) }",
+        "pub fn validate_selection(selection: &ContractSelection) -> Result<(), ContractError> { if selection.schema != SCHEMA_ID { return Err(ContractError::named(\"version_mismatch\", format!(\"expected schema {SCHEMA_ID}, received {}\", selection.schema))); }\n    if selection.encoding != CANONICAL_ENCODING { return Err(ContractError::named(\"invalid_params\", format!(\"expected encoding {CANONICAL_ENCODING}, received {}\", selection.encoding))); } let capabilities = validate_named_list(&selection.capabilities, MAX_CAPABILITIES, MAX_CAPABILITY_NAME_BYTES, \"capability\", |name| capability_spec(name).is_some())?; let methods = validate_named_list(&selection.methods, MAX_METHODS, MAX_METHOD_NAME_BYTES, \"method\", |name| method_spec(name).is_some())?; validate_available_capabilities(&capabilities)?; validate_available_methods(&methods)?; validate_method_capabilities(&capabilities, &methods)?; if capabilities.contains(\"event_bus\") && !methods.contains(\"bus/lifecycle\") { return Err(ContractError::named(\"capability_mismatch\", \"event_bus requires bus/lifecycle\")); } validate_limits(&selection.limits) }",
         "pub fn host_offer(max_frame_bytes: usize, max_concurrent_requests: usize) -> Result<ContractOffer, ContractError> { if max_frame_bytes == 0 || max_concurrent_requests == 0 { return Err(ContractError::named(\"invalid_params\", \"host offer limits must be greater than zero\")); } let offer = ContractOffer { schema: SCHEMA_ID.to_owned(), encoding: CANONICAL_ENCODING.to_owned(),",
         f"        required_capabilities: vec![{rust_array(required_capabilities)}].into_iter().map(str::to_owned).collect(), optional_capabilities: vec![{rust_array(optional_capabilities)}].into_iter().map(str::to_owned).collect(), required_methods: vec![{rust_array(required_methods)}].into_iter().map(str::to_owned).collect(), optional_methods: vec![{rust_array(optional_methods)}].into_iter().map(str::to_owned).collect(),",
         "        limits: ProtocolLimits { max_frame_bytes: max_frame_bytes.min(MAX_FRAME_BYTES), max_concurrent_requests: max_concurrent_requests.min(MAX_CONCURRENT_REQUESTS), max_tools: MAX_TOOLS } }; validate_offer(&offer)?; Ok(offer) }",
@@ -718,6 +842,7 @@ def render_rust(schema: dict[str, Any], source_hash: str) -> str:
         "pub fn parse_json_rpc_envelope(value: serde_json::Value) -> Result<JsonRpcEnvelope, ContractError> { let invalid = |error: ContractError| ContractError::named(\"invalid_request\", error.message); canonical_value(&value, 0).map_err(invalid)?; let object = value.as_object().ok_or_else(|| ContractError::named(\"invalid_request\", \"JSON-RPC envelope must be an object\"))?; let facts = (object.contains_key(\"id\"), object.contains_key(\"method\"), object.contains_key(\"result\"), object.contains_key(\"error\")); let spec = ENVELOPES.iter().find(|entry| (entry.id, entry.method, entry.result, entry.error) == facts).ok_or_else(|| ContractError::named(\"invalid_request\", \"JSON-RPC envelope has an invalid request/response shape\"))?; if let Some(method) = object.get(\"method\").and_then(serde_json::Value::as_str) { if let Some(method_spec) = method_spec(method) { if method_spec.notification == facts.0 { return Err(ContractError::named(\"invalid_request\", \"JSON-RPC method id presence violates generated method semantics\")); } } } let parsed = match spec.model { \"JsonRpcRequest\" => parse_json_rpc_request(value).map(JsonRpcEnvelope::Request).map_err(invalid), \"JsonRpcNotification\" => parse_json_rpc_notification(value).map(JsonRpcEnvelope::Notification).map_err(invalid), \"JsonRpcSuccessResponse\" => parse_json_rpc_success_response(value).map(JsonRpcEnvelope::SuccessResponse).map_err(invalid), \"JsonRpcErrorResponse\" => parse_json_rpc_error_response(value).map(JsonRpcEnvelope::ErrorResponse).map_err(invalid), _ => Err(ContractError::named(\"internal_error\", \"unknown generated envelope\")) }?; match spec.semantic_validator { None => {}, Some(\"error_object\") => match &parsed { JsonRpcEnvelope::ErrorResponse(response) => validate_error_object(&response.error).map_err(invalid)?, _ => return Err(ContractError::named(\"internal_error\", \"error_object validator applied to a non-error envelope\")), }, Some(_) => return Err(ContractError::named(\"internal_error\", \"unknown generated envelope semantic validator\")), }; Ok(parsed) }",
         "",
     ])
+    lines.extend(render_theme_policy_rust(schema))
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
@@ -1041,6 +1166,7 @@ def render_python(schema: dict[str, Any], source_hash: str) -> str:
         "    caps = _named_list(selection.capabilities, MAX_CAPABILITIES, MAX_CAPABILITY_NAME_BYTES, 'capability', {name for name, _required, _available in CAPABILITY_SPECS})",
         "    methods = _named_list(selection.methods, MAX_METHODS, MAX_METHOD_NAME_BYTES, 'method', {name for name, _direction, _capability, _required, _available, _params, _result, _terminal, _notification in METHOD_SPECS})",
         "    _validate_available(caps, methods); _validate_limits(selection.limits)",
+        "    if 'event_bus' in caps and 'bus/lifecycle' not in methods: raise ContractError('capability_mismatch', 'event_bus requires bus/lifecycle')",
         "",
         "def host_offer(max_frame_bytes: int, max_concurrent_requests: int) -> ContractOffer:",
         "    if not isinstance(max_frame_bytes, int) or not isinstance(max_concurrent_requests, int) or max_frame_bytes <= 0 or max_concurrent_requests <= 0: raise ContractError('invalid_params', 'host limits must be positive integers')",
@@ -1117,6 +1243,7 @@ def render_python(schema: dict[str, Any], source_hash: str) -> str:
         "",
     ])
     # `re` is only needed by snake in generated module; keep import source-only concise.
+    lines.extend(render_theme_policy_python(schema))
     lines.insert(7, "import re")
     return "\n".join(lines).rstrip("\n") + "\n"
 
@@ -1269,10 +1396,10 @@ def render_typescript_runtime(schema: dict[str, Any], source_hash: str) -> str:
         "function _validateLimits(limits) { if (!Number.isSafeInteger(limits.max_frame_bytes) || !Number.isSafeInteger(limits.max_concurrent_requests) || !Number.isSafeInteger(limits.max_tools) || limits.max_frame_bytes <= 0 || limits.max_concurrent_requests <= 0 || limits.max_tools <= 0) throw new ContractError('invalid_params', 'negotiated limits must be positive integers'); if (limits.max_frame_bytes > MAX_FRAME_BYTES || limits.max_concurrent_requests > MAX_CONCURRENT_REQUESTS || limits.max_tools > MAX_TOOLS) throw new ContractError('resource_exhausted', 'negotiated limit exceeds API 0.3 maximum'); }",
         "function _validateAvailable(caps, methods) { const availableCaps = new Set(CAPABILITY_SPECS.filter((entry) => entry.available).map((entry) => entry.name)); if (![...caps].every((value) => availableCaps.has(value))) throw new ContractError('capability_mismatch', 'contract contains unavailable capability'); for (const method of methods) { const spec = METHOD_SPECS.find((entry) => entry.name === method); if (!spec || !spec.available || !caps.has(spec.capability)) throw new ContractError('capability_mismatch', 'method is unavailable or lacks its capability'); } }",
         "function validateOffer(offer) { const value = parseContractOffer(_wire(offer)); if (value.schema !== SCHEMA_ID) throw new ContractError('version_mismatch', 'schema mismatch'); if (value.encoding !== CANONICAL_ENCODING) throw new ContractError('invalid_params', 'encoding mismatch'); const names = new Set(CAPABILITY_SPECS.map((entry) => entry.name)); const required = _namedList(value.required_capabilities, MAX_CAPABILITIES, MAX_CAPABILITY_NAME_BYTES, 'capability', names); const optional = _namedList(value.optional_capabilities, MAX_CAPABILITIES, MAX_CAPABILITY_NAME_BYTES, 'capability', names); if ([...required].some((name) => optional.has(name))) throw new ContractError('capability_mismatch', 'capability is both required and optional'); if (required.size !== " + str(len(required_capabilities)) + " || !" + json.dumps(required_capabilities) + ".every((name) => required.has(name)) || ![...optional].every((name) => " + json.dumps(optional_capabilities) + ".includes(name))) throw new ContractError('capability_mismatch', 'host offer capability sets differ from generated API 0.3 contract'); const methodNames = new Set(METHOD_SPECS.map((entry) => entry.name)); const requiredMethods = _namedList(value.required_methods, MAX_METHODS, MAX_METHOD_NAME_BYTES, 'method', methodNames); const optionalMethods = _namedList(value.optional_methods, MAX_METHODS, MAX_METHOD_NAME_BYTES, 'method', methodNames); if ([...requiredMethods].some((name) => optionalMethods.has(name))) throw new ContractError('capability_mismatch', 'method is both required and optional'); if (requiredMethods.size !== " + str(len(required_methods)) + " || !" + json.dumps(required_methods) + ".every((name) => requiredMethods.has(name)) || ![...optionalMethods].every((name) => " + json.dumps(optional_methods) + ".includes(name))) throw new ContractError('capability_mismatch', 'host offer method sets differ from generated API 0.3 contract'); _validateAvailable(new Set([...required, ...optional]), new Set([...requiredMethods, ...optionalMethods])); _validateLimits(value.limits); }",
-        "function validateSelection(selection) { const value = parseContractSelection(_wire(selection)); if (value.schema !== SCHEMA_ID) throw new ContractError('version_mismatch', 'schema mismatch'); if (value.encoding !== CANONICAL_ENCODING) throw new ContractError('invalid_params', 'encoding mismatch'); const caps = _namedList(value.capabilities, MAX_CAPABILITIES, MAX_CAPABILITY_NAME_BYTES, 'capability', new Set(CAPABILITY_SPECS.map((entry) => entry.name))); const methods = _namedList(value.methods, MAX_METHODS, MAX_METHOD_NAME_BYTES, 'method', new Set(METHOD_SPECS.map((entry) => entry.name))); _validateAvailable(caps, methods); _validateLimits(value.limits); }",
+        "function validateSelection(selection) { const value = parseContractSelection(_wire(selection)); if (value.schema !== SCHEMA_ID) throw new ContractError('version_mismatch', 'schema mismatch'); if (value.encoding !== CANONICAL_ENCODING) throw new ContractError('invalid_params', 'encoding mismatch'); const caps = _namedList(value.capabilities, MAX_CAPABILITIES, MAX_CAPABILITY_NAME_BYTES, 'capability', new Set(CAPABILITY_SPECS.map((entry) => entry.name))); const methods = _namedList(value.methods, MAX_METHODS, MAX_METHOD_NAME_BYTES, 'method', new Set(METHOD_SPECS.map((entry) => entry.name))); _validateAvailable(caps, methods); if (caps.has('event_bus') && !methods.has('bus/lifecycle')) throw new ContractError('capability_mismatch', 'event_bus requires bus/lifecycle'); _validateLimits(value.limits); }",
         f"function hostOffer(maxFrameBytes, maxConcurrentRequests) {{ if (!Number.isSafeInteger(maxFrameBytes) || !Number.isSafeInteger(maxConcurrentRequests) || maxFrameBytes <= 0 || maxConcurrentRequests <= 0) throw new ContractError('invalid_params', 'host limits must be positive integers'); const offer = {{ schema: SCHEMA_ID, encoding: CANONICAL_ENCODING, required_capabilities: {json.dumps(required_capabilities)}, optional_capabilities: {json.dumps(optional_capabilities)}, required_methods: {json.dumps(required_methods)}, optional_methods: {json.dumps(optional_methods)}, limits: {{ max_frame_bytes: Math.min(maxFrameBytes, MAX_FRAME_BYTES), max_concurrent_requests: Math.min(maxConcurrentRequests, MAX_CONCURRENT_REQUESTS), max_tools: MAX_TOOLS }} }}; validateOffer(offer); return offer; }}",
         "function selectRequired(offer) { validateOffer(offer); return { schema: offer.schema, encoding: offer.encoding, capabilities: [...offer.required_capabilities], methods: [...offer.required_methods], limits: { ...offer.limits } }; }",
-        "function negotiate(offer, selection) { validateOffer(offer); validateSelection(selection); const caps = new Set(selection.capabilities); const methods = new Set(selection.methods); const offeredCaps = new Set([...offer.required_capabilities, ...offer.optional_capabilities]); const offeredMethods = new Set([...offer.required_methods, ...offer.optional_methods]); if (![...caps].every((value) => offeredCaps.has(value)) || !offer.required_capabilities.every((value) => caps.has(value)) || ![...methods].every((value) => offeredMethods.has(value)) || !offer.required_methods.every((value) => methods.has(value))) throw new ContractError('capability_mismatch', 'selection violates subset rules'); if (selection.limits.max_frame_bytes > offer.limits.max_frame_bytes || selection.limits.max_concurrent_requests > offer.limits.max_concurrent_requests || selection.limits.max_tools > offer.limits.max_tools) throw new ContractError('capability_mismatch', 'selection increases a host offer limit'); return { capabilities: caps, methods, limits: { ...selection.limits } }; }",
+        "function negotiate(offer, selection) { validateOffer(offer); validateSelection(selection); if (selection.capabilities.includes('event_bus') && !selection.methods.includes('bus/lifecycle')) throw new ContractError('capability_mismatch', 'event_bus requires bus/lifecycle'); const caps = new Set(selection.capabilities); const methods = new Set(selection.methods); const offeredCaps = new Set([...offer.required_capabilities, ...offer.optional_capabilities]); const offeredMethods = new Set([...offer.required_methods, ...offer.optional_methods]); if (![...caps].every((value) => offeredCaps.has(value)) || !offer.required_capabilities.every((value) => caps.has(value)) || ![...methods].every((value) => offeredMethods.has(value)) || !offer.required_methods.every((value) => methods.has(value))) throw new ContractError('capability_mismatch', 'selection violates subset rules'); if (selection.limits.max_frame_bytes > offer.limits.max_frame_bytes || selection.limits.max_concurrent_requests > offer.limits.max_concurrent_requests || selection.limits.max_tools > offer.limits.max_tools) throw new ContractError('capability_mismatch', 'selection increases a host offer limit'); return { capabilities: caps, methods, limits: { ...selection.limits } }; }",
         "function methodIsAvailable(contract, name, direction) { const spec = METHOD_SPECS.find((entry) => entry.name === name); return Boolean(spec && spec.available && (spec.direction === direction || spec.direction === 'bidirectional') && contract.methods.has(name) && contract.capabilities.has(spec.capability)); }",
         "function requireMethod(contract, name, direction) { if (!methodIsAvailable(contract, name, direction)) throw new ContractError('unknown_method', `method ${JSON.stringify(name)} is unavailable for ${direction}`); }",
         "function validateDisposition(value) { const parsed = parseDisposition(_wire(value)); const spec = DISPOSITION_SPECS[parsed.kind]; if (spec === undefined) throw new ContractError('invalid_params', 'unknown disposition'); if (parsed.reason !== undefined && (parsed.reason === null || !parsed.reason || _utf8Bytes(parsed.reason, 'disposition reason').length > MAX_REASON_BYTES)) throw new ContractError('invalid_params', 'disposition reason is empty or exceeds max_reason_bytes'); if (spec && parsed.reason === undefined) throw new ContractError('invalid_params', 'disposition requires a reason'); }",
@@ -1299,9 +1426,9 @@ def render_docs(schema: dict[str, Any], source_hash: str) -> str:
     lines = [
         "<!-- @generated by scripts/generate-extension-api-v03.py; DO NOT EDIT. -->",
         f"<!-- Source: protocol/extension-api-v0.3.schema.json (sha256: {source_hash}) -->",
-        "# octet Extension API 0.3 Reference",
+        "# octet Extension API 0.4 Reference",
         "",
-        "API `0.3` is a schema-generated canonical JSON-RPC contract. The generated bindings validate all foundation shapes before runtime branching; product adapters only convert generated values to host types.",
+        "API `0.4` is the current working-tree extension API version, using the feature-negotiated JSON-RPC wire retained from API `0.2`. Extensions add tools and bounded host-shaped integrations to a small coding host; this is not a promise of Pi execution parity or a general extension platform. Exact host offers and frontend bindings determine product availability. This reference targets octet 0.8.0; native publication does not publish SDK registries.",
         "",
         "## Version policy",
         "",
@@ -1312,11 +1439,11 @@ def render_docs(schema: dict[str, Any], source_hash: str) -> str:
         lines.append(f"| `{entry['version']}` | {entry['status']} | `{entry['wire']}` | {entry['runtime']} | {entry['bundles']} |")
     lines.extend([
         "",
-        "API `0.1` remains frozen at its legacy wire. API `0.2` remains runtime and bundle supported; API `0.3` is current. Selection is exact and never silently upgrades a legacy manifest. Required host-offer sets are fixed; a product may omit any generated optional capability and its optional methods when its safely bound host service is unavailable.",
+        "API `0.1` remains frozen at its legacy wire. API `0.2` and `0.3` remain runtime and bundle supported; API `0.4` is current and is the version new extensions must declare. Selection is exact and never silently upgrades a legacy manifest. The tables and canonical models below are generated from the retained API `0.3` schema, not a replacement API `0.4` handshake. For the feature-negotiated wire, including commands, status/presentation, dynamic tools, artifacts, agent_sessions, and conditional approvals, see [the protocol reference](PROTOCOL-REFERENCE.md). Existing runtime contracts, SDKs, and conformance tests remain live; documenting a service does not promise that every product host exposes it. On the canonical wire, required host-offer sets are fixed; optional services are omitted when they cannot be safely bound.",
         "",
         "## Canonical framing and JSON-RPC envelopes",
         "",
-        "Frames are UTF-8 canonical JSON followed by exactly one LF. `max_frame_bytes` excludes that delimiter. After initialization the selected bound replaces the offered bound atomically for both stdin writes and stdout reads. A frame exactly at the bound is accepted; one byte over terminates the protocol stream.",
+        "This section describes the retained API `0.3` canonical wire. API `0.4` keeps feature-negotiated JSON-RPC framing instead; do not retag canonical messages. Canonical frames are UTF-8 canonical JSON followed by exactly one LF. `max_frame_bytes` excludes that delimiter. After initialization the selected bound replaces the offered bound atomically for both stdin writes and stdout reads. A frame exactly at the bound is accepted; one byte over terminates the protocol stream.",
         "",
         "JSON-RPC envelopes have no unknown fields. Requests require `id`, `method`, and `params`; notifications require `method` and `params` but forbid `id`; responses require a valid non-null ID and exactly one of `result` or `error`. Error-response code/message pairs must exactly match the generated API `0.3` error table. IDs are bounded strings or non-negative portable integers. Duplicate keys, noncanonical whitespace/escapes, malformed UTF-16 surrogate escapes, nonportable numbers, and depth violations are rejected before dispatch.",
         "",
@@ -1333,7 +1460,7 @@ def render_docs(schema: dict[str, Any], source_hash: str) -> str:
     lines.extend(["", "## Methods and terminal semantics", "", "| Method | Direction | Params | Result | Terminal | Notification | Status |", "| --- | --- | --- | --- | --- | :---: | --- |"])
     for entry in schema["methods"]:
         lines.append(f"| `{entry['name']}` | `{entry['direction']}` | `{entry['params'] or '—'}` | `{entry['result'] or '—'}` | `{entry['terminal']}` | {'yes' if entry['notification'] else 'no'} | {entry['status']} |")
-    lines.extend(["", "Deferred capabilities and methods are represented in this schema but remain unavailable; only the listed foundation methods and capabilities may be negotiated.", "", "## Errors", "", "| Name | Code | Message | Meaning |", "| --- | ---: | --- | --- |"])
+    lines.extend(["", "Deferred capabilities and methods remain unavailable on this canonical API `0.3` wire; only the listed foundation methods and capabilities may be negotiated there. In particular, this does not withdraw dynamic tools used by MCP or other retained API `0.2`/`0.4` services.", "", "## Errors", "", "| Name | Code | Message | Meaning |", "| --- | ---: | --- | --- |"])
     for entry in schema["errors"]:
         lines.append(f"| `{entry['name']}` | `{entry['code']}` | {entry['message']} | {entry['description']} |")
     lines.extend(["", "## Dispositions", "", "| Kind | Reason | Meaning |", "| --- | --- | --- |"])
@@ -1355,7 +1482,7 @@ def render_docs(schema: dict[str, Any], source_hash: str) -> str:
     lines.extend([
         "## Generated artifacts and conformance",
         "",
-        "The schema generates Rust, Python, TypeScript ESM/runtime declarations, canonical golden fixtures, independent hostile negative fixtures, and this reference. Optional nullable fields preserve absent versus explicit `null`; optional non-null fields reject explicit `null` in all three SDKs.",
+        "This live schema generates Rust, Python, TypeScript ESM/runtime declarations, canonical golden fixtures, independent hostile negative fixtures, and this reference. Keep generation and conformance checks when qualifying the bounded authoring path; these artifacts are not archived parity scaffolding. Optional nullable fields preserve absent versus explicit `null`; optional non-null fields reject explicit `null` in all three SDKs.",
         "",
         "```console",
         "python3 scripts/generate-extension-api-v03.py --check",
@@ -1377,7 +1504,7 @@ def generated_files(schema: dict[str, Any], source_hash: str) -> dict[Path, byte
         ROOT / "sdk/typescript/src/api_v03.mjs": render_typescript_runtime(schema, source_hash).encode("utf-8"),
         ROOT / "sdk/typescript/src/api_v03.ts": types,
         ROOT / "sdk/typescript/src/api_v03.d.ts": types,
-        ROOT / "docs/extensions/API-0.3-REFERENCE.md": render_docs(schema, source_hash).encode("utf-8"),
+        ROOT / "docs/extensions/API-0.4-REFERENCE.md": render_docs(schema, source_hash).encode("utf-8"),
     }
     manifest: dict[str, Any] = {"api_version": schema["api_version"], "canonical_encoding": schema["canonical_encoding"], "schema_sha256": source_hash, "fixtures": []}
     for fixture in schema["fixtures"]:

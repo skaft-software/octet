@@ -1,9 +1,10 @@
 # octet-web-search
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
+public-install evidence. Reviewed source checkouts and local archives remain
+separate installation options.
 
 Search the public web and retrieve pages with stable citations. Choose
 [Brave Search](https://brave.com/search/api/) or a configured
@@ -12,8 +13,8 @@ browser tabs, sign in, run JavaScript, or submit forms.
 
 ## Start a search
 
-With [octet 0.7.6 installed](../../docs/installation.md) and Python 3.9+ available
-as `python3`, install the matching signed public bundle, then explicitly enable it:
+With [octet 0.8.0](../../docs/installation.md), Python 3.9+
+available as `python3`, and verified matching published assets, the catalog path is:
 
 ```console
 octet extension install octet-web-search
@@ -68,9 +69,11 @@ results, diagnostics, or frontend state. Credentialed requests never redirect;
 401/403 invalidates the stored key so setup/search can ask again.
 
 SearXNG settings live at `~/.config/octet/octet-web-search.json`. The provider
-picker preserves them while Brave is selected. Endpoint URLs must be non-secret.
-A private self-hosted provider requires `allow_private_endpoint: true`; this
-exception never permits private `web_fetch`/`web_find` destinations or redirects.
+picker preserves them while Brave is selected. Endpoint URLs must be non-secret;
+configured query parameters such as `timeout_limit` are retained and the search
+request adds its own query, JSON, and safe-search parameters. A private
+self-hosted provider requires `allow_private_endpoint: true`; this exception
+never permits private `web_fetch`/`web_find` destinations or redirects.
 `limits.allowed_domains` is an egress allowlist; a tool's `domains` can only narrow
 it. See the [complete configuration rules](REFERENCE.md#searxng).
 
@@ -84,8 +87,8 @@ keeps the process stopped even with explicit grants: executable startup still
 requires `unsafe_host`. An admitted extension has your OS authority; manifest
 consent metadata is not a sandbox. Skill loading remains independent.
 
-The source bundle `0.7.6` requires exactly octet `0.7.6` and retains API `0.2`.
-The following is a bundled-runtime reference, not a current SDK authoring tutorial.
+The source bundle `0.8.0` requires exactly octet `0.8.0` and uses API `0.4`.
+The following is a bundled-runtime reference, not a general SDK authoring tutorial.
 
 - <a id="install-and-opt-in"></a>[Install and opt in](REFERENCE.md#install-and-opt-in): public catalog installation and persistent activation.
 - <a id="choose-a-provider"></a>[Choose a provider](REFERENCE.md#choose-a-provider).

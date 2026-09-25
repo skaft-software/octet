@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use octet_ai::{Media, ToolDef};
+use octet_ai::{Media, ToolDef, Usage};
 use tokio::sync::mpsc;
 
 use crate::effect::{ToolEffect, ToolPolicyDenialCode};
@@ -81,6 +81,31 @@ pub trait Tool: Send + Sync {
         ToolConcurrency::Sequential
     }
 
+    /// One-line description of this tool for the model-visible tool prompt.
+    ///
+    /// This is the Pi `promptSnippet` contribution: a short phrase used when a
+    /// host lists the available tools outside the provider's function schema
+    /// (for example a "You can use these tools" section in a system prompt).
+    /// `None`, the default, contributes nothing, so a host that has no prompt
+    /// section is unaffected. Returning `Some` must never change tool
+    /// resolution or authority: it is presentation text only, never
+    /// authorization input, and it is not a substitute for
+    /// [`Tool::definition`]'s description.
+    fn prompt_snippet(&self) -> Option<&str> {
+        None
+    }
+
+    /// Short behavioral guidelines for this tool, appended after the prompt
+    /// snippet when the tool is active.
+    ///
+    /// This is the Pi `promptGuidelines` contribution. The default is empty,
+    /// which contributes nothing. Guidelines are presentation text; a host
+    /// must not derive capability, effect classification, or allowlist
+    /// decisions from them. Order is meaningful only for readability.
+    fn prompt_guidelines(&self) -> &[&str] {
+        &[]
+    }
+
     /// Executes the tool with the model-provided arguments (a JSON object
     /// matching the definition's schema).
     async fn execute(
@@ -88,6 +113,47 @@ pub trait Tool: Send + Sync {
         args: serde_json::Value,
         ctx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError>;
+}
+
+/// One tool's model-visible prompt contribution.
+///
+/// Produced by [`collect_tool_prompt_contributions`] from the registered tools
+/// so a host can render a bounded "available tools" section without
+/// duplicating the snippet text of every built-in tool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolPromptContribution {
+    /// Tool name, matching [`Tool::definition`]'s `name`.
+    pub name: String,
+    /// The tool's [`Tool::prompt_snippet`].
+    pub snippet: String,
+    /// The tool's [`Tool::prompt_guidelines`], in declared order.
+    pub guidelines: Vec<String>,
+}
+
+/// Collects prompt contributions from `tools`, in iteration order.
+///
+/// Tools that return [`Tool::prompt_snippet`]` == None` are skipped entirely,
+/// which is also the reason a host cannot use this list to enumerate tools: it
+/// reflects presentation intent only. Callers pass the same `&dyn Tool` values
+/// they registered, so the contribution always matches the code that will run.
+pub fn collect_tool_prompt_contributions<'a>(
+    tools: impl IntoIterator<Item = &'a dyn Tool>,
+) -> Vec<ToolPromptContribution> {
+    tools
+        .into_iter()
+        .filter_map(|tool| {
+            let snippet = tool.prompt_snippet()?;
+            Some(ToolPromptContribution {
+                name: tool.definition().name,
+                snippet: snippet.to_string(),
+                guidelines: tool
+                    .prompt_guidelines()
+                    .iter()
+                    .map(|guideline| (*guideline).to_string())
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 /// A descriptor containing basic tool metadata.
@@ -144,6 +210,8 @@ impl<E: ErasedTool> Tool for ErasedToolAdapter<E> {
     fn definition(&self) -> ToolDef {
         let def = self.inner.definition();
         ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: def.descriptor.name.clone(),
             description: def.descriptor.description.clone(),
             parameters: def.input_schema.clone(),
@@ -427,6 +495,7 @@ pub struct ToolProgressSink {
     tx: mpsc::Sender<ToolProgress>,
     dropped_bytes: Arc<AtomicU64>,
     dropped_events: Arc<AtomicU64>,
+    invocation: Option<crate::tools::durability::InvocationHandle>,
 }
 
 impl ToolProgressSink {
@@ -438,6 +507,7 @@ impl ToolProgressSink {
             tx,
             dropped_bytes: Arc::new(AtomicU64::new(0)),
             dropped_events: Arc::new(AtomicU64::new(0)),
+            invocation: None,
         }
     }
 
@@ -458,7 +528,16 @@ impl ToolProgressSink {
             tx,
             dropped_bytes: Arc::new(AtomicU64::new(0)),
             dropped_events: Arc::new(AtomicU64::new(0)),
+            invocation: None,
         }
+    }
+
+    pub(crate) fn with_invocation(
+        mut self,
+        invocation: crate::tools::durability::InvocationHandle,
+    ) -> Self {
+        self.invocation = Some(invocation);
+        self
     }
 
     /// Emit a stdout or stderr chunk. Non‑blocking; drops silently when
@@ -660,6 +739,14 @@ pub struct ToolContext<'a> {
 }
 
 impl ToolContext<'_> {
+    /// Session-backed, invocation-scoped replay memos and partial output.
+    /// Absent outside agent-dispatched calls (for example standalone tool tests).
+    /// Successful writes are synced before returning; partial output is never
+    /// evidence that an effect completed.
+    pub fn invocation(&self) -> Option<&crate::tools::durability::InvocationHandle> {
+        self.progress.invocation.as_ref()
+    }
+
     /// Resolves an existing local path. Relative paths use the workspace as
     /// their base; hosts that enable trusted-local access may also use absolute
     /// paths, `~/…`, parent components, and external symlinks.
@@ -1028,6 +1115,184 @@ impl ToolOutputCommit {
     }
 }
 
+/// Default minimum interval between adaptive preview publications.
+///
+/// Matches Pi's harness-global publisher policy (`minEmitInterval = 100 ms`).
+pub const DEFAULT_PREVIEW_MIN_EMIT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+/// Default sustained encode budget for adaptive preview publication, in bytes
+/// per second. Matches Pi's harness-global `targetBytesPerSecond = 100 KB/s`.
+pub const DEFAULT_PREVIEW_TARGET_BYTES_PER_SECOND: u64 = 100 * 1000;
+
+/// The publication decision for one recorded preview update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewPublication {
+    /// Publish the latest state now: this is the first update after idle, or a
+    /// write that arrived after the previous deadline had already passed.
+    Immediate,
+    /// Hold the update behind the single trailing timer that fires after this
+    /// delay. Later writes before that deadline collapse into the latest state.
+    Scheduled(std::time::Duration),
+}
+
+/// Bounded adaptive coalescer for *replaceable* preview snapshots.
+///
+/// A fixed interval alone bounds event rate but not bytes, and a byte budget
+/// alone permits unbounded event counts; Pi therefore paces both. This type
+/// implements the landed adaptive algorithm
+/// `nextDelay = max(minEmitInterval, encodedBytes * 1000 / targetBytesPerSecond)`
+/// with the three behavioral guarantees that matter:
+///
+/// 1. the first dirty state after idle publishes immediately;
+/// 2. writes before the next deadline collapse into the latest state and never
+///    queue, so retained progress state stays bounded by one snapshot;
+/// 3. at most one trailing timer exists, and completion, error, or a durable
+///    checkpoint forces one publication that cancels it.
+///
+/// Only replaceable state may be coalesced. Append-only byte streams (live
+/// `stdout`/`stderr` chunks) must still be forwarded verbatim, because dropping
+/// or merging them would break the `complete_<stream>=true` contract.
+#[derive(Debug, Clone)]
+pub struct AdaptivePreviewCoalescer {
+    min_emit_interval: std::time::Duration,
+    target_bytes_per_second: u64,
+    deadline: Option<std::time::Instant>,
+    pending: Option<usize>,
+}
+
+impl Default for AdaptivePreviewCoalescer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AdaptivePreviewCoalescer {
+    /// Creates a coalescer with Pi's harness-global policy.
+    pub fn new() -> Self {
+        Self::with_policy(
+            DEFAULT_PREVIEW_MIN_EMIT_INTERVAL,
+            DEFAULT_PREVIEW_TARGET_BYTES_PER_SECOND,
+        )
+    }
+
+    /// Creates a coalescer with an explicit policy. A zero
+    /// `target_bytes_per_second` removes the rate term, leaving the minimum
+    /// interval as the only floor.
+    pub fn with_policy(
+        min_emit_interval: std::time::Duration,
+        target_bytes_per_second: u64,
+    ) -> Self {
+        Self {
+            min_emit_interval,
+            target_bytes_per_second,
+            deadline: None,
+            pending: None,
+        }
+    }
+
+    /// Delay owed for publishing a snapshot of `encoded_bytes` at this instant.
+    ///
+    /// Always at least the minimum interval, so sustained publication can never
+    /// exceed the interval floor in event count, and always at least
+    /// `encoded_bytes / target_bytes_per_second` in wall-clock time, so
+    /// sustained encoded throughput converges to the target.
+    pub fn delay_for(&self, encoded_bytes: usize) -> std::time::Duration {
+        let by_rate = (encoded_bytes as u64)
+            .saturating_mul(1000)
+            .checked_div(self.target_bytes_per_second)
+            .unwrap_or(0);
+        std::time::Duration::from_millis(by_rate).max(self.min_emit_interval)
+    }
+
+    /// Records the latest complete snapshot size and decides what to do now.
+    ///
+    /// Passing the size of the *latest bounded state* rather than an increment
+    /// is what makes collapse lossless for a replaceable snapshot.
+    pub fn record(&mut self, encoded_bytes: usize, now: std::time::Instant) -> PreviewPublication {
+        match self.deadline {
+            Some(deadline) if now < deadline => {
+                self.pending = Some(encoded_bytes);
+                PreviewPublication::Scheduled(deadline - now)
+            }
+            _ => {
+                self.publish(now, encoded_bytes);
+                PreviewPublication::Immediate
+            }
+        }
+    }
+
+    /// Time remaining until the single trailing timer fires, or `None` when no
+    /// update is held. `Some(ZERO)` means the deadline has already passed and
+    /// [`Self::take_due`] will publish.
+    pub fn deadline_in(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    /// The size of the held snapshot, if any update is waiting.
+    pub fn pending_bytes(&self) -> Option<usize> {
+        self.pending
+    }
+
+    /// Publishes held state once its deadline has passed, returning the
+    /// published snapshot size. Collapsed writes are lost only as intermediate
+    /// snapshots: the latest state is what is published.
+    pub fn take_due(&mut self, now: std::time::Instant) -> Option<usize> {
+        let pending = self.pending?;
+        if self.deadline.is_some_and(|deadline| now < deadline) {
+            return None;
+        }
+        self.publish(now, pending);
+        Some(pending)
+    }
+
+    /// Forces one bounded publication and cancels the trailing timer.
+    ///
+    /// Used at correctness boundaries — command completion, error or abort, a
+    /// memo or output checkpoint — where the consumer must see terminal state
+    /// even if the pacing deadline has not arrived. A later [`Self::take_due`]
+    /// cannot fire for the settled invocation because the timer was cancelled.
+    pub fn force(&mut self, now: std::time::Instant, encoded_bytes: usize) {
+        self.publish(now, encoded_bytes);
+    }
+
+    fn publish(&mut self, now: std::time::Instant, encoded_bytes: usize) {
+        self.pending = None;
+        self.deadline = Some(now + self.delay_for(encoded_bytes));
+    }
+}
+
+/// Host-owned sink for durable partial-output checkpoints of a running tool.
+///
+/// Pi's `tool-durability.md` gives a tool an opt-in `checkpoint: true` request on
+/// its update callback: every update stays a live publication, and the request
+/// additionally asks the harness to durably *replace* this invocation's bounded
+/// progress snapshot at `pendingToolOutput(operationId, invocationId)`. octet
+/// delivers the same request through an explicit handle, because a tool cannot
+/// reach the session log through [`ToolContext`].
+///
+/// Contract:
+///
+/// * the tool owns snapshot bounding, checkpoint cadence, and duplicate
+///   suppression; it hands the sink a bounded *complete* snapshot, never a
+///   growing value and never an append-only chunk;
+/// * `Ok(())` means the replacement was accepted, not that it is already durable
+///   — the sink owns enqueueing and promise tracking;
+/// * `Err(..)` is a storage fault. It never means the command failed, never
+///   proves the effect settled, and never becomes the tool's result;
+/// * a checkpoint is auxiliary observation data. Recovery may preserve it, but
+///   may never infer success or failure from it, and it is deleted when the
+///   invocation's outcome becomes known.
+///
+/// An implementation is provided by
+/// [`InvocationHandle`](crate::tools::durability::InvocationHandle), and tests or
+/// hosts may implement it directly.
+pub trait PartialOutputCheckpointSink: Send + Sync {
+    /// Replaces this invocation's durable partial-output snapshot.
+    fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError>;
+}
+
 /// Canonical tool output: compact text plus optional structured media and a
 /// semantic error marker. Transport-level failures still use [`ToolError`]; a
 /// completed tool may return a rich error envelope without losing its media or
@@ -1043,6 +1308,26 @@ pub struct ToolOutput {
     is_error: bool,
     delivery_commit: Option<ToolOutputCommit>,
     presentation_images_omitted: bool,
+    terminate: bool,
+    usage: Option<Usage>,
+}
+
+/// Decides whether a completed tool batch may end the run.
+///
+/// Pi's rule is unanimity: a batch finishes with `may_finish` only when *every*
+/// finalized result in it requested termination. One tool asking to stop must
+/// not discard the results of its siblings, and an empty batch never
+/// terminates, so callers pass the finalized results of exactly one assistant
+/// batch in assistant source order.
+pub fn batch_requests_termination(finalized: impl IntoIterator<Item = bool>) -> bool {
+    let mut any = false;
+    for terminate in finalized {
+        any = true;
+        if !terminate {
+            return false;
+        }
+    }
+    any
 }
 
 impl std::fmt::Debug for ToolOutput {
@@ -1057,6 +1342,7 @@ impl std::fmt::Debug for ToolOutput {
                 "presentation_images_omitted",
                 &self.presentation_images_omitted,
             )
+            .field("usage", &self.usage)
             .finish_non_exhaustive()
     }
 }
@@ -1074,6 +1360,8 @@ impl ToolOutput {
             is_error: false,
             delivery_commit: None,
             presentation_images_omitted: false,
+            terminate: false,
+            usage: None,
         }
     }
 
@@ -1111,7 +1399,27 @@ impl ToolOutput {
             is_error: false,
             delivery_commit: None,
             presentation_images_omitted: false,
+            terminate: false,
+            usage: None,
         }
+    }
+
+    /// Attaches provider-reported usage produced by this tool execution.
+    ///
+    /// Pi's `ToolResultMessage.usage` is explicitly *not* part of main LLM
+    /// context accounting: the agent adds it to the run's billed turn totals and
+    /// never to the assistant turn's context estimate. A tool that calls a
+    /// provider on the host's behalf (search, retrieval, sandbox inference)
+    /// reports the exact counters here; unpriced or absent usage stays absent
+    /// rather than becoming a fabricated zero.
+    pub fn with_usage(mut self, usage: Usage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    /// Provider-reported usage produced by this tool execution, if any.
+    pub fn usage(&self) -> Option<&Usage> {
+        self.usage.as_ref()
     }
 
     /// Marks whether this completed output represents a semantic tool error.
@@ -1178,6 +1486,25 @@ impl ToolOutput {
     /// per-image reason available when hydrating the complete durable result.
     pub fn presentation_images_omitted(&self) -> bool {
         self.presentation_images_omitted
+    }
+
+    /// Marks this finalized result as requesting that the run stop after this
+    /// assistant batch is placed.
+    ///
+    /// The request is only ever honored through
+    /// [`batch_requests_termination`]: every finalized result of the batch must
+    /// request termination, so a tool can express "the work is complete" but
+    /// never unilaterally discard a sibling call's result. Tools that are not
+    /// designed to end a run leave this unset.
+    pub fn requesting_termination(mut self) -> Self {
+        self.terminate = true;
+        self
+    }
+
+    /// Whether this finalized result requests run termination. Defaults to
+    /// `false` for every constructor, so existing tools remain unaffected.
+    pub fn terminates_run(&self) -> bool {
+        self.terminate
     }
 
     /// Enrich only the owning frontend's stripped output, never observer copies.
@@ -1337,6 +1664,10 @@ impl ToolOutput {
             is_error: self.is_error,
             delivery_commit: None,
             presentation_images_omitted: false,
+            terminate: self.terminate,
+            // Provider usage is billing evidence for the completed call, not
+            // presentation content: lowering media must never drop it.
+            usage: self.usage,
         }
     }
 }

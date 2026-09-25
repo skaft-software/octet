@@ -928,6 +928,47 @@ class AgentSessionTests(unittest.TestCase):
         )
         host.shutdown()
 
+    def test_model_discovery_and_selection_are_gated_bounded_and_correlated(self):
+        from unittest.mock import Mock
+        extension = Extension(api_version="0.2", stderr=io.StringIO())
+        host = RunningExtension(extension)
+        host.start(initialize_v02(optional=["agent_sessions", "agent_model_selection_v1"]))
+        extension.request = Mock(return_value={"models": [], "truncated": False})
+        extension.list_agent_models(query="haiku", limit=3, parent_request_id=42)
+        extension.request.assert_called_once_with("agent/models", {"query": "haiku", "limit": 3},
+            parent_request_id=42, operation_scoped=True)
+        for arguments in ({"limit": True}, {"limit": 0}, {"limit": 101},
+                          {"query": "x" * 129}, {"query": "é" * 65}, {"query": "x\ny"}):
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                extension.list_agent_models(**arguments, parent_request_id=42)
+        extension.request.return_value = {"models": [], "truncated": "false"}
+        with self.assertRaises(RpcError):
+            extension.list_agent_models(parent_request_id=42)
+        extension.request.return_value = {"agent_id": "worker"}
+        spawn = dict(task_name="reader", message="x", idempotency_key="key", tools=["read"],
+                     max_depth=1, max_concurrent_children=1, max_output_bytes=512,
+                     parent_request_id=42)
+        extension.spawn_agent(**spawn, model_selection={"model": "haiku", "reasoning": "max"})
+        self.assertEqual(extension.request.call_args.args[1]["policy"]["model_selection"],
+                         {"model": "haiku", "reasoning": "max"})
+        extension.spawn_agent(**spawn, model_selection={"provider": "cloudflare", "model": "@cf/openai/gpt-oss-120b"})
+        self.assertEqual(extension.request.call_args.args[1]["policy"]["model_selection"]["model"],
+                         "@cf/openai/gpt-oss-120b")
+        extension.spawn_agent(**spawn, model_selection={"model": "a" * 256})
+        extension.spawn_agent(**spawn, model_selection={"reasoning": "on"})
+        self.assertEqual(extension.request.call_args.args[1]["policy"]["model_selection"],
+                         {"reasoning": "on"})
+        for selection in ({"api_key": "secret"}, {"model": "bad model"}, {"model": 5},
+                          {"model": "a" * 257}, {"reasoning": "enabled"}, {"reasoning": "@cf/low"}):
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                extension.spawn_agent(**spawn, model_selection=selection)
+        extension._features = frozenset({"agent_sessions"})
+        with self.assertRaisesRegex(RpcError, "agent_model_selection_v1"):
+            extension.list_agent_models(parent_request_id=42)
+        with self.assertRaisesRegex(RpcError, "agent_model_selection_v1"):
+            extension.spawn_agent(**spawn, model_selection={"model": "haiku"})
+        host.shutdown()
+
     def test_agent_session_helpers_require_negotiation(self):
         extension = Extension(api_version="0.2", stderr=io.StringIO())
         host = RunningExtension(extension)

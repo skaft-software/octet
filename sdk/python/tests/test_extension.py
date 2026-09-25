@@ -245,6 +245,56 @@ class ExtensionTests(unittest.TestCase):
         self.assertFalse(extension.running)
         self.assertTrue(any("stdin closed" in line for line in diagnostics.getvalue().splitlines()))
 
+    def test_eof_waits_for_an_admitted_shutdown_hook_and_ack(self):
+        output = io.StringIO()
+        started, release = threading.Event(), threading.Event()
+        extension = Extension(
+            stdin=io.StringIO(json.dumps(initialize()) + "\n" + json.dumps(request(2, "shutdown")) + "\n"),
+            stdout=output, stderr=io.StringIO(), shutdown_timeout=1.0,
+        )
+
+        @extension.on_shutdown
+        def shutdown(_params):
+            started.set()
+            release.wait(2)
+
+        runner = threading.Thread(target=extension.run)
+        runner.start()
+        try:
+            self.assertTrue(started.wait(1))
+            self.assertFalse(extension._eof_done.wait(0.1), "EOF overtook the admitted shutdown hook")
+            self.assertTrue(runner.is_alive())
+        finally:
+            release.set()
+            runner.join(2)
+        self.assertFalse(runner.is_alive())
+        self.assertIn({"jsonrpc": "2.0", "id": 2, "result": {}}, decode_lines(output))
+
+    def test_eof_shutdown_hook_wait_is_bounded(self):
+        started, release = threading.Event(), threading.Event()
+        extension = Extension(
+            stdin=io.StringIO(json.dumps(initialize()) + "\n" + json.dumps(request(2, "shutdown")) + "\n"),
+            stdout=io.StringIO(), stderr=io.StringIO(),
+            shutdown_timeout=0.05, cancellation_grace=0.01,
+        )
+
+        @extension.on_shutdown
+        def shutdown(_params):
+            started.set()
+            release.wait(2)
+
+        runner = threading.Thread(target=extension.run)
+        runner.start()
+        try:
+            self.assertTrue(started.wait(1))
+            runner.join(1)
+            self.assertFalse(runner.is_alive(), "EOF must retain its bounded drain")
+            self.assertFalse(extension._shutdown_done.is_set())
+        finally:
+            release.set()
+            runner.join(2)
+            self.assertTrue(extension._shutdown_done.wait(1))
+
     def test_contribution_defaults_and_handlers(self):
         output = io.StringIO()
         messages = [

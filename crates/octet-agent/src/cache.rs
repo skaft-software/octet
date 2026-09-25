@@ -194,6 +194,7 @@ fn analyze_session_cache_impl(
                 .map(|index| (index, assistant, record)),
             UsageRecordKind::DelegatedAgent { .. }
             | UsageRecordKind::Compaction
+            | UsageRecordKind::CacheWarm
             | UsageRecordKind::RejectedResponsesTurn
             | UsageRecordKind::TerminalGate { .. } => None,
         })

@@ -1,4 +1,4 @@
-# octet AI design
+# octet AI architecture
 
 ## Canonical model
 
@@ -26,6 +26,33 @@ sessions. Protocol validation rejects it in strict mode (or reports
 `ignored_reasoning_mode` in lossy mode), and no codec serializes a
 `reasoning.mode` field. The product layer must migrate legacy Pro state only
 after it has both model metadata and a live, trusted `octet-subagents` observer.
+
+### Endpoint self-description
+
+`octet_ai::discovery::ModelSelfDescription::from_entry` decodes the opt-in
+`octet_capabilities` v1 object under a 4096-byte serialization bound before
+cloning its payload. The host supplies a `DiscoverySource` (endpoint identity,
+returned API name, selected protocol). Response data cannot assert provenance,
+choose a URL/authenticator, or register another protocol. Absent and invalid
+objects remain distinct; errors contain no response values.
+
+V1 supports the intersection with existing Chat/Responses codecs: text/image
+input, text output, ordinary/parallel tools, structured output and exact effort
+options. Unknown fields and unsupported capabilities fail closed. Native codecs,
+Lite, Ultra/V2, audio, deferred loading, arbitrary reasoning profiles, toggles and
+budgets are not enabled by this schema. The coding host still maps exact effort
+choices through declaration-owned wire profiles and keeps explicit configured
+models and legacy endpoint assertions ahead of self-description leaves. Sparse
+family defaults cannot override a self-description's disabled capabilities.
+
+Only selected-endpoint inventory or its URL/account-isolated raw cache may be
+passed as authority. The pinned models.dev record contributes a display name,
+provider-scoped pricing, and — solely where the endpoint asserts nothing —
+input modalities and context/output limits; it never supplies reasoning
+controls or tool/structured-output flags, and it never overrides an endpoint
+assertion. Public API
+provenance is not a new persisted `ModelSpec`/native-host protocol field. See the
+[provider schema and integration limits](../providers.md#endpoint-capability-self-description-unreleased).
 
 ## Google generateContent
 
@@ -88,6 +115,15 @@ the original client and other attempts retain independent tracking.
 ## Stream contract
 
 A successful guarded stream has exactly one `Started`, balanced start/delta/end events for every indexed part, at most one usage event, and exactly one terminal `Finished`. Premature EOF, events after finish, and unbalanced parts are errors. Completed parseable tool arguments are normalized and checked against the immutable request schema snapshot before their `ToolCallEnd`: an ordinary schema mismatch remains a canonical call marked for a bounded paired error, while malformed schemas, malformed arguments, and validation-limit failures are errors. An authoritative max-token terminal is the sole malformed-argument exception: it retains only the call envelope with empty arguments so the agent can pair a non-executing error result and continue safely.
+
+### Mistral Conversations terminal boundary
+
+Conversations validates HTTPS (literal loopback HTTP only for local endpoints)
+and rejects userinfo, query and fragment before resolving credentials. Its SSE
+adapter reports an annotated `MissingFinish` when EOF lacks the native terminal,
+including when a function argument buffer is already valid JSON. This occurs
+before the generic stream guard's `PrematureEof` classification; it does not
+close pending parts, emit `ToolCallEnd`, synthesize usage or replay a POST.
 
 ### Responses failure provenance
 
@@ -167,8 +203,7 @@ even after provisional generation. The agent separates finite
 streamed-inference replacement and HTTP-admission budgets; neither authorizes
 blanket retry or establishes the number of accepted generations or charges.
 Transport fallback does not reset these logical-turn budgets. See the
-[recovery boundary](../tools.md#recovery-and-security) and
-[historical v0.7.4 recovery qualification](../qualification/v0.7.4-recovery.md).
+[recovery boundary](../tools.md#recovery-and-security).
 The coding product uses a
 fifteen-minute response-header default for built-in and custom routes; custom
 providers can override that startup allowance for their own cold-start profile.

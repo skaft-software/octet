@@ -13,11 +13,13 @@ from octet_extension import Extension
 
 from .config import (
     STREAMABLE_HTTP_GATE_ERROR,
+    STATIC_CREDENTIAL_AUTH_TYPE,
     BridgeConfig,
     ConfigError,
     load_config,
 )
 from .manager import BridgeManager
+from .streamable_http import StaticEnvironmentCredentialProvider
 
 
 SUPPORTED_FEATURES = (
@@ -43,10 +45,34 @@ class ProtocolReadyExtension(Extension):
         super()._send_result(request_id, result)
         if (
             isinstance(result, Mapping)
-            and result.get("api_version") == "0.2"
+            and result.get("api_version") == "0.4"
             and isinstance(result.get("protocol"), Mapping)
         ):
             self.protocol_ready.set()
+
+
+def static_credential_provider(
+    config: BridgeConfig,
+) -> Optional[StaticEnvironmentCredentialProvider]:
+    """Compose the bundled static credential source only when it is configured.
+
+    The bridge never inspects ambient environment variables by itself. A
+    ``static-bearer`` server descriptor must explicitly name one
+    ``OCTET_MCP_*`` variable, and the provider refuses any other name. Every
+    other remote descriptor keeps the fail-closed unavailable default until the
+    process owner explicitly composes a host credential adapter. OAuth/browser
+    authorization stays policy-gated and unimplemented.
+    """
+
+    credentials = {
+        server.id: server.auth.credential
+        for server in config.servers
+        if server.enabled
+        and server.transport == "streamable-http"
+        and server.auth is not None
+        and server.auth.type == STATIC_CREDENTIAL_AUTH_TYPE
+    }
+    return StaticEnvironmentCredentialProvider(credentials) if credentials else None
 
 
 def build_runtime(
@@ -79,7 +105,7 @@ def build_runtime(
             }
 
     extension = ProtocolReadyExtension(
-        api_version="0.2",
+        api_version="0.4",
         max_concurrent_requests=8,
         max_pending_requests=64,
         writer_queue_size=64,
@@ -94,6 +120,7 @@ def build_runtime(
         scratch_directory=Path(
             os.environ.get("OCTET_EXTENSION_SCRATCH", ".octet-mcp-scratch")
         ),
+        credential_provider=static_credential_provider(config),
         experimental_streamable_http_mcp=experimental_streamable_http_mcp,
     )
 
@@ -106,8 +133,7 @@ def build_runtime(
         ),
     )
     def mcp_command(arguments: list[str], context: Mapping[str, Any]) -> dict[str, Any]:
-        del context
-        return manager.execute_command(arguments)
+        return manager.execute_command(arguments, context)
 
     @extension.status("status")
     def mcp_status(params: Mapping[str, Any]) -> dict[str, Any]:

@@ -14,6 +14,19 @@ const MAX_CREDENTIAL_BYTES: usize = 1024 * 1024;
 const MAX_MODEL_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_JWT_PAYLOAD_BYTES: usize = 512 * 1024;
 const MIGRATION_MARKER_BYTES: &[u8] = b"legacy-import-v1\n";
+/// How long a caller waits for the cross-process refresh lock before failing
+/// closed.
+///
+/// The lock protects a short critical section (token rotation, the one-time
+/// legacy import, logout). A peer can be suspended, killed while holding it, or
+/// waiting on a token endpoint, and none of that belongs in *this* process's
+/// readiness path. The wait is therefore deliberately short, the acquisition is
+/// never blocking, and the failure is explicit and actionable.
+pub(crate) const REFRESH_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Retry cadence while waiting for the refresh lock. The uncontended path does
+/// not sleep at all: the first attempt either takes the lock or the deadline has
+/// already passed.
+const REFRESH_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
 fn cache_modified_is_stale(modified: std::time::SystemTime, max_age: std::time::Duration) -> bool {
     modified.elapsed().map_or(true, |age| age >= max_age)
@@ -176,16 +189,49 @@ impl CredentialStore {
     }
 
     pub(crate) fn lock_refresh(&self) -> Result<RefreshLock> {
+        self.lock_refresh_within(REFRESH_LOCK_WAIT)
+    }
+
+    /// Acquire the cross-process refresh lock, waiting at most `wait`.
+    ///
+    /// Unlike a blocking `flock`, this can never wedge the caller: each attempt
+    /// is non-blocking and the loop stops at the deadline, so a peer that is
+    /// suspended, killed while holding the lock, or waiting on a token endpoint
+    /// delays this process by at most `wait`. A timed-out attempt holds nothing
+    /// (it never acquired the lock), so it cannot leave a phantom holder or a
+    /// blocked lock worker behind; the caller's own `RefreshLock` guard, when it
+    /// exists, still releases exactly as before.
+    pub(crate) fn lock_refresh_within(&self, wait: std::time::Duration) -> Result<RefreshLock> {
         let path = self.refresh_lock_directory()?;
         let directory = octet_agent::secure_fs::open_private_directory_for_lock(&path)
             .with_context(|| format!("opening refresh lock directory {}", path.display()))?;
-        fs2::FileExt::lock_exclusive(&directory)
-            .with_context(|| format!("locking refresh state {}", path.display()))?;
-        Ok(RefreshLock {
-            directory,
-            path,
-            locked: true,
-        })
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match fs2::FileExt::try_lock_exclusive(&directory) {
+                Ok(()) => {
+                    return Ok(RefreshLock {
+                        directory,
+                        path,
+                        locked: true,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        anyhow::bail!(
+                            "another octet process is holding the Codex refresh lock on {} (waited {} ms); refusing to block on it: retry, or stop the other octet process",
+                            path.display(),
+                            wait.as_millis()
+                        );
+                    }
+                    std::thread::sleep(REFRESH_LOCK_POLL.min(remaining));
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("locking refresh state {}", path.display()));
+                }
+            }
+        }
     }
 
     /// Load the credential, or `None` if neither octet nor the third-party
@@ -982,5 +1028,52 @@ mod tests {
 
         assert!(store.lock_refresh().is_err());
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+    }
+
+    /// The refresh lock is acquired without an unbounded wait, the refusal is
+    /// bounded and secret-free, and a timed-out attempt leaves no phantom
+    /// holder behind (so it can never wedge a later owner).
+    #[test]
+    fn a_contended_refresh_lock_fails_closed_and_leaves_no_phantom_holder() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(directory.path().join("codex.json"));
+        store
+            .save(&CredentialFile {
+                tokens: Tokens {
+                    access_token: "acc".into(),
+                    refresh_token: "rt-must-never-be-echoed".into(),
+                    account_id: "acct_1".into(),
+                },
+                expires_at: 1_000_000,
+            })
+            .unwrap();
+
+        // Uncontended: even a zero wait takes the lock, because the deadline
+        // bounds *waiting*, not the acquisition itself.
+        let immediate = store
+            .lock_refresh_within(std::time::Duration::ZERO)
+            .unwrap();
+        immediate.finish().unwrap();
+
+        // Contended: the wait is bounded and the failure is explicit.
+        let held = store.lock_refresh().unwrap();
+        let error = store
+            .lock_refresh_within(std::time::Duration::from_millis(20))
+            .err()
+            .expect("a contended refresh lock must refuse");
+        let text = error.to_string();
+        assert!(text.contains("holding the Codex refresh lock"), "{text}");
+        assert!(text.contains("refusing to block on it"), "{text}");
+        assert!(text.len() <= 512, "bounded refusal: {} bytes", text.len());
+        assert!(!text.contains("rt-must-never-be-echoed"), "{text}");
+
+        // Releasing the owner releases the lock: the timed-out attempt never
+        // acquired it, so no lock worker is left waiting and no phantom holder
+        // survives to starve the next owner.
+        held.finish().unwrap();
+        let again = store
+            .lock_refresh_within(std::time::Duration::from_secs(1))
+            .unwrap();
+        again.finish().unwrap();
     }
 }

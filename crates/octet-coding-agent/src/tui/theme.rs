@@ -1,9 +1,11 @@
 #![allow(missing_docs)]
 
 use std::collections::BTreeMap;
-#[cfg(test)]
+#[cfg(any(test, feature = "serve"))]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::time::{Duration, Instant};
 
 use octet_ai::{Model, ModelSpec};
 use sexy_tui_rs::theme::{capability::CapabilityTier, Theme as SexyTheme};
@@ -13,9 +15,13 @@ use sexy_tui_rs::{
 };
 
 use crate::config::{ColorMode, Config};
-#[cfg(test)]
 use crate::resource_resolver::{ResourceKind, ResourceResolver};
 use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+#[cfg(test)]
+use crate::tui::theme_reload::{
+    ReloadBoundary, ReloadDecision, ReloadFailureKind, ThemeChangeReceiver, ThemeChangeSender,
+    ThemePathError, ThemeReloadEngine, ThemeReloadMode, ThemeWatch,
+};
 use crate::tui::theme_schema::{self, ParsedTheme, RoleStyleSpec, ThemeSurface};
 
 #[allow(unused_imports)]
@@ -172,6 +178,34 @@ pub(crate) enum TerminalBackground {
     Unknown,
 }
 
+/// The activity shimmer implementation used by the renderer.
+///
+/// Physical mode is the default for terminals with a known background and
+/// TrueColor/ANSI256 output. Classic remains available for A/B comparisons and
+/// is also the safe fallback for unknown backgrounds and ANSI16 terminals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShimmerMode {
+    Classic,
+    Physical,
+}
+
+impl ShimmerMode {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "classic" => Some(Self::Classic),
+            "physical" => Some(Self::Physical),
+            _ => None,
+        }
+    }
+
+    fn from_environment() -> Self {
+        std::env::var("OCTET_SHIMMER")
+            .ok()
+            .and_then(|value| Self::parse(&value))
+            .unwrap_or(Self::Physical)
+    }
+}
+
 /// The three terminal-appearance choices exposed by the interactive TUI.
 /// These are selectors for the compiled theme, not filesystem theme names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,6 +281,7 @@ pub struct OctetTheme {
     inner: SexyTheme,
     capabilities: TerminalCapabilities,
     background: TerminalBackground,
+    shimmer: ShimmerMode,
     semantic_styles: BTreeMap<String, TextStyle>,
     glyphs: BTreeMap<String, String>,
     ascii_glyphs: BTreeMap<String, String>,
@@ -378,6 +413,60 @@ fn default_surfaces() -> BTreeMap<String, ThemeSurface> {
     .collect()
 }
 
+/// Published semantic role vocabulary (roadmap #419).
+///
+/// These are the terminal-independent role names that the theme-file `[roles]`
+/// table maps onto octet's semantic text roles. `docs/themes.md` publishes the
+/// same list; the `published_semantic_role_vocabulary_is_closed_and_accepted`
+/// test keeps the two in sync. Extensions contribute additional
+/// `extension.<namespace>.<role>` roles, which the schema accepts as open but
+/// typed names.
+#[cfg(test)]
+pub const SEMANTIC_ROLE_VOCABULARY: &[&str] = &[
+    "text",
+    "foreground",
+    "muted",
+    "subtle",
+    "dim",
+    "accent",
+    "success",
+    "warning",
+    "error",
+    "heading",
+    "md_heading",
+    "emphasis",
+    "md_emphasis",
+    "strong",
+    "md_strong",
+    "inline_code",
+    "md_code",
+    "code",
+    "md_code_block",
+    "quote",
+    "md_quote",
+    "border",
+    "link",
+    "md_link",
+    "list_marker",
+    "md_list_bullet",
+    "diff_add",
+    "diff_added",
+    "diff_remove",
+    "diff_removed",
+    "diff_context",
+    "diff_hunk",
+    "diff_header",
+    "syntax_comment",
+    "syntax_keyword",
+    "syntax_function",
+    "syntax_variable",
+    "syntax_string",
+    "syntax_number",
+    "syntax_type",
+    "syntax_operator",
+    "syntax_punctuation",
+];
+
 fn semantic_text_role(name: &str) -> Option<(TextRole, &'static str)> {
     Some(match name {
         "text" | "foreground" => (TextRole::Text, "foreground"),
@@ -439,6 +528,7 @@ impl OctetTheme {
             inner,
             capabilities,
             background,
+            shimmer: ShimmerMode::from_environment(),
             semantic_styles: BTreeMap::new(),
             glyphs: default_glyphs(),
             ascii_glyphs: default_ascii_glyphs(),
@@ -506,6 +596,10 @@ impl OctetTheme {
         self.background
     }
 
+    pub(crate) fn shimmer_mode(&self) -> ShimmerMode {
+        self.shimmer
+    }
+
     /// Return a theme glyph with deterministic ASCII fallback. Theme files can
     /// change semantic marks, but cannot force Unicode into a conservative
     /// terminal profile.
@@ -561,6 +655,15 @@ impl OctetTheme {
             TextStyle::plain().background(Color::Rgb(rgb.0, rgb.1, rgb.2)),
             text,
         )
+    }
+
+    /// Search decoration uses the active theme accent and capability downgrade.
+    /// Current and ordinary matches differ in attributes, not raw ANSI colours.
+    pub(crate) fn transcript_search_match(&self, text: &str, current: bool) -> String {
+        let mut style = self.semantic_style("accent").underline();
+        style.attributes.bold = current;
+        style.attributes.inverse = current;
+        self.inner.apply_style(style, text)
     }
 
     fn apply_style_layered(&self, style: TextStyle, text: &str) -> String {
@@ -687,6 +790,59 @@ impl OctetTheme {
             TextStyle::plain()
                 .foreground(foreground)
                 .background(Color::Rgb(color.red, color.green, color.blue)),
+            text,
+        )
+    }
+
+    /// Only the compiled prompt body opts into compact, provenance-coloured
+    /// highlights. Unknown backgrounds use an unpainted, readable foreground;
+    /// limited palettes use the existing contrast-tested surface treatment.
+    pub(crate) fn prompt_text_highlight(&self, color: Option<&str>, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        let Some(source) = color.and_then(parse_hex_color) else {
+            return text.to_owned();
+        };
+        if self.capabilities.color == ColorDepth::None
+            || self.background == TerminalBackground::Unknown
+        {
+            return text.to_owned();
+        }
+        if self.capabilities.color != ColorDepth::TrueColor {
+            return self.prompt_color_cell(color, text);
+        }
+        let (background, foreground) = match self.background {
+            TerminalBackground::Dark => (
+                balance_to_luminance(source, 0.10),
+                Rgb {
+                    red: 0xe6,
+                    green: 0xe6,
+                    blue: 0xeb,
+                },
+            ),
+            TerminalBackground::Light => (
+                balance_to_luminance(source, 0.88),
+                Rgb {
+                    red: 0x20,
+                    green: 0x23,
+                    blue: 0x27,
+                },
+            ),
+            TerminalBackground::Unknown => unreachable!("handled above"),
+        };
+        self.inner.apply_style(
+            TextStyle::plain()
+                .foreground(Color::Rgb(
+                    foreground.red,
+                    foreground.green,
+                    foreground.blue,
+                ))
+                .background(Color::Rgb(
+                    background.red,
+                    background.green,
+                    background.blue,
+                )),
             text,
         )
     }
@@ -888,6 +1044,7 @@ impl OctetTheme {
                 syntax_highlighting: true,
                 tables: true,
                 stable_block_geometry: true,
+                prose_width: None,
                 unordered_list_marker: UnorderedListMarker::Dash,
                 ..RenderOptions::default()
             },
@@ -1338,9 +1495,13 @@ pub(crate) fn balance_background(source: &str, background: TerminalBackground) -
         TerminalBackground::Light => 0.95,
         TerminalBackground::Unknown => UNIVERSAL_TARGET_LUMINANCE,
     };
+    hex_color(balance_to_luminance(source, target_luminance))
+}
+
+fn balance_to_luminance(source: Rgb, target_luminance: f64) -> Rgb {
     let source_luminance = relative_luminance(source);
     if (source_luminance - target_luminance).abs() <= 0.002 {
-        return hex_color(source);
+        return source;
     }
     let lighten = source_luminance < target_luminance;
     let destination = if lighten {
@@ -1372,7 +1533,7 @@ pub(crate) fn balance_background(source: &str, background: TerminalBackground) -
             low = amount;
         }
     }
-    hex_color(blend(source, destination, high))
+    blend(source, destination, high)
 }
 
 fn balance_foreground(source: &str, background: TerminalBackground) -> String {
@@ -1513,6 +1674,14 @@ fn default_theme_for(
         &standard_surface("#202630", "#f1f5f4", background),
     );
     theme.override_token("md_code_inline_bg", "default");
+    theme.override_token(
+        "tool_output",
+        match background {
+            TerminalBackground::Dark => "#bec2c6",
+            TerminalBackground::Light => "#50585c",
+            TerminalBackground::Unknown => "default",
+        },
+    );
     apply_required_surfaces(&mut theme, background);
     apply_standard_technical_palette(&mut theme, background);
     // There is no model before the startup picker. Use octet green until the
@@ -1554,6 +1723,17 @@ pub(crate) fn test_theme_for(
 }
 
 #[cfg(test)]
+pub(crate) fn test_theme_for_shimmer(
+    background: TerminalBackground,
+    capabilities: TerminalCapabilities,
+    shimmer: ShimmerMode,
+) -> OctetTheme {
+    let mut theme = default_theme_for(background, capabilities);
+    theme.shimmer = shimmer;
+    theme
+}
+
+#[cfg(test)]
 pub(crate) fn test_theme_from_source(source: &str) -> OctetTheme {
     test_theme_source_with(
         source,
@@ -1579,17 +1759,15 @@ pub(crate) fn test_theme_source_with(
     .expect("renderer test theme should compile")
 }
 
-#[cfg(test)]
-fn project_theme_dir(config: &Config) -> PathBuf {
-    config.workspace.join(".octet").join("themes")
-}
-
-#[cfg(test)]
 fn theme_file_name(name: &str) -> Option<String> {
     let name = name.trim();
     if name.is_empty()
+        || name == "."
+        || name == ".."
         || Path::new(name).components().count() != 1
-        || name.contains(std::path::MAIN_SEPARATOR)
+        || name
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b'\\' | b'\0'))
     {
         return None;
     }
@@ -1600,16 +1778,43 @@ fn theme_file_name(name: &str) -> Option<String> {
     })
 }
 
-/// Resolve a theme by name, preferring the workspace theme directory.
+#[cfg(any(test, feature = "serve"))]
+fn discover_themes(config: &Config) -> crate::resource_resolver::ResourceSnapshot {
+    let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
+    resolver.discover(ResourceKind::Theme, &config.theme_paths)
+}
+
+/// Return best-effort diagnostics from the theme discovery pass. A diagnostic
+/// is inspectable by callers but never turns discovery into a startup error.
 #[cfg(test)]
-pub fn theme_path(name: &str, config: &Config) -> Option<PathBuf> {
-    let file_name = theme_file_name(name)?;
+pub fn theme_discovery_diagnostics(
+    config: &Config,
+) -> Vec<crate::resource_resolver::ResourceDiagnostic> {
+    discover_themes(config).diagnostics().to_vec()
+}
+
+fn resolved_theme_resource(
+    name: &str,
+    config: &Config,
+) -> anyhow::Result<(ResourceResolver, crate::resource_resolver::ResolvedResource)> {
+    let file_name =
+        theme_file_name(name).ok_or_else(|| anyhow::anyhow!("invalid theme name {name:?}"))?;
     let resource_name = file_name.strip_suffix(".toml").unwrap_or(&file_name);
     let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
-    resolver
-        .discover(ResourceKind::Theme, &config.theme_paths)
+    let snapshot = resolver.discover(ResourceKind::Theme, &config.theme_paths);
+    let resource = snapshot
         .get(resource_name)
-        .map(|resource| resource.path.clone())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("theme {name:?} was not discovered"))?;
+    Ok((resolver, resource))
+}
+
+/// Resolve a theme by name through the shared global/project/explicit resolver.
+#[cfg(test)]
+pub fn theme_path(name: &str, config: &Config) -> Option<PathBuf> {
+    resolved_theme_resource(name, config)
+        .ok()
+        .map(|(_, resource)| resource.path)
 }
 
 fn read_theme_file_bounded(path: &Path) -> anyhow::Result<String> {
@@ -1848,6 +2053,117 @@ pub fn load_resolved_theme(
     )
 }
 
+/// Reference coordinator for active-theme reload conformance tests.
+/// Production file changes use the unified reload supervisor.
+///
+/// The interactive frontend owns the `notify` adapter: it registers
+/// [`Self::watch_spec`] with the watcher and forwards ordinary file changes
+/// through [`Self::sender`]. Everything after the filesystem callback lives
+/// here, so a reload reuses the same bounded, no-follow, regular-file
+/// validation as startup and only commits at an idle prompt boundary.
+///
+/// Call [`Self::poll`] once per idle-loop tick with the current boundary. It
+/// drains the bounded channel, admits at most one due request, runs
+/// [`OctetTheme::reload`], and returns the decision to apply. Print, plain, and
+/// RPC modes stay inert, and a compiled-default source never creates a watcher.
+#[derive(Debug)]
+#[cfg(test)]
+pub struct ThemeFileReload {
+    engine: ThemeReloadEngine<OctetTheme>,
+    receiver: ThemeChangeReceiver,
+}
+
+#[cfg(test)]
+impl ThemeFileReload {
+    /// Build the coordinator for the active `theme`. Returns the bounded sender
+    /// the frontend's watcher callback must use, or an error when the active
+    /// file path cannot be watched.
+    pub fn new(
+        theme: &OctetTheme,
+        mode: ThemeReloadMode,
+        debounce: Duration,
+    ) -> Result<(Self, ThemeChangeSender), ThemePathError> {
+        let (sender, receiver) = crate::tui::theme_reload::theme_change_channel();
+        let active_path = theme.source_path().map(Path::to_path_buf);
+        let fallback = default_theme_for(theme.background, theme.capabilities);
+        let engine = ThemeReloadEngine::new(mode, active_path, theme.clone(), fallback, debounce)?;
+        Ok((Self { engine, receiver }, sender))
+    }
+
+    /// The non-recursive parent-directory watch the frontend must register, if
+    /// any. `None` means the engine owns no file source or is non-interactive.
+    pub fn watch_spec(&self) -> Option<ThemeWatch> {
+        self.engine.watch_spec()
+    }
+
+    /// Switch runtime mode; leaving interactive cancels queued and in-flight work.
+    pub fn set_mode(&mut self, mode: ThemeReloadMode) {
+        self.engine.set_mode(mode);
+    }
+
+    /// Re-point the coordinator after a theme selection. Returns whether the
+    /// active source changed; a change cancels queued and in-flight work.
+    pub fn set_active_theme(&mut self, theme: &OctetTheme) -> Result<bool, ThemePathError> {
+        self.engine.set_last_good(theme.clone());
+        self.engine
+            .set_compiled_fallback(default_theme_for(theme.background, theme.capabilities));
+        self.engine
+            .set_active_theme(theme.source_path().map(Path::to_path_buf))
+    }
+
+    /// Drain the bounded watcher channel and, at an idle boundary, load and
+    /// commit at most one due reload. Invalid or unsafe edits retain the
+    /// last-good theme; missing or broken sources install the compiled fallback.
+    pub fn poll(
+        &mut self,
+        now: Instant,
+        boundary: ReloadBoundary,
+    ) -> Option<ReloadDecision<OctetTheme>> {
+        self.engine.drain_notifications(&self.receiver, now);
+        let request = self.engine.begin_if_ready(now, boundary)?;
+        let path = request.path().to_path_buf();
+        let token = request.token();
+        let capabilities = self.engine.last_good().capabilities;
+        let background = self.engine.last_good().background;
+        let result = load_theme_path_for(&path, capabilities, background)
+            .map_err(|error| classify_reload_failure(&error));
+        Some(self.engine.finish(token, result))
+    }
+
+    /// The currently retained theme.
+    pub fn last_good(&self) -> &OctetTheme {
+        self.engine.last_good()
+    }
+}
+
+/// Map the existing bounded loader's error into the reload retention policy
+/// without changing that loader. Missing sources fall back to the compiled
+/// default; unsafe replacements and schema failures retain the last-good theme.
+#[cfg(test)]
+fn classify_reload_failure(error: &anyhow::Error) -> ReloadFailureKind {
+    use octet_agent::secure_fs::SecureFileError;
+    if let Some(secure) = error.downcast_ref::<SecureFileError>() {
+        return match secure {
+            SecureFileError::NotRegular | SecureFileError::InvalidPath(_) => {
+                ReloadFailureKind::Unsafe
+            }
+            SecureFileError::TooLarge { .. } => ReloadFailureKind::Broken,
+            SecureFileError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+                ReloadFailureKind::Missing
+            }
+            _ => ReloadFailureKind::Other,
+        };
+    }
+    if let Some(io) = error.downcast_ref::<std::io::Error>() {
+        return if io.kind() == std::io::ErrorKind::NotFound {
+            ReloadFailureKind::Missing
+        } else {
+            ReloadFailureKind::Other
+        };
+    }
+    ReloadFailureKind::Invalid
+}
+
 /// Load a named theme or return an error without altering the current theme.
 pub(crate) fn load_named_theme_for_background(
     name: &str,
@@ -1855,10 +2171,17 @@ pub(crate) fn load_named_theme_for_background(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let capabilities = TerminalCapabilities::detect(config.color, config.plain);
-    if name.trim().eq_ignore_ascii_case(DEFAULT_THEME_NAME) {
+    if theme_file_name(name)
+        .as_deref()
+        .and_then(|file_name| file_name.strip_suffix(".toml"))
+        .is_some_and(|resource_name| resource_name.eq_ignore_ascii_case(DEFAULT_THEME_NAME))
+    {
         return Ok(default_theme_for(background, capabilities));
     }
-    anyhow::bail!("only the default theme is available")
+
+    let (resolver, resource) = resolved_theme_resource(name, config)?;
+    let source_text = resolver.read_text(&resource)?;
+    load_resolved_theme_for(&resource.path, &source_text, capabilities, background)
 }
 
 /// Load a named theme or return an error without altering the current theme.
@@ -1896,28 +2219,17 @@ pub fn load_theme(config: &Config) -> OctetTheme {
     load_theme_for_background(config, terminal_background())
 }
 
-#[cfg(test)]
-fn available_themes_from_dirs(global: &Path, project: &Path) -> Vec<String> {
-    let mut names = BTreeSet::new();
-    for directory in [global, project] {
-        if let Ok(entries) = std::fs::read_dir(directory) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|extension| extension.to_str()) == Some("toml") {
-                    if let Some(name) = path.file_stem().and_then(|name| name.to_str()) {
-                        names.insert(name.to_owned());
-                    }
-                }
-            }
+/// Return the compiled default and all safe names selected by the shared
+/// resolver. Parsing is deferred to the loader so discovery stays best-effort.
+#[cfg(any(test, feature = "serve"))]
+pub fn available_themes(config: &Config) -> Vec<String> {
+    let mut names = BTreeSet::from([DEFAULT_THEME_NAME.to_owned()]);
+    for resource in discover_themes(config).resources() {
+        if theme_file_name(&resource.name).is_some() {
+            names.insert(resource.name.clone());
         }
     }
     names.into_iter().collect()
-}
-
-/// Return the single theme exposed by the current runtime.
-#[allow(dead_code)]
-pub fn available_themes(_config: &Config) -> Vec<String> {
-    vec![DEFAULT_THEME_NAME.to_owned()]
 }
 
 fn contains_any(text: &str, markers: &[&str]) -> bool {
@@ -2082,7 +2394,7 @@ mod tests {
             invocation_cwd: workspace,
             model: None,
             model_explicit: false,
-            reasoning: octet_ai::ReasoningConfig::Off,
+            reasoning: None,
             reasoning_explicit: false,
             reasoning_mode: octet_ai::ReasoningMode::Standard,
             reasoning_mode_explicit: false,
@@ -2134,41 +2446,53 @@ mod tests {
     }
 
     #[test]
-    fn project_theme_wins_and_available_themes_deduplicate() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = config(directory.path().to_owned());
-        let project = project_theme_dir(&config);
-        let global = directory.path().join("global-themes");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&global).unwrap();
-        std::fs::write(project.join("project.toml"), "accent = 'blue'").unwrap();
-        std::fs::write(project.join("shared.toml"), "accent = 'green'").unwrap();
-        std::fs::write(global.join("global.toml"), "accent = 'red'").unwrap();
-        std::fs::write(global.join("shared.toml"), "accent = 'red'").unwrap();
+    fn shimmer_mode_accepts_only_the_documented_values() {
+        assert_eq!(ShimmerMode::parse("classic"), Some(ShimmerMode::Classic));
         assert_eq!(
-            theme_path("shared", &config),
-            Some(project.join("shared.toml").canonicalize().unwrap())
+            ShimmerMode::parse(" PHYSICAL "),
+            Some(ShimmerMode::Physical)
         );
-        assert_eq!(
-            available_themes_from_dirs(&global, &project),
-            vec![
-                "global".to_owned(),
-                "project".to_owned(),
-                "shared".to_owned()
-            ]
-        );
+        assert_eq!(ShimmerMode::parse("legacy"), None);
+        assert_eq!(ShimmerMode::parse(""), None);
     }
 
     #[test]
-    fn only_compiled_default_is_exposed() {
+    fn project_theme_is_discovered_loaded_and_names_are_deduplicated() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().to_owned());
+        let project = config.workspace.join(".octet/themes");
+        let explicit = directory.path().join("explicit-themes");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&explicit).unwrap();
+        std::fs::write(project.join("shared.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(explicit.join("custom.toml"), "accent = '#654321'").unwrap();
+        config.theme_paths.push(explicit);
+
+        assert_eq!(
+            theme_path("shared", &config),
+            Some(project.canonicalize().unwrap().join("shared.toml"))
+        );
+        let theme = load_named_theme("shared", &config).unwrap();
+        assert_eq!(
+            theme.resolve::<String>("accent").as_deref(),
+            Some("#123456")
+        );
+
+        let names = available_themes(&config);
+        assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
+        assert!(names.contains(&"shared".to_owned()));
+        assert!(names.contains(&"custom".to_owned()));
+        assert_eq!(names.iter().filter(|name| *name == "shared").count(), 1);
+    }
+
+    #[test]
+    fn missing_and_legacy_names_keep_the_compiled_default_fallback() {
         let directory = tempfile::tempdir().unwrap();
         let config = config(directory.path().to_owned());
-        assert_eq!(
-            available_themes(&config),
-            vec![DEFAULT_THEME_NAME.to_owned()]
-        );
+        let names = available_themes(&config);
+        assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
         assert!(load_named_theme(DEFAULT_THEME_NAME, &config).is_ok());
-        for name in ["legacy-theme", "custom"] {
+        for name in ["legacy-theme", "custom", "compact"] {
             assert!(
                 load_named_theme(name, &config).is_err(),
                 "unexpected theme availability for {name}"
@@ -2177,18 +2501,141 @@ mod tests {
 
         let custom_dir = directory.path().join("themes");
         std::fs::create_dir_all(&custom_dir).unwrap();
-        std::fs::write(custom_dir.join("custom.toml"), "accent = 'red'").unwrap();
+        std::fs::write(custom_dir.join("custom.toml"), "accent = '#123456'").unwrap();
         let mut configured = config;
         configured.theme_paths.push(custom_dir);
-        configured.theme = Some("legacy-theme".to_owned());
-        assert_eq!(
-            available_themes(&configured),
-            vec![DEFAULT_THEME_NAME.to_owned()]
-        );
+        configured.theme = Some("custom".to_owned());
+        assert!(available_themes(&configured).contains(&"custom".to_owned()));
         assert!(
-            load_theme_for_background(&configured, TerminalBackground::Unknown)
+            !load_theme_for_background(&configured, TerminalBackground::Unknown)
                 .is_compiled_default()
         );
+
+        for name in ["legacy-theme", "compact"] {
+            configured.theme = Some(name.to_owned());
+            for background in [
+                TerminalBackground::Unknown,
+                TerminalBackground::Dark,
+                TerminalBackground::Light,
+            ] {
+                let theme = load_theme_for_background(&configured, background);
+                assert!(theme.is_compiled_default());
+                assert_eq!(theme.background(), background);
+                assert!(theme.layout_for_width(80).show_footer);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_and_oversized_named_themes_fall_back_without_startup_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let themes = directory.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(themes.join("malformed.toml"), "[colors\naccent = '#123456'").unwrap();
+        std::fs::write(
+            themes.join("oversized.toml"),
+            vec![b' '; MAX_THEME_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        let mut config = config(directory.path().to_owned());
+        config.theme_paths.push(themes);
+        for (name, expected_error) in [("malformed", ""), ("oversized", "too large")] {
+            config.theme = Some(name.to_owned());
+            let error = load_named_theme(name, &config).unwrap_err().to_string();
+            if !expected_error.is_empty() {
+                assert!(error.contains(expected_error), "{error}");
+            }
+            assert!(
+                load_theme_for_background(&config, TerminalBackground::Unknown)
+                    .is_compiled_default(),
+                "{name} must use the compiled fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_names_cannot_traverse_outside_discovered_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let themes = directory.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(themes.join("safe.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(directory.path().join("outside.toml"), "accent = '#654321'").unwrap();
+        let mut config = config(directory.path().to_owned());
+        config.theme_paths.push(themes);
+
+        assert!(theme_path("safe", &config).is_some());
+        for name in [
+            "../outside",
+            r"..\outside",
+            "/tmp/outside",
+            "safe/../safe",
+            "..",
+        ] {
+            assert!(
+                theme_path(name, &config).is_none(),
+                "accepted unsafe name {name:?}"
+            );
+            assert!(
+                load_named_theme(name, &config).is_err(),
+                "loaded unsafe name {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn untrusted_project_themes_are_not_selected() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().to_owned());
+        config.workspace_trusted = false;
+        let project = config.workspace.join(".octet/themes");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("untrusted-project.toml"), "accent = '#123456'").unwrap();
+
+        assert!(theme_path("untrusted-project", &config).is_none());
+        assert!(!available_themes(&config).contains(&"untrusted-project".to_owned()));
+        assert!(theme_discovery_diagnostics(&config)
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("workspace is not trusted") }));
+        config.theme = Some("untrusted-project".to_owned());
+        assert!(
+            load_theme_for_background(&config, TerminalBackground::Unknown).is_compiled_default()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_and_fifo_theme_candidates_are_not_selected() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let themes = directory.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        let target = directory.path().join("target.toml");
+        std::fs::write(&target, "accent = '#123456'").unwrap();
+        symlink(&target, themes.join("linked.toml")).unwrap();
+
+        let fifo = themes.join("pipe.toml");
+        let fifo_name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+
+        let mut config = config(directory.path().to_owned());
+        config.theme_paths.push(themes);
+        let names = available_themes(&config);
+        assert!(!names.contains(&"linked".to_owned()));
+        assert!(!names.contains(&"pipe".to_owned()));
+        assert!(theme_path("linked", &config).is_none());
+        assert!(theme_path("pipe", &config).is_none());
+        assert!(theme_discovery_diagnostics(&config)
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.path.ends_with("linked.toml")
+                    && diagnostic
+                        .message
+                        .contains("candidate must not be a symlink")
+            }));
     }
 
     #[test]
@@ -2272,6 +2719,182 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         symlink(&replacement, &path).unwrap();
         assert!(theme.reload().is_err());
+    }
+
+    #[test]
+    fn shipped_reference_theme_is_schema_valid_and_variant_aware() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/themes/octet-default.toml");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        assert!(
+            source.len() as u64 <= MAX_THEME_BYTES,
+            "reference theme exceeds the bounded file size"
+        );
+
+        let dark =
+            theme_schema::parse_theme(&source, "reference", TerminalBackground::Dark).unwrap();
+        let light =
+            theme_schema::parse_theme(&source, "reference", TerminalBackground::Light).unwrap();
+        assert_eq!(
+            dark.tokens.get("accent").map(String::as_str),
+            Some("#16876d")
+        );
+        assert_eq!(
+            dark.tokens.get("md_code_bg").map(String::as_str),
+            Some("#202630"),
+            "dark variant keeps the dark fenced-code surface"
+        );
+        assert_eq!(
+            light.tokens.get("md_code_bg").map(String::as_str),
+            Some("#f1f5f4"),
+            "light variant overrides the universal fenced-code surface"
+        );
+        assert!(dark.roles.contains_key("extension.example.badge"));
+        assert_eq!(
+            dark.glyphs.len(),
+            dark.ascii_glyphs.len(),
+            "every unicode glyph has an ASCII fallback"
+        );
+
+        // The file must compile through the real bounded loader, not just parse.
+        let compiled = load_resolved_theme_for(
+            &path,
+            &source,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        )
+        .unwrap();
+        assert!(matches!(compiled.source(), ThemeSource::File(_)));
+        assert_eq!(compiled.metadata().name, "octet default reference");
+        assert_eq!(
+            compiled.resolve::<String>("md_code_bg").as_deref(),
+            Some("#202630")
+        );
+    }
+
+    #[test]
+    fn active_theme_reload_poll_applies_edits_and_retains_last_good() {
+        use crate::tui::theme_reload::{try_send_change, FileChangeEvent, FileChangeKind};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active.toml");
+        std::fs::write(
+            &path,
+            "[metadata]\nname = 'Initial'\n[colors]\naccent = '#111111'\n",
+        )
+        .unwrap();
+        let theme = load_theme_path_for(
+            &path,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        )
+        .unwrap();
+
+        let (mut reload, sender) =
+            ThemeFileReload::new(&theme, ThemeReloadMode::Interactive, Duration::ZERO).unwrap();
+        assert!(
+            !reload.set_active_theme(&theme).unwrap(),
+            "same source is idempotent"
+        );
+        let watch = reload.watch_spec().expect("interactive file theme watches");
+        assert_eq!(watch.directory(), directory.path());
+        assert!(!watch.recursive());
+
+        let now = Instant::now();
+        // A busy boundary drains the event but never admits a reload.
+        assert!(try_send_change(
+            &sender,
+            FileChangeEvent::new(&path, FileChangeKind::Modify)
+        ));
+        assert!(reload.poll(now, ReloadBoundary::Busy).is_none());
+
+        // A real edit loads through OctetTheme::reload at the idle boundary.
+        std::fs::write(
+            &path,
+            "[metadata]\nname = 'Edited'\n[colors]\naccent = '#222222'\n",
+        )
+        .unwrap();
+        assert!(try_send_change(
+            &sender,
+            FileChangeEvent::new(&path, FileChangeKind::Modify)
+        ));
+        match reload.poll(now, ReloadBoundary::Idle).expect("applied") {
+            ReloadDecision::Applied(theme) => assert_eq!(theme.metadata().name, "Edited"),
+            other => panic!("expected an applied theme, got {other:?}"),
+        }
+
+        // An invalid edit retains the last-good theme instead of applying it.
+        std::fs::write(&path, "[metadata]\nname = 7\n").unwrap();
+        assert!(try_send_change(
+            &sender,
+            FileChangeEvent::new(&path, FileChangeKind::Modify)
+        ));
+        assert!(matches!(
+            reload.poll(now, ReloadBoundary::Idle),
+            Some(ReloadDecision::RetainedLastGood {
+                failure: ReloadFailureKind::Invalid
+            })
+        ));
+        assert_eq!(reload.last_good().metadata().name, "Edited");
+
+        // A removed source installs the compiled fallback.
+        std::fs::remove_file(&path).unwrap();
+        assert!(try_send_change(
+            &sender,
+            FileChangeEvent::new(&path, FileChangeKind::Remove)
+        ));
+        assert!(matches!(
+            reload.poll(now, ReloadBoundary::Idle),
+            Some(ReloadDecision::FellBackToCompiledDefault(_))
+        ));
+
+        // Non-interactive modes stay inert.
+        reload.set_mode(ThemeReloadMode::Print);
+        assert!(reload.watch_spec().is_none());
+        assert!(reload.poll(now, ReloadBoundary::Idle).is_none());
+    }
+
+    #[test]
+    fn published_semantic_role_vocabulary_is_closed_and_accepted() {
+        let mut seen = std::collections::BTreeSet::new();
+        for name in SEMANTIC_ROLE_VOCABULARY {
+            assert!(seen.insert(*name), "duplicate published role {name}");
+            assert!(
+                semantic_text_role(name).is_some(),
+                "published role {name} is not a mapped semantic role"
+            );
+            let source = format!("[roles.{name}]\nbold = true\n");
+            let parsed =
+                theme_schema::parse_theme(&source, "vocabulary", TerminalBackground::Unknown)
+                    .unwrap_or_else(|error| panic!("role {name}: {error}"));
+            assert!(parsed.roles.contains_key(*name));
+            let theme = load_theme_source_for(
+                &source,
+                "vocabulary",
+                ThemeSource::CompiledDefault,
+                "Vocabulary",
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                TerminalBackground::Unknown,
+            )
+            .unwrap_or_else(|error| panic!("role {name}: {error}"));
+            assert!(
+                theme.semantic_styles.contains_key(*name),
+                "role {name} was not retained as a semantic style"
+            );
+        }
+
+        // The extension-namespaced channel is open but still typed.
+        let extension = "[roles.\"extension.git.branch\"]\nforeground = \"accent\"\n";
+        let parsed =
+            theme_schema::parse_theme(extension, "extension", TerminalBackground::Unknown).unwrap();
+        assert!(parsed.roles.contains_key("extension.git.branch"));
+        assert!(theme_schema::parse_theme(
+            "[roles.\"private state\"]\nbold = true\n",
+            "bad-role",
+            TerminalBackground::Unknown,
+        )
+        .is_err());
     }
 
     #[test]
@@ -2471,6 +3094,7 @@ mod tests {
             Some(TerminalThemeChoice::Light)
         );
         assert_eq!(TerminalThemeChoice::parse("custom"), None);
+        assert_eq!(TerminalThemeChoice::parse("compact"), None);
 
         let directory = tempfile::tempdir().unwrap();
         let mut config = config(directory.path().to_owned());

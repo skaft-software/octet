@@ -58,6 +58,7 @@ struct CompactBashOutput {
     lines: Vec<String>,
     capture_truncations: Vec<BashCaptureTruncation>,
     panel_elided: bool,
+    spill_notices: Vec<&'static str>,
 }
 
 fn bash_capture_footer(line: &str) -> Option<(&'static str, &str)> {
@@ -107,6 +108,11 @@ fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
     let mut panel_elided = false;
     let mut protocol_error = false;
     let mut expect_stream_header = false;
+    let framed_result = result.lines().next().is_some_and(|line| {
+        (line.starts_with("exit=") && line.contains("duration=")) || line.starts_with("error ")
+    });
+    let mut capture_metadata = false;
+    let mut spill_notices = Vec::new();
     for (line_index, raw) in result.lines().enumerate() {
         let line = raw.trim_end();
         let trimmed = line.trim();
@@ -120,13 +126,41 @@ fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
             continue;
         }
         if expect_stream_header && is_bash_stream_header(trimmed) {
+            capture_metadata = false;
             protocol_error = false;
             expect_stream_header = false;
             continue;
         }
         if bash_capture_footer(trimmed).is_some() || is_bash_complete_footer(trimmed) {
+            capture_metadata = framed_result;
             expect_stream_header = true;
             continue;
+        }
+        // Spill locations are capture-envelope metadata, not evidence. Limit
+        // this filtering to the footer region: a command may legitimately print
+        // `full_output_path=...` or `spill_error=true` as ordinary output.
+        if capture_metadata {
+            if trimmed.starts_with("full_output_path=")
+                || trimmed.starts_with("partial_output_path=")
+            {
+                continue;
+            }
+            let notice = if trimmed.starts_with("spill_expired=true") {
+                Some("spill output expired; unavailable to expand")
+            } else if trimmed.starts_with("spill_truncated=true") {
+                Some("spill byte limit reached; remaining bytes unavailable to expand")
+            } else if trimmed.starts_with("spill_error=true") {
+                Some("spill capture failed; full output unavailable to expand")
+            } else {
+                None
+            };
+            if let Some(notice) = notice {
+                spill_notices.push(notice);
+                continue;
+            }
+            if !trimmed.is_empty() {
+                capture_metadata = false;
+            }
         }
         if trimmed.is_empty()
             || trimmed == "(no output)"
@@ -149,6 +183,7 @@ fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
         lines: content,
         capture_truncations,
         panel_elided,
+        spill_notices,
     }
 }
 
@@ -173,7 +208,11 @@ fn bash_content_gutter() -> usize {
 }
 
 fn capture_loss_details(compact: &CompactBashOutput) -> Vec<String> {
-    let mut details = Vec::new();
+    let mut details: Vec<String> = compact
+        .spill_notices
+        .iter()
+        .map(|notice| (*notice).to_owned())
+        .collect();
     if compact.panel_elided {
         details.push("older live output was elided; unavailable to expand".to_owned());
     }
@@ -201,12 +240,12 @@ pub(super) fn render_compact_bash_output(
     let loss_details = capture_loss_details(&compact);
     let mut output_rows = Vec::new();
     for output_line in compact.lines {
-        output_rows.extend(wrap_hanging(
-            &subdued_text(theme, &output_line),
-            output_indent,
-            output_indent,
-            width,
-        ));
+        let text = if theme.is_compiled_default() {
+            theme.fg("tool_output", &output_line)
+        } else {
+            subdued_text(theme, &output_line)
+        };
+        output_rows.extend(wrap_hanging(&text, output_indent, output_indent, width));
     }
     if output_rows.is_empty() {
         let placeholder = if panel.finished {
@@ -245,7 +284,11 @@ pub(super) fn render_compact_bash_output(
             let mut details = loss_details;
             if hidden_rows > 0 {
                 let unit = if hidden_rows == 1 { "row" } else { "rows" };
-                details.push(format!("{hidden_rows} earlier visual {unit} hidden"));
+                details.push(if theme.is_compiled_default() {
+                    format!("{hidden_rows} output {unit} collapsed")
+                } else {
+                    format!("{hidden_rows} earlier visual {unit} hidden")
+                });
             }
             let detail = format!("{ellipsis} {}", details.join(" · "));
             fit_line(
@@ -257,7 +300,7 @@ pub(super) fn render_compact_bash_output(
 }
 
 /// Maximum command-content rows in terse mode, independent of the output tail.
-const COMPACT_BASH_INPUT_ROWS: usize = 3;
+const COMPACT_BASH_INPUT_ROWS: usize = 2;
 
 pub(super) fn render_bash_row(
     command: &str,
@@ -280,11 +323,20 @@ pub(super) fn render_bash_row(
     // Count after terminal sanitization and literal syntax wrapping so newlines,
     // wide graphemes, tabs, and long single-line commands share one visual budget.
     // Only this display projection is shortened; the retained command is intact.
-    let command = renderer.render_inline_syntax(command, "bash", content_width);
+    let command = if theme.is_compiled_default() {
+        renderer.render_inline_syntax_wrapped(command, "bash", content_width)
+    } else {
+        renderer.render_inline_syntax(command, "bash", content_width)
+    };
+    let preview_rows = if theme.is_compiled_default() {
+        COMPACT_BASH_INPUT_ROWS
+    } else {
+        3
+    };
     let hidden_rows = if expanded {
         0
     } else {
-        command.lines.len().saturating_sub(COMPACT_BASH_INPUT_ROWS)
+        command.lines.len().saturating_sub(preview_rows)
     };
     let visible_rows = command.lines.len() - hidden_rows;
     let use_plain = theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
@@ -303,14 +355,30 @@ pub(super) fn render_bash_row(
         let ellipsis = if theme.unicode() { "…" } else { "..." };
         let unit = if hidden_rows == 1 { "line" } else { "lines" };
         let hint = format!("{ellipsis} {hidden_rows} more {unit} hidden (ctrl+o to expand)");
-        // Keep the entire hint readable on narrow terminals without spending a
-        // command-preview row on it or changing the nested output's own budget.
-        rows.extend(wrap_hanging(
-            &subdued_text(theme, &hint),
-            &continuation,
-            &continuation,
-            width,
-        ));
+        if theme.is_compiled_default() {
+            let available = usize::from(width).saturating_sub(visible_width(&continuation));
+            let short = format!("{ellipsis}+{hidden_rows}");
+            let with_key = format!("{short} Ctrl+O");
+            let cue = if visible_width(&hint) <= available {
+                &hint
+            } else if visible_width(&with_key) <= available {
+                &with_key
+            } else {
+                &short
+            };
+            rows.push(fit_line(
+                &format!("{continuation}{}", subdued_text(theme, cue)),
+                width,
+            ));
+        } else {
+            // Custom themes keep their existing expanded hint geometry.
+            rows.extend(wrap_hanging(
+                &subdued_text(theme, &hint),
+                &continuation,
+                &continuation,
+                width,
+            ));
+        }
     }
     rows
 }
@@ -324,6 +392,36 @@ mod tests {
     use crate::presentation::summarize_tool;
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use crate::tui::theme::{test_theme, test_theme_with};
+
+    #[test]
+    fn bash_output_excludes_capture_paths_but_keeps_literal_output_and_loss_notices() {
+        let output = "exit=0 duration=1ms\nstdout: 999 bytes, showing first 2 and last 1 lines\nfull_output_path=ordinary-output\nspill_error=true ordinary-output\nretained tail\ntruncated_stdout=head:2 tail:1 omitted_bytes:123\nfull_output_path=/private/capture.log\npartial_output_path=/private/partial.log\nspill_truncated=true (per-stream byte limit reached)\nspill_error=true (full output could not be retained)\nstderr: 999 bytes, showing first 1 and last 1 lines\nretained stderr\ntruncated_stderr=head:1 tail:1 omitted_bytes:456\nspill_expired=true (owner retention evicted this output)";
+        let panel = ToolPanel::new(
+            ToolCallId("projection".into()),
+            "bash".into(),
+            "{}".into(),
+            summarize_tool("bash", &serde_json::json!({"command":"printf retained"})),
+            output.into(),
+            true,
+            false,
+            None,
+            None,
+        );
+        let theme = test_theme();
+        let text =
+            plain_rows(&render_compact_bash_output(&panel, &theme, 160, true, "")).join("\n");
+        assert!(text.contains("full_output_path=ordinary-output"));
+        assert!(text.contains("spill_error=true ordinary-output"));
+        assert!(text.contains("retained tail"));
+        assert!(text.contains("retained stderr"));
+        assert!(!text.contains("/private/"));
+        assert!(!text.contains("spill_truncated=true"));
+        assert!(text.contains("spill byte limit reached"));
+        assert!(text.contains("spill capture failed"));
+        assert!(text.contains("spill output expired"));
+        assert!(text.contains("123 bytes"));
+        assert!(text.contains("456 bytes"));
+    }
 
     fn plain_rows(rows: &[String]) -> Vec<String> {
         rows.iter()
@@ -339,24 +437,39 @@ mod tests {
         let renderer = theme.rich_renderer();
         let collapsed = render_bash_row(command, &renderer, theme, width, false);
         let expanded = render_bash_row(command, &renderer, theme, width, true);
-        let retained = expanded.len().min(COMPACT_BASH_INPUT_ROWS);
+        let preview_rows = if theme.is_compiled_default() {
+            COMPACT_BASH_INPUT_ROWS
+        } else {
+            3
+        };
+        let retained = expanded.len().min(preview_rows);
         assert_eq!(&collapsed[..retained], &expanded[..retained]);
-        if expanded.len() <= COMPACT_BASH_INPUT_ROWS {
+        if expanded.len() <= preview_rows {
             assert_eq!(collapsed, expanded);
         } else {
-            let hidden = expanded.len() - COMPACT_BASH_INPUT_ROWS;
+            let hidden = expanded.len() - preview_rows;
             let unit = if hidden == 1 { "line" } else { "lines" };
             let ellipsis = if theme.unicode() { "…" } else { "..." };
-            let hint = plain_rows(&collapsed[COMPACT_BASH_INPUT_ROWS..])
+            let hint = plain_rows(&collapsed[preview_rows..])
                 .iter()
                 .map(|row| row.trim())
                 .collect::<Vec<_>>()
                 .join(" ");
-            assert_eq!(
-                hint,
-                format!("{ellipsis} {hidden} more {unit} hidden (ctrl+o to expand)"),
-                "width {width}: {collapsed:?}"
-            );
+            let full = format!("{ellipsis} {hidden} more {unit} hidden (ctrl+o to expand)");
+            if theme.is_compiled_default() {
+                assert_eq!(
+                    collapsed.len(),
+                    preview_rows + 1,
+                    "width {width}: {collapsed:?}"
+                );
+                let short = format!("{ellipsis}+{hidden}");
+                assert!(
+                    [&full, &format!("{short} Ctrl+O"), &short].contains(&&hint),
+                    "width {width}: {collapsed:?}"
+                );
+            } else {
+                assert_eq!(hint, full, "width {width}: {collapsed:?}");
+            }
         }
         for rows in [&collapsed, &expanded] {
             assert!(rows
@@ -396,7 +509,7 @@ mod tests {
     #[test]
     fn bash_input_short_commands_do_not_reserve_a_hint_row() {
         let theme = test_theme();
-        for command in ["", "printf one", "one\ntwo", "one\n\nthree", "one\ntwo\n"] {
+        for command in ["", "printf one", "one\ntwo"] {
             let (collapsed, expanded) = assert_input_window(command, &theme, 80);
             assert!(collapsed.len() <= COMPACT_BASH_INPUT_ROWS);
             assert_eq!(collapsed, expanded);
@@ -410,10 +523,10 @@ mod tests {
         let command = "cat <<'EOF'\nfirst\n\n    fourth\nEOF\nprintf done";
         let (collapsed, expanded) = assert_input_window(command, &theme, 100);
         assert_eq!(expanded.len(), 6);
-        assert_eq!(collapsed.len(), 4);
+        assert_eq!(collapsed.len(), 3);
         assert_eq!(
-            plain_rows(&collapsed)[..3],
-            ["Bash  cat <<'EOF'", "      first", "      "]
+            plain_rows(&collapsed)[..2],
+            ["Bash  cat <<'EOF'", "      first"]
         );
         let full_command = plain_rows(&expanded)
             .iter()
@@ -423,7 +536,7 @@ mod tests {
         assert_eq!(full_command, command);
         assert!(!collapsed.join("\n").contains("fourth"));
         let (singular, _) = assert_input_window("one\ntwo\nthree\nfour", &theme, 100);
-        assert!(strip_terminal_sequences(&singular[3]).contains("1 more line hidden"));
+        assert!(strip_terminal_sequences(&singular[2]).contains("2 more lines hidden"));
     }
 
     #[test]
@@ -433,19 +546,24 @@ mod tests {
         for width in [18, 42, 80, 120] {
             let (collapsed, expanded) = assert_input_window(&command, &theme, width);
             let content_width = usize::from(width) - bash_content_gutter();
-            assert_eq!(expanded.len(), command.len().div_ceil(content_width));
+            assert!(expanded.len() >= command.len().div_ceil(content_width));
             assert_eq!(
                 plain_rows(&expanded)
                     .iter()
                     .map(|row| &row[bash_content_gutter()..])
                     .collect::<String>(),
-                command
+                command.replace(' ', "")
             );
-            if width == 120 {
-                assert_eq!(collapsed, expanded, "the wide frame no longer hides input");
-            } else {
-                assert!(expanded.len() > COMPACT_BASH_INPUT_ROWS);
-            }
+            // Soft wrapping may drop boundary whitespace visually; semantic
+            // copy still preserves the exact sanitized command.
+            assert_eq!(
+                theme
+                    .rich_renderer()
+                    .render_inline_syntax_wrapped(&command, "bash", content_width as u16)
+                    .copy_text,
+                command,
+            );
+            assert_eq!(collapsed.len(), COMPACT_BASH_INPUT_ROWS + 1);
         }
     }
 
@@ -464,7 +582,10 @@ mod tests {
                     let (_, expanded) = assert_input_window(&command, &theme, width);
                     let plain = plain_rows(&expanded);
                     let mut content = plain.iter().map(|row| &row[bash_content_gutter()..]);
-                    assert_eq!(content.clone().collect::<String>(), command);
+                    assert_eq!(
+                        content.clone().collect::<String>(),
+                        command.replace(' ', "")
+                    );
                     assert!(content.all(|row| !row.starts_with(['\u{301}', '\u{200d}'])));
                 }
             }
@@ -514,11 +635,11 @@ mod tests {
                 100,
                 expanded,
             );
-            assert_eq!(input.len(), if expanded { 5 } else { 4 });
+            assert_eq!(input.len(), if expanded { 5 } else { 3 });
             let tail = render_compact_bash_output(&panel, &theme, 100, false, "");
             assert_eq!(tail.len(), COMPACT_EXEC_OUTPUT_ROWS);
             assert_eq!(plain_rows(&tail)[1..], ["5", "6", "7", "8"]);
-            assert!(strip_terminal_sequences(&tail[0]).contains("4 earlier visual rows hidden"));
+            assert!(strip_terminal_sequences(&tail[0]).contains("4 output rows collapsed"));
             assert_eq!(
                 render_compact_bash_output(&panel, &theme, 100, true, "").len(),
                 8

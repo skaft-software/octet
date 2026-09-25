@@ -2,7 +2,7 @@
 
 use crate::error::DecodeError;
 use crate::pricing::Pricing;
-use crate::CompatibilityMode;
+pub use crate::CompatibilityMode;
 use serde::{Deserialize, Serialize};
 
 /// Newtype representing an endpoint identifier.
@@ -29,6 +29,9 @@ pub enum CacheRetention {
     /// Provider default short-lived cache retention.
     #[default]
     Short,
+    /// Short retention for a one-off Anthropic cache warm: place the message
+    /// breakpoint before the synthetic final user turn, not on that turn.
+    WarmShort,
     /// Request the provider's long-lived retention where supported.
     Long,
 }
@@ -52,9 +55,16 @@ pub struct CacheCompatibility {
     /// Optional Anthropic-style cache-control convention on Chat payloads.
     #[serde(default)]
     pub cache_control_format: Option<CacheControlFormat>,
+    /// Whether this Responses route accepts an explicit prompt-cache mode.
+    #[serde(default)]
+    pub supports_explicit_prompt_cache_mode: bool,
     /// Whether Anthropic-style cache markers are accepted on tool definitions.
     #[serde(default = "default_true")]
     pub supports_cache_control_on_tools: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 const fn default_true() -> bool {
@@ -69,6 +79,7 @@ impl Default for CacheCompatibility {
             send_session_affinity_headers: false,
             session_affinity_format: None,
             cache_control_format: None,
+            supports_explicit_prompt_cache_mode: false,
             supports_cache_control_on_tools: true,
         }
     }
@@ -113,6 +124,14 @@ pub enum Protocol {
     BedrockConverse,
     /// Google Generative AI / Vertex `generateContent` protocol.
     GoogleGenerativeAi,
+    /// Native Mistral Conversations HTTP/SSE protocol.
+    MistralConversations,
+    /// Native `pi-messages` (Radius gateway) HTTP/SSE protocol.
+    ///
+    /// This is not an OpenAI alias: one `POST <base>/messages` carries Pi's own
+    /// `{ model, context, options }` document and the response is a stream of
+    /// serialized assistant-message events.
+    PiMessages,
 }
 
 /// Preferred transport for streaming provider responses.
@@ -135,6 +154,9 @@ pub enum EndpointTransport {
 /// family needs data, not a client branch.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestRuntime {
+    /// Explicit endpoint authority, intersected with model Responses features.
+    #[serde(default)]
+    pub responses_features: ResponsesFeatures,
     /// Encoding applied to a complete request body before it is sent.
     #[serde(default)]
     pub body_encoding: RequestBodyEncoding,
@@ -182,6 +204,8 @@ pub enum ResponsesRuntimeProfile {
     Default,
     /// ChatGPT Codex subscription behavior over the existing Responses codec.
     Codex,
+    /// Azure Responses deployment routing and API-version configuration.
+    Azure,
 }
 
 impl ResponsesRuntimeProfile {
@@ -203,6 +227,65 @@ impl ResponsesRuntimeProfile {
     /// Whether the endpoint rejects `max_output_tokens` outright.
     pub const fn omits_max_output_tokens(self) -> bool {
         matches!(self, Self::Codex)
+    }
+
+    /// Whether this profile declares the Responses `service_tier` request
+    /// field.
+    ///
+    /// The tier changes provider routing and billing, so the codec emits it
+    /// only for a profile that declares the field and fails closed for every
+    /// other route rather than silently dropping a caller's control. Only the
+    /// Codex subscription profile declares it today; widening this is an
+    /// endpoint declaration, never a provider-name branch.
+    pub const fn accepts_service_tier(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+
+    /// Whether this profile declares the Responses computer-use tool
+    /// (`computer_use_preview`).
+    ///
+    /// Declaring the tool asks the provider's model to propose computer
+    /// actions as `computer_call` items. The codec only carries that protocol
+    /// exchange — it never performs an action — so this is an endpoint
+    /// declaration, never a provider-name branch or an authority grant.
+    /// Whether anything may execute an action is decided by host policy.
+    /// Routes that do not declare the tool fail closed instead of silently
+    /// dropping the caller's request.
+    pub const fn accepts_computer_use(self) -> bool {
+        matches!(self, Self::Default)
+    }
+}
+
+/// OpenAI Responses service tier requested for a single request.
+///
+/// This mirrors the Responses `service_tier` request parameter. Values are
+/// typed rather than free-form so an unknown tier fails at the boundary instead
+/// of reaching the wire; the endpoint's declared
+/// [`ResponsesRuntimeProfile::accepts_service_tier`] decides whether the codec
+/// may send it at all.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    /// Let the provider pick the cheapest capacity it can serve.
+    Auto,
+    /// The provider's standard service tier.
+    Default,
+    /// Discounted flex processing on slower, interruptible capacity.
+    Flex,
+    /// Premium priority processing.
+    Priority,
+}
+
+impl ServiceTier {
+    /// Exact Responses wire value for this tier.
+    pub const fn wire_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Flex => "flex",
+            Self::Priority => "priority",
+        }
     }
 }
 
@@ -252,9 +335,42 @@ impl std::fmt::Debug for Endpoint {
     }
 }
 
+/// Explicit Responses feature authority. Missing metadata grants no feature.
+/// Model and endpoint declarations are intersected; Lite/V2 and model names do
+/// not grant these capabilities. None of these flags authorizes tool execution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResponsesFeatures {
+    /// Function/custom tools may return results after later assistant turns.
+    pub async_tools: bool,
+    /// The endpoint supports native WebSocket mid-turn steering.
+    pub steering: bool,
+    /// Ordered input items may update reasoning effort without changing baseline.
+    pub reasoning_effort_updates: bool,
+    /// Separately qualified compact endpoint accepts configuration updates.
+    pub compact_reasoning_effort_updates: bool,
+}
+
+impl ResponsesFeatures {
+    /// Requires explicit agreement between model and endpoint declarations.
+    pub const fn intersection(self, endpoint: Self) -> Self {
+        Self {
+            async_tools: self.async_tools && endpoint.async_tools,
+            steering: self.steering && endpoint.steering,
+            reasoning_effort_updates: self.reasoning_effort_updates
+                && endpoint.reasoning_effort_updates,
+            compact_reasoning_effort_updates: self.compact_reasoning_effort_updates
+                && endpoint.compact_reasoning_effort_updates,
+        }
+    }
+}
+
 /// Model capabilities.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
+    /// Explicit model authority; endpoint support is independently required.
+    #[serde(default)]
+    pub responses_features: ResponsesFeatures,
     /// Supported modalities for model input.
     pub input_modalities: ModalitySet,
     /// Supported modalities for model output.
@@ -275,9 +391,9 @@ pub struct Capabilities {
     pub agent_delegation: Option<AgentDelegation>,
     /// Whether the model supports structured outputs (JSON schema / mode).
     pub structured_output: bool,
-    /// Whether the provider loads tool schemas dynamically after a
-    /// `added_tool_names` announcement on a tool result. When false, every
-    /// registered tool's schema is sent with every request.
+    /// Reserved legacy flag; must be false. No codec currently implements
+    /// native deferred tool loading. Catalog and request validation reject true
+    /// rather than hide schemas after a local registry announcement.
     #[serde(default)]
     pub deferred_tool_loading: bool,
 }
@@ -684,6 +800,13 @@ pub struct ModelSpec {
     /// Prompt-cache compatibility settings for this model/endpoint.
     #[serde(default)]
     pub cache: CacheCompatibility,
+    /// Validated model defaults and explicit provider wire compatibility.
+    /// Header secrets are excluded from public model serialization.
+    #[serde(
+        default,
+        serialize_with = "crate::declarations::serialize_public_preset"
+    )]
+    pub preset: crate::declarations::ModelPreset,
 }
 
 /// Multimodal data structure.
@@ -1023,9 +1146,8 @@ pub struct ToolResult {
     pub is_error: bool,
     /// Names from the registry that became available as a consequence of this
     /// tool execution (for example an extension or MCP server that registers
-    /// additional tools on first use). Providers capable of deferred tool
-    /// loading treat these names as load points: once announced, those tool
-    /// schemas are excluded from the static request schema set.
+    /// additional tools on first use). This is local registry metadata only:
+    /// codecs still send every tool schema and do not claim native load points.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_tool_names: Option<Vec<String>>,
 }
@@ -1068,6 +1190,9 @@ pub enum ToolArgumentValidation {
 /// Call to a tool.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCall {
+    /// Provider async scheduling marker, never permission to execute a tool.
+    #[serde(default, rename = "async", skip_serializing_if = "is_false")]
+    pub async_execution: bool,
     /// Unique call identifier.
     pub id: ToolCallId,
     /// Name of the tool to invoke.
@@ -1294,12 +1419,67 @@ pub struct Request {
 /// Tool definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolDef {
+    /// Provider async scheduling marker, never permission to execute a tool.
+    #[serde(default, rename = "async", skip_serializing_if = "is_false")]
+    pub async_execution: bool,
     /// Name of the tool.
     pub name: String,
     /// Description of what the tool does.
     pub description: String,
     /// JSON schema describing expected parameters.
     pub parameters: serde_json::Value,
+    /// Optional provider-side constrained-sampling request for this tool.
+    ///
+    /// `None` means the caller made no request: codecs send the ordinary
+    /// function schema. A codec that cannot honor a declared requirement must
+    /// fail the request rather than silently relax it (see
+    /// [`crate::constrained_sampling`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constrained_sampling: Option<ConstrainedSampling>,
+}
+
+/// Provider-side constrained-sampling request attached to a [`ToolDef`].
+///
+/// This roughly maps to the `strict` concept implemented by several APIs as
+/// JSON-schema constrained sampling. Grammar variants let callers provide
+/// provider-specific encodings of the same intended language; a codec uses the
+/// variant its route actually defines and ignores the rest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConstrainedSampling {
+    /// Ask the provider to enforce the tool's parameter schema.
+    JsonSchema {
+        /// How to react when the schema is outside the provider's strict subset.
+        #[serde(default)]
+        strict: ConstrainedSamplingStrict,
+    },
+    /// Ask the provider to constrain generation with a grammar.
+    Grammar {
+        /// Provider-specific grammar encodings of the intended language.
+        variants: GrammarVariants,
+    },
+}
+
+/// Failure policy for JSON-schema constrained sampling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstrainedSamplingStrict {
+    /// Omit the constraint when the route or schema cannot express it.
+    #[default]
+    Prefer,
+    /// Fail the request rather than run without the constraint.
+    Require,
+}
+
+/// Provider-specific grammar encodings for grammar constrained sampling.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrammarVariants {
+    /// OpenAI `custom` tool Lark grammar definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_lark: Option<String>,
+    /// OpenAI `custom` tool regex grammar definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_regex: Option<String>,
 }
 
 /// Tool invocation constraint settings.
@@ -1463,6 +1643,11 @@ pub struct Response {
     /// Complete opaque Responses output, when the provider supplied an
     /// authoritative terminal output snapshot.
     pub responses_output: Option<crate::responses::ResponsesOutput>,
+    /// Deferred provider handle when [`StopReason::Deferred`] parked the turn.
+    ///
+    /// This is transport data, not assistant content, and is never serialized
+    /// into model context.
+    pub deferred: Option<crate::deferred::DeferredHandle>,
     /// Lossy mode diagnostics. Empty in Strict mode.
     pub diagnostics: Vec<crate::error::Diagnostic>,
 }
@@ -1483,6 +1668,14 @@ pub enum StopReason {
     Refusal,
     /// Claude-style turn pause.
     PauseTurn,
+    /// Provider parked the request and returned a deferred handle.
+    ///
+    /// The handle that must be polled is carried on
+    /// [`Response::deferred`]; the host owns durable suspension and poll
+    /// scheduling. This variant never means "retry the generation request".
+    Deferred,
+    /// Native Responses interruption with an independently streamed successor.
+    Steered,
     /// Other custom/unknown reason.
     Other(String),
 }
@@ -1498,6 +1691,8 @@ impl StopReason {
             StopReason::StopSequence => "stop_sequence",
             StopReason::Refusal => "refusal",
             StopReason::PauseTurn => "pause_turn",
+            StopReason::Deferred => "deferred",
+            StopReason::Steered => "steered",
             StopReason::Other(s) => s,
         }
     }
@@ -1525,6 +1720,8 @@ impl<'de> serde::Deserialize<'de> for StopReason {
             "stop_sequence" => Ok(StopReason::StopSequence),
             "refusal" | "content_filter" => Ok(StopReason::Refusal),
             "pause_turn" => Ok(StopReason::PauseTurn),
+            "deferred" => Ok(StopReason::Deferred),
+            "steered" => Ok(StopReason::Steered),
             _ => Ok(StopReason::Other(s)),
         }
     }
@@ -1614,6 +1811,20 @@ mod tests {
     }
 
     #[test]
+    fn explicit_prompt_cache_mode_is_opt_in_and_backwards_compatible() {
+        let mut serialized = serde_json::to_value(CacheCompatibility::default()).unwrap();
+        assert!(!serialized["supports_explicit_prompt_cache_mode"]
+            .as_bool()
+            .unwrap());
+        serialized
+            .as_object_mut()
+            .unwrap()
+            .remove("supports_explicit_prompt_cache_mode");
+        let parsed: CacheCompatibility = serde_json::from_value(serialized).unwrap();
+        assert!(!parsed.supports_explicit_prompt_cache_mode);
+    }
+
+    #[test]
     fn test_modality_set_algebra() {
         let empty = ModalitySet::none();
         assert!(!empty.contains(Modality::Image));
@@ -1631,12 +1842,14 @@ mod tests {
     #[test]
     fn test_model_spec_serde_round_trip() {
         let spec = ModelSpec {
+            preset: Default::default(),
             id: ModelId("test-model".to_string()),
             endpoint: EndpointId("test-endpoint".to_string()),
             api_name: "gpt-4o-mini".to_string(),
             display_name: None,
             protocol: Protocol::OpenAiChat,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -1778,6 +1991,7 @@ mod tests {
     #[test]
     fn test_tool_call_arguments_value() {
         let tc = ToolCall {
+            async_execution: false,
             id: ToolCallId("call_1".to_string()),
             name: "grep".to_string(),
             arguments_json: r#"{"pattern": "test"}"#.to_string(),
@@ -1787,6 +2001,7 @@ mod tests {
         assert_eq!(parsed["pattern"], "test");
 
         let tc_invalid = ToolCall {
+            async_execution: false,
             id: ToolCallId("call_2".to_string()),
             name: "grep".to_string(),
             arguments_json: r#""just a string""#.to_string(),
@@ -1801,6 +2016,8 @@ mod tests {
             system: Some("sys".to_string()),
             messages: vec![],
             tools: vec![ToolDef {
+                async_execution: false,
+                constrained_sampling: None,
                 name: "tool".to_string(),
                 description: "desc".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
@@ -1847,6 +2064,9 @@ mod tests {
 
         let de_other: StopReason = serde_json::from_str("\"something_else\"").unwrap();
         assert_eq!(de_other, StopReason::Other("something_else".to_string()));
+
+        let de_deferred: StopReason = serde_json::from_str("\"deferred\"").unwrap();
+        assert_eq!(de_deferred, StopReason::Deferred);
     }
 
     #[test]
@@ -1857,6 +2077,7 @@ mod tests {
         assert_eq!(StopReason::StopSequence.as_canonical(), "stop_sequence");
         assert_eq!(StopReason::Refusal.as_canonical(), "refusal");
         assert_eq!(StopReason::PauseTurn.as_canonical(), "pause_turn");
+        assert_eq!(StopReason::Deferred.as_canonical(), "deferred");
         assert_eq!(
             StopReason::Other("network_error".to_string()).as_canonical(),
             "network_error"
@@ -1868,6 +2089,7 @@ mod tests {
             StopReason::StopSequence,
             StopReason::Refusal,
             StopReason::PauseTurn,
+            StopReason::Deferred,
             StopReason::Other("network_error".to_string()),
         ] {
             let serialized = serde_json::to_string(&stop).unwrap();

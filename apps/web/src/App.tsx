@@ -1,7 +1,9 @@
 import {
   Archive,
   ArchiveRestore,
+  ArrowLeftRight,
   ChevronDown,
+  Columns2,
   Download,
   Folder,
   GitBranch,
@@ -76,6 +78,23 @@ import {
 } from "./components/ComposerCommands/goal";
 import { applyStoredTypePreferences } from "./theme";
 import {
+  DEFAULT_DOCK_LAYOUT,
+  type DockLayout,
+  type DockPaneId,
+  type DockSlot,
+  dockSlotFor,
+  dockSplitVisible,
+  moveDockPane,
+  parseDockLayout,
+  serializeDockLayout,
+  setDockSplit,
+} from "./workspace-layout";
+import {
+  GLOBAL_SHORTCUTS,
+  registerGlobalShortcuts,
+  type ShortcutAction,
+} from "./shortcuts";
+import {
   createTransport,
   type TransportConnectionState,
   transportModeFromSearch,
@@ -112,6 +131,7 @@ const activityPaneStorageKey = "octet.ui.activity-width";
 const inspectorPaneStorageKey = "octet.ui.inspector-width";
 const terminalPaneStorageKey = "octet.ui.terminal-width";
 const terminalPaneOpenStorageKey = "octet.ui.terminal.open";
+const dockLayoutStorageKey = "octet.ui.dock.layout";
 const notificationPreferenceKey = (hostId: string) =>
   `octet.notifications.enabled.${encodeURIComponent(hostId)}`;
 
@@ -130,6 +150,7 @@ const MemoizedInspector = memo(
     previous.selection === next.selection &&
     previous.closing === next.closing &&
     previous.modal === next.modal &&
+    previous.dockSlot === next.dockSlot &&
     previous.previewsAvailable === next.previewsAvailable &&
     previous.resourceContentUrl === next.resourceContentUrl &&
     previous.onRestoreFocus === next.onRestoreFocus &&
@@ -158,6 +179,25 @@ function storedBoolean(key: string): boolean {
     return window.localStorage.getItem(key) === "true";
   } catch {
     return false;
+  }
+}
+
+function storedDockLayout(): DockLayout {
+  try {
+    return parseDockLayout(window.localStorage.getItem(dockLayoutStorageKey));
+  } catch {
+    return DEFAULT_DOCK_LAYOUT;
+  }
+}
+
+function persistDockLayout(layout: DockLayout): void {
+  try {
+    window.localStorage.setItem(
+      dockLayoutStorageKey,
+      serializeDockLayout(layout),
+    );
+  } catch {
+    // A hardened browser may disable storage; the layout still works in memory.
   }
 }
 
@@ -284,6 +324,54 @@ function ErrorState({
   );
 }
 
+const shortcutDescriptions: Record<ShortcutAction, string> = {
+  "new-session": "Start a new task",
+  "toggle-sidebar": "Show or hide the sidebar",
+  "open-settings": "Open settings",
+  "open-transcript-search": "Focus task and transcript search",
+  "open-projects": "Open projects",
+  "focus-model-picker": "Focus the model picker",
+  "close-overlay": "Close the active panel or overlay",
+};
+
+function ShortcutReference() {
+  return (
+    <details
+      className="shortcut-reference"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.currentTarget.open = false;
+        event.currentTarget.querySelector("summary")?.focus();
+      }}
+    >
+      <summary
+        aria-label="Keyboard shortcuts"
+        title="Keyboard shortcuts"
+      >
+        <span aria-hidden="true">?</span>
+      </summary>
+      <div
+        className="shortcut-reference-panel"
+        role="dialog"
+        aria-label="Keyboard shortcuts"
+      >
+        <strong>Keyboard shortcuts</strong>
+        <dl>
+          {GLOBAL_SHORTCUTS.map((shortcut) => (
+            <div key={shortcut.action}>
+              <dt>
+                <kbd>{shortcut.label}</kbd>
+              </dt>
+              <dd>{shortcutDescriptions[shortcut.action]}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </details>
+  );
+}
+
 interface HeaderProps {
   sidebarOpen: boolean;
   sessionId: string;
@@ -303,6 +391,13 @@ interface HeaderProps {
   sessionExportAvailable: boolean;
   activityButtonRef: RefObject<HTMLButtonElement | null>;
   sidebarButtonRef: RefObject<HTMLButtonElement | null>;
+  terminalButtonRef?: RefObject<HTMLButtonElement | null>;
+  /** User-created dock split: the second pane column exists only when enabled. */
+  dockSplitAvailable?: boolean;
+  dockSplitOn?: boolean;
+  dockOrder?: readonly DockPaneId[];
+  onToggleDockSplit?: () => void;
+  onMoveDockPane?: (pane: DockPaneId, offset: -1 | 1) => void;
   onOpenSidebar: () => void;
   onToggleActivity: () => void;
   onToggleTerminal: () => void;
@@ -331,6 +426,12 @@ export function SessionHeader({
   sessionExportAvailable,
   activityButtonRef,
   sidebarButtonRef,
+  terminalButtonRef,
+  dockSplitAvailable = false,
+  dockSplitOn = false,
+  dockOrder = [],
+  onToggleDockSplit,
+  onMoveDockPane,
   onOpenSidebar,
   onToggleActivity,
   onToggleTerminal,
@@ -354,8 +455,8 @@ export function SessionHeader({
       setMenuOpen(false);
       window.requestAnimationFrame(() => menuTriggerRef.current?.focus());
     };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [menuOpen]);
 
   const finishRename = (commit: boolean, restoreFocus: boolean) => {
@@ -380,6 +481,8 @@ export function SessionHeader({
             ref={sidebarButtonRef}
             className="icon-button open-sidebar"
             onClick={onOpenSidebar}
+            aria-keyshortcuts="Control+B"
+            title="Open sidebar (Ctrl+B)"
           >
             <Menu aria-hidden="true" />
             <span className="sr-only">Open sidebar</span>
@@ -416,6 +519,7 @@ export function SessionHeader({
       </div>
 
       <div className="session-header-actions">
+        <ShortcutReference />
         <GoalBadge
           goal={goal}
           working={status === "working" || status === "needs_attention"}
@@ -428,10 +532,12 @@ export function SessionHeader({
         </span>
         {terminalAvailable ? (
           <button
+            ref={terminalButtonRef}
             className={`icon-button ${terminalOpen ? "is-active" : ""}`}
             onClick={onToggleTerminal}
             aria-label={terminalOpen ? "Close terminal" : "Open terminal"}
             aria-pressed={terminalOpen}
+            title={terminalOpen ? "Close terminal" : "Open terminal"}
           >
             <SquareTerminal aria-hidden="true" />
           </button>
@@ -442,9 +548,50 @@ export function SessionHeader({
             className={`icon-button ${activityOpen ? "is-active" : ""}`}
             onClick={onToggleActivity}
             aria-label={activityOpen ? "Close activity" : "Open activity"}
+            title={activityOpen ? "Close activity" : "Open activity"}
           >
             <PanelRight aria-hidden="true" />
           </button>
+        ) : null}
+        {dockSplitAvailable && onToggleDockSplit ? (
+          <button
+            className={`icon-button ${dockSplitOn ? "is-active" : ""}`}
+            onClick={onToggleDockSplit}
+            aria-pressed={dockSplitOn}
+            aria-label={
+              dockSplitOn ? "Merge dock panes" : "Split dock into two panes"
+            }
+            title={
+              dockSplitOn
+                ? "Merge dock panes into one column"
+                : "Show two dock panes side by side"
+            }
+          >
+            <Columns2 aria-hidden="true" />
+          </button>
+        ) : null}
+        {dockSplitAvailable && onMoveDockPane ? (
+          dockOrder.map((pane, index) => (
+            <button
+              key={`dock-move-${pane}`}
+              className="icon-button"
+              onClick={() =>
+                onMoveDockPane(pane, index === 0 ? 1 : -1)
+              }
+              aria-label={
+                index === 0
+                  ? "Move the first dock pane right"
+                  : "Move the second dock pane left"
+              }
+              title={
+                index === 0
+                  ? "Move the left dock pane right"
+                  : "Move the right dock pane left"
+              }
+            >
+              <ArrowLeftRight aria-hidden="true" />
+            </button>
+          ))
         ) : null}
         {sessionActionsAvailable ? (
           <div className="menu-anchor">
@@ -578,10 +725,12 @@ function BranchHistorySheet({
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      onClose();
     };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [onClose]);
 
   return (
@@ -691,12 +840,15 @@ function UtilityTopbar({
           ref={sidebarButtonRef}
           className="icon-button"
           onClick={onOpenSidebar}
+          aria-keyshortcuts="Control+B"
+          title="Open sidebar (Ctrl+B)"
         >
           <Menu aria-hidden="true" />
           <span className="sr-only">Open sidebar</span>
         </button>
       ) : null}
       <strong>{title}</strong>
+      <ShortcutReference />
     </header>
   );
 }
@@ -736,6 +888,9 @@ export default function App() {
   const [terminalPaneWidth, setTerminalPaneWidth] = useState(() =>
     storedPaneWidth(terminalPaneStorageKey, 460),
   );
+  const [dockLayout, setDockLayoutState] = useState<DockLayout>(
+    storedDockLayout,
+  );
   const [surface, setSurface] = useState<Surface>(() =>
     window.location.pathname === "/overview" ? "fleet" : "session",
   );
@@ -752,6 +907,7 @@ export default function App() {
   });
   const activityButtonRef = useRef<HTMLButtonElement>(null);
   const sidebarButtonRef = useRef<HTMLButtonElement>(null);
+  const terminalButtonRef = useRef<HTMLButtonElement>(null);
   const inspectorCloseTimerRef = useRef<number | null>(null);
   const paneResizeCleanupRef = useRef<(() => void) | null>(null);
   const restoreActivityFocus = useCallback(() => {
@@ -761,6 +917,11 @@ export default function App() {
   }, []);
   const restoreSidebarFocus = useCallback(() => {
     const restore = () => sidebarButtonRef.current?.focus();
+    restore();
+    window.requestAnimationFrame(restore);
+  }, []);
+  const restoreTerminalFocus = useCallback(() => {
+    const restore = () => terminalButtonRef.current?.focus();
     restore();
     window.requestAnimationFrame(restore);
   }, []);
@@ -907,10 +1068,14 @@ export default function App() {
     !delegatedSessionReadOnly && state.bootstrap?.capabilities.terminal,
   );
 
-  const closeTerminal = useCallback(() => {
-    setTerminalOpen(false);
-    persistBoolean(terminalPaneOpenStorageKey, false);
-  }, []);
+  const closeTerminal = useCallback(
+    (restoreFocus = false) => {
+      setTerminalOpen(false);
+      persistBoolean(terminalPaneOpenStorageKey, false);
+      if (restoreFocus) restoreTerminalFocus();
+    },
+    [restoreTerminalFocus],
+  );
 
   const visibleTerminalOpen =
     surface === "session" && terminalAvailable && terminalOpen;
@@ -925,11 +1090,140 @@ export default function App() {
   );
   const visibleActivityOpen =
     surface === "session" && activityOpen && activityAvailable;
+  // The dock hosts at most two panes. The default (unsplit) layout keeps the
+  // historical single-column behaviour; a user-created split shows the activity
+  // rail and the inspector side by side in the persisted order.
+  const dockPanesOpen = [visibleActivityOpen, Boolean(inspector)].filter(
+    Boolean,
+  ).length;
+  const dockSplitActive =
+    surface === "session" &&
+    wideLayout &&
+    !visibleTerminalOpen &&
+    dockSplitVisible(dockLayout, dockPanesOpen);
+  const updateDockLayout = useCallback((next: DockLayout) => {
+    setDockLayoutState(next);
+    persistDockLayout(next);
+  }, []);
+  const toggleDockSplit = useCallback(() => {
+    updateDockLayout(setDockSplit(dockLayout, !dockLayout.split));
+  }, [dockLayout, updateDockLayout]);
+  const reorderDockPane = useCallback(
+    (pane: DockPaneId, offset: -1 | 1) => {
+      updateDockLayout(moveDockPane(dockLayout, pane, offset));
+    },
+    [dockLayout, updateDockLayout],
+  );
   const modalWorkspaceOpen =
     surface === "session" &&
     (branchHistoryOpen ||
       (!wideLayout && (visibleActivityOpen || Boolean(inspector))) ||
       (!terminalSplitLayout && visibleTerminalOpen));
+  const closeBranchHistory = useCallback(() => {
+    setBranchHistoryOpen(false);
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLButtonElement>('[aria-label="Task actions"]')
+        ?.focus();
+    });
+  }, []);
+
+  const focusSidebarSearch = useCallback(() => {
+    if (branchHistoryOpen) setBranchHistoryOpen(false);
+    if (mobileLayout) {
+      if (inspector) closeInspector();
+      if (visibleActivityOpen) closeActivity();
+      if (visibleTerminalOpen) closeTerminal();
+    }
+    setSidebarOpen(true);
+    const focus = () => {
+      const search = document.querySelector<HTMLInputElement>(
+        ".sidebar-search input",
+      );
+      if (!search || search.closest("[inert]")) return;
+      search.focus();
+    };
+    focus();
+    window.requestAnimationFrame(() => {
+      focus();
+      window.requestAnimationFrame(focus);
+    });
+  }, [
+    branchHistoryOpen,
+    closeActivity,
+    closeInspector,
+    closeTerminal,
+    inspector,
+    mobileLayout,
+    visibleActivityOpen,
+    visibleTerminalOpen,
+  ]);
+
+  const focusModelPicker = useCallback(() => {
+    if (surface !== "session" || modalWorkspaceOpen) return;
+    if (mobileLayout && sidebarOpen) closeSidebar();
+    const focus = () => {
+      const picker = document.querySelector<HTMLButtonElement>(
+        ".model-picker-trigger",
+      );
+      if (!picker || picker.disabled || picker.closest("[inert]")) return;
+      picker.focus();
+    };
+    window.requestAnimationFrame(() => {
+      focus();
+      window.requestAnimationFrame(focus);
+    });
+  }, [
+    closeSidebar,
+    mobileLayout,
+    modalWorkspaceOpen,
+    sidebarOpen,
+    surface,
+  ]);
+
+  const closeOverlay = useCallback(() => {
+    if (branchHistoryOpen) {
+      closeBranchHistory();
+      return;
+    }
+    if (inspector) {
+      closeInspector();
+      return;
+    }
+    if (visibleActivityOpen) {
+      closeActivity();
+      return;
+    }
+    if (visibleTerminalOpen) {
+      closeTerminal(true);
+      return;
+    }
+    if (mobileLayout && sidebarOpen) closeSidebar();
+  }, [
+    branchHistoryOpen,
+    closeActivity,
+    closeBranchHistory,
+    closeInspector,
+    closeSidebar,
+    closeTerminal,
+    inspector,
+    mobileLayout,
+    sidebarOpen,
+    visibleActivityOpen,
+    visibleTerminalOpen,
+  ]);
+
+  const hasClosableOverlay =
+    branchHistoryOpen ||
+    Boolean(inspector) ||
+    visibleActivityOpen ||
+    visibleTerminalOpen ||
+    (mobileLayout && sidebarOpen);
+  const canInterrupt = surface === "session" && Boolean(
+    session?.activeRunId ||
+      session?.status === "working" ||
+      session?.status === "needs_attention",
+  );
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 760px)");
@@ -1104,12 +1398,45 @@ export default function App() {
     [activityPaneWidth, inspectorPaneWidth, paneBounds, terminalPaneWidth],
   );
 
+  const dockResizeTargets = useMemo(() => {
+    if (surface !== "session" || !wideLayout || visibleTerminalOpen) return [];
+    if (dockSplitActive) {
+      return [
+        { pane: dockLayout.order[0], slot: "a" as DockSlot },
+        { pane: dockLayout.order[1], slot: "b" as DockSlot },
+      ];
+    }
+    if (visibleActivityOpen && !inspector) {
+      return [{ pane: "activity" as DockPaneId, slot: "a" as DockSlot }];
+    }
+    if (inspector) {
+      return [{ pane: "inspector" as DockPaneId, slot: "a" as DockSlot }];
+    }
+    return [];
+  }, [
+    dockLayout.order,
+    dockSplitActive,
+    inspector,
+    surface,
+    visibleActivityOpen,
+    visibleTerminalOpen,
+    wideLayout,
+  ]);
+  const dockWidthFor = useCallback(
+    (pane: DockPaneId | undefined) =>
+      pane === "inspector" ? inspectorPaneWidth : activityPaneWidth,
+    [activityPaneWidth, inspectorPaneWidth],
+  );
   const appClass = useMemo(
     () =>
       [
         "app-shell",
         sidebarOpen ? "has-sidebar" : "",
-        visibleActivityOpen && !inspector ? "has-activity" : "",
+        dockSplitActive
+          ? "has-dock-split"
+          : visibleActivityOpen && !inspector
+            ? "has-activity"
+            : "",
         inspector ? "has-inspector" : "",
         visibleTerminalOpen ? "has-terminal" : "",
         `surface-${surface}`,
@@ -1117,6 +1444,7 @@ export default function App() {
         .filter(Boolean)
         .join(" "),
     [
+      dockSplitActive,
       inspector,
       sidebarOpen,
       surface,
@@ -1127,6 +1455,8 @@ export default function App() {
   const appStyle = {
     "--activity-width": `${activityPaneWidth}px`,
     "--inspector-width": `${inspectorPaneWidth}px`,
+    "--dock-a-width": `${dockWidthFor(dockLayout.order[0])}px`,
+    "--dock-b-width": `${dockWidthFor(dockLayout.order[1])}px`,
     "--terminal-width": `${terminalPaneWidth}px`,
   } as CSSProperties;
   const selectionError = state.selectionError;
@@ -1376,6 +1706,51 @@ export default function App() {
       setSidebarOpen(false);
     }
   }, []);
+  useEffect(() => {
+    return registerGlobalShortcuts({
+      onAction: (action) => {
+        switch (action) {
+          case "new-session":
+            startNewSession();
+            break;
+          case "toggle-sidebar":
+            if (sidebarOpen) closeSidebar();
+            else setSidebarOpen(true);
+            break;
+          case "open-settings":
+            openSettings();
+            break;
+          case "open-transcript-search":
+            focusSidebarSearch();
+            break;
+          case "open-projects":
+            openProjects();
+            break;
+          case "focus-model-picker":
+            focusModelPicker();
+            break;
+          case "close-overlay":
+            if (hasClosableOverlay) closeOverlay();
+            else if (canInterrupt) void store.interrupt();
+            break;
+        }
+      },
+      isEnabled: (action) =>
+        action !== "close-overlay" || hasClosableOverlay || canInterrupt,
+    });
+  }, [
+    canInterrupt,
+    closeOverlay,
+    closeSidebar,
+    focusModelPicker,
+    focusSidebarSearch,
+    hasClosableOverlay,
+    openProjects,
+    openSettings,
+    sidebarOpen,
+    startNewSession,
+  ]);
+
   const submitSession = useCallback(
     (
       prompt: string,
@@ -1496,7 +1871,7 @@ export default function App() {
       store.writeProjectFile(projectId, request),
     [],
   );
-const getCommandDiscovery = useCallback(
+  const getCommandDiscovery = useCallback(
     () => store.getCommandDiscovery(),
     [],
   );
@@ -1544,9 +1919,10 @@ const getCommandDiscovery = useCallback(
     return store.forkConversation(entryId);
   }, [session?.branches.head]);
   const openRuntimeStatus = useCallback(() => {
+    closeTerminal();
     setInspector(null);
     setActivityOpen(true);
-  }, []);
+  }, [closeTerminal]);
 
   const editUserTurn = useCallback(
     (entryId: string, text: string) =>
@@ -1701,6 +2077,7 @@ const getCommandDiscovery = useCallback(
             }
             activityButtonRef={activityButtonRef}
             sidebarButtonRef={sidebarButtonRef}
+            terminalButtonRef={terminalButtonRef}
             onOpenSidebar={() => setSidebarOpen(true)}
             onToggleActivity={() => {
               closeTerminal();
@@ -1708,6 +2085,13 @@ const getCommandDiscovery = useCallback(
               setActivityOpen((open) => !open);
             }}
             onToggleTerminal={toggleTerminal}
+            dockSplitAvailable={
+              activityAvailable && state.bootstrap.capabilities.previews
+            }
+            dockSplitOn={dockLayout.split}
+            dockOrder={dockLayout.order}
+            onToggleDockSplit={toggleDockSplit}
+            onMoveDockPane={reorderDockPane}
             onRename={(title) => void store.rename(title)}
             onPin={(pinned) => {
               void store.pin(pinned);
@@ -1778,13 +2162,13 @@ const getCommandDiscovery = useCallback(
                 ? "Command center"
                 : surface === "settings"
                   ? "Settings"
-                : surface === "projects"
-                  ? "Projects"
-                  : surface === "files"
-                    ? "Files"
-                    : surface === "usage"
-                      ? "Usage"
-                      : "Connected devices"
+                  : surface === "projects"
+                    ? "Projects"
+                    : surface === "files"
+                      ? "Files"
+                      : surface === "usage"
+                        ? "Usage"
+                        : "Connected devices"
             }
             sidebarOpen={sidebarOpen}
             onOpenSidebar={() => setSidebarOpen(true)}
@@ -1891,28 +2275,35 @@ const getCommandDiscovery = useCallback(
 
       {surface === "session" && session ? (
         <>
-          {wideLayout &&
-          !visibleTerminalOpen &&
-          ((visibleActivityOpen && !inspector) || inspector) ? (
+          {dockResizeTargets.map((target) => (
             <div
-              className="pane-resize-handle"
+              key={target.slot}
+              data-dock-slot={target.slot}
+              className={
+                target.slot === "b"
+                  ? "pane-resize-handle dock-split-resize-handle"
+                  : "pane-resize-handle"
+              }
               role="separator"
               aria-label={
-                inspector ? "Resize inspector" : "Resize task activity"
+                target.pane === "inspector"
+                  ? target.slot === "b"
+                    ? "Resize inspector (second pane)"
+                    : "Resize inspector"
+                  : target.slot === "b"
+                    ? "Resize task activity (second pane)"
+                    : "Resize task activity"
               }
               aria-orientation="vertical"
-              aria-valuemin={inspector ? 520 : 280}
-              aria-valuemax={paneBounds(inspector ? "inspector" : "activity").max}
+              aria-valuemin={target.pane === "inspector" ? 520 : 280}
+              aria-valuemax={paneBounds(target.pane).max}
               aria-valuenow={
-                inspector ? inspectorPaneWidth : activityPaneWidth
+                target.pane === "inspector" ? inspectorPaneWidth : activityPaneWidth
               }
               tabIndex={0}
               onPointerDown={(event) => {
                 event.preventDefault();
-                beginPaneResize(
-                  inspector ? "inspector" : "activity",
-                  event.clientX,
-                );
+                beginPaneResize(target.pane, event.clientX);
               }}
               onKeyDown={(event) => {
                 if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
@@ -1920,17 +2311,22 @@ const getCommandDiscovery = useCallback(
                 }
                 event.preventDefault();
                 resizePaneBy(
-                  inspector ? "inspector" : "activity",
+                  target.pane,
                   event.key === "ArrowLeft" ? 16 : -16,
                 );
               }}
             />
-          ) : null}
+          ))}
           <ActivityRail
             session={session}
+            dockSlot={
+              dockSplitActive
+                ? (dockSlotFor(dockLayout, "activity") ?? undefined)
+                : undefined
+            }
             open={
               visibleActivityOpen &&
-              !inspector &&
+              (dockSplitActive || !inspector) &&
               !(mobileLayout && sidebarOpen)
             }
             onClose={closeActivity}
@@ -1952,6 +2348,11 @@ const getCommandDiscovery = useCallback(
             selection={inspector}
             closing={inspectorClosing}
             modal={!wideLayout}
+            dockSlot={
+              dockSplitActive
+                ? (dockSlotFor(dockLayout, "inspector") ?? undefined)
+                : undefined
+            }
             previewsAvailable={state.bootstrap.capabilities.previews}
             resourceContentUrl={resourceContentUrl}
             onRestoreFocus={restoreActivityFocus}
@@ -1962,7 +2363,7 @@ const getCommandDiscovery = useCallback(
       {surface === "session" && session && branchHistoryOpen ? (
         <BranchHistorySheet
           session={session}
-          onClose={() => setBranchHistoryOpen(false)}
+          onClose={closeBranchHistory}
           onCheckout={(entryId) => store.checkoutBranch(entryId)}
         />
       ) : null}

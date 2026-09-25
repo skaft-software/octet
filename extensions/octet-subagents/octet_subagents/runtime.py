@@ -52,11 +52,61 @@ SPAWN_SCHEMA: Dict[str, Any] = {
             "enum": sorted(PROFILE_INSTRUCTIONS),
             "default": "explore",
         },
+        "provider": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "default": "inherit",
+            "description": (
+                "Per-worker orchestration selection. `inherit` (the default) uses the "
+                "parent session's provider. A provider must be passed together with an "
+                "explicit model; an unknown or malformed selection is rejected, never "
+                "silently coerced."
+            ),
+        },
         "model": {
             "type": "string",
-            "enum": ["inherit"],
+            "minLength": 1,
+            "maxLength": 256,
             "default": "inherit",
-            "description": "API 0.2 agent_sessions inherits the parent model.",
+            "description": (
+                "Per-worker model selection; `inherit` (the default) uses the parent "
+                "session's model. Explicit routes are resolved by the host's configured "
+                "catalog and used by the worker; discover exact identifiers with subagent_models. "
+                "Unknown routes are rejected without fallback."
+            ),
+        },
+        "reasoning": {
+            "type": "string",
+            "enum": ["inherit", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+            "default": "inherit",
+            "description": (
+                "Per-worker reasoning effort; `inherit` (the default) uses the parent's "
+                "already-normalized selection. An unknown level is rejected, and a level "
+                "above the model's ceiling is normalized by the host using configured "
+                "model metadata, never caller capability hints."
+            ),
+        },
+        "reasoning_capability": {
+            "type": ["object", "null"],
+            "default": None,
+            "additionalProperties": False,
+            "properties": {
+                "ceiling": {
+                    "type": "string",
+                    "enum": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+                },
+                "floor": {
+                    "type": "string",
+                    "enum": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+                },
+                "ultra": {"type": "boolean"},
+            },
+            "description": (
+                "Legacy caller hint, retained for request compatibility only. "
+                "The host uses its configured model metadata, never these values, "
+                "to normalize reasoning and reports the effective choice."
+            ),
         },
         "tools": {
             "type": "array",
@@ -185,8 +235,10 @@ class SdkAgentSessions:
         max_cost_microdollars: Optional[int],
         max_output_bytes: int,
         timeout_ms: Optional[int],
+        model_selection: Optional[Mapping[str, str]],
     ) -> Mapping[str, Any]:
         return self.extension.spawn_agent(
+            model_selection=model_selection,
             task_name=task_name,
             profile=profile,
             fingerprint=fingerprint,
@@ -281,6 +333,13 @@ def _compact_metadata(result: Mapping[str, Any]) -> Dict[str, Any]:
             "state",
             "profile",
             "model",
+            "model_policy",
+            "model_policy_applied",
+            "provider",
+            "provider_policy",
+            "reasoning",
+            "reasoning_policy",
+            "reasoning_note",
             "tools",
             "elapsed_ms",
             "turn_count",
@@ -293,6 +352,10 @@ def _compact_metadata(result: Mapping[str, Any]) -> Dict[str, Any]:
             "artifacts",
             "recovered_after_restart",
             "delivery",
+            "detached",
+            "reattachable",
+            "detached_at_ms",
+            "reattach_count",
         }
         metadata["worker"] = {key: value for key, value in worker.items() if key in keep}
     workers = result.get("workers")
@@ -332,6 +395,23 @@ def _result_text(operation: str, result: Mapping[str, Any]) -> str:
                 worker.get("model", "inherited"),
                 ",".join(worker.get("tools", [])) if isinstance(worker.get("tools"), list) else "unknown",
             ))
+            if worker.get("model_policy") not in {None, "inherit"}:
+                lines.append(
+                    "requested selection: provider %s / model %s / reasoning %s (%s)"
+                    % (
+                        worker.get("provider_policy", "inherit"),
+                        worker.get("model_policy"),
+                        worker.get("reasoning_policy", "inherit"),
+                        "applied by the host"
+                        if worker.get("model_policy_applied")
+                        else "not applied by the host; inherited in force",
+                    )
+                )
+            if worker.get("detached"):
+                lines.append(
+                    "detached: still owned by this parent session and reattachable (%s)"
+                    % ("session reference retained" if worker.get("reattachable") else "waiting for a session reference")
+                )
             lines.append("session: %s" % (worker.get("session") or "host session pending"))
         lines.append("octet owns the durable child, hard limits, cancellation, and duplicate-free parent-turn completion delivery.")
         lines.append("Use subagent_wait or subagent_status; do not poll aggressively.")
@@ -355,6 +435,20 @@ def _result_text(operation: str, result: Mapping[str, Any]) -> str:
                 lines.extend(["", "Last error (%s):" % selected.get("id"), str(selected["last_error"])])
             if selected.get("session"):
                 lines.append("session: %s" % selected["session"])
+        reattachment = result.get("reattachment")
+        if isinstance(reattachment, Mapping):
+            lines.append(
+                "Reattachment: %s — %s"
+                % (
+                    reattachment.get("state", "unknown"),
+                    reattachment.get("detail", "no detail"),
+                )
+            )
+        approval = result.get("approval")
+        if isinstance(approval, Mapping):
+            lines.append(
+                "Awaiting approval: %s" % approval.get("detail", "parked by the host")
+            )
         if operation == "wait" and result.get("wait_timed_out"):
             lines.append("The bounded wait expired; workers continue in the background unless their wall deadline settled them.")
         else:
@@ -398,6 +492,10 @@ def _error_result(operation: str, error: Exception) -> Dict[str, Any]:
     elif isinstance(error, RpcError):
         code = "agent_sessions_error"
         message = bounded_text(error.message, 4096)
+        for typed_code in ("unsupported_model", "unsupported_reasoning"):
+            if message.startswith(typed_code + ":"):
+                code = typed_code
+                break
     else:
         code = "internal_error"
         message = "the bounded subagent operation failed"
@@ -414,7 +512,7 @@ def _error_result(operation: str, error: Exception) -> Dict[str, Any]:
 
 def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
     extension = Extension(
-        api_version="0.2",
+        api_version="0.4",
         max_concurrent_requests=4,
         max_pending_requests=16,
         supported_features=(
@@ -422,6 +520,7 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
             "content_parts",
             "lifecycle_events",
             "agent_sessions",
+            "agent_model_selection_v1",
             "delegation_telemetry_v1",
         ),
     )
@@ -434,6 +533,15 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
             _require_agent_sessions(extension)
             owner = Owner.from_context(context)
             token = current_cancellation()
+            if operation == "models":
+                if not isinstance(arguments, Mapping) or set(arguments) - {"query", "limit"}:
+                    raise SubagentError("subagent_models accepts only query and limit")
+                try:
+                    result = extension.list_agent_models(**arguments)
+                except ValueError as error:
+                    raise SubagentError(str(error)) from error
+                return tool_result(text_content(json.dumps(result, ensure_ascii=True)),
+                                   metadata={"operation": "models"})
             if operation == "spawn":
                 result = orchestrator.spawn(sessions, owner, arguments, token)
             elif operation == "status":
@@ -463,9 +571,20 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
             return _error_result(operation, error)
 
     @extension.tool(
+        name="subagent_models",
+        description="Discover configured, credential-available worker models and supported reasoning. Bounded owner-scoped catalog; credentials are never returned. Use exact provider/model identifiers for subagent_spawn.",
+        parameters={"type": "object", "additionalProperties": False, "properties": {
+            "query": {"type": "string", "maxLength": 128},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}},
+    )
+    def subagent_models(arguments: Mapping[str, Any], context: Mapping[str, Any]):
+        return invoke("models", arguments, context)
+
+    @extension.tool(
         name="subagent_spawn",
         description=(
-            "Launch one named, depth-one octet worker with a bounded profile, inherited model, and an optional (host-enforced) tool whitelist, wall deadline, turn ceiling, output size, and cost ceiling. "
+            "Launch one named, depth-one octet worker with a bounded profile and an optional (host-enforced) tool whitelist, wall deadline, turn ceiling, output size, and cost ceiling. "
+            "Optionally select the worker's provider, model, and reasoning effort per spawn (`inherit` is the default and copies the parent session); an unknown selection is rejected rather than coerced. "
             "Ceilings default to inherited/unlimited, so a minimal spawn is just name and task. Defaults to background and is retry-safe through an idempotency key. "
             "At most 8 active children per parent (32 total); no writers beyond the granted tools, no graph, swarm, team chat, or recursive spawn."
         ),
@@ -518,8 +637,8 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
 
     @extension.command(
         name="subagents",
-        description="Browse workers and inspect read-only delegated transcripts",
-        usage="/subagents [list|inspect <name-or-id>|stop <name-or-id|all>]",
+        description="Browse workers, inspect read-only delegated transcripts, and report blocked pane plans pending atomic host writer ownership",
+        usage="/subagents [list|inspect <name-or-id>|wait <name-or-id>|reattach <name-or-id>|stop <name-or-id|all>|open-all tmux|open-all herdr]",
     )
     def subagents_command(arguments: list[str], context: Mapping[str, Any]):
         try:
@@ -541,6 +660,35 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
                 )
                 return {
                     "text": _result_text("status", result),
+                    "notifications": [],
+                }
+            if arguments and arguments[0] == "open-all":
+                _require_agent_sessions(extension)
+                return orchestrator.open_all_owned(
+                    sessions, Owner.from_context(context), arguments[1:], current_cancellation()
+                )
+            if (
+                len(arguments) in {1, 2}
+                and arguments[0] in {"wait", "reattach"}
+                and isinstance(context.get("resource_owner"), Mapping)
+            ):
+                # Explicit parent wait / reattachment. The wait refreshes through
+                # the authoritative host service, which is exactly what lets the
+                # owning session pick a detached worker back up; without an
+                # authenticated owner the cached fallback stays fail-closed.
+                _require_agent_sessions(extension)
+                authenticated_owner = Owner.from_context(context)
+                wait_arguments: Dict[str, Any] = {"timeout_seconds": 30}
+                if len(arguments) == 2:
+                    wait_arguments["target"] = arguments[1]
+                result = orchestrator.wait(
+                    sessions,
+                    authenticated_owner,
+                    wait_arguments,
+                    current_cancellation(),
+                )
+                return {
+                    "text": _result_text("wait", result),
                     "notifications": [],
                 }
             if (

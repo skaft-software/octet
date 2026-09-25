@@ -1,5 +1,10 @@
 //! Composer surface: an inset multiline input area framed by stable
 //! model-adaptive rules, with a calm semantic status footer below.
+//!
+//! This surface owns rendering, cache invalidation, geometry, and footer layout
+//! only. Attachment admission/composition live in `tui::composer`; popup
+//! selection/event loops and model/session/extension/subagent flows remain with
+//! the view and picker owners.
 
 use std::time::Instant;
 
@@ -13,7 +18,7 @@ use crate::tui::view::{fit_line, footer_width, EditorDisplayMap, FooterSegment};
 const CURSOR_CELL_RESERVATION: usize = 1;
 
 fn composer_cursor_marker(state: &super::view::ShellState) -> &'static str {
-    if state.panel.is_some() {
+    if state.panel.is_some() || state.transcript_search_active() {
         ""
     } else {
         CURSOR_MARKER
@@ -739,11 +744,30 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
         &state.reasoning
     }
     .trim();
+    let footer_model = if state.theme.is_compiled_default() {
+        crate::presentation::model::footer_model_name(
+            &full_model,
+            if active {
+                state.run_model.as_deref().unwrap_or(&state.model)
+            } else {
+                &state.model
+            },
+        )
+    } else {
+        &full_model
+    };
+    // Configured names may contain meaningful family/version words. Only the
+    // compiled footer suppresses the legacy first-word fitting fallback.
+    let footer_names = if state.theme.is_compiled_default() {
+        vec![footer_model.to_owned()]
+    } else {
+        model_names
+    };
     let mut segments = vec![StatusFooterSegment::new(
         FooterKind::Identity,
         identity_variants(
-            &full_model,
-            &model_names,
+            footer_model,
+            &footer_names,
             effort,
             super::view::semantic_separator(&state.theme),
         ),
@@ -792,15 +816,11 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
             | crate::presentation::PriceDisplay::Priced => None,
         }
     };
-    if state.usage_uncertain {
-        segments.push(StatusFooterSegment::new(
-            FooterKind::Cost,
-            vec![match state.displayed_session_cost_microdollars() {
-                Some(cost) => format!("subtotal {} + ?", format_microdollars(cost)),
-                None => "usage/cost unknown".to_owned(),
-            }],
-        ));
-    } else if let Some(cost) = cost {
+    // Plain dollars, nothing else: the coding agent provides the estimate and
+    // the provider API is the source of truth. `usage_uncertain` stays a durable
+    // state fact (surfaced by `/telemetry` and the non-TUI channels) and never
+    // rewrites the footer cost as a subtotal or a `+ ?` marker.
+    if let Some(cost) = cost {
         segments.push(StatusFooterSegment::new(FooterKind::Cost, vec![cost]));
     }
 
@@ -908,17 +928,6 @@ fn append_status_footer(
 ) {
     if status_footer_visible(state, width) {
         lines.push(render_status_footer(state, width, now));
-    }
-}
-
-/// Format a token count compactly: `1.2k`, `856`, `1.0m`.
-pub(crate) fn compact_token_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}m", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
     }
 }
 
@@ -1066,6 +1075,33 @@ mod tests {
     }
 
     #[test]
+    fn compiled_footer_never_falls_back_to_a_first_word_model_name() {
+        let name = "Claude Sonnet 4.6";
+        for custom in [false, true] {
+            let mut state = crate::tui::view::ShellState::default();
+            state.theme = if custom {
+                crate::tui::theme::test_theme_from_source("[layout]\nprompt_padding = true")
+            } else {
+                crate::tui::theme::test_theme()
+            };
+            state.model_display = name.to_owned();
+            state.model_compact_names = crate::presentation::model_display_name_variants(name);
+            let wide = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+                &state,
+                80,
+                Instant::now(),
+            ));
+            assert!(wide.contains(name), "{wide:?}");
+            let narrow = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+                &state,
+                16,
+                Instant::now(),
+            ));
+            assert_eq!(narrow.contains("Claude"), custom, "{narrow:?}");
+        }
+    }
+
+    #[test]
     fn footer_workspace_uses_home_components_not_string_prefixes() {
         use std::path::Path;
         let home = Some(Path::new("/home/user"));
@@ -1107,6 +1143,44 @@ mod tests {
             footer_workspace(Path::new("/long/parent/project"), None, 10, false),
             "...project"
         );
+    }
+
+    #[test]
+    fn footer_cost_is_plain_dollars_even_when_usage_is_uncertain() {
+        for usage_uncertain in [true, false] {
+            let mut state = crate::tui::view::ShellState::default();
+            state.theme = crate::tui::theme::test_theme();
+            state.usage_uncertain = usage_uncertain;
+            state.price_display = crate::presentation::PriceDisplay::Priced;
+            state.session_cost_microdollars = Some(123_456);
+            let footer = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+                &state,
+                120,
+                Instant::now(),
+            ));
+            assert!(footer.contains("$0.123"), "{footer:?}");
+            for forbidden in ["subtotal", "+", "?", "unknown", "usage/cost"] {
+                assert!(
+                    !footer.contains(forbidden),
+                    "{forbidden:?} leaked into {footer:?}"
+                );
+            }
+            // The durable uncertainty fact is untouched by rendering.
+            assert_eq!(state.usage_uncertain, usage_uncertain);
+        }
+
+        // A configured zero price is still a plain dollar figure.
+        let mut zero = crate::tui::view::ShellState::default();
+        zero.theme = crate::tui::theme::test_theme();
+        zero.usage_uncertain = true;
+        zero.price_display = crate::presentation::PriceDisplay::ExplicitZero;
+        let footer = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+            &zero,
+            120,
+            Instant::now(),
+        ));
+        assert!(footer.contains("$0"), "{footer:?}");
+        assert!(!footer.contains("subtotal"), "{footer:?}");
     }
 
     #[test]

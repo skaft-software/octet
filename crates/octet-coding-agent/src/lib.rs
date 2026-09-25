@@ -6,6 +6,9 @@ mod app;
 mod auth;
 mod batch;
 mod cli;
+/// Codex context-window policy, deliberate clamp notices, and the explicit
+/// opt-in override entry point (`resolve_codex_context_window`).
+pub mod codex_context;
 mod commands;
 mod compaction;
 mod config;
@@ -13,13 +16,14 @@ mod doctor;
 mod extension_bundle;
 mod extension_package;
 mod extensions;
+/// Best-effort Herdr pane lifecycle reporting (`pane.report_agent`).
+mod herdr;
 /// Versioned NDJSON process boundary for non-Rust consumers.
 pub mod host;
 mod hydrate;
 mod migrate;
 mod modes;
 mod output;
-mod pi;
 mod presentation;
 mod prompts;
 mod provider_setup;
@@ -35,6 +39,10 @@ pub mod provider {
         ProviderDefinitionError, ProviderDiagnostic, ProviderRouteDefinition,
     };
 }
+mod reexec;
+/// Poll-based live-reload supervisor: staleness sampling plus the idle-boundary
+/// apply policy shared by resources, extensions, and the host image.
+mod reload;
 mod resource_resolver;
 mod resources;
 mod session_catalog;
@@ -62,15 +70,35 @@ pub async fn run_cli() -> std::process::ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     let args = std::env::args_os().collect::<Vec<_>>();
-    let (cli, extension_flag_values, parsed_cwd) = if cli::uses_runtime_extension_flag_parser(&args)
-    {
-        let cwd = std::env::current_dir()?;
-        let (cli, extension_flag_values) = cli::parse_with_extension_flags(args, &cwd)?;
-        (cli, extension_flag_values, Some(cwd))
-    } else {
-        (cli::Cli::parse(), Default::default(), None)
-    };
+    // The internal re-exec probe is answered before clap, provider setup,
+    // extension activation, workspace access, networking, or the agent loop.
+    // This early return is the whole guarantee: no `App` can be constructed,
+    // no workspace is read, no extension process is started, and no request is
+    // made because nothing below this branch runs for a probe invocation.
+    if reexec::probe_requested(&args) {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(reexec::probe_payload().as_bytes());
+        let _ = std::io::stdout().flush();
+        return Ok(());
+    }
+    app::bootstrap::startup_phase("process.enter");
+    let (mut cli, extension_flag_values, parsed_cwd) =
+        if cli::uses_runtime_extension_flag_parser(&args) {
+            let cwd = std::env::current_dir()?;
+            let (cli, extension_flag_values) = cli::parse_with_extension_flags(args, &cwd)?;
+            (cli, extension_flag_values, Some(cwd))
+        } else {
+            (cli::Cli::parse(), Default::default(), None)
+        };
     let top_level_command = cli.command.clone();
+    let parity = cli.parity.clone();
+    parity.validate()?;
+    // `--no-session` must be an explicitly headless frontend; checked before
+    // stdin can promote a bare invocation to print mode.
+    parity.require_headless_frontend(&cli)?;
+    // Bridge the opt-in Codex context-window override to the resolution policy
+    // before any bootstrap or mode dispatch reads it.
+    parity.install_codex_context_env();
 
     // Subscription auth commands run and exit before any run configuration is
     // built — they need neither a workspace nor a session.
@@ -87,9 +115,6 @@ async fn run() -> anyhow::Result<()> {
         return run_auth_command(provider, AuthCommand::Logout).await;
     }
 
-    if let Some(cli::TopLevelCommand::Pi { command }) = top_level_command.clone() {
-        return pi::run(command, &std::env::current_dir()?);
-    }
     if let Some(cli::TopLevelCommand::Migrate { command }) = top_level_command.clone() {
         return migrate::run(command, &std::env::current_dir()?);
     }
@@ -104,8 +129,17 @@ async fn run() -> anyhow::Result<()> {
         no_open,
         port,
         web_root,
+        name,
     }) = top_level_command.clone()
     {
+        // The installed extension runtime owns its own launch protocol and this
+        // build cannot apply a startup session name. Fail closed instead of
+        // silently ignoring a requested name.
+        if name.is_some() {
+            anyhow::bail!(
+                "octet serve --name requires an octet build with the embedded Serve runtime ('serve' feature); this build launches the installed octet-serve extension package, which has no startup session-name option to set"
+            );
+        }
         return extension_package::run_serve(no_open, port, web_root);
     }
 
@@ -124,16 +158,43 @@ async fn run() -> anyhow::Result<()> {
         tui::terminal::install_panic_hook();
         tui::terminal::install_signal_restore()?;
     }
+    let invocation = if top_level_command.is_none() && parity.list_models.is_none() {
+        cli::parity::prepare_input(&mut cli, &cwd)?
+    } else {
+        Default::default()
+    };
     let mut config = cli::build_config(cli, &cwd)?;
+    app::bootstrap::startup_phase("cli.configured");
     config.extension_flag_values = extension_flag_values;
+    if let Some(search) = parity.list_models.as_deref() {
+        return cli::parity::list_models(&config, search);
+    }
     if matches!(&top_level_command, Some(cli::TopLevelCommand::Doctor)) {
         return doctor::run(&config);
     }
     if let Some(cli::TopLevelCommand::Sessions { command }) = top_level_command.clone() {
         return session_commands::run(command, &config);
     }
+    if let Some(cli::TopLevelCommand::Herdr { command }) = top_level_command.clone() {
+        // `octet herdr restore` is also the Herdr plugin's startup hook, so it
+        // must stay a self-contained command: no provider discovery, no model
+        // resolution, and no terminal ownership.
+        return herdr::run_command(command);
+    }
+    if let Some(cli::TopLevelCommand::Catalog { command }) = top_level_command.clone() {
+        return cli::catalog_publish::run(command, &config);
+    }
+    if let Some(cli::TopLevelCommand::Eval { command }) = top_level_command.clone() {
+        // The harness owns isolated runs, using a scripted fixture by default
+        // or the operator's explicit private loopback model profile.
+        return cli::eval::run(command, &config.invocation_cwd);
+    }
     if let Some(cli::TopLevelCommand::Setup { options }) = top_level_command.clone() {
-        return provider_setup::run_cli(&options, &config);
+        // Provider setup owns a synchronous HTTP client and its runtime. Keep that
+        // boundary off the Tokio executor so reqwest::blocking cannot construct or
+        // drop a runtime from within an async context.
+        return tokio::task::spawn_blocking(move || provider_setup::run_cli(&options, &config))
+            .await?;
     }
     if let Some(cli::TopLevelCommand::Batch { command }) = top_level_command.clone() {
         return batch::run(command, &config).await;
@@ -143,27 +204,62 @@ async fn run() -> anyhow::Result<()> {
         no_open,
         port,
         web_root,
+        name,
     }) = top_level_command
     {
-        return extensions::serve::run(config, port, no_open, web_root).await;
+        return extensions::serve::run_with_session_name(config, port, no_open, web_root, name)
+            .await;
+    }
+    let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
+    let interactive = matches!(config.mode, config::Mode::Interactive) && capabilities.interactive;
+    // Interactive inventory and session selection run only after the shell owns input.
+    if !interactive {
+        parity.resolve_models(&mut config)?;
+        parity.select_session(&mut config)?;
+        app::bootstrap::startup_phase("selection.resolved");
     }
     let mode = config.mode.clone();
     let initial_prompt = config.initial_prompt.clone();
-    let capabilities = tui::terminal::TerminalCapabilities::detect(config.color, config.plain);
-    let boot = app::bootstrap::bootstrap(config)?;
-    let result = match mode {
-        config::Mode::Interactive if capabilities.interactive => {
-            modes::interactive::run_interactive(boot).await
+    let result = async {
+        match mode {
+            config::Mode::Interactive if capabilities.interactive => {
+                modes::interactive::run_interactive_with_options(config, parity.clone()).await
+            }
+            config::Mode::Interactive => {
+                modes::plain::run_plain(app::bootstrap::bootstrap(config)?, initial_prompt).await
+            }
+            config::Mode::Print { prompt } => {
+                modes::print::run_invocation(
+                    app::bootstrap::bootstrap(config)?,
+                    prompt,
+                    invocation.remaining,
+                    invocation.media,
+                    invocation.json,
+                )
+                .await
+            }
+            config::Mode::Rpc => modes::rpc::run_rpc(app::bootstrap::bootstrap(config)?).await,
         }
-        config::Mode::Interactive => modes::plain::run_plain(boot, initial_prompt).await,
-        config::Mode::Print { prompt } => modes::print::run_print(boot, prompt).await,
-        config::Mode::Rpc => modes::rpc::run_rpc(boot).await,
-    };
+    }
+    .await;
+    // Bootstrap and early print/RPC validation can fail after --no-session has
+    // created its private store, before a mode's normal accounting finalizer.
+    // An already finalized run makes this a no-op.
+    let accounting = modes::print::finish_ephemeral_accounting();
     // Mode owners have now aborted active work and shut down their children.
     // Preserve the conventional signal status even when cleanup itself found
     // an error, rather than surfacing an unrelated anyhow exit code.
     tui::terminal::exit_if_signaled();
-    result
+    match (result, accounting) {
+        (Ok(()), accounting) => accounting,
+        (Err(error), Err(accounting_error)) => {
+            output::stderr_line(format!(
+                "warning: ephemeral accounting failed: {accounting_error:#}"
+            ));
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+    }
 }
 
 enum AuthCommand {
@@ -179,6 +275,13 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
             match command {
                 AuthCommand::Login { headless } => auth::codex::login(&store, headless).await,
                 AuthCommand::Logout => auth::codex::logout(&store).await,
+            }
+        }
+        "copilot" | "github-copilot" => {
+            let store = auth::copilot::CredentialStore::new(auth::copilot::default_path()?);
+            match command {
+                AuthCommand::Login { headless } => auth::copilot::login(&store, headless).await,
+                AuthCommand::Logout => auth::copilot::logout(&store).await,
             }
         }
         "custom" | "openai-custom" => {
@@ -225,6 +328,6 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
                 }
             }
         }
-        other => anyhow::bail!("unknown provider {other:?}; supported: codex, custom"),
+        other => anyhow::bail!("unknown provider {other:?}; supported: codex, copilot, custom"),
     }
 }

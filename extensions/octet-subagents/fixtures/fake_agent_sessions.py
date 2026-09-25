@@ -85,6 +85,9 @@ class FakeAgent:
     export_reference: Optional[str] = None
     delivery_enqueued: bool = False
     delivery_state: str = "host_managed"
+    # Bounded host-side reason carried by a detached/parked record (reattach
+    # refusal, approval park). The real host omits it when there is no reason.
+    diagnostic: Optional[str] = None
 
     def record(self) -> Dict[str, Any]:
         return {
@@ -119,6 +122,7 @@ class FakeAgent:
             "cost_microdollars": self.usage.get("cost_microdollars"),
             "provenance": {"kind": "extension_agent_session"},
             "delivery_state": self.delivery_state,
+            "diagnostic": self.diagnostic,
         }
 
 
@@ -444,6 +448,7 @@ class FakeAgentSessions:
         max_cost_microdollars: Optional[int],
         max_output_bytes: int,
         timeout_ms: Optional[int],
+        model_selection=None,
     ) -> Mapping[str, Any]:
         self._maybe_cancel("spawn")
         policy = {
@@ -456,6 +461,15 @@ class FakeAgentSessions:
             "max_output_bytes": max_output_bytes,
             "timeout_ms": timeout_ms,
         }
+        if model_selection:
+            if model_selection.get("model") == "other":
+                raise FakeAgentSessionsError("unsupported_model: unknown configured route")
+            policy["model_selection"] = dict(model_selection)
+            policy["resolved_model"] = {
+                "provider": model_selection.get("provider", "anthropic"),
+                "model": model_selection.get("model", "claude-sonnet-test"),
+                "reasoning": {"type": "effort", "value": "low"},
+            }
         key = (self.principal, self.owner, idempotency_key)
         with self.host._lock:
             self.host.calls.append((self.principal, self.owner, "spawn"))

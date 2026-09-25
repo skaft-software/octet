@@ -1,7 +1,7 @@
 name = "octet-browse"
-version = "0.7.6"
-api_version = "0.2"
-requires_octet = "=0.7.6"
+version = "0.8.0"
+api_version = "0.4"
+requires_octet = "=0.8.0"
 description = "Always-headful semantic browser automation with an isolated persistent profile and manual-auth boundary"
 
 [entrypoint]
@@ -20,6 +20,10 @@ environment = []
 [contributes]
 tools = [
   "browser_status",
+  "browser_backend_select",
+  "browser_backend_revoke",
+  "browser_backend_stop",
+  "browser_backend_status",
   "browser_launch",
   "browser_tabs",
   "browser_open_url",

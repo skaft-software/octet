@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Dict, Mapping, Optional
 
+from .adapters import AdapterRegistry, BrowserConnector, TargetSelection
 from .artifacts import ArtifactStore, ScreenshotRecord
 from .paths import BrowsePaths, PLAYWRIGHT_VERSION
 from .presentation import BrowsePresentation
@@ -34,14 +35,18 @@ class BrowseController:
         profile: Optional[ProfileManager] = None,
         worker: Optional[PlaywrightWorker] = None,
         artifacts: Optional[ArtifactStore] = None,
+        adapters: Optional[AdapterRegistry] = None,
     ) -> None:
         self.paths = paths or BrowsePaths.for_home()
         self.presentation = presentation
         self.setup = setup or SetupManager(self.paths, on_state=self._on_setup_state)
         self.profile = profile or ProfileManager(self.paths)
         self.artifacts = artifacts or ArtifactStore(self.paths)
+        self.adapters = adapters if adapters is not None else AdapterRegistry()
         self.worker = worker or PlaywrightWorker(
-            lambda: BrowserEngine(self.paths, self.setup, self.profile)
+            lambda: BrowserEngine(
+                self.paths, self.setup, self.profile, adapters=self.adapters
+            )
         )
         self._shutdown_lock = threading.Lock()
         self._closed = False
@@ -207,6 +212,84 @@ class BrowseController:
         browser["setup_state"] = setup_status.state
         browser["install_log"] = setup_status.log_path
         return browser
+
+    def register_backend(self, connector: BrowserConnector) -> None:
+        """Register one connector explicitly supplied by the host integration."""
+        self.adapters.register(connector)
+
+    def unregister_backend(self, connector_id: str) -> None:
+        self.adapters.unregister(connector_id)
+
+    def browser_backend_select(
+        self,
+        owner: ResourceOwner,
+        selection: Mapping[str, Any],
+        *,
+        cancellation: Any = None,
+    ) -> Dict[str, Any]:
+        selected = TargetSelection.from_mapping(selection)
+        return self._worker_call(
+            "backend_select",
+            owner,
+            selected,
+            cancellation=cancellation,
+            activity_id="browse:backend-select",
+            kind="browser",
+            running="Selecting an explicitly injected browser target",
+            succeeded="Explicit browser target selected",
+        )
+
+    def browser_backend_revoke(
+        self,
+        owner: ResourceOwner,
+        selection: Mapping[str, Any],
+        *,
+        cancellation: Any = None,
+    ) -> Dict[str, Any]:
+        selected = TargetSelection.from_mapping(selection)
+        return self._worker_call(
+            "backend_revoke",
+            owner,
+            selected,
+            cancellation=cancellation,
+            activity_id="browse:backend-revoke",
+            kind="browser",
+            running="Revoking the explicitly selected browser target",
+            succeeded="Explicit browser target revoked",
+        )
+
+    def browser_backend_stop(
+        self,
+        owner: ResourceOwner,
+        selection: Mapping[str, Any],
+        *,
+        cancellation: Any = None,
+    ) -> Dict[str, Any]:
+        selected = TargetSelection.from_mapping(selection)
+        return self._worker_call(
+            "backend_stop",
+            owner,
+            selected,
+            timeout=CONFIRMATION_OPERATION_TIMEOUT,
+            cancellation=cancellation,
+            activity_id="browse:backend-stop",
+            kind="browser",
+            running="Stopping the explicitly selected browser target",
+            succeeded="Explicit browser target stopped",
+        )
+
+    def browser_backend_status(
+        self, owner: Optional[ResourceOwner], *, cancellation: Any = None
+    ) -> Dict[str, Any]:
+        return self._worker_call(
+            "backend_status",
+            owner,
+            cancellation=cancellation,
+            activity_id="browse:backend-status",
+            kind="browser",
+            running="Reading injected browser backend state",
+            succeeded="Injected browser backend state ready",
+        )
 
     def browser_launch(
         self, owner: ResourceOwner, *, cancellation: Any = None
@@ -570,9 +653,11 @@ class BrowseController:
         lines = [
             f"Browse setup: {setup.get('state', 'degraded')} · Playwright {PLAYWRIGHT_VERSION}",
             f"Browser: {'open' if browser.get('open') else 'closed'}",
+            f"Browser mode: {'external connector' if browser.get('external_open') else 'isolated Chromium' if browser.get('isolated_open') else 'closed'}",
             f"Browser health: {'degraded' if browser.get('degraded') else 'healthy'}",
             f"Tabs: {browser.get('tab_count', 0)}",
             f"Selected origin: {browser.get('selected_origin', 'unavailable')}",
+            f"Injected connectors: {len(browser.get('backends', [])) if isinstance(browser.get('backends'), list) else 0}",
             f"Profile health: {profile_health}",
             f"Install log: {setup.get('log_path', self.paths.display(self.paths.install_log))}",
             "Install log contents, profile paths, query strings, page text, and typed values are withheld.",

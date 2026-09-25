@@ -19,6 +19,41 @@ pub(crate) fn cache_session_id(req: &Request) -> Option<&str> {
     cache_session_id_for(req.cache_retention, req.session_id.as_deref())
 }
 
+/// OpenCode's routing header is not a prompt-cache control: even a request
+/// without explicit cache retention must stay on the same session route.
+pub(crate) fn is_opencode_session_route(model: &crate::catalog::Model) -> bool {
+    model.spec.cache.send_session_affinity_headers
+        && matches!(
+            model.endpoint.id.0.as_str(),
+            "opencode" | "opencode-go" | "opencode-anthropic" | "opencode-google"
+        )
+}
+
+pub(crate) fn add_opencode_session_header(
+    model: &crate::catalog::Model,
+    req: &Request,
+    headers: &mut http::HeaderMap,
+) -> Result<(), AiError> {
+    const NAME: &str = "x-opencode-session";
+    if !is_opencode_session_route(model)
+        || model.endpoint.default_headers.contains_key(NAME)
+        || model
+            .spec
+            .preset
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case(NAME))
+    {
+        return Ok(());
+    }
+    if let Some(session_id) = req.session_id.as_deref().filter(|id| !id.is_empty()) {
+        let value = http::HeaderValue::from_str(session_id)
+            .map_err(|_| ConfigError::InvalidHeader(NAME.into()))?;
+        headers.insert(http::HeaderName::from_static(NAME), value);
+    }
+    Ok(())
+}
+
 pub(crate) fn cache_session_id_for(
     retention: CacheRetention,
     session_id: Option<&str>,
@@ -59,10 +94,71 @@ pub(crate) fn cache_control(
 pub(crate) mod anthropic;
 pub(crate) mod bedrock;
 pub(crate) mod google;
+pub(crate) mod grammar;
+pub(crate) mod mistral_conversations;
 pub(crate) mod openai_chat;
 pub(crate) mod openai_responses;
+pub(crate) mod pi_messages;
+pub(crate) mod preset;
 
 pub(crate) mod sse;
+
+/// Pi's per-API `supportsStrictMode` default with a model's explicit
+/// declaration applied.
+///
+/// Responses defaults off except Azure/Codex; Google and Mistral default on;
+/// Anthropic and Bedrock default off. Public OpenAI Chat accepts strict tools,
+/// but unknown compatible Chat endpoints do not inherit that guarantee. A model
+/// preset may override the route default in either direction.
+pub(crate) fn strict_mode_for(model: &crate::catalog::Model) -> bool {
+    use crate::types::Protocol;
+    if let Some(declared) = model.spec.preset.supports_strict_mode {
+        return declared;
+    }
+    // Only the Chat-compatible fallback changes here; the other API defaults
+    // remain unchanged.
+    if model.spec.protocol == Protocol::OpenAiResponses {
+        return matches!(
+            model.endpoint.runtime.responses_profile,
+            crate::types::ResponsesRuntimeProfile::Azure
+                | crate::types::ResponsesRuntimeProfile::Codex
+        );
+    }
+    if model.spec.protocol == Protocol::OpenAiChat {
+        let url = &model.endpoint.base_url;
+        return url.scheme() == "https"
+            && url.host_str() == Some("api.openai.com")
+            && url.path() == "/v1/";
+    }
+    if model.spec.protocol == Protocol::AnthropicMessages {
+        return anthropic_strict_tools_for(model);
+    }
+    if model.spec.protocol == Protocol::BedrockConverse {
+        return false;
+    }
+    // Google, Mistral and future routes retain their existing defaults.
+    true
+}
+
+/// Pi's `AnthropicMessagesCompat.supportsStrictTools`: default `false`.
+pub(crate) fn anthropic_strict_tools_for(model: &crate::catalog::Model) -> bool {
+    model
+        .spec
+        .preset
+        .anthropic_compat
+        .as_ref()
+        .and_then(|compat| compat.supports_strict_tools)
+        .unwrap_or(false)
+}
+
+/// Pi's `supportsOpenAIGrammarTools`: off unless the model declares it.
+pub(crate) fn grammar_tools_for(model: &crate::catalog::Model) -> bool {
+    model
+        .spec
+        .preset
+        .supports_openai_grammar_tools
+        .unwrap_or(false)
+}
 
 /// Resolves a protocol path while preserving the narrowly allowed version query
 /// attached to an endpoint base URL. Azure's versioned API uses this shape;
@@ -277,6 +373,7 @@ impl serde::Serialize for Base64Bytes {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum WireImageUrl {
     Url(String),
     Inline {
@@ -357,12 +454,14 @@ pub(crate) mod harness {
             .with(Modality::Audio);
         let output = ModalitySet::none().with(Modality::Audio);
         let spec = ModelSpec {
+            preset: Default::default(),
             id: ModelId("fixture-model".to_string()),
             endpoint: EndpointId("fixture-ep".to_string()),
             api_name: "fixture-api-name".to_string(),
             display_name: None,
             protocol,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: input,
                 output_modalities: output,
                 tools: true,
@@ -421,6 +520,7 @@ pub(crate) mod harness {
             model.spec.protocol,
             model.spec.pricing.clone(),
         );
+        builder.strict_tool_sampling = crate::protocol::strict_mode_for(model);
         if let Some(tool_definitions) = tool_definitions {
             if let Err(error) = builder.set_tool_definitions(tool_definitions) {
                 return (Vec::new(), Some(error));

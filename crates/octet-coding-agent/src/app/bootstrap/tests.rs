@@ -1,4 +1,8 @@
 use super::*;
+use crate::codex_context::{
+    CodexContextClampReporter, CODEX_5_6_CONTEXT_WINDOW, CODEX_CONTEXT_WINDOW_CAP,
+    CODEX_LEGACY_CONTEXT_WINDOW,
+};
 
 #[test]
 fn discovered_reasoning_supports_chat_and_responses_models() {
@@ -14,6 +18,13 @@ fn discovered_reasoning_supports_chat_and_responses_models() {
         "gpt-5.4"
     ));
     assert!(discovered_model_supports_reasoning(
+        openai,
+        Protocol::OpenAiResponses,
+        "gpt-6-astra"
+    ));
+    // Discovery receives API IDs, not product catalog IDs. Do not manufacture
+    // a public capability contract for a namespaced or future alias.
+    assert!(!discovered_model_supports_reasoning(
         openai,
         Protocol::OpenAiResponses,
         "openai/gpt-6-astra"
@@ -222,7 +233,7 @@ fn config(directory: &std::path::Path, model: Option<&str>) -> Config {
         invocation_cwd: directory.to_path_buf(),
         model: model.map(|model| ModelId(model.to_owned())),
         model_explicit: model.is_some(),
-        reasoning: ReasoningConfig::Off,
+        reasoning: None,
         reasoning_explicit: false,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
@@ -271,7 +282,11 @@ fn configured_test_extensions(_skills: Arc<dyn SkillRegistry>, config: &Config) 
     let model_id = config.model.as_ref().expect("test model");
     let model = boot.catalog.resolve(model_id).unwrap();
     let session = Session::create(config.workspace.join("tool-policy-test.jsonl")).unwrap();
-    configured_extensions(config, &session, &model, &config.reasoning, &boot.sessions)
+    let reasoning = config
+        .reasoning
+        .clone()
+        .unwrap_or_else(|| default_reasoning_for_model(&model));
+    configured_extensions(config, &session, &model, &reasoning, &boot.sessions)
         .unwrap()
         .0
 }
@@ -881,34 +896,65 @@ fn third_party_gpt_6_astra_discovery_uses_its_pinned_provider_metadata() {
     });
     let models = openrouter_models_from_response(&crate::providers::OPENROUTER, &response).unwrap();
     assert_eq!(models.len(), 1);
-    assert!(models[0]
+    // A third-party Astra route does not inherit direct OpenAI or snapshot
+    // capabilities, even when its provider-scoped display metadata is known.
+    let snapshot =
+        octet_ai::model_metadata::model_capability_metadata("openrouter", "openai/gpt-6-astra")
+            .unwrap();
+    assert_eq!(
+        models[0].display_name.as_deref(),
+        Some(snapshot["name"].as_str().unwrap())
+    );
+    assert!(!models[0]
         .capabilities
         .input_modalities
         .contains(octet_ai::Modality::Image));
-    assert_eq!(
-        models[0]
-            .capabilities
-            .reasoning
-            .as_ref()
-            .unwrap()
-            .openai_chat_mode,
-        OpenAiChatReasoningMode::OpenRouter
-    );
+    assert!(models[0].capabilities.reasoning.is_none());
+    assert!(!models[0].capabilities.tools);
+    assert!(!models[0].capabilities.structured_output);
+    assert!(!models[0].capabilities.parallel_tool_calls);
+    assert_eq!(models[0].protocol, Protocol::OpenAiChat);
     assert_eq!(models[0].limits.context_window, 128_000);
+    assert_eq!(models[0].limits.max_output_tokens, 32_000);
     assert!(!models[0].capabilities.responses_lite);
     assert!(models[0].capabilities.agent_delegation.is_none());
 
     let mut advertised = response;
     advertised["data"][0]["architecture"] =
         serde_json::json!({"input_modalities": ["text", "image"]});
-    advertised["data"][0]["supported_parameters"] = serde_json::json!(["reasoning.effort"]);
+    advertised["data"][0]["supported_parameters"] =
+        serde_json::json!(["reasoning.effort", "tools", "response_format"]);
+    advertised["data"][0]["reasoning"] =
+        serde_json::json!({"supported":true,"values":["low","high"],"default":"high"});
     let models =
         openrouter_models_from_response(&crate::providers::OPENROUTER, &advertised).unwrap();
+    assert_eq!(models.len(), 1);
     assert!(models[0]
         .capabilities
         .input_modalities
         .contains(octet_ai::Modality::Image));
-    assert!(models[0].capabilities.reasoning.is_some());
+    assert!(models[0].capabilities.tools);
+    assert!(models[0].capabilities.structured_output);
+    let reasoning = models[0].capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        reasoning.openai_chat_mode,
+        OpenAiChatReasoningMode::OpenRouter
+    );
+    assert_eq!(reasoning.options.as_ref().unwrap().values, ["low", "high"]);
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().default.as_deref(),
+        Some("high")
+    );
+    assert!(reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)));
+    assert!(reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)));
+    assert!(!reasoning.supports(&ReasoningConfig::Off));
+    assert!(!reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)));
+    assert!(!reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra)));
+    assert_eq!(models[0].protocol, Protocol::OpenAiChat);
+    assert_eq!(models[0].limits.context_window, 128_000);
+    assert_eq!(models[0].limits.max_output_tokens, 32_000);
+    assert!(!models[0].capabilities.responses_lite);
+    assert!(models[0].capabilities.agent_delegation.is_none());
 }
 
 #[test]
@@ -1179,6 +1225,67 @@ fn codex_astra_fallback_is_conservative_and_retains_advertised_max() {
 }
 
 #[test]
+fn codex_luna_fallback_uses_exact_effort_choices_for_auxiliary_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let mut catalog = base_model_catalog(true).unwrap();
+    register_openai_codex(
+        &mut catalog,
+        crate::auth::codex::CredentialStore::new(path),
+        true,
+    )
+    .unwrap();
+
+    let luna = catalog
+        .resolve(&ModelId("gpt-5.6-luna".into()))
+        .expect("offline Codex Luna fallback");
+    assert_eq!(luna.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
+    let capability = luna
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .expect("Luna reasoning capability");
+    let options = capability.options.as_ref().expect("exact Luna choices");
+    assert_eq!(
+        options.values,
+        ["none", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(options.default, None);
+    assert_eq!(capability.min_effort, octet_ai::ReasoningEffort::Low);
+    assert_eq!(capability.max_effort, octet_ai::ReasoningEffort::Max);
+    assert_eq!(
+        default_reasoning_for_model(&luna),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)
+    );
+    assert_eq!(
+        octet_ai::select_auxiliary_reasoning(&luna).unwrap(),
+        ReasoningConfig::Off
+    );
+    assert_eq!(
+        capability.wire_value(&ReasoningConfig::Off),
+        Some("none".to_owned())
+    );
+    assert_eq!(
+        capability.wire_value(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)),
+        Some("max".to_owned())
+    );
+
+    // The observed correction is route-specific; generic sparse fallback keeps
+    // its prior conservative range and does not gain an inferred Off choice.
+    let sol = codex_fallback_reasoning_options("gpt-5.6-sol");
+    assert_eq!(
+        sol.values,
+        ["minimal", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        codex_min_effort("gpt-5.6-sol"),
+        octet_ai::ReasoningEffort::Minimal
+    );
+}
+
+#[test]
 fn offline_codex_registration_uses_cached_inventory_without_dynamic_capabilities() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cached-codex.json");
@@ -1318,6 +1425,9 @@ fn codex_fallback_never_infers_ultra_or_delegation_from_oauth_plan() {
 #[test]
 fn codex_spark_and_astra_are_registered_as_image_capable() {
     assert!(codex_supports_image_input("gpt-6-astra"));
+    assert!(codex_supports_image_input("gpt-6-sol"));
+    assert!(codex_supports_image_input("gpt-6-luna"));
+    assert!(!codex_supports_image_input("gpt-6-unadvertised"));
     assert!(codex_supports_image_input("gpt-5.3-codex-spark"));
     assert!(codex_supports_image_input("gpt-5.3-codex"));
     assert!(codex_supports_image_input("gpt-5.4-mini"));
@@ -1334,9 +1444,9 @@ fn codex_spark_and_astra_are_registered_as_image_capable() {
 }
 
 #[test]
-fn codex_catalog_query_uses_astra_compatible_client_and_cache_versions() {
-    assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.153.2");
-    assert_eq!(CODEX_MODEL_CACHE_VERSION, 6);
+fn codex_catalog_query_uses_gpt6_compatible_client_and_cache_versions() {
+    assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.156.1");
+    assert_eq!(CODEX_MODEL_CACHE_VERSION, 8);
     let url = codex_models_url().unwrap();
     assert_eq!(url.path(), "/backend-api/codex/models");
     assert_eq!(
@@ -1466,6 +1576,493 @@ fn codex_astra_live_object_metadata_requires_explicit_ultra_and_v2() {
     assert_eq!(astra.max_effort, octet_ai::ReasoningEffort::Max);
     assert!(astra.responses_lite);
     assert_eq!(astra.agent_delegation, None);
+}
+
+#[test]
+fn codex_observed_sol_luna_inventory_preserves_exact_ids_and_oauth_routes() {
+    // Model-only projection of authenticated GET /backend-api/codex/models on
+    // 2026-09-23 with client_version=0.153.2 and installed codex-cli 0.154.0.
+    // Both returned these 5.6 slugs, not gpt-6-sol/gpt-6-luna. No inference,
+    // output limit, price, or alias equivalence was established by that GET.
+    let body = serde_json::json!({"models": [
+        {
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6-Sol",
+            "context_window": 272_000,
+            "max_context_window": 872_000,
+            "default_reasoning_level": "low",
+            "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}
+            ],
+            "use_responses_lite": true,
+            "multi_agent_version": "v2",
+            "visibility": "list",
+            "supported_in_api": true,
+            "minimal_client_version": "0.144.0",
+            "input_modalities": ["text", "image"]
+        },
+        {
+            "slug": "gpt-5.6-luna",
+            "display_name": "GPT-5.6-Luna",
+            "context_window": 272_000,
+            "max_context_window": 872_000,
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}
+            ],
+            "use_responses_lite": true,
+            "multi_agent_version": "v1",
+            "visibility": "list",
+            "supported_in_api": true,
+            "minimal_client_version": "0.144.0",
+            "input_modalities": ["text", "image"]
+        }
+    ]});
+    let directory = tempfile::tempdir().unwrap();
+    for plan in ["plus", "pro"] {
+        let path = directory.path().join(format!("{plan}-codex.json"));
+        write_codex_credential(&path, false, plan);
+        let store = crate::auth::codex::CredentialStore::new(path);
+        let claims = crate::auth::codex::usable_subscription_claims(&store)
+            .unwrap()
+            .unwrap();
+        let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+        assert_eq!(models.len(), 2);
+        for model in &models {
+            let sol = model.id == "gpt-5.6-sol";
+            assert!(sol || model.id == "gpt-5.6-luna");
+            assert_eq!(model.default_context_window, 272_000);
+            assert_eq!(model.max_context_window, 872_000);
+            assert_eq!(
+                model.context_window,
+                if !sol && plan == "pro" {
+                    372_000
+                } else {
+                    272_000
+                }
+            );
+            assert_eq!(model.max_output_tokens, CODEX_MAX_OUTPUT_TOKENS);
+            assert_eq!(model.min_effort, octet_ai::ReasoningEffort::Low);
+            assert_eq!(
+                model.reasoning_options.default.as_deref(),
+                Some(if sol { "low" } else { "medium" })
+            );
+            let mut expected = vec!["low", "medium", "high", "xhigh", "max"];
+            if sol {
+                expected.push("ultra");
+            }
+            assert_eq!(model.reasoning_options.values, expected);
+            assert_eq!(model.agent_delegation, sol.then_some(AgentDelegation::V2));
+            assert!(model.responses_lite);
+        }
+        save_codex_model_cache(&store, &CodexDiscovery { claims, models }).unwrap();
+        let mut catalog = ModelCatalog::default();
+        // Registration uses an account-bound fixture cache, never the network.
+        // Its conservative offline reduction must retain exact ordinary choices.
+        register_openai_codex(&mut catalog, store, true).unwrap();
+        for id in ["gpt-5.6-sol", "gpt-5.6-luna"] {
+            let model = catalog.resolve(&ModelId(id.into())).unwrap();
+            assert_eq!(model.spec.api_name, id);
+            assert_eq!(model.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
+            assert_eq!(
+                model.endpoint.base_url.as_str(),
+                crate::providers::CODEX.base_url
+            );
+            assert!(matches!(model.endpoint.auth, Auth::Dynamic(_)));
+            assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+            let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+            assert_eq!(
+                reasoning.options.as_ref().unwrap().values,
+                ["low", "medium", "high", "xhigh", "max"]
+            );
+            assert!(!reasoning.supports(&ReasoningConfig::Off));
+            assert!(!model.spec.capabilities.responses_lite);
+            assert_eq!(model.spec.capabilities.agent_delegation, None);
+        }
+        for absent in [
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "codex/gpt-6-sol",
+            "codex/gpt-6-luna",
+        ] {
+            assert!(catalog.resolve(&ModelId(absent.into())).is_err());
+        }
+    }
+}
+
+#[test]
+fn codex_gpt6_sol_luna_inventory_registers_exact_oauth_contracts() {
+    // Model-only projection of the account inventory observed on 2026-09-23
+    // with client_version=0.156.1. Both models require at least 0.155.0.
+    // These OAuth choices intentionally differ from public API reasoning=none.
+    let body = serde_json::json!({"models": [
+        {
+            "slug": "gpt-6-sol", "display_name": "GPT-6-Sol",
+            "minimal_client_version": "0.155.0",
+            "context_window": 272_000, "max_context_window": 872_000,
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}
+            ],
+            "multi_agent_version": "v2", "use_responses_lite": true,
+            "supports_reasoning_effort_updates": true,
+            "input_modalities": ["text", "image"]
+        },
+        {
+            "slug": "gpt-6-luna", "display_name": "GPT-6-Luna",
+            "minimal_client_version": "0.155.0",
+            "context_window": 272_000, "max_context_window": 872_000,
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}
+            ],
+            "multi_agent_version": "v2", "use_responses_lite": true,
+            "supports_reasoning_effort_updates": true,
+            "input_modalities": ["text", "image"]
+        }
+    ]});
+    let directory = tempfile::tempdir().unwrap();
+    for plan in ["plus", "pro"] {
+        let path = directory.path().join(format!("{plan}-codex.json"));
+        write_codex_credential(&path, false, plan);
+        let store = crate::auth::codex::CredentialStore::new(path);
+        let claims = crate::auth::codex::usable_subscription_claims(&store)
+            .unwrap()
+            .unwrap();
+        let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+        assert_eq!(models.len(), 2);
+        for model in &models {
+            assert_eq!(model.context_window, 272_000);
+            assert_eq!(model.max_context_window, 872_000);
+            assert_eq!(model.reasoning_options.default.as_deref(), Some("medium"));
+            let mut efforts = vec!["low", "medium", "high", "xhigh", "max"];
+            if model.id == "gpt-6-sol" {
+                efforts.push("ultra");
+            }
+            assert_eq!(model.reasoning_options.values, efforts);
+            assert_eq!(model.agent_delegation, Some(AgentDelegation::V2));
+            assert!(model.responses_lite);
+            assert!(model.reasoning_effort_updates);
+        }
+        save_codex_model_cache(&store, &CodexDiscovery { claims, models }).unwrap();
+        let mut catalog = ModelCatalog::default();
+        register_openai_codex(&mut catalog, store, true).unwrap();
+        for id in ["gpt-6-sol", "gpt-6-luna"] {
+            let model = catalog.resolve(&ModelId(format!("codex/{id}"))).unwrap();
+            assert_eq!(model.spec.api_name, id);
+            assert_eq!(model.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
+            assert_eq!(
+                model.endpoint.base_url.as_str(),
+                crate::providers::CODEX.base_url
+            );
+            assert!(matches!(model.endpoint.auth, Auth::Dynamic(_)));
+            assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+            assert!(model
+                .spec
+                .capabilities
+                .input_modalities
+                .contains(octet_ai::Modality::Image));
+            let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+            assert_eq!(
+                reasoning.options.as_ref().unwrap().values,
+                ["low", "medium", "high", "xhigh", "max"]
+            );
+            assert!(!reasoning.supports(&ReasoningConfig::Off));
+            assert!(!model.spec.capabilities.responses_lite);
+            assert!(!model.responses_features().reasoning_effort_updates);
+            assert!(!model.responses_features().async_tools);
+            assert!(!model.responses_features().steering);
+            assert_eq!(model.spec.capabilities.agent_delegation, None);
+        }
+    }
+}
+
+#[test]
+fn public_gpt6_discovery_uses_exact_contracts_without_cross_route_inference() {
+    let declaration = &crate::providers::OPENAI;
+    let mut catalog = metadata_fixture_catalog(declaration, declaration.base_url);
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data": [
+            {"id":"gpt-6-astra"}, {"id":"gpt-6-sol"}, {"id":"gpt-6-luna"},
+            {"id":"gpt-6-unverified"}
+        ]}),
+    )
+    .unwrap();
+    for leaf in ["astra", "sol", "luna"] {
+        let model = catalog
+            .resolve(&ModelId(format!("openai/gpt-6-{leaf}")))
+            .unwrap();
+        let capability = model.spec.capabilities.reasoning.as_ref().unwrap();
+        let mut efforts = vec!["low", "medium", "high", "xhigh", "max"];
+        if leaf != "astra" {
+            efforts.insert(0, "none");
+        }
+        assert_eq!(capability.options.as_ref().unwrap().values, efforts);
+        assert_eq!(
+            capability.options.as_ref().unwrap().default.as_deref(),
+            Some(if leaf == "astra" { "low" } else { "medium" })
+        );
+        assert_eq!(capability.supports(&ReasoningConfig::Off), leaf != "astra");
+        assert_eq!(model.spec.limits.context_window, 1_050_000);
+        assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+        assert!(model.spec.capabilities.responses_features.async_tools);
+        // Model authority alone never upgrades an unqualified endpoint.
+        assert_eq!(
+            model.responses_features(),
+            octet_ai::ResponsesFeatures::default()
+        );
+        let mut endpoint = (*model.endpoint).clone();
+        endpoint.runtime = declaration.inventory_route().unwrap().runtime;
+        let qualified = Model {
+            spec: model.spec,
+            endpoint: Arc::new(endpoint),
+        };
+        assert!(qualified.responses_features().async_tools);
+        assert!(qualified.responses_features().steering);
+        assert!(qualified.responses_features().reasoning_effort_updates);
+        assert!(
+            !qualified
+                .responses_features()
+                .compact_reasoning_effort_updates
+        );
+    }
+    let unverified = catalog
+        .resolve(&ModelId("openai/gpt-6-unverified".into()))
+        .unwrap();
+    assert!(unverified.spec.capabilities.reasoning.is_none());
+    assert_eq!(unverified.spec.limits.context_window, 128_000);
+    assert_eq!(
+        unverified.spec.capabilities.responses_features,
+        Default::default()
+    );
+    assert_eq!(
+        crate::providers::OPENAI
+            .inventory_route()
+            .unwrap()
+            .transport,
+        EndpointTransport::WebSocketPreferred
+    );
+}
+
+#[test]
+fn codex_reasoning_updates_need_positive_fresh_account_metadata() {
+    for assertion in [
+        serde_json::Value::Null,
+        serde_json::json!(false),
+        serde_json::json!("true"),
+        serde_json::json!(true),
+    ] {
+        let body = serde_json::json!({"models":[{
+            "slug":"gpt-6-sol", "context_window":272_000, "max_context_window":872_000,
+            "supported_reasoning_levels":["low","medium","high","xhigh","max"],
+            "supports_reasoning_effort_updates": assertion,
+            "use_responses_lite":true, "multi_agent_version":"v2"
+        }]});
+        let models = codex_models_from_response(&body, None).unwrap();
+        assert_eq!(models[0].reasoning_effort_updates, assertion == true);
+        assert!(models[0].responses_lite);
+        assert_eq!(models[0].agent_delegation, Some(AgentDelegation::V2));
+        let offline = conservative_offline_codex_models(models);
+        assert!(!offline[0].reasoning_effort_updates);
+    }
+    assert!(fallback_codex_models(None)
+        .iter()
+        .all(|model| !model.reasoning_effort_updates));
+    let endpoint = crate::providers::CODEX
+        .inventory_route()
+        .unwrap()
+        .runtime
+        .responses_features;
+    assert!(endpoint.reasoning_effort_updates);
+    assert!(
+        !endpoint.async_tools && !endpoint.steering && !endpoint.compact_reasoning_effort_updates
+    );
+}
+
+#[test]
+fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
+    for (id, input) in [("gpt-6-sol", 2_000_000), ("gpt-6-luna", 100_000)] {
+        let public = crate::providers::pricing_for(&crate::providers::OPENAI, id).unwrap();
+        assert_eq!(public.input.0, input);
+        assert_eq!(public.output.0, input * 5);
+        assert_eq!(public.cache_read.0, input / 10);
+        assert_eq!(public.cache_write_5m.0, input * 5 / 4);
+        assert_eq!(public.tiers[0].min_input_tokens, 272_001);
+        assert_eq!(public.tiers[0].input.unwrap().0, input * 2);
+        assert_eq!(public.tiers[0].output.unwrap().0, input * 15 / 2);
+        assert!(crate::providers::pricing_for(&crate::providers::CODEX, id).is_none());
+        assert!(crate::providers::pricing_for(
+            &crate::providers::OPENAI,
+            &format!("{id}-unverified")
+        )
+        .is_none());
+    }
+    // Reviewed subscription prices still apply to explicitly allowlisted models,
+    // but even a known public API quote must not price an unreviewed OAuth route.
+    let astra = crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6-astra").unwrap();
+    assert_eq!(astra.input, TokenRate(10_000_000));
+    assert_eq!(astra.output, TokenRate(50_000_000));
+    assert!(crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-4o-mini").is_some());
+    assert!(crate::providers::pricing_for(&crate::providers::CODEX, "gpt-4o-mini").is_none());
+}
+
+#[test]
+fn session_resume_uses_effective_reasoning_update_not_the_pinned_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = Session::create(directory.path().join("reasoning.jsonl")).unwrap();
+    let low = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
+    let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    let model = ModelId("codex/gpt-6-sol".into());
+    append_config_if_changed(&mut session, &model, &low, ReasoningMode::Standard).unwrap();
+    session
+        .append(EntryValue::ResponsesReasoning {
+            endpoint: EndpointId(crate::auth::codex::ENDPOINT_ID.into()),
+            model: model.clone(),
+            baseline: low,
+            update: Some(octet_ai::ResponsesConfigurationUpdate {
+                reasoning: high.clone(),
+            }),
+        })
+        .unwrap();
+    let persisted = persisted_session_config(&session).unwrap();
+    assert_eq!(persisted.model, Some(model));
+    assert_eq!(persisted.reasoning, Some(high));
+    // A later explicit selection wins over an older route's cache marker.
+    append_config_if_changed(
+        &mut session,
+        &ModelId("gpt-4o-mini".into()),
+        &ReasoningConfig::Off,
+        ReasoningMode::Standard,
+    )
+    .unwrap();
+    assert_eq!(
+        persisted_session_config(&session).unwrap().reasoning,
+        Some(ReasoningConfig::Off)
+    );
+}
+
+#[test]
+fn gpt6_resume_and_idle_rebuild_honor_explicit_effort_without_replacing_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let low = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
+    let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    let max = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max);
+    let mut process_config = config(directory.path(), Some("gpt-6-sol"));
+    process_config.resume = ResumeSelector::Continue;
+    process_config.reasoning = Some(max.clone());
+    process_config.reasoning_explicit = true;
+    let boot = bootstrap(process_config).unwrap();
+    let path = boot.sessions.new_path("2026-09-23T00-00-00Z");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut session = Session::create(&path).unwrap();
+    append_config_if_changed(
+        &mut session,
+        &ModelId("gpt-6-sol".into()),
+        &low,
+        ReasoningMode::Standard,
+    )
+    .unwrap();
+    session
+        .append(EntryValue::Message(octet_ai::Message::User(
+            octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("resumable task".into())],
+            },
+        )))
+        .unwrap();
+    session
+        .append(EntryValue::ResponsesReasoning {
+            endpoint: EndpointId("openai".into()),
+            model: ModelId("gpt-6-sol".into()),
+            baseline: low.clone(),
+            update: Some(octet_ai::ResponsesConfigurationUpdate {
+                reasoning: high.clone(),
+            }),
+        })
+        .unwrap();
+    drop(session);
+    let launch = resolve_launch_print(&boot, "unused").unwrap();
+    assert_eq!(launch.reasoning, max);
+    let app = build_app(boot, launch, "system".into()).unwrap();
+    assert_eq!(app.reasoning, max);
+    assert_eq!(app.agent.reasoning(), &max);
+    assert_eq!(
+        app.agent
+            .session()
+            .responses_reasoning(&EndpointId("openai".into()), &ModelId("gpt-6-sol".into()))
+            .unwrap(),
+        Some((low.clone(), max))
+    );
+    let app = rebuild_app(app, None, Some(high.clone()), None, None).unwrap();
+    assert_eq!(app.reasoning, high);
+    assert_eq!(app.agent.reasoning(), &high);
+    assert_eq!(
+        app.agent
+            .session()
+            .responses_reasoning(&EndpointId("openai".into()), &ModelId("gpt-6-sol".into()))
+            .unwrap(),
+        Some((low, high))
+    );
+}
+
+#[test]
+fn codex_fresh_pre_gpt6_cache_refreshes_once_before_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(path);
+    let claims = crate::auth::codex::usable_subscription_claims(&store)
+        .unwrap()
+        .unwrap();
+    let mut body = serde_json::json!({"models": [{
+        "slug": "gpt-5.6-sol", "context_window": 272_000,
+        "max_context_window": 872_000, "default_reasoning_level": "medium",
+        "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max"]
+    }]});
+    let old_cache = CodexModelCache {
+        version: 7,
+        account_id: claims.account_id.clone(),
+        plan: codex_plan_cache_key(&claims).map(str::to_owned),
+        models: codex_models_from_response(&body, claims.plan.as_ref()).unwrap(),
+    };
+    store
+        .save_model_cache(&serde_json::to_vec(&old_cache).unwrap())
+        .unwrap();
+    assert!(load_codex_model_cache(&store, &claims).unwrap().is_none());
+    let (offline, source) = codex_inventory_models(&store, &claims, true, false, |_| {
+        panic!("offline must not refresh the old inventory")
+    });
+    assert_eq!(source, CodexInventorySource::ConservativeFallback);
+    assert!(!offline.iter().any(|m| m.id == "gpt-6-sol"));
+
+    body["models"][0]["slug"] = serde_json::json!("gpt-6-sol");
+    let live = CodexDiscovery {
+        claims: claims.clone(),
+        models: codex_models_from_response(&body, claims.plan.as_ref()).unwrap(),
+    };
+    let requests = std::cell::Cell::new(0);
+    let (models, source) = codex_inventory_models(&store, &claims, false, false, |_| {
+        requests.set(requests.get() + 1);
+        Ok(live)
+    });
+    assert_eq!(source, CodexInventorySource::OnlineDiscovery);
+    assert_eq!(requests.get(), 1);
+    assert_eq!(models[0].id, "gpt-6-sol");
+    assert_eq!(
+        load_codex_model_cache(&store, &claims).unwrap(),
+        Some(models.clone())
+    );
+    let (cached, source) = codex_inventory_models(&store, &claims, false, false, |_| {
+        panic!("current inventory must not refresh again")
+    });
+    assert_eq!(source, CodexInventorySource::FreshCache);
+    assert_eq!(cached, models);
 }
 
 #[test]
@@ -1612,10 +2209,12 @@ fn codex_astra_cache_caps_output_and_honors_lower_metadata() {
             reasoning_options: codex_fallback_reasoning_options("gpt-6-astra"),
             id: "gpt-6-astra".into(),
             context_window: 272_000,
+            default_context_window: 272_000,
             max_context_window: 872_000,
             max_output_tokens,
             min_effort: octet_ai::ReasoningEffort::Low,
             max_effort: octet_ai::ReasoningEffort::Max,
+            reasoning_effort_updates: false,
             responses_lite: false,
             agent_delegation: None,
         }],
@@ -2075,6 +2674,192 @@ fn custom_registry_registers_labeled_providers_with_isolated_auth_and_models() {
         .is_err());
 }
 
+#[tokio::test]
+async fn custom_model_preset_registry_discovery_cache_and_wire_preserve_only_configured_controls() {
+    use octet_ai::{CompatibilityMode, Message, Request, UserMessage, UserPart};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let directory = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let secret = "configured-model-header-canary";
+    Mock::given(method("GET")).and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "configured", "preset": {"headers": {"x-model-secret": "untrusted-replacement"}}},
+                {"id": "discovered", "preset": {
+                    "headers": {"x-remote-secret": "untrusted-inventory-header"},
+                    "sampling_params": {"top_p": 0.01}, "vllm_priority": 99
+                }}
+            ]
+        }))).expect(1).mount(&server).await;
+    Mock::given(method("POST")).and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"id\":\"preset\",\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n",
+                "data: {\"id\":\"preset\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+            ))).expect(1).mount(&server).await;
+    let provider: crate::auth::custom::CustomProvider = serde_json::from_value(serde_json::json!({
+        "base_url": format!("{}/v1/", server.uri()), "auth": {"kind": "none"}, "auto_discover": true,
+        "models": [{"api_name": "configured", "preset": {
+            "headers": {"x-model-secret": secret},
+            "sampling_params": {"temperature": 0.25, "top_p": 0.7}, "vllm_priority": -3
+        }}]
+    })).unwrap();
+    let expected_preset = provider.credential.models[0].preset.clone();
+    let store =
+        crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
+    store
+        .save_registry(&crate::auth::custom::CustomRegistry::single(
+            "fixture", provider,
+        ))
+        .unwrap();
+    let (online, offline) = tokio::task::spawn_blocking(move || {
+        let mut online = ModelCatalog::default();
+        register_custom_openai_endpoints_from_store(&mut online, &store, false).unwrap();
+        let mut offline = ModelCatalog::default();
+        register_custom_openai_endpoints_from_store(&mut offline, &store, true).unwrap();
+        let cache =
+            String::from_utf8(store.load_model_cache_for("fixture").unwrap().unwrap()).unwrap();
+        assert!(!cache.contains("configured-model-header-canary"));
+        assert!(!cache.contains("untrusted-inventory-header"));
+        (online, offline)
+    })
+    .await
+    .unwrap();
+    let id = ModelId("custom/fixture/configured".into());
+    let model = offline.resolve(&id).unwrap();
+    assert_eq!(online.resolve(&id).unwrap().spec.preset, expected_preset);
+    assert_eq!(model.spec.preset, expected_preset);
+    assert_eq!(
+        offline
+            .resolve(&ModelId("custom/fixture/discovered".into()))
+            .unwrap()
+            .spec
+            .preset,
+        octet_ai::ModelPreset::default(),
+        "provider inventory cannot grant request overrides"
+    );
+    let public = serde_json::to_string(&*model.spec).unwrap();
+    assert!(!public.contains(secret));
+    assert!(!public.contains("x-model-secret"));
+    assert!(!format!("{model:?}").contains(secret));
+    let request = Request {
+        system: Some("fixture system".into()),
+        messages: vec![Message::User(UserMessage {
+            content: vec![UserPart::Text("fixture prompt".into())],
+        })],
+        tools: vec![],
+        tool_choice: octet_ai::ToolChoice::None,
+        max_output_tokens: Some(128),
+        temperature: Some(0.75),
+        stop: vec![],
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: ReasoningMode::Standard,
+        responses: None,
+        output_format: octet_ai::OutputFormat::Text,
+        output_modalities: octet_ai::OutputModalities::Text,
+        compatibility: CompatibilityMode::Strict,
+        cache_retention: octet_ai::CacheRetention::None,
+        session_id: None,
+    };
+    AiClient::new().complete(&model, request).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let post = requests
+        .iter()
+        .find(|request| request.method.as_str() == "POST")
+        .unwrap();
+    assert_eq!(
+        post.headers
+            .get("x-model-secret")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        secret
+    );
+    assert!(post.headers.get("x-remote-secret").is_none());
+    assert!(post.headers.get("authorization").is_none());
+    let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+    assert_eq!(
+        body["temperature"], 0.75,
+        "canonical request wins over the preset default"
+    );
+    assert_eq!(body["top_p"], 0.7);
+    assert_eq!(body["priority"], -3);
+    assert!(!body.to_string().contains(secret));
+    assert_eq!(
+        model.spec.preset, expected_preset,
+        "dispatch must not mutate the configured model"
+    );
+}
+
+#[test]
+fn custom_model_preset_cache_omits_headers_without_mutating_the_private_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
+    let secret = "cache-preset-header-canary";
+    let configured: crate::auth::custom::CustomModel = serde_json::from_value(serde_json::json!({
+        "api_name": "configured", "preset": {
+            "headers": {"x-model-secret": secret}, "sampling_params": {"top_p": 0.7}
+        }
+    }))
+    .unwrap();
+    let fingerprint = custom_model_cache_fingerprint("account", std::slice::from_ref(&configured));
+    save_custom_model_cache_for(
+        &store,
+        "fixture",
+        "http://localhost/v1/",
+        &fingerprint,
+        std::slice::from_ref(&configured),
+    )
+    .unwrap();
+    let raw = String::from_utf8(store.load_model_cache_for("fixture").unwrap().unwrap()).unwrap();
+    assert!(!raw.contains(secret));
+    assert!(!raw.contains("x-model-secret"));
+    assert_eq!(configured.preset.headers["x-model-secret"], secret);
+    let Some(CachedCustomInventory::Available(models)) =
+        load_custom_model_cache_for(&store, "fixture", "http://localhost/v1/", &fingerprint)
+            .unwrap()
+    else {
+        panic!("missing cache")
+    };
+    assert!(models[0].preset.headers.is_empty());
+    assert_eq!(
+        models[0].preset.sampling_params,
+        configured.preset.sampling_params
+    );
+    // Also reject cached header authority at the read boundary, rather than
+    // relying solely on every historical cache having used the current writer.
+    let cache = CustomModelCache {
+        version: CUSTOM_MODEL_CACHE_VERSION,
+        base_url: "http://localhost/v1/".into(),
+        credential_fingerprint: fingerprint.clone(),
+        models: vec![configured.clone()],
+    };
+    store
+        .save_model_cache_for("fixture", &serde_json::to_vec(&cache).unwrap())
+        .unwrap();
+    let Some(CachedCustomInventory::Available(models)) =
+        load_custom_model_cache_for(&store, "fixture", "http://localhost/v1/", &fingerprint)
+            .unwrap()
+    else {
+        panic!("missing cache")
+    };
+    assert!(models[0].preset.headers.is_empty());
+    let mut changed = configured.clone();
+    changed
+        .preset
+        .headers
+        .insert("x-model-secret".into(), "replacement".into());
+    assert_ne!(
+        custom_model_cache_fingerprint("account", &[changed]),
+        fingerprint
+    );
+}
+
 #[test]
 fn custom_model_cache_is_scoped_to_endpoint_and_reuses_discovery() {
     let directory = tempfile::tempdir().unwrap();
@@ -2097,6 +2882,7 @@ fn custom_model_cache_is_scoped_to_endpoint_and_reuses_discovery() {
         reasoning_default: String::new(),
         reasoning_uses_system_message: true,
         pricing: None,
+        preset: Default::default(),
     }];
     let mut first_headers = http::HeaderMap::new();
     first_headers.insert("x-organization", "tenant-one".parse().unwrap());
@@ -2232,95 +3018,79 @@ fn version_four_custom_cache_is_invalid_after_hlid_tool_fallback_change() {
     );
 }
 
-#[test]
-fn stale_positive_custom_cache_refreshes_the_current_catalog() {
+#[tokio::test]
+async fn stale_positive_custom_cache_is_available_without_waiting_for_discovery() {
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
     let directory = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "currently-served-model"}]
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let provider: crate::auth::custom::CustomProvider = serde_json::from_value(serde_json::json!({
+        "base_url": format!("{}/v1/", server.uri()),
+        "auth": {"kind": "none"},
+        "auto_discover": true
+    }))
+    .unwrap();
     let store =
         crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
-    let cred = crate::auth::custom::CustomCredential {
-        base_url: "http://custom.test/v1/".to_string(),
-        api_key: "key".to_string(),
-        api_name: String::new(),
-        headers: Vec::new(),
-        models: Vec::new(),
-        auto_discover: true,
-    };
-    let fingerprint = custom_credential_fingerprint(&cred.api_key, &http::HeaderMap::new());
+    let credential = custom_credential_fingerprint("", &http::HeaderMap::new());
+    let fingerprint = custom_model_cache_fingerprint(&credential, &[]);
     let previous = crate::auth::custom::CustomModel {
-        api_name: "previous-model".to_string(),
+        api_name: "last-good-model".into(),
         ..Default::default()
     };
-    save_custom_model_cache(
+    save_custom_model_cache_for(
         &store,
-        &cred.base_url,
+        "fixture",
+        &provider.credential.base_url,
         &fingerprint,
         std::slice::from_ref(&previous),
     )
     .unwrap();
+    let cache_path = std::fs::read_dir(directory.path().join("credentials"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .next()
+        .unwrap();
+    std::fs::File::open(&cache_path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    assert!(store
+        .model_cache_is_stale_for("fixture", PROVIDER_INVENTORY_REFRESH_INTERVAL)
+        .unwrap());
 
-    let fresh = refresh_stale_custom_models_with(
-        &store,
-        &cred,
-        &fingerprint,
-        vec![previous],
-        Duration::ZERO,
-        |_| {
-            vec![crate::auth::custom::CustomModel {
-                api_name: "currently-served-model".to_string(),
-                ..Default::default()
-            }]
-        },
-    );
-
-    assert_eq!(fresh[0].api_name, "currently-served-model");
-    assert!(matches!(
-        load_custom_model_cache(&store, &cred.base_url, &fingerprint).unwrap(),
-        Some(CachedCustomInventory::Available(models))
-            if models[0].api_name == "currently-served-model"
-    ));
-}
-
-#[test]
-fn failed_stale_custom_refresh_retains_the_last_good_catalog() {
-    let directory = tempfile::tempdir().unwrap();
-    let store =
-        crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
-    let cred = crate::auth::custom::CustomCredential {
-        base_url: "http://custom.test/v1/".to_string(),
-        api_key: "key".to_string(),
-        api_name: String::new(),
-        headers: Vec::new(),
-        models: Vec::new(),
-        auto_discover: true,
-    };
-    let fingerprint = custom_credential_fingerprint(&cred.api_key, &http::HeaderMap::new());
-    let previous = crate::auth::custom::CustomModel {
-        api_name: "last-good-model".to_string(),
-        ..Default::default()
-    };
-    save_custom_model_cache(
-        &store,
-        &cred.base_url,
-        &fingerprint,
-        std::slice::from_ref(&previous),
-    )
+    let [online, offline] = tokio::task::spawn_blocking(move || {
+        [false, true].map(|offline| {
+            let mut catalog = ModelCatalog::default();
+            register_custom_openai_provider(
+                &mut catalog,
+                &store,
+                "fixture",
+                &provider,
+                false,
+                offline,
+            )
+            .unwrap();
+            catalog
+        })
+    })
+    .await
     .unwrap();
-
-    let retained = refresh_stale_custom_models_with(
-        &store,
-        &cred,
-        &fingerprint,
-        vec![previous],
-        Duration::ZERO,
-        |_| Vec::new(),
-    );
-
-    assert_eq!(retained[0].api_name, "last-good-model");
-    assert!(matches!(
-        load_custom_model_cache(&store, &cred.base_url, &fingerprint).unwrap(),
-        Some(CachedCustomInventory::Available(models))
-            if models[0].api_name == "last-good-model"
-    ));
+    let id = ModelId("custom/fixture/last-good-model".into());
+    assert!(online.resolve(&id).is_ok());
+    assert!(offline.resolve(&id).is_ok());
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[test]
@@ -2528,10 +3298,40 @@ fn deepseek_v4_pro_is_registered_as_openai_chat_with_env_auth() {
 }
 
 #[test]
+fn first_launch_uses_custom_server_reasoning_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut boot = bootstrap(config(directory.path(), Some("custom/onboarding/probe"))).unwrap();
+    let mut spec = (*boot
+        .catalog
+        .resolve(&ModelId("gpt-4o-mini".into()))
+        .unwrap()
+        .spec)
+        .clone();
+    spec.id = ModelId("custom/onboarding/probe".into());
+    spec.capabilities.reasoning = custom_reasoning_capability(&crate::auth::custom::CustomModel {
+        reasoning: true,
+        reasoning_values: vec!["none".into(), "default".into()],
+        reasoning_default: "default".into(),
+        ..Default::default()
+    });
+    boot.catalog.register_model(spec).unwrap();
+
+    let launch = resolve_launch_print(&boot, "first-run").unwrap();
+    let app = build_app(boot, launch, "system".into()).unwrap();
+    assert_eq!(app.reasoning, ReasoningConfig::On);
+    assert_eq!(
+        persisted_session_config(app.agent.session())
+            .unwrap()
+            .reasoning,
+        Some(ReasoningConfig::On)
+    );
+}
+
+#[test]
 fn deepseek_v4_pro_accepts_high_reasoning_at_startup() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = config(directory.path(), Some(DEEPSEEK_MODEL_ID));
-    config.reasoning = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    config.reasoning = Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High));
     let boot = bootstrap(config).unwrap();
     let launch = resolve_launch_print(&boot, "test-session").unwrap();
     let app = build_app(boot, launch, "system".into()).unwrap();
@@ -2623,11 +3423,143 @@ fn print_resume_restores_session_model_and_reasoning_unless_cli_overrides() {
     let mut overridden = config(directory.path(), Some("gpt-4o-mini"));
     overridden.resume = ResumeSelector::Continue;
     overridden.model_explicit = true;
-    overridden.reasoning = ReasoningConfig::Off;
+    overridden.reasoning = Some(ReasoningConfig::Off);
     overridden.reasoning_explicit = true;
     let launch = resolve_launch_print(&bootstrap(overridden).unwrap(), "unused").unwrap();
     assert_eq!(launch.model.0, "gpt-4o-mini");
     assert_eq!(launch.reasoning, ReasoningConfig::Off);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumed_ultra_override_binds_observation_before_selection() {
+    use octet_ai::{ReasoningEffort, ResponsesFeatures};
+
+    let directory = tempfile::tempdir().unwrap();
+    let model_id = "fixture-ultra-resume";
+    let ultra = ReasoningConfig::Effort(ReasoningEffort::Ultra);
+    let low = ReasoningConfig::Effort(ReasoningEffort::Low);
+    let mut process_config = config(directory.path(), Some(model_id));
+    process_config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+    // Extension roots contain named bundle directories; discovery scans their direct children.
+    let extension_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions")
+        .canonicalize()
+        .unwrap();
+    process_config.extension_paths = vec![extension_root.clone()];
+    process_config.enabled_extensions = vec!["octet-subagents".into()];
+    process_config.invocation_trusted_extensions = vec!["octet-subagents".into()];
+    process_config.resume = ResumeSelector::Continue;
+    process_config.reasoning = Some(ultra.clone());
+    process_config.reasoning_explicit = true;
+    let mut boot = bootstrap(process_config).unwrap();
+    let mut model = boot
+        .catalog
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    let features = ResponsesFeatures {
+        reasoning_effort_updates: true,
+        ..Default::default()
+    };
+    let endpoint = Arc::make_mut(&mut model.endpoint);
+    endpoint.id = octet_ai::EndpointId("fixture-ultra-resume".into());
+    endpoint.runtime.responses_features = features;
+    boot.catalog.register_endpoint(endpoint.clone()).unwrap();
+    let spec = Arc::make_mut(&mut model.spec);
+    spec.id = ModelId(model_id.into());
+    spec.endpoint = model.endpoint.id.clone();
+    spec.capabilities.responses_features = features;
+    spec.capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
+    let capability = spec.capabilities.reasoning.as_mut().unwrap();
+    capability.max_effort = ReasoningEffort::Ultra;
+    capability.options = Some(octet_ai::types::ReasoningOptions {
+        values: vec!["none".into(), "low".into(), "max".into(), "ultra".into()],
+        default: Some("low".into()),
+    });
+    boot.catalog.register_model(spec.clone()).unwrap();
+    let path = boot.sessions.new_path("ultra-resume");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut session = Session::create(&path).unwrap();
+    session
+        .append(EntryValue::Config {
+            model: Some(model_id.into()),
+            reasoning: Some("low".into()),
+            reasoning_mode: None,
+        })
+        .unwrap();
+    let history = session
+        .append(EntryValue::Message(octet_ai::Message::User(
+            octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("preserve history".into())],
+            },
+        )))
+        .unwrap();
+    session
+        .append(EntryValue::ResponsesReasoning {
+            endpoint: model.endpoint.id.clone(),
+            model: model.spec.id.clone(),
+            baseline: low.clone(),
+            update: None,
+        })
+        .unwrap();
+    drop(session);
+
+    let launch = resolve_launch_print(&boot, "unused").unwrap();
+    assert_eq!(launch.reasoning, ultra);
+    let mut app = build_app(boot, launch, "system".into()).unwrap();
+    assert!(
+        app.executable_extensions.has_agent_session_service(),
+        "{}",
+        app.executable_extensions.inspect_text()
+    );
+    // An installed global copy must not hide a broken source-fixture root.
+    let subagents = app
+        .executable_extensions
+        .summaries()
+        .into_iter()
+        .find(|summary| summary.name == "octet-subagents")
+        .expect("the source bundle is discovered");
+    assert_eq!(
+        subagents.manifest_path,
+        extension_root.join("octet-subagents/extension.toml")
+    );
+    assert!(app.agent.delegation_team_directory().is_some());
+    assert_eq!(app.agent.reasoning(), &ultra);
+    assert_eq!(app.reasoning, ultra);
+    assert_eq!(app.agent.session().path(), path);
+    assert!(app.agent.session().entry(&history).is_some());
+    assert_eq!(
+        app.agent
+            .session()
+            .responses_reasoning(&model.endpoint.id, &model.spec.id)
+            .unwrap(),
+        Some((ultra.clone(), ultra.clone()))
+    );
+
+    // Exercise the consuming rebuild path independently of launch restoration.
+    // Its existing durable pin is lower than the explicit requested override.
+    app.agent.set_reasoning(low.clone()).unwrap();
+    app.reasoning = low.clone();
+    app.config.reasoning = Some(low);
+    let mut app = rebuild_app(app, None, Some(ultra.clone()), None, None).unwrap();
+    assert!(
+        app.executable_extensions.has_agent_session_service(),
+        "{}",
+        app.executable_extensions.inspect_text()
+    );
+    assert!(app.agent.delegation_team_directory().is_some());
+    assert_eq!(app.agent.reasoning(), &ultra);
+    assert_eq!(app.reasoning, ultra);
+    assert_eq!(app.agent.session().path(), path);
+    assert!(app.agent.session().entry(&history).is_some());
+    assert_eq!(
+        app.agent
+            .session()
+            .responses_reasoning(&model.endpoint.id, &model.spec.id)
+            .unwrap(),
+        Some((ultra.clone(), ultra))
+    );
+    app.executable_extensions.shutdown_blocking();
 }
 
 #[test]
@@ -2635,7 +3567,7 @@ fn explicit_reasoning_clears_a_persisted_legacy_pro_mode() {
     let directory = tempfile::tempdir().unwrap();
     let mut process_config = config(directory.path(), Some("gpt-5.4-mini-responses"));
     process_config.resume = ResumeSelector::Continue;
-    process_config.reasoning = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    process_config.reasoning = Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High));
     process_config.reasoning_explicit = true;
     process_config.reasoning_mode_explicit = false;
     let boot = bootstrap(process_config).unwrap();
@@ -2683,14 +3615,20 @@ fn launch_configuration_parts_returns_the_preopened_resume_session() {
         .unwrap();
     drop(session);
 
-    let (prepared, model, reasoning, reasoning_mode) =
-        launch_configuration_parts(&config, &SessionSelection::OpenExisting(path.clone())).unwrap();
+    let (
+        prepared,
+        LaunchConfiguration {
+            model,
+            reasoning,
+            reasoning_mode,
+        },
+    ) = launch_configuration_parts(&config, &SessionSelection::OpenExisting(path.clone())).unwrap();
 
     assert_eq!(prepared.as_ref().map(Session::path), Some(path.as_path()));
     assert_eq!(model, Some(ModelId("gpt-5.4-mini-responses".into())));
     assert_eq!(
         reasoning,
-        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+        Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High))
     );
     assert_eq!(reasoning_mode, ReasoningMode::Standard);
 }
@@ -2842,7 +3780,7 @@ fn model_without_tool_capability_gets_no_default_surface_and_rejects_explicit_to
         &default_config,
         &session,
         &model,
-        &default_config.reasoning,
+        &ReasoningConfig::Off,
         &boot.sessions,
     )
     .unwrap();
@@ -2856,7 +3794,7 @@ fn model_without_tool_capability_gets_no_default_surface_and_rejects_explicit_to
         &default_config,
         &explicit_session,
         &model,
-        &default_config.reasoning,
+        &ReasoningConfig::Off,
         &boot.sessions,
     )
     .unwrap();
@@ -2898,71 +3836,145 @@ fn initial_build_records_configuration_provenance() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn unknown_api_03_last_initial_provider_model_preflights_restarts_and_reloads_with_fresh_routes(
 ) {
-    let node = std::process::Command::new("node")
-        .arg("--version")
-        .status()
-        .expect("node is required for the checked-in Pi bridge fixture");
-    assert!(
-        node.success(),
-        "node must be usable for the Pi bridge fixture"
-    );
-
     let directory = tempfile::tempdir().unwrap();
     let extension_root = directory.path().join("extensions");
-    let provider = extension_root.join("pi-provider");
+    let provider = extension_root.join("native-provider");
     std::fs::create_dir_all(&provider).unwrap();
-    let launcher = provider.join("launch-bridge.sh");
-    std::fs::write(&launcher, "#!/bin/sh\nexec node \"$@\"\n").unwrap();
+    // This retained provider lifecycle is independent of the removed Pi bridge.
+    std::fs::write(
+        provider.join("provider.py"),
+        r#"#!/usr/bin/env python3
+import json
+import sys
+import time
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def receive():
+    line = sys.stdin.readline()
+    assert line, "host closed stdin"
+    value = json.loads(line)
+    assert line.rstrip("\n") == canonical(value), line
+    return value
+
+
+def send(value):
+    sys.stdout.write(canonical(value) + "\n")
+    sys.stdout.flush()
+
+
+def provider(provider_id, model_id):
+    return {
+        "provider": {
+            "id": provider_id,
+            "label": provider_id + " provider",
+            "auth": {"kind": "none"},
+        },
+        "models": [{
+            "id": model_id,
+            "api_name": model_id,
+            "protocol": "openai_chat",
+            "context_window": 8192,
+            "max_output_tokens": 1024,
+            "capabilities": {
+                "tools": False,
+                "parallel_tool_calls": False,
+                "structured_output": False,
+                "reasoning": False,
+            },
+        }],
+    }
+
+
+def reverse_request(identifier, method, params):
+    send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+    response = receive()
+    assert response.get("id") == identifier and "result" in response, response
+    return response["result"]
+
+
+initialize = receive()
+assert initialize["method"] == "initialize", initialize
+contract = initialize["params"]["contract"]
+provider_capabilities = {"provider_catalog", "provider_stream", "provider_auth"}
+provider_methods = {
+    "providers/complete",
+    "providers/register",
+    "providers/update",
+    "providers/unregister",
+    "provider/stream",
+    "provider/event",
+    "provider/cancel",
+    "provider/auth/request",
+    "provider/auth/revoke",
+}
+selection = {
+    "schema": contract["schema"],
+    "encoding": contract["encoding"],
+    "capabilities": [
+        capability
+        for capability in contract["required_capabilities"] + contract["optional_capabilities"]
+        if capability in contract["required_capabilities"] or capability in provider_capabilities
+    ],
+    "methods": [
+        method
+        for method in contract["required_methods"] + contract["optional_methods"]
+        if method in contract["required_methods"] or method in provider_methods
+    ],
+    "limits": contract["limits"],
+}
+send({
+    "jsonrpc": "2.0",
+    "id": initialize["id"],
+    "result": {
+        "api_version": "0.3",
+        "tools": [],
+        "contract": selection,
+    },
+})
+reverse_request("first", "providers/register", provider("fixture-first-provider", "fixture-first-model"))
+time.sleep(0.075)
+reverse_request("second", "providers/register", provider("fixture-second-provider", "fixture-second-model"))
+send({"jsonrpc": "2.0", "method": "providers/complete", "params": {}})
+shutdown = receive()
+assert shutdown["method"] == "shutdown", shutdown
+send({"jsonrpc": "2.0", "id": shutdown["id"], "result": {"terminal": "shutdown"}})
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(provider.join("provider.py"))
+        .unwrap()
+        .permissions();
     use std::os::unix::fs::PermissionsExt as _;
-    let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
     permissions.set_mode(0o700);
-    std::fs::set_permissions(&launcher, permissions).unwrap();
-    let repository = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("coding-agent crate has a repository root")
-        .to_owned();
-    let bridge = repository
-        .join("extensions/octet-pi-compat/bridge.mjs")
-        .to_string_lossy()
-        .into_owned();
-    let provider_extension = repository
-        .join("extensions/octet-pi-compat/tests/fixtures/provider-extension.mjs")
-        .to_string_lossy()
-        .into_owned();
-    let fake_pi = repository
-        .join("extensions/octet-pi-compat/tests/fixtures/fake-pi")
-        .to_string_lossy()
-        .into_owned();
+    std::fs::set_permissions(provider.join("provider.py"), permissions).unwrap();
     std::fs::write(
         provider.join("extension.toml"),
-        format!(
-            r#"name = "pi-provider"
+        r#"name = "native-provider"
 version = "0.3.0"
 api_version = "0.3"
 
 [entrypoint]
-command = "launch-bridge.sh"
-args = [{bridge:?}, "--extension", {provider_extension:?}, "--pi-package", {fake_pi:?}, "--api-version", "0.3"]
-env = {{ OCTET_PI_FIXTURE_API_VERSION = "0.3", OCTET_PI_FIXTURE_PROVIDER_AUTH = "none", OCTET_PI_FIXTURE_PROVIDER_REGISTER_DELAY_MS = "75", OCTET_PI_FIXTURE_INITIAL_PROVIDER_COUNT = "2" }}
+command = "provider.py"
 
 [contributes]
-tools = ["pi"]
 providers = true
-"#
-        ),
+"#,
     )
     .unwrap();
 
-    // The fake Pi fixture queues this declaration after the first provider.
+    // The native fixture queues this declaration after the first provider.
     // Selecting it proves preflight waits for the owner's complete batch rather
     // than returning after the first reverse registration.
     let model_id = "fixture-second-provider/fixture-second-model";
     let mut config = config(directory.path(), Some(model_id));
     config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
     config.extension_paths = vec![extension_root];
-    config.enabled_extensions = vec!["pi-provider".into()];
-    config.invocation_trusted_extensions = vec!["pi-provider".into()];
+    config.enabled_extensions = vec!["native-provider".into()];
+    config.invocation_trusted_extensions = vec!["native-provider".into()];
 
     let boot = bootstrap(config).unwrap();
     boot.preflight_extension_providers().unwrap();
@@ -2988,7 +4000,7 @@ providers = true
     assert!(
         reloads
             .iter()
-            .any(|message| message.starts_with("reloaded pi-provider (generation ")),
+            .any(|message| message.starts_with("reloaded native-provider (generation ")),
         "provider reload failed: {reloads:?}"
     );
     app.synchronize_extension_provider_catalog();
@@ -3316,6 +4328,30 @@ fn reasoning_ingress_distinguishes_absent_unknown_false_and_malformed() {
 }
 
 #[test]
+fn mistral_conversations_discovery_does_not_invent_reasoning_controls() {
+    for provider in ["mistral", "openrouter"] {
+        let declaration = BUILTIN_PROVIDER_DECLARATIONS
+            .iter()
+            .find(|d| d.id == provider)
+            .unwrap();
+        for value in [
+            serde_json::json!({"reasoning": true}),
+            serde_json::json!({"reasoning": {
+                "supported": true, "values": ["low", "high"], "default": "high"
+            }}),
+        ] {
+            assert!(discovered_reasoning_capability(
+                declaration,
+                Protocol::MistralConversations,
+                "mistral-small-latest",
+                &decode_reasoning_metadata(&value).unwrap(),
+            )
+            .is_none());
+        }
+    }
+}
+
+#[test]
 fn exact_codex_cache_roundtrip_retains_choices_default_label_and_offline_holes() {
     let fixture = thinking_hotfix_fixture();
     let models = codex_models_from_response(&fixture["codex_exact"], None).unwrap();
@@ -3427,6 +4463,8 @@ async fn sparse_cerebras_discovery_selection_stream_and_tool_continuation_loopba
             content: vec![UserPart::Text("Look up".into())],
         })],
         tools: vec![ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "lookup".into(),
             description: "lookup".into(),
             parameters: serde_json::json!({"type":"object"}),
@@ -3840,7 +4878,601 @@ fn metadata_fixture_catalog(declaration: &ProviderDeclaration, base_url: &str) -
 }
 
 #[test]
-fn pinned_metadata_enriches_only_discovered_deepseek_flash() {
+fn direct_opus_5_5_has_official_defaults_and_prices_without_off() {
+    let builtin = ModelCatalog::builtin().unwrap();
+    let model = builtin.resolve(&ModelId("claude-opus-5-5".into())).unwrap();
+    assert_eq!(model.spec.protocol, Protocol::AnthropicMessages);
+    assert_eq!(model.spec.limits.context_window, 1_000_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+    let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().values,
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        default_reasoning_for_model(&model),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)
+    );
+    assert!(!reasoning.supports(&ReasoningConfig::Off));
+    let price = model.spec.pricing.as_ref().unwrap();
+    assert_eq!(price.input, TokenRate(4_000_000));
+    assert_eq!(price.output, TokenRate(20_000_000));
+    assert_eq!(price.cache_read, TokenRate(200_000));
+    assert_eq!(price.cache_write_5m, TokenRate(5_000_000));
+    assert_eq!(price.cache_write_1h, Some(TokenRate(8_000_000)));
+    assert!(current_direct_model_pricing("opencode", "claude-opus-5-5").is_none());
+    assert!(current_direct_model_pricing("github-copilot", "claude-opus-5-5").is_none());
+
+    // The native provider's sparse inventory retains the same model contract;
+    // an explicit negative assertion never gets overwritten by the fallback.
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == "anthropic")
+        .expect("Anthropic declaration");
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_anthropic_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"claude-opus-5-5"}]}),
+    )
+    .unwrap();
+    let discovered = catalog
+        .resolve(&ModelId("anthropic/claude-opus-5-5".into()))
+        .unwrap();
+    assert_eq!(discovered.spec.limits, model.spec.limits);
+    assert_eq!(discovered.spec.pricing, model.spec.pricing);
+    assert_eq!(
+        default_reasoning_for_model(&discovered),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)
+    );
+    let mut asserted = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_anthropic_compatible_models_from_response(
+        &mut asserted,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"claude-opus-5-5","reasoning":false,
+            "context_window":16_384,"max_output_tokens":4_096,"input_modalities":["text"]}]}),
+    )
+    .unwrap();
+    let asserted = asserted
+        .resolve(&ModelId("anthropic/claude-opus-5-5".into()))
+        .unwrap();
+    assert!(asserted.spec.capabilities.reasoning.is_none());
+    assert_eq!(asserted.spec.limits.context_window, 16_384);
+    assert!(!asserted
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+}
+
+#[test]
+fn direct_grok_4_7_uses_its_own_inventory_route_and_long_context_tariff() {
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == "xai")
+        .expect("xAI declaration");
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[
+            {"id":"grok-4.7","tools":true},
+            {"id":"grok-4.7-unverified"}
+        ]}),
+    )
+    .unwrap();
+    let model = catalog.resolve(&ModelId("xai/grok-4.7".into())).unwrap();
+    assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+    assert_eq!(model.spec.limits.context_window, 500_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 500_000); // refreshed xAI snapshot limit
+    assert!(model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    assert!(model.spec.capabilities.tools);
+    let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().values,
+        ["low", "medium", "high", "xhigh"]
+    );
+    assert_eq!(
+        default_reasoning_for_model(&model),
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+    );
+    assert!(!reasoning.supports(&ReasoningConfig::Off));
+    let price = model.spec.pricing.as_ref().unwrap();
+    assert_eq!(price.input, TokenRate(2_000_000));
+    assert_eq!(price.output, TokenRate(6_000_000));
+    assert_eq!(price.cache_read, TokenRate(500_000));
+    assert_eq!(price.tiers.len(), 1);
+    assert_eq!(price.tiers[0].min_input_tokens, 200_000);
+    assert_eq!(price.tiers[0].input, Some(TokenRate(4_000_000)));
+    assert_eq!(price.tiers[0].output, Some(TokenRate(12_000_000)));
+    assert_eq!(price.tiers[0].cache_read, Some(TokenRate(1_000_000)));
+    assert!(current_direct_model_pricing("opencode", "grok-4.7").is_none());
+    assert!(current_direct_model_pricing("github-copilot", "grok-4.7").is_none());
+    let unverified = catalog
+        .resolve(&ModelId("xai/grok-4.7-unverified".into()))
+        .unwrap();
+    assert_eq!(unverified.spec.limits.context_window, 128_000);
+    assert!(unverified.spec.capabilities.reasoning.is_none());
+    assert!(unverified.spec.pricing.is_none());
+
+    let mut asserted = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openai_compatible_models_from_response(
+        &mut asserted,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"grok-4.7","reasoning":false,
+            "context_window":65_536,"max_output_tokens":4_096,
+            "input_modalities":["text"],"tools":false}]}),
+    )
+    .unwrap();
+    let asserted = asserted.resolve(&ModelId("xai/grok-4.7".into())).unwrap();
+    assert_eq!(asserted.spec.limits.context_window, 65_536);
+    assert_eq!(asserted.spec.limits.max_output_tokens, 4_096);
+    assert!(!asserted
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    assert!(!asserted.spec.capabilities.tools);
+    assert!(asserted.spec.capabilities.reasoning.is_none());
+}
+
+#[test]
+fn pinned_metadata_display_merge_never_imports_functional_fields() {
+    let snapshot = serde_json::json!({
+        "name":"Snapshot label", "limit":{"context":1_000_000,"output":384_000},
+        "modalities":{"input":["text","image"]}, "tool_call":true,
+        "structured_output":true, "reasoning":true,
+        "reasoning_options":{"values":["low","max"],"default":"max"},
+        "interleaved":{"field":"reasoning_content"}
+    });
+    let sparse = serde_json::json!({"id":"fixture"});
+    assert_eq!(
+        builtin_display_entry(&sparse, &snapshot),
+        serde_json::json!({"id":"fixture","display_name":"Snapshot label"})
+    );
+    for assertion in [
+        serde_json::json!("Endpoint label"),
+        serde_json::Value::Null,
+        serde_json::json!(false),
+        serde_json::json!({"malformed":true}),
+    ] {
+        for entry in [
+            serde_json::json!({"id":"fixture","display_name":assertion}),
+            serde_json::json!({"id":"fixture","provider":{"name":assertion}}),
+            serde_json::json!({"id":"fixture","top_provider":{"name":assertion}}),
+            serde_json::json!({"id":"fixture","capabilities":{"name":assertion}}),
+        ] {
+            assert_eq!(builtin_display_entry(&entry, &snapshot), entry);
+        }
+    }
+}
+
+/// A vision model whose live inventory omits modality fields must still accept
+/// images when the pinned models.dev snapshot it is keyed to asserts image input.
+/// The endpoint stays authoritative: an explicit live assertion (including an
+/// explicit text-only list) always wins, and an id heuristic is never consulted
+/// once any modality is asserted.
+#[test]
+fn sparse_inventory_inherits_pinned_image_input_without_overriding_endpoint_assertions() {
+    let declaration = &crate::providers::DEEPSEEK;
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_deepseek_models_from_response(
+        &mut catalog,
+        declaration,
+        &serde_json::json!({"data":[
+            {"id":"deepseek-flash"},
+            {"id":"deepseek-v4-pro"},
+            {"id":"deepseek-v4-flash-vision-exp"},
+            {"id":"deepseek-text-only-fixture","input_modalities":["text"]},
+            {"id":"deepseek-unpinned-fixture"}
+        ]}),
+    )
+    .unwrap();
+    let vision = catalog
+        .resolve(&ModelId("deepseek/deepseek-flash".into()))
+        .unwrap();
+    assert!(
+        vision
+            .spec
+            .capabilities
+            .input_modalities
+            .contains(octet_ai::Modality::Image),
+        "the pinned snapshot asserts text+image for DeepSeek V4.1 Flash"
+    );
+    // The pinned snapshot is text-only for V4 Pro, so the fix must not grant
+    // image input by id, provider or family heuristic.
+    let text_only = catalog
+        .resolve(&ModelId("deepseek/deepseek-v4-pro".into()))
+        .unwrap();
+    assert!(
+        !text_only
+            .spec
+            .capabilities
+            .input_modalities
+            .contains(octet_ai::Modality::Image),
+        "the snapshot declares text-only input for DeepSeek V4 Pro"
+    );
+    // A model whose own id says "vision" and which the snapshot also lists as
+    // multimodal still resolves to image input.
+    let declared_vision = catalog
+        .resolve(&ModelId("deepseek/deepseek-v4-flash-vision-exp".into()))
+        .unwrap();
+    assert!(declared_vision
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    // An endpoint that asserts a text-only inventory keeps that decision.
+    let endpoint_authority = catalog
+        .resolve(&ModelId("deepseek/deepseek-text-only-fixture".into()))
+        .unwrap();
+    assert!(!endpoint_authority
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    // No pinned snapshot entry means no invented capability.
+    let unpinned = catalog
+        .resolve(&ModelId("deepseek/deepseek-unpinned-fixture".into()))
+        .unwrap();
+    assert!(!unpinned
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+}
+
+/// Regression: a model released after this binary was built must still get its
+/// thinking levels from the provider's own inventory. OpenRouter advertises its
+/// reasoning primitive through `supported_parameters`; treating that list as an
+/// undecodable assertion left every new model (for example `stealth/union-alpha`)
+/// with thinking permanently Off until the pinned snapshot was refreshed and the
+/// binary rebuilt.
+#[test]
+fn newly_discovered_openrouter_model_decodes_its_advertised_reasoning_parameters() {
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == "openrouter")
+        .unwrap();
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openrouter_models_from_response(
+        &mut catalog,
+        declaration,
+        &serde_json::json!({"data":[
+            {"id":"stealth/union-alpha","supported_parameters":["tools","reasoning"],
+             "context_length":128_000,"max_completion_tokens":8_192},
+            {"id":"vendor/text-only","supported_parameters":["tools"],
+             "context_length":64_000,"max_completion_tokens":4_096},
+            {"id":"vendor/explicit-off","supported_parameters":["reasoning"],
+             "reasoning":false,"context_length":64_000,"max_completion_tokens":4_096}
+        ]}),
+    )
+    .unwrap();
+    let advertised = catalog
+        .resolve(&ModelId("openrouter/stealth/union-alpha".into()))
+        .unwrap();
+    let capability = advertised
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .unwrap_or_else(|| panic!("an advertised reasoning parameter must grant thinking levels"));
+    assert_eq!(
+        capability.openai_chat_mode,
+        OpenAiChatReasoningMode::OpenRouter
+    );
+    assert_eq!(capability.choices(), vec![ReasoningConfig::On]);
+    assert_eq!(capability.control, ReasoningControl::AlwaysOn);
+    assert_eq!(
+        octet_ai::select_auxiliary_reasoning(&advertised).unwrap(),
+        ReasoningConfig::On
+    );
+    // A model that does not advertise reasoning stays without it.
+    let text_only = catalog
+        .resolve(&ModelId("openrouter/vendor/text-only".into()))
+        .unwrap();
+    assert!(text_only.spec.capabilities.reasoning.is_none());
+    // An explicit negative assertion still wins over the parameter list.
+    let explicit_off = catalog
+        .resolve(&ModelId("openrouter/vendor/explicit-off".into()))
+        .unwrap();
+    assert!(explicit_off.spec.capabilities.reasoning.is_none());
+}
+
+#[test]
+fn openrouter_saved_off_emits_diagnostics_during_build_and_session_rebuild() {
+    const CHILD: &str = "OCTET_TEST_OPENROUTER_REASONING_DIAGNOSTIC";
+    if std::env::var_os(CHILD).is_none() {
+        // Exercise the real stderr route without replacing a process-global
+        // descriptor underneath concurrently running unit tests.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "app::bootstrap::tests::openrouter_saved_off_emits_diagnostics_during_build_and_session_rebuild",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(
+            stderr
+                .matches("cannot honor reasoning=off; using advertised reasoning=max")
+                .count(),
+            2,
+            "{stderr}"
+        );
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut boot = bootstrap(config(directory.path(), Some("gpt-4o-mini"))).unwrap();
+    let declaration = &crate::providers::OPENROUTER;
+    boot.catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openrouter_models_from_response(&mut boot.catalog, declaration, &serde_json::json!({"data":[{
+        "id":"fixture/mandatory", "context_length":1310720, "max_completion_tokens":16384,
+        "reasoning":{"mandatory":true,"default_enabled":true,"supported_efforts":["max","high","low"],"default_effort":"max"}
+    }]})).unwrap();
+    let model = ModelId("openrouter/fixture/mandatory".into());
+    let saved_path = directory.path().join("saved-off.jsonl");
+    let mut saved = Session::create(&saved_path).unwrap();
+    append_config_if_changed(
+        &mut saved,
+        &model,
+        &ReasoningConfig::Off,
+        ReasoningMode::Standard,
+    )
+    .unwrap();
+    drop(saved);
+    let app = build_app(
+        boot,
+        LaunchSelection {
+            model: model.clone(),
+            session: SessionSelection::CreateNew(directory.path().join("initial-off.jsonl")),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: ReasoningMode::Standard,
+        },
+        "system".into(),
+    )
+    .unwrap();
+    let expected = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max);
+    assert_eq!(app.reasoning, expected);
+    let app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::OpenExisting(saved_path)),
+    )
+    .unwrap();
+    assert_eq!(app.reasoning, expected);
+    assert_eq!(
+        persisted_session_config(app.agent.session())
+            .unwrap()
+            .reasoning,
+        Some(expected)
+    );
+}
+
+#[test]
+fn openrouter_mandatory_reasoning_drives_picker_resume_and_summary_selection() {
+    use octet_ai::ReasoningEffort;
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "openrouter")
+        .unwrap();
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openrouter_models_from_response(
+        &mut catalog,
+        declaration,
+        &serde_json::json!({"data":[{
+            "id":"z-ai/glm-5.3-flash", "context_length":1_310_720,
+            "top_provider":{"context_length":1_048_576,"max_completion_tokens":943_718},
+            "supported_parameters":["tools","reasoning","reasoning_effort"],
+            "reasoning":{"mandatory":true,"default_enabled":true,
+                         "supported_efforts":["max","high","low"],"default_effort":"max"}
+        }]}),
+    )
+    .unwrap();
+    let model = catalog
+        .resolve(&ModelId("openrouter/z-ai/glm-5.3-flash".into()))
+        .unwrap();
+    let capability = model.spec.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        capability.options.as_ref().unwrap().values,
+        ["max", "high", "low"]
+    );
+    assert_eq!(
+        capability.options.as_ref().unwrap().default.as_deref(),
+        Some("max")
+    );
+    assert!(!capability.supports(&ReasoningConfig::Off));
+    assert!(!capability.supports(&ReasoningConfig::Effort(ReasoningEffort::Medium)));
+    let expected = ReasoningConfig::Effort(ReasoningEffort::Max);
+    assert_eq!(
+        octet_ai::select_auxiliary_reasoning(&model).unwrap(),
+        expected
+    );
+    let (selected, _, warning) = normalize_reasoning_selection_for_model_with_subagents(
+        &ReasoningConfig::Off,
+        ReasoningMode::Standard,
+        &model,
+        false,
+    )
+    .unwrap();
+    assert_eq!(selected, expected);
+    assert!(warning.unwrap().contains("cannot honor reasoning=off"));
+
+    // A million-token route is not automatically restricted to a 128K working set.
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path(), None);
+    assert_eq!(
+        effective_compaction_threshold_fraction(&config, &model),
+        1.0
+    );
+    config.compaction.max_active_tokens = Some(120_000);
+    assert_eq!(
+        effective_compaction_threshold_fraction(&config, &model),
+        120_000.0 / 1_310_720.0
+    );
+    config.compaction.max_active_tokens = Some(0);
+    assert_eq!(
+        effective_compaction_threshold_fraction(&config, &model),
+        1.0
+    );
+}
+
+#[test]
+fn openrouter_reasoning_optional_toggle_and_malformed_contracts() {
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "openrouter")
+        .unwrap();
+    let decode = |reasoning| {
+        builtin_discovery_reasoning(
+            &serde_json::json!({
+                "reasoning": reasoning, "supported_parameters":["reasoning_effort"]
+            }),
+            Some(declaration),
+        )
+    };
+    let mandatory = decode(serde_json::json!({"mandatory":true})).unwrap();
+    let capability =
+        discovered_reasoning_capability(declaration, Protocol::OpenAiChat, "fixture", &mandatory)
+            .unwrap();
+    assert_eq!(capability.control, ReasoningControl::AlwaysOn);
+    assert_eq!(capability.choices(), vec![ReasoningConfig::On]);
+    let optional = decode(serde_json::json!({"mandatory":false,"default_enabled":false})).unwrap();
+    assert_eq!(optional.control, Some(ReasoningControl::Toggle));
+    assert_eq!(optional.options.unwrap().default.as_deref(), Some("false"));
+    let optional = decode(
+        serde_json::json!({"mandatory":false,"default_enabled":false,
+        "supported_efforts":["high","low"],"default_effort":"high"}),
+    )
+    .unwrap();
+    let options = optional.options.unwrap();
+    assert_eq!(options.default.as_deref(), Some("false"));
+    assert!(options.choices().contains(&ReasoningConfig::Off));
+    let optional = decode(serde_json::json!({"mandatory":false,"supported_efforts":["none","high"],"default_effort":"none"})).unwrap();
+    assert_eq!(optional.options.unwrap().values, ["none", "high"]);
+    let optional = decode(serde_json::json!({"mandatory":false,"default_enabled":true,
+        "supported_efforts":["high","medium","low","none"],"default_effort":"none"}))
+    .unwrap();
+    assert_eq!(optional.options.unwrap().default.as_deref(), Some("none"));
+    for invalid in [
+        serde_json::json!({"mandatory":"true"}),
+        serde_json::json!({"mandatory":true,"default_enabled":false}),
+        serde_json::json!({"mandatory":true,"supported_efforts":["none","high"]}),
+        serde_json::json!({"mandatory":true,"supported_efforts":["low"],"default_effort":"max"}),
+        serde_json::json!({"mandatory":true,"supported_efforts":[]}),
+        serde_json::json!({"mandatory":true,"default_effort":"max"}),
+        serde_json::json!({"mandatory":false,"default_enabled":"false"}),
+        serde_json::json!({"mandatory":false,"supported_efforts":["high","high"]}),
+        serde_json::json!({"mandatory":false,"supported_efforts":["on"]}),
+    ] {
+        assert!(decode(invalid.clone()).is_err(), "accepted {invalid}");
+    }
+    // A negative assertion still wins, even against the native object.
+    let disabled = builtin_discovery_reasoning(
+        &serde_json::json!({
+            "reasoning":{"mandatory":true}, "supports_reasoning":false,
+            "supported_parameters":["reasoning_effort"]
+        }),
+        Some(declaration),
+    )
+    .unwrap();
+    assert_eq!(disabled.supported, Some(false));
+}
+
+#[tokio::test]
+async fn openrouter_discovery_to_summary_wire_uses_the_endpoint_contract() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"summary\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n",
+                "data: [DONE]\n\n"
+            )))
+        .expect(4)
+        .mount(&server).await;
+    let declaration = &crate::providers::OPENROUTER;
+    let mut catalog = metadata_fixture_catalog(declaration, &format!("{}/", server.uri()));
+    register_openrouter_models_from_response(&mut catalog, declaration, &serde_json::json!({"data":[
+        {"id":"fixture/mandatory","context_length":1_310_720,"max_completion_tokens":16384,
+         "supported_parameters":["reasoning","reasoning_effort"],
+         "reasoning":{"mandatory":true,"default_enabled":true,"supported_efforts":["max","high","low"],"default_effort":"max"}},
+        {"id":"fixture/toggle","context_length":64000,"max_completion_tokens":8192,
+         "reasoning":{"mandatory":false,"default_enabled":true}},
+        {"id":"fixture/parameter-only","context_length":64000,"max_completion_tokens":8192,
+         "supported_parameters":["reasoning_effort"]}
+    ]})).unwrap();
+    let client = AiClient::new();
+    for (id, selection) in [
+        ("mandatory", None),
+        ("toggle", Some(ReasoningConfig::On)),
+        ("toggle", Some(ReasoningConfig::Off)),
+        ("parameter-only", None),
+    ] {
+        let model = catalog
+            .resolve(&ModelId(format!("openrouter/fixture/{id}")))
+            .unwrap();
+        let reasoning =
+            selection.unwrap_or_else(|| octet_ai::select_auxiliary_reasoning(&model).unwrap());
+        client
+            .complete(
+                &model,
+                octet_ai::Request {
+                    system: Some("Summarize the conversation".into()),
+                    messages: vec![octet_ai::Message::User(octet_ai::UserMessage {
+                        content: vec![octet_ai::UserPart::Text("history".into())],
+                    })],
+                    tools: vec![],
+                    tool_choice: octet_ai::ToolChoice::Auto,
+                    max_output_tokens: Some(1024),
+                    temperature: None,
+                    stop: vec![],
+                    reasoning,
+                    reasoning_mode: ReasoningMode::Standard,
+                    responses: None,
+                    output_format: octet_ai::OutputFormat::Text,
+                    output_modalities: octet_ai::OutputModalities::Text,
+                    compatibility: octet_ai::CompatibilityMode::Strict,
+                    cache_retention: octet_ai::CacheRetention::Short,
+                    session_id: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let requests = server.received_requests().await.unwrap();
+    let bodies = requests
+        .iter()
+        .map(|request| serde_json::from_slice::<serde_json::Value>(&request.body).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(bodies[0]["reasoning"], serde_json::json!({"effort":"max"}));
+    assert_eq!(bodies[1]["reasoning"], serde_json::json!({"enabled":true}));
+    assert!(bodies[2].get("reasoning").is_none());
+    assert!(bodies[3].get("reasoning").is_none());
+    assert!(bodies
+        .iter()
+        .all(|body| body.get("reasoning_effort").is_none()));
+}
+
+#[test]
+fn pinned_metadata_enriches_discovered_display_only() {
     let declaration = &crate::providers::DEEPSEEK;
     let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
     register_deepseek_models_from_response(
@@ -3865,10 +5497,18 @@ fn pinned_metadata_enriches_only_discovered_deepseek_flash() {
         model.spec.display_name.as_deref(),
         Some("DeepSeek V4.1 Flash")
     );
+    // A sparse endpoint publishes no limits, so the pinned provider record
+    // supplies its documented window (DeepSeek V4.1 Flash is 1M context /
+    // 393,216 output) instead of the generic 128K/64K placeholder that used to
+    // truncate this model. The endpoint still wins whenever it says anything.
     assert_eq!(model.spec.limits.context_window, 1_000_000);
-    assert_eq!(model.spec.limits.max_output_tokens, 384_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 393_216);
+    // The existing sparse tools default is independent of the supplement, and
+    // every pinned field except the asserted input modalities and a documented
+    // limit the endpoint refused to publish stays out of the authority boundary
+    // (see the sibling image-input regression).
     assert!(model.spec.capabilities.tools);
-    assert!(model.spec.capabilities.structured_output);
+    assert!(!model.spec.capabilities.structured_output);
     assert!(model
         .spec
         .capabilities
@@ -3892,6 +5532,48 @@ fn pinned_metadata_enriches_only_discovered_deepseek_flash() {
     // A flat models.dev quote is not the official peak/off-peak tariff.
     assert!(model.spec.pricing.is_none());
     assert!(crate::providers::pricing_for(declaration, "deepseek-v4-pro").is_none());
+
+    // The same model may advertise richer functionality, without borrowing any
+    // missing field or extra reasoning choice from its pinned snapshot.
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_deepseek_models_from_response(
+        &mut catalog,
+        declaration,
+        &serde_json::json!({"data":[{
+            "id":"deepseek-flash", "name":"Endpoint Flash",
+            "context_window":96_000, "max_output_tokens":8192,
+            "tools":true, "structured_output":true, "input_modalities":["text","image"],
+            "reasoning":{"supported":true,"values":["low","high"],"default":"high"}
+        }]}),
+    )
+    .unwrap();
+    let model = catalog
+        .resolve(&ModelId("deepseek/deepseek-flash".into()))
+        .unwrap();
+    assert_eq!(model.spec.display_name.as_deref(), Some("Endpoint Flash"));
+    // Explicit endpoint limits are never replaced by the pinned record.
+    assert_eq!(model.spec.limits.context_window, 96_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 8192);
+    assert!(model.spec.capabilities.tools);
+    assert!(model.spec.capabilities.structured_output);
+    assert!(model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(reasoning.options.as_ref().unwrap().values, ["low", "high"]);
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().default.as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        reasoning.openai_chat_mode,
+        OpenAiChatReasoningMode::DeepSeekThinking
+    );
+    assert!(reasoning.preserves_state);
+    assert!(!reasoning.supports(&ReasoningConfig::Off));
+    assert!(!reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)));
 }
 
 #[test]
@@ -3941,7 +5623,12 @@ fn pinned_metadata_preserves_endpoint_assertions_and_unknowns() {
             &model.reasoning_metadata
         )
         .is_none());
+        // Limits are independent of the reasoning assertion: the endpoint
+        // publishes none, so the documented window applies and reasoning still
+        // refuses to be invented from the snapshot.
         assert_eq!(model.context_window, Some(1_000_000));
+        assert_eq!(model.max_output_tokens, Some(393_216));
+        assert_eq!(deepseek_discovered_limits(&model), (1_000_000, 393_216));
     }
     for reasoning in [
         serde_json::json!("yes"),
@@ -3989,13 +5676,31 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
         assert_eq!(model.display_name, None);
         assert!(model.reasoning_metadata.options.is_none());
     }
-    let source =
-        octet_ai::model_metadata::model_capability_metadata("deepseek", "deepseek-flash").unwrap();
-    assert!(snapshot_reasoning_metadata(
-        &crate::providers::DEEPSEEK,
+    let declaration = &crate::providers::DEEPSEEK;
+    let model = api_models_from_response_for(&body, Some(declaration))
+        .unwrap()
+        .remove(0);
+    assert_eq!(model.display_name.as_deref(), Some("DeepSeek V4.1 Flash"));
+    let reasoning = discovered_reasoning_capability(
+        declaration,
+        Protocol::OpenAiChat,
+        &model.id,
+        &model.reasoning_metadata,
+    )
+    .unwrap();
+    assert_eq!(
+        reasoning.openai_chat_mode,
+        OpenAiChatReasoningMode::DeepSeekThinking
+    );
+    assert_eq!(
+        reasoning.options.as_ref().unwrap().values,
+        ["none", "low", "high", "max"]
+    );
+    assert!(discovered_reasoning_capability(
+        declaration,
         Protocol::OpenAiResponses,
-        "deepseek-flash",
-        &source
+        &model.id,
+        &model.reasoning_metadata,
     )
     .is_none());
     let declaration = BUILTIN_PROVIDER_DECLARATIONS
@@ -4008,9 +5713,14 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
     )
     .unwrap()
     .remove(0);
-    assert_eq!(model.context_window, Some(65_536));
-    assert_eq!(model.max_output_tokens, Some(32_768));
+    // The scoped snapshot names Cerebras' inventory row and, because the
+    // endpoint publishes no limit at all, supplies that row's documented
+    // window. Reasoning still comes only from the source contract.
+    assert_eq!(model.context_window, Some(131_072));
+    assert_eq!(model.max_output_tokens, Some(40_960));
     assert_eq!(model.display_name.as_deref(), Some("Qwen3.8 27B"));
+    assert_eq!(model.reasoning_metadata.supported, None);
+    assert!(model.reasoning_metadata.options.is_none());
     let reasoning = discovered_reasoning_capability(
         declaration,
         Protocol::OpenAiChat,
@@ -4030,46 +5740,77 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
         reasoning.options.as_ref().unwrap().default.as_deref(),
         Some("high")
     );
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"qwen-3.8-27b"}]}),
+    )
+    .unwrap();
+    let registered = catalog
+        .resolve(&ModelId("cerebras/qwen-3.8-27b".into()))
+        .unwrap();
+    // Registration uses this model's documented row (128K context / 40K
+    // output) instead of the generic 128K/64K placeholder, because the endpoint
+    // publishes no limit for it.
+    assert_eq!(registered.spec.limits.context_window, 131_072);
+    assert_eq!(registered.spec.limits.max_output_tokens, 40_960);
+    assert_eq!(
+        registered.spec.capabilities.reasoning.as_ref(),
+        Some(&reasoning)
+    );
     // An effort array in an external catalog is not a universal wire contract.
     let groq = BUILTIN_PROVIDER_DECLARATIONS
         .iter()
         .find(|d| d.id == "groq")
         .unwrap();
-    assert!(
-        snapshot_reasoning_metadata(groq, Protocol::OpenAiChat, "unverified-route", &source)
-            .is_none()
-    );
+    let model = api_models_from_response_for(&body, Some(groq))
+        .unwrap()
+        .remove(0);
+    assert!(discovered_reasoning_capability(
+        groq,
+        Protocol::OpenAiChat,
+        &model.id,
+        &model.reasoning_metadata,
+    )
+    .is_none());
 }
 
 #[test]
-fn pinned_metadata_openrouter_enriches_missing_but_not_invalid_limits_or_prices() {
+fn pinned_metadata_openrouter_uses_endpoint_limits_and_fails_closed_for_invalid_prices() {
     let declaration = openrouter_declaration();
     let parse =
         |entry| openrouter_models_from_response(declaration, &serde_json::json!({"data":[entry]}));
-    let model = parse(serde_json::json!({"id":"deepseek/deepseek-v4-pro"}))
-        .unwrap()
-        .remove(0);
-    assert_eq!(model.limits.context_window, 1_048_576);
-    assert_eq!(
-        model
-            .capabilities
-            .reasoning
-            .as_ref()
-            .unwrap()
-            .openai_chat_mode,
-        OpenAiChatReasoningMode::OpenRouter
-    );
+    let model = parse(serde_json::json!({
+        "id":"deepseek/deepseek-v4-pro",
+        "top_provider":{"max_completion_tokens":65536}
+    }))
+    .unwrap()
+    .remove(0);
+    assert_eq!(model.limits.context_window, 131_072);
+    assert_eq!(model.limits.max_output_tokens, 65_536);
+    assert!(model.capabilities.reasoning.is_none());
     assert!(model.pricing.is_some());
     for value in [
         serde_json::Value::Null,
         serde_json::json!({"prompt":"unknown","completion":"0.5"}),
     ] {
-        let model = parse(serde_json::json!({"id":"deepseek/deepseek-v4-pro", "pricing":value}))
-            .unwrap()
-            .remove(0);
+        let model = parse(serde_json::json!({
+            "id":"deepseek/deepseek-v4-pro",
+            "top_provider":{"max_completion_tokens":65536},
+            "pricing":value
+        }))
+        .unwrap()
+        .remove(0);
         assert!(model.pricing.is_none());
     }
-    assert!(parse(serde_json::json!({"id":"deepseek/deepseek-v4-pro", "top_provider":{"max_completion_tokens":null}})).unwrap().is_empty());
+    assert!(parse(serde_json::json!({
+        "id":"deepseek/deepseek-v4-pro",
+        "top_provider":{"max_completion_tokens":null}
+    }))
+    .unwrap()
+    .is_empty());
 }
 
 #[tokio::test]
@@ -4111,6 +5852,8 @@ async fn pinned_metadata_deepseek_flash_exact_wire_controls_and_required_replay(
             content: vec![UserPart::Text("Look up".into())],
         })],
         tools: vec![ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "lookup".into(),
             description: "lookup".into(),
             parameters: serde_json::json!({"type":"object"}),
@@ -4197,10 +5940,50 @@ async fn pinned_metadata_deepseek_flash_exact_wire_controls_and_required_replay(
 
 #[test]
 fn pinned_metadata_partial_limit_leaves_are_independent() {
-    for limit in [
-        serde_json::json!({"context":1_000_000}),
-        serde_json::json!({"output":384_000}),
-        serde_json::json!({}),
+    for (limit, discovered, effective) in [
+        (
+            serde_json::json!({"context":1_000_000}),
+            (Some(1_000_000), None),
+            (1_000_000, 64_000),
+        ),
+        (
+            serde_json::json!({"output":384_000}),
+            (None, Some(384_000)),
+            (128_000, 128_000),
+        ),
+        (
+            serde_json::json!({"context":96_000,"output":8192}),
+            (Some(96_000), Some(8192)),
+            (96_000, 8192),
+        ),
+        (serde_json::json!({}), (None, None), (128_000, 64_000)),
+        (
+            serde_json::json!({"context":null}),
+            (None, None),
+            (128_000, 64_000),
+        ),
+        (
+            serde_json::json!({"output":null}),
+            (None, None),
+            (128_000, 64_000),
+        ),
+        (
+            serde_json::json!({"context":64_000,"output":null}),
+            (Some(64_000), None),
+            (64_000, 64_000),
+        ),
+        (
+            serde_json::json!({"context":null,"output":2048}),
+            (None, Some(2048)),
+            (128_000, 2048),
+        ),
+        (serde_json::Value::Null, (None, None), (128_000, 64_000)),
+        (
+            serde_json::json!("malformed"),
+            (None, None),
+            (128_000, 64_000),
+        ),
+        (serde_json::json!(false), (None, None), (128_000, 64_000)),
     ] {
         let model = api_models_from_response_for(
             &serde_json::json!({"data":[{"id":"deepseek-flash", "limit":limit}]}),
@@ -4208,30 +5991,12 @@ fn pinned_metadata_partial_limit_leaves_are_independent() {
         )
         .unwrap()
         .remove(0);
-        assert_eq!(deepseek_discovered_limits(&model), (1_000_000, 384_000));
+        // Only the asserted leaf is decoded; the snapshot supplies neither.
+        assert_eq!((model.context_window, model.max_output_tokens), discovered);
+        // Registration independently applies existing defaults and the context
+        // clamp, not the snapshot's 1M / 384K limits.
+        assert_eq!(deepseek_discovered_limits(&model), effective);
     }
-    for limit in [serde_json::Value::Null, serde_json::json!("malformed")] {
-        let model = api_models_from_response_for(
-            &serde_json::json!({"data":[{"id":"deepseek-flash", "limit":limit}]}),
-            Some(&crate::providers::DEEPSEEK),
-        )
-        .unwrap()
-        .remove(0);
-        assert_eq!(
-            (model.context_window, model.max_output_tokens),
-            (None, None)
-        );
-    }
-    let model = api_models_from_response_for(
-        &serde_json::json!({"data":[{"id":"deepseek-flash", "limit":{"context":null}}]}),
-        Some(&crate::providers::DEEPSEEK),
-    )
-    .unwrap()
-    .remove(0);
-    assert_eq!(
-        (model.context_window, model.max_output_tokens),
-        (None, Some(384_000))
-    );
 }
 
 #[test]
@@ -4257,15 +6022,42 @@ fn pinned_metadata_production_deepseek_alias_follows_admitted_inventory_and_conf
         .unwrap();
         let legacy = catalog.resolve(&ModelId(DEEPSEEK_MODEL_ID.into())).unwrap();
         assert_eq!(legacy.spec.api_name, api_name);
-        assert_eq!(legacy.spec.limits.context_window, 1_000_000);
-        assert_eq!(legacy.spec.limits.max_output_tokens, 384_000);
+        // Legacy V4 and the current Flash alias have different source defaults
+        // and controls; matching display names must not conflate their contracts.
+        // Both aliases now carry the refreshed pinned 1M/393,216 limits
+        // because the endpoint publishes none; their reasoning contracts still
+        // differ and must not be conflated.
+        let (context, output, values, default) = if api_name == "deepseek-flash" {
+            (1_000_000, 393_216, vec!["none", "low", "high", "max"], None)
+        } else {
+            (
+                1_000_000,
+                393_216,
+                vec!["none", "high", "xhigh"],
+                Some("high"),
+            )
+        };
+        assert_eq!(legacy.spec.limits.context_window, context);
+        assert_eq!(legacy.spec.limits.max_output_tokens, output);
         let reasoning = legacy.spec.capabilities.reasoning.as_ref().unwrap();
         assert_eq!(
             reasoning.openai_chat_mode,
             OpenAiChatReasoningMode::DeepSeekThinking
         );
-        assert!(reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)));
-        assert!(!reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Xhigh)));
+        assert!(reasoning.preserves_state);
+        assert_eq!(reasoning.options.as_ref().unwrap().values, values);
+        assert_eq!(
+            reasoning.options.as_ref().unwrap().default.as_deref(),
+            default
+        );
+        assert_eq!(
+            reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max)),
+            api_name == "deepseek-flash"
+        );
+        assert_eq!(
+            reasoning.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Xhigh)),
+            api_name != "deepseek-flash"
+        );
         if api_name == "deepseek-flash" {
             assert_eq!(
                 legacy.spec.display_name.as_deref(),
@@ -4485,6 +6277,97 @@ fn pinned_metadata_sparse_static_routes_keep_their_declared_wire_profiles() {
 }
 
 #[test]
+fn pinned_metadata_native_discovery_rejects_budgets_outside_output_limit() {
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "opencode")
+        .unwrap();
+    let api_name = "claude-sonnet-4-5";
+    let known = declaration
+        .static_reasoning_for(api_name, Protocol::AnthropicMessages)
+        .unwrap();
+    assert_eq!(known.effort_budgets.as_ref().unwrap().max, 32_768);
+    for messages in [false, true] {
+        let default_context = if messages { 200_000 } else { 128_000 };
+        // With no endpoint limit at all, the pinned row supplies this model's
+        // documented window (Claude Sonnet 4.5 is 1M context / 64K output).
+        let pinned_context = 1_000_000;
+        let pinned_output = 64_000;
+        for (context, output, effective_output, fits) in [
+            // The pinned output (64K) covers the declared 32K budget table.
+            (None, None, pinned_output, true),
+            (None, Some(32_768), 32_768, false),
+            (None, Some(32_769), 32_769, true),
+            (None, Some(2048), 2048, false),
+            (Some(8192), Some(64_000), 8192, false),
+            (Some(128_000), Some(64_000), 64_000, true),
+        ] {
+            let mut catalog = ModelCatalog::default();
+            for route in declaration.routes {
+                let id = EndpointId(route.endpoint_id.into());
+                if !catalog.has_endpoint(&id) {
+                    catalog
+                        .register_endpoint(Endpoint {
+                            id,
+                            base_url: url::Url::parse("https://fixture.invalid/").unwrap(),
+                            auth: Auth::None,
+                            default_headers: Default::default(),
+                            transport: route.transport,
+                            runtime: route.runtime,
+                            timeout: Duration::from_secs(5),
+                        })
+                        .unwrap();
+                }
+            }
+            let mut body = serde_json::json!({"data":[{"id":api_name,"reasoning":true}]});
+            if let Some(context) = context {
+                body["data"][0]["context_window"] = serde_json::json!(context);
+            }
+            if let Some(output) = output {
+                body["data"][0]["max_output_tokens"] = serde_json::json!(output);
+            }
+            if messages {
+                register_anthropic_compatible_models_from_response(
+                    &mut catalog,
+                    declaration,
+                    ModelFilter::All,
+                    &body,
+                )
+                .unwrap();
+            } else {
+                register_openai_compatible_models_from_response(
+                    &mut catalog,
+                    declaration,
+                    ModelFilter::All,
+                    &body,
+                )
+                .unwrap();
+            }
+            crate::providers::register_static_models(&mut catalog, declaration).unwrap();
+            let model = catalog
+                .resolve(&ModelId(format!("opencode/{api_name}")))
+                .unwrap();
+            assert_eq!(model.spec.protocol, Protocol::AnthropicMessages);
+            assert_eq!(
+                model.spec.limits.context_window,
+                context.unwrap_or(if output.is_none() {
+                    pinned_context
+                } else {
+                    default_context
+                })
+            );
+            assert_eq!(model.spec.limits.max_output_tokens, effective_output);
+            // Preserve the full declaration when it fits; otherwise retain the
+            // inventory row without raising limits or inventing a budget table.
+            assert_eq!(
+                model.spec.capabilities.reasoning.as_ref(),
+                fits.then_some(&known)
+            );
+        }
+    }
+}
+
+#[test]
 fn pinned_metadata_native_discovery_narrows_exact_choices_without_changing_codec() {
     let declaration = BUILTIN_PROVIDER_DECLARATIONS
         .iter()
@@ -4522,7 +6405,7 @@ fn pinned_metadata_native_discovery_narrows_exact_choices_without_changing_codec
                 &mut catalog,
                 declaration,
                 ModelFilter::All,
-                &serde_json::json!({"data":[{"id":api_name,
+                &serde_json::json!({"data":[{"id":api_name,"max_output_tokens":64_000,
                     "reasoning":{"supported":true,"values":values,"default":default}}]}),
             )
             .unwrap();
@@ -4531,6 +6414,8 @@ fn pinned_metadata_native_discovery_narrows_exact_choices_without_changing_codec
                 .resolve(&ModelId(format!("opencode/{api_name}")))
                 .unwrap();
             assert_eq!(model.spec.protocol, Protocol::AnthropicMessages);
+            assert_eq!(model.spec.limits.context_window, 128_000);
+            assert_eq!(model.spec.limits.max_output_tokens, 64_000);
             let known = declaration.static_reasoning_for(api_name, Protocol::AnthropicMessages);
             if let Some(mut expected) = known.filter(|_| expected) {
                 expected.options = Some(octet_ai::types::ReasoningOptions {
@@ -4561,4 +6446,871 @@ fn pinned_metadata_native_discovery_narrows_exact_choices_without_changing_codec
             }
         }
     }
+}
+
+#[test]
+fn codex_context_tier_follows_the_plan_entitlement() {
+    use crate::auth::codex::ChatGptPlan;
+    for (plan, tier) in [
+        (Some(ChatGptPlan::Pro), CodexContextTier::Extended),
+        (Some(ChatGptPlan::ProLite), CodexContextTier::Extended),
+        (Some(ChatGptPlan::Plus), CodexContextTier::Default),
+        (Some(ChatGptPlan::Free), CodexContextTier::Default),
+        (Some(ChatGptPlan::Team), CodexContextTier::Default),
+        (
+            Some(ChatGptPlan::Unknown("future-tier".into())),
+            CodexContextTier::Default,
+        ),
+        (None, CodexContextTier::Default),
+    ] {
+        assert_eq!(codex_context_tier(plan.as_ref()), tier, "{plan:?}");
+    }
+}
+
+pub(super) fn codex_discovered_model(
+    model_id: &str,
+    default_context_window: u64,
+    max_context_window: u64,
+    max_output_tokens: u64,
+) -> DiscoveredCodexModel {
+    DiscoveredCodexModel {
+        id: model_id.to_owned(),
+        display_name: None,
+        reasoning_options: codex_fallback_reasoning_options(model_id),
+        context_window: default_context_window,
+        default_context_window,
+        max_context_window,
+        max_output_tokens,
+        min_effort: codex_min_effort(model_id),
+        max_effort: codex_max_effort(model_id),
+        reasoning_effort_updates: false,
+        responses_lite: false,
+        agent_delegation: None,
+    }
+}
+
+#[test]
+fn codex_registration_keeps_the_deliberate_cap_and_reports_it_once() {
+    let astra = codex_discovered_model("gpt-6-astra", 872_000, 872_000, 128_000);
+    let mut reporter = CodexContextClampReporter::default();
+    let resolution = codex_context_resolve_for_registration(
+        &astra,
+        CodexContextTier::Extended,
+        CodexContextOverride::NONE,
+    );
+    assert_eq!(resolution.context_window, CODEX_CONTEXT_WINDOW_CAP);
+    assert_eq!(resolution.max_output_tokens, CODEX_MAX_OUTPUT_TOKENS);
+    assert!(!resolution.override_applied);
+    // The deliberate cap keeps accounting on the standard published tier; the
+    // clamp must still be visible rather than silent.
+    assert!(!resolution.has_uncertain_usage);
+    let clamp = resolution.clamp.clone().expect("astra is clamped");
+    assert_eq!(clamp.advertised_context_window, 872_000);
+    assert_eq!(clamp.effective_context_window, CODEX_CONTEXT_WINDOW_CAP);
+
+    // Report through the same boundary the registration loop uses.
+    assert_eq!(
+        reporter.observe(resolution.clamp.clone()),
+        Some(clamp.clone())
+    );
+    assert_eq!(reporter.observe(resolution.clamp.clone()), None);
+    assert_eq!(reporter.observe(None), None);
+    assert_eq!(reporter.observe(resolution.clamp), Some(clamp));
+}
+
+#[test]
+fn codex_registration_applies_only_an_acknowledged_entitled_override() {
+    let astra = codex_discovered_model("gpt-6-astra", 872_000, 872_000, 128_000);
+
+    // A Plus-style session cannot raise the window even when acknowledged.
+    let refused = codex_context_resolve_for_registration(
+        &astra,
+        CodexContextTier::Default,
+        CodexContextOverride::raising(500_000, true),
+    );
+    assert_eq!(refused.context_window, CODEX_CONTEXT_WINDOW_CAP);
+    assert!(!refused.override_applied);
+
+    // An unacknowledged Pro request is refused too.
+    let refused = codex_context_resolve_for_registration(
+        &astra,
+        CodexContextTier::Extended,
+        CodexContextOverride::raising(500_000, false),
+    );
+    assert_eq!(refused.context_window, CODEX_CONTEXT_WINDOW_CAP);
+    assert!(!refused.override_applied);
+
+    // Above entitlement is refused rather than silently clamped.
+    let refused = codex_context_resolve_for_registration(
+        &astra,
+        CodexContextTier::Extended,
+        CodexContextOverride::raising(872_001, true),
+    );
+    assert_eq!(refused.context_window, CODEX_CONTEXT_WINDOW_CAP);
+
+    // The acknowledged Pro request raises to the model's entitlement.
+    let raised = codex_context_resolve_for_registration(
+        &astra,
+        CodexContextTier::Extended,
+        CodexContextOverride::raising(872_000, true),
+    );
+    assert_eq!(raised.context_window, CODEX_ASTRA_MAX_CONTEXT_WINDOW);
+    assert!(raised.override_applied);
+    assert!(raised.clamp.is_none());
+    assert!(raised.has_uncertain_usage);
+    assert_eq!(
+        raised.uncertain_usage_operation(),
+        Some("codex-context-above-272k")
+    );
+    assert_eq!(raised.max_output_tokens, CODEX_MAX_OUTPUT_TOKENS);
+}
+
+#[test]
+fn codex_registration_names_above_tier_accounting_for_every_raised_route() {
+    // The recorded session note branches on `uncertain_usage_operation`, so this
+    // asserts the same trigger the registration loop uses. The documented 372K
+    // luna window is above the standard tier without any override, while the
+    // deliberate 272K cap owes no obligation.
+    let luna = codex_discovered_model(
+        "gpt-5.6-luna",
+        CODEX_5_6_CONTEXT_WINDOW,
+        CODEX_5_6_CONTEXT_WINDOW,
+        128_000,
+    );
+    let resolution = codex_context_resolve_for_registration(
+        &luna,
+        CodexContextTier::Default,
+        CodexContextOverride::NONE,
+    );
+    assert_eq!(resolution.context_window, CODEX_5_6_CONTEXT_WINDOW);
+    assert!(!resolution.override_applied, "luna needs no override");
+    assert!(
+        resolution.clamp.is_none(),
+        "372K luna is the documented window"
+    );
+    assert!(
+        resolution.has_uncertain_usage,
+        "above 272K the whole request is metered differently"
+    );
+    assert_eq!(
+        resolution.uncertain_usage_operation(),
+        Some("codex-context-above-272k")
+    );
+
+    let astra = codex_discovered_model("gpt-6-astra", 872_000, 872_000, 128_000);
+    let capped = codex_context_resolve_for_registration(
+        &astra,
+        CodexContextTier::Extended,
+        CodexContextOverride::NONE,
+    );
+    assert_eq!(capped.context_window, CODEX_CONTEXT_WINDOW_CAP);
+    assert_eq!(capped.uncertain_usage_operation(), None);
+    assert!(capped.clamp.is_some(), "the cap stays visible");
+
+    // An acknowledged raise turns the same route into an uncertain one.
+    let raised = codex_context_resolve_for_registration(
+        &astra,
+        CodexContextTier::Extended,
+        CodexContextOverride::raising(500_000, true),
+    );
+    assert_eq!(raised.context_window, 500_000);
+    assert_eq!(
+        raised.uncertain_usage_operation(),
+        Some("codex-context-above-272k")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Startup readiness (wiring12b, wave 11): a proven selection initializes only
+// its own route before the first turn; unrelated providers cannot delay it.
+// Every proof below is a consultation/request counter or a typed decision —
+// none of them depends on a wall-clock threshold.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn readiness_plan_narrows_only_a_proven_route() {
+    let directory = tempfile::tempdir().unwrap();
+
+    // An explicit selection names its own builtin route.
+    let explicit = config(directory.path(), Some("codex/gpt-6-astra"));
+    assert_eq!(catalog_readiness(&explicit).route_ids(), vec!["codex"]);
+
+    // Un-namespaced ids may belong to any route (Codex's historical
+    // compatibility ids, a custom OpenAI-compatible registry, an extension
+    // provider) and must stay on the fleet plan; a real namespace that is not
+    // the selected one must not change that.
+    assert!(catalog_readiness(&config(directory.path(), Some("gpt-5.6-sol"))).is_fleet());
+    assert!(catalog_readiness(&config(directory.path(), Some("custom/probe"))).is_fleet());
+    assert!(catalog_readiness(&config(directory.path(), Some("acme-extension/worker"))).is_fleet());
+    assert_eq!(
+        catalog_readiness(&config(directory.path(), Some("deepseek/deepseek-v4-pro"))).route_ids(),
+        vec!["deepseek"]
+    );
+
+    // Model-less setup and the picker enumerate every provider.
+    assert!(catalog_readiness(&config(directory.path(), None)).is_fleet());
+
+    // A resumed session without an explicit selection may carry provenance only
+    // the session file knows, so readiness stays full. An explicit selection is
+    // authoritative over that provenance.
+    for resume in [
+        ResumeSelector::Resume(Some("session-a".into())),
+        ResumeSelector::Continue,
+        ResumeSelector::Fork(Some("session-a".into())),
+    ] {
+        let mut resumed = config(directory.path(), None);
+        resumed.resume = resume.clone();
+        assert!(
+            catalog_readiness(&resumed).is_fleet(),
+            "restored provenance {resume:?} must keep the fleet plan"
+        );
+
+        let mut overridden = config(directory.path(), Some("codex/gpt-6-astra"));
+        overridden.resume = resume;
+        assert_eq!(
+            catalog_readiness(&overridden).route_ids(),
+            vec!["codex"],
+            "an explicit selection is authoritative over restored provenance"
+        );
+    }
+}
+
+#[test]
+fn readiness_plan_keeps_configured_compaction_routes() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let mut same_route = config(directory.path(), Some("codex/gpt-6-astra"));
+    same_route.compaction.compact_model = Some(ModelId("codex/gpt-5.6-sol".into()));
+    assert_eq!(catalog_readiness(&same_route).route_ids(), vec!["codex"]);
+
+    let mut other_route = config(directory.path(), Some("codex/gpt-6-astra"));
+    other_route.compaction.compact_model = Some(ModelId("deepseek/deepseek-v4-pro".into()));
+    assert_eq!(
+        catalog_readiness(&other_route).route_ids(),
+        vec!["codex", "deepseek"],
+        "the configured compaction route must exist before the first turn"
+    );
+
+    // An un-namespaced compaction id cannot be proven to be a builtin route, and
+    // `build_app` fails closed when it does not resolve: ambiguity stays fleet
+    // rather than silently dropping the route.
+    let mut unproven = config(directory.path(), Some("codex/gpt-6-astra"));
+    unproven.compaction.compact_model = Some(ModelId("cheap-compactor".into()));
+    assert!(catalog_readiness(&unproven).is_fleet());
+}
+
+/// `bedrock` is the reported startup blocker: its AWS credential chain (including
+/// EC2 instance metadata) is *always* treated as configured, so the fleet plan
+/// spawns and joins it on every launch. The declaration-consultation counter is
+/// the exact request count: a Codex route must not touch it at all.
+#[test]
+fn narrowed_readiness_never_consults_an_unrelated_provider() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = catalog_readiness(&config(directory.path(), Some("codex/gpt-6-astra")));
+    assert_eq!(plan.route_ids(), vec!["codex"]);
+    assert!(plan.includes(crate::providers::CODEX.id));
+    assert!(
+        !plan.includes("bedrock"),
+        "the AWS credential chain is not part of a Codex route"
+    );
+    assert!(
+        CatalogReadiness::Fleet.includes("bedrock"),
+        "the fleet plan still initializes the AWS route"
+    );
+
+    reset_readiness_declarations_consulted();
+    let (_catalog, _notes) = model_catalog_for_readiness(false, &plan).unwrap();
+    assert_eq!(
+        readiness_declarations_consulted(),
+        vec![crate::providers::CODEX.id],
+        "exactly the selected route may be consulted; an unrelated configured provider must not be"
+    );
+}
+
+/// A fresh, account- and plan-matched cache is already validated inside its
+/// freshness window: it must serve dynamic capability with zero discovery
+/// requests. The closure is the request counter.
+#[test]
+fn a_fresh_codex_cache_serves_dynamic_capabilities_without_a_discovery_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(&path);
+    let claims = crate::auth::codex::usable_subscription_claims(&store)
+        .unwrap()
+        .unwrap();
+    let cached = CodexDiscovery {
+        claims: claims.clone(),
+        models: codex_models_from_response(
+            &serde_json::json!({
+                "models": [{
+                    "slug": "cached-account-model",
+                    "context_window": 196_000,
+                    "max_output_tokens": 24_000,
+                    "use_responses_lite": true,
+                    "multi_agent_version": "v2",
+                    "supported_reasoning_levels": ["high", "ultra"]
+                }]
+            }),
+            claims.plan.as_ref(),
+        )
+        .unwrap(),
+    };
+    save_codex_model_cache(&store, &cached).unwrap();
+
+    let discovery_requests = std::cell::Cell::new(0_u32);
+    let (models, source) = codex_inventory_models(&store, &claims, false, false, |_store| {
+        discovery_requests.set(discovery_requests.get() + 1);
+        anyhow::bail!("a fresh account- and plan-matched cache must not trigger discovery")
+    });
+    assert_eq!(source, CodexInventorySource::FreshCache);
+    assert_eq!(discovery_requests.get(), 0, "zero inventory requests");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "cached-account-model");
+    assert_eq!(models[0].context_window, 196_000);
+    assert!(
+        models[0].responses_lite,
+        "a validated fresh cache keeps its dynamic capability"
+    );
+    assert_eq!(models[0].agent_delegation, Some(AgentDelegation::V2));
+}
+
+/// A cache that is stale, bound to another account, or structurally invalid must
+/// never be trusted. Discovery runs exactly once; when it also fails, the
+/// conservative fallback keeps the plan's entitlement window and carries no
+/// dynamic capability and no unadvertised Ultra.
+#[test]
+fn an_unusable_codex_cache_discovers_once_and_never_serves_dynamic_capabilities() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(&path);
+    let claims = crate::auth::codex::usable_subscription_claims(&store)
+        .unwrap()
+        .unwrap();
+    let live = CodexDiscovery {
+        claims: claims.clone(),
+        models: codex_models_from_response(
+            &serde_json::json!({
+                "models": [{
+                    "slug": "live-account-model",
+                    "context_window": 300_000,
+                    "max_output_tokens": 32_000,
+                    "use_responses_lite": true,
+                    "multi_agent_version": "v2",
+                    "supported_reasoning_levels": ["low", "ultra"]
+                }]
+            }),
+            claims.plan.as_ref(),
+        )
+        .unwrap(),
+    };
+    let mut cached = live.clone();
+    cached.models[0].id = "cached-account-model".to_owned();
+    cached.models[0].context_window = 196_000;
+    cached.models[0].default_context_window = 196_000;
+    save_codex_model_cache(&store, &cached).unwrap();
+
+    let cache_path = {
+        let stem = path.file_stem().and_then(|value| value.to_str()).unwrap();
+        path.with_file_name(format!("{stem}-models.json"))
+    };
+
+    // Stale: outside the freshness window the cache is skipped and discovery
+    // runs exactly once, and the live inventory (not the cache) is registered.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&cache_path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now()
+                    .checked_sub(CODEX_MODEL_CACHE_REFRESH_INTERVAL + Duration::from_secs(1))
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+    let discovery_requests = std::cell::Cell::new(0_u32);
+    let (models, source) = codex_inventory_models(&store, &claims, false, false, {
+        let live = live.clone();
+        |_store| {
+            discovery_requests.set(discovery_requests.get() + 1);
+            Ok(live)
+        }
+    });
+    assert_eq!(source, CodexInventorySource::OnlineDiscovery);
+    assert_eq!(discovery_requests.get(), 1, "exactly one discovery request");
+    assert_eq!(models[0].id, "live-account-model");
+
+    // Account mismatch: a mismatched account binding is refused without a
+    // request to the network *as a cache*; discovery still seeds the cache.
+    let mut mismatched = live.clone();
+    mismatched.models[0].id = "other-account-model".to_owned();
+    let mut mismatched_bytes = serde_json::to_value(CodexModelCache {
+        version: CODEX_MODEL_CACHE_VERSION,
+        account_id: "acct_other".into(),
+        plan: codex_plan_cache_key(&claims).map(str::to_owned),
+        models: mismatched.models.clone(),
+    })
+    .unwrap();
+    mismatched_bytes["models"][0]["context_window"] = serde_json::json!(300_000);
+    store
+        .save_model_cache(&serde_json::to_vec(&mismatched_bytes).unwrap())
+        .unwrap();
+    let discovery_requests = std::cell::Cell::new(0_u32);
+    let (models, source) = codex_inventory_models(&store, &claims, false, false, {
+        let live = live.clone();
+        |_store| {
+            discovery_requests.set(discovery_requests.get() + 1);
+            Ok(live)
+        }
+    });
+    assert_eq!(source, CodexInventorySource::OnlineDiscovery);
+    assert_eq!(discovery_requests.get(), 1);
+    assert_eq!(models[0].id, "live-account-model");
+
+    // Invalid: a structurally broken cache is refused, discovery runs once, and
+    // its failure falls back to the conservative catalog — never to the broken
+    // cache's dynamic capability.
+    let mut invalid = cached.clone();
+    invalid.models[0].context_window = 0;
+    save_codex_model_cache(&store, &invalid).unwrap();
+    let discovery_requests = std::cell::Cell::new(0_u32);
+    let (models, source) = codex_inventory_models(&store, &claims, false, false, |_store| {
+        discovery_requests.set(discovery_requests.get() + 1);
+        anyhow::bail!("live discovery is unavailable in this test")
+    });
+    assert_eq!(source, CodexInventorySource::ConservativeFallback);
+    assert_eq!(discovery_requests.get(), 1);
+    assert!(
+        models.iter().any(|model| model.id == "gpt-5.6-luna"),
+        "the fallback catalog keeps the plan's entitlement models"
+    );
+    let luna = models
+        .iter()
+        .find(|model| model.id == "gpt-5.6-luna")
+        .unwrap();
+    assert_eq!(
+        luna.context_window, CODEX_5_6_CONTEXT_WINDOW,
+        "the plan's entitlement window survives the fallback"
+    );
+    for model in &models {
+        assert!(!model.responses_lite, "{}", model.id);
+        assert_eq!(model.agent_delegation, None, "{}", model.id);
+        assert_ne!(
+            model.max_effort,
+            octet_ai::ReasoningEffort::Ultra,
+            "{}",
+            model.id
+        );
+    }
+}
+
+#[test]
+fn a_route_readiness_worker_that_settles_in_time_is_joined_and_reported() {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let value = run_route_readiness(
+        "unit route readiness",
+        Duration::from_secs(5),
+        cancel,
+        |_stop| -> anyhow::Result<u32> { Ok(7) },
+    )
+    .unwrap();
+    assert_eq!(value, 7);
+}
+
+/// A deadline must be typed, bounded, and must *signal* cancellation: without
+/// the signal the worker's own check would never fire and the credential step
+/// could still start an inventory request the launch no longer wants.
+#[test]
+fn a_timed_out_route_readiness_envelope_cancels_and_settles_the_worker() {
+    let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+    let error = run_route_readiness(
+        "unit route readiness",
+        Duration::from_millis(20),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        move |stop| -> anyhow::Result<()> {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let _ = settled_tx.send(());
+            anyhow::bail!("cancelled before the inventory request")
+        },
+    )
+    .unwrap_err();
+    let timeout = error
+        .downcast_ref::<RouteReadinessTimeout>()
+        .expect("a deadline is reported as a typed, bounded timeout");
+    assert_eq!(timeout.phase, "unit route readiness");
+    assert_eq!(timeout.waited, Duration::from_millis(20));
+    assert!(
+        timeout.to_string().contains("did not finish within 20 ms"),
+        "{timeout}"
+    );
+    settled_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the timed-out worker must observe cancellation and settle");
+}
+
+/// The refresh lock is the one wait that cannot be cancelled mid-acquisition
+/// (it only ever uses a bounded non-blocking attempt). A timed-out worker that
+/// holds it must therefore settle and release it, with no worker left behind.
+#[test]
+fn a_timed_out_route_readiness_worker_releases_the_refresh_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(&path);
+    let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+    let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+    let error = run_route_readiness(
+        "unit lock holder",
+        Duration::from_millis(20),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        {
+            let store = store.clone();
+            move |stop| -> anyhow::Result<()> {
+                let guard = store.lock_refresh_within(Duration::from_secs(1))?;
+                holding_tx.send(()).unwrap();
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                drop(guard);
+                let _ = settled_tx.send(());
+                anyhow::bail!("cancelled with the refresh lock released")
+            }
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error.downcast_ref::<RouteReadinessTimeout>().is_some(),
+        "{error:#}"
+    );
+    holding_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the worker must acquire the refresh lock before the deadline");
+    settled_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the timed-out worker must settle instead of staying blocked");
+
+    // The lock is free again: an acquisition that succeeds well inside a
+    // generous deadline proves the timed-out worker released it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match store.lock_refresh_within(Duration::from_millis(10)) {
+            Ok(guard) => {
+                drop(guard);
+                break;
+            }
+            Err(error) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+                let _ = error;
+            }
+            Err(error) => panic!("the refresh lock must be released: {error:#}"),
+        }
+    }
+}
+
+/// The strongest form of "an unrelated provider cannot delay readiness": the
+/// AWS credential chain is poisoned so that *entering* it fails closed. A
+/// Codex-only plan must complete with the selected route named and zero
+/// consultations of the unrelated provider — a request counter plus a
+/// fail-closed probe, never a wall-clock threshold.
+#[test]
+fn a_poisoned_unrelated_provider_is_never_entered_by_a_narrowed_plan() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = catalog_readiness(&config(directory.path(), Some("codex/gpt-6-astra")));
+    assert_eq!(plan.route_ids(), vec!["codex"]);
+    assert!(plan.includes(crate::providers::CODEX.id));
+
+    let bedrock = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == "bedrock")
+        .expect("the AWS declaration is a generated builtin");
+    let poison = ForbiddenReadinessConsultation::new(bedrock.id);
+    // The probe is live: entering the poisoned declaration would panic, so a
+    // narrowed plan that consulted it could not pass this test.
+    assert!(
+        std::panic::catch_unwind(|| declaration_is_configured(bedrock)).is_err(),
+        "the fail-closed probe must fire when the declaration is actually entered"
+    );
+
+    reset_readiness_declarations_consulted();
+    let (_catalog, _notes) = model_catalog_for_readiness(false, &plan).unwrap();
+    drop(poison);
+    let consulted = readiness_declarations_consulted();
+    assert!(
+        consulted.contains(&crate::providers::CODEX.id),
+        "the selected route is consulted: {consulted:?}"
+    );
+    assert!(
+        !consulted.contains(&"bedrock"),
+        "an unrelated configured provider must never be entered: {consulted:?}"
+    );
+}
+
+/// The unit-test (fixture) registration path must not buy determinism by
+/// ignoring a fresh, account- and plan-matched cache: the cache still decides
+/// the inventory, reduced to the conservative contract because it cannot be
+/// revalidated online, and the discovery closure is never called.
+#[test]
+fn a_fixture_registration_honours_a_fresh_cache_without_a_discovery_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fixture-codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(&path);
+    let claims = crate::auth::codex::usable_subscription_claims(&store)
+        .unwrap()
+        .unwrap();
+
+    let discovery_requests = std::cell::Cell::new(0_u32);
+    // No cache yet: the checked-in catalog, labelled as the fixture path.
+    let (models, source) = codex_inventory_models(&store, &claims, false, true, |_store| {
+        discovery_requests.set(discovery_requests.get() + 1);
+        anyhow::bail!("the fixture path must never discover")
+    });
+    assert_eq!(source, CodexInventorySource::Fixture);
+    assert_eq!(discovery_requests.get(), 0);
+    assert!(models.iter().any(|model| model.id == "gpt-5.6-sol"));
+
+    let cached = CodexDiscovery {
+        claims: claims.clone(),
+        models: codex_models_from_response(
+            &serde_json::json!({
+                "models": [{
+                    "slug": "cached-fixture-model",
+                    "context_window": 196_000,
+                    "max_output_tokens": 24_000,
+                    "use_responses_lite": true,
+                    "multi_agent_version": "v2",
+                    "supported_reasoning_levels": ["high", "ultra"]
+                }]
+            }),
+            claims.plan.as_ref(),
+        )
+        .unwrap(),
+    };
+    save_codex_model_cache(&store, &cached).unwrap();
+
+    let (models, source) = codex_inventory_models(&store, &claims, false, true, |_store| {
+        discovery_requests.set(discovery_requests.get() + 1);
+        anyhow::bail!("the fixture path must never discover")
+    });
+    assert_eq!(source, CodexInventorySource::FreshCache);
+    assert_eq!(discovery_requests.get(), 0, "no inventory request");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "cached-fixture-model");
+    assert!(
+        !models[0].responses_lite,
+        "the fixture path reduces a cache it cannot revalidate"
+    );
+    assert_eq!(models[0].agent_delegation, None);
+    assert_ne!(models[0].max_effort, octet_ai::ReasoningEffort::Ultra);
+}
+
+/// The recorded note survives catalog construction into the `App` a frontend
+/// holds, is visible to an on-demand surface, is delivered at most once, and
+/// survives a rebuild — while remaining something startup never renders.
+#[test]
+fn the_recorded_codex_note_reaches_the_app_lazily_and_survives_a_rebuild() {
+    let directory = tempfile::tempdir().unwrap();
+    let effective = ModelId("gpt-4o-mini".into());
+    let mut boot = bootstrap(config(directory.path(), Some("gpt-4o-mini"))).unwrap();
+
+    // Build the exact note a catalog would record for this effective model.
+    let mut notes = CodexContextNotes::default();
+    notes.record(
+        effective.clone(),
+        crate::codex_context::codex_context_session_note(
+            "gpt-5.6-luna",
+            &crate::codex_context::resolve_codex_context_window(
+                "gpt-5.6-luna",
+                crate::codex_context::CodexContextTier::Default,
+                372_000,
+                372_000,
+                Some(128_000),
+                crate::codex_context::CodexContextOverride::NONE,
+            )
+            .unwrap(),
+        )
+        .expect("372K is above the standard tier"),
+    );
+    boot.codex_context_notes = notes;
+
+    let launch = LaunchSelection {
+        model: effective.clone(),
+        session: SessionSelection::CreateNew(directory.path().join("note.jsonl")),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+    };
+    let app = build_app(boot, launch, "system".into()).unwrap();
+
+    // On-demand surface: readable without delivering.
+    let report = app
+        .codex_context_report()
+        .expect("the note is available")
+        .to_owned();
+    assert!(report.starts_with("note: Codex model"), "{report}");
+    assert!(!report.contains("Session::"), "{report}");
+    assert_eq!(app.codex_context_report(), Some(report.as_str()));
+
+    // First assistant turn: delivered exactly once, then silent.
+    assert_eq!(
+        app.take_codex_context_note().as_deref(),
+        Some(report.as_str())
+    );
+    assert_eq!(app.take_codex_context_note(), None);
+    assert_eq!(app.take_codex_context_note(), None);
+    // The peek survives delivery for diagnostics: the once-per-session latch
+    // only governs delivery, never the on-demand report.
+    assert_eq!(app.codex_context_report(), Some(report.as_str()));
+
+    // The latch survives a rebuild: a delivered note stays delivered and no
+    // second delivery can leak into the new App.
+    let app = rebuild_app(app, None, None, None, None).unwrap();
+    assert_eq!(app.take_codex_context_note(), None);
+    assert_eq!(app.codex_context_report(), Some(report.as_str()));
+
+    // /new opens a different transcript, so its first assistant turn owes its
+    // own note rather than inheriting the old session's delivered latch.
+    let app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::CreateNew(
+            directory.path().join("new-note.jsonl"),
+        )),
+    )
+    .unwrap();
+    assert_eq!(
+        app.take_codex_context_note().as_deref(),
+        Some(report.as_str())
+    );
+    assert_eq!(app.take_codex_context_note(), None);
+
+    // Reopening that same transcript is not a new note-delivery boundary.
+    let current = app.agent.session().path().to_owned();
+    let app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::OpenExisting(current)),
+    )
+    .unwrap();
+    assert_eq!(app.take_codex_context_note(), None);
+}
+
+/// Deferring provider inventories must stay an enrichment concern, not an
+/// extension-lifecycle change: a narrowed launch starts no extension host, and
+/// enriching twice rebuilds the catalog at most once with no duplicate provider
+/// registration and no second activation. Extension startup itself is unchanged
+/// (`activate_eager` already fans out with `join_all`); this pins that readiness
+/// and enrichment never enter that path.
+///
+/// The configuration-level narrowing is asserted on `catalog_readiness` itself:
+/// a unit-test build never reads an ambient Codex credential
+/// (`register_codex_catalog` skips the ambient HOME in tests), so the narrowed
+/// catalog cannot resolve `codex/gpt-6-astra` and `bootstrap` completes the
+/// launch with the fleet catalog through its documented repair rule. The wait
+/// that narrowing actually removes is proven by the consultation counters in
+/// `narrowed_readiness_never_consults_an_unrelated_provider`.
+#[test]
+fn deferred_enrichment_does_not_start_extensions_or_duplicate_providers() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path(), Some("codex/gpt-6-astra"));
+    config.extension_paths = vec![directory.path().join("extensions")];
+    config.enabled_extensions = vec!["fixture-extension".into()];
+
+    assert_eq!(
+        catalog_readiness(&config).route_ids(),
+        vec!["codex"],
+        "the launch decision itself is the narrowed Codex route"
+    );
+
+    let mut boot = bootstrap(config).unwrap();
+    assert!(
+        boot.readiness_plan().is_fleet(),
+        "an unresolvable selection is completed by the fleet repair, never failed"
+    );
+    assert!(
+        boot.prestarted_extensions.borrow().is_none(),
+        "readiness must not start an extension host"
+    );
+
+    boot.enrich_catalog().unwrap();
+    assert!(boot.readiness_plan().is_fleet());
+    assert!(
+        boot.prestarted_extensions.borrow().is_none(),
+        "enrichment must not start an extension host either"
+    );
+    let enriched_models = boot.catalog.models().count();
+    assert!(enriched_models > 0);
+
+    // Idempotent: a second enrichment is a no-op, so a surface may call it
+    // freely without duplicating a provider registration or re-running startup.
+    boot.enrich_catalog().unwrap();
+    assert_eq!(boot.catalog.models().count(), enriched_models);
+}
+
+/// The consumer seam for a narrowed launch: a surface that enumerates every
+/// route calls `App::enrich_catalog` first. The call must move the plan to the
+/// fleet, keep the active model resolvable, and be a true no-op on the second
+/// call so a picker can call it freely.
+#[test]
+fn the_app_enrichment_seam_is_idempotent_and_keeps_the_active_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let effective = ModelId("gpt-4o-mini".into());
+    let boot = bootstrap(config(directory.path(), Some("gpt-4o-mini"))).unwrap();
+    let launch = LaunchSelection {
+        model: effective.clone(),
+        session: SessionSelection::CreateNew(directory.path().join("enrich.jsonl")),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+    };
+    let mut app = build_app(boot, launch, "system".into()).unwrap();
+
+    // Represent the state a deferred plan leaves in the App: the fleet catalog
+    // is already complete here, so the observable contract is that the
+    // completing call changes nothing, disturbs nothing, and never repeats.
+    app.readiness = CatalogReadiness::Routes(vec!["codex"]);
+    let before = app.catalog.models().count();
+    app.enrich_catalog().unwrap();
+    assert!(app.readiness.is_fleet(), "enrichment completes the plan");
+    assert!(
+        app.catalog.resolve(&effective).is_ok(),
+        "the active model stays resolvable after enrichment"
+    );
+    let enriched = app.catalog.models().count();
+    assert_eq!(enriched, before, "no model is dropped or duplicated");
+
+    app.enrich_catalog().unwrap();
+    assert_eq!(
+        app.catalog.models().count(),
+        enriched,
+        "a second enrichment is a no-op"
+    );
+    assert!(app.catalog.resolve(&effective).is_ok());
+}
+
+#[test]
+fn delegation_completes_deferred_catalog_only_for_a_live_service() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = config(directory.path(), Some("codex/gpt-6-astra"));
+    let mut catalog = ModelCatalog::default();
+    let mut readiness = CatalogReadiness::Routes(vec!["codex"]);
+    let mut notes = CodexContextNotes::default();
+    complete_delegation_catalog(false, &config, &mut catalog, &mut readiness, &mut notes).unwrap();
+    assert!(!readiness.is_fleet());
+    assert_eq!(catalog.models().count(), 0);
+    complete_delegation_catalog(true, &config, &mut catalog, &mut readiness, &mut notes).unwrap();
+    assert!(readiness.is_fleet());
+    assert!(catalog
+        .resolve(&ModelId("claude-sonnet-4-6".into()))
+        .is_ok());
+    assert!(catalog.resolve(&ModelId("gpt-4o-mini".into())).is_ok());
+    let count = catalog.models().count();
+    complete_delegation_catalog(true, &config, &mut catalog, &mut readiness, &mut notes).unwrap();
+    assert_eq!(catalog.models().count(), count);
 }

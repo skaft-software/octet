@@ -18,7 +18,7 @@ workspace = true
 benchmarks = []
 
 [dependencies]
-octet-ai = { version = "=0.7.6", path = "../octet-ai" }
+octet-ai = { version = "=0.8.0", path = "../octet-ai" }
 bytes = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
 serde = { version = "1", features = ["derive"] }
@@ -57,6 +57,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_Power",
     "Win32_System_Threading",

@@ -234,6 +234,38 @@ pub struct CustomModel {
     /// trusted pricing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<CustomPricing>,
+    /// Explicit user-configured request defaults. Header values remain private
+    /// credential data; inventory caches and public model views must omit them.
+    #[serde(default, deserialize_with = "deserialize_model_preset")]
+    pub preset: octet_ai::ModelPreset,
+}
+
+fn deserialize_model_preset<'de, D>(
+    deserializer: D,
+) -> std::result::Result<octet_ai::ModelPreset, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Neither schema errors nor declaration errors may echo secret-bearing
+    // header keys/values or arbitrary configured template/sampling values.
+    let invalid = || <D::Error as serde::de::Error>::custom("invalid custom model preset");
+    let preset = octet_ai::ModelPreset::deserialize(deserializer).map_err(|_| invalid())?;
+    preset.validate().map_err(|_| invalid())?;
+    Ok(preset)
+}
+
+fn validate_registry_model_presets(registry: &CustomRegistry) -> Result<()> {
+    for model in registry
+        .providers
+        .values()
+        .flat_map(|provider| &provider.credential.models)
+    {
+        model
+            .preset
+            .validate()
+            .map_err(|_| anyhow::anyhow!("invalid custom model preset"))?;
+    }
+    Ok(())
 }
 
 /// Explicit per-token pricing for one custom model.
@@ -294,6 +326,7 @@ impl Default for CustomModel {
             reasoning_default: String::new(),
             reasoning_uses_system_message: false,
             pricing: None,
+            preset: Default::default(),
         }
     }
 }
@@ -432,6 +465,7 @@ impl CredentialStore {
         if registry.version != REGISTRY_VERSION {
             return Err(RegistryCommitError::Storage);
         }
+        validate_registry_model_presets(registry).map_err(|_| RegistryCommitError::Storage)?;
         let bytes =
             serde_json::to_vec_pretty(registry).map_err(|_| RegistryCommitError::Storage)?;
         match octet_agent::secure_fs::write_private_atomic_if_unchanged(
@@ -493,6 +527,27 @@ impl CredentialStore {
     pub(crate) fn save_model_cache_for(&self, provider_id: &str, bytes: &[u8]) -> Result<()> {
         let path = self.model_cache_path_for(provider_id);
         write_private(&path, bytes).with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// A background refresh may publish only over the exact cache it observed
+    /// before discovery. A newer setup or refresh must never be rolled back.
+    pub(crate) fn save_model_cache_if_unchanged_for(
+        &self,
+        provider_id: &str,
+        expected: &[u8],
+        bytes: &[u8],
+    ) -> Result<bool> {
+        let path = self.model_cache_path_for(provider_id);
+        match octet_agent::secure_fs::write_private_atomic_if_unchanged(
+            &path,
+            Some(expected),
+            bytes,
+            MAX_MODEL_CACHE_BYTES,
+        ) {
+            Ok(()) => Ok(true),
+            Err(octet_agent::secure_fs::SecureFileError::Changed) => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
+        }
     }
 
     /// Compatibility cache accessor for the original single endpoint.
@@ -580,6 +635,7 @@ impl CredentialStore {
                 registry.version
             );
         }
+        validate_registry_model_presets(registry)?;
         let bytes = serde_json::to_vec_pretty(registry)?;
         write_private(&self.path, &bytes)
             .with_context(|| format!("writing {}", self.path.display()))
@@ -781,6 +837,102 @@ mod tests {
     }
 
     #[test]
+    fn custom_model_preset_round_trips_privately_and_defaults_for_legacy_models() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("credentials/custom.json");
+        let store = CredentialStore::new(&path);
+        let secret = "preset-header-private-canary";
+        let provider: CustomProvider = serde_json::from_value(serde_json::json!({
+            "base_url": "http://127.0.0.1:8000/v1/", "auto_discover": false,
+            "models": [{"api_name": "configured", "preset": {
+                "headers": {"x-model-secret": secret},
+                "sampling_params": {"temperature": 0.25}, "vllm_priority": -3
+            }}]
+        }))
+        .unwrap();
+        let preset = provider.credential.models[0].preset.clone();
+        let registry = CustomRegistry::single("local", provider);
+        assert!(!format!("{registry:?}").contains(secret));
+        assert!(!format!("{preset:?}").contains(secret));
+        store.save_registry(&registry).unwrap();
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains(secret),
+            "the owner-private credential registry must retain configured headers"
+        );
+        let loaded = store.load_registry().unwrap().unwrap();
+        assert_eq!(
+            loaded.providers["local"].credential.models[0].preset,
+            preset
+        );
+        assert!(!format!("{loaded:?}").contains(secret));
+        let legacy: CustomModel =
+            serde_json::from_value(serde_json::json!({"api_name": "legacy"})).unwrap();
+        assert_eq!(legacy.preset, octet_ai::ModelPreset::default());
+        assert_eq!(
+            CustomModel::default().preset,
+            octet_ai::ModelPreset::default()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn custom_model_preset_validation_redacts_failures_and_preserves_registry_on_rejection() {
+        let secret = "preset-validation-secret-canary";
+        for preset in [
+            serde_json::json!({"headers": secret}),
+            serde_json::json!({"headers": {"invalid header": secret}}),
+            serde_json::json!({"headers": {"x-secret": format!("{secret}\r\ninjected: value")}}),
+            serde_json::json!({"sampling_params": {"model": secret}}),
+            serde_json::json!({"sampling_params": {"temperature": 3}}),
+            serde_json::json!({"headers": {"x-secret": "x".repeat(octet_ai::declarations::MAX_DECLARATION_BYTES + 1)}}),
+        ] {
+            let error = serde_json::from_value::<CustomModel>(serde_json::json!({
+                "api_name": "invalid", "preset": preset,
+            }))
+            .err()
+            .expect("invalid preset must not deserialize");
+            assert!(error.to_string().contains("invalid custom model preset"));
+            assert!(!format!("{error:?}").contains(secret));
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("credentials/custom.json");
+        let store = CredentialStore::new(&path);
+        let provider: CustomProvider = serde_json::from_value(serde_json::json!({
+            "base_url": "http://127.0.0.1:8000/v1/", "auto_discover": false,
+            "models": [{"api_name": "configured"}]
+        }))
+        .unwrap();
+        let mut registry = CustomRegistry::single("local", provider);
+        store.save_registry(&registry).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let snapshot = store.load_registry_snapshot().unwrap();
+        registry
+            .providers
+            .get_mut("local")
+            .unwrap()
+            .credential
+            .models[0]
+            .preset
+            .headers
+            .insert("x-secret".into(), format!("{secret}\r\n"));
+        let error = store.save_registry(&registry).unwrap_err();
+        assert_eq!(error.to_string(), "invalid custom model preset");
+        assert!(!format!("{error:?}").contains(secret));
+        assert!(matches!(
+            store.save_registry_if_unchanged(&snapshot, &registry),
+            Err(RegistryCommitError::Storage)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
     fn model_pricing_round_trips_and_defaults_to_none() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials/custom.json");
@@ -977,6 +1129,25 @@ mod tests {
         store.delete().unwrap();
         assert!(store.load_model_cache_for("apple-fm").unwrap().is_none());
         assert!(store.load_model_cache_for("home-server").unwrap().is_none());
+    }
+
+    #[test]
+    fn background_model_cache_refresh_cannot_overwrite_a_newer_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("credentials/custom.json"));
+        store.save_model_cache_for("fixture", b"old").unwrap();
+        let old = store.load_model_cache_for("fixture").unwrap().unwrap();
+        assert!(store
+            .save_model_cache_if_unchanged_for("fixture", &old, b"refreshed")
+            .unwrap());
+        store.save_model_cache_for("fixture", b"newer").unwrap();
+        assert!(!store
+            .save_model_cache_if_unchanged_for("fixture", &old, b"late")
+            .unwrap());
+        assert_eq!(
+            store.load_model_cache_for("fixture").unwrap().unwrap(),
+            b"newer"
+        );
     }
 
     #[test]

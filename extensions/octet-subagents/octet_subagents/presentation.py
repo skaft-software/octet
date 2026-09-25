@@ -21,7 +21,11 @@ GENERIC_STATE = {
     "stopped": "stopped",
     "timed_out": "failed",
     "cancelled": "cancelled",
-    "orphaned": "unavailable",
+    # Detached is recoverable, not terminal: it stays "degraded" (usable with
+    # reduced functionality) rather than "unavailable" so no frontend renders a
+    # session-owned worker as a dead resource.
+    "orphaned": "degraded",
+    "awaiting_approval": "pending",
     "restarted": "degraded",
 }
 STATE_LABEL = {
@@ -35,9 +39,16 @@ STATE_LABEL = {
     "stopped": "stopped",
     "timed_out": "timed out",
     "cancelled": "cancelled",
-    "orphaned": "orphaned",
+    # Reworded: still owned by this session, just detached from any host run.
+    "orphaned": "detached",
+    "awaiting_approval": "awaiting approval",
     "restarted": "restarted",
 }
+
+# Stable surface name. The presentation collection title is always exactly this
+# name so a picker header cannot change shape as workers come and go; live
+# counts stay in `status.label` (and in the text listing header).
+SURFACE_TITLE = "Subagents"
 
 
 def semantic_id(prefix: str, value: str) -> str:
@@ -56,6 +67,27 @@ def duration_label(elapsed_ms: int) -> str:
     return "%02d:%02d" % (minutes, seconds)
 
 
+def human_duration(elapsed_ms: int) -> str:
+    """Readable elapsed label for the live panel: `42s`, `5m49s`, `2h05m`."""
+    total_seconds = max(0, elapsed_ms // 1000)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return "%dh%02dm" % (hours, minutes)
+    if minutes:
+        return "%dm%02ds" % (minutes, seconds)
+    return "%ds" % seconds
+
+
+def human_tokens(value: int) -> str:
+    """Bounded-width token label: exact below 10K, then `13K`, then `1.2M`."""
+    if value < 10_000:
+        return str(value)
+    if value < 995_000:
+        return "%.0fK" % (value / 1000.0)
+    return "%.1fM" % (value / 1_000_000.0)
+
+
 def cost_label(microdollars: Optional[int]) -> str:
     if microdollars is None:
         return "?"
@@ -70,11 +102,15 @@ def counts(workers: Sequence[Worker]) -> Dict[str, int]:
         "limited": 0,
         "failed": 0,
         "stopped": 0,
+        # Detached workers are session-owned and reattachable, so they are
+        # counted separately from deliberately stopped workers instead of
+        # disappearing into the stopped bucket.
+        "detached": 0,
     }
     for worker in workers:
         if worker.state == "queued":
             values["queued"] += 1
-        elif worker.state in {"running", "waiting", "stopping"}:
+        elif worker.state in {"running", "waiting", "stopping", "awaiting_approval"}:
             values["running"] += 1
         elif worker.state == "done":
             values["done"] += 1
@@ -82,6 +118,8 @@ def counts(workers: Sequence[Worker]) -> Dict[str, int]:
             values["limited"] += 1
         elif worker.state == "failed" or worker.state == "timed_out":
             values["failed"] += 1
+        elif worker.state == "orphaned":
+            values["detached"] += 1
         else:
             values["stopped"] += 1
     return values
@@ -90,16 +128,22 @@ def counts(workers: Sequence[Worker]) -> Dict[str, int]:
 def compact_status(workers: Sequence[Worker]) -> Tuple[str, str, Optional[str]]:
     value = counts(workers)
     pieces = []
-    for key in ("running", "queued", "done", "limited", "failed", "stopped"):
+    for key in ("running", "queued", "done", "limited", "failed", "detached", "stopped"):
         if value[key]:
             pieces.append("%d %s" % (value[key], key))
-    label = "Subagents" if not pieces else "Subagents · " + " · ".join(pieces)
+    label = SURFACE_TITLE if not pieces else SURFACE_TITLE + " · " + " · ".join(pieces)
     if value["failed"]:
         state = "degraded"
         detail = "One or more bounded workers failed or timed out."
     elif value["limited"]:
         state = "degraded"
         detail = "One or more bounded workers reached their turn limit."
+    elif value["detached"]:
+        state = "degraded"
+        detail = (
+            "One or more workers are still owned by this session but detached "
+            "from any host run; they keep their evidence and can be reattached."
+        )
     elif value["running"] or value["queued"]:
         state = "active"
         detail = None
@@ -138,56 +182,158 @@ def worker_references(worker: Worker) -> List[Dict[str, Any]]:
     return references
 
 
+def _model_label(provider: str, model: str) -> str:
+    """Qualify bare IDs without repeating a host-canonical provider prefix."""
+    if provider in {"inherit", "inherited"} or model.startswith(provider + "/"):
+        return model
+    return "%s/%s" % (provider, model)
+
+
 def worker_secondary(worker: Worker, now_ms: int) -> str:
-    state = STATE_LABEL.get(worker.state, safe_label(worker.state))
-    if worker.max_turns is None:
-        turns = "%s turns, no ceiling" % (
-            worker.turn_count if worker.turn_count is not None else "?"
-        )
-    else:
-        turns = "?/%d turns" % worker.max_turns
-        if worker.turn_count is not None:
-            turns = "%d/%d turns" % (worker.turn_count, worker.max_turns)
-    if worker.max_tokens is None:
-        tokens = "%s tok · inherited no ceiling" % (
-            worker.tokens_used if worker.tokens_used is not None else "?"
-        )
-    else:
-        tokens = "?/%d tok" % worker.max_tokens
-        if worker.tokens_used is not None:
-            tokens = "%d/%d tok" % (worker.tokens_used, worker.max_tokens)
-    if worker.max_cost_microdollars is None:
-        cost = "%s / no ceiling" % cost_label(worker.cost_microdollars)
-    else:
-        cost = "%s/%s" % (
-            cost_label(worker.cost_microdollars),
-            cost_label(worker.max_cost_microdollars),
-        )
-    restart = " · restarted" if worker.recovered else ""
-    tool_calls = "%d tool call%s" % (
-        worker.tool_call_count,
-        "" if worker.tool_call_count == 1 else "s",
+    """Information-only row for the live `/subagents` panel.
+
+    Absence is never rendered as text: an inherited turn/token/cost ceiling, an
+    unexposed counter, and a healthy worker's missing failure reason are simply
+    omitted. Every field that remains carries information, so a panel of many
+    workers cannot fill with `no ceiling`/`?` placeholders. Values are
+    human-format (`5m49s`, `263K`) so a bounded row still reads as data.
+    """
+    pieces = [
+        STATE_LABEL.get(worker.state, safe_label(worker.state)),
+        human_duration(worker.elapsed_ms(now_ms)),
+        # The row is labelled as a model, so it must name a model and nothing
+        # else. The worker's profile is documented in the detail document
+        # (`Model/profile: <model> (inherited) / <profile>`), never spliced into
+        # the model string: `explore/deepseek/deepseek-flash` reads as a
+        # provider-qualified id that does not exist.
+        worker.effective_model,
+    ]
+    # Per-worker orchestration selection. `inherit` is the default and stays
+    # absent (absence is never rendered as text); an explicit request is shown as
+    # `requested→effective` so a pane-per-worker fleet is legible and a selection
+    # the host has not applied is never implied to be in force.
+    if worker.requested_model != "inherit":
+        requested_model = _model_label(worker.requested_provider, worker.requested_model)
+        marker = "" if worker.model_policy_applied else " (not applied by host)"
+        pieces.append("model %s%s" % (requested_model, marker))
+    if worker.requested_reasoning != "inherit":
+        if not worker.model_policy_applied:
+            pieces.append(
+                "reasoning %s (not applied by host)" % worker.requested_reasoning
+            )
+        elif worker.effective_reasoning == worker.requested_reasoning:
+            pieces.append("reasoning %s" % worker.requested_reasoning)
+        else:
+            pieces.append(
+                "reasoning %s→%s"
+                % (worker.requested_reasoning, worker.effective_reasoning)
+            )
+    if worker.reasoning_note:
+        pieces.append(worker.reasoning_note)
+    pieces.append(
+        "%d call%s" % (worker.tool_call_count, "" if worker.tool_call_count == 1 else "s")
     )
-    # Tool identities and arguments belong only in the explicit inspector.
-    return bounded_text(
-        "%s · %s · %s/%s · %s · %s · %s · %s%s"
-        % (
-            state,
-            duration_label(worker.elapsed_ms(now_ms)),
-            worker.profile,
-            worker.effective_model,
-            tool_calls,
-            turns,
-            tokens,
-            cost,
-            restart,
-        ),
-        1024,
+    if worker.turn_count is not None:
+        if worker.max_turns is not None:
+            pieces.append("%d/%d turns" % (worker.turn_count, worker.max_turns))
+        else:
+            pieces.append("%d turns" % worker.turn_count)
+    elif worker.max_turns is not None:
+        pieces.append("max %d turns" % worker.max_turns)
+    if worker.tokens_used is not None:
+        used = human_tokens(worker.tokens_used)
+        if worker.max_tokens is None:
+            pieces.append("%s tok" % used)
+        else:
+            pieces.append("%s/%s tok" % (used, human_tokens(worker.max_tokens)))
+    if worker.cost_microdollars is not None:
+        if worker.max_cost_microdollars is None:
+            pieces.append(cost_label(worker.cost_microdollars))
+        else:
+            pieces.append(
+                "%s/%s"
+                % (
+                    cost_label(worker.cost_microdollars),
+                    cost_label(worker.max_cost_microdollars),
+                )
+            )
+    if worker.recovered:
+        pieces.append("restarted")
+    if worker.host_diagnostic:
+        # Keep host recovery guidance visible even after interrupted work settles;
+        # this is a bounded host diagnostic, never child prose or tool content.
+        reason = bounded_text(safe_label(worker.host_diagnostic), 160).strip()
+        if reason:
+            pieces.append(reason)
+    if worker.detached:
+        # A detached worker is still owned by this session; say so, and say
+        # whether it can be reattached, instead of rendering a terminal row.
+        pieces.append("reattachable" if worker.reattachable else "reattach pending")
+    if worker.reattached:
+        pieces.append("reattached ×%d" % worker.reattach_count)
+    if worker.awaiting_approval:
+        pieces.append("approval required")
+    if worker.state in {"failed", "timed_out"}:
+        # A failed row without its bounded reason is useless; the reason is a
+        # host-observed failure class, never tool arguments or child prose.
+        reason = bounded_text(safe_label(worker.last_error or ""), 160).strip()
+        if reason:
+            pieces.append(reason)
+    return bounded_text(" · ".join(pieces), 1024)
+
+
+def _selection_text(worker: Worker) -> str:
+    """One bounded line describing the requested per-worker selection.
+
+    `inherit` is the default and is stated as such; a request the host has not
+    been able to apply is stated as not applied, never implied to be in force.
+    """
+    requested = []
+    if worker.requested_provider != "inherit" or worker.requested_model != "inherit":
+        if worker.requested_provider == "inherit":
+            requested.append("model %s" % worker.requested_model)
+        else:
+            requested.append(
+                "provider/model %s" % _model_label(worker.requested_provider, worker.requested_model)
+            )
+    if worker.requested_reasoning != "inherit":
+        requested.append("reasoning %s" % worker.requested_reasoning)
+    if not requested:
+        return "inherit the parent session's provider, model, and reasoning."
+    applied = (
+        "applied by the host"
+        if worker.model_policy_applied
+        else "requested only; the host has not confirmed a per-worker selection"
     )
+    text = "%s (%s; effective %s / reasoning %s)" % (
+        ", ".join(requested),
+        applied,
+        _model_label(worker.effective_provider, worker.effective_model),
+        worker.effective_reasoning,
+    )
+    if worker.reasoning_note:
+        text = "%s. %s" % (text, worker.reasoning_note)
+    return text
 
 
 def detail_body(worker: Worker, now_ms: int) -> str:
     tools = ", ".join(worker.tools)
+    if worker.awaiting_approval:
+        ownership = (
+            "still owned by this parent session but detached at the approval "
+            "boundary: it is parked and must not mutate unattended. Approve in an "
+            "interactive octet session, then reattach with /subagents wait or "
+            "subagent_continue."
+        )
+    elif worker.detached:
+        ownership = (
+            "still owned by this parent session; currently detached from any host "
+            "run (a recoverable state, not a terminal one). Use /subagents wait to "
+            "reattach. /subagents open-all remains Partial: pane execution is "
+            "blocked until atomic host writer claim/settlement is available."
+        )
+    else:
+        ownership = "attached to a host run owned by this parent session."
     token_use = str(worker.tokens_used) if worker.tokens_used is not None else "not exposed"
     token_limit = (
         str(worker.max_tokens)
@@ -199,7 +345,12 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         "Worker: %s (%s)" % (worker.name, worker.agent_id),
         "Parentage: parent > %s; depth %d (maximum 1)" % (worker.name, worker.depth),
         "Elapsed: %s" % duration_label(worker.elapsed_ms(now_ms)),
-        "Model/profile: %s (inherited) / %s" % (worker.effective_model, worker.profile),
+        "Model/profile: %s%s / %s" % (
+            _model_label(worker.effective_provider, worker.effective_model),
+            " (inherited)" if worker.requested_model == "inherit" and worker.requested_provider == "inherit" else "",
+            worker.profile,
+        ),
+        "Orchestration selection: %s" % _selection_text(worker),
         "Current phase/tool: %s" % safe_label(worker.current_tool or worker.phase),
         "Requested tool policy: %s"
         % (
@@ -248,7 +399,24 @@ def detail_body(worker: Worker, now_ms: int) -> str:
         "Isolation: the cwd/filesystem may be shared and is not an isolation boundary.",
         "Delivery: %s; octet's durable parent mailbox owns completion claim/ack." % worker.delivery_state,
         "Session: %s" % (worker.session or "not yet exposed by agent_sessions"),
+        "Session ownership: %s" % ownership,
     ]
+    if worker.host_diagnostic:
+        lines.append("Host reattachment: %s" % worker.host_diagnostic)
+    if worker.reattach_count:
+        lines.append(
+            "Reattachment: reattached %d time(s); last reattached at %s."
+            % (
+                worker.reattach_count,
+                (
+                    "%d ms Unix time" % worker.last_reattached_at_ms
+                    if worker.last_reattached_at_ms is not None
+                    else "an unrecorded time"
+                ),
+            )
+        )
+    elif worker.detached_at_ms is not None:
+        lines.append("Detached since: %d ms Unix time." % worker.detached_at_ms)
     if worker.export_reference:
         lines.append("Export: %s" % safe_label(worker.export_reference))
     if worker.recovered:
@@ -368,7 +536,9 @@ def build_snapshot(
         selected = ordered[-1]
     collection: Dict[str, Any] = {
         "kind": "tree",
-        "title": status_label,
+        # Stable surface name, never a live count: the header must not change
+        # shape as workers come and go. Counts stay in `status.label`.
+        "title": SURFACE_TITLE,
         "nodes": nodes,
     }
     if selected is not None:

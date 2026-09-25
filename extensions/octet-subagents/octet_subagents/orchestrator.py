@@ -11,6 +11,9 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Seque
 
 from .model import (
     CHILD_TOOLS,
+    DETACHED_LABEL,
+    DETACHED_STATE,
+    INHERIT,
     MAX_ACTIVE_CHILDREN,
     MAX_CHILD_MESSAGE_BYTES,
     MAX_DEPTH,
@@ -33,6 +36,7 @@ from .model import (
     sanitize_document,
     validate_plain_text,
 )
+from .launcher import execute_plan, plan_open_all, render_outcome, skipped_worker_row
 from .presentation import build_snapshot, detail_body, narrow_list
 
 
@@ -40,6 +44,68 @@ _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,512}$")
 _AGENT_PATH_RE = re.compile(r"^/[A-Za-z0-9_./:-]{1,1023}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+# Session-scoped delegation: one owning run retiring a child record means
+# "detached from any run", not "dead". These strings are the single source for
+# the diagnostic the extension writes when it first observes the detachment, so
+# a later reattachment can clear exactly that text and nothing else.
+DETACHED_PHASE = "detached from any host run; still owned by this session"
+DETACHED_DIAGNOSTIC = (
+    "The host no longer reports this worker for the current run; the worker's "
+    "session is still owned by this parent session, so its last observed state, "
+    "usage, and bounded output are retained for reattachment and diagnosis."
+)
+REATTACHED_PHASE = "reattached to the owning session; the host record is live again"
+# Host statuses that mean the worker is still owned by the session but is not
+# attached to a run. `awaiting_approval` is the bounded park state: the host
+# must not let it mutate unattended, and the extension must render it rather
+# than stalling silently or reporting a fake success.
+DETACHED_HOST_STATES = frozenset({"shutdown", "orphaned", "detached"})
+
+
+def _host_model_policy(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """Render only host-confirmed settings; never infer a route from a request."""
+    from .model import _model_id
+
+    policy = record.get("policy")
+    policy = policy if isinstance(policy, Mapping) else {}
+    selection = policy.get("model_selection") or {}
+    resolved = policy.get("resolved_model")
+    if not isinstance(selection, Mapping):
+        raise SubagentError("invalid host model selection", code="host_state_invalid")
+    requested = {key: _model_id(selection.get(key, INHERIT), key) for key in ("provider", "model", "reasoning")}
+    fields: Dict[str, Any] = {
+        "requested_provider": requested["provider"], "requested_model": requested["model"],
+        "requested_reasoning": requested["reasoning"], "effective_provider": "inherited",
+        "effective_model": "inherited", "effective_reasoning": "inherited",
+        "model_policy_applied": False, "reasoning_note": None,
+    }
+    if resolved is None:
+        if selection:
+            raise SubagentError("host did not confirm the requested child route", code="host_state_invalid")
+        return fields
+    if not isinstance(resolved, Mapping):
+        raise SubagentError("invalid host model settings", code="host_state_invalid")
+    provider = _model_id(resolved.get("provider"), "provider")
+    model = _model_id(resolved.get("model"), "model")
+    reasoning = resolved.get("reasoning")
+    if not isinstance(reasoning, Mapping):
+        raise SubagentError("invalid host reasoning settings", code="host_state_invalid")
+    kind, value = reasoning.get("type"), reasoning.get("value")
+    if not isinstance(kind, str):
+        raise SubagentError("invalid host reasoning settings", code="host_state_invalid")
+    if kind in {"off", "on"}:
+        effective = kind
+    elif kind == "effort" and isinstance(value, str) and value in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+        effective = value
+    elif kind == "budget" and type(value) is int and 0 < value < 2**64:
+        effective = "budget=%d" % value
+    else:
+        raise SubagentError("invalid host reasoning settings", code="host_state_invalid")
+    fields.update(effective_provider=provider, effective_model=model,
+                  effective_reasoning=effective, model_policy_applied=True)
+    if requested["reasoning"] not in {INHERIT, effective}:
+        fields["reasoning_note"] = "Host normalized reasoning=%s to %s." % (requested["reasoning"], effective)
+    return fields
 
 
 def _host_policy(
@@ -217,6 +283,7 @@ class AgentSessions(Protocol):
         max_cost_microdollars: Optional[int],
         max_output_bytes: int,
         timeout_ms: Optional[int],
+        model_selection: Optional[Mapping[str, str]],
     ) -> Mapping[str, Any]: ...
 
     def list_agents(self) -> Mapping[str, Any]: ...
@@ -246,6 +313,9 @@ class OwnerState:
     pending_spawns: Dict[str, SpawnRequest] = field(default_factory=dict)
     selected_agent_id: Optional[str] = None
     last_used_ms: int = 0
+    # Host observations must be applied in request order for this owner. Do not
+    # hold the global state lock across a blocking host list/wait call.
+    refresh_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 class Orchestrator:
@@ -299,6 +369,7 @@ class Orchestrator:
         try:
             self._check_cancelled(cancellation)
             response = client.spawn_agent(
+                model_selection=request.model_selection,
                 task_name=request.name,
                 profile=request.profile,
                 fingerprint=request.fingerprint,
@@ -457,23 +528,24 @@ class Orchestrator:
                     wait_timed_out = True
                     break
                 slice_ms = max(1, min(1_000, caller_deadline - now))
-                response = client.wait_agents(timeout_ms=slice_ms)
-                self._check_cancelled(cancellation)
-                if not isinstance(response, Mapping) or not isinstance(
-                    response.get("timed_out"), bool
-                ):
-                    raise SubagentError(
-                        "agent_sessions returned an invalid wait response",
-                        code="host_state_invalid",
-                    )
-                snapshot = response.get("snapshot")
-                if not isinstance(snapshot, Mapping):
-                    raise SubagentError(
-                        "agent_sessions wait omitted its authoritative snapshot",
-                        code="host_state_invalid",
-                    )
-                self._reconcile_snapshot(state, snapshot)
-                self._enforce_policy_descendants(client, state, cancellation)
+                with state.refresh_lock:
+                    response = client.wait_agents(timeout_ms=slice_ms)
+                    self._check_cancelled(cancellation)
+                    if not isinstance(response, Mapping) or not isinstance(
+                        response.get("timed_out"), bool
+                    ):
+                        raise SubagentError(
+                            "agent_sessions returned an invalid wait response",
+                            code="host_state_invalid",
+                        )
+                    snapshot = response.get("snapshot")
+                    if not isinstance(snapshot, Mapping):
+                        raise SubagentError(
+                            "agent_sessions wait omitted its authoritative snapshot",
+                            code="host_state_invalid",
+                        )
+                    self._reconcile_snapshot(state, snapshot)
+                    self._enforce_policy_descendants(client, state, cancellation)
         finally:
             with self._lock:
                 for agent_id in waiting_ids:
@@ -492,6 +564,39 @@ class Orchestrator:
             result["completion_delivery"] = (
                 "host_owned_parent_turn" if not wait_timed_out else "workers_continue_in_background"
             )
+            # An explicit parent wait is also the reattachment surface: the
+            # reconcile above is what lets the owning session pick a detached
+            # worker back up, so report that outcome explicitly instead of
+            # leaving a detached row reading as terminal.
+            if selected is not None and selected.detached:
+                result["reattachment"] = {
+                    "state": "detached",
+                    "reattachable": selected.reattachable,
+                    "detail": (
+                        "still owned by this parent session; the host has not yet "
+                        "republished a live record for the current run"
+                    ),
+                }
+                if selected.host_diagnostic:
+                    # The host refused the reattach and named why: report the
+                    # reason instead of a silent stall.
+                    result["reattachment"]["reason"] = selected.host_diagnostic
+            elif selected is not None and selected.reattached:
+                result["reattachment"] = {
+                    "state": "reattached",
+                    "count": selected.reattach_count,
+                    "detail": "the host republished the worker's live session",
+                }
+            if selected is not None and selected.awaiting_approval:
+                result["approval"] = {
+                    "state": "awaiting_approval",
+                    "detail": (
+                        "parked at the approval boundary; it cannot mutate unattended "
+                        "and stays visible until it is approved or stopped"
+                    ),
+                }
+                if selected.host_diagnostic:
+                    result["approval"]["reason"] = selected.host_diagnostic
         return result
 
     def stop(
@@ -517,12 +622,15 @@ class Orchestrator:
         self._refresh(client, state, cancellation)
         with self._lock:
             if stop_all:
-                targets = [worker for worker in state.workers.values() if worker.active]
+                targets = [
+                    worker for worker in state.workers.values()
+                    if worker.active or worker.state == "idle"
+                ]
             else:
                 targets = [self._resolve_locked(state, target)]
             target_ids = [worker.agent_id for worker in targets]
             for worker in targets:
-                if worker.active:
+                if worker.active or worker.state == "idle":
                     worker.stop_requested = True
                     worker.state = "stopping"
                     worker.phase = "host interrupt requested"
@@ -581,7 +689,7 @@ class Orchestrator:
         arguments: Mapping[str, Any],
         cancellation: Optional[Cancellation] = None,
     ) -> Dict[str, Any]:
-        """Continue one owned worker: steer it if active, resume it if settled."""
+        """Steer active work; submit a new task to idle or settled workers."""
         if not isinstance(arguments, Mapping):
             raise SubagentError("subagent_continue arguments must be an object")
         unknown = set(arguments) - {"target", "message"}
@@ -604,10 +712,16 @@ class Orchestrator:
             state.selected_agent_id = worker.agent_id
             display = worker.name
             if worker.state == "orphaned":
+                # Detached, not dead: the session still owns this worker and its
+                # durable session reference survives the owning run. The host
+                # republishes the live record on reattachment; until then this is
+                # an explicit bounded state, never a silent stall.
                 raise SubagentError(
-                    "worker %s was orphaned by a host shutdown and cannot be resumed"
+                    "worker %s is still owned by this session but is currently "
+                    "detached from any host run; reattach it with /subagents wait "
+                    "or subagent_status once the host republishes its live session"
                     % display,
-                    code="orphaned",
+                    code="detached",
                 )
             if worker.state == "stopping":
                 raise SubagentError(
@@ -615,8 +729,22 @@ class Orchestrator:
                     % display,
                     code="worker_stopping",
                 )
-            action = "resumed" if worker.terminal else "steered"
-            if worker.terminal:
+            if worker.state == "awaiting_approval":
+                # The host parked this worker at the approval boundary. Queueing
+                # new work into it would be unattended mutation, so refuse with an
+                # explicit bounded state instead of stalling or pretending.
+                raise SubagentError(
+                    "worker %s is parked at the host approval boundary and cannot "
+                    "accept unattended input; approve it in an interactive session "
+                    "or stop it explicitly" % display,
+                    code="worker_awaiting_approval",
+                )
+            # Reattachment can restore a live receiver with no queued task.
+            # Steering alone only buffers information there; a follow-up starts
+            # work in the retained child conversation.
+            resume = worker.terminal or worker.state == "idle"
+            action = "resumed" if resume else "steered"
+            if resume:
                 client.follow_up_agent(worker.agent_id, message)
                 # The host accepted the resume, so the previous run is closed.
                 # Clear the sticky flags or the next refresh would re-map the
@@ -668,6 +796,50 @@ class Orchestrator:
                 publish = self._snapshot_locked(state)
             self._publish(publish)
             return {"text": text, "notifications": []}
+        if verb == "open-all":
+            raise SubagentError(
+                "open-all requires an owner-bound command and a fresh agent/list; "
+                "the cached fallback cannot authorize a session launch",
+                code="owner_required",
+            )
+        if verb in {"wait", "reattach"} and len(arguments) <= 2:
+            # The cached fallback holds no live agent_sessions client, so it can
+            # never claim a wait or a reattachment happened. Report the detached
+            # set explicitly instead of stalling or reporting success.
+            with self._lock:
+                detached = [
+                    worker for worker in state.workers.values() if worker.detached
+                ]
+                reattachable = sum(worker.reattachable for worker in detached)
+            if detached:
+                return {
+                    "text": (
+                        "%d worker(s) are still owned by this parent session but "
+                        "detached from any host run (%d reattachable). The cached "
+                        "fallback cannot observe the live host service, so no wait "
+                        "or reattachment was performed. Run /subagents wait from an "
+                        "interactive owner-bound session or call subagent_wait."
+                        % (len(detached), reattachable)
+                    ),
+                    "notifications": [
+                        {
+                            "level": "warning",
+                            "title": "Subagent wait requires owner authority",
+                            "message": (
+                                "Detached workers keep their evidence and stay "
+                                "reattachable; no silent stall and no fake success."
+                            ),
+                        }
+                    ],
+                }
+            return {
+                "text": (
+                    "No detached workers. An explicit live wait needs the owner-bound "
+                    "command context: run /subagents wait from an interactive session "
+                    "or call subagent_wait."
+                ),
+                "notifications": [],
+            }
         if verb == "stop" and len(arguments) == 2:
             # This cached fallback has no live service client. Never smuggle a
             # stale request ID through it; the runtime handles owner-bound stop.
@@ -694,8 +866,99 @@ class Orchestrator:
                 ],
             }
         return {
-            "text": "Usage: /subagents [list|inspect <name-or-id>|stop <name-or-id|all>]\nThe fallback is cached/read-only; authoritative wait and stop use subagent_wait and subagent_stop.",
+            "text": (
+                "Usage: /subagents [list|inspect <name-or-id>|stop <name-or-id|all>"
+                "|wait <name-or-id>|reattach <name-or-id>|open-all tmux|open-all herdr]\n"
+                "The fallback is cached/read-only; authoritative wait, reattachment, "
+                "and stop use subagent_wait and subagent_stop, and open-all needs the "
+                "owner-bound command context."
+            ),
             "notifications": [],
+        }
+
+    def open_all_owned(
+        self, client: Any, owner: Owner, arguments: Sequence[Any], cancellation: Any
+    ) -> Dict[str, Any]:
+        self.status(client, owner, {}, cancellation)
+        with self._lock:
+            workers = list(self._owners[owner.stable_key].workers.values())
+        return self.open_all(owner=owner, workers=workers, arguments=arguments)
+
+    def open_all(
+        self,
+        *,
+        owner: Owner,
+        workers: Sequence[Worker],
+        arguments: Sequence[Any] = (),
+        environment: Optional[Mapping[str, str]] = None,
+        launcher: Optional[Callable[..., Any]] = None,
+    ) -> Dict[str, Any]:
+        """Report blocked pane plans until atomic host writer ownership exists.
+
+        The normal read-only parent-controlled path is untouched. Host launchability
+        cannot authorize execution. Planning failures (a missing multiplexer, an
+        unsafe identifier, the pane cap) raise before anything is created.
+        """
+        if len(arguments) > 1:
+            raise SubagentError("Usage: /subagents open-all tmux|herdr")
+        multiplexer = arguments[0] if arguments else None
+        candidates = [worker for worker in workers if worker.active or worker.launchable]
+        # Session-owned workers that are not attached to any run get no pane, and
+        # they are named in the report: opening a stale pane would target the
+        # wrong session, and silently dropping the row would hide a worker that is
+        # still alive and reattachable.
+        skipped = [
+            skipped_worker_row(worker)
+            for worker in workers
+            if worker not in candidates
+        ]
+        plan = plan_open_all(
+            multiplexer=multiplexer,
+            parent_session_id=owner.host_session_id,
+            workers=candidates,
+            workspace=owner.workspace,
+            environment=environment,
+        )
+        execute = launcher if launcher is not None else (lambda value: execute_plan(value, workspace=owner.workspace))
+        outcome = execute(plan)
+        notifications: List[Dict[str, Any]] = []
+        if skipped:
+            notifications.append(
+                {
+                    "level": "info",
+                    "title": "Subagent open-all left session-owned workers unopened",
+                    "message": (
+                        "%d retained worker(s) were not opened; see their exact "
+                        "host refusal or reattach/approval reason." % len(skipped)
+                    ),
+                }
+            )
+        if not outcome.ok:
+            notifications.append(
+                {
+                    "level": "warning",
+                    "title": "Subagent open-all stopped early",
+                    "message": "Some panes were not opened; nothing created was destroyed. "
+                    "Inspect existing panes before retrying to avoid duplicate writers.",
+                }
+            )
+        elif outcome.blocked:
+            notifications.append(
+                {
+                    "level": "warning",
+                    "title": "Subagent open-all has blocked panes",
+                    "message": (
+                        "%d pane(s) were planned but not opened; see the per-pane "
+                        "ownership or host launchability reason."
+                        % len(outcome.blocked)
+                    ),
+                }
+            )
+        return {
+            "text": render_outcome(plan, outcome, skipped=skipped),
+            "notifications": notifications,
+            "panes": [pane.plan_row() for pane in plan.panes],
+            "skipped": skipped,
         }
 
     def status_contribution(self, context: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
@@ -753,7 +1016,7 @@ class Orchestrator:
             for state in self._owners.values():
                 state.pending_spawns.clear()
                 for worker in state.workers.values():
-                    if worker.active:
+                    if worker.active or worker.state == "idle":
                         worker.state = "orphaned"
                         worker.phase = "extension shutdown; host cleanup requested"
                         worker.completed_at_ms = now
@@ -828,13 +1091,14 @@ class Orchestrator:
         state: OwnerState,
         cancellation: Optional[Cancellation],
     ) -> None:
-        self._check_cancelled(cancellation)
-        snapshot = client.list_agents()
-        self._check_cancelled(cancellation)
-        self._reconcile_snapshot(state, snapshot)
-        self._enforce_policy_descendants(client, state, cancellation)
-        with self._lock:
-            publish = self._snapshot_locked(state)
+        with state.refresh_lock:
+            self._check_cancelled(cancellation)
+            snapshot = client.list_agents()
+            self._check_cancelled(cancellation)
+            self._reconcile_snapshot(state, snapshot)
+            self._enforce_policy_descendants(client, state, cancellation)
+            with self._lock:
+                publish = self._snapshot_locked(state)
         self._publish(publish)
 
     def _reconcile_snapshot(
@@ -896,20 +1160,22 @@ class Orchestrator:
             for agent_id in stale_ids:
                 worker = state.workers[agent_id]
                 worker.host_present = False
+                worker.launchable = False
+                worker.launch_blocked = None
+                worker.live_task = None
                 # A new owning run or host-side cleanup may retire the live
                 # record before the extension gets another list/wait call. Keep
                 # the last bounded summary/error and sibling roster as terminal
                 # evidence instead of making the entire tree disappear.
-                if worker.active:
+                if worker.active or worker.state == "idle":
                     worker.state = "orphaned"
-                    worker.phase = "host worker record no longer available"
+                    worker.detached_at_ms = now
+                    worker.phase = DETACHED_PHASE
+                    worker.host_diagnostic = None
                     worker.current_tool = None
                     worker.completed_at_ms = now
                     if worker.last_error is None:
-                        worker.last_error = (
-                            "The host no longer reports this worker; its last "
-                            "observed state is retained for diagnosis."
-                        )
+                        worker.last_error = DETACHED_DIAGNOSTIC
             self._trim_workers_locked(state)
             persistence_error = snapshot.get("persistence_error")
             if isinstance(persistence_error, str) and persistence_error.strip():
@@ -973,8 +1239,7 @@ class Orchestrator:
             depth=depth_from_record(record),
             name=safe_label(task_name),
             profile=profile,
-            requested_model="inherit",
-            effective_model=owner.inherited_model or "inherited",
+            **_host_model_policy(record),
             tools=effective_tools,
             state="restarted",
             phase="recovered from host ancestry",
@@ -999,10 +1264,30 @@ class Orchestrator:
     def _update_worker_from_record(
         self, worker: Worker, record: Mapping[str, Any]
     ) -> None:
+        for key, value in _host_model_policy(record).items():
+            setattr(worker, key, value)
         worker.host_present = True
+        worker.launchable = record.get("launchable") is True
+        worker.live_task = record.get("live_task") if type(record.get("live_task")) is bool else None
+        blocked = record.get("launch_blocked")
+        worker.launch_blocked = sanitize_document(blocked, 512) if isinstance(blocked, str) and blocked else None
+        # The host record carries its own bounded reason when a worker could not
+        # be reattached or is parked at the approval boundary. It is surfaced by
+        # this process instead of being replaced by a local guess.
+        diagnostic = record.get("diagnostic")
+        worker.host_diagnostic = (
+            sanitize_document(diagnostic, MAX_ERROR_BYTES)
+            if isinstance(diagnostic, str) and diagnostic.strip()
+            else None
+        )
+        # A detached worker whose record the host reports again has been
+        # reattached by the owning session: clear the detachment, count it, and
+        # drop exactly the diagnostic the extension wrote when it detached.
+        reattaching = worker.detached
         state_name, status = host_state(record)
         mapped = {
             "pending": "queued",
+            "idle": "idle",
             "queued": "queued",
             "running": "running",
             "waiting": "waiting",
@@ -1014,18 +1299,25 @@ class Orchestrator:
             "cancelled": "cancelled",
             "shutdown": "orphaned",
             "orphaned": "orphaned",
+            "detached": "orphaned",
+            "awaiting_approval": "awaiting_approval",
             "timed_out": "timed_out",
             "stopped": "stopped",
             "restarted": "restarted",
         }.get(state_name, "orphaned")
+        if reattaching and mapped in {"orphaned", "awaiting_approval"}:
+            # The host still reports a detached or parked state; this is not a
+            # reattachment, and the original detachment time is preserved. A
+            # worker parked on new authority was deliberately not resumed.
+            reattaching = False
         if state_name == "interrupted":
             if worker.timeout_requested:
                 mapped = "timed_out"
             elif worker.stop_requested:
                 mapped = "stopped"
-        if worker.timeout_requested and mapped in {"running", "queued", "waiting"}:
+        if worker.timeout_requested and mapped in {"running", "queued", "waiting", "idle"}:
             mapped = "timed_out"
-        elif worker.stop_requested and mapped in {"running", "queued", "waiting"}:
+        elif worker.stop_requested and mapped in {"running", "queued", "waiting", "idle"}:
             mapped = "stopping"
         elif worker.state == "waiting" and mapped == "running":
             mapped = "waiting"
@@ -1081,6 +1373,7 @@ class Orchestrator:
         worker.started_at_ms = started_at_ms
         worker.completed_at_ms = completed_at_ms
         session = record.get("session")
+        worker.session = None
         if (
             isinstance(session, str)
             and session
@@ -1103,6 +1396,7 @@ class Orchestrator:
             worker.current_tool = None
             worker.phase = {
                 "queued": "queued by host",
+                "idle": "idle; waiting for a follow-up task",
                 "running": "running in host session",
                 "waiting": "waiting for host completion",
                 "done": "completed",
@@ -1111,10 +1405,25 @@ class Orchestrator:
                 "cancelled": "cancelled",
                 "stopped": "stopped",
                 "timed_out": "timed out",
-                "orphaned": "host session unavailable",
+                "orphaned": DETACHED_PHASE,
+                "awaiting_approval": (
+                    "awaiting approval: parked by the host and not mutating unattended"
+                ),
                 "restarted": "recovered after restart",
                 "stopping": "host interrupt requested",
             }.get(worker.state, "unknown")
+        if reattaching:
+            worker.detached_at_ms = None
+            worker.reattach_count += 1
+            worker.last_reattached_at_ms = self._now_ms()
+            worker.phase = REATTACHED_PHASE
+            # The refusal/park note described the previous detached state; the
+            # host has republished a live record, so it no longer applies.
+            worker.host_diagnostic = None
+            if worker.last_error == DETACHED_DIAGNOSTIC:
+                # Only the detachment diagnostic is cleared; a real host error is
+                # preserved across reattachment.
+                worker.last_error = None
         (
             turns,
             tool_calls,
@@ -1288,6 +1597,16 @@ class Orchestrator:
                 "agent_sessions did not retain the requested recovery metadata",
                 code="host_state_invalid",
             )
+        model_policy = _host_model_policy(response)
+        if request.model_selection is not None and (
+            any(model_policy["requested_" + key] != value for key, value in
+                (("provider", request.provider), ("model", request.model), ("reasoning", request.reasoning)))
+            or not model_policy["model_policy_applied"]
+        ):
+            raise SubagentError(
+                "host did not confirm the requested child route",
+                code="host_state_invalid",
+            )
         state_name, _ = host_state(response)
         created_at_ms, started_at_ms, completed_at_ms = _host_timestamps(
             response, state_name, deadline_at_ms
@@ -1304,8 +1623,7 @@ class Orchestrator:
             depth=depth,
             name=request.name,
             profile=request.profile,
-            requested_model=request.model,
-            effective_model=owner.inherited_model or "inherited",
+            **model_policy,
             tools=effective_tools,
             state="queued",
             phase="queued by host",

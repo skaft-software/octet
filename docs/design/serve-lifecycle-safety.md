@@ -1,13 +1,13 @@
-# Serve lifecycle and safety design
+# Serve lifecycle and safety architecture
 
 Maintainer reference for safety contracts described by the experimental
 `octet serve` source snapshot. For local use, see the
 [Serve guide](../experimental/octet-serve/README.md). The contracts protect
 octet's trust, persistence, and protocol boundaries; they do **not** turn octet
-into an operating-system sandbox. This document describes octet 0.7.6 source
-contracts, not a new qualification pass. The [0.7.4 recovery record](../qualification/v0.7.4-recovery.md)
-retains its historical scope; current release results belong to the
-[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
+into an operating-system sandbox. This document describes octet 0.8.0 RC source
+contracts, not a new qualification pass or publication. The
+[historical 0.7.6 release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
+retains its own release results; those do not qualify this candidate.
 
 ## Security model
 

@@ -24,7 +24,7 @@
   ],
   "collection": {
     "kind": "tree",
-    "title": "Workers",
+    "title": "Subagents",
     "nodes": [
       {
         "id": "worker:1",

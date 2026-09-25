@@ -508,10 +508,11 @@ fn ordered_image_and_audio_cross_the_process_and_provider_boundaries() {
     let sessions = workspace.join("sessions");
     let image_one = workspace.join("first.png");
     let audio = workspace.join("music.wav");
-    let image_two = workspace.join("second.jpg");
-    std::fs::write(&image_one, b"first-image").unwrap();
+    let image_two = workspace.join("second.png");
+    let one_pixel_png = include_bytes!("fixtures/export_html/one-pixel.png");
+    std::fs::write(&image_one, one_pixel_png).unwrap();
     std::fs::write(&audio, b"raw-audio").unwrap();
-    std::fs::write(&image_two, b"second-image").unwrap();
+    std::fs::write(&image_two, one_pixel_png).unwrap();
     let (base_url, provider_requests, provider) = spawn_openai_fixture(&["MEDIA_OK"]);
     let mut request = run_request(
         "media-request",

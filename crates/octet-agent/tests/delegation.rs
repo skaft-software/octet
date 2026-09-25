@@ -16,6 +16,7 @@ use octet_ai::{
     AiClient, Auth, Capabilities, Endpoint, EndpointId, Message, ModalitySet, Model, ModelId,
     ModelLimits, ModelSpec, Protocol, ReasoningConfig, ToolResultPart, UserPart,
 };
+use sha2::{Digest, Sha256};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
@@ -517,6 +518,7 @@ fn scripted_model(uri: &str) -> Model {
             display_name: None,
             protocol: Protocol::AnthropicMessages,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none(),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -533,6 +535,7 @@ fn scripted_model(uri: &str) -> Model {
             },
             pricing: None,
             cache: octet_ai::CacheCompatibility::default(),
+            preset: Default::default(),
         }),
         endpoint: Arc::new(Endpoint {
             id: EndpointId("delegation-test".into()),
@@ -549,6 +552,8 @@ fn scripted_model(uri: &str) -> Model {
 struct EnabledAgent {
     agent: Agent,
     team_directory: PathBuf,
+    /// Root-scoped durable fleet roster, beside the private team directory.
+    fleet_roster: PathBuf,
     _workspace: tempfile::TempDir,
     _sessions: tempfile::TempDir,
 }
@@ -594,9 +599,18 @@ fn build_enabled_agent_with_mode(
     } else {
         agent.enable_v2_delegation(config).unwrap()
     };
+    let root_digest = format!(
+        "{:x}",
+        Sha256::digest(agent.session().path().to_string_lossy().as_bytes())
+    );
+    let fleet_roster = session_dir
+        .path()
+        .join("delegation")
+        .join(format!("fleet-{}.json", &root_digest[..16]));
     EnabledAgent {
         agent,
         team_directory,
+        fleet_roster,
         _workspace: workspace_dir,
         _sessions: session_dir,
     }
@@ -668,6 +682,32 @@ async fn wait_for_provenance(
     })
     .await
     .expect("timed out waiting for delegation provenance")
+}
+
+/// Reads one session-owned durable fleet record from its root-scoped roster.
+///
+/// The roster is the restart-surviving half of a delegated worker's record:
+/// it carries the agent id, name, task, child-session reference, status, and
+/// consumed budget for the owning session.
+fn fleet_record(harness: &EnabledAgent, agent_id: &str) -> serde_json::Value {
+    let text = std::fs::read_to_string(&harness.fleet_roster)
+        .unwrap_or_else(|error| panic!("missing durable fleet roster: {error}"));
+    let fleet: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|error| panic!("malformed roster: {error}"));
+    fleet["records"]
+        .as_array()
+        .unwrap_or_else(|| panic!("malformed fleet roster: {fleet}"))
+        .iter()
+        .find(|record| record["agent_id"] == agent_id)
+        .cloned()
+        .unwrap_or_else(|| panic!("missing fleet record {agent_id}: {fleet}"))
+}
+
+/// Whether any worker was silently retired at the run boundary.
+fn any_shutdown(events: &[serde_json::Value]) -> bool {
+    events
+        .iter()
+        .any(|event| event["event"] == "agent_status" && event["status"]["state"] == "shutdown")
 }
 
 fn listed_agent<'a>(value: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
@@ -1077,7 +1117,7 @@ async fn delegation_enforces_concurrency_depth_and_total_limits() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn completing_a_root_run_cancels_unfinished_delegated_workers() {
+async fn completing_a_root_run_detaches_and_keeps_the_worker_discoverable() {
     let server = MockServer::start().await;
     let state = Arc::new(ScriptState::default());
     mount_script(
@@ -1092,14 +1132,35 @@ async fn completing_a_root_run_cancels_unfinished_delegated_workers() {
 
     let output = harness.agent.complete("spawn and finish").await.unwrap();
     assert_eq!(output.text, "root finished without waiting");
-    wait_for_provenance(&provenance_path, |events| {
-        events.iter().any(|event| {
-            event["event"] == "agent_status"
-                && event["agent_id"] == "agent-1"
-                && event["status"]["state"] == "shutdown"
-        })
+    // The end of the owning run is an explicit, journaled boundary: the worker
+    // survives it instead of being retired with the run.
+    let events = wait_for_provenance(&provenance_path, |events| {
+        events.iter().any(|event| event["event"] == "run_detached")
     })
     .await;
+    let detached = events
+        .iter()
+        .find(|event| event["event"] == "run_detached")
+        .unwrap();
+    assert!(detached["agent_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "agent-1"));
+    // Never a silent vanish: retirement stays visible, and a surviving worker
+    // is not reported as shut down.
+    assert!(!any_shutdown(&events));
+    // The session-owned durable record survives the run: id, name, task,
+    // child-session reference, status, and consumed budget.
+    let record = fleet_record(&harness, "agent-1");
+    assert_eq!(record["agent_path"], "/root/slow");
+    assert_eq!(record["task_name"], "slow");
+    assert_eq!(record["parent_id"], "root");
+    assert_eq!(record["detached"], true);
+    assert!(Path::new(record["session_path"].as_str().unwrap()).exists());
+    assert_eq!(record["status"]["state"], "running");
+    assert_eq!(record["turn_count"], 0);
+    assert!(record["usage"]["total_tokens"].as_u64().is_some());
     assert!(state.unexpected.lock().unwrap().is_empty());
 }
 
@@ -1118,7 +1179,7 @@ async fn cancellation_harness() -> (EnabledAgent, MockServer, Arc<ScriptState>) 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn aborting_or_dropping_a_root_run_cancels_delegated_workers() {
+async fn aborting_or_dropping_a_root_run_keeps_delegated_workers_reattachable() {
     let (mut explicit, _server, state) = cancellation_harness().await;
     let explicit_provenance = explicit.team_directory.join("provenance.jsonl");
     let mut run = explicit.agent.prompt("spawn then abort").await.unwrap();
@@ -1137,12 +1198,28 @@ async fn aborting_or_dropping_a_root_run_cancels_delegated_workers() {
     .expect("explicit abort did not settle");
     assert!(matches!(reason, FinishReason::Aborted));
     drop(run);
-    wait_for_provenance(&explicit_provenance, |events| {
-        events
-            .iter()
-            .any(|event| event["event"] == "agent_status" && event["status"]["state"] == "shutdown")
+    // Session-scoped lifetime: ending the turn - even by an explicit abort -
+    // detaches the worker with `agent-1` instead of retiring it silently.
+    let events = wait_for_provenance(&explicit_provenance, |events| {
+        events.iter().any(|event| event["event"] == "run_detached")
     })
     .await;
+    let detached = events
+        .iter()
+        .find(|event| event["event"] == "run_detached")
+        .unwrap();
+    assert!(detached["agent_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "agent-1"));
+    // Not a silent vanish: the worker is not shut down, and its durable
+    // session-owned record is still present and reattachable.
+    assert!(!any_shutdown(&events));
+    let roster = fleet_record(&explicit, "agent-1");
+    assert_eq!(roster["agent_path"], "/root/slow");
+    assert_eq!(roster["detached"], true);
+    assert!(Path::new(roster["session_path"].as_str().unwrap()).exists());
     assert!(state.unexpected.lock().unwrap().is_empty());
     drop(explicit);
 
@@ -1160,12 +1237,14 @@ async fn aborting_or_dropping_a_root_run_cancels_delegated_workers() {
     .await
     .expect("spawn tool did not finish");
     drop(run);
-    wait_for_provenance(&dropped_provenance, |events| {
-        events
-            .iter()
-            .any(|event| event["event"] == "agent_status" && event["status"]["state"] == "shutdown")
+    let events = wait_for_provenance(&dropped_provenance, |events| {
+        events.iter().any(|event| event["event"] == "run_detached")
     })
     .await;
+    assert!(!any_shutdown(&events));
+    let roster = fleet_record(&dropped, "agent-1");
+    assert_eq!(roster["agent_path"], "/root/slow");
+    assert_eq!(roster["detached"], true);
     assert!(state.unexpected.lock().unwrap().is_empty());
     drop(dropped);
 }
@@ -1184,6 +1263,8 @@ impl Respond for ReusableAgentScript {
         };
         let index = next_index(&self.state.counters, route);
         match (route, index) {
+            // Worker names are session-scoped: run 2 delegates under a fresh
+            // name while the run-1 record keeps its own durable identity.
             ("root", 0) | ("root", 4) => response(tool_turn(&[(
                 if index == 0 {
                     "spawn-reused-1"
@@ -1191,7 +1272,10 @@ impl Respond for ReusableAgentScript {
                     "spawn-reused-2"
                 },
                 "spawn_agent",
-                serde_json::json!({"task_name": "reused", "message": format!("task for owning run {}", index / 4 + 1)}),
+                serde_json::json!({
+                    "task_name": if index == 0 { "reused" } else { "reused-two" },
+                    "message": format!("task for owning run {}", index / 4 + 1)
+                }),
             )])),
             ("root", 1) | ("root", 2) | ("root", 5) | ("root", 6) => response(tool_turn(&[(
                 match index {
@@ -1224,6 +1308,7 @@ async fn delegation_is_reusable_across_owning_runs_on_the_same_agent() {
     )
     .await;
     let mut harness = build_enabled_agent(&server, DelegationLimits::default());
+    let provenance_path = harness.team_directory.join("provenance.jsonl");
 
     let first = harness.agent.complete("first owning run").await.unwrap();
     assert_eq!(first.text, "first owning run complete");
@@ -1243,6 +1328,178 @@ async fn delegation_is_reusable_across_owning_runs_on_the_same_agent() {
     assert!(child_requests[1]
         .to_string()
         .contains("task for owning run 2"));
+
+    // Session-scoped lifetime: the first run's worker record is not lost when
+    // the second run starts, and no duplicate worker was spawned for it.
+    let first_record = fleet_record(&harness, "agent-1");
+    assert_eq!(first_record["agent_path"], "/root/reused");
+    assert_eq!(first_record["status"]["state"], "completed");
+    let second_record = fleet_record(&harness, "agent-2");
+    assert_eq!(second_record["agent_path"], "/root/reused-two");
+    let spawned = read_provenance(&provenance_path)
+        .into_iter()
+        .filter(|event| event["event"] == "agent_spawned")
+        .collect::<Vec<_>>();
+    assert_eq!(spawned.len(), 2, "{spawned:?}");
+}
+
+/// A worker whose first provider attempt outlives the owning run, so the run
+/// boundary really does detach a *running* child.
+struct SurvivingWorkerScript {
+    state: Arc<ScriptState>,
+}
+
+impl Respond for SurvivingWorkerScript {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body = self.state.record(request);
+        let route = if request_system(&body).contains("You are /root/survivor") {
+            "child"
+        } else {
+            "root"
+        };
+        let index = next_index(&self.state.counters, route);
+        match (route, index) {
+            ("root", 0) => response(tool_turn(&[(
+                "spawn-survivor",
+                "spawn_agent",
+                serde_json::json!({
+                    "task_name": "survivor",
+                    "message": "outlive the owning turn"
+                }),
+            )])),
+            ("root", 1) => response(text_turn("first turn complete")),
+            ("root", 2) => response(tool_turn(&[(
+                "list-survivor",
+                "list_agents",
+                serde_json::json!({}),
+            )])),
+            ("root", 3) => response(tool_turn(&[(
+                "wait-survivor",
+                "wait_agent",
+                serde_json::json!({"timeout_ms": 2_500}),
+            )])),
+            ("root", 4) => response(tool_turn(&[(
+                "steer-survivor",
+                "followup_task",
+                serde_json::json!({
+                    "target": "/root/survivor",
+                    "message": "continue after reattachment"
+                }),
+            )])),
+            ("root", 5) => response(tool_turn(&[(
+                "list-after-steer",
+                "list_agents",
+                serde_json::json!({}),
+            )])),
+            ("root", 6) => response(tool_turn(&[(
+                "stop-survivor",
+                "interrupt_agent",
+                serde_json::json!({"target": "/root/survivor"}),
+            )])),
+            ("root", 7) => response(text_turn("second turn complete")),
+            // Slow enough that the owning run always ends while this worker is
+            // still executing, fast enough to settle inside one parent wait.
+            ("child", 0) => response(text_turn("survivor first task complete"))
+                .set_delay(Duration::from_millis(800)),
+            // The steered run parks here until the parent interrupts it.
+            ("child", 1) => delayed_response(text_turn("survivor continued")),
+            _ => self.state.unexpected(route, index),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_survives_the_owning_turn_and_a_later_turn_waits_steers_and_stops_it() {
+    let server = MockServer::start().await;
+    let state = Arc::new(ScriptState::default());
+    mount_script(
+        &server,
+        SurvivingWorkerScript {
+            state: state.clone(),
+        },
+    )
+    .await;
+    let mut harness = build_enabled_agent(&server, DelegationLimits::default());
+    let provenance_path = harness.team_directory.join("provenance.jsonl");
+
+    let first = harness.agent.complete("spawn survivor").await.unwrap();
+    assert_eq!(first.text, "first turn complete");
+    let events = wait_for_provenance(&provenance_path, |events| {
+        events.iter().any(|event| event["event"] == "run_detached")
+    })
+    .await;
+    assert!(!any_shutdown(&events));
+    let detached = fleet_record(&harness, "agent-1");
+    assert_eq!(detached["agent_path"], "/root/survivor");
+    assert_eq!(detached["detached"], true);
+    assert_eq!(detached["status"]["state"], "running");
+
+    // A later turn reattaches the very same worker: it is discovered by
+    // `list_agents`, waited on, steered, and finally stopped explicitly.
+    let second = harness.agent.complete("reattach survivor").await.unwrap();
+    assert_eq!(second.text, "second turn complete");
+    assert!(state.unexpected.lock().unwrap().is_empty());
+
+    let root_results = tool_results(harness.agent.session());
+    let listed = parse_result(&root_results, "list-survivor");
+    let agents = listed["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1, "{listed}");
+    assert_eq!(agents[0]["agent_id"], "agent-1");
+    assert_eq!(agents[0]["agent_path"], "/root/survivor");
+    assert_eq!(agents[0]["detached"], false);
+    // Session-owned launchable handle: the token is opaque and argv-safe and
+    // never carries a path or a secret. A worker that a live task still owns
+    // refuses to hand its transcript to another process.
+    let handle = agents[0]["handle"].as_str().expect("worker handle");
+    assert!(handle.starts_with("agent-session:"));
+    assert_eq!(handle.len(), "agent-session:".len() + 64);
+    assert!(handle
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b':'));
+    assert_eq!(agents[0]["launchable"], false);
+    assert!(
+        agents[0]["launch_blocked"]
+            .as_str()
+            .expect("bounded reason")
+            .contains("live worker"),
+        "{listed}"
+    );
+
+    // An explicit parent wait observes the surviving worker's result.
+    let waited = parse_result(&root_results, "wait-survivor");
+    assert_eq!(waited["timed_out"], false, "{waited}");
+    assert!(
+        waited.to_string().contains("survivor first task complete"),
+        "{waited}"
+    );
+
+    let steered = parse_result(&root_results, "steer-survivor");
+    assert_eq!(steered["agent_id"], "agent-1");
+    assert_eq!(steered["delivery"], "new_run");
+    let after_steer = parse_result(&root_results, "list-after-steer");
+    assert_eq!(
+        after_steer["agents"].as_array().unwrap().len(),
+        1,
+        "{after_steer}"
+    );
+
+    let stopped = parse_result(&root_results, "stop-survivor");
+    assert_eq!(stopped["agent_id"], "agent-1");
+
+    // No duplicate spawn across the boundary, and the stop is diagnosed.
+    let spawned = read_provenance(&provenance_path)
+        .into_iter()
+        .filter(|event| event["event"] == "agent_spawned")
+        .collect::<Vec<_>>();
+    assert_eq!(spawned.len(), 1, "{spawned:?}");
+    wait_for_provenance(&provenance_path, |events| {
+        events.iter().any(|event| {
+            event["event"] == "agent_status"
+                && event["agent_id"] == "agent-1"
+                && event["status"]["state"] == "interrupted"
+        })
+    })
+    .await;
 }
 
 struct StartupRetryScript {

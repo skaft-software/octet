@@ -1,4 +1,4 @@
-# `octet-coding-agent` design
+# `octet-coding-agent` architecture
 
 **Status:** Current implementation contract.
 
@@ -24,10 +24,26 @@ parses extension source with a real TypeScript syntax tree, and emits a
 versioned dry-run report. It never constructs an `Agent`, discovers a provider,
 executes package code, writes either setup, or invokes a model. A malformed
 package becomes a local diagnostic rather than preventing independent packages
-from being inventoried. The user contract and future compatibility boundary are
+from being inventoried. The user contract and compatibility limits are
 documented in [`../pi-migration.md`](../pi-migration.md).
 
 ## Startup and resume
+
+Interactive terminal ownership precedes provider-catalog bootstrap. Cold or
+expired model discovery runs through the same blocking-lifecycle worker boundary
+as session/extension startup, so typing, paste, resize, and coordinated Ctrl-C
+shutdown remain live while discovery waits. The pending surface shows the draft
+without a provisional model footer; branded readiness and prompt submission
+still wait for launch resolution, extension startup, and history hydration.
+Plain, print, and RPC retain their non-TUI bootstrap path. This is a responsiveness
+boundary, not a reduction in provider latency or native-history replay work.
+A launch with a proven built-in selection initializes only its required route;
+a resume without an explicit selection remains fleet-ready because its model
+provenance is not known until the session is opened. A valid positive custom
+inventory uses its cache immediately, refreshing stale metadata for a later
+catalog build. Once idle, `/model` opens from current routes and enriches the
+fleet in the background; filtering and highlighted model identity survive the
+refresh, while cancellation/failure leaves the active selection untouched.
 
 Startup resolves the persistent session before final model selection:
 
@@ -38,8 +54,11 @@ Startup resolves the persistent session before final model selection:
 3. Explicit `--model` and `--reasoning` flags override recovered values.
    Project/global defaults apply only when the session has no corresponding
    value.
-4. Resolve the model and normalize reasoning against its advertised
-   capabilities. A persisted legacy Pro bit migrates to Ultra only when the
+4. Resolve the model before filling an unset reasoning preference from its
+   advertised default (or first supported enabled choice). Explicit Off remains
+   distinct from unset; absent usable reasoning metadata stays Off. Normalize
+   the selection against the model's capabilities. A persisted legacy Pro bit
+   migrates to Ultra only when the
    route advertises Ultra effort and V2 collaboration and the host has an
    executable V2 runtime; otherwise it is cleared with a warning while the
    independently selected effort is retained.
@@ -48,7 +67,7 @@ Startup resolves the persistent session before final model selection:
 
 Runtime `/resume` and branch checkout use the same restoration behavior.
 Interactive resume follows renderer ownership. Default terminal-owned mode
-hydrates the complete active branch so Pi's complete logical frame can populate
+hydrates the complete active branch so the complete logical frame can populate
 native scrollback without an impossible later prepend. Explicit application-owned
 mode hydrates only a bounded active-branch tail for first paint; the complete
 branch is materialized when semantic navigation or selection reaches beyond that
@@ -127,10 +146,12 @@ labels it as such.
 
 System instructions are composed through `compose_instructions(&Config)`.
 
-- If `Config::system_prompt` is `Some(value)`, composition is replaced entirely
-  by that exact value (including `""`), bypassing AGENTS and skill instructions.
-- If `system_prompt` is `None`, the default flow composes the base prompt,
-  trusted workspace/global `AGENTS.md` context, and active skill instructions.
+- If `Config::system_prompt` is `Some(value)`, composition returns that exact
+  value (including `""`) and bypasses AGENTS/context composition. Bootstrap may
+  still append the discovered skill metadata and file-location catalog.
+- If `system_prompt` is `None`, the default flow composes the base prompt and
+  trusted workspace/global `AGENTS.md` context; bootstrap then appends the
+  discovered skill catalog. It does not inject full skill bodies.
 - Layer precedence for `system_prompt`, lowest to highest, is global config,
   trusted project config, `OCTET_SYSTEM_PROMPT`, then CLI `--system-prompt`.
   An explicit empty CLI value overrides every lower layer.
@@ -140,9 +161,10 @@ System instructions are composed through `compose_instructions(&Config)`.
 
 The environment block truthfully distinguishes the workspace root from the
 invocation directory. Relative tool paths and the default `bash` working
-directory resolve from the workspace root. Enabled core-tool names are listed,
-while the contract acknowledges extension and skill tools supplied alongside
-them. When the workspace has the octet source-checkout markers, the base prompt
+directory resolve from the workspace root. Enabled core-tool names are listed;
+extension tools may be supplied alongside them. Skill discovery is represented by
+file locations in the composed prompt, not a built-in model-facing tool surface.
+When the workspace has the octet source-checkout markers, the base prompt
 also includes absolute paths to the README, `docs/`, `examples/`, `crates/`, and
 the coding-agent crate and tells the model to consult them for octet questions or
 changes. Packaged installs resolve the matching README, docs, examples, and
@@ -151,8 +173,9 @@ text assets from the binary into that same data layout. Behavioral changes
 require regression tests rather than model-specific prompt tuning.
 
 Global and trusted workspace `AGENTS.md` files retain root-to-leaf precedence
-and are wrapped in path-labelled `<project_instructions>` blocks. Active skill
-instructions use labelled blocks with stable IDs and hashes.
+and are wrapped in path-labelled `<project_instructions>` blocks. Skill discovery
+adds only its bounded metadata and file-location catalog to the composed prompt;
+full skill bodies are not injected by this composition.
 
 ## Compaction and handoff summaries
 
@@ -169,12 +192,11 @@ reconfiguration, and RPC toggles, and `/context` reports that same effective
 capacity.
 
 The product pre-request gate and `octet-agent` overflow recovery share one
-Pi-compatible summarization implementation. Conversation messages are first
+structured summarization implementation. Conversation messages are first
 serialized inside `<conversation>` tags so the model cannot mistake them for a
-live turn. Initial and iterative summaries use Pi's exact structured Markdown
-contracts; iterative calls provide the prior checkpoint in
-`<previous-summary>` tags. Branch-handoff helpers use Pi's corresponding branch
-prompt and preamble.
+live turn. Initial and iterative summaries use structured Markdown contracts;
+iterative calls provide the prior checkpoint in `<previous-summary>` tags.
+Branch-handoff helpers use a separate branch prompt and preamble.
 
 File tracking is deterministic host behavior, not model output. Successful or
 failed assistant calls to `read`, `write`, and `edit` contribute paths;
@@ -185,12 +207,11 @@ summaries retain them. Legacy entries deserialize with empty details.
 
 ## Agent construction and tools
 
-Every build or idle-boundary rebuild creates one `ExtensionHost` and registers,
-in order:
-
-- Core tools: `read`, `edit`, `write`, `bash`, then opt-in `search`. The default
-  surface omits `search` because `bash` already provides `rg`/`find`/`ls`.
-- Skill tools: `search_skills`, `load_skill`, `read_skill_resource`.
+Every build or idle-boundary rebuild creates one `ExtensionHost`. `CoreTools`
+registers the core tools in order: `read`, `edit`, `write`, `bash`, then opt-in
+`search`; the default surface omits `search` because `bash` already provides
+`rg`/`find`/`ls`. Enabled extensions may add their own tools after discovery and
+policy admission. Skill discovery does not add a model-facing tool.
 
 Context budgeting reserves the serialized schemas from that exact host rather
 than reproducing a hard-coded subset. When delegation is installed, bootstrap
@@ -229,37 +250,69 @@ V2 delegation. Without the service, Ultra is clamped to the highest ordinary
 safe effort. The coding host chooses this activation policy, while `octet-agent`
 enforces execution, isolation, provenance, limits, and cancellation;
 `octet-ai` only reports the provider capability. Delegated children inherit the
-root's approved extensions, sandbox, model/reasoning and cache settings,
+root's approved extensions, sandbox and cache settings,
 compaction/completion/output policy, retry and turn bounds, and cost ceiling.
+Model/reasoning default to the parent's effective selection. With negotiated
+`agent_model_selection_v1`, the product resolves explicit worker selections
+against the same credential-filtered catalog as `/model`; `subagent_models`
+provides bounded, secret-free discovery. A live child-session service completes
+any deferred provider inventories during build/rebuild before the active run,
+and provider-sync boundaries refresh the resolver snapshot. The kernel pins the
+resolved worker model/reasoning for continuation and recovery, uses its pricing
+and model limits, and refuses unavailable saved selections rather than falling
+back to the parent. No credentials or endpoint overrides come from the extension.
 Their bounded status, spawn/list result, and durable spawn record include the
 same effective tool-policy snapshot plus source-only parent-inherited versus
 child-override orchestration provenance; they never expose paths, environment
 values, approval material, extension identities, or model arguments.
 During an active interactive run, the product schedules one nonblocking
 owner-scoped subagent status refresh every 250 ms, reduces the resulting fenced
-semantic snapshot, and renders the complete bounded worker roster as one
-persistent transcript event above the composer. Ordinary tool disclosure never
-truncates that event. It temporarily adds structured priced child cost to the
-host-owned footer; after `octet-agent` mirrors the settled child usage into root
-`delegated_agent` records, the idle footer reads only the durable session total.
+semantic snapshot, and updates one bounded tool-like **Subagents** transcript
+block in place, including between root turns. Its heading counts worker states
+and up to four active child lines show tasks and input/output tokens; `/subagents`
+retains the complete roster and cost. Ctrl+O retains disclosure. Structured
+priced child cost temporarily augments the host-owned footer; after
+`octet-agent` mirrors the settled child usage into root `delegated_agent`
+records, the idle footer reads only the durable session total.
 
 ## Skills
 
 Skills are discovered from user, workspace, and explicit CLI directories with
 explicit paths taking highest precedence. Workspace skills require workspace
-trust. Model-visible activation is explicit:
+trust. Discovery supplies immutable descriptors: the composed prompt lists each
+visible filesystem skill location and directs the model to use the ordinary
+`read` tool. No model-facing skill-specific tools are registered, and discovery
+does not inject full skill bodies into the system prompt.
 
-1. `search_skills` returns metadata.
-2. `load_skill` verifies trust and required registered/enabled tools, snapshots
-   the instructions and content hash, persists `SkillActivated`, and returns
-   only compact activation metadata.
-3. `read_skill_resource` requires a matching active activation, reloads
-   `SKILL.md`, rejects a changed instructions hash, permits only text under
-   `references/` or `templates/`, and persists the resource snapshot.
+The frontends have different command and persistence paths:
 
-Active instructions are appended once in labelled system-prompt blocks rather
-than duplicated in both the prompt and `load_skill` result. Activation/resource
-state survives compaction through snapshots in the compaction entry.
+- TUI `/skills load NAME` resolves the skill and prefills `/skill:NAME`. On
+  submission, `expand_skill_command` checks declared required tools and inlines
+  the `SKILL.md` body plus arguments into an ordinary user message; it does not
+  append `SkillActivated`. TUI `/skills off` can append `SkillDeactivated` only
+  for an activation already present on the branch.
+- Serve's slash-command worker appends `SkillActivated` (descriptor, content
+  hash, and instructions) on load and `SkillDeactivated` on off. The activation
+  event is Serve-only; TUI `off` can only deactivate pre-existing state. Plain,
+  print, and RPC do not gain this activation path.
+- Interactive submission and the plain, print, and RPC prompt paths expand
+  explicit `/skill:NAME` text as ordinary prompt content. They do not provide a
+  second activation API. Prompt-template `{{skill:name}}` expansion likewise
+  requires an already active session skill.
+
+The model uses ordinary `read` for `SKILL.md` and referenced files, subject to the
+normal allowlist and sandbox. For package resource semantics, supporting text is
+limited to `references/` or `templates/`. Discovery caps YAML frontmatter at 32
+KiB and `SKILL.md` at 256 KiB; a supporting text read is capped at 512 KiB. The
+session schema contains `SkillResourceRead`/resource snapshots, but no current
+registered model tool writes that event; it is not a model-facing resource API.
+
+Compaction keeps the configured recent-message token window (default 20,000) and
+summarizes older ordinary messages. A TUI inline body is therefore ordinary
+history and may be summarized away; it does not become durable active state.
+Serve activation events are separate session state and their active snapshots
+are carried by compaction, so that Serve-only persistence must not be promised
+for TUI activation.
 
 ## Prompt templates
 
@@ -307,14 +360,13 @@ remain disabled; the appearance selector is not a theme loader. See
   sorting, current/all-workspace scopes, rename, and recoverable trash.
 - `/fork` — fork from a selected user message (or the whole current conversation)
   and prefill that message in the new session; `/clone` forks at the current head.
-- `/tree`, `/checkout <entry-id>` — inspect durable entries and switch branches.
 - `/name [name]`, `/export [path]` — name and safely export the current session.
 - `/prompt [name] [arguments]` — inspect or expand prompt templates.
-- `/skills search|load|reload|off ...` — inspect and explicitly activate skills.
+- `/skills search|load|reload|off ...` — inspect, invoke, reload, or deactivate skills; TUI load-prefill does not establish durable activation.
 - `/extensions [status|reload]` — interactively enable/disable managed executable bundles, inspect diagnostics, or reload running full-access extensions; enablement never grants trust and safe mode keeps processes stopped.
 - `/subagents` — when supplied by the enabled `octet-subagents` package, navigate workers with arrow keys and open owner-authorized read-only transcripts with Enter.
 - `/help [command]` — show local command help and octet self-documentation.
-- `/status`, `/quit` — product status and lifecycle controls.
+- `/status`, `/exit` — product status and lifecycle controls.
 
 The top-level `octet doctor` command performs read-mostly prerequisite, provider,
 and model-visibility checks without constructing an Agent or starting executable
@@ -347,12 +399,14 @@ closed.
 
 Authenticated Codex discovery sends compatibility client version `0.153.2` and
 parses the provider's string/object reasoning levels, `use_responses_lite`, and
-`multi_agent_version: "v2"`. Cache schema version 6 invalidates inventories
-queried with older compatibility or context-window policies. It preserves those
-fields, uses a 372K working window for GPT-5.6 Luna and 272K for other Codex
-models, and remains scoped to the authenticated account context. Only fresh,
-complete, account-matched metadata is registered. Stale or future-dated cache
-entries are refreshed synchronously before online catalog construction;
+`multi_agent_version: "v2"`. Cache schema version 7 invalidates inventories
+queried with older compatibility or context-window policies; entries carry the
+pre-cap backend default window so the deliberate Codex cap can be reported and an
+explicit operator override resolved exactly (`docs/codex-context.md`). It
+preserves those fields, uses a 372K working window for GPT-5.6 Luna and 272K for
+other Codex models, and remains scoped to the authenticated account context. Only
+fresh, complete, account-matched metadata is registered. Stale or future-dated
+cache entries are refreshed synchronously before online catalog construction;
 malformed, incomplete, duplicate, or inconsistent entries fail closed. Offline
 launches may retain fresh cached model identities and limits but strip Ultra,
 Responses Lite, and delegation. octet never infers those dynamic capabilities
@@ -416,10 +470,24 @@ credentials and headers remain behind
 provider definitions, catalog model metadata, logs, or persistence. The resolver
 serializes exchange/refresh and refreshes before its short-lived session expires.
 
-The standalone CLI and NDJSON host intentionally provide no Copilot login or
-configuration path. GitHub OAuth endpoint behavior, Enterprise policy, and live
-integration testing remain embedding-host responsibilities; the product covers
-only deterministic fake-host/transport behavior.
+The product now supplies a separate `auth::copilot` adapter for GitHub.com's
+bounded device/OAuth exchange, owner-private selected credential storage and
+vetted inference origins. CLI `--login copilot [--headless]` and `--logout copilot`
+(also `github-copilot`) dispatch before workspace/session startup. Synchronous
+catalog construction registers through a scoped discovery thread/current-thread
+runtime; the existing interactive blocking-lifecycle worker remains outside the
+renderer. Offline and missing credentials return before runtime/client creation,
+and failed discovery cannot partially mutate the catalog. Setup rebuilds and
+Codex-only logout preserve independent Copilot registration.
+
+The same catalog flows into existing NDJSON `models` and catalog-backed `run`;
+there is no new native-host auth command, OAuth payload field, or extension API
+0.3 authority. TUI slash auth is not yet integrated. Fresh credential resolution
+rechecks the host's selected login; explicit replacement is serialized with
+invalidation, and rejected/changed origins fence every resolver sharing a host.
+No local operation promises remote revocation of an already-resolved request or
+pending device code. This source contract does not establish native/live
+acceptance.
 
 ## Authentication
 

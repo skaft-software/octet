@@ -19,13 +19,17 @@ use tokio::runtime::Handle;
 use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::extension_process::{
-    DiscoveredExtension, ExtensionLifecycleProfile, ExtensionProcess, ExtensionReloadReport,
-    ExtensionRuntimeConfig, ExtensionRuntimeError as ProcessRuntimeError, ExtensionRuntimeSharing,
-    ExtensionTrust, EXTENSION_API_VERSION_0_1,
+    DiscoveredExtension, ExtensionHealthState, ExtensionLifecycleProfile, ExtensionProcess,
+    ExtensionReloadReport, ExtensionRuntimeConfig, ExtensionRuntimeError as ProcessRuntimeError,
+    ExtensionRuntimeSharing, ExtensionTrust, EXTENSION_API_VERSION_0_1,
 };
 use crate::secure_fs::read_regular_file_bounded;
 
 const MAX_CATALOG_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CATALOG_PACKAGE_FILES: usize = 256;
+const MAX_CATALOG_PACKAGE_ENTRIES: usize = 1024;
+const MAX_CATALOG_PACKAGE_DEPTH: usize = 8;
+const MAX_CATALOG_PACKAGE_BYTES: usize = 16 * 1024 * 1024;
 const ESTIMATED_PROCESS_FDS: usize = 4;
 const SUPERVISOR_POLL: Duration = Duration::from_millis(100);
 fn lock<T>(value: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -266,7 +270,7 @@ pub struct ExtensionRuntimeCatalogDiagnostic {
 pub struct ExtensionRuntimeCatalogEntry {
     /// The validated selected manifest and explicit activation policy.
     pub descriptor: DiscoveredExtension,
-    /// Digest of the manifest and resolved local entrypoint content.
+    /// Digest of the manifest, local entrypoint, and bounded local Python packages.
     pub content_digest: ExtensionContentDigest,
     /// Whether the entrypoint content was directly verified. Workspace sharing
     /// requires this to be true; isolated legacy execution remains compatible
@@ -371,6 +375,57 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+// Conservatively bind Python's local import surface, including vendored and
+// namespace packages. Scan every local .py below the entrypoint rather than
+// guessing which conditional/dynamic imports will execute at runtime.
+fn python_package_sources(root: &Path) -> Result<Vec<PathBuf>, String> {
+    fn visit(
+        directory: &Path,
+        depth: usize,
+        sources: &mut Vec<PathBuf>,
+        entries: &mut usize,
+    ) -> Result<(), String> {
+        if depth > MAX_CATALOG_PACKAGE_DEPTH {
+            return Err("extension package depth exceeds source bound".into());
+        }
+        let listing = std::fs::read_dir(directory)
+            .map_err(|_| "extension package directory cannot be verified".to_owned())?;
+        for entry in listing {
+            let entry =
+                entry.map_err(|_| "extension package directory cannot be verified".to_owned())?;
+            *entries += 1;
+            if *entries > MAX_CATALOG_PACKAGE_ENTRIES {
+                return Err("extension package entries exceed source bound".into());
+            }
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|_| "extension package entry cannot be verified".to_owned())?;
+            if path.extension().is_some_and(|extension| extension == "py") {
+                // Keep symlink/special candidates in the list so secure reads
+                // reject them rather than silently omitting imported modules.
+                sources.push(path);
+                if sources.len() > MAX_CATALOG_PACKAGE_FILES {
+                    return Err("extension package files exceed source bound".into());
+                }
+            } else if file_type.is_dir() {
+                visit(&path, depth + 1, sources, entries)?;
+            } else if file_type.is_symlink() {
+                // A package directory may itself be a symlink. We cannot
+                // safely enumerate its imported modules without following it.
+                return Err("extension package directory cannot be verified".into());
+            }
+        }
+        Ok(())
+    }
+
+    let mut sources = Vec::new();
+    let mut entries = 0;
+    visit(root, 0, &mut sources, &mut entries)?;
+    sources.sort();
+    Ok(sources)
+}
+
 fn catalog_content_digest(
     descriptor: &DiscoveredExtension,
 ) -> Result<(ExtensionContentDigest, bool), String> {
@@ -401,7 +456,33 @@ fn catalog_content_digest(
     match read_regular_file_bounded(&local, MAX_CATALOG_SOURCE_BYTES) {
         Ok(bytes) => {
             hasher.update(b"\0source\0");
+            let python_entrypoint = local.extension().is_some_and(|extension| extension == "py")
+                || bytes
+                    .split(|byte| *byte == b'\n')
+                    .next()
+                    .is_some_and(|line| {
+                        line.starts_with(b"#!") && line.windows(6).any(|part| part == b"python")
+                    });
             hasher.update(bytes);
+            if python_entrypoint {
+                let root = local
+                    .parent()
+                    .ok_or("extension package root cannot be located")?;
+                let mut total = 0usize;
+                for source in python_package_sources(root)? {
+                    let relative = source
+                        .strip_prefix(root)
+                        .map_err(|_| "extension package path cannot be verified".to_owned())?;
+                    let remaining = MAX_CATALOG_PACKAGE_BYTES.saturating_sub(total);
+                    let content = read_regular_file_bounded(&source, remaining)
+                        .map_err(|_| "extension package source cannot be verified".to_owned())?;
+                    total += content.len();
+                    hasher.update(b"\0package\0");
+                    hasher.update(relative.to_string_lossy().as_bytes());
+                    hasher.update(b"\0");
+                    hasher.update(content);
+                }
+            }
             Ok((
                 ExtensionContentDigest(format!("{:x}", hasher.finalize())),
                 true,
@@ -743,6 +824,7 @@ struct ManagedRuntime {
     provenance: ExtensionRuntimeProvenance,
     process: ExtensionProcess,
     usage: ExtensionRuntimeUsage,
+    estimated_usage: ExtensionRuntimeUsage,
     bindings: BTreeSet<u64>,
     lifecycle: ExtensionLifecycleProfile,
     sharing: ExtensionRuntimeSharing,
@@ -767,6 +849,7 @@ struct RecentStatus {
 /// inspectable without exposing the child command, workspace path, or stderr.
 struct StartingRuntime {
     notify: Arc<Notify>,
+    reservation: Arc<AtomicBool>,
     provenance: ExtensionRuntimeProvenance,
     usage: ExtensionRuntimeUsage,
 }
@@ -839,10 +922,11 @@ impl ExtensionRuntimeManager {
         if self.inner.shutdown.load(Ordering::Acquire) {
             return;
         }
-        let changed = {
+        let (changed, canceled_starts) = {
             let mut current = write(&self.inner.catalog);
             let mut changed = Vec::new();
-            let state = lock(&self.inner.state);
+            let mut canceled_starts = Vec::new();
+            let mut state = lock(&self.inner.state);
             for (key, runtime) in &state.active {
                 let replacement = match catalog.get(&runtime.descriptor.manifest.name) {
                     None => Some(ExtensionManagedRuntimeState::Stopped),
@@ -866,9 +950,65 @@ impl ExtensionRuntimeManager {
                     changed.push((key.clone(), replacement));
                 }
             }
+            let starting_keys = state.starting.keys().cloned().collect::<Vec<_>>();
+            for key in starting_keys {
+                let Some(starting) = state.starting.get(&key) else {
+                    continue;
+                };
+                let replacement = match catalog.get(&starting.provenance.extension) {
+                    None => Some(ExtensionManagedRuntimeState::Stopped),
+                    Some(entry)
+                        if !Self::entry_is_eligible(entry)
+                            || entry.lifecycle() != starting.provenance.lifecycle
+                            || !matches!(
+                                (&key.scope, entry.sharing()),
+                                (RuntimeScope::Shared, ExtensionRuntimeSharing::Workspace)
+                                    | (
+                                        RuntimeScope::Binding(_) | RuntimeScope::OneShot(_),
+                                        ExtensionRuntimeSharing::Isolated,
+                                    )
+                            ) =>
+                    {
+                        Some(ExtensionManagedRuntimeState::Inactive)
+                    }
+                    Some(entry)
+                        if entry.content_digest.as_str() != key.content_digest
+                            || (entry.sharing() == ExtensionRuntimeSharing::Workspace
+                                && !entry.source_verified) =>
+                    {
+                        Some(ExtensionManagedRuntimeState::StaleSource)
+                    }
+                    Some(_) => None,
+                };
+                if let Some(replacement) = replacement {
+                    if let Some(starting) = state.starting.remove(&key) {
+                        state.recent.insert(
+                            starting.provenance.extension.clone(),
+                            RecentStatus {
+                                provenance: starting.provenance,
+                                state: replacement,
+                                resource_exhausted: None,
+                                failure: match replacement {
+                                    ExtensionManagedRuntimeState::Inactive => {
+                                        Some(ExtensionRuntimeFailure::NotEligible)
+                                    }
+                                    ExtensionManagedRuntimeState::StaleSource => {
+                                        Some(ExtensionRuntimeFailure::StaleSource)
+                                    }
+                                    _ => None,
+                                },
+                            },
+                        );
+                        canceled_starts.push(starting.notify);
+                    }
+                }
+            }
             *current = catalog;
-            changed
+            (changed, canceled_starts)
         };
+        for notify in canceled_starts {
+            notify.notify_waiters();
+        }
         for (key, replacement) in changed {
             self.stop_key(&key, Some(replacement)).await;
         }
@@ -899,6 +1039,7 @@ impl ExtensionRuntimeManager {
             session_digest: sha256_hex(b"octet-extension-session-binding-v1\0", session_owner),
             active: Arc::new(StdMutex::new(BTreeSet::new())),
             released: Arc::new(AtomicBool::new(false)),
+            release_notify: Arc::new(Notify::new()),
             // Activation fans out cloned handles. Only the final binding handle
             // may perform Drop-based cleanup; a completed activation must not
             // release the session attachment that owns the returned process.
@@ -908,6 +1049,7 @@ impl ExtensionRuntimeManager {
 
     /// Returns static and active runtime status without starting eligible entries.
     pub fn statuses(&self) -> Vec<ExtensionRuntimeStatus> {
+        self.reconcile_dead_usage();
         let catalog = self.catalog();
         let state = lock(&self.inner.state);
         let mut statuses = BTreeMap::<(String, String), ExtensionRuntimeStatus>::new();
@@ -976,7 +1118,7 @@ impl ExtensionRuntimeManager {
                 ),
                 ExtensionRuntimeStatus {
                     provenance: runtime.provenance.clone(),
-                    state: runtime.state,
+                    state: Self::observed_runtime_state(runtime),
                     bindings: runtime.bindings.len(),
                     usage: runtime.usage,
                     resource_exhausted: None,
@@ -1006,6 +1148,7 @@ impl ExtensionRuntimeManager {
 
     /// Returns aggregate resource usage currently charged to the fleet.
     pub fn usage(&self) -> ExtensionRuntimeUsage {
+        self.reconcile_dead_usage();
         lock(&self.inner.state).usage
     }
 
@@ -1044,23 +1187,91 @@ impl ExtensionRuntimeManager {
             state.usage = ExtensionRuntimeUsage::default();
             let starters = std::mem::take(&mut state.starting)
                 .into_values()
-                .map(|starting| starting.notify)
+                .map(|starting| {
+                    starting.reservation.store(false, Ordering::Release);
+                    starting.notify
+                })
                 .collect::<Vec<_>>();
             let runtimes = std::mem::take(&mut state.active)
                 .into_values()
-                .map(|runtime| runtime.process)
+                .map(|runtime| (runtime.process, runtime.gate))
                 .collect::<Vec<_>>();
             (runtimes, starters)
         };
         for starter in starters {
             starter.notify_waiters();
         }
-        let _ = join_all(runtimes.iter().map(ExtensionProcess::shutdown)).await;
+        let _ = join_all(runtimes.into_iter().map(|(process, gate)| async move {
+            let _guard = gate.lock().await;
+            let _ = process.shutdown().await;
+        }))
+        .await;
     }
 
     fn entry_is_eligible(entry: &ExtensionRuntimeCatalogEntry) -> bool {
         entry.descriptor.activation.enabled
             && entry.descriptor.activation.trust == ExtensionTrust::Trusted
+    }
+
+    fn observed_runtime_state(runtime: &ManagedRuntime) -> ExtensionManagedRuntimeState {
+        if runtime.state != ExtensionManagedRuntimeState::Ready {
+            return runtime.state;
+        }
+        if !runtime.process.is_running() {
+            return ExtensionManagedRuntimeState::Backoff;
+        }
+        match runtime.process.health_snapshot().state {
+            ExtensionHealthState::Ready | ExtensionHealthState::Degraded => {
+                ExtensionManagedRuntimeState::Ready
+            }
+            ExtensionHealthState::Starting
+            | ExtensionHealthState::Initializing
+            | ExtensionHealthState::Draining => ExtensionManagedRuntimeState::Starting,
+            ExtensionHealthState::Backoff => ExtensionManagedRuntimeState::Backoff,
+            ExtensionHealthState::Parked => ExtensionManagedRuntimeState::Parked,
+            ExtensionHealthState::Stopped | ExtensionHealthState::Crashed => {
+                ExtensionManagedRuntimeState::Backoff
+            }
+        }
+    }
+
+    fn runtime_is_attachable(runtime: &ManagedRuntime) -> bool {
+        runtime.process.is_running()
+            && matches!(
+                runtime.state,
+                ExtensionManagedRuntimeState::Ready
+                    | ExtensionManagedRuntimeState::ResourceExhausted
+            )
+            && matches!(
+                runtime.process.health_snapshot().state,
+                ExtensionHealthState::Ready | ExtensionHealthState::Degraded
+            )
+    }
+
+    fn reconcile_dead_usage(&self) {
+        let mut state = lock(&self.inner.state);
+        let released = state
+            .active
+            .values_mut()
+            .filter_map(|runtime| {
+                (!runtime.process.is_running()).then(|| std::mem::take(&mut runtime.usage))
+            })
+            .collect::<Vec<_>>();
+        for usage in released {
+            Self::release_usage(&mut state, usage);
+        }
+    }
+
+    fn release_usage(state: &mut ManagerState, usage: ExtensionRuntimeUsage) {
+        state.usage.processes = state.usage.processes.saturating_sub(usage.processes);
+        state.usage.file_descriptors = state
+            .usage
+            .file_descriptors
+            .saturating_sub(usage.file_descriptors);
+        state.usage.buffered_bytes = state
+            .usage
+            .buffered_bytes
+            .saturating_sub(usage.buffered_bytes);
     }
 
     fn validate_catalog_identity(
@@ -1286,22 +1497,34 @@ impl ExtensionRuntimeManager {
     }
 
     async fn stop_key(&self, key: &RuntimeKey, replacement: Option<ExtensionManagedRuntimeState>) {
+        let gate = lock(&self.inner.state)
+            .active
+            .get(key)
+            .map(|runtime| Arc::clone(&runtime.gate));
+        if let Some(gate) = gate {
+            let _guard = gate.lock().await;
+            self.stop_key_after_gate(key, replacement, &gate).await;
+        }
+    }
+
+    /// Removes and shuts down a runtime while its lifecycle gate is held.
+    /// Reload uses this form for validation failures after it has already
+    /// acquired the same gate.
+    async fn stop_key_after_gate(
+        &self,
+        key: &RuntimeKey,
+        replacement: Option<ExtensionManagedRuntimeState>,
+        expected_gate: &Arc<Mutex<()>>,
+    ) {
         let runtime = {
             let mut state = lock(&self.inner.state);
-            let runtime = state.active.remove(key);
+            let should_remove = state
+                .active
+                .get(key)
+                .is_some_and(|runtime| Arc::ptr_eq(&runtime.gate, expected_gate));
+            let runtime = should_remove.then(|| state.active.remove(key)).flatten();
             if let Some(runtime) = &runtime {
-                state.usage.processes = state
-                    .usage
-                    .processes
-                    .saturating_sub(runtime.usage.processes);
-                state.usage.file_descriptors = state
-                    .usage
-                    .file_descriptors
-                    .saturating_sub(runtime.usage.file_descriptors);
-                state.usage.buffered_bytes = state
-                    .usage
-                    .buffered_bytes
-                    .saturating_sub(runtime.usage.buffered_bytes);
+                Self::release_usage(&mut state, runtime.usage);
                 if let Some(replacement) = replacement {
                     state.recent.insert(
                         runtime.provenance.extension.clone(),
@@ -1335,24 +1558,17 @@ impl ExtensionRuntimeManager {
                 });
                 if should_stop {
                     if let Some(runtime) = state.active.remove(&key) {
-                        state.usage.processes = state
-                            .usage
-                            .processes
-                            .saturating_sub(runtime.usage.processes);
-                        state.usage.file_descriptors = state
-                            .usage
-                            .file_descriptors
-                            .saturating_sub(runtime.usage.file_descriptors);
-                        state.usage.buffered_bytes = state
-                            .usage
-                            .buffered_bytes
-                            .saturating_sub(runtime.usage.buffered_bytes);
-                        stop.push(runtime.process);
+                        Self::release_usage(&mut state, runtime.usage);
+                        stop.push((runtime.process, runtime.gate));
                     }
                 }
             }
         }
-        let _ = join_all(stop.iter().map(ExtensionProcess::shutdown)).await;
+        let _ = join_all(stop.into_iter().map(|(process, gate)| async move {
+            let _guard = gate.lock().await;
+            let _ = process.shutdown().await;
+        }))
+        .await;
     }
 
     async fn settle_one_shots(&self, binding_id: u64, keys: BTreeSet<RuntimeKey>) {
@@ -1378,6 +1594,7 @@ impl ExtensionRuntimeManager {
         key: RuntimeKey,
         automatic: bool,
     ) -> Result<ExtensionReloadReport, ExtensionRuntimeManagerError> {
+        self.reconcile_dead_usage();
         let gate = {
             let state = lock(&self.inner.state);
             state
@@ -1392,11 +1609,14 @@ impl ExtensionRuntimeManager {
         if self.inner.shutdown.load(Ordering::Acquire) {
             return Err(ExtensionRuntimeManagerError::ManagerClosed);
         }
-        let (descriptor, provenance, process, usage, was_running) = {
+        let (descriptor, provenance, process, estimated_usage) = {
             let mut state = lock(&self.inner.state);
             let Some(runtime) = state.active.get_mut(&key) else {
                 return Err(ExtensionRuntimeManagerError::UnknownExtension);
             };
+            if !Arc::ptr_eq(&runtime.gate, &gate) {
+                return Err(ExtensionRuntimeManagerError::UnknownExtension);
+            }
             let now = Instant::now();
             let history = if automatic {
                 &mut runtime.restarts
@@ -1452,16 +1672,20 @@ impl ExtensionRuntimeManager {
                 runtime.descriptor.clone(),
                 runtime.provenance.clone(),
                 runtime.process.clone(),
-                runtime.usage,
-                runtime.process.is_running(),
+                runtime.estimated_usage,
             )
+        };
+        let _transition = ReloadTransition {
+            manager: Arc::downgrade(&self.inner),
+            key: key.clone(),
+            gate: Arc::clone(&gate),
         };
 
         let entry = read(&self.inner.catalog)
             .get(&descriptor.manifest.name)
             .cloned();
         let Some(entry) = entry else {
-            self.stop_key(&key, Some(ExtensionManagedRuntimeState::StaleSource))
+            self.stop_key_after_gate(&key, Some(ExtensionManagedRuntimeState::StaleSource), &gate)
                 .await;
             return Err(ExtensionRuntimeManagerError::StaleSource);
         };
@@ -1471,17 +1695,18 @@ impl ExtensionRuntimeManager {
             } else {
                 ExtensionManagedRuntimeState::StaleSource
             };
-            self.stop_key(&key, Some(replacement)).await;
+            self.stop_key_after_gate(&key, Some(replacement), &gate)
+                .await;
             self.record_entry_validation_failure(&provenance, &error);
             return Err(error);
         }
 
-        let transient = if was_running {
+        let mut transient = {
             let mut state = lock(&self.inner.state);
-            match self.reserve(&mut state, usage, &provenance) {
+            match self.reserve(&mut state, estimated_usage, &provenance) {
                 Ok(()) => Some(UsageReservation {
                     manager: Arc::downgrade(&self.inner),
-                    usage,
+                    usage: estimated_usage,
                     armed: true,
                 }),
                 Err(error) => {
@@ -1497,13 +1722,15 @@ impl ExtensionRuntimeManager {
                         );
                     }
                     if let Some(runtime) = state.active.get_mut(&key) {
-                        runtime.state = ExtensionManagedRuntimeState::Ready;
+                        runtime.state = if runtime.process.is_running() {
+                            ExtensionManagedRuntimeState::Ready
+                        } else {
+                            ExtensionManagedRuntimeState::Backoff
+                        };
                     }
                     return Err(error);
                 }
             }
-        } else {
-            None
         };
 
         let permit = match self.acquire_startup(&provenance).await {
@@ -1518,7 +1745,6 @@ impl ExtensionRuntimeManager {
         let result =
             tokio::time::timeout(self.inner.budget.startup_timeout, process.reload()).await;
         drop(permit);
-        drop(transient);
         match result {
             Ok(Ok(report)) => {
                 if self.inner.shutdown.load(Ordering::Acquire) {
@@ -1531,15 +1757,43 @@ impl ExtensionRuntimeManager {
                     } else {
                         ExtensionManagedRuntimeState::StaleSource
                     };
-                    self.stop_key(&key, Some(replacement)).await;
+                    self.stop_key_after_gate(&key, Some(replacement), &gate)
+                        .await;
                     self.record_entry_validation_failure(&provenance, &error);
                     return Err(error);
                 }
-                let mut state = lock(&self.inner.state);
-                if let Some(runtime) = state.active.get_mut(&key) {
-                    runtime.state = ExtensionManagedRuntimeState::Ready;
-                    runtime.restart_attempt = 0;
-                    runtime.next_restart = None;
+                let committed = {
+                    let mut state = lock(&self.inner.state);
+                    let old_usage = match state.active.get_mut(&key) {
+                        Some(runtime) if Arc::ptr_eq(&runtime.gate, &gate) => {
+                            let old_usage = runtime.usage;
+                            runtime.usage = estimated_usage;
+                            runtime.estimated_usage = estimated_usage;
+                            runtime.state = ExtensionManagedRuntimeState::Ready;
+                            runtime.restart_attempt = 0;
+                            runtime.next_restart = None;
+                            Some(old_usage)
+                        }
+                        _ => None,
+                    };
+                    if let Some(old_usage) = old_usage {
+                        Self::release_usage(&mut state, old_usage);
+                        state.recent.remove(&provenance.extension);
+                        if let Some(reservation) = transient.as_mut() {
+                            reservation.disarm();
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !committed {
+                    let _ = process.shutdown().await;
+                    return Err(if self.inner.shutdown.load(Ordering::Acquire) {
+                        ExtensionRuntimeManagerError::ManagerClosed
+                    } else {
+                        ExtensionRuntimeManagerError::UnknownExtension
+                    });
                 }
                 Ok(report)
             }
@@ -1674,10 +1928,53 @@ fn classify_process_failure(error: &ProcessRuntimeError) -> ExtensionRuntimeFail
     }
 }
 
+// Restore the manager transition before its lifecycle gate unlocks if the
+// reload future is dropped. Process-level cancellation owns candidate cleanup;
+// a draining process must not be advertised as attachable after cancellation.
+struct ReloadTransition {
+    manager: Weak<ManagerInner>,
+    key: RuntimeKey,
+    gate: Arc<Mutex<()>>,
+}
+
+impl Drop for ReloadTransition {
+    fn drop(&mut self) {
+        let Some(manager) = self.manager.upgrade() else {
+            return;
+        };
+        let mut state = lock(&manager.state);
+        let Some(runtime) = state.active.get_mut(&self.key) else {
+            return;
+        };
+        if !Arc::ptr_eq(&runtime.gate, &self.gate)
+            || runtime.state != ExtensionManagedRuntimeState::Starting
+        {
+            return;
+        }
+        runtime.state = if !runtime.process.is_running() {
+            runtime.next_restart = Some(Instant::now() + manager.budget.restart_backoff);
+            ExtensionManagedRuntimeState::Backoff
+        } else if matches!(
+            runtime.process.health_snapshot().state,
+            ExtensionHealthState::Ready | ExtensionHealthState::Degraded
+        ) {
+            ExtensionManagedRuntimeState::Ready
+        } else {
+            ExtensionManagedRuntimeState::Parked
+        };
+    }
+}
+
 struct UsageReservation {
     manager: Weak<ManagerInner>,
     usage: ExtensionRuntimeUsage,
     armed: bool,
+}
+
+impl UsageReservation {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
 }
 
 impl Drop for UsageReservation {
@@ -1704,36 +2001,43 @@ impl Drop for UsageReservation {
 struct StartReservation {
     manager: Weak<ManagerInner>,
     key: RuntimeKey,
+    reservation: Arc<AtomicBool>,
     usage: ExtensionRuntimeUsage,
     notify: Arc<Notify>,
     armed: bool,
 }
 
 impl StartReservation {
+    fn is_current(&self, state: &ManagerState) -> bool {
+        state
+            .starting
+            .get(&self.key)
+            .is_some_and(|starting| Arc::ptr_eq(&starting.reservation, &self.reservation))
+    }
+
     fn disarm(&mut self) {
         self.armed = false;
+        self.reservation.store(false, Ordering::Release);
     }
 }
 
 impl Drop for StartReservation {
     fn drop(&mut self) {
-        if !self.armed {
+        if !self.armed || !self.reservation.swap(false, Ordering::AcqRel) {
             return;
         }
         let Some(manager) = self.manager.upgrade() else {
             return;
         };
         let mut state = lock(&manager.state);
-        state.starting.remove(&self.key);
-        state.usage.processes = state.usage.processes.saturating_sub(self.usage.processes);
-        state.usage.file_descriptors = state
-            .usage
-            .file_descriptors
-            .saturating_sub(self.usage.file_descriptors);
-        state.usage.buffered_bytes = state
-            .usage
-            .buffered_bytes
-            .saturating_sub(self.usage.buffered_bytes);
+        if state
+            .starting
+            .get(&self.key)
+            .is_some_and(|starting| Arc::ptr_eq(&starting.reservation, &self.reservation))
+        {
+            state.starting.remove(&self.key);
+        }
+        ExtensionRuntimeManager::release_usage(&mut state, self.usage);
         self.notify.notify_waiters();
     }
 }
@@ -1746,6 +2050,7 @@ pub struct ExtensionSessionBinding {
     session_digest: String,
     active: Arc<StdMutex<BTreeSet<RuntimeKey>>>,
     released: Arc<AtomicBool>,
+    release_notify: Arc<Notify>,
     owners: Arc<()>,
 }
 
@@ -1757,6 +2062,21 @@ impl ExtensionSessionBinding {
 
     /// Explicitly activates one static catalog entry.
     pub async fn activate(
+        &self,
+        extension: &str,
+        config: ExtensionRuntimeConfig,
+    ) -> Result<ExtensionRuntimeLease, ExtensionRuntimeManagerError> {
+        // Register before checking `released` so release also wakes callers
+        // waiting on another startup or a reload gate, without a lost wakeup.
+        let released = Arc::clone(&self.release_notify).notified_owned();
+        tokio::select! {
+            biased;
+            _ = released => Err(ExtensionRuntimeManagerError::BindingClosed),
+            result = self.activate_inner(extension, config) => result,
+        }
+    }
+
+    async fn activate_inner(
         &self,
         extension: &str,
         mut config: ExtensionRuntimeConfig,
@@ -1800,6 +2120,7 @@ impl ExtensionSessionBinding {
             }
             if config.agent_sessions
                 || config.session_lifecycle.is_some()
+                || config.event_bus.is_some()
                 || config.approvals
                 || config.secret_broker.is_some()
             {
@@ -1837,34 +2158,73 @@ impl ExtensionSessionBinding {
         }
 
         loop {
-            let (wait, reservation) = {
+            self.manager.reconcile_dead_usage();
+            let (wait, reservation, restart, gate) = {
+                // Match catalog replacement's lock order and keep eligibility
+                // stable through admission, including after any awaited gate.
+                let catalog = read(&self.manager.inner.catalog);
+                ExtensionRuntimeManager::validate_catalog_identity(
+                    &key,
+                    &entry,
+                    catalog.get(extension),
+                )?;
                 let mut state = lock(&self.manager.inner.state);
+                let mut active = lock(&self.active);
+                if self.released.load(Ordering::Acquire) {
+                    return Err(ExtensionRuntimeManagerError::BindingClosed);
+                }
                 if self.manager.inner.shutdown.load(Ordering::Acquire) {
                     return Err(ExtensionRuntimeManagerError::ManagerClosed);
                 }
                 if let Some(runtime) = state.active.get_mut(&key) {
-                    runtime.bindings.insert(self.id);
-                    lock(&self.active).insert(key.clone());
-                    return Ok(ExtensionRuntimeLease {
-                        process: runtime.process.clone(),
-                        provenance: runtime.provenance.clone(),
-                        shared: runtime.sharing == ExtensionRuntimeSharing::Workspace,
-                        one_shot: runtime.lifecycle == ExtensionLifecycleProfile::OneShot,
-                    });
-                }
-                if let Some(wait) = state.starting.get(&key) {
+                    if ExtensionRuntimeManager::runtime_is_attachable(runtime) {
+                        runtime.bindings.insert(self.id);
+                        active.insert(key.clone());
+                        return Ok(ExtensionRuntimeLease {
+                            process: runtime.process.clone(),
+                            provenance: runtime.provenance.clone(),
+                            shared: runtime.sharing == ExtensionRuntimeSharing::Workspace,
+                            one_shot: runtime.lifecycle == ExtensionLifecycleProfile::OneShot,
+                        });
+                    }
+                    if !runtime.process.is_running()
+                        && runtime.lifecycle != ExtensionLifecycleProfile::OneShot
+                        && matches!(
+                            runtime.state,
+                            ExtensionManagedRuntimeState::Ready
+                                | ExtensionManagedRuntimeState::Backoff
+                        )
+                    {
+                        (None, None, true, None)
+                    } else if runtime.state == ExtensionManagedRuntimeState::Parked {
+                        return Err(ExtensionRuntimeManagerError::Failed {
+                            failure: ExtensionRuntimeFailure::Launch,
+                        });
+                    } else {
+                        // Reload holds this gate while the old generation is
+                        // draining. Never attach a lease to that generation.
+                        (None, None, false, Some(Arc::clone(&runtime.gate)))
+                    }
+                } else if let Some(wait) = state.starting.get(&key) {
                     // Create the waiter before releasing the state lock: a
                     // completed startup's notify_waiters stores no later permit.
-                    (Some(Arc::clone(&wait.notify).notified_owned()), None)
+                    (
+                        Some(Arc::clone(&wait.notify).notified_owned()),
+                        None,
+                        false,
+                        None,
+                    )
                 } else {
                     let usage = ExtensionRuntimeManager::estimated_usage(&config);
                     match self.manager.reserve(&mut state, usage, &provenance) {
                         Ok(()) => {
                             let notify = Arc::new(Notify::new());
+                            let reservation_token = Arc::new(AtomicBool::new(true));
                             state.starting.insert(
                                 key.clone(),
                                 StartingRuntime {
                                     notify: Arc::clone(&notify),
+                                    reservation: Arc::clone(&reservation_token),
                                     provenance: provenance.clone(),
                                     usage,
                                 },
@@ -1874,10 +2234,13 @@ impl ExtensionSessionBinding {
                                 Some(StartReservation {
                                     manager: Arc::downgrade(&self.manager.inner),
                                     key: key.clone(),
+                                    reservation: reservation_token,
                                     usage,
                                     notify,
                                     armed: true,
                                 }),
+                                false,
+                                None,
                             )
                         }
                         Err(error) => {
@@ -1899,10 +2262,43 @@ impl ExtensionSessionBinding {
                     }
                 }
             };
+            if restart {
+                self.manager.reload_key(key.clone(), true).await?;
+                continue;
+            }
+            if let Some(gate) = gate {
+                let _guard = gate.lock().await;
+                tokio::time::sleep(SUPERVISOR_POLL).await;
+                continue;
+            }
             if let Some(reservation) = reservation {
-                return self
-                    .start_new(entry, provenance, key, config, reservation)
-                    .await;
+                // Catalog replacement and shutdown also wake the startup owner,
+                // not only callers coalesced behind it. Check identity after
+                // registering the waiter so a removed/reselected key cannot
+                // commit an earlier reservation into the new generation.
+                let invalidated = Arc::clone(&reservation.notify).notified_owned();
+                {
+                    let state = lock(&self.manager.inner.state);
+                    // Shutdown removes starting reservations under this lock.
+                    // Check closure and currency together so shutdown cannot
+                    // remove our reservation between the two checks and be
+                    // misreported as a catalog/source change.
+                    if self.manager.inner.shutdown.load(Ordering::Acquire) {
+                        return Err(ExtensionRuntimeManagerError::ManagerClosed);
+                    }
+                    if !reservation.is_current(&state) {
+                        return Err(ExtensionRuntimeManagerError::StaleSource);
+                    }
+                }
+                return tokio::select! {
+                    biased;
+                    _ = invalidated => Err(if self.manager.inner.shutdown.load(Ordering::Acquire) {
+                        ExtensionRuntimeManagerError::ManagerClosed
+                    } else {
+                        ExtensionRuntimeManagerError::StaleSource
+                    }),
+                    result = self.start_new(entry, provenance, key, config, reservation) => result,
+                };
             }
             let wait = wait.expect("a non-starting activation waits for its owner");
             wait.await;
@@ -2000,11 +2396,20 @@ impl ExtensionSessionBinding {
                 Err(error) => Err(error),
                 Ok(()) => {
                     let mut state = lock(&self.manager.inner.state);
+                    let mut active = lock(&self.active);
                     if self.manager.inner.shutdown.load(Ordering::Acquire) {
                         Err(ExtensionRuntimeManagerError::ManagerClosed)
+                    } else if self.released.load(Ordering::Acquire) {
+                        Err(ExtensionRuntimeManagerError::BindingClosed)
+                    } else if !reservation.is_current(&state) {
+                        Err(ExtensionRuntimeManagerError::StaleSource)
                     } else {
                         state.starting.remove(&key);
                         state.recent.remove(&provenance.extension);
+                        active.insert(key.clone());
+                        // Transfer the charge under the same state lock as the
+                        // runtime insertion; shutdown cannot release it twice.
+                        reservation.disarm();
                         state.active.insert(
                             key.clone(),
                             ManagedRuntime {
@@ -2012,6 +2417,7 @@ impl ExtensionSessionBinding {
                                 provenance: provenance.clone(),
                                 process: process.clone(),
                                 usage,
+                                estimated_usage: usage,
                                 bindings: BTreeSet::from([self.id]),
                                 lifecycle,
                                 sharing,
@@ -2034,8 +2440,6 @@ impl ExtensionSessionBinding {
                 .record_entry_validation_failure(&provenance, &error);
             return Err(error);
         }
-        lock(&self.active).insert(key.clone());
-        reservation.disarm();
         reservation.notify.notify_waiters();
         if self.manager.inner.shutdown.load(Ordering::Acquire) {
             lock(&self.active).remove(&key);
@@ -2150,6 +2554,7 @@ impl ExtensionSessionBinding {
         if self.released.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.release_notify.notify_waiters();
         let keys = std::mem::take(&mut *lock(&self.active));
         self.manager.detach_binding(self.id, keys).await;
     }
@@ -2269,6 +2674,131 @@ done
         }
     }
 
+    #[cfg(unix)]
+    fn python_descriptor(root: &Path, name: &str) -> DiscoveredExtension {
+        let mut selected = descriptor(root, name, ExtensionLifecycleProfile::WorkspaceService);
+        let directory = selected.manifest_path.parent().unwrap();
+        let package = directory.join("localpkg");
+        fs::create_dir(&package).unwrap();
+        fs::write(package.join("__init__.py"), "").unwrap();
+        fs::write(package.join("helper.py"), "START_TEXT = 'started'\n").unwrap();
+        write_script(
+            &directory.join("runner.py"),
+            r#"#!/usr/bin/env python3
+import os
+import sys
+sys.path.insert(0, os.environ['OCTET_EXTENSION_DIR'])
+from localpkg.helper import START_TEXT
+with open(os.path.join(os.environ['OCTET_WORKSPACE'], 'starts'), 'a') as output:
+    output.write(START_TEXT)
+for line in sys.stdin:
+    if '"method":"initialize"' in line:
+        print('{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.2","tools":[],"commands":[],"protocol":{"version":"0.2","features":["request_cancellation","content_parts"],"limits":{"max_concurrent_requests":1}}}}', flush=True)
+    if '"method":"shutdown"' in line:
+        print('{"jsonrpc":"2.0","id":2,"result":{}}', flush=True)
+        break
+"#,
+        );
+        selected.manifest.entrypoint.command = "runner.py".into();
+        fs::write(
+            &selected.manifest_path,
+            toml::to_string(&selected.manifest).unwrap(),
+        )
+        .unwrap();
+        selected
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn imported_python_helper_edit_fences_start_and_retires_live_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = python_descriptor(temporary.path(), "workspace-service");
+        let helper = selected
+            .manifest_path
+            .parent()
+            .unwrap()
+            .join("localpkg/helper.py");
+        let initial = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        assert!(initial.get("workspace-service").unwrap().source_verified);
+        let manager = ExtensionRuntimeManager::new(
+            ExtensionRuntimeDomain::ordinary(temporary.path()).unwrap(),
+        );
+        manager.replace_catalog(initial).await;
+        fs::write(&helper, "START_TEXT = 'changed'\n").unwrap();
+        let binding = manager.bind_session("session-a").unwrap();
+        assert!(matches!(
+            binding
+                .activate(
+                    "workspace-service",
+                    ExtensionRuntimeConfig::new(temporary.path())
+                )
+                .await,
+            Err(ExtensionRuntimeManagerError::StaleSource)
+        ));
+        assert!(!temporary.path().join("starts").exists());
+
+        let updated = ExtensionRuntimeCatalog::from_descriptors([selected]);
+        manager.replace_catalog(updated).await;
+        binding
+            .activate(
+                "workspace-service",
+                ExtensionRuntimeConfig::new(temporary.path()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(temporary.path().join("starts")).unwrap(),
+            "changed"
+        );
+        fs::write(&helper, "START_TEXT = 'changed-again'\n").unwrap();
+        assert!(matches!(
+            manager.reload("workspace-service").await.as_slice(),
+            [Err(ExtensionRuntimeManagerError::StaleSource)]
+        ));
+        assert_eq!(manager.usage(), ExtensionRuntimeUsage::default());
+        binding.release().await;
+        manager.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn python_package_digest_binds_vendored_modules_and_rejects_unverified_sources() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = python_descriptor(temporary.path(), "python-service");
+        let directory = selected.manifest_path.parent().unwrap();
+        let initial = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        let initial_digest = initial
+            .get("python-service")
+            .unwrap()
+            .content_digest
+            .clone();
+        let vendor = directory.join("vendor/octet_extension");
+        fs::create_dir_all(&vendor).unwrap();
+        fs::write(vendor.join("__init__.py"), "").unwrap();
+        let module = vendor.join("extension.py");
+        fs::write(&module, "VALUE = 1\n").unwrap();
+        let added = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        let added_digest = added.get("python-service").unwrap().content_digest.clone();
+        assert_ne!(initial_digest, added_digest);
+        fs::write(&module, "VALUE = 2\n").unwrap();
+        let edited = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        assert_ne!(
+            added_digest,
+            edited.get("python-service").unwrap().content_digest
+        );
+        fs::remove_file(&module).unwrap();
+        let removed = ExtensionRuntimeCatalog::from_descriptors([selected.clone()]);
+        assert_ne!(
+            added_digest,
+            removed.get("python-service").unwrap().content_digest
+        );
+        use std::os::unix::fs::symlink;
+        symlink(directory.join("localpkg/helper.py"), &module).unwrap();
+        let unverified = ExtensionRuntimeCatalog::from_descriptors([selected]);
+        assert!(!unverified.get("python-service").unwrap().source_verified);
+        assert!(!unverified.diagnostics().is_empty());
+    }
+
     #[test]
     fn dropping_a_temporary_binding_does_not_release_its_owner() {
         let temporary = tempfile::tempdir().unwrap();
@@ -2341,26 +2871,48 @@ done
         let binding = manager.bind_session("session-a").unwrap();
         let workspace = temporary.path().to_owned();
         let mut pending = tokio::task::JoinSet::new();
+        let mut ready = Vec::new();
+        // Spawn real waiters and confirm that each has registered its executor
+        // waker before shutdown; observing Starting alone only proves that one
+        // of the eight callers has reached the startup reservation.
         for _ in 0..8 {
             let binding = binding.clone();
             let workspace = workspace.clone();
+            let (signal, received) = tokio::sync::oneshot::channel();
+            ready.push(received);
             pending.spawn(async move {
-                binding
-                    .activate("lazy-runtime", ExtensionRuntimeConfig::new(workspace))
-                    .await
+                let mut activation = Box::pin(
+                    binding.activate("lazy-runtime", ExtensionRuntimeConfig::new(workspace)),
+                );
+                let mut signal = Some(signal);
+                std::future::poll_fn(|cx| {
+                    let polled = std::future::Future::poll(activation.as_mut(), cx);
+                    if let Some(signal) = signal.take() {
+                        let readiness = match &polled {
+                            std::task::Poll::Pending => Ok(()),
+                            std::task::Poll::Ready(Err(error)) => {
+                                Err(format!("activation completed before shutdown: {error:?}"))
+                            }
+                            std::task::Poll::Ready(Ok(_)) => {
+                                Err("activation launched a child before shutdown".to_owned())
+                            }
+                        };
+                        let _ = signal.send(readiness);
+                    }
+                    polled
+                })
+                .await
             });
         }
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !manager
-                .statuses()
-                .iter()
-                .any(|status| status.state == ExtensionManagedRuntimeState::Starting)
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("one activation must own the pending startup");
+        let readiness = tokio::time::timeout(Duration::from_secs(1), join_all(ready))
+            .await
+            .expect("all activations must be polled before shutdown");
+        for received in readiness {
+            received
+                .expect("activation dropped its readiness signal")
+                .expect("activation must remain pending while the startup slot is held");
+        }
+        assert_eq!(lock(&manager.inner.state).starting.len(), 1);
         assert!(manager
             .statuses()
             .iter()
@@ -2369,14 +2921,28 @@ done
         manager.shutdown().await;
         tokio::time::timeout(Duration::from_secs(1), async {
             while let Some(result) = pending.join_next().await {
-                assert!(matches!(
-                    result.unwrap(),
-                    Err(ExtensionRuntimeManagerError::ManagerClosed)
-                ));
+                match result.unwrap() {
+                    Err(ExtensionRuntimeManagerError::ManagerClosed) => {}
+                    Err(error) => panic!("shutdown returned {error:?} instead of ManagerClosed"),
+                    Ok(_) => panic!("shutdown admitted a runtime"),
+                }
             }
         })
         .await
         .expect("shutdown must wake both the startup owner and coalesced activations");
+        assert!(matches!(
+            binding
+                .activate(
+                    "lazy-runtime",
+                    ExtensionRuntimeConfig::new(temporary.path())
+                )
+                .await,
+            Err(ExtensionRuntimeManagerError::ManagerClosed)
+        ));
+        assert!(matches!(
+            manager.bind_session("session-b"),
+            Err(ExtensionRuntimeManagerError::ManagerClosed)
+        ));
         drop(permit);
         assert!(!temporary.path().join("starts").exists());
     }

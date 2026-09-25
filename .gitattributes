@@ -1,2 +1,4 @@
 extensions/octet-serve/web/** -text
 extensions/octet-serve/vendor/lopdf/** whitespace=-trailing-space,-blank-at-eof
+# SSE events require a terminating blank line, including the final event.
+crates/octet-ai/tests/fixtures/pi_messages/*.sse whitespace=-blank-at-eof

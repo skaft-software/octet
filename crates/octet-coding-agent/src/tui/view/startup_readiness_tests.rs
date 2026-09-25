@@ -69,7 +69,7 @@ fn first_branded_frame_waits_for_identity_workspace_and_appearance() {
         assert_eq!(state.model_lab, Some(ModelLab::Google));
         let accent = state.theme.model_rgb(state.model_lab).unwrap();
         assert!(accent.1 > accent.0 && accent.1 > accent.2, "Gemma is green");
-        let wordmark = state.theme.fg("model_accent", "octet");
+        let wordmark = state.theme.bold("octet");
         assert!(update
             .replacement
             .iter()
@@ -143,6 +143,41 @@ fn startup_input_owners_render_and_resize_without_releasing_branding() {
 }
 
 #[test]
+fn startup_lifecycle_waits_paint_the_draft_without_provisional_model_chrome() {
+    for application_viewport in [false, true] {
+        let mut shell = pending_shell();
+        shell.set_run_label("discovering models…");
+        shell.state.borrow_mut().editor.set_text("retained draft");
+        let component = ShellComponent::new(shell.state.clone(), application_viewport);
+        for (width, height) in [(12, 1), (24, 4), (46, 8), (96, 18), (120, 40)] {
+            shell.set_size(width, height);
+            let frame = component.render(width);
+            assert_unbranded(&frame);
+            assert_eq!(frame.len(), usize::from(height));
+            assert!(frame
+                .iter()
+                .all(|line| visible_width(line) <= usize::from(width)));
+            if height >= 4 {
+                assert!(plain(&frame).contains("retained draft"));
+                assert!(frame.iter().any(|line| line.contains(CURSOR_MARKER)));
+            }
+        }
+        shell.show_overlay_text("Verification instructions".into());
+        let overlay = plain(&component.render(120));
+        assert!(overlay.contains("Verification instructions"));
+        assert!(!overlay.contains("retained draft"));
+        shell.close_overlay();
+        assert!(plain(&component.render(120)).contains("retained draft"));
+        shell.set_identity("custom", "custom/probe", "off");
+        shell.set_run_label("idle");
+        shell.finish_startup();
+        let ready = plain(&component.render(120));
+        assert!(ready.contains("retained draft"));
+        assert!(ready.contains("custom/probe"));
+    }
+}
+
+#[test]
 fn readiness_inserts_one_welcome_prefix_into_a_warm_cache() {
     let mut shell = pending_shell();
     shell.set_workspace(PathBuf::from("/startup-fixture/workspace"));
@@ -164,7 +199,7 @@ fn readiness_inserts_one_welcome_prefix_into_a_warm_cache() {
     );
     assert!(!text.contains("selecting model"), "{text}");
     assert_eq!(state.transcript_cache.borrow().last_update_start, 0);
-    assert_eq!(state.transcript_cache.borrow().block_starts, [8]);
+    assert_eq!(state.transcript_cache.borrow().block_starts, [7]);
 }
 
 #[test]
@@ -185,5 +220,29 @@ fn renderer_reconstruction_preserves_pending_and_ready_startup_state() {
         assert_eq!(text.matches("octet v").count(), 1, "{text}");
         assert!(text.contains("setup needed"), "{text}");
         assert_eq!(shell.state.borrow().startup_card_started_at, started);
+    }
+}
+
+#[test]
+fn silent_startup_keeps_a_visible_composer_in_both_viewport_modes() {
+    for application_viewport in [false, true] {
+        let mut shell = pending_shell();
+        let component = ShellComponent::new(shell.state.clone(), application_viewport);
+        for (width, height) in [(24, 4), (46, 8), (96, 18)] {
+            shell.set_size(width, height);
+            for draft in ["", "startup draft"] {
+                shell.state.borrow_mut().editor.set_text(draft);
+                let frame = component.render(width);
+                assert_unbranded(&frame);
+                assert_eq!(frame.len(), usize::from(height));
+                assert!(frame.iter().any(|row| row.contains(CURSOR_MARKER)));
+                assert!(frame
+                    .iter()
+                    .all(|row| visible_width(row) <= usize::from(width)));
+                assert!(plain(&frame).contains(draft));
+                assert!(!plain(&frame).contains("extensions"));
+                assert!(!plain(&frame).contains("discovering"));
+            }
+        }
     }
 }

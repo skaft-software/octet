@@ -1,13 +1,14 @@
 # octet-mcp reference
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
+public-install evidence. Reviewed source checkouts and local archives remain
+separate installation options.
 
-[Usage guide](README.md). This is the bundled API `0.2` implementation contract,
-not a current extension-authoring example. Distribution `0.7.6` requires exactly
-octet `0.7.6`; these version numbers are independent.
+[Usage guide](README.md). This is the bundled API `0.4` implementation contract,
+not a general extension-authoring tutorial. Distribution `0.8.0` requires exactly
+octet `0.8.0`; these version numbers are independent.
 
 One resident extension process owns every explicitly configured
 [Model Context Protocol](https://modelcontextprotocol.io/) server session and
@@ -15,12 +16,12 @@ maps its live tool catalog to transactional `tools/register` and
 `tools/unregister` calls.
 
 ```text
-octet <- API 0.2 JSON-RPC -> octet-mcp <- MCP JSON-RPC stdio -> local servers
+octet <- API 0.4 JSON-RPC -> octet-mcp <- MCP JSON-RPC stdio -> local servers
                                  \-> MCP Streamable HTTP -> explicit remote endpoint
 ```
 
 Local stdio is the normal transport. Streamable HTTP is blocked-by-default and
-experimental, with the unresolved defects listed below. Legacy MCP SSE endpoints,
+experimental, with the remediation and remaining closure gates listed below. Legacy MCP SSE endpoints,
 OAuth/browser authorization, resources, prompts, sampling, elicitation, automatic
 server installation, and ambient discovery are unsupported.
 
@@ -53,9 +54,18 @@ An explicitly read-only tool may run without an additional prompt. Every
 `unknown` or `destructive` call goes through the negotiated host
 `policy/evaluate` service. If policy intents are unavailable, evaluation fails,
 or the host denies the intent, the bridge fails closed. It uses a one-use
-approval retry only when the host actually negotiates `approvals`; octet `0.7.6`'s
+approval retry only when the host actually negotiates `approvals`; octet `0.8.0`'s
 coding product does not currently enable approval issuance, so those calls are
-denied with an explanatory tool error. An MCP tool call is never automatically
+denied with an explanatory tool error. The working-tree coding host now supplies
+a scoped `mcp.tool.call` adapter: `unsafe_host` permits unknown/destructive calls
+only for the admitted `octet-mcp` process and its exact active, owner-scoped tool
+call. The exact published tool identity, arguments, and generation must match; hints
+never authorize a different call. Controlled policies deny external calls and
+still prevent process startup. Generic operations remain denied and approval-token
+issuance remains off; this does not add a new per-server permission configuration.
+The bridge owns configured-server provenance; the target server label is only
+namespace-checked, not an independent host permission key.
+An MCP tool call is never automatically
 replayed after timeout, cancellation, crash, or an ambiguous disconnect.
 
 Server descriptions, schemas, logs, errors, and results are untrusted data.
@@ -99,56 +109,120 @@ octet-mcp --experimental-streamable-http-mcp --config ~/.octet/mcp.json --check-
 ```
 
 A remote endpoint is a separate explicit network-trust decision. Streamable HTTP
-uses the exact configured URL, TLS certificate/hostname validation, no proxy or
-cookie discovery, and no redirects. HTTPS is required except for a numeric
-loopback address, which exists for deterministic local development and tests.
+uses the exact configured URL, TLS 1.2 or newer with certificate/hostname
+validation, no proxy or cookie discovery, and no redirects. HTTPS is required
+except for a numeric loopback address, which exists for deterministic local
+development and tests.
 URLs cannot contain userinfo, a query, or a fragment, preventing URL-auth and
 query credential fields as well as endpoint switching by redirect. The extension
 never synthesizes a browser `Origin` header or forwards browser credentials.
+DNS runs in an isolated, cancellable Python helper which is killed and reaped on
+cancellation/shutdown. Every answer must be globally routable; mixed public/private
+answers and mapped/transition addresses fail closed. Only an explicitly configured
+literal loopback address is exempt. The reviewed numeric address is pinned for the
+client lifetime, with no second DNS lookup during connection; TLS still uses the
+original endpoint hostname for SNI and certificate verification. Non-public HTTPS
+endpoints are not supported (apart from that literal loopback exception).
 
-Remote `auth` contains only a logical credential reference, never a token or
-header value. A host/application composition may inject the narrow
-`CredentialProvider.bearer_token(reference, server_id=...)` adapter; the bridge
-asks it at request time, uses the returned token only to form that request's
-`Authorization: Bearer` header, redacts it from parsed remote data, then drops
-it. The normal bundled runtime intentionally has no provider, so such a server
-parks with `authentication_unavailable`. OAuth discovery, browser redirects,
-token acquisition/refresh, persistent token stores, static config headers, and
-secret environment fallback are not implemented.
+Remote `auth` never contains a token or header value; it names one of two
+explicit sources. `{"type": "bearer", "credential": "<reference>"}` is a bounded
+logical reference that only an explicitly composed
+`CredentialProvider.bearer_token(reference, server_id=..., resource_owner=...)`
+adapter can resolve; the bridge asks it at request time, uses the returned token
+only to form that request's `Authorization: Bearer` header, redacts it from
+parsed remote data, then drops it. The owner is an immutable host-issued
+`ResourceOwner`, never a tool argument. Adapters must bind their lookup to that
+complete owner and return promptly; a blocking application callback cannot be
+forcibly killed inside Python. Its late return cannot initiate DNS or a
+connection after cancellation/deadline.
+
+`{"type": "static-bearer", "environment": "OCTET_MCP_<NAME>"}` is the only
+bundled static source. It must name exactly one environment variable inside this
+extension's own `OCTET_MCP_*` namespace; resolution is bound to that exact server
+ID and configured static variable. A different server's `bearer` broker reference
+never gains an environment fallback merely because a static server is present.
+The bridge reads that name from the
+process environment per request, so a rotated value is observed without
+retaining it, and it refuses any other name so a configuration cannot point the
+bridge at an unrelated ambient provider/cloud token. The value is never stored,
+logged, echoed in an error or diagnostic, sent to `presentation`, or included in
+result metadata; an unset or unnamespaced name fails closed as
+`authentication_unavailable` before any socket is opened. Either way, an
+owner-bound server whose source resolves nothing parks with
+`authentication_unavailable`.
+
+OAuth discovery, dynamic client registration, browser redirects, token
+acquisition/refresh, keychains, dotenv files, persistent token stores, arbitrary
+static config headers, and env-var fallback outside `OCTET_MCP_*` are **not**
+implemented and are policy-gated. The exact missing primitive is a
+host-brokered OAuth/credential authorization service negotiated over the
+extension API (a typed `authorization/request` capability plus a host-owned
+token store); nothing in the extension API or this package may substitute a
+self-composed browser flow, and a configuration file must never be able to
+widen it.
 
 ### Known Streamable HTTP defects
 
-The gate is a containment measure, not a claim that remote transport is safe.
-Do **not** enable it for production, privileged networks, or sensitive
-credentials. The known unresolved defects are:
+The gate remains a containment measure, not a production safety qualification.
+Do **not** enable it for production, privileged networks, or sensitive credentials.
+The original nine defects now have the following local remediation and regressions
+in `tests/test_http_hardening.py`:
 
-1. HTTPS SSRF remains possible through DNS rebinding; connections are not pinned
-   to a reviewed address.
-2. Credential and session state can be shared across distinct resource owners.
-3. DNS workers can outlive cancellation and shutdown (they are not reliably
-   killable).
-4. Buffered SSE handling can confuse peer identity.
-5. Control-message fanout is unbounded.
-6. Aggregate budgets can reset across remote transport paths.
-7. Truncated framing can be accepted.
-8. An empty SSE event ID can produce an incorrect resume cursor.
-9. The startup deadline can be escaped.
+| Original defect | Current safeguard |
+| --- | --- |
+| 1. HTTPS DNS rebinding/SSRF | Validate all resolved addresses; reject non-public/special-use answers; connect only a pinned numeric address with original-host TLS verification. |
+| 2. Cross-owner credentials and sessions | Require an immutable host owner before remote startup; pass it to credential composition; reject absent/foreign session, instance or generation before policy, credentials or I/O. No in-place owner migration. |
+| 3. DNS outlives cancellation/shutdown | A bounded-output isolated helper is killable and reaped; sockets and helpers belong to tracked operations. |
+| 4. Buffered SSE confuses peer identity | Route server requests/progress while reading; distinguish requests from terminal responses even when IDs collide; parse before payload redaction and reject foreign response IDs. |
+| 5. Unbounded control fanout | At most 16 peer-request/catalog-change actions per operation and 16 concurrent reply/cancel workers per client; no unbounded control queue; tracked cancellation and absolute control watchdogs. |
+| 6. Budgets reset across transport paths | One cumulative byte/event/control budget for a POST and all GET resumptions. |
+| 7. Truncated framing accepted | Require complete SSE blank-line boundaries, exact Content-Length and strict chunk separators/final trailer terminator; ambiguous framing fails closed. |
+| 8. Empty SSE ID retains stale cursor | Commit IDs at complete event boundaries; empty ID clears the operation-local cursor and prevents another GET; absent ID preserves it. |
+| 9. Startup deadline renewed | One absolute deadline covers initialize, initialized notification and every initial catalog page, including admission, DNS and resumptions. Refresh has one deadline across all pages. |
 
-The only activation path is the process-owner opt-in above. These defects need
-remediation before general availability; the framing and recovery behavior
-below does not override this warning.
+**Remaining closure gates:** this is still a candidate, not general availability.
+Local TLS/HTTP adversarial fixtures do not qualify external-server interoperability,
+Linux/platform cleanup, long-duration resource pressure or host/Serve owner changes.
+A resident binds to only one host owner: remotes initially park with
+`resource_owner_required`; run `/mcp restart <server>` from an owned command to
+connect. A different owner requires restarting the extension process. Automatic
+multi-owner partitioning, owner-settlement cleanup and host-qualified owner-specific
+catalog visibility remain unimplemented; foreign tool calls fail closed. These
+limitations must not be mistaken for a fully shared remote service.
+
+Static, extension-scoped credentials and the optional permanent GET notification
+stream are now implemented and covered by deterministic loopback regressions
+(`tests/test_streamable_http.py`), so the previous "no static credentials / no
+permanent GET stream" defects are closed locally. Two gates remain open:
+
+- **OAuth/credential brokering is policy-gated, not missing by accident.** The
+  exact missing primitive is a host-brokered authorization service negotiated
+  over the extension API — a typed `authorization/request` capability with a
+  host-owned token store and refresh ownership. Nothing in the bundled API `0.4`
+  surface can express it, and this package will not substitute a self-composed
+  browser/OAuth flow or read an ambient provider token.
+- **No live remote qualification.** All stream/credential evidence comes from
+  deterministic loopback HTTP fixtures; no external MCP server, real credential,
+  real OAuth server, or long-duration stream has been exercised here.
+
+An injected synchronous credential/progress callback is trusted application code;
+Python cannot forcibly terminate it. Its operation remains bounded in admission
+and late network activity is fenced, but full cleanup cannot be guaranteed until
+it returns. An unresolved `bearer` reference still has no stock credential
+adapter. API `0.4` product integration and release qualification remain
+independent gates.
 
 ## Requirements and installation
 
-- octet exactly `0.7.6` (`requires_octet = "=0.7.6"`)
+- octet exactly `0.8.0` (`requires_octet = "=0.8.0"`)
 - Python 3.9 or newer on `PATH`
 - separately installed MCP server executables
 
 The release bundle includes the dependency-free Python extension SDK under
 `vendor/`; startup never runs `pip`, a browser download, or install code.
 
-With [octet 0.7.6 installed](../../docs/installation.md), install the matching
-signed public bundle, then explicitly enable it:
+With [octet 0.8.0](../../docs/installation.md) and verified
+matching published assets, the catalog path is:
 
 ```console
 octet extension install octet-mcp
@@ -194,7 +268,8 @@ duplicate server IDs, NUL/control characters, mutually incompatible transport
 fields, unsafe remote URLs, and values outside package ceilings. Commands are
 direct argument arrays and never pass through a shell. Remote endpoints are exact
 URL strings rather than discovery patterns; there is no raw `headers`, token,
-password, or OAuth configuration field.
+password, or OAuth configuration field. The one static credential form names an
+extension-scoped `OCTET_MCP_*` environment variable and never carries its value.
 
 A minimal user file is:
 
@@ -254,10 +329,31 @@ absolute endpoint. It accepts `https`; `http` is accepted only for literal
 
 `credential` is a bounded logical reference, not a secret. It requires an
 application-provided `CredentialProvider`; the stock executable fails closed
-without one. Omit `auth` for an endpoint that does not need authorization. Do
-not put tokens in a URL, label, argument, `env`, or any other config field. The
-parser rejects remote header/auth-value fields and this package deliberately does
-not offer static HTTP headers.
+without one. The bundled static form is likewise explicit and extension-scoped:
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "remote-static-example": {
+      "transport": "streamable-http",
+      "url": "https://mcp.example.invalid/mcp",
+      "auth": {"type": "static-bearer", "environment": "OCTET_MCP_REMOTE_TOKEN"}
+    }
+  }
+}
+```
+
+`environment` must match `OCTET_MCP_` followed by uppercase letters, digits, or
+underscores (at most 48 more bytes). The bridge reads exactly that variable from
+the process environment on each request, holds no token, and never logs, echoes,
+or publishes it; an unset variable fails closed as `authentication_unavailable`.
+Any other name — including an ambient `OPENAI_API_KEY`-style provider token — is
+rejected by the parser and by the bundled source. Omit `auth` for an endpoint
+that does not need authorization. Do not put tokens in a URL, label, argument,
+`env`, or `headers`: the parser still rejects a `headers` field and any
+`auth` field that would carry a literal token, and this package deliberately
+offers no arbitrary static header or OAuth configuration.
 
 ### Digest-pinned trusted project configuration
 
@@ -309,8 +405,8 @@ activities, and action counts have additional fixed bounds in source.
 
 ### Streamable HTTP framing and recovery
 
-This describes the experimental path, subject to all
-[known defects](#known-streamable-http-defects), not a safety qualification.
+This describes the experimental path, subject to the
+[remaining closure gates](#known-streamable-http-defects), not a safety qualification.
 
 The HTTP client POSTs one JSON-RPC message with `Content-Type: application/json`
 and `Accept: application/json, text/event-stream`. It accepts a bounded JSON
@@ -322,34 +418,59 @@ A `404` for an established session is treated as expiration and triggers the
 normal fresh-session reconnect path.
 
 SSE response events are UTF-8 JSON-RPC `message` events, bounded by the existing
-frame limit both per event and in aggregate (at most 256 events). A server-issued
-SSE `id` is retained only in memory. If a POST response stream closes before its
+frame limit both per event and cumulatively across the POST and all resumed GETs
+(at most 256 event blocks, including ignored/control blocks). Peer requests and
+progress route as complete events arrive, not after the final response. A server-issued
+SSE `id` is retained only in that operation's memory; an empty ID clears it. If a POST response stream closes before its
 terminal response *after* such an ID, the bridge may perform at most the
 configured `maxRestarts` bounded GET resumptions with `Last-Event-ID`; it never
 re-POSTs the original request. Without an ID, an interrupted request is
 ambiguous and is not replayed. Server-provided SSE `retry` values are capped by
-the configured backoff maximum. This path does not open a permanent optional GET
-notification stream and does not implement the retired standalone/legacy SSE
-transport.
+the configured backoff maximum.
+
+After the `initialize` response and `notifications/initialized`, the bridge opens
+the optional permanent GET notification stream **only when the negotiated server
+capabilities actually declare a `listChanged: true` capability**. That stream is
+best-effort and never gates a request: `405 Method Not Allowed` marks it
+`unsupported` in one bounded log line and it is never retried, while every POST
+path keeps working. Each connection is renewed inside the configured
+`requestTimeoutMs`, so an idle stream connection is a normal renewal rather than
+a failure; a connection ends with a committed SSE event ID, the next connection
+sends that exact `Last-Event-ID`, and a peer that replays the acknowledged
+identity fails closed with `sse_event_replayed` (an empty `id:` clears the
+cursor). Its committed cursor is memory-only, exactly like the session identity.
+Failed connections use `backoffInitialMs`→`backoffMaxMs` and are bounded by
+`maxRestarts` consecutive failures and 64 lifetime failures. Healthy completed
+streams and renewals after an established SSE response do not consume either
+failure budget. A timeout before establishing the SSE response counts as a
+failure. Exceeding either bound ends the stream through the normal bounded
+lifecycle failure path. The retired standalone/legacy SSE transport is still not
+implemented.
 
 HTTP response bodies, event streams, request slots, timeouts, and shutdown use
-the configured bounds, subject to the defects above. Redirects are rejected
+the configured bounds, subject to the closure gates above. Redirects are rejected
 before following a `Location`; 401/403 park with a generic authentication error;
 malformed, oversized, unsupported-content-type, and unsafe status responses park
 without retaining response text. Rate limits and transient transport/server
 failures use the existing bounded lifecycle backoff (honouring a capped numeric
 `Retry-After` when present). Cancellation aborts the in-flight socket and sends
-one bounded `notifications/cancelled`; it never claims rollback or replays the
+at most one best-effort bounded `notifications/cancelled`; it never claims rollback or replays the
 request.
 
 ## Catalogs, calls, and results
 
 The initialize catalog is empty epoch `0`; configured servers start only after
 the octet initialize response has been flushed. Each successful server catalog
-change publishes complete dynamic definitions. The bundled API `0.2` SDK keeps
+change publishes complete dynamic definitions. The bundled API `0.4` SDK keeps
 eight committed octet schema/handler snapshots, so an older in-flight model turn
 uses the handler and validation schema from the `catalog_revision` it saw.
 Removed/restarted servers never alias an old epoch to a new connection.
+
+The bridge filters unsupported schema keywords at every schema node, including
+schema-valued `additionalProperties`. Recursive MCP `$defs`/`$ref` constraints
+cannot be enforced by octet's tool bus; omitting them may make a catch-all
+schema permissive, not grant approval for a tool call. The read-only annotation
+and host policy gates remain separate.
 
 Calls use bounded concurrency and timeout, forward octet cancellation as MCP
 `notifications/cancelled`, and retain safe server/tool provenance and terminal
@@ -357,13 +478,13 @@ activity. Cancellation requests cooperation and never claims rollback.
 Server-reported progress is reduced to bounded numeric progress; untrusted
 progress messages are not promoted to UI authority.
 
-MCP results cross the normal API `0.2` boundary:
+MCP results cross the normal API `0.4` boundary:
 
 - text remains ordered model-visible text;
 - an MCP `structuredContent` paired with `outputSchema` becomes validated octet
   `structured_content`;
 - schema-less structured content is retained in bounded, non-model-visible
-  metadata because API `0.2` forbids `structured_content` without a declaration;
+  metadata because API `0.4` forbids `structured_content` without a declaration;
 - supported image/audio base64 is written to the generation scratch directory,
   published through `artifact/publish`, then removed locally; and
 - malformed, unsupported, or oversized content returns a bounded tool error.
@@ -377,7 +498,9 @@ active host-derived session owner and process generation.
 Servers transition through configured, connecting, ready, refreshing,
 degraded, backoff, parked, and stopped states. Transient crashes reconnect with
 bounded full-jitter exponential backoff. Permanent configuration/protocol
-failures and exhausted retry budgets park. Refresh reads a catalog without
+failures and exhausted retry budgets park. A successful connection and catalog
+publish resets the restart failure counter, so healthy sessions do not deplete
+it. Refresh reads a catalog without
 relaunching; restart explicitly replaces a connection; stop removes its current
 tools and closes it. Shutdown closes all roots in bounded parallel workers, and
 octet's extension process-group cleanup is the final descendant fence.
@@ -395,7 +518,7 @@ Use the narrow/headless fallback in every frontend:
 ```
 
 `/mcp snapshot` returns the same generic semantic snapshot published through API
-`0.2` `presentation/update`. Lifecycle actions route only to the manifest-
+`0.4` `presentation/update`. Lifecycle actions route only to the manifest-
 declared `mcp` command with literal bridge-authored arguments; server text and
 model output cannot manufacture an action.
 
@@ -421,7 +544,8 @@ fixtures are frontend-neutral and are intended for both TUI and Serve reducers.
 
 ## Tests
 
-From the package root:
+From the package root (the release-manifest test requires Python 3.11+
+for stdlib `tomllib`; runtime transport tests also run on Python 3.9):
 
 ```console
 python3 -m unittest discover -s tests -t . -v
@@ -431,6 +555,7 @@ The dependency-free suite covers strict config/trust, real and adversarial stdio
 servers, deterministic loopback Streamable HTTP framing/session/auth/SSE fixtures,
 add/replace/remove catalogs, epoch-pinned schemas, malformed/oversized frames,
 cancellation, timeout, crash/restart/parking, bounded redacted logs, media
-artifacts, policy failure, shutdown, API `0.2` wire behavior, generic
+artifacts, policy failure, shutdown, API `0.4` wire behavior, generic
 presentation fixtures, and release/package smoke checks. This inventory is not
-live remote-transport or release qualification.
+live remote-transport or release qualification. The local TLS fixture uses a
+[deliberately public test-only key](fixtures/tls/README.md), never a real credential.

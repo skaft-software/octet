@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use crate::error::{AiError, ConfigError, DecodeError, ProviderError};
 use crate::protocol::sse::SseEvent;
 use crate::protocol::{emit_event, HttpRequestParts};
-use crate::stream::{ResponseBuilder, StreamEvent};
+use crate::stream::{ResponseBuilder, StreamEvent, MAX_TOOL_ARGUMENT_BYTES};
 use crate::types::{
     AssistantPart, ImageSource, Media, Message, OutputFormat, Protocol, ProviderPartMetadata,
     ReasoningConfig, Request, StopReason, ToolCallId, ToolChoice, ToolResultPart, Usage, UserPart,
@@ -23,7 +23,6 @@ use crate::validate::{normalize_request_reasoning, validate_request};
 /// it well below the aggregate response cap so a malicious provider cannot use
 /// a single metadata field to retain an excessive allocation.
 const MAX_THOUGHT_SIGNATURE_BYTES: usize = 64 * 1024;
-const FUNCTION_ARGS_KEY_PREFIX: &str = "google_function_args_";
 
 /// Builds a Google Generative AI / Vertex streaming request.
 pub(crate) fn build_request(
@@ -51,9 +50,10 @@ pub(crate) fn build_request(
     let contents = google_contents(model, &req)?;
     root.insert("contents".to_owned(), Value::Array(contents));
 
-    if let Some(tools) = google_tools(model, &req) {
+    let (tools, use_strict_mode) = google_tools(model, &req)?;
+    if let Some(tools) = tools {
         root.insert("tools".to_owned(), tools);
-        if let Some(tool_config) = google_tool_config(&req.tool_choice) {
+        if let Some(tool_config) = google_tool_config(&req.tool_choice, use_strict_mode) {
             root.insert("toolConfig".to_owned(), tool_config);
         }
     }
@@ -83,6 +83,7 @@ pub(crate) fn build_request(
         http::header::ACCEPT,
         http::HeaderValue::from_static("text/event-stream"),
     );
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -97,6 +98,7 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
     let mut contents = Vec::new();
     let mut tool_names = HashMap::<String, String>::new();
     let mut pending_calls = Vec::new();
+    let include_tool_call_id = google_requires_tool_call_id(&model.spec.api_name);
 
     for message in &req.messages {
         match message {
@@ -128,7 +130,12 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                                 // deliberately omitted rather than guessed.
                                 continue;
                             };
-                            parts.push(function_response_part(name, &id, result));
+                            parts.push(function_response_part(
+                                name,
+                                &id,
+                                result,
+                                include_tool_call_id,
+                            ));
                             pending_calls.retain(|pending| pending != &id);
                         }
                     }
@@ -136,7 +143,12 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                 push_content(&mut contents, "user", parts);
             }
             Message::Assistant(assistant) => {
-                flush_missing_function_responses(&mut contents, &mut pending_calls, &tool_names);
+                flush_missing_function_responses(
+                    &mut contents,
+                    &mut pending_calls,
+                    &tool_names,
+                    include_tool_call_id,
+                );
                 let same_google_model = assistant.protocol == Protocol::GoogleGenerativeAi
                     && assistant.model == model.spec.id;
                 let mut pending_signature = None;
@@ -177,7 +189,13 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                             let id = crate::protocol::normalize_tool_call_id(&call.id.0);
                             tool_names.insert(id.clone(), call.name.clone());
                             pending_calls.push(id.clone());
-                            parts.push(function_call_part(call.name.clone(), id, args, signature));
+                            parts.push(function_call_part(
+                                call.name.clone(),
+                                id,
+                                args,
+                                signature,
+                                include_tool_call_id,
+                            ));
                         }
                         AssistantPart::Media(_) => {
                             // A signature is position-bound. Never move one from
@@ -191,7 +209,12 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
         }
     }
 
-    flush_missing_function_responses(&mut contents, &mut pending_calls, &tool_names);
+    flush_missing_function_responses(
+        &mut contents,
+        &mut pending_calls,
+        &tool_names,
+        include_tool_call_id,
+    );
     Ok(contents)
 }
 
@@ -201,6 +224,7 @@ fn flush_missing_function_responses(
     contents: &mut Vec<Value>,
     pending: &mut Vec<String>,
     names: &HashMap<String, String>,
+    include_tool_call_id: bool,
 ) {
     let parts = pending
         .drain(..)
@@ -213,7 +237,7 @@ fn flush_missing_function_responses(
                 is_error: true,
                 added_tool_names: None,
             };
-            function_response_part(&names[&id], &id, &result)
+            function_response_part(&names[&id], &id, &result, include_tool_call_id)
         })
         .collect();
     push_content(contents, "user", parts);
@@ -245,10 +269,18 @@ fn text_part(text: String, signature: Option<String>, thought: bool) -> Value {
     Value::Object(part)
 }
 
-fn function_call_part(name: String, id: String, args: Value, signature: Option<String>) -> Value {
+fn function_call_part(
+    name: String,
+    id: String,
+    args: Value,
+    signature: Option<String>,
+    include_tool_call_id: bool,
+) -> Value {
     let mut function_call = Map::new();
     function_call.insert("name".to_owned(), Value::String(name));
-    function_call.insert("id".to_owned(), Value::String(id));
+    if include_tool_call_id {
+        function_call.insert("id".to_owned(), Value::String(id));
+    }
     function_call.insert("args".to_owned(), args);
     let mut part = Map::new();
     part.insert("functionCall".to_owned(), Value::Object(function_call));
@@ -258,7 +290,12 @@ fn function_call_part(name: String, id: String, args: Value, signature: Option<S
     Value::Object(part)
 }
 
-fn function_response_part(name: &str, id: &str, result: &crate::types::ToolResult) -> Value {
+fn function_response_part(
+    name: &str,
+    id: &str,
+    result: &crate::types::ToolResult,
+    include_tool_call_id: bool,
+) -> Value {
     let text = result
         .content
         .iter()
@@ -275,7 +312,9 @@ fn function_response_part(name: &str, id: &str, result: &crate::types::ToolResul
     );
     let mut function_response = Map::new();
     function_response.insert("name".to_owned(), Value::String(name.to_owned()));
-    function_response.insert("id".to_owned(), Value::String(id.to_owned()));
+    if include_tool_call_id {
+        function_response.insert("id".to_owned(), Value::String(id.to_owned()));
+    }
     function_response.insert("response".to_owned(), Value::Object(response));
     let mut part = Map::new();
     part.insert(
@@ -283,6 +322,29 @@ fn function_response_part(name: &str, id: &str, result: &crate::types::ToolResul
         Value::Object(function_response),
     );
     Value::Object(part)
+}
+
+/// Google 2.x and older Cloud Code Assist routes reject function-call IDs;
+/// Gemini 3+, Claude, and gpt-oss require them. Keep this model-family gate
+/// aligned with the pinned Pi Google adapter rather than sending IDs universally.
+fn google_requires_tool_call_id(model_id: &str) -> bool {
+    let model_id = model_id.to_ascii_lowercase();
+    if model_id.starts_with("claude-") || model_id.starts_with("gpt-oss-") {
+        return true;
+    }
+    let Some(version) = model_id
+        .strip_prefix("gemini-live-")
+        .or_else(|| model_id.strip_prefix("gemini-"))
+    else {
+        return false;
+    };
+    let major = version
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>()
+        .parse::<u32>()
+        .ok();
+    major.is_some_and(|major| major >= 3)
 }
 
 fn content_value(role: &str, parts: Vec<Value>) -> Value {
@@ -315,44 +377,57 @@ fn push_content(contents: &mut Vec<Value>, role: &str, parts: Vec<Value>) {
     contents.push(content_value(role, parts));
 }
 
-fn google_tools(model: &crate::catalog::Model, req: &Request) -> Option<Value> {
+fn google_tools(
+    model: &crate::catalog::Model,
+    req: &Request,
+) -> Result<(Option<Value>, bool), AiError> {
     if req.tools.is_empty()
         || !model.spec.capabilities.tools
         || matches!(req.tool_choice, ToolChoice::None)
     {
-        return None;
+        return Ok((None, false));
     }
-    let declarations = req
-        .tools
-        .iter()
-        .map(|tool| {
-            let mut declaration = Map::new();
-            declaration.insert("name".to_owned(), Value::String(tool.name.clone()));
-            if !tool.description.is_empty() {
-                declaration.insert(
-                    "description".to_owned(),
-                    Value::String(tool.description.clone()),
-                );
-            }
-            // `parametersJsonSchema` accepts the canonical JSON Schema directly;
-            // do not silently rewrite it into Google's narrower Schema dialect.
-            declaration.insert("parametersJsonSchema".to_owned(), tool.parameters.clone());
-            Value::Object(declaration)
-        })
-        .collect();
+    let mut use_strict_mode = false;
+    let mut declarations = Vec::with_capacity(req.tools.len());
+    for tool in &req.tools {
+        // Strict JSON-schema constrained sampling rewrites the tool schema into
+        // Google's validated subset; otherwise the canonical JSON Schema is sent
+        // unchanged.
+        let (parameters, strict) = crate::constrained_sampling::function_tool_parameters(
+            tool,
+            super::strict_mode_for(model),
+        )?;
+        use_strict_mode |= strict;
+        let mut declaration = Map::new();
+        declaration.insert("name".to_owned(), Value::String(tool.name.clone()));
+        if !tool.description.is_empty() {
+            declaration.insert(
+                "description".to_owned(),
+                Value::String(tool.description.clone()),
+            );
+        }
+        declaration.insert("parametersJsonSchema".to_owned(), parameters);
+        declarations.push(Value::Object(declaration));
+    }
     let mut tool = Map::new();
     tool.insert(
         "functionDeclarations".to_owned(),
         Value::Array(declarations),
     );
-    Some(Value::Array(vec![Value::Object(tool)]))
+    Ok((
+        Some(Value::Array(vec![Value::Object(tool)])),
+        use_strict_mode,
+    ))
 }
 
-fn google_tool_config(choice: &ToolChoice) -> Option<Value> {
+fn google_tool_config(choice: &ToolChoice, use_strict_mode: bool) -> Option<Value> {
     let mut function_calling = Map::new();
     match choice {
         ToolChoice::Auto => {
-            function_calling.insert("mode".to_owned(), Value::String("AUTO".to_owned()));
+            // Validated tool-calling mode enforces the declared parameter
+            // schemas; a strict tool request selects it.
+            let mode = if use_strict_mode { "VALIDATED" } else { "AUTO" };
+            function_calling.insert("mode".to_owned(), Value::String(mode.to_owned()));
         }
         ToolChoice::Required => {
             function_calling.insert("mode".to_owned(), Value::String("ANY".to_owned()));
@@ -376,7 +451,7 @@ fn google_tool_config(choice: &ToolChoice) -> Option<Value> {
 
 fn google_generation_config(model: &crate::catalog::Model, req: &Request) -> Map<String, Value> {
     let mut config = Map::new();
-    if let Some(max_tokens) = req.max_output_tokens {
+    if let Some(max_tokens) = crate::effective_output_token_cap(model, req.max_output_tokens) {
         config.insert("maxOutputTokens".to_owned(), Value::from(max_tokens));
     }
     if let Some(temperature) = req.temperature {
@@ -710,6 +785,7 @@ fn decode_google_function_call(
             events,
             builder,
             StreamEvent::ToolCallStart {
+                async_execution: false,
                 index,
                 id: ToolCallId(id),
                 name: call.name,
@@ -721,19 +797,32 @@ fn decode_google_function_call(
     // Gemini may send cumulative function-call snapshots. Keep a merged object
     // privately until terminal rather than appending multiple complete JSON
     // objects into canonical tool arguments.
-    let args_key = function_args_key(index);
-    let merged = match builder.temp_buffers.get(&args_key) {
-        Some(previous) => {
-            let mut prior = serde_json::from_str::<Value>(previous)
-                .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-            merge_json_object(&mut prior, call.args);
-            prior
-        }
-        None => call.args,
+    let (old_size, new_size) = match builder.google_function_args.get(&index) {
+        Some((prior, size)) => (
+            *size,
+            size.checked_add_signed(merged_size_change(prior, &call.args)?)
+                .ok_or(DecodeError::ToolArgumentsTooLarge)?,
+        ),
+        None => (0, argument_json_size(&call.args)?),
     };
-    let args = serde_json::to_string(&merged)
-        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
-    builder.replace_temp_buffer(args_key, args)?;
+    if new_size > MAX_TOOL_ARGUMENT_BYTES {
+        return Err(DecodeError::ToolArgumentsTooLarge.into());
+    }
+    // Reserve the prospective size before mutating retained state. Only changed
+    // subtrees are measured; untouched argument prefixes are neither reparsed
+    // nor serialized on each delta.
+    builder.resize_buffered_content(old_size, new_size)?;
+    match builder.google_function_args.get_mut(&index) {
+        Some((prior, size)) => {
+            merge_json_object(prior, call.args);
+            *size = new_size;
+        }
+        None => {
+            builder
+                .google_function_args
+                .insert(index, (call.args, new_size));
+        }
+    }
     Ok(())
 }
 
@@ -784,8 +873,51 @@ fn google_canonical_index(builder: &mut ResponseBuilder, key: &str) -> usize {
     index
 }
 
-fn function_args_key(index: usize) -> String {
-    format!("{FUNCTION_ARGS_KEY_PREFIX}{index}")
+// Count escaped JSON bytes without materializing a serialized copy. Every
+// subtree of a valid tool argument must itself fit the argument ceiling.
+fn argument_json_size(value: &impl serde::Serialize) -> Result<usize, AiError> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .filter(|size| *size <= MAX_TOOL_ARGUMENT_BYTES)
+                .ok_or_else(|| std::io::Error::other("tool arguments exceed byte limit"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|_| AiError::Decode(DecodeError::ToolArgumentsTooLarge))?;
+    Ok(counter.0)
+}
+
+fn merged_size_change(target: &Value, source: &Value) -> Result<isize, AiError> {
+    match (target, source) {
+        (Value::Object(target), Value::Object(source)) => {
+            let mut change = 0;
+            let mut members = target.len();
+            for (key, value) in source {
+                if let Some(existing) = target.get(key) {
+                    change += merged_size_change(existing, value)?;
+                } else {
+                    // A new member contributes its quoted key, colon, value,
+                    // and a comma unless it is the object's first member.
+                    change += (argument_json_size(key)?
+                        + 1
+                        + argument_json_size(value)?
+                        + usize::from(members > 0)) as isize;
+                    members += 1;
+                }
+            }
+            Ok(change)
+        }
+        _ => Ok(argument_json_size(source)? as isize - argument_json_size(target)? as isize),
+    }
 }
 
 fn merge_json_object(target: &mut Value, source: Value) {
@@ -858,7 +990,10 @@ fn close_google_tool_calls(
         .collect::<Vec<_>>();
     indices.sort_unstable();
     for index in indices {
-        if let Some(args) = builder.take_temp_buffer(&function_args_key(index)) {
+        if let Some((args, size)) = builder.google_function_args.remove(&index) {
+            builder.release_buffered_content(size);
+            let args = serde_json::to_string(&args)
+                .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
             emit_event(
                 events,
                 builder,
@@ -890,15 +1025,19 @@ fn map_stop_reason(reason: &str, has_tool_calls: bool) -> StopReason {
 }
 
 fn map_usage(usage: GoogleUsageMetadata) -> Result<Usage, AiError> {
-    if usage.cached_content_tokens > usage.prompt_tokens
-        || usage.thoughts_tokens > usage.candidate_tokens
-    {
+    if usage.cached_content_tokens > usage.prompt_tokens {
         return Err(AiError::Decode(DecodeError::UsageUnderflow));
     }
     let input_tokens = usage.prompt_tokens - usage.cached_content_tokens;
+    // Google reports thought tokens separately from candidate tokens; both
+    // contribute to canonical output while thoughts remain the reasoning subset.
+    let output_tokens = usage
+        .candidate_tokens
+        .checked_add(usage.thoughts_tokens)
+        .ok_or(AiError::Decode(DecodeError::UsageUnderflow))?;
     let calculated_total = usage
         .prompt_tokens
-        .checked_add(usage.candidate_tokens)
+        .checked_add(output_tokens)
         .ok_or(AiError::Decode(DecodeError::UsageUnderflow))?;
     let total_tokens = if usage.total_tokens == 0 {
         calculated_total
@@ -910,7 +1049,7 @@ fn map_usage(usage: GoogleUsageMetadata) -> Result<Usage, AiError> {
         cache_read_tokens: usage.cached_content_tokens,
         cache_write_tokens: 0,
         cache_write_1h_tokens: 0,
-        output_tokens: usage.candidate_tokens,
+        output_tokens,
         reasoning_tokens: usage.thoughts_tokens,
         total_tokens,
     })
@@ -921,19 +1060,25 @@ mod tests {
     use super::*;
     use crate::catalog::Model;
     use crate::types::{
-        Capabilities, Endpoint, EndpointId, ModalitySet, ModelId, ModelLimits, ModelSpec,
-        OutputModalities,
+        AssistantMessage, Capabilities, Endpoint, EndpointId, ModalitySet, ModelId, ModelLimits,
+        ModelSpec, OutputModalities, ToolCall, ToolCallId, ToolResult, ToolResultPart, UserMessage,
     };
 
     fn model() -> Model {
+        model_with_api_name("gemini-2.5-flash")
+    }
+
+    fn model_with_api_name(api_name: &str) -> Model {
         Model {
             spec: std::sync::Arc::new(ModelSpec {
+                preset: Default::default(),
                 id: ModelId("gemini-test".to_owned()),
-                api_name: "gemini-2.5-flash".to_owned(),
+                api_name: api_name.to_owned(),
                 display_name: None,
                 endpoint: EndpointId("google".to_owned()),
                 protocol: Protocol::GoogleGenerativeAi,
                 capabilities: Capabilities {
+                    responses_features: Default::default(),
                     input_modalities: ModalitySet::none(),
                     output_modalities: ModalitySet::none(),
                     tools: true,
@@ -965,7 +1110,7 @@ mod tests {
 
     #[test]
     fn maps_structured_output_to_native_json_schema() {
-        let request = Request {
+        let mut request = Request {
             messages: Vec::new(),
             system: None,
             tools: Vec::new(),
@@ -997,6 +1142,91 @@ mod tests {
             body["generationConfig"]["responseJsonSchema"]["type"],
             "object"
         );
+
+        let mut zen = model();
+        std::sync::Arc::make_mut(&mut zen.spec)
+            .cache
+            .send_session_affinity_headers = true;
+        std::sync::Arc::make_mut(&mut zen.endpoint).id = EndpointId("opencode-google".into());
+        request.cache_retention = crate::types::CacheRetention::None;
+        request.session_id = Some("zen-session".into());
+        assert_eq!(
+            build_request(&zen, &request).unwrap().headers["x-opencode-session"],
+            "zen-session"
+        );
+        request.session_id = None;
+        let parts = build_request(&zen, &request).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+    }
+
+    #[test]
+    fn uses_model_specific_google_tool_call_id_shape() {
+        let request = Request {
+            messages: vec![
+                Message::Assistant(AssistantMessage {
+                    content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
+                        id: ToolCallId("call-1".to_owned()),
+                        name: "lookup".to_owned(),
+                        arguments_json: r#"{"city":"Paris"}"#.to_owned(),
+                        argument_error: None,
+                    })],
+                    model: ModelId("gemini-test".to_owned()),
+                    protocol: Protocol::GoogleGenerativeAi,
+                }),
+                Message::User(UserMessage {
+                    content: vec![UserPart::ToolResult(ToolResult {
+                        tool_call_id: ToolCallId("call-1".to_owned()),
+                        content: vec![ToolResultPart::Text("Paris is sunny".to_owned())],
+                        is_error: false,
+                        added_tool_names: None,
+                    })],
+                }),
+            ],
+            system: None,
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: Vec::new(),
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: Default::default(),
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            session_id: None,
+            cache_retention: Default::default(),
+            compatibility: Default::default(),
+            responses: None,
+        };
+
+        let legacy = build_request(&model(), &request).unwrap();
+        assert_eq!(
+            legacy.url.path(),
+            "/v1beta/models/gemini-2.5-flash:streamGenerateContent"
+        );
+        assert_eq!(legacy.url.query(), Some("alt=sse"));
+        let legacy_body: Value = serde_json::from_slice(&legacy.body).unwrap();
+        let legacy_call = &legacy_body["contents"][0]["parts"][0]["functionCall"];
+        assert_eq!(legacy_call["name"], "lookup");
+        assert!(legacy_call.get("id").is_none());
+        let legacy_response = &legacy_body["contents"][1]["parts"][0]["functionResponse"];
+        assert_eq!(legacy_response["response"]["output"], "Paris is sunny");
+        assert!(legacy_response.get("id").is_none());
+
+        let modern = build_request(&model_with_api_name("gemini-3-flash"), &request).unwrap();
+        let modern_body: Value = serde_json::from_slice(&modern.body).unwrap();
+        assert_eq!(
+            modern_body["contents"][0]["parts"][0]["functionCall"]["id"],
+            "call-1"
+        );
+        assert_eq!(
+            modern_body["contents"][1]["parts"][0]["functionResponse"]["id"],
+            "call-1"
+        );
+        assert!(!google_requires_tool_call_id("gemini-2.5-flash"));
+        assert!(google_requires_tool_call_id("gemini-3-flash"));
+        assert!(google_requires_tool_call_id("claude-3-7-sonnet"));
+        assert!(!google_requires_tool_call_id("gemma-3-27b"));
     }
 
     #[test]
@@ -1025,6 +1255,71 @@ mod tests {
                 AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature { .. }),
                 AssistantPart::Text(text)
             ] if text == "visible"
+        ));
+    }
+
+    #[test]
+    fn incremental_argument_size_matches_recursive_merge_and_escaping() {
+        let mut prior = serde_json::json!({});
+        let mut size = argument_json_size(&prior).unwrap();
+        for update in [
+            serde_json::json!({"nested": {"a": "long prefix", "b": 1}, "array": [1, 2]}),
+            serde_json::json!({"nested": {"a": "x", "quoted\"": "\n\t\"é"}}),
+            serde_json::json!({"array": {"empty": {}}, "new": null}),
+            serde_json::json!({"nested": false, "array": {"empty": {"x": 3}}}),
+            serde_json::json!({}),
+        ] {
+            size = size
+                .checked_add_signed(merged_size_change(&prior, &update).unwrap())
+                .unwrap();
+            merge_json_object(&mut prior, update);
+            assert_eq!(size, serde_json::to_vec(&prior).unwrap().len());
+        }
+    }
+
+    #[test]
+    fn argument_update_reserves_before_mutating_the_retained_object() {
+        let mut builder =
+            ResponseBuilder::new(model().spec.id.clone(), Protocol::GoogleGenerativeAi, None);
+        let mut events = Vec::new();
+        let call = |args| GoogleFunctionCall {
+            id: None,
+            name: "read".to_owned(),
+            args,
+        };
+        decode_google_function_call(
+            &mut events,
+            &mut builder,
+            0,
+            call(serde_json::json!({"path": "a"})),
+            None,
+        )
+        .unwrap();
+        let prior = builder.google_function_args[&0].clone();
+        assert_eq!(builder.buffered_content_bytes, prior.1);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ToolCallArgsDelta { .. })));
+        builder.aggregate_content_bytes = crate::stream::MAX_RESPONSE_CONTENT_BYTES - prior.1;
+        assert!(matches!(
+            decode_google_function_call(
+                &mut events,
+                &mut builder,
+                0,
+                call(serde_json::json!({"line": 2})),
+                None
+            ),
+            Err(AiError::Decode(DecodeError::ResponseTooLarge))
+        ));
+        assert_eq!(builder.google_function_args[&0], prior);
+        assert_eq!(builder.buffered_content_bytes, prior.1);
+    }
+
+    #[test]
+    fn google_argument_size_enforces_the_tool_limit_before_retention() {
+        assert!(matches!(
+            argument_json_size(&"x".repeat(MAX_TOOL_ARGUMENT_BYTES)),
+            Err(AiError::Decode(DecodeError::ToolArgumentsTooLarge))
         ));
     }
 
@@ -1058,5 +1353,57 @@ mod tests {
             response.message.content.as_slice(),
             [AssistantPart::ToolCall(call)] if call.arguments_json == r#"{"line":2,"path":"a"}"#
         ));
+    }
+
+    #[test]
+    fn decodes_thought_usage_and_terminal_text() {
+        let stream_model = model();
+        let mut builder = ResponseBuilder::new(
+            stream_model.spec.id.clone(),
+            Protocol::GoogleGenerativeAi,
+            None,
+        );
+        let frame = SseEvent {
+            event: None,
+            data: r#"{"responseId":"response-1","candidates":[{"content":{"parts":[{"text":"private thought","thought":true,"thoughtSignature":"sig-1"},{"text":"visible answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":2,"candidatesTokenCount":1,"thoughtsTokenCount":2,"totalTokenCount":0}}"#.to_owned(),
+        };
+        let events = decode_stream_event(&stream_model, &frame, &mut builder).unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ReasoningDelta { delta, .. } if delta == "private thought"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TextDelta { delta, .. } if delta == "visible answer"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Usage(usage) if usage.input_tokens == 8
+                && usage.cache_read_tokens == 2
+                && usage.output_tokens == 3
+                && usage.reasoning_tokens == 2
+                && usage.total_tokens == 13
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Finished(response) if response.response_id.as_deref() == Some("response-1")
+        )));
+    }
+
+    #[test]
+    fn reports_native_provider_errors_without_stream_events() {
+        let stream_model = model();
+        let mut builder = ResponseBuilder::new(
+            stream_model.spec.id.clone(),
+            Protocol::GoogleGenerativeAi,
+            None,
+        );
+        let frame = SseEvent {
+            event: None,
+            data: r#"{"responseId":"response-error","error":{"code":400,"status":"INVALID_ARGUMENT","message":"invalid request"}}"#.to_owned(),
+        };
+        let error = decode_stream_event(&stream_model, &frame, &mut builder).unwrap_err();
+        assert!(matches!(error, AiError::Provider(_)));
+        assert!(!builder.started);
     }
 }

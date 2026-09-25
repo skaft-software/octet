@@ -28,6 +28,138 @@ struct TuiDiagnostics {
     bytes: usize,
     omitted: usize,
     deferred: usize,
+    automatic: usize,
+    problems: std::collections::BTreeMap<DiagnosticComponent, [u8; 32]>,
+}
+
+/// Stable producing component, independent of the resource reload layer. A
+/// skipped provider or keybinding load never constitutes a successful check.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DiagnosticComponent {
+    Resource(&'static str),
+    Bootstrap(String),
+    Keybindings(String),
+}
+
+/// Only automatic passes suppress unchanged problems. Plain/print and explicit
+/// checks keep chronological feedback; work-loss events use stderr directly.
+pub(crate) struct AutomaticDiagnostics(bool);
+
+pub(crate) fn automatic_diagnostics() -> AutomaticDiagnostics {
+    let mut route = TUI_DIAGNOSTICS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let active = if let Some(queue) = route.as_mut() {
+        queue.automatic += 1;
+        true
+    } else {
+        false
+    };
+    AutomaticDiagnostics(active)
+}
+
+impl Drop for AutomaticDiagnostics {
+    fn drop(&mut self) {
+        if self.0 {
+            if let Some(queue) = TUI_DIAGNOSTICS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            {
+                queue.automatic -= 1;
+            }
+        }
+    }
+}
+
+/// A bounded result of one actual component check. Explicit completion, rather
+/// than Drop, is required before an empty result can clear remembered problems.
+pub(crate) struct DiagnosticCheck {
+    component: DiagnosticComponent,
+    messages: TuiDiagnostics,
+}
+
+impl DiagnosticCheck {
+    pub(crate) fn new(component: DiagnosticComponent) -> Self {
+        Self {
+            component,
+            messages: TuiDiagnostics::default(),
+        }
+    }
+
+    pub(crate) fn problem(&mut self, message: impl Display) {
+        self.messages.push(message.to_string());
+    }
+
+    pub(crate) fn finish(mut self, checked: bool) {
+        let messages = self.messages.take();
+        checked_diagnostics(self.component.clone(), messages, checked);
+    }
+}
+
+impl Drop for DiagnosticCheck {
+    fn drop(&mut self) {
+        // Failure/unwind can still report problems, but is not evidence of a
+        // successful empty check. Events are deliberately never captured here.
+        let messages = self.messages.take();
+        if !messages.is_empty() {
+            checked_diagnostics(self.component.clone(), messages, false);
+        }
+    }
+}
+
+pub(crate) fn checked_diagnostics(
+    component: DiagnosticComponent,
+    messages: Vec<String>,
+    checked: bool,
+) {
+    let terminal = io::stderr().is_terminal();
+    let mut route = TUI_DIAGNOSTICS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(queue) = route.as_mut().filter(|_| terminal) {
+        if queue.check(component, &messages, checked) {
+            for message in messages {
+                queue.push(safe_line(&message, terminal).into_owned());
+            }
+        }
+    } else {
+        for message in messages {
+            write_line(io::stderr().lock(), &message, terminal);
+        }
+    }
+}
+
+impl TuiDiagnostics {
+    fn check(
+        &mut self,
+        component: DiagnosticComponent,
+        messages: &[String],
+        checked: bool,
+    ) -> bool {
+        use sha2::{Digest, Sha256};
+        if messages.is_empty() {
+            if checked {
+                self.problems.remove(&component);
+            }
+            return false;
+        }
+        let mut hash = Sha256::new();
+        for message in messages {
+            hash.update(message.len().to_le_bytes());
+            hash.update(message.as_bytes());
+        }
+        let hash: [u8; 32] = hash.finalize().into();
+        let changed = self.problems.get(&component) != Some(&hash);
+        // Bounded retained state. Excess components remain visible rather than
+        // evicting another component and incorrectly forgetting its problem.
+        if self.problems.contains_key(&component)
+            || self.problems.len() < MAX_TUI_DIAGNOSTIC_ENTRIES
+        {
+            self.problems.insert(component, hash);
+        }
+        changed || self.automatic == 0
+    }
 }
 
 /// Keep lifecycle diagnostics pending through the caller's final hydration,
@@ -232,6 +364,17 @@ pub(crate) fn stdout_table_line(value: impl Display) {
     let _ = writeln!(io::stdout().lock(), "{value}");
 }
 
+pub(crate) fn routine_diagnostic(value: impl Display) {
+    let automatic = TUI_DIAGNOSTICS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|queue| queue.automatic > 0);
+    if !automatic {
+        stderr_line(value);
+    }
+}
+
 pub(crate) fn stderr_line(value: impl Display) {
     let terminal = io::stderr().is_terminal();
     let value = value.to_string();
@@ -258,6 +401,39 @@ pub(crate) fn stderr_multiline(value: impl Display) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_diagnostics_recur_only_after_their_own_successful_check() {
+        let mut queue = TuiDiagnostics {
+            automatic: 1,
+            ..Default::default()
+        };
+        let skills = DiagnosticComponent::Resource("skills");
+        let provider = DiagnosticComponent::Bootstrap("provider-a".into());
+        let keys = DiagnosticComponent::Keybindings("fixture".into());
+        let problem = vec!["broken".into()];
+        assert!(queue.check(skills.clone(), &problem, true));
+        assert!(!queue.check(skills.clone(), &problem, true));
+        assert!(!queue.check(provider.clone(), &[], true));
+        assert!(!queue.check(keys.clone(), &[], true));
+        assert!(
+            !queue.check(skills.clone(), &[], false),
+            "skipped is not cleared"
+        );
+        assert!(!queue.check(skills.clone(), &problem, true));
+        assert!(queue.check(skills.clone(), &["changed".into()], true));
+        assert!(!queue.check(skills.clone(), &[], true));
+        assert!(queue.check(skills, &problem, true));
+        assert!(queue.check(provider.clone(), &problem, true));
+        queue.automatic = 0;
+        assert!(
+            queue.check(provider, &problem, true),
+            "explicit checks remain visible"
+        );
+        queue.push("actual work lost".into());
+        queue.push("actual work lost".into());
+        assert_eq!(queue.take(), ["actual work lost", "actual work lost"]);
+    }
 
     #[test]
     fn lifecycle_diagnostics_wait_through_delayed_hydration() {

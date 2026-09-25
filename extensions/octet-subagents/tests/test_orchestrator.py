@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import os
 import threading
 import unittest
+from unittest import mock
 
 try:
     from .helpers import FakeCancellation, owner
 except ImportError:  # unittest discover -s tests
     from helpers import FakeCancellation, owner
+
+try:
+    from .test_launcher import PARENT_ID, SECRETS, Stub
+except ImportError:  # unittest discover -s tests
+    from test_launcher import PARENT_ID, SECRETS, Stub
 
 from fake_agent_sessions import (
     FakeAgentSessionsError,
@@ -37,7 +44,12 @@ class PolicyTests(unittest.TestCase):
             ({"name": "worker", "task": "x", "tools": ["read", "browser"]}, "invalid_request"),
             ({"name": "worker", "task": "x", "tools": ["read", "subagent_spawn"]}, "invalid_request"),
             ({"name": "worker", "task": "x", "tools": ["read", "read"]}, "invalid_request"),
-            ({"name": "worker", "task": "x", "model": "other"}, "unsupported_model"),
+            # A malformed provider/model/effort selection is refused with a typed
+            # error, never silently coerced.
+            ({"name": "worker", "task": "x", "model": "bad model"}, "unsupported_model"),
+            ({"name": "worker", "task": "x", "provider": "openai;rm"}, "unsupported_model"),
+            ({"name": "worker", "task": "x", "provider": "anthropic"}, "unsupported_model"),
+            ({"name": "worker", "task": "x", "reasoning": "extreme"}, "unsupported_reasoning"),
             ({"name": "worker", "task": "x", "max_tokens": 64000}, "invalid_request"),
             ({"name": "Worker", "task": "x"}, "invalid_request"),
             ({"name": "worker", "task": "bad\x1b[31m"}, "invalid_request"),
@@ -46,6 +58,116 @@ class PolicyTests(unittest.TestCase):
                 with self.assertRaises(SubagentError) as raised:
                     SpawnRequest.parse(arguments)
                 self.assertEqual(raised.exception.code, code)
+
+    def test_per_worker_selection_defers_to_host_not_caller_capability(self):
+        inherited = SpawnRequest.parse({"name": "worker", "task": "x"})
+        self.assertIsNone(inherited.model_selection)
+        selected = SpawnRequest.parse({"name": "worker", "task": "x",
+            "provider": "anthropic", "model": "claude-haiku-4-5", "reasoning": "max",
+            "reasoning_capability": {"ceiling": "medium"}})
+        self.assertEqual(selected.model_selection, {
+            "provider": "anthropic", "model": "claude-haiku-4-5", "reasoning": "max"})
+        self.assertNotEqual(selected.fingerprint, inherited.fingerprint)
+        other = SpawnRequest.parse({"name": "worker", "task": "x", "model": "other"})
+        self.assertEqual(other.model_selection, {"model": "other"})
+
+    def test_binary_reasoning_on_is_forwarded_unchanged(self):
+        from octet_subagents.reasoning import parse_level
+        from octet_subagents.runtime import SPAWN_SCHEMA
+        self.assertEqual(parse_level("on"), "on")
+        self.assertIn("on", SPAWN_SCHEMA["properties"]["reasoning"]["enum"])
+        request = SpawnRequest.parse({"name": "worker", "task": "x", "reasoning": "on"})
+        self.assertEqual(request.model_selection, {"reasoning": "on"})
+
+    def test_configured_identifier_syntax_and_host_width(self):
+        for model in ("@cf/openai/gpt-oss-120b", "a" * 256):
+            request = SpawnRequest.parse({"name": "worker", "task": "x", "model": model})
+            self.assertEqual(request.model_selection, {"model": model})
+        for arguments in ({"model": "a" * 257}, {"reasoning": "@cf/low"}):
+            with self.assertRaises(SubagentError):
+                SpawnRequest.parse(dict(name="worker", task="x", **arguments))
+
+    def test_worker_selection_is_recorded_as_requested_and_never_implied_applied(self):
+        """Only the host may confirm execution settings."""
+        clock = ManualClock()
+        host = FakeHostState(clock)
+        client = host.client()
+        orchestrator = Orchestrator(publish=lambda snapshot: None, now_ms=clock)
+        result = orchestrator.spawn(
+            client,
+            owner(),
+            {
+                "name": "reader",
+                "task": "x",
+                "model": "claude-sonnet-test",
+                "reasoning": "low",
+            },
+        )
+        worker = result["worker"]
+        self.assertEqual(worker["model_policy"], "claude-sonnet-test")
+        self.assertEqual(worker["reasoning_policy"], "low")
+        self.assertTrue(worker["model_policy_applied"])
+        self.assertEqual(worker["model"], "claude-sonnet-test")
+        # The fake host confirms its normalized reasoning.
+        self.assertEqual(worker["reasoning"], "low")
+
+        with self.assertRaisesRegex(FakeAgentSessionsError, "unsupported_model"):
+            orchestrator.spawn(
+                client, owner(), {"name": "other-reader", "task": "x", "model": "other"}
+            )
+
+        # Positive inherit path: nothing supplied means the child copies the
+        # parent session's already-normalized selection exactly, and the panel
+        # never claims a policy the host did not apply.
+        inherited = orchestrator.spawn(
+            client, owner(), {"name": "inheriting-reader", "task": "x"}
+        )["worker"]
+        self.assertEqual(
+            (
+                inherited["provider_policy"],
+                inherited["model_policy"],
+                inherited["reasoning_policy"],
+            ),
+            ("inherit", "inherit", "inherit"),
+        )
+        self.assertFalse(inherited["model_policy_applied"])
+        self.assertEqual(inherited["model"], "inherited")
+        self.assertEqual(inherited["reasoning"], "inherited")
+
+    def test_host_normalization_restoration_continuation_and_retry(self):
+        host = FakeHostState()
+        client = host.client()
+        orchestrator = Orchestrator(publish=lambda snapshot: None, now_ms=host.clock)
+        args = {"name": "reader", "task": "x", "model": "haiku", "reasoning": "max",
+                "reasoning_capability": {"ceiling": "high"}, "idempotency_key": "route-v1"}
+        first = orchestrator.spawn(client, owner(), args)["worker"]
+        self.assertEqual(first["model"], "haiku")
+        self.assertEqual(first["reasoning"], "low")
+        self.assertEqual(first["reasoning_policy"], "max")
+        restored = Orchestrator(publish=lambda snapshot: None, now_ms=host.clock)
+        retry = restored.spawn(client, owner(), args)["worker"]
+        for field in ("id", "model", "reasoning", "model_policy", "reasoning_policy"):
+            self.assertEqual(first[field], retry[field])
+        host.complete(first["id"], "done")
+        continued = restored.continue_worker(client, owner(), {
+            "target": first["id"], "message": "next"})["worker"]
+        self.assertEqual(continued["model"], "haiku")
+        self.assertEqual(continued["reasoning"], "low")
+        with self.assertRaises(SubagentError):
+            restored.spawn(client, owner(), dict(args, model="another"))
+        self.assertEqual(len(host.agents), 1)
+
+    def test_host_must_confirm_route_and_serialized_reasoning(self):
+        from octet_subagents.orchestrator import _host_model_policy
+        for reasoning, rendered in (({"type": "off"}, "off"), ({"type": "on"}, "on"),
+                                    ({"type": "budget", "value": 2048}, "budget=2048")):
+            policy = {"model_selection": {"model": "haiku"}, "resolved_model": {
+                "provider": "anthropic", "model": "haiku", "reasoning": reasoning}}
+            self.assertEqual(_host_model_policy({"policy": policy})["effective_reasoning"], rendered)
+        for policy in ({"model_selection": {"model": "haiku"}},
+                       {"resolved_model": {"provider": "anthropic", "model": "haiku", "reasoning": "low"}}):
+            with self.assertRaises(SubagentError):
+                _host_model_policy({"policy": policy})
 
     def test_canonical_child_message_keeps_task_as_data_and_never_grants_writer(self):
         request = SpawnRequest.parse(
@@ -154,6 +276,62 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["workers"][0]["state"], "cancelled")
         self.assertGreater(self.snapshots[-1]["revision"], terminal["revision"])
+
+    def test_refresh_serializes_host_observation_and_reconcile_per_owner(self):
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        captured = threading.Event()
+        release = threading.Event()
+        second_started = threading.Event()
+        second_listed = threading.Event()
+        results = []
+        errors = []
+        delegate = self.client
+
+        class DelayedClient:
+            def list_agents(self):
+                if threading.current_thread().name == "old-observation":
+                    snapshot = delegate.list_agents()
+                    captured.set()
+                    if not release.wait(timeout=3):
+                        raise AssertionError("test did not release the old observation")
+                    return snapshot
+                second_listed.set()
+                return delegate.list_agents()
+
+        def status(client):
+            try:
+                result = self.orchestrator.status(client, self.owner, {"target": agent_id})
+                results.append((threading.current_thread().name, result["worker"]["state"]))
+            except BaseException as error:
+                errors.append(error)
+
+        old = threading.Thread(target=status, args=(DelayedClient(),), name="old-observation", daemon=True)
+        def second_status():
+            second_started.set()
+            status(DelayedClient())
+        newer = threading.Thread(target=second_status, name="new-observation", daemon=True)
+        old.start()
+        try:
+            self.assertTrue(captured.wait(timeout=3))
+            self.host.complete(agent_id, "Finished.")
+            newer.start()
+            self.assertTrue(second_started.wait(timeout=3))
+            # A newer host list must not overtake a list already captured for
+            # this owner, then have the older result overwrite terminal state.
+            self.assertFalse(second_listed.wait(timeout=0.2))
+        finally:
+            release.set()
+            old.join(timeout=3)
+            if newer.ident is not None:
+                newer.join(timeout=3)
+        self.assertFalse(old.is_alive())
+        self.assertFalse(newer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(second_listed.is_set())
+        self.assertEqual(len(results), 2)
+        self.assertIn(("new-observation", "done"), results)
+        self.assertEqual(self.orchestrator.status(self.client, self.owner, {"target": agent_id})["worker"]["state"], "done")
 
     def test_concurrency_is_enforced_and_children_inherit_no_token_ceiling(self):
         for number in range(1, 9):
@@ -302,7 +480,10 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(worker["turn_count"], 2)
         self.assertEqual(worker["turn_limit"], 2)
         self.assertEqual(self.snapshots[-1]["collection"]["nodes"][0]["state"], "degraded")
-        self.assertIn("1 limited", self.snapshots[-1]["collection"]["title"])
+        # The picker header is the stable surface name; the live counts remain
+        # in the extension's own status label.
+        self.assertEqual(self.snapshots[-1]["collection"]["title"], "Subagents")
+        self.assertIn("1 limited", self.snapshots[-1]["status"]["label"])
 
         delivery = self.host.parent_turn_delivery(
             owner="owner-a", principal="octet-subagents@test", commit=True
@@ -350,6 +531,21 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(sibling["state"], "orphaned")
         self.assertIn("last observed state", sibling["last_error"])
         self.assertEqual(len(self.snapshots[-1]["collection"]["nodes"]), 2)
+        # TASK 3: `orphaned` no longer means dead. The worker is still owned by
+        # this session, visibly detached from any run, and reattachable.
+        self.assertTrue(sibling["detached"])
+        self.assertTrue(sibling["reattachable"])
+        self.assertEqual(sibling["detached_at_ms"], self.clock())
+        self.assertEqual(sibling["session"], fake_session_reference(sibling_id))
+        self.assertEqual(retained["worker"]["detached"], False)
+        node = next(
+            item
+            for item in self.snapshots[-1]["collection"]["nodes"]
+            if item["id"] == "worker:%s" % sibling_id
+        )
+        self.assertEqual(node["state"], "degraded")
+        self.assertIn("detached", node["secondary"])
+        self.assertIn("reattachable", node["secondary"])
 
         self.host.spawns.clear()
         retried = self.spawn("failed-worker", idempotency_key="failed-v1")
@@ -360,6 +556,269 @@ class OrchestrationTests(unittest.TestCase):
             [worker["name"] for worker in workers],
             ["running-sibling", "failed-worker"],
         )
+
+    def test_detached_worker_reattaches_when_the_host_republishes_the_record(self):
+        """Reattachment surface: a still-live worker is picked back up, not buried."""
+        agent_id = self.spawn("running-sibling")["worker"]["id"]
+        self.host.start(agent_id, phase="searching")
+        self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        record = self.host.agents[agent_id]
+
+        # The owning run ended: the record disappears before the next observation.
+        self.host.owners[("octet-subagents@test", "owner-a")] = []
+        self.host.agents.clear()
+        detached = self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        self.assertEqual(detached["worker"]["state"], "orphaned")
+        self.assertTrue(detached["worker"]["detached"])
+        self.assertEqual(detached["worker"]["reattach_count"], 0)
+
+        # The owning session republishes the live record on a later turn.
+        self.host.agents[agent_id] = record
+        self.host.owners[("octet-subagents@test", "owner-a")] = [agent_id]
+        reattached = self.orchestrator.status(
+            self.client, self.owner, {"target": agent_id}
+        )
+        worker = reattached["worker"]
+        self.assertEqual(worker["state"], "running")
+        self.assertFalse(worker["detached"])
+        self.assertFalse(worker["reattachable"])
+        self.assertEqual(worker["reattach_count"], 1)
+        self.assertIsNotNone(worker["last_reattached_at_ms"])
+        self.assertIsNone(worker["last_error"], "the detachment note is cleared on reattach")
+        self.assertEqual(worker["session"], fake_session_reference(agent_id))
+
+    def test_reattached_idle_worker_continues_with_follow_up_not_steering(self):
+        agent_id = self.spawn("restored-worker")["worker"]["id"]
+        record = self.host.agents[agent_id]
+        record.status = {"state": "detached"}
+        self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        record.status = {"state": "idle"}
+        record.phase = "idle"
+        status = self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        self.assertEqual(status["worker"]["state"], "idle")
+        self.assertFalse(status["worker"]["detached"])
+        self.assertEqual(status["worker"]["reattach_count"], 1)
+        self.assertEqual(status["counts"], {"active": 0, "terminal": 0, "total": 1})
+        continued = self.orchestrator.continue_worker(
+            self.client, self.owner, {"target": agent_id, "message": "Continue after restart."}
+        )
+        self.assertEqual(continued["action"], "resumed")
+        self.assertEqual(continued["worker"]["state"], "queued")
+        self.assertEqual(continued["worker"]["session"], status["worker"]["session"])
+        self.assertEqual(self.host.follow_ups, [(agent_id, "Continue after restart.")])
+        self.assertEqual(self.host.steers, [])
+
+    def test_missing_idle_worker_is_detached_and_cannot_be_continued(self):
+        agent_id = self.spawn("idle-worker")["worker"]["id"]
+        self.host.agents[agent_id].status = {"state": "idle"}
+        self.orchestrator.status(self.client, self.owner, {})
+        self.host.owners[("octet-subagents@test", "owner-a")] = []
+        self.host.agents.clear()
+        with self.assertRaises(SubagentError) as raised:
+            self.orchestrator.continue_worker(
+                self.client, self.owner, {"target": agent_id, "message": "Do not send stale work."}
+            )
+        self.assertEqual(raised.exception.code, "detached")
+        self.assertEqual(self.host.follow_ups, [])
+        self.assertEqual(self.host.steers, [])
+
+    def test_timeout_and_cancelled_continuations_clear_sticky_stop_flags(self):
+        for host_state in ("timed_out", "interrupted"):
+            with self.subTest(host_state=host_state):
+                agent_id = self.spawn("settled-" + host_state)["worker"]["id"]
+                record = self.host.agents[agent_id]
+                record.status = {"state": host_state}
+                record.completed_at_ms = self.clock()
+                cached = self.orchestrator._owner_state(self.owner).workers[agent_id]
+                cached.stop_requested = host_state == "interrupted"
+                cached.timeout_requested = host_state == "timed_out"
+                result = self.orchestrator.continue_worker(
+                    self.client, self.owner, {"target": agent_id, "message": "Resume the retained task."}
+                )
+                self.assertEqual(result["action"], "resumed")
+                self.assertEqual(result["worker"]["state"], "queued")
+                self.assertFalse(cached.stop_requested)
+                self.assertFalse(cached.timeout_requested)
+                self.assertEqual(self.host.follow_ups[-1], (agent_id, "Resume the retained task."))
+        self.assertEqual(self.host.steers, [])
+
+    def test_stop_all_includes_an_idle_reattached_worker(self):
+        agent_id = self.spawn("idle-worker")["worker"]["id"]
+        self.host.agents[agent_id].status = {"state": "idle"}
+        self.orchestrator.stop(self.client, self.owner, {"all": True})
+        self.assertEqual(self.host.calls[-1][2], "interrupt")
+
+    def test_explicit_wait_reports_detachment_reattachment_and_approval_parks(self):
+        agent_id = self.spawn("parked-worker")["worker"]["id"]
+        self.host.start(agent_id)
+        # A normally attached worker has nothing to reattach.
+        attached = self.orchestrator.wait(
+            self.client, self.owner, {"target": agent_id, "timeout_seconds": 1}
+        )
+        self.assertNotIn("reattachment", attached)
+
+        self.host.owners[("octet-subagents@test", "owner-a")] = []
+        self.host.agents.clear()
+        gone = self.orchestrator.wait(
+            self.client, self.owner, {"target": agent_id, "timeout_seconds": 1}
+        )
+        self.assertEqual(gone["reattachment"]["state"], "detached")
+        self.assertTrue(gone["reattachment"]["reattachable"])
+        self.assertIn("still owned by this parent session", gone["reattachment"]["detail"])
+
+        # The host parks it at the approval boundary: rendered, never a stall.
+        record = self.spawn("parked-worker-2")["worker"]["id"]
+        self.host.agents[record].status = {"state": "awaiting_approval"}
+        self.host.agents[record].phase = "waiting for approval"
+        parked = self.orchestrator.wait(
+            self.client, self.owner, {"target": record, "timeout_seconds": 1}
+        )
+        self.assertEqual(parked["worker"]["state"], "awaiting_approval")
+        self.assertEqual(parked["approval"]["state"], "awaiting_approval")
+        self.assertIn("cannot mutate unattended", parked["approval"]["detail"])
+        with self.assertRaises(SubagentError) as raised:
+            self.orchestrator.continue_worker(
+                self.client, self.owner, {"target": record, "message": "Keep going."}
+            )
+        self.assertEqual(raised.exception.code, "worker_awaiting_approval")
+        self.assertEqual(self.host.steers, [])
+        self.assertEqual(self.host.follow_ups, [])
+
+    def test_host_reattach_refusal_and_park_reasons_are_surfaced(self):
+        """A refused reattach or a parked worker reports the host's own reason."""
+        agent_id = self.spawn("refused-worker")["worker"]["id"]
+        self.host.start(agent_id)
+        record = self.host.agents[agent_id]
+        record.status = {"state": "detached"}
+        record.diagnostic = (
+            "not reattached: another live session owner holds the durable fleet "
+            "lease (instance abc123, generation 7)"
+        )
+
+        refused = self.orchestrator.status(
+            self.client, self.owner, {"target": agent_id}
+        )
+        worker = refused["worker"]
+        self.assertTrue(worker["detached"])
+        self.assertTrue(worker["reattachable"])
+        self.assertIn("another live session owner", worker["host_diagnostic"])
+        node = next(
+            item
+            for item in self.snapshots[-1]["collection"]["nodes"]
+            if item["id"] == "worker:%s" % agent_id
+        )
+        self.assertIn("another live session owner", node["secondary"])
+
+        waited = self.orchestrator.wait(
+            self.client, self.owner, {"target": agent_id, "timeout_seconds": 1}
+        )
+        self.assertEqual(waited["reattachment"]["state"], "detached")
+        self.assertIn(
+            "another live session owner", waited["reattachment"]["reason"]
+        )
+
+        # The owning session parks it at the approval boundary instead: the park
+        # reason is reported on the approval surface, and it stays parked.
+        record.status = {
+            "state": "awaiting_approval",
+            "reason": "tool effect requires new authority",
+        }
+        record.diagnostic = (
+            "parked at the approval boundary and not resumed by reattachment; "
+            "an explicit decision is required: tool effect requires new authority"
+        )
+        parked = self.orchestrator.wait(
+            self.client, self.owner, {"target": agent_id, "timeout_seconds": 1}
+        )
+        self.assertEqual(parked["worker"]["state"], "awaiting_approval")
+        self.assertIn("explicit decision", parked["approval"]["reason"])
+        with self.assertRaises(SubagentError) as raised:
+            self.orchestrator.continue_worker(
+                self.client, self.owner, {"target": agent_id, "message": "Keep going."}
+            )
+        self.assertEqual(raised.exception.code, "worker_awaiting_approval")
+
+    def test_cached_command_surface_reports_detached_workers_without_faking_a_wait(self):
+        agent_id = self.spawn("detached-worker")["worker"]["id"]
+        self.host.start(agent_id)
+        self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        self.host.owners[("octet-subagents@test", "owner-a")] = []
+        self.host.agents.clear()
+        self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+
+        cached = {"host": {"session_id": "parent-session"}}
+        result = self.orchestrator.command(["wait", agent_id], cached)
+        self.assertIn("still owned by this parent session", result["text"])
+        self.assertIn("reattachable", result["text"])
+        self.assertIn("no wait", result["text"].lower())
+        self.assertTrue(result["notifications"])
+        self.assertIn(
+            "detached",
+            self.orchestrator.command(["list"], cached)["text"].lower(),
+        )
+        usage = self.orchestrator.command(["nonsense-with-extra"], cached)["text"]
+        self.assertIn("wait <name-or-id>", usage)
+        self.assertIn("reattach <name-or-id>", usage)
+        self.assertIn("open-all tmux", usage)
+
+    def test_cached_open_all_cannot_reuse_launch_authority(self):
+        self.spawn()
+        with self.assertRaises(SubagentError) as raised:
+            self.orchestrator.command(["open-all", "tmux"], {"host": {"session_id": PARENT_ID}})
+        self.assertEqual(raised.exception.code, "owner_required")
+
+    def test_launchability_is_observed_and_cleared_on_missing_record(self):
+        agent_id = self.spawn()["worker"]["id"]
+        state = self.orchestrator._owner_state(self.owner)
+        record = self.host.agents[agent_id].record()
+        record.update(launchable=True, live_task=False, launch_blocked=None)
+        self.orchestrator._reconcile_snapshot(state, {"agents": [record]})
+        self.assertTrue(state.workers[agent_id].launchable)
+        self.assertFalse(state.workers[agent_id].live_task)
+        record.update(launchable=False, live_task=True, launch_blocked="live worker")
+        self.orchestrator._reconcile_snapshot(state, {"agents": [record]})
+        self.assertFalse(state.workers[agent_id].launchable)
+        self.assertEqual(state.workers[agent_id].launch_blocked, "live worker")
+        record.pop("live_task")
+        record.pop("launchable")
+        record.pop("launch_blocked")
+        self.orchestrator._reconcile_snapshot(state, {"agents": [record]})
+        self.assertIsNone(state.workers[agent_id].live_task)
+        self.assertFalse(state.workers[agent_id].launchable)
+        self.orchestrator._reconcile_snapshot(state, {"agents": []})
+        self.assertFalse(state.workers[agent_id].host_present)
+        self.assertFalse(state.workers[agent_id].launchable)
+
+    def test_owner_bound_open_all_refreshes_before_planning(self):
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        with mock.patch.object(self.orchestrator, "open_all", return_value={}) as launch:
+            self.orchestrator.open_all_owned(self.client, self.owner, ["tmux"], FakeCancellation())
+        self.assertEqual(launch.call_args.kwargs["workers"][0].state, "running")
+
+    def test_fresh_host_launchability_cannot_authorize_product_panes(self):
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        self.host.complete(agent_id, "Settled fixture.")
+        snapshot = self.client.list_agents()
+        snapshot["agents"][0].update(launchable=True, live_task=False, launch_blocked=None)
+        stub = Stub()
+        self.addCleanup(stub.close)
+        with stub.path(TMUX=None, HERDR_ENV="1"):
+            with mock.patch.object(self.client, "list_agents", return_value=snapshot) as listed:
+                with mock.patch("octet_subagents.launcher._run") as run:
+                    for multiplexer in ("tmux", "herdr"):
+                        for attempt in range(2):
+                            with self.subTest(multiplexer=multiplexer, attempt=attempt):
+                                result = self.orchestrator.open_all_owned(
+                                    self.client, self.owner, [multiplexer], FakeCancellation())
+                                self.assertIn("0 pane(s) created", result["text"])
+                                self.assertIn("atomic host writer claim/settlement unavailable",
+                                              result["text"])
+                                self.assertTrue(all(not pane["resolvable"] for pane in result["panes"]))
+                    run.assert_not_called()
+                self.assertEqual(listed.call_count, 4)
+        self.assertEqual(stub.recorded(), [])
 
     def test_wall_timeout_interrupts_and_has_distinct_terminal_state(self):
         agent_id = self.spawn(timeout_seconds=5)["worker"]["id"]

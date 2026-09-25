@@ -1,18 +1,18 @@
 # Legacy Python extension runtime
 
-This checkout's source distribution is **0.7.6**, not a claim of SDK registry
-publication. For version-matched published native assets and installation
-evidence, see the [octet 0.7.6 release record](../../docs/releases/v0.7.6.md).
+This SDK's source distribution is **0.8.0**. Native assets and installation
+evidence are recorded in the [0.8.0 release notes](../../docs/releases/v0.8.0.md).
+Native publication does not publish SDK packages to PyPI or npm.
 
 This is the retained **API `0.1`/`0.2` maintenance reference** for
 `octet_extension.Extension`, not a current-API quickstart. New authoring uses
-[API `0.3`](../../docs/extensions.md); generated `octet_extension.api_v03`
+[API `0.4`](../../docs/extensions.md); generated `octet_extension.api_v03`
 models and canonical validators do not implement a complete API `0.3`
 `Extension` runtime. Do not retag a legacy manifest or silently translate wires.
 
-**Identity boundary:** octet 0.7.6 source uses `octet_version`, `requires_octet`,
+**Identity boundary:** octet 0.8.0 source uses `octet_version`, `requires_octet`,
 `OCTET_*`, and `octet_extension`, not aliases for old Ygg names. First-party source
-SDK/extension distributions are version `0.7.6`; independent examples retain
+SDK/extension distributions are version `0.8.0`; independent examples retain
 their own versions. Native octet publication does not publish the SDK to PyPI.
 
 `octet-extension-sdk` is dependency-free. It owns JSON-RPC 2.0 JSON-lines
@@ -276,10 +276,11 @@ Exact helpers:
 
 - `spawn_agent(*, task_name, message, idempotency_key, tools, max_depth,
   max_concurrent_children, max_turns, max_tokens=None, max_cost_microdollars,
-  max_output_bytes, timeout_ms, profile=None, fingerprint=None,
+  max_output_bytes, timeout_ms, profile=None, fingerprint=None, model_selection=None,
   parent_request_id=...)`;
 - `send_agent_message(target, message, *, parent_request_id=...)`;
 - `follow_up_agent(target, message, *, parent_request_id=...)`;
+- `list_agent_models(*, query=None, limit=50, parent_request_id=...)`;
 - `list_agents(*, parent_request_id=...)`;
 - `wait_agents(*, timeout_ms=30_000, parent_request_id=...)`;
 - `interrupt_agent(target, *, parent_request_id=...)`.
@@ -363,6 +364,13 @@ Progress needs negotiated `request_progress` and an active parent. It is ephemer
 protocol traffic, not tool-result content. See
 [cancellation](../../docs/extensions/PROTOCOL-REFERENCE.md#19-cancelrequest-api-02)
 and [progress bounds](../../docs/extensions/PROTOCOL-REFERENCE.md#26-progress-api-02).
+
+For retained API `0.2`, `ext.progress_decoration(label, detail=None)` also requires
+negotiated `progress_decoration`. The helpers `persistence_metadata(value,
+public=False)` and `post_mutation_rescan(resource_ids)` build typed hook result
+fields for declared `before_persistence` and `post_mutation` hooks. See the
+[complete bounded contracts and product coverage](../../docs/extensions/HOOK-ENRICHMENT.md);
+these are not API `0.3` aliases.
 
 ## Structured results and artifacts
 
@@ -548,4 +556,6 @@ Stdout is reserved for JSON-RPC; `ext.log.info(...)` and other log levels emit
 structured JSON stderr diagnostics. On `shutdown`, Python stops admission,
 drains to a bounded deadline, cooperatively cancels the remainder, runs optional
 `@ext.on_shutdown`, acknowledges, and exits. Stdin EOF uses the same bounded
-drain before treating transport as lost. See [host shutdown and failure stages](../../docs/extensions/PROTOCOL-REFERENCE.md#18-shutdown).
+drain before treating transport as lost. If EOF follows an admitted shutdown, it
+waits for that hook and acknowledgement within the EOF drain budget; a stuck hook
+cannot extend the drain indefinitely. See [host shutdown and failure stages](../../docs/extensions/PROTOCOL-REFERENCE.md#18-shutdown).

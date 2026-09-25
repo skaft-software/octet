@@ -91,10 +91,12 @@ jobs:
           scripts/build-octet-image.sh --context "$RUNNER_TEMP/octet-container-context"
           test "$(cat "$RUNNER_TEMP/octet-container-context/.octet-container-source")" = "$(git rev-parse HEAD)"
           test ! -e "$RUNNER_TEMP/octet-container-context/.git"
-      - name: Test performance measurement contracts (no live clients)
+      - name: Test measurement and repository-tooling contracts (no live clients)
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 -m unittest discover -s scripts/tests -p 'test_bench_*.py'
+        run: |
+          python3 -m unittest discover -s scripts/tests
+          python3 scripts/test_diff_model_catalog.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --doc --profile ci-test --locked
@@ -105,9 +107,8 @@ jobs:
       # the dedicated compilation check on the 1.86 MSRV in the job below; use
       # 1.90 only to assemble the publishable crates together. The serve feature depends on the
       # publish-excluded optional extension.
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-        with:
-          toolchain: 1.90.0
+      - name: Install Rust 1.90 packaging toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal --no-self-update
       - run: cargo +1.90.0 package --workspace --exclude octet-coding-agent --locked --no-verify
 
   first-party-extension-tests:
@@ -168,15 +169,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       - run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
+        timeout-minutes: 15
+        env:
+          OCTET_PTY_TRACE: "1"
       - run: cargo check --workspace --all-targets --no-default-features --locked
 
   msrv:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # This action revision is fixed to Rust 1.86.0; it has no toolchain input.
       - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-        with:
-          toolchain: 1.86.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       - run: cargo check --workspace --all-targets --all-features --locked
 

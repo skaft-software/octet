@@ -14,6 +14,8 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::ExitStatus;
@@ -36,6 +38,18 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify, Semaphore};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
+};
 
 use crate::artifact::{ArtifactId, ArtifactPublication, ArtifactSource, ArtifactStore};
 use crate::delegation::{
@@ -44,10 +58,10 @@ use crate::delegation::{
 use crate::effect::{EffectPolicy, ToolEffect};
 use crate::events::AgentEvent;
 use crate::extension::{
-    AssistantPersistenceContext, DynamicToolRegistration, EventObserver, Extension, ExtensionHost,
-    PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
-    PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
-    ToolCallHook,
+    AssistantPersistenceContext, CompactionStrategy, DynamicToolRegistration, EventObserver,
+    Extension, ExtensionHost, PersistenceMetadataHook, PersistenceMetadataProposal,
+    PostMutationContext, PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext,
+    ProviderRetryHook, ToolCallHook,
 };
 use crate::extension_api_v03 as api_v03;
 use crate::extension_policy::{
@@ -63,8 +77,11 @@ use crate::tool::{
     ToolOutputContentPart, ToolProgressDecoration, ToolProgressSink,
 };
 
+mod event_bus;
+pub use event_bus::ExtensionEventBus;
+
 /// The newest executable-extension API implemented by this octet release.
-pub const EXTENSION_API_VERSION: &str = EXTENSION_API_VERSION_0_3;
+pub const EXTENSION_API_VERSION: &str = EXTENSION_API_VERSION_0_4;
 
 /// Frozen compatibility version for simple, trusted text extensions.
 pub const EXTENSION_API_VERSION_0_1: &str = "0.1";
@@ -74,6 +91,13 @@ pub const EXTENSION_API_VERSION_0_2: &str = "0.2";
 
 /// Schema-generated canonical extension protocol foundation.
 pub const EXTENSION_API_VERSION_0_3: &str = api_v03::API_VERSION;
+
+/// Power-parity protocol: the union of every `0.2` and `0.3` capability plus
+/// inline components, host-mediated session/model/provider control, themes,
+/// host flag projection, and the extended event set. `0.2` and `0.3` manifests
+/// validate the same union (no version-adaptation layers); only `0.1` remains
+/// restricted.
+pub const EXTENSION_API_VERSION_0_4: &str = "0.4";
 
 /// API `0.2` cooperative request cancellation feature.
 pub const EXTENSION_FEATURE_REQUEST_CANCELLATION: &str = "request_cancellation";
@@ -104,6 +128,8 @@ pub const EXTENSION_FEATURE_DYNAMIC_TOOLS: &str = "dynamic_tools";
 pub const EXTENSION_FEATURE_RUNTIME_COMMANDS: &str = "runtime_commands";
 /// API `0.2` host-owned child model-session service.
 pub const EXTENSION_FEATURE_AGENT_SESSIONS: &str = "agent_sessions";
+/// Host-confirmed configured worker routing and bounded discovery.
+pub const EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1: &str = "agent_model_selection_v1";
 /// API `0.2` first-party delegation telemetry contract.
 pub const EXTENSION_FEATURE_DELEGATION_TELEMETRY: &str = "delegation_telemetry_v1";
 /// Stable schema label shown by `/extensions status`.
@@ -126,6 +152,46 @@ pub const EXTENSION_FEATURE_TERMINAL_INPUT: &str = "terminal_input";
 pub const EXTENSION_FEATURE_AUTOCOMPLETE: &str = "autocomplete";
 /// API `0.2` initialization-time semantic tool-renderer discovery.
 pub const EXTENSION_FEATURE_DYNAMIC_TOOL_RENDERERS: &str = "dynamic_tool_renderers";
+/// API `0.2` host-owned composer snapshot and mutation handoff.
+///
+/// This grants no terminal ownership: an extension can read and mutate the
+/// ordinary host composer, and every operation stays owner-scoped.
+pub const EXTENSION_FEATURE_COMPOSER: &str = "composer";
+/// API `0.2` runtime shortcut registration and `shortcut/trigger` dispatch.
+pub const EXTENSION_FEATURE_SHORTCUTS: &str = "shortcuts";
+/// API `0.2` extension-owned durable session entries and session naming.
+pub const EXTENSION_FEATURE_SESSION_ENTRIES: &str = "session_entries";
+/// API `0.2` bounded host-mediated message injection.
+pub const EXTENSION_FEATURE_MESSAGE_INJECTION: &str = "message_injection";
+/// API `0.2` coalesced message, compaction, dialog, model, and bash fan-out.
+pub const EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2: &str = "lifecycle_events_v2";
+/// API `0.2` host-owned active tool selection.
+pub const EXTENSION_FEATURE_ACTIVE_TOOLS: &str = "active_tools";
+/// API `0.2` foreground terminal handoff request and revocation notification.
+///
+/// This does not hand the extension a terminal: it asks the frontend that owns
+/// the foreground session's tty to cede it for the duration of one grant, and
+/// the host keeps the right to revoke that grant with `terminal/grant-lost`.
+pub const EXTENSION_FEATURE_TERMINAL_HANDOFF: &str = "terminal_handoff";
+/// API `0.2` read-only session-manager and pending-message snapshot requests.
+///
+/// The host derives every field from the foreground session; the extension
+/// supplies only the owner envelope and can never write through this feature.
+pub const EXTENSION_FEATURE_SESSION_CONTEXT: &str = "session_context";
+/// API `0.2` read-only disclosure of host-owned composed system prompt text.
+///
+/// This is deliberately a separate negotiated feature because it discloses
+/// host-owned prompt text rather than a neutral session snapshot.
+pub const EXTENSION_FEATURE_SYSTEM_PROMPT_READ: &str = "system_prompt_read";
+
+/// API `0.2` read-only model view and secret-free model catalog.
+///
+/// The host publishes what it knows about the selected model and its catalog.
+/// Credentials, authorization headers, and provider endpoints are never part of
+/// this surface: octet owns provider transport.
+pub const EXTENSION_FEATURE_MODEL_CATALOG: &str = "model_catalog";
+/// API 0.4 host-owned local compaction replacement (vision models only).
+pub const EXTENSION_FEATURE_COMPACTION_STRATEGY: &str = "compaction_strategy";
 
 const API_0_2_REQUIRED_FEATURES: &[&str] = &[
     EXTENSION_FEATURE_REQUEST_CANCELLATION,
@@ -144,6 +210,15 @@ const API_0_2_OPTIONAL_FEATURES: &[&str] = &[
     EXTENSION_FEATURE_TERMINAL_INPUT,
     EXTENSION_FEATURE_AUTOCOMPLETE,
     EXTENSION_FEATURE_DYNAMIC_TOOL_RENDERERS,
+    EXTENSION_FEATURE_COMPOSER,
+    EXTENSION_FEATURE_SHORTCUTS,
+    EXTENSION_FEATURE_SESSION_ENTRIES,
+    EXTENSION_FEATURE_MESSAGE_INJECTION,
+    EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+    EXTENSION_FEATURE_ACTIVE_TOOLS,
+    EXTENSION_FEATURE_TERMINAL_HANDOFF,
+    EXTENSION_FEATURE_SESSION_CONTEXT,
+    EXTENSION_FEATURE_MODEL_CATALOG,
 ];
 
 const MAX_EXTENSION_AGENT_WAIT_MS: u64 = 60_000;
@@ -204,6 +279,12 @@ pub const MAX_EXTENSION_CHILD_REQUEST_IDS_PER_GENERATION: usize = 65_536;
 /// boundary.
 pub const MAX_EXTENSION_SESSION_LIFECYCLE_QUEUE: usize = 16;
 const MAX_LIFECYCLE_REASON_BYTES: usize = 4 * 1024;
+/// Maximum UTF-8 bytes in one frontend-minted terminal handoff grant id.
+///
+/// The grant id is minted by the granting frontend, not by the host, so this is
+/// the documented cap that frontend must stay inside: the host never rewrites a
+/// grant id it forwards to an extension.
+pub const MAX_EXTENSION_TERMINAL_GRANT_ID_BYTES: usize = 128;
 /// A declared session hook is a bounded lifecycle finalizer, never a request-path interceptor.
 const SESSION_HOOK_DEADLINE: Duration = Duration::from_millis(250);
 /// Maximum UTF-8 prompt bytes admitted by an API `0.2` input request.
@@ -242,6 +323,60 @@ pub const MAX_EXTENSION_AUTOCOMPLETE_ITEMS: usize = 32;
 pub const MAX_EXTENSION_AUTOCOMPLETE_TEXT_BYTES: usize = 1024;
 /// Maximum bytes in one normalized observer input payload.
 pub const MAX_EXTENSION_TERMINAL_INPUT_BYTES: usize = 256;
+/// Maximum composer text bytes admitted by `composer/set`/`composer/insert`.
+/// Mirrors [`MAX_EXTENSION_EDITOR_TEXT_BYTES`] (256 KiB).
+pub const MAX_EXTENSION_COMPOSER_TEXT_BYTES: usize = MAX_EXTENSION_EDITOR_TEXT_BYTES;
+/// Maximum bytes in one runtime-registered shortcut identifier.
+/// Mirrors [`MAX_EXTENSION_UI_KEY_BYTES`] (128 bytes).
+pub const MAX_EXTENSION_SHORTCUT_ID_BYTES: usize = MAX_EXTENSION_UI_KEY_BYTES;
+/// Maximum bytes in one extension-owned session entry type name.
+/// Mirrors [`MAX_EXTENSION_UI_KEY_BYTES`] (128 bytes).
+pub const MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES: usize = MAX_EXTENSION_UI_KEY_BYTES;
+/// Maximum canonical JSON bytes in one session entry payload.
+/// Mirrors [`DEFAULT_EXTENSION_MANIFEST_BYTES`] (64 KiB).
+pub const MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES: usize = 64 * 1024;
+/// Maximum bytes in one session entry label.
+/// Mirrors [`MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES`] (4 KiB).
+pub const MAX_EXTENSION_SESSION_LABEL_BYTES: usize = MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES;
+/// Maximum bytes in one host session name.
+/// Mirrors [`MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES`] (4 KiB).
+pub const MAX_EXTENSION_SESSION_NAME_BYTES: usize = MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES;
+/// Maximum injected message bytes admitted by `session/send_message` and
+/// `session/send_user_message`. Mirrors [`MAX_EXTENSION_EDITOR_TEXT_BYTES`].
+pub const MAX_EXTENSION_INJECTED_MESSAGE_BYTES: usize = MAX_EXTENSION_EDITOR_TEXT_BYTES;
+/// Maximum bytes in one `bash/user` command text.
+/// Mirrors [`MAX_EXTENSION_UI_TEXT_BYTES`] (8 KiB).
+pub const MAX_EXTENSION_BASH_COMMAND_BYTES: usize = MAX_EXTENSION_UI_TEXT_BYTES;
+/// Maximum bounded detail appended to one typed request error message.
+/// Mirrors the order of magnitude of [`MAX_CONFIRMATION_REQUEST_ID_BYTES`].
+pub const MAX_EXTENSION_REQUEST_ERROR_DETAIL_BYTES: usize = 512;
+/// Maximum UTF-8 bytes in one disclosed host system prompt. Large but finite:
+/// the host fails the request rather than truncating disclosure silently.
+/// Mirrors [`MAX_EXTENSION_EDITOR_TEXT_BYTES`] (256 KiB).
+pub const MAX_EXTENSION_SYSTEM_PROMPT_BYTES: usize = MAX_EXTENSION_EDITOR_TEXT_BYTES;
+/// Maximum UTF-8 bytes in one context snapshot label (session name, model, or
+/// reasoning). Mirrors [`MAX_EXTENSION_SESSION_NAME_BYTES`] (4 KiB).
+pub const MAX_EXTENSION_CONTEXT_LABEL_BYTES: usize = MAX_EXTENSION_SESSION_NAME_BYTES;
+/// Maximum UTF-8 bytes in one context snapshot path (for example `cwd`).
+/// Mirrors [`MAX_EXTENSION_EDITOR_TEXT_BYTES`] (256 KiB).
+pub const MAX_EXTENSION_CONTEXT_PATH_BYTES: usize = MAX_EXTENSION_EDITOR_TEXT_BYTES;
+/// Maximum active-skill summaries in one session-manager snapshot.
+/// Mirrors [`MAX_EXTENSION_AUTOCOMPLETE_ITEMS`].
+pub const MAX_EXTENSION_CONTEXT_ACTIVE_SKILLS: usize = 32;
+/// Maximum UTF-8 bytes in one active-skill identifier or name.
+/// Mirrors [`MAX_EXTENSION_UI_KEY_BYTES`] (128 bytes).
+pub const MAX_EXTENSION_CONTEXT_SKILL_FIELD_BYTES: usize = MAX_EXTENSION_UI_KEY_BYTES;
+/// Maximum bytes in one coalesced `message/updated` batch. Well under
+/// [`DEFAULT_EXTENSION_MESSAGE_BYTES`] and above the
+/// `MESSAGE_DELTA_FLUSH_BYTES` boundary which normally flushes first.
+pub const MAX_EXTENSION_MESSAGE_UPDATED_TEXT_BYTES: usize = 8 * 1024;
+/// Accumulated coalesced bytes which force a `message/updated` flush.
+const MESSAGE_DELTA_FLUSH_BYTES: usize = 4096;
+/// Accumulated coalesced deltas which force a `message/updated` flush.
+const MESSAGE_DELTA_FLUSH_DELTAS: u64 = 64;
+/// Time since the first unflushed delta which forces a flush at the next push
+/// or explicit flush. A coalescer never opens a per-delta round trip.
+const MESSAGE_DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 
 static HOST_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static HOST_SHUTDOWN_NOTIFY: LazyLock<Notify> = LazyLock::new(Notify::new);
@@ -397,6 +532,88 @@ static REGISTERED_PROCESS_GROUPS: LazyLock<StdMutex<BTreeMap<i32, RegisteredProc
 static PROCESS_SNAPSHOT_REFRESH: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
 static NEXT_PROCESS_GROUP_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(windows)]
+static WINDOWS_PROCESS_JOBS: LazyLock<
+    StdMutex<BTreeMap<u64, (RegisteredProcessKind, Weak<WindowsJob>)>>,
+> = LazyLock::new(|| StdMutex::new(BTreeMap::new()));
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+#[allow(non_snake_case)]
+unsafe extern "system" {
+    fn NtResumeProcess(process_handle: HANDLE) -> i32;
+}
+
+#[cfg(windows)]
+struct WindowsJob {
+    handle: OwnedHandle,
+    terminated: AtomicBool,
+}
+
+#[cfg(windows)]
+impl WindowsJob {
+    fn create() -> std::io::Result<Self> {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: CreateJobObjectW returned a new owned handle for this process.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let mut limits = unsafe { std::mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle.as_raw_handle().cast(),
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of_mut!(limits).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            handle,
+            terminated: AtomicBool::new(false),
+        })
+    }
+
+    fn terminate(&self) {
+        if !self.terminated.swap(true, Ordering::AcqRel) {
+            // The Job Object owns the exact process tree assigned by the
+            // suspended launch handshake; it cannot target an unrelated PID.
+            unsafe {
+                let _ = TerminateJobObject(self.handle.as_raw_handle().cast(), 1);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn register_windows_job(kind: RegisteredProcessKind, job: &Arc<WindowsJob>) -> u64 {
+    let registration_id = NEXT_PROCESS_GROUP_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed);
+    let mut registered = lock_std_mutex(&WINDOWS_PROCESS_JOBS);
+    registered.retain(|_, (_, job)| job.strong_count() != 0);
+    registered.insert(registration_id, (kind, Arc::downgrade(job)));
+    registration_id
+}
+
+#[cfg(windows)]
+fn unregister_windows_job(registration_id: u64) {
+    lock_std_mutex(&WINDOWS_PROCESS_JOBS).remove(&registration_id);
+}
+
+#[cfg(windows)]
+fn windows_jobs(kind: Option<RegisteredProcessKind>) -> Vec<Arc<WindowsJob>> {
+    let mut registered = lock_std_mutex(&WINDOWS_PROCESS_JOBS);
+    registered.retain(|_, (_, job)| job.strong_count() != 0);
+    registered
+        .values()
+        .filter(|(registered_kind, _)| kind.is_none_or(|wanted| wanted == *registered_kind))
+        .filter_map(|(_, job)| job.upgrade())
+        .collect()
+}
+
 #[cfg(unix)]
 const PROCESS_REAPER_POLL: Duration = Duration::from_millis(25);
 
@@ -412,12 +629,14 @@ static PROCESS_REAPER: LazyLock<Option<std::thread::Thread>> = LazyLock::new(|| 
         .map(|handle| handle.thread().clone())
 });
 
+#[cfg(unix)]
 fn valid_process_group_id(process_group_id: u64) -> Option<i32> {
     i32::try_from(process_group_id)
         .ok()
         .filter(|process_group_id| *process_group_id > 0)
 }
 
+#[cfg(not(windows))]
 fn register_process_group(process_group_id: u64, kind: RegisteredProcessKind) -> u64 {
     let registration_id = NEXT_PROCESS_GROUP_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed);
     #[cfg(unix)]
@@ -459,6 +678,7 @@ fn remove_registered_process_group(
     }
 }
 
+#[cfg(not(windows))]
 fn unregister_process_group(process_group_id: u64, registration_id: u64) -> bool {
     #[cfg(unix)]
     if let Some(process_group_id) = valid_process_group_id(process_group_id) {
@@ -477,16 +697,27 @@ fn unregister_process_group(process_group_id: u64, registration_id: u64) -> bool
 pub struct ProcessGroupGuard {
     process_group_id: AtomicU64,
     registration_id: u64,
+    #[cfg(windows)]
+    job: Option<Arc<WindowsJob>>,
+    #[cfg(windows)]
+    disarmed: AtomicBool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ProcessTerminationHandle {
+    #[cfg(not(windows))]
     process_group_id: u64,
+    #[cfg(not(windows))]
     registration_id: u64,
+    #[cfg(windows)]
+    job: Arc<WindowsJob>,
 }
 
 impl ProcessTerminationHandle {
     fn terminate(self) {
+        #[cfg(windows)]
+        self.job.terminate();
+        #[cfg(not(windows))]
         terminate_registered_process_group(
             self.process_group_id,
             self.registration_id,
@@ -497,14 +728,17 @@ impl ProcessTerminationHandle {
 
 impl ProcessGroupGuard {
     /// Registers a shell or built-in `bash` child process group.
+    #[cfg(not(windows))]
     pub fn bash(pid: Option<u32>) -> Self {
         Self::new(pid.map(u64::from).unwrap_or(0), RegisteredProcessKind::Bash)
     }
 
+    #[cfg(not(windows))]
     fn extension(process_group_id: u64) -> Self {
         Self::new(process_group_id, RegisteredProcessKind::Extension)
     }
 
+    #[cfg(not(windows))]
     fn new(process_group_id: u64, kind: RegisteredProcessKind) -> Self {
         let registration_id = register_process_group(process_group_id, kind);
         Self {
@@ -513,23 +747,84 @@ impl ProcessGroupGuard {
         }
     }
 
+    #[cfg(windows)]
+    fn from_windows(
+        process_id: u32,
+        kind: RegisteredProcessKind,
+        job: Arc<WindowsJob>,
+        registration_id: u64,
+    ) -> Self {
+        let _ = kind;
+        Self {
+            process_group_id: AtomicU64::new(u64::from(process_id)),
+            registration_id,
+            job: Some(job),
+            disarmed: AtomicBool::new(false),
+        }
+    }
+
     fn termination_handle(&self) -> ProcessTerminationHandle {
-        ProcessTerminationHandle {
-            process_group_id: self.process_group_id.load(Ordering::Acquire),
-            registration_id: self.registration_id,
+        #[cfg(windows)]
+        {
+            ProcessTerminationHandle {
+                job: self
+                    .job
+                    .as_ref()
+                    .expect("Windows process guard always owns a Job Object")
+                    .clone(),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            ProcessTerminationHandle {
+                process_group_id: self.process_group_id.load(Ordering::Acquire),
+                registration_id: self.registration_id,
+            }
         }
     }
 
     /// Immediately force-terminates the owned process group.
     pub fn terminate_now(&self) {
-        let process_group_id = self.process_group_id.swap(0, Ordering::AcqRel);
-        terminate_registered_process_group(process_group_id, self.registration_id, libc_sigkill());
+        #[cfg(windows)]
+        {
+            if !self.disarmed.load(Ordering::Acquire) {
+                if let Some(job) = &self.job {
+                    job.terminate();
+                }
+            }
+            self.process_group_id.store(0, Ordering::Release);
+        }
+        #[cfg(not(windows))]
+        {
+            let process_group_id = self.process_group_id.swap(0, Ordering::AcqRel);
+            terminate_registered_process_group(
+                process_group_id,
+                self.registration_id,
+                libc_sigkill(),
+            );
+        }
     }
 
     /// Releases the group after its child and output pipes have fully settled.
     pub fn disarm(&self) {
-        let process_group_id = self.process_group_id.swap(0, Ordering::AcqRel);
-        unregister_process_group(process_group_id, self.registration_id);
+        #[cfg(windows)]
+        {
+            if !self.disarmed.swap(true, Ordering::AcqRel) {
+                // A successful Bash root may have started background work. The
+                // bounded Windows route does not leave that work outside the
+                // host-owned Job Object; close it only after all pipes settled.
+                if let Some(job) = &self.job {
+                    job.terminate();
+                }
+                unregister_windows_job(self.registration_id);
+            }
+            self.process_group_id.store(0, Ordering::Release);
+        }
+        #[cfg(not(windows))]
+        {
+            let process_group_id = self.process_group_id.swap(0, Ordering::AcqRel);
+            unregister_process_group(process_group_id, self.registration_id);
+        }
     }
 
     #[cfg(unix)]
@@ -635,6 +930,93 @@ impl ProcessGroupGuard {
             let _ = (lifetime, cancellation);
             self.disarm();
         }
+    }
+}
+
+#[cfg(windows)]
+/// Prepares and registers a Windows process in an exact, private Job Object.
+///
+/// The child is created suspended so assignment succeeds before any extension
+/// or shell code can run. Dropping the resulting guard terminates the owned
+/// job tree.
+pub struct WindowsProcessLaunch {
+    job: Arc<WindowsJob>,
+    kind: RegisteredProcessKind,
+    registration_id: u64,
+}
+
+#[cfg(windows)]
+impl WindowsProcessLaunch {
+    /// Prepare a Bash-compatible child for Job Object supervision.
+    pub fn bash(command: &mut Command) -> std::io::Result<Self> {
+        Self::prepare(command, RegisteredProcessKind::Bash)
+    }
+
+    /// Prepare an executable extension child for Job Object supervision.
+    pub fn extension(command: &mut Command) -> std::io::Result<Self> {
+        Self::prepare(command, RegisteredProcessKind::Extension)
+    }
+
+    fn prepare(command: &mut Command, kind: RegisteredProcessKind) -> std::io::Result<Self> {
+        let job = Arc::new(WindowsJob::create()?);
+        let registration_id = register_windows_job(kind, &job);
+        // No application code runs until the process is assigned to the Job
+        // Object. A failed assignment therefore fails closed rather than
+        // falling back to direct-child cleanup.
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_SUSPENDED
+                | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+        );
+        Ok(Self {
+            job,
+            kind,
+            registration_id,
+        })
+    }
+
+    /// Assign the suspended child to the Job Object and resume it.
+    pub fn register(self, child: &Child) -> std::io::Result<ProcessGroupGuard> {
+        let process_id = child.id().ok_or_else(|| {
+            unregister_windows_job(self.registration_id);
+            std::io::Error::other("spawned Windows process did not expose a process ID")
+        })?;
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_SUSPEND_RESUME,
+                0,
+                process_id,
+            )
+        };
+        if process.is_null() {
+            unregister_windows_job(self.registration_id);
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: OpenProcess returned a handle owned by this scope.
+        let process = unsafe { OwnedHandle::from_raw_handle(process) };
+        let assigned = unsafe {
+            AssignProcessToJobObject(
+                self.job.handle.as_raw_handle().cast(),
+                process.as_raw_handle().cast(),
+            )
+        };
+        if assigned == 0 {
+            unregister_windows_job(self.registration_id);
+            return Err(std::io::Error::last_os_error());
+        }
+        let status = unsafe { NtResumeProcess(process.as_raw_handle().cast()) };
+        if status < 0 {
+            self.job.terminate();
+            unregister_windows_job(self.registration_id);
+            return Err(std::io::Error::other(format!(
+                "failed to resume Windows process: NTSTATUS {status:#x}"
+            )));
+        }
+        Ok(ProcessGroupGuard::from_windows(
+            process_id,
+            self.kind,
+            self.job,
+            self.registration_id,
+        ))
     }
 }
 
@@ -1312,6 +1694,7 @@ fn registered_process_is_alive(process_group_id: i32, registration_id: u64) -> b
     identities.any(process_identity_is_alive)
 }
 
+#[cfg(not(windows))]
 fn libc_sigkill() -> i32 {
     #[cfg(unix)]
     {
@@ -1323,6 +1706,7 @@ fn libc_sigkill() -> i32 {
     }
 }
 
+#[cfg(not(windows))]
 fn terminate_registered_process_group(process_group_id: u64, registration_id: u64, signal: i32) {
     #[cfg(unix)]
     {
@@ -1454,7 +1838,14 @@ pub async fn terminate_bash_process_groups(timeout: Duration) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let _ = timeout;
+        for job in windows_jobs(Some(RegisteredProcessKind::Bash)) {
+            job.terminate();
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = timeout;
 }
 
@@ -1466,6 +1857,10 @@ pub fn force_kill_registered_process_groups() {
     {
         let process_keys = registered_process_keys(None);
         signal_registered_processes(&process_keys, libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    for job in windows_jobs(None) {
+        job.terminate();
     }
 }
 
@@ -1657,14 +2052,15 @@ impl ExtensionManifest {
         if !api_v03::runtime_supports_api_version(&self.api_version) {
             return Err(ExtensionRuntimeError::UnsupportedApiVersion {
                 extension: self.api_version.clone(),
-                host: "0.1, 0.2, or 0.3".into(),
+                host: "0.1, 0.2, 0.3, or 0.4".into(),
             });
         }
         if self.runtime.sharing == ExtensionRuntimeSharing::Workspace
             && self.api_version == EXTENSION_API_VERSION_0_1
         {
             return Err(ExtensionRuntimeError::InvalidManifest(
-                "workspace sharing requires extension API 0.2 or 0.3 resource-owner fences".into(),
+                "workspace sharing requires extension API 0.2 or later resource-owner fences"
+                    .into(),
             ));
         }
         if let Some(requires_octet) = &self.requires_octet {
@@ -1694,14 +2090,9 @@ impl ExtensionManifest {
                 "shortcuts require extension API 0.2".into(),
             ));
         }
-        if self.api_version == EXTENSION_API_VERSION_0_3 && !self.contributes.shortcuts.is_empty() {
+        if !self.contributes.flags.is_empty() && self.api_version == EXTENSION_API_VERSION_0_1 {
             return Err(ExtensionRuntimeError::InvalidManifest(
-                "shortcuts are not yet supported by extension API 0.3".into(),
-            ));
-        }
-        if !self.contributes.flags.is_empty() && self.api_version != EXTENSION_API_VERSION_0_3 {
-            return Err(ExtensionRuntimeError::InvalidManifest(
-                "CLI flags require extension API 0.3".into(),
+                "CLI flags require extension API 0.2 or later".into(),
             ));
         }
         if self.api_version == EXTENSION_API_VERSION_0_1
@@ -1719,9 +2110,19 @@ impl ExtensionManifest {
                     .into(),
             ));
         }
-        if self.api_version != EXTENSION_API_VERSION_0_3 && self.contributes.providers {
+        if self
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::CompactionStrategy)
+            && self.api_version != EXTENSION_API_VERSION_0_4
+        {
             return Err(ExtensionRuntimeError::InvalidManifest(
-                "provider catalogs require extension API 0.3".into(),
+                "compaction_strategy requires extension API 0.4".into(),
+            ));
+        }
+        if self.api_version == EXTENSION_API_VERSION_0_1 && self.contributes.providers {
+            return Err(ExtensionRuntimeError::InvalidManifest(
+                "provider catalogs require extension API 0.2 or later".into(),
             ));
         }
         let declares_session_start = self
@@ -1729,37 +2130,12 @@ impl ExtensionManifest {
             .hooks
             .contains(&ExtensionHook::SessionStart);
         let declares_session_end = self.contributes.hooks.contains(&ExtensionHook::SessionEnd);
-        if self.api_version != EXTENSION_API_VERSION_0_3
+        if self.api_version == EXTENSION_API_VERSION_0_1
             && (declares_session_start || declares_session_end)
         {
             return Err(ExtensionRuntimeError::InvalidManifest(
-                "session_start and session_end hooks require extension API 0.3".into(),
+                "session_start and session_end hooks require extension API 0.2 or later".into(),
             ));
-        }
-        if self.api_version == EXTENSION_API_VERSION_0_3 {
-            if declares_session_start != declares_session_end {
-                return Err(ExtensionRuntimeError::InvalidManifest(
-                    "API 0.3 session_start and session_end hooks must be declared together".into(),
-                ));
-            }
-            if !self.contributes.commands.is_empty()
-                || self
-                    .contributes
-                    .hooks
-                    .iter()
-                    .any(|hook| !hook.is_session_hook())
-                || !self.contributes.ui.is_empty()
-                || self.contributes.context
-                || !self.contributes.tool_renderers.is_empty()
-                || self.contributes.notifications
-                || self.contributes.confirmations
-                || self.contributes.presentation
-            {
-                return Err(ExtensionRuntimeError::InvalidManifest(
-                    "API 0.3 currently implements only its negotiated initial tool catalog, secret-free provider catalogs, manifest-declared CLI flags, and declared session_start/session_end hooks; commands, other hooks, context, UI, renderers, notifications, confirmations, and presentation are deferred"
-                        .into(),
-                ));
-            }
         }
         if self.entrypoint.command.trim().is_empty()
             || self.entrypoint.command.chars().any(char::is_control)
@@ -1850,6 +2226,14 @@ pub struct ExtensionCapabilities {
     /// Only host-reviewed non-value names such as `SSH_AUTH_SOCK` are accepted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environment: Vec<String>,
+    /// Whether this extension may read the composed host system prompt.
+    ///
+    /// `system_prompt_read` is offered and negotiable only when this is declared,
+    /// because the reply discloses host-owned prompt text (project context,
+    /// skills, injected file contents) across the process boundary. An
+    /// extension that does not declare it cannot negotiate the feature at all.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub system_prompt: bool,
 }
 
 /// Filesystem access declared by an extension.
@@ -1956,6 +2340,8 @@ pub enum ExtensionHook {
     /// Advises on a host-admitted provider retry without changing retry safety
     /// or the host retry budget.
     ProviderRetry,
+    /// Replaces the parent-model local compaction call on vision routes.
+    CompactionStrategy,
     /// Proposes one namespaced metadata value for a completed assistant turn
     /// before its atomic durable persistence boundary.
     BeforePersistence,
@@ -2353,6 +2739,9 @@ pub struct ToolCatalogUpdateResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionPolicy {
+    /// Optional configured provider, model and reasoning selection.
+    #[serde(default)]
+    pub model_selection: Option<crate::delegation::AgentModelSelection>,
     /// Requested upper-bound tool allowlist. Accepted standard tools are
     /// `read`, `search`, `edit`, `write`, and `bash`.
     pub tools: Vec<String>,
@@ -2386,6 +2775,9 @@ pub struct AgentSessionPolicy {
 impl From<AgentSessionPolicy> for ExtensionAgentSessionPolicy {
     fn from(policy: AgentSessionPolicy) -> Self {
         Self {
+            model_selection: policy.model_selection,
+            resolved_model: None,
+            resolved_reasoning: None,
             tools: policy.tools,
             max_depth: policy.max_depth,
             max_concurrent_children: policy.max_concurrent_children,
@@ -2452,6 +2844,20 @@ pub struct AgentSessionListRequest {
     pub parent_request_id: u64,
 }
 
+/// Owner-bound, bounded configured-model discovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionModelsRequest {
+    /// Active host request defining the resource owner.
+    pub parent_request_id: u64,
+    #[serde(default)]
+    /// Optional case-insensitive search, at most 128 bytes.
+    pub query: Option<String>,
+    #[serde(default)]
+    /// Maximum rows, default 50, range 1 through 100.
+    pub limit: Option<usize>,
+}
+
 /// API `0.2` request to wait for owned child-session state changes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2461,6 +2867,367 @@ pub struct AgentSessionWaitRequest {
     /// Bounded wait duration. Defaults to 30 seconds and is capped at 60.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+}
+
+/// API `0.2` request for the current host composer snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposerGetRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// API `0.2` request carrying complete replacement composer text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposerTextRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Bounded UTF-8 text. `composer/set` replaces and `composer/insert`
+    /// inserts it at the host composer cursor.
+    pub text: String,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// Result of one admitted composer snapshot request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposerTextResult {
+    /// Current bounded composer text.
+    pub text: String,
+}
+
+/// API `0.2` request to register one runtime terminal shortcut.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShortcutRegisterRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Extension-owned action identifier reported back by `shortcut/trigger`.
+    pub id: String,
+    /// Portable terminal key spelling, for example `ctrl+shift+c`.
+    pub key: String,
+    /// User-facing summary of the action.
+    pub description: String,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// API `0.2` request to append one extension-owned durable session entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAppendEntryRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Extension-owned entry type name.
+    pub entry_type: String,
+    /// Bounded opaque entry payload.
+    pub data: serde_json::Value,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// Result of one admitted session entry append.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAppendEntryResult {
+    /// Host-assigned durable entry identifier.
+    pub entry_id: String,
+}
+
+/// API `0.2` request to set the active session name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSetNameRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Bounded session name. An empty name clears it.
+    pub name: String,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// API `0.2` request to label one durable session entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSetLabelRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Durable entry returned by `session/append_entry`.
+    pub entry_id: String,
+    /// Bounded entry label. An empty label clears it.
+    pub label: String,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// API `0.2` request to inject one bounded assistant or system message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSendMessageRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Exactly `assistant` or `system`. Any other role is refused.
+    pub role: String,
+    /// Bounded injected message text.
+    pub text: String,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// API `0.2` request to inject one bounded user message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSendUserMessageRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Bounded injected user message text.
+    pub text: String,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// API `0.2` request to replace the active model tool set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsSetActiveRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Complete replacement active tool set, validated like `tools/register`.
+    pub names: Vec<String>,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// API `0.2` request to cede the foreground raw terminal to this session owner.
+///
+/// The request carries no parameter beyond the owner envelope: the granting
+/// frontend decides whether it can cede at all. The answer is
+/// `{grant_id, columns, rows}` and is delivered later through the ordinary
+/// child-request response path, so the child request stays registered until the
+/// frontend answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalAcquireRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// API `0.2` request to return a ceded foreground terminal to the host.
+///
+/// Release is idempotent for the frontend that owns the grant: the frontend
+/// decides whether the caller still holds the current grant, and a stale or
+/// foreign caller is refused there. Like acquire, this request is answered on
+/// the ordinary child-request response path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalReleaseRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// Result of one admitted `terminal/acquire` request.
+///
+/// The frontend mints `grant_id`, so every field here is produced by the host
+/// process itself and never by the extension.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalAcquireResult {
+    /// Opaque frontend-minted grant identifier, at most
+    /// [`MAX_EXTENSION_TERMINAL_GRANT_ID_BYTES`] UTF-8 bytes.
+    pub grant_id: String,
+    /// Terminal width in columns at the moment the grant was handed out.
+    pub columns: u16,
+    /// Terminal height in rows at the moment the grant was handed out.
+    pub rows: u16,
+}
+
+/// Result of one admitted `terminal/release` request.
+///
+/// Release has no result body: the host answers `{}` once the frontend reports
+/// that it re-entered its own terminal and input loop.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalReleaseResult {}
+
+/// API `0.2` owner-scoped envelope for one read-only context snapshot request.
+///
+/// Every context snapshot request carries only the owner envelope. The host
+/// derives the snapshot from the foreground session, so the extension supplies
+/// no parameters and can never write through these requests.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSnapshotRequest {
+    /// Active host request that supplies the authoritative resource owner.
+    pub parent_request_id: u64,
+    /// Explicit owner for a caller that outlived its host request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_owner: Option<ExtensionResourceOwner>,
+}
+
+/// Maximum UTF-8 bytes in one bounded model-view field.
+pub const MAX_EXTENSION_MODEL_FIELD_BYTES: usize = 256;
+/// Maximum UTF-8 bytes in one Pi wire API name.
+pub const MAX_EXTENSION_MODEL_API_BYTES: usize = 64;
+/// Maximum input modalities in one model view (Pi declares `text` and `image`).
+pub const MAX_EXTENSION_MODEL_INPUTS: usize = 2;
+/// Maximum rows in one secret-free model catalog snapshot.
+pub const MAX_EXTENSION_MODEL_CATALOG_ROWS: usize = 64;
+
+impl ExtensionModelView {
+    /// Validates one bounded, secret-free model view.
+    ///
+    /// A view that cannot be stated within bounds is refused rather than
+    /// truncated: a shortened identifier would name a different model. Callers
+    /// answer `bounds_exceeded` instead.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_bounded_bytes("model id", &self.id, MAX_EXTENSION_MODEL_FIELD_BYTES)?;
+        if self.id.is_empty() {
+            return Err("model id must not be empty".into());
+        }
+        if let Some(name) = &self.name {
+            validate_bounded_bytes("model name", name, MAX_EXTENSION_MODEL_FIELD_BYTES)?;
+        }
+        validate_bounded_bytes("model api", &self.api, MAX_EXTENSION_MODEL_API_BYTES)?;
+        validate_bounded_bytes(
+            "model provider",
+            &self.provider,
+            MAX_EXTENSION_MODEL_FIELD_BYTES,
+        )?;
+        if self.provider.is_empty() {
+            return Err("model provider must not be empty".into());
+        }
+        if self.input.len() > MAX_EXTENSION_MODEL_INPUTS {
+            return Err(format!(
+                "model input carries {} modalities; limit is {MAX_EXTENSION_MODEL_INPUTS}",
+                self.input.len()
+            ));
+        }
+        for modality in &self.input {
+            if !matches!(modality.as_str(), "text" | "image") {
+                return Err("model input modality must be `text` or `image`".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Result of one admitted `context/model_catalog` request.
+///
+/// Rows reuse [`ExtensionModelView`] so a catalog entry and the selected view
+/// are the same bounded, secret-free shape: there is exactly one model-view
+/// definition on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextModelCatalogResult {
+    /// Catalog rows, at most [`MAX_EXTENSION_MODEL_CATALOG_ROWS`].
+    pub models: Vec<ExtensionModelView>,
+    /// Whether the host truncated the catalog to the bounded row count.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl ContextModelCatalogResult {
+    /// Validates the bounded catalog snapshot.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.models.len() > MAX_EXTENSION_MODEL_CATALOG_ROWS {
+            return Err(format!(
+                "model catalog contains {} rows; limit is {MAX_EXTENSION_MODEL_CATALOG_ROWS}",
+                self.models.len()
+            ));
+        }
+        for model in &self.models {
+            model.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Result of one admitted `context/session_manager` request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSessionManagerResult {
+    /// Active host session identifier.
+    pub session_id: String,
+    /// Optional host session name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Optional selected model identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Optional selected reasoning level identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Active skill summaries, at most [`MAX_EXTENSION_CONTEXT_ACTIVE_SKILLS`].
+    #[serde(default)]
+    pub active_skills: Vec<ContextSkillSummary>,
+    /// Host working directory for the active session.
+    pub cwd: String,
+}
+
+/// One active skill summary in a session-manager snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSkillSummary {
+    /// Stable skill identifier.
+    pub id: String,
+    /// User-facing skill name.
+    pub name: String,
+}
+
+/// Result of one admitted `context/pending_messages` request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextPendingMessagesResult {
+    /// Bounded count of pending messages for the active session.
+    pub pending: u32,
+}
+
+/// Result of one admitted `context/system_prompt` request.
+///
+/// The disclosed `text` is bounded to
+/// [`MAX_EXTENSION_SYSTEM_PROMPT_BYTES`]; the frontend that composes the prompt
+/// must refuse rather than truncate an over-bound disclosure. Run
+/// [`ContextSystemPromptResult::validate`] before answering.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSystemPromptResult {
+    /// Host-owned composed system prompt text.
+    pub text: String,
+}
+
+impl ContextSystemPromptResult {
+    /// Validates the disclosed prompt text against its disclosure bound.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.text.len() > MAX_EXTENSION_SYSTEM_PROMPT_BYTES {
+            return Err(format!(
+                "system prompt text is {} bytes; limit is {MAX_EXTENSION_SYSTEM_PROMPT_BYTES}",
+                self.text.len()
+            ));
+        }
+        if self.text.chars().any(|character| character == '\u{0}') {
+            return Err("system prompt text must not contain NUL".to_owned());
+        }
+        Ok(())
+    }
 }
 
 /// A global terminal shortcut declared in the manifest and echoed by initialize.
@@ -2527,12 +3294,66 @@ pub struct ExtensionHostState {
     /// Canonical current model identifier.
     #[serde(default)]
     pub model: Option<String>,
+    /// Pi-shaped view of the current model, when the host resolved one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_view: Option<ExtensionModelView>,
     /// Inspectably serialized reasoning configuration.
     #[serde(default)]
     pub reasoning: Option<serde_json::Value>,
     /// Skills explicitly active at this boundary.
     #[serde(default)]
     pub active_skills: Vec<ExtensionActiveSkill>,
+}
+
+/// Pi-shaped model view exposed to an extension as `ctx.model`.
+///
+/// Pi's `Model` describes the provider's own model record. octet projects only
+/// the bounded, secret-free subset it can state truthfully, so the endpoint base
+/// URL and credentials are never part of an extension-visible model. `baseUrl`
+/// is omitted rather than fabricated: an extension reading it observes
+/// `undefined`, never a URL octet did not disclose.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionModelView {
+    /// Canonical model identifier, as octet resolves it.
+    pub id: String,
+    /// Human-facing model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Pi's wire API name for the model's protocol.
+    pub api: String,
+    /// Pi provider identity that owns the model's route.
+    pub provider: String,
+    /// Whether the model accepts reasoning controls.
+    pub reasoning: bool,
+    /// Accepted input modalities from Pi's `("text" | "image")` set.
+    pub input: Vec<String>,
+    /// Per-million-token rates, absent when the route is unpriced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ExtensionModelCost>,
+    /// Context window in tokens.
+    pub context_window: u64,
+    /// Maximum output tokens.
+    pub max_tokens: u64,
+}
+
+/// Pi-shaped per-million-token model rates.
+///
+/// Rates stay in octet's own exact integer unit — microdollars per million
+/// tokens — so the projection never rounds or re-derives a rate. The bridge
+/// converts to Pi's `$/million` floating-point rates when it assembles
+/// `ctx.model.cost`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionModelCost {
+    /// Prompt input rate, in microdollars per million tokens.
+    pub input: u64,
+    /// Generated output rate, in microdollars per million tokens.
+    pub output: u64,
+    /// Cached input read rate, in microdollars per million tokens.
+    pub cache_read: u64,
+    /// Cache write rate, in microdollars per million tokens.
+    pub cache_write: u64,
 }
 
 /// Compact skill metadata sent to executable extensions.
@@ -2792,6 +3613,9 @@ pub struct ExtensionHookOutput {
     /// Advice accepted only for a typed `provider_retry` hook response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_retry: Option<ExtensionProviderRetryAdvice>,
+    /// Base64 PNG frames returned only from the API 0.4 compaction hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_frames: Option<Vec<String>>,
     /// Metadata accepted only for a typed `before_persistence` hook response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence_metadata: Option<ExtensionPersistenceMetadata>,
@@ -2992,6 +3816,392 @@ impl ExtensionEditorRequest {
     }
 }
 
+/// One host-owned composer operation requested by an API `0.2` extension.
+///
+/// The composer stays host-owned: an extension reads or mutates the ordinary
+/// composer through the frontend that holds the resource owner's lease.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionComposerOperation {
+    /// Return the current composer snapshot.
+    Get,
+    /// Replace the complete composer text.
+    Set {
+        /// Complete replacement text.
+        text: String,
+    },
+    /// Insert text at the composer cursor.
+    Insert {
+        /// Text to insert at the cursor.
+        text: String,
+    },
+}
+
+impl ExtensionComposerOperation {
+    /// Validates every bounded field, mirroring
+    /// [`ExtensionEditorRequest::validate`].
+    pub fn validate(&self) -> Result<(), String> {
+        let text = match self {
+            Self::Set { text } | Self::Insert { text } => Some(text),
+            Self::Get => None,
+        };
+        if let Some(text) = text {
+            validate_bounded_bytes("composer text", text, MAX_EXTENSION_COMPOSER_TEXT_BYTES)?;
+            validate_plain_text("composer text", text)?;
+        }
+        Ok(())
+    }
+}
+
+/// One foreground terminal handoff operation requested by an API `0.2`
+/// extension.
+///
+/// The terminal stays host-owned: the frontend decides whether to cede the raw
+/// tty, mints the grant identifier, and re-enters its own input loop on release.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionTerminalOperation {
+    /// Acquire the exclusive foreground terminal grant.
+    Acquire,
+    /// Return the grant to the host.
+    Release,
+}
+
+/// One read-only host context snapshot requested by an API `0.2` extension.
+///
+/// The snapshot is derived from the foreground session and never mutates it.
+/// `session_context` gates `SessionManager` and `PendingMessages`;
+/// `system_prompt_read` gates `SystemPrompt`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionContextOperation {
+    /// Return the active session-manager snapshot.
+    SessionManager,
+    /// Return the bounded count of pending messages.
+    PendingMessages,
+    /// Return the host-owned composed system prompt text.
+    SystemPrompt,
+}
+
+/// One read-only model operation requested by an API `0.2` extension.
+///
+/// `model_catalog` gates both operations. The view is metadata only; a caller
+/// that cannot be answered is refused rather than handed a synthesized model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionModelOperation {
+    /// Return the selected model view.
+    Current,
+    /// Return the secret-free model catalog.
+    Catalog,
+}
+
+/// One extension-owned session entry operation requested by an API `0.2`
+/// extension.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionSessionEntryOperation {
+    /// Append one typed durable entry.
+    Append {
+        /// Extension-owned entry type name.
+        entry_type: String,
+        /// Bounded opaque entry payload.
+        data: serde_json::Value,
+    },
+    /// Replace the active session name.
+    SetName {
+        /// Bounded session name.
+        name: String,
+    },
+    /// Label one durable session entry.
+    SetLabel {
+        /// Durable entry returned by `session/append_entry`.
+        entry_id: String,
+        /// Bounded entry label.
+        label: String,
+    },
+}
+
+impl ExtensionSessionEntryOperation {
+    /// Validates every bounded field of one session entry operation.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Append { entry_type, data } => {
+                validate_bounded_bytes(
+                    "session entry type",
+                    entry_type,
+                    MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES,
+                )?;
+                if entry_type.is_empty() {
+                    return Err("session entry type must not be empty".into());
+                }
+                let bytes = serde_json::to_vec(data)
+                    .map_err(|error| format!("session entry data is not serializable: {error}"))?;
+                if bytes.len() > MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES {
+                    return Err(format!(
+                        "session entry data is {} JSON bytes; limit is {MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES}",
+                        bytes.len()
+                    ));
+                }
+                Ok(())
+            }
+            Self::SetName { name } => {
+                validate_bounded_bytes("session name", name, MAX_EXTENSION_SESSION_NAME_BYTES)
+            }
+            Self::SetLabel { entry_id, label } => {
+                validate_bounded_bytes(
+                    "session entry id",
+                    entry_id,
+                    MAX_CONFIRMATION_REQUEST_ID_BYTES,
+                )?;
+                validate_bounded_bytes(
+                    "session entry label",
+                    label,
+                    MAX_EXTENSION_SESSION_LABEL_BYTES,
+                )
+            }
+        }
+    }
+}
+
+/// One bounded message injection requested by an API `0.2` extension.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionMessageInjection {
+    /// Assistant-role injected text.
+    Assistant {
+        /// Bounded injected text.
+        text: String,
+    },
+    /// System-role injected text.
+    System {
+        /// Bounded injected text.
+        text: String,
+    },
+    /// User-role injected text.
+    User {
+        /// Bounded injected text.
+        text: String,
+    },
+}
+
+impl ExtensionMessageInjection {
+    /// Validates the bounded injected text, mirroring
+    /// [`validate_extension_editor_text`]'s plain-text posture.
+    pub fn validate(&self) -> Result<(), String> {
+        let text = match self {
+            Self::Assistant { text } | Self::System { text } | Self::User { text } => text,
+        };
+        validate_bounded_bytes(
+            "injected message",
+            text,
+            MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
+        )?;
+        validate_plain_text("injected message", text)
+    }
+}
+
+/// Contract failure kinds shared by every Wave-1 owner-scoped request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionRequestFailure {
+    /// The extension did not negotiate the feature this request belongs to.
+    UnsupportedFeature,
+    /// The authoritative owner is not the foreground session.
+    NotForegroundOwner,
+    /// The request is malformed or violates a semantic rule.
+    InvalidRequest,
+    /// A bounded field exceeded its named cap.
+    BoundsExceeded,
+}
+
+impl ExtensionRequestFailure {
+    /// JSON-RPC error code carrying this contract failure on API 0.2.
+    pub fn code(self) -> i64 {
+        match self {
+            Self::UnsupportedFeature => -32601,
+            Self::NotForegroundOwner => -32002,
+            Self::InvalidRequest | Self::BoundsExceeded => -32602,
+        }
+    }
+
+    /// Stable contract name used by the bridge and the SDKs.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::UnsupportedFeature => "unsupported_feature",
+            Self::NotForegroundOwner => "not_foreground_owner",
+            Self::InvalidRequest => "invalid_request",
+            Self::BoundsExceeded => "bounds_exceeded",
+        }
+    }
+
+    /// Bounded `error.message` text with the contract name as its first token.
+    pub fn message(self, detail: &str) -> String {
+        let detail = detail.trim();
+        let mut bounded = String::new();
+        for character in detail.chars() {
+            if bounded.len() + character.len_utf8() > MAX_EXTENSION_REQUEST_ERROR_DETAIL_BYTES {
+                break;
+            }
+            bounded.push(character);
+        }
+        if bounded.is_empty() {
+            return self.name().to_owned();
+        }
+        format!("{}: {bounded}", self.name())
+    }
+
+    /// One JSON-RPC error object for this contract failure.
+    pub fn error_object(self, detail: &str) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code(),
+            "message": self.message(detail),
+        })
+    }
+}
+
+/// Terminal answer for one admitted Wave-1 owner-scoped request.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExtensionRequestOutcome {
+    /// Successful bounded result.
+    Ok(serde_json::Value),
+    /// Typed refusal with a bounded detail.
+    Failed(ExtensionRequestFailure, String),
+}
+
+impl ExtensionRequestOutcome {
+    /// Successful outcome carrying one serializable result.
+    pub fn result<T: Serialize>(result: T) -> Self {
+        match serde_json::to_value(result) {
+            Ok(value) => Self::Ok(value),
+            Err(error) => Self::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("unencodable result: {error}"),
+            ),
+        }
+    }
+
+    /// Typed refusal outcome with a bounded detail.
+    pub fn failed(failure: ExtensionRequestFailure, detail: impl Into<String>) -> Self {
+        Self::Failed(failure, detail.into())
+    }
+
+    /// Encodes one complete JSON-RPC response envelope for `id`.
+    pub fn into_response(self, id: ExtensionRequestId) -> serde_json::Value {
+        match self {
+            Self::Ok(result) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": result,
+            }),
+            Self::Failed(failure, detail) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": failure.error_object(&detail),
+            }),
+        }
+    }
+}
+
+/// Bounded `message/started` and `message/settled` payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionMessageLifecycle {
+    /// Host message identity within the active turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+}
+
+/// Coalesced `message/updated` payload. One notification per batch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionMessageUpdated {
+    /// Host message identity within the active turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// Coalesced delta text of this batch, bounded by
+    /// [`MAX_EXTENSION_MESSAGE_UPDATED_TEXT_BYTES`].
+    pub delta: String,
+    /// Number of extension-visible deltas coalesced into this batch.
+    pub deltas: u64,
+}
+
+/// Bounded compaction boundary payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionCompactionReport {
+    /// Bounded host-provided reason, present on failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Bounded session name or label change payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionSessionInfoChanged {
+    /// Host session identity the change belongs to.
+    pub session_id: String,
+    /// Current host session name, when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Durable entry that was labelled, when the change was a label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
+}
+
+/// Bounded dialog start or terminal boundary payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionDialogLifecycle {
+    /// Host-owned dialog surface, for example `select`, `confirm`, or `input`.
+    pub dialog: String,
+}
+
+/// Bounded model selection payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionModelSelected {
+    /// Canonical selected model identifier, when the host has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Pi-shaped view of the selected model, when the host resolved one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_view: Option<ExtensionModelView>,
+}
+
+/// Bounded reasoning selection payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionReasoningSelected {
+    /// Selected reasoning level, when the host has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+}
+
+/// Bounded user `!`/`!!` bash payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionUserBash {
+    /// Bounded command text the user ran.
+    pub command: String,
+}
+
+/// Bounded `shortcut/trigger` payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionShortcutTrigger {
+    /// Extension-owned action identifier returned by `shortcut/register`.
+    pub id: String,
+}
+
+/// Bounded `terminal/grant-lost` payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalGrantLost {
+    /// Bounded host-provided revocation reason.
+    pub reason: String,
+}
+
 /// Snapshot returned after one host-owned editor operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3188,6 +4398,74 @@ fn validate_extension_autocomplete_text(kind: &str, text: &str) -> Result<(), St
     }
     if text.chars().any(|character| character.is_control()) {
         return Err(format!("{kind} contains a terminal control character"));
+    }
+    Ok(())
+}
+
+fn validate_bounded_bytes(kind: &str, value: &str, limit: usize) -> Result<(), String> {
+    if value.len() > limit {
+        return Err(format!("{kind} exceeded {limit} UTF-8 bytes"));
+    }
+    Ok(())
+}
+
+/// Bounds one host-originated notification field, refusing rather than
+/// truncating a value whose exact content is load-bearing.
+fn bounded_notification_text(
+    kind: &str,
+    value: &str,
+    limit: usize,
+) -> Result<String, ExtensionRuntimeError> {
+    if value.len() > limit {
+        return Err(ExtensionRuntimeError::Protocol(format!(
+            "{kind} exceeded {limit} UTF-8 bytes"
+        )));
+    }
+    validate_plain_text(kind, value).map_err(ExtensionRuntimeError::Protocol)?;
+    Ok(value.to_owned())
+}
+
+/// Truncates one bounded host-originated diagnostic/reason field on a UTF-8
+/// character boundary. Used only where dropping the notification would be
+/// worse than shortening a human-readable reason.
+fn truncated_notification_text(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_owned();
+    }
+    let mut bounded = String::new();
+    for character in value.chars() {
+        if bounded.len() + character.len_utf8() > limit {
+            break;
+        }
+        bounded.push(character);
+    }
+    bounded
+}
+
+fn validate_plain_text(kind: &str, value: &str) -> Result<(), String> {
+    if value.chars().any(|character| {
+        character == '\u{1b}'
+            || (character.is_control() && !matches!(character, '\n' | '\t' | '\r'))
+    }) {
+        return Err(format!("{kind} contains a terminal control character"));
+    }
+    Ok(())
+}
+
+/// Classifies one bounded plain-text field into the contract's typed refusal.
+fn bounded_plain_text_failure(
+    kind: &str,
+    value: &str,
+    limit: usize,
+) -> Result<(), (ExtensionRequestFailure, String)> {
+    if value.len() > limit {
+        return Err((
+            ExtensionRequestFailure::BoundsExceeded,
+            format!("{kind} exceeded {limit} UTF-8 bytes"),
+        ));
+    }
+    if let Err(detail) = validate_plain_text(kind, value) {
+        return Err((ExtensionRequestFailure::InvalidRequest, detail));
     }
     Ok(())
 }
@@ -3793,6 +5071,104 @@ pub enum ExtensionEvent {
         /// Monotonic extension-owned state snapshot.
         snapshot: ExtensionPresentationSnapshot,
     },
+    /// One host-owned composer operation awaiting a foreground projection.
+    ComposerRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the request.
+        generation: u64,
+        /// Host-derived resource owner, or process scope when absent.
+        owner: Option<ExtensionResourceOwner>,
+        /// Bounded composer operation.
+        operation: ExtensionComposerOperation,
+    },
+    /// One extension-owned durable session entry operation.
+    SessionEntryRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the request.
+        generation: u64,
+        /// Host-derived resource owner, or process scope when absent.
+        owner: Option<ExtensionResourceOwner>,
+        /// Bounded session entry operation.
+        operation: ExtensionSessionEntryOperation,
+    },
+    /// One bounded message injection awaiting the foreground session.
+    MessageInjectionRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the request.
+        generation: u64,
+        /// Host-derived resource owner, or process scope when absent.
+        owner: Option<ExtensionResourceOwner>,
+        /// Bounded injected message.
+        injection: ExtensionMessageInjection,
+    },
+    /// One runtime shortcut registration awaiting the host keymap.
+    ShortcutRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the request.
+        generation: u64,
+        /// Host-derived resource owner, or process scope when absent.
+        owner: Option<ExtensionResourceOwner>,
+        /// Extension-owned action identifier reported back by `shortcut/trigger`.
+        shortcut_id: String,
+        /// Portable terminal key spelling.
+        key: String,
+        /// User-facing summary of the action.
+        description: String,
+    },
+    /// One active-tool replacement awaiting the host tool policy.
+    ActiveToolsRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the request.
+        generation: u64,
+        /// Host-derived resource owner, or process scope when absent.
+        owner: Option<ExtensionResourceOwner>,
+        /// Complete replacement active tool set.
+        names: Vec<String>,
+    },
+    /// One foreground terminal handoff operation awaiting the frontend.
+    TerminalRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the request.
+        generation: u64,
+        /// Host-derived resource owner, or process scope when absent.
+        owner: Option<ExtensionResourceOwner>,
+        /// Bounded handoff operation.
+        operation: ExtensionTerminalOperation,
+    },
+    /// One read-only context snapshot awaiting the foreground session.
+    ///
+    /// The child request stays registered until the frontend answers through
+    /// `respond_to_extension_request`.
+    ContextSnapshotRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the request.
+        generation: u64,
+        /// Host-derived resource owner, or process scope when absent.
+        owner: Option<ExtensionResourceOwner>,
+        /// Bounded snapshot operation.
+        operation: ExtensionContextOperation,
+    },
+    /// One read-only model view awaiting the foreground session.
+    ///
+    /// The child request stays registered until the frontend answers through
+    /// `respond_to_extension_request`.
+    ModelViewRequested {
+        /// Process-originated JSON-RPC ID.
+        request_id: ExtensionRequestId,
+        /// Process generation that owns the request.
+        generation: u64,
+        /// Host-derived resource owner, or process scope when absent.
+        owner: Option<ExtensionResourceOwner>,
+        /// Bounded model operation.
+        operation: ExtensionModelOperation,
+    },
     /// Bounded stderr or protocol diagnostic.
     Diagnostic {
         /// Human-readable diagnostic text.
@@ -4002,6 +5378,8 @@ pub struct ExtensionRuntimeConfig {
     /// only when configured; it remains inactive until the product binds a safe
     /// interactive idle boundary. Legacy processes never retain this service.
     pub session_lifecycle: Option<ExtensionSessionLifecycleService>,
+    /// Optional session-isolated data bus; never bind to workspace-shared processes.
+    pub event_bus: Option<Arc<ExtensionEventBus>>,
     /// Offer single-use approval redemption. A trusted frontend can issue a
     /// capability with [`ExtensionProcess::respond_to_policy_approval`].
     pub approvals: bool,
@@ -4056,6 +5434,7 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
                 "session_lifecycle_configured",
                 &self.session_lifecycle.is_some(),
             )
+            .field("event_bus_configured", &self.event_bus.is_some())
             .field("approvals", &self.approvals)
             .field("secret_broker_configured", &self.secret_broker.is_some())
             .field(
@@ -4089,6 +5468,7 @@ impl ExtensionRuntimeConfig {
             flag_values: BTreeMap::new(),
             agent_sessions: false,
             session_lifecycle: None,
+            event_bus: None,
             approvals: false,
             secret_broker: None,
             provider_registry: None,
@@ -4191,7 +5571,7 @@ pub enum ExtensionRuntimeError {
     /// A request was cooperatively cancelled before a terminal response.
     #[error("extension request `{method}` cancelled: {reason}")]
     Cancelled {
-        /// JSON-RPC method.
+        /// Original JSON-RPC request method, not the cancellation notification.
         method: String,
         /// Inspectable terminal reason.
         reason: String,
@@ -4323,6 +5703,8 @@ pub mod methods {
     pub const AGENT_FOLLOW_UP: &str = "agent/follow_up";
     /// Extension request to inspect owned child sessions.
     pub const AGENT_LIST: &str = "agent/list";
+    /// Discover configured worker model choices for an owner.
+    pub const AGENT_MODELS: &str = "agent/models";
     /// Extension request to wait for owned child-session state changes.
     pub const AGENT_WAIT: &str = "agent/wait";
     /// Extension request to interrupt an owned child-session tree.
@@ -4339,6 +5721,68 @@ pub mod methods {
     pub const TOOL_STARTED: &str = "tool/started";
     /// Observational global tool terminal boundary.
     pub const TOOL_SETTLED: &str = "tool/settled";
+    /// Extension request for the current host composer snapshot.
+    pub const COMPOSER_GET: &str = "composer/get";
+    /// Extension request to replace the complete host composer text.
+    pub const COMPOSER_SET: &str = "composer/set";
+    /// Extension request to insert text at the host composer cursor.
+    pub const COMPOSER_INSERT: &str = "composer/insert";
+    /// Extension request to register one runtime terminal shortcut.
+    pub const SHORTCUT_REGISTER: &str = "shortcut/register";
+    /// Extension request to append one extension-owned durable session entry.
+    pub const SESSION_APPEND_ENTRY: &str = "session/append_entry";
+    /// Extension request to set the active host session name.
+    pub const SESSION_SET_NAME: &str = "session/set_name";
+    /// Extension request to label one durable session entry.
+    pub const SESSION_SET_LABEL: &str = "session/set_label";
+    /// Extension request to inject one bounded assistant or system message.
+    pub const SESSION_SEND_MESSAGE: &str = "session/send_message";
+    /// Extension request to inject one bounded user message.
+    pub const SESSION_SEND_USER_MESSAGE: &str = "session/send_user_message";
+    /// Extension request to replace the active host tool set.
+    pub const TOOLS_SET_ACTIVE: &str = "tools/set_active";
+    /// Host-to-extension runtime shortcut activation.
+    pub const SHORTCUT_TRIGGER: &str = "shortcut/trigger";
+    /// Host-to-extension assistant message start.
+    pub const MESSAGE_STARTED: &str = "message/started";
+    /// Host-to-extension coalesced assistant message deltas.
+    pub const MESSAGE_UPDATED: &str = "message/updated";
+    /// Host-to-extension assistant message terminal boundary.
+    pub const MESSAGE_SETTLED: &str = "message/settled";
+    /// Host-to-extension compaction start.
+    pub const COMPACTION_STARTED: &str = "compaction/started";
+    /// Host-to-extension compaction success.
+    pub const COMPACTION_SETTLED: &str = "compaction/settled";
+    /// Host-to-extension compaction failure.
+    pub const COMPACTION_FAILED: &str = "compaction/failed";
+    /// Host-to-extension session name or label change.
+    pub const SESSION_INFO_CHANGED: &str = "session/info_changed";
+    /// Host-to-extension dialog start.
+    pub const DIALOG_STARTED: &str = "dialog/started";
+    /// Host-to-extension dialog terminal boundary.
+    pub const DIALOG_SETTLED: &str = "dialog/settled";
+    /// Host-to-extension model selection change.
+    pub const MODEL_SELECTED: &str = "model/selected";
+    /// Host-to-extension reasoning selection change.
+    pub const REASONING_SELECTED: &str = "reasoning/selected";
+    /// Host-to-extension user `!`/`!!` bash execution.
+    pub const BASH_USER: &str = "bash/user";
+    /// Extension request to cede the foreground raw terminal.
+    pub const TERMINAL_ACQUIRE: &str = "terminal/acquire";
+    /// Extension request to return a ceded foreground terminal.
+    pub const TERMINAL_RELEASE: &str = "terminal/release";
+    /// Host-to-extension revocation of an outstanding terminal grant.
+    pub const TERMINAL_GRANT_LOST: &str = "terminal/grant-lost";
+    /// Extension request for the active session-manager snapshot.
+    pub const CONTEXT_SESSION_MANAGER: &str = "context/session_manager";
+    /// Extension request for the bounded pending-message count.
+    pub const CONTEXT_PENDING_MESSAGES: &str = "context/pending_messages";
+    /// Extension request for the host-owned composed system prompt text.
+    pub const CONTEXT_SYSTEM_PROMPT: &str = "context/system_prompt";
+    /// Extension request for the selected model view.
+    pub const CONTEXT_MODEL: &str = "context/model";
+    /// Extension request for the secret-free model catalog.
+    pub const CONTEXT_MODEL_CATALOG: &str = "context/model_catalog";
 }
 
 /// Extension identity sent during initialization.
@@ -4371,6 +5815,12 @@ pub struct InitializeRequest {
     pub contributes: ManifestContributions,
     /// Initial session/model/skill state.
     pub host: ExtensionHostState,
+    /// Declared CLI flag values projected into API `0.2` initialize so that
+    /// `pi.getFlag` observes host-resolved values rather than local defaults.
+    /// Reuses the API `0.3` [`api_v03::InitializeFlagValue`] shape. Omitted
+    /// byte-for-byte for API `0.1` and for a host that has no flags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag_values: Option<Vec<api_v03::InitializeFlagValue>>,
     /// Additive API `0.2` feature and limit negotiation. Frozen API `0.1`
     /// initialization omits this field byte-for-byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4889,14 +6339,19 @@ impl ExtensionProcess {
         self.negotiated_protocol().features
     }
 
+    /// Tests one feature against the current process generation without cloning
+    /// the negotiated catalog. The connection fence is held through the lookup.
+    pub fn supports_feature(&self, feature: &str) -> bool {
+        let connection = read_std_lock(&self.inner.connection);
+        let supported = read_std_lock(&connection.protocol).supports(feature);
+        supported
+    }
+
     pub(crate) fn bind_agent_session_service(
         &self,
         service: ExtensionDelegationService,
     ) -> Result<(), ExtensionRuntimeError> {
-        if !self
-            .negotiated_protocol()
-            .supports(EXTENSION_FEATURE_AGENT_SESSIONS)
-        {
+        if !self.supports_feature(EXTENSION_FEATURE_AGENT_SESSIONS) {
             return Err(ExtensionRuntimeError::Protocol(format!(
                 "extension `{}` did not negotiate `{EXTENSION_FEATURE_AGENT_SESSIONS}`",
                 self.inner.descriptor.manifest.name
@@ -4986,10 +6441,7 @@ impl ExtensionProcess {
         session_id: impl Into<String>,
     ) -> ExtensionExecutionContext {
         let mut context = self.execution_context();
-        if matches!(
-            self.api_version(),
-            EXTENSION_API_VERSION_0_2 | EXTENSION_API_VERSION_0_3
-        ) {
+        if is_stateful_api(self.api_version()) {
             let generation = read_std_lock(&self.inner.connection).generation;
             context.resource_owner = Some(ExtensionResourceOwner {
                 session_id: session_id.into(),
@@ -5597,7 +7049,7 @@ impl ExtensionProcess {
         mutation: &PostMutationContext,
         resource_owner: Option<&str>,
     ) -> Result<PostMutationDisposition, ExtensionRuntimeError> {
-        if self.api_version() != EXTENSION_API_VERSION_0_2
+        if !is_stateful_api(self.api_version())
             || !self
                 .inner
                 .contributions
@@ -5829,6 +7281,307 @@ impl ExtensionProcess {
         }
     }
 
+    /// Best-effort Wave-1 lifecycle fan-out. A closed, draining, or replaced
+    /// generation drops the notification instead of erroring a live turn.
+    fn queue_lifecycle_notification<T: Serialize>(
+        &self,
+        feature: &str,
+        method: &str,
+        params: &T,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if !connection_is_usable(&connection) {
+            return Ok(());
+        }
+        self.queue_ui_notification(feature, method, params)
+    }
+
+    /// Answers one admitted owner-scoped request only while its generation is
+    /// current. This is the resource-owner fence for the request surface.
+    pub async fn respond_to_extension_request(
+        &self,
+        request_id: ExtensionRequestId,
+        generation: u64,
+        outcome: ExtensionRequestOutcome,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if generation != connection.generation {
+            return Err(ExtensionRuntimeError::Closed(format!(
+                "extension request belongs to stale generation {generation}; current generation is {}",
+                connection.generation
+            )));
+        }
+        match outcome {
+            ExtensionRequestOutcome::Ok(result) => {
+                connection.send_child_response(request_id, &result).await
+            }
+            ExtensionRequestOutcome::Failed(failure, detail) => {
+                connection
+                    .send_child_error_response(request_id, failure.code(), failure.message(&detail))
+                    .await
+            }
+        }
+    }
+
+    /// Coalesces one observed assistant delta. A `message/updated` notification
+    /// is emitted only at a flush boundary, so no per-delta round trip exists.
+    pub fn push_message_delta(&self, delta: &str) -> Result<(), ExtensionRuntimeError> {
+        if delta.len() > MAX_EXTENSION_MESSAGE_UPDATED_TEXT_BYTES {
+            return Err(ExtensionRuntimeError::Protocol(format!(
+                "message delta exceeded {MAX_EXTENSION_MESSAGE_UPDATED_TEXT_BYTES} UTF-8 bytes"
+            )));
+        }
+        let connection = read_std_lock(&self.inner.connection).clone();
+        let (batches, message_id) = {
+            let mut coalescer = lock_std_mutex(&connection.message_deltas);
+            let batches = coalescer.push(delta, Instant::now());
+            (batches, coalescer.active_message_id())
+        };
+        self.emit_message_delta_batches(batches, message_id)
+    }
+
+    /// Flushes every coalesced delta as one bounded `message/updated`.
+    pub fn flush_message_deltas(&self) -> Result<(), ExtensionRuntimeError> {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        let (batches, message_id) = {
+            let mut coalescer = lock_std_mutex(&connection.message_deltas);
+            let batches = coalescer.flush(Instant::now());
+            (batches, coalescer.active_message_id())
+        };
+        self.emit_message_delta_batches(batches, message_id)
+    }
+
+    fn emit_message_delta_batches(
+        &self,
+        batches: Vec<MessageDeltaBatch>,
+        message_id: Option<String>,
+    ) -> Result<(), ExtensionRuntimeError> {
+        for batch in batches {
+            self.queue_lifecycle_notification(
+                EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+                methods::MESSAGE_UPDATED,
+                &batch.into_updated(message_id.clone()),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Opens one observable assistant message boundary.
+    pub fn notify_message_started(&self, message_id: &str) -> Result<(), ExtensionRuntimeError> {
+        let message_id =
+            bounded_notification_text("message id", message_id, MAX_EXTENSION_UI_KEY_BYTES)?;
+        let connection = read_std_lock(&self.inner.connection).clone();
+        lock_std_mutex(&connection.message_deltas).begin_message(&message_id);
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::MESSAGE_STARTED,
+            &ExtensionMessageLifecycle {
+                message_id: Some(message_id),
+            },
+        )
+    }
+
+    /// Closes one observable assistant message, flushing coalesced deltas first.
+    pub fn notify_message_settled(&self, message_id: &str) -> Result<(), ExtensionRuntimeError> {
+        let message_id =
+            bounded_notification_text("message id", message_id, MAX_EXTENSION_UI_KEY_BYTES)?;
+        self.flush_message_deltas()?;
+        let connection = read_std_lock(&self.inner.connection).clone();
+        lock_std_mutex(&connection.message_deltas).end_message();
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::MESSAGE_SETTLED,
+            &ExtensionMessageLifecycle {
+                message_id: Some(message_id),
+            },
+        )
+    }
+
+    /// Begins one host compaction boundary.
+    pub fn notify_compaction_started(&self) -> Result<(), ExtensionRuntimeError> {
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::COMPACTION_STARTED,
+            &ExtensionCompactionReport { reason: None },
+        )
+    }
+
+    /// Reports one successful host compaction.
+    pub fn notify_compaction_settled(&self) -> Result<(), ExtensionRuntimeError> {
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::COMPACTION_SETTLED,
+            &ExtensionCompactionReport { reason: None },
+        )
+    }
+
+    /// Reports one failed host compaction with a bounded reason.
+    pub fn notify_compaction_failed(&self, reason: &str) -> Result<(), ExtensionRuntimeError> {
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::COMPACTION_FAILED,
+            &ExtensionCompactionReport {
+                reason: Some(truncated_notification_text(
+                    reason,
+                    MAX_LIFECYCLE_REASON_BYTES,
+                )),
+            },
+        )
+    }
+
+    /// Reports a host session name or label change for the current host state.
+    pub fn notify_session_info_changed(&self) -> Result<(), ExtensionRuntimeError> {
+        let host = read_std_lock(&self.inner.host_state).clone();
+        let Some(session_id) = host.session_id.clone() else {
+            return Ok(());
+        };
+        let session_id =
+            bounded_notification_text("session id", &session_id, MAX_EXTENSION_UI_KEY_BYTES)?;
+        let name = match host.session_name {
+            Some(name) => Some(bounded_notification_text(
+                "session name",
+                &name,
+                MAX_EXTENSION_SESSION_NAME_BYTES,
+            )?),
+            None => None,
+        };
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::SESSION_INFO_CHANGED,
+            &ExtensionSessionInfoChanged {
+                session_id,
+                name,
+                entry_id: None,
+            },
+        )
+    }
+
+    /// Reports one durable entry label change for the current host session.
+    pub fn notify_entry_label_changed(&self, entry_id: &str) -> Result<(), ExtensionRuntimeError> {
+        let host = read_std_lock(&self.inner.host_state).clone();
+        let Some(session_id) = host.session_id.clone() else {
+            return Ok(());
+        };
+        let session_id =
+            bounded_notification_text("session id", &session_id, MAX_EXTENSION_UI_KEY_BYTES)?;
+        let entry_id = bounded_notification_text(
+            "session entry id",
+            entry_id,
+            MAX_CONFIRMATION_REQUEST_ID_BYTES,
+        )?;
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::SESSION_INFO_CHANGED,
+            &ExtensionSessionInfoChanged {
+                session_id,
+                name: None,
+                entry_id: Some(entry_id),
+            },
+        )
+    }
+
+    /// Opens one host-owned dialog boundary.
+    pub fn notify_dialog_started(&self, dialog: &str) -> Result<(), ExtensionRuntimeError> {
+        let dialog = bounded_notification_text("dialog", dialog, MAX_EXTENSION_UI_KEY_BYTES)?;
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::DIALOG_STARTED,
+            &ExtensionDialogLifecycle { dialog },
+        )
+    }
+
+    /// Closes one host-owned dialog boundary.
+    pub fn notify_dialog_settled(&self, dialog: &str) -> Result<(), ExtensionRuntimeError> {
+        let dialog = bounded_notification_text("dialog", dialog, MAX_EXTENSION_UI_KEY_BYTES)?;
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::DIALOG_SETTLED,
+            &ExtensionDialogLifecycle { dialog },
+        )
+    }
+
+    /// Reports the current host model selection.
+    pub fn notify_model_selected(&self) -> Result<(), ExtensionRuntimeError> {
+        let host = read_std_lock(&self.inner.host_state).clone();
+        let model = match host.model {
+            Some(model) => Some(bounded_notification_text(
+                "model",
+                &model,
+                MAX_EXTENSION_UI_KEY_BYTES,
+            )?),
+            None => None,
+        };
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::MODEL_SELECTED,
+            &ExtensionModelSelected {
+                model,
+                model_view: host.model_view,
+            },
+        )
+    }
+
+    /// Reports the current host reasoning selection.
+    pub fn notify_reasoning_selected(&self) -> Result<(), ExtensionRuntimeError> {
+        let host = read_std_lock(&self.inner.host_state).clone();
+        let reasoning = match host.reasoning {
+            Some(serde_json::Value::String(level)) => Some(truncated_notification_text(
+                &level,
+                MAX_EXTENSION_UI_KEY_BYTES,
+            )),
+            Some(value) => Some(truncated_notification_text(
+                &value.to_string(),
+                MAX_EXTENSION_UI_KEY_BYTES,
+            )),
+            None => None,
+        };
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::REASONING_SELECTED,
+            &ExtensionReasoningSelected { reasoning },
+        )
+    }
+
+    /// Reports one user `!`/`!!` bash execution.
+    pub fn notify_user_bash(&self, command: &str) -> Result<(), ExtensionRuntimeError> {
+        let command =
+            bounded_notification_text("bash command", command, MAX_EXTENSION_BASH_COMMAND_BYTES)?;
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
+            methods::BASH_USER,
+            &ExtensionUserBash { command },
+        )
+    }
+
+    /// Fires one runtime-registered shortcut back to its owning extension.
+    pub fn notify_shortcut_trigger(&self, shortcut_id: &str) -> Result<(), ExtensionRuntimeError> {
+        let id =
+            bounded_notification_text("shortcut id", shortcut_id, MAX_EXTENSION_SHORTCUT_ID_BYTES)?;
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_SHORTCUTS,
+            methods::SHORTCUT_TRIGGER,
+            &ExtensionShortcutTrigger { id },
+        )
+    }
+
+    /// Revokes one granted foreground terminal with a bounded reason.
+    ///
+    /// Best-effort like the Wave-1 lifecycle fan-out: an extension that did not
+    /// negotiate `terminal_handoff` is a silent no-op, and a closed or draining
+    /// generation drops the notification instead of failing a live turn. The
+    /// frontend fires this exactly when a grant it handed out stopped being
+    /// valid: the holder crashed, the session or process generation moved, or a
+    /// coordinated shutdown force-restored the terminal.
+    pub fn notify_terminal_grant_lost(&self, reason: &str) -> Result<(), ExtensionRuntimeError> {
+        self.queue_lifecycle_notification(
+            EXTENSION_FEATURE_TERMINAL_HANDOFF,
+            methods::TERMINAL_GRANT_LOST,
+            &TerminalGrantLost {
+                reason: truncated_notification_text(reason, MAX_LIFECYCLE_REASON_BYTES),
+            },
+        )
+    }
+
     /// Answers a process-originated editor request only when its generation is
     /// still current. This is the editor lease's stale-owner fence.
     pub async fn respond_to_editor(
@@ -5922,6 +7675,30 @@ impl ExtensionProcess {
     /// request. Product event drains use this to avoid duplicate UI/actions.
     pub fn confirmation_answered(&self, request_id: &ExtensionRequestId, generation: u64) -> bool {
         lock_std_mutex(&self.inner.answered_confirmations).contains(generation, request_id)
+    }
+
+    /// Checks an adapter's target against the exact host-issued, owner-scoped
+    /// tool call. Commands, settled requests, and other generations cannot lend
+    /// their authority to a tool policy request. The digest never retains raw
+    /// tool arguments beyond the existing request frame.
+    pub fn policy_matches_tool_call(
+        &self,
+        generation: u64,
+        parent_request_id: u64,
+        tool: &str,
+        arguments: &serde_json::Value,
+    ) -> bool {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if generation != connection.generation {
+            return false;
+        }
+        let expected = tool_call_policy_digest(tool, arguments);
+        let pending = lock_std_mutex(&connection.pending);
+        pending.get(&parent_request_id).is_some_and(|parent| {
+            parent.resource_owner.is_some()
+                && parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
+                && parent.tool_call_policy_digest == Some(expected)
+        })
     }
 
     /// Answers an extension-originated API `0.2` policy evaluation request.
@@ -6073,7 +7850,7 @@ impl ExtensionProcess {
                 connection.generation
             )));
         }
-        if read_std_lock(&connection.protocol).version != EXTENSION_API_VERSION_0_2 {
+        if !is_stateful_api(&read_std_lock(&connection.protocol).version) {
             return Err(ExtensionRuntimeError::Protocol(
                 "input/request requires API 0.2".into(),
             ));
@@ -6283,7 +8060,7 @@ impl ExtensionProcess {
     /// any remainder without replaying them.
     pub async fn drain(&self, deadline: Duration) -> bool {
         let connection = read_std_lock(&self.inner.connection).clone();
-        connection.drain(deadline).await
+        connection.drain(deadline, "reload drain deadline").await
     }
 
     /// Restarts the process and atomically swaps it in after a successful
@@ -6579,6 +8356,15 @@ impl ExtensionProcess {
                 );
             }
 
+            // Cutover is committed. Withdraw the old topic owner before the
+            // replacement reader can bind and run its start hooks; speculative
+            // initialization and failed reloads leave the old owner intact.
+            if let Some(bus) = &previous.event_bus {
+                bus.remove(
+                    &previous.provider_owner.extension_instance_id,
+                    previous.generation,
+                );
+            }
             *active = Arc::clone(&replacement);
             replacement.activate_post_initialize();
             self.inner.generation.store(generation, Ordering::Release);
@@ -6680,7 +8466,9 @@ impl ExtensionProcess {
             "shutdown",
         )
         .await;
-        let _ = connection.drain(self.inner.config.shutdown_timeout).await;
+        let _ = connection
+            .drain(self.inner.config.shutdown_timeout, "shutdown")
+            .await;
         let graceful = connection.shutdown().await;
         self.inner
             .approval_store
@@ -6757,7 +8545,7 @@ impl ExtensionProcess {
 #[async_trait::async_trait]
 impl ProviderRetryHook for ExtensionProcess {
     async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice {
-        if self.api_version() != EXTENSION_API_VERSION_0_2
+        if !is_stateful_api(self.api_version())
             || !self
                 .inner
                 .contributions
@@ -6815,7 +8603,7 @@ impl PersistenceMetadataHook for ExtensionProcess {
         &self,
         context: &AssistantPersistenceContext,
     ) -> Option<PersistenceMetadataProposal> {
-        if self.api_version() != EXTENSION_API_VERSION_0_2
+        if !is_stateful_api(self.api_version())
             || !self
                 .inner
                 .contributions
@@ -6858,10 +8646,72 @@ impl PersistenceMetadataHook for ExtensionProcess {
     }
 }
 
+#[async_trait::async_trait]
+impl CompactionStrategy for ExtensionProcess {
+    async fn render(
+        &self,
+        model_id: &str,
+        text: &str,
+        owner: &str,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if self.api_version() != EXTENSION_API_VERSION_0_4
+            || !self.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY)
+        {
+            return Err("compaction_strategy was not negotiated".into());
+        }
+        let generation = read_std_lock(&self.inner.connection).generation;
+        let mut context = self.execution_context();
+        context.resource_owner = Some(ExtensionResourceOwner {
+            session_id: owner.to_owned(),
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: generation,
+        });
+        let output = self
+            .run_hook(
+                ExtensionHook::CompactionStrategy,
+                serde_json::json!({ "model_id": model_id, "text": text }),
+                context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if read_std_lock(&self.inner.connection).generation != generation {
+            return Err("compaction strategy changed generation during render".into());
+        }
+        let encoded = output
+            .compaction_frames
+            .ok_or("compaction strategy returned no frames")?;
+        if encoded.is_empty() || encoded.len() > 32 {
+            return Err("compaction strategy returned an invalid frame count".into());
+        }
+        let mut frames = Vec::with_capacity(encoded.len());
+        for item in encoded {
+            if item.len() > 512 * 1024 {
+                return Err("compaction frame exceeds 512 KiB".into());
+            }
+            frames.push(
+                base64::engine::general_purpose::STANDARD
+                    .decode(item)
+                    .map_err(|_| "compaction frame is not base64")?,
+            );
+        }
+        Ok(frames)
+    }
+}
+
 impl Extension for ExtensionProcess {
     fn register(&self, host: &mut ExtensionHost) {
         self.register_dynamic_tool_catalog(host);
         host.observe(self.clone());
+        if self.api_version() == EXTENSION_API_VERSION_0_4
+            && self.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY)
+            && self
+                .inner
+                .contributions
+                .hooks
+                .contains(&ExtensionHook::CompactionStrategy)
+        {
+            host.compaction_strategy(self.clone());
+        }
         if self.inner.contributions.hooks.iter().any(|hook| {
             matches!(
                 hook,
@@ -6870,7 +8720,7 @@ impl Extension for ExtensionProcess {
         }) {
             host.tool_call_hook(self.clone());
         }
-        if self.api_version() == EXTENSION_API_VERSION_0_2
+        if uses_api_0_2_capabilities(self.api_version())
             && self
                 .inner
                 .contributions
@@ -6879,7 +8729,7 @@ impl Extension for ExtensionProcess {
         {
             host.provider_retry_hook(self.clone());
         }
-        if self.api_version() == EXTENSION_API_VERSION_0_2
+        if uses_api_0_2_capabilities(self.api_version())
             && self
                 .inner
                 .contributions
@@ -7127,7 +8977,7 @@ impl ExtensionProcess {
     ) -> ExtensionExecutionContext {
         let mut execution = self.execution_context();
         execution.execution_scope = Some(context.execution_scope.to_owned());
-        if self.api_version() == EXTENSION_API_VERSION_0_2 {
+        if uses_api_0_2_capabilities(self.api_version()) {
             execution.resource_owner = Some(ExtensionResourceOwner {
                 session_id: context.resource_owner.to_owned(),
                 extension_instance_id: self.inner.instance_id.clone(),
@@ -7540,6 +9390,8 @@ struct ProcessTool {
 impl Tool for ProcessTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: self.definition.name.clone(),
             description: self.definition.description.clone(),
             parameters: self.definition.parameters.clone(),
@@ -7668,6 +9520,14 @@ impl Tool for ProcessTool {
                             "extension event stream dropped {count} event(s)"
                         ));
                     }
+                    Ok(ExtensionEvent::ComposerRequested { .. })
+                    | Ok(ExtensionEvent::SessionEntryRequested { .. })
+                    | Ok(ExtensionEvent::MessageInjectionRequested { .. })
+                    | Ok(ExtensionEvent::ShortcutRequested { .. })
+                    | Ok(ExtensionEvent::ActiveToolsRequested { .. })
+                    | Ok(ExtensionEvent::TerminalRequested { .. })
+                    | Ok(ExtensionEvent::ContextSnapshotRequested { .. })
+                    | Ok(ExtensionEvent::ModelViewRequested { .. }) => {}
                     Err(broadcast::error::RecvError::Closed) => events_open = false,
                 }
             }
@@ -7803,7 +9663,9 @@ struct ProcessConnection {
     provider_stream_idle_timeout: Duration,
     provider_stream_deadline: Duration,
     provider_owner_removed: AtomicBool,
+    event_bus: Option<Arc<ExtensionEventBus>>,
     process_group: ProcessGroupGuard,
+    message_deltas: StdMutex<MessageDeltaCoalescer>,
 }
 
 fn connection_is_usable(connection: &ProcessConnection) -> bool {
@@ -7843,6 +9705,12 @@ struct PendingRequest {
     child_interaction_progress: Option<ToolProgressSink>,
     resource_owner: Option<ExtensionResourceOwner>,
     last_progress_sequence: Option<u64>,
+    tool_call_policy_digest: Option<[u8; 32]>,
+}
+
+fn tool_call_policy_digest(tool: &str, arguments: &serde_json::Value) -> [u8; 32] {
+    // JSON Values serialize deterministically (object keys are ordered).
+    Sha256::digest(serde_json::to_vec(&(tool, arguments)).expect("JSON values serialize")).into()
 }
 
 type PendingRequests = Arc<StdMutex<HashMap<u64, PendingRequest>>>;
@@ -7987,6 +9855,7 @@ struct WriterFrame {
     line: Vec<u8>,
     state: Arc<AtomicU8>,
     completion: Option<oneshot::Sender<Result<(), PendingError>>>,
+    bus_delivery: Option<event_bus::Delivery>,
 }
 
 struct ZeroizingBytes(Vec<u8>);
@@ -8002,6 +9871,142 @@ struct ChildSuccessResponse<'a, T: ?Sized> {
     jsonrpc: &'static str,
     id: &'a ExtensionRequestId,
     result: &'a T,
+}
+
+/// One prepared process-originated response envelope.
+enum ChildEnvelope<'a, T: ?Sized> {
+    Success(&'a T),
+    Error { code: i64, message: String },
+}
+
+#[derive(Serialize)]
+struct ChildErrorResponse<'a> {
+    jsonrpc: &'static str,
+    id: &'a ExtensionRequestId,
+    error: ChildErrorObject,
+}
+
+#[derive(Serialize)]
+struct ChildErrorObject {
+    code: i64,
+    message: String,
+}
+
+/// One bounded coalesced `message/updated` batch.
+struct MessageDeltaBatch {
+    delta: String,
+    deltas: u64,
+}
+
+impl Clone for MessageDeltaBatch {
+    fn clone(&self) -> Self {
+        Self {
+            delta: self.delta.clone(),
+            deltas: self.deltas,
+        }
+    }
+}
+
+impl MessageDeltaBatch {
+    fn into_updated(self, message_id: Option<String>) -> ExtensionMessageUpdated {
+        ExtensionMessageUpdated {
+            message_id,
+            delta: self.delta,
+            deltas: self.deltas,
+        }
+    }
+}
+
+/// Coalesces per-token assistant deltas into at most one `message/updated`
+/// notification per batch. Every batch is bounded by
+/// [`MAX_EXTENSION_MESSAGE_UPDATED_TEXT_BYTES`]; the coalescer never opens a
+/// per-delta round trip.
+#[derive(Default)]
+struct MessageDeltaCoalescer {
+    message_id: Option<String>,
+    pending: String,
+    deltas: u64,
+    first_pending_at: Option<Instant>,
+    batches_emitted: u64,
+}
+
+impl MessageDeltaCoalescer {
+    fn begin_message(&mut self, message_id: &str) {
+        self.pending.clear();
+        self.deltas = 0;
+        self.first_pending_at = None;
+        self.message_id = Some(message_id.to_owned());
+    }
+
+    fn end_message(&mut self) {
+        self.message_id = None;
+    }
+
+    /// Appends one delta and returns every batch that must be emitted now.
+    fn push(&mut self, delta: &str, now: Instant) -> Vec<MessageDeltaBatch> {
+        let mut batches = Vec::new();
+        if !delta.is_empty()
+            && !self.pending.is_empty()
+            && self.pending.len() + delta.len() > MAX_EXTENSION_MESSAGE_UPDATED_TEXT_BYTES
+        {
+            if let Some(batch) = self.take(now) {
+                batches.push(batch);
+            }
+        }
+        if !delta.is_empty() {
+            if self.first_pending_at.is_none() {
+                self.first_pending_at = Some(now);
+            }
+            self.pending.push_str(delta);
+            self.deltas += 1;
+        }
+        if self.should_flush(now) {
+            if let Some(batch) = self.take(now) {
+                batches.push(batch);
+            }
+        }
+        batches
+    }
+
+    fn flush(&mut self, now: Instant) -> Vec<MessageDeltaBatch> {
+        match self.take(now) {
+            Some(batch) => vec![batch],
+            None => Vec::new(),
+        }
+    }
+
+    fn should_flush(&self, now: Instant) -> bool {
+        if self.pending.is_empty() {
+            return false;
+        }
+        if self.pending.len() >= MESSAGE_DELTA_FLUSH_BYTES
+            || self.deltas >= MESSAGE_DELTA_FLUSH_DELTAS
+        {
+            return true;
+        }
+        self.first_pending_at
+            .is_some_and(|first| now.duration_since(first) >= MESSAGE_DELTA_FLUSH_INTERVAL)
+    }
+
+    fn take(&mut self, _now: Instant) -> Option<MessageDeltaBatch> {
+        if self.pending.is_empty() {
+            self.deltas = 0;
+            self.first_pending_at = None;
+            return None;
+        }
+        let batch = MessageDeltaBatch {
+            delta: std::mem::take(&mut self.pending),
+            deltas: self.deltas,
+        };
+        self.deltas = 0;
+        self.first_pending_at = None;
+        self.batches_emitted += 1;
+        Some(batch)
+    }
+
+    fn active_message_id(&self) -> Option<String> {
+        self.message_id.clone()
+    }
 }
 
 impl Drop for WriterFrame {
@@ -8109,6 +10114,13 @@ async fn run_protocol_writer(
 ) {
     while let Some(mut frame) = frames.recv().await {
         if frame
+            .bus_delivery
+            .as_ref()
+            .is_some_and(|delivery| !delivery.is_current() && !delivery.control_expired())
+        {
+            continue;
+        }
+        if frame
             .state
             .compare_exchange(
                 FRAME_QUEUED,
@@ -8149,14 +10161,17 @@ async fn run_protocol_writer(
             return;
         }
 
-        let result = async {
+        let write = async {
             stdin
                 .write_all(&frame.line)
                 .await
                 .map_err(|error| error.to_string())?;
             stdin.flush().await.map_err(|error| error.to_string())
-        }
-        .await;
+        };
+        let result = match &frame.bus_delivery {
+            Some(delivery) => delivery.guard_write(write).await,
+            None => write.await,
+        };
         match result {
             Ok(()) => {
                 frame.state.store(FRAME_WRITTEN, Ordering::Release);
@@ -8246,6 +10261,9 @@ impl ProcessConnection {
 
     fn remove_provider_owner(&self) {
         if !self.provider_owner_removed.swap(true, Ordering::AcqRel) {
+            if let Some(bus) = &self.event_bus {
+                bus.remove(&self.provider_owner.extension_instance_id, self.generation);
+            }
             if let Some(registry) = &self.provider_registry {
                 registry.remove_owner(&self.provider_owner);
             }
@@ -8506,6 +10524,14 @@ impl ProcessConnection {
                     child_interaction_progress,
                     resource_owner,
                     last_progress_sequence: None,
+                    tool_call_policy_digest: (method == methods::TOOL_CALL)
+                        .then(|| {
+                            Some(tool_call_policy_digest(
+                                message["params"]["name"].as_str()?,
+                                message["params"].get("arguments")?,
+                            ))
+                        })
+                        .flatten(),
                 },
             );
             if let Some(request_started) = request_started {
@@ -8522,6 +10548,7 @@ impl ProcessConnection {
                     line,
                     state: frame_state,
                     completion: None,
+                    bus_delivery: None,
                 })
                 .await
                 .map_err(|_| ExtensionRuntimeError::Closed("extension writer closed".into()))?;
@@ -8531,7 +10558,10 @@ impl ProcessConnection {
                 Err(_) => Err(PendingError::Closed("response channel closed".into())),
             };
             registration.disarm();
-            reply.map_err(pending_error)
+            // Pending cancellation carries a reason, while this future retains
+            // the admitted JSON-RPC method. Keep that provenance on shutdown or
+            // reload just as on the direct cancellation and timeout paths.
+            reply.map_err(|error| pending_error(error, method))
         };
         tokio::pin!(operation);
         let timed = tokio::time::timeout(timeout, &mut operation);
@@ -8582,7 +10612,7 @@ impl ProcessConnection {
     }
 
     fn require_api_v03_host_method(&self, method: &str) -> Result<(), ExtensionRuntimeError> {
-        if read_std_lock(&self.protocol).version != EXTENSION_API_VERSION_0_3 {
+        if !is_canonical_api(&read_std_lock(&self.protocol).version) {
             return Ok(());
         }
         let contract = read_std_lock(&self.api_v03_contract)
@@ -8600,7 +10630,7 @@ impl ProcessConnection {
         &self,
         message: &serde_json::Value,
     ) -> Result<Vec<u8>, ExtensionRuntimeError> {
-        let is_api_v03 = read_std_lock(&self.protocol).version == EXTENSION_API_VERSION_0_3;
+        let is_api_v03 = is_canonical_api(&read_std_lock(&self.protocol).version);
         let mut line = if is_api_v03 {
             api_v03::parse_json_rpc_envelope(message.clone()).map_err(api_v03_protocol_error)?;
             api_v03::canonical_frame(message, self.max_frame_bytes())
@@ -8621,7 +10651,7 @@ impl ProcessConnection {
     }
 
     fn queue_notification(&self, method: &str, params: serde_json::Value) -> bool {
-        if read_std_lock(&self.protocol).version == EXTENSION_API_VERSION_0_3
+        if is_canonical_api(&read_std_lock(&self.protocol).version)
             && method == methods::CANCEL_REQUEST
             && api_v03::parse_cancel_request_params(params.clone()).is_err()
         {
@@ -8641,6 +10671,7 @@ impl ProcessConnection {
                 line,
                 state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                 completion: None,
+                bus_delivery: None,
             })
             .is_ok();
         if !queued {
@@ -8764,14 +10795,42 @@ impl ProcessConnection {
         id: ExtensionRequestId,
         result: &T,
     ) -> Result<ChildResponseAdmission, ExtensionRuntimeError> {
-        let response = ChildSuccessResponse {
-            jsonrpc: "2.0",
-            id: &id,
-            result,
+        self.send_child_envelope_admitted(id, ChildEnvelope::Success(result))
+            .await
+    }
+
+    /// Answers one process-originated request with a typed contract failure.
+    async fn send_child_error_response(
+        &self,
+        id: ExtensionRequestId,
+        code: i64,
+        message: String,
+    ) -> Result<(), ExtensionRuntimeError> {
+        self.send_child_envelope_admitted::<()>(id, ChildEnvelope::Error { code, message })
+            .await
+            .map(|_| ())
+    }
+
+    async fn send_child_envelope_admitted<T: Serialize + ?Sized>(
+        &self,
+        id: ExtensionRequestId,
+        envelope: ChildEnvelope<'_, T>,
+    ) -> Result<ChildResponseAdmission, ExtensionRuntimeError> {
+        let response = match envelope {
+            ChildEnvelope::Success(result) => serde_json::to_value(ChildSuccessResponse {
+                jsonrpc: "2.0",
+                id: &id,
+                result,
+            })
+            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?,
+            ChildEnvelope::Error { code, message } => serde_json::to_value(ChildErrorResponse {
+                jsonrpc: "2.0",
+                id: &id,
+                error: ChildErrorObject { code, message },
+            })
+            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?,
         };
-        let mut line = if read_std_lock(&self.protocol).version == EXTENSION_API_VERSION_0_3 {
-            let response = serde_json::to_value(response)
-                .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        let mut line = if is_canonical_api(&read_std_lock(&self.protocol).version) {
             api_v03::parse_json_rpc_envelope(response.clone()).map_err(api_v03_protocol_error)?;
             api_v03::canonical_json(&response)
                 .map_err(api_v03_protocol_error)?
@@ -8816,6 +10875,7 @@ impl ProcessConnection {
                         line: line.0.clone(),
                         state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                         completion: Some(completed),
+                        bus_delivery: None,
                     });
                     tokio::pin!(admission);
                     tokio::select! {
@@ -8852,7 +10912,7 @@ impl ProcessConnection {
                         .map_err(|_| {
                             ExtensionRuntimeError::Closed("extension writer closed".into())
                         })?
-                        .map_err(pending_error)?;
+                        .map_err(|error| pending_error(error, "request"))?;
                     return Ok(ChildResponseAdmission::Queued);
                 }
                 Err(CHILD_RESPONDING) => {
@@ -8910,10 +10970,10 @@ impl ProcessConnection {
         })
     }
 
-    async fn drain(self: &Arc<Self>, deadline: Duration) -> bool {
+    async fn drain(self: &Arc<Self>, deadline: Duration, cancellation_reason: &str) -> bool {
         let settled = self.quiesce(deadline).await;
         if !settled {
-            self.cancel_all_pending("reload drain deadline");
+            self.cancel_all_pending(cancellation_reason);
         } else {
             self.settle_artifacts();
         }
@@ -8961,7 +11021,7 @@ impl ProcessConnection {
         let acknowledged = if self.closed.load(Ordering::Acquire) {
             false
         } else {
-            let is_api_v03 = read_std_lock(&self.protocol).version == EXTENSION_API_VERSION_0_3;
+            let is_api_v03 = is_canonical_api(&read_std_lock(&self.protocol).version);
             let params = if is_api_v03 {
                 let params = api_v03::ShutdownParams {};
                 if api_v03::validate_shutdown_params(&params).is_err() {
@@ -9250,6 +11310,7 @@ fn decode_provider_stream_event(
             }
             Ok(DecodedProviderStreamEvent::emit(
                 StreamEvent::ToolCallStart {
+                    async_execution: false,
                     index: payload.index,
                     id: ToolCallId(payload.id),
                     name: payload.name,
@@ -9317,7 +11378,10 @@ fn provider_protocol_name(protocol: Protocol) -> Option<&'static str> {
         // The API 0.3 extension-provider schema intentionally declares only
         // these three generic wire protocols. Do not coerce native host codecs
         // into a misleading generic route.
-        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi => None,
+        Protocol::BedrockConverse
+        | Protocol::GoogleGenerativeAi
+        | Protocol::MistralConversations
+        | Protocol::PiMessages => None,
     }
 }
 
@@ -9636,6 +11700,13 @@ async fn spawn_connection(
         .env("OCTET_EXTENSION_SCRATCH", &scratch_directory);
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    let process_launch = WindowsProcessLaunch::extension(&mut command).map_err(|error| {
+        ExtensionRuntimeError::Spawn {
+            extension: descriptor.manifest.name.clone(),
+            message: format!("failed to prepare Windows process supervision: {error}"),
+        }
+    })?;
 
     // Linux can transiently reject exec with ETXTBSY ("Text file busy") when a
     // freshly written entrypoint is launched while another host thread still
@@ -9668,8 +11739,22 @@ async fn spawn_connection(
             }
         }
     };
+    #[cfg(unix)]
     let process_group_id = extension_process_group_id(&child);
+    #[cfg(unix)]
     let process_group = ProcessGroupGuard::extension(process_group_id);
+    #[cfg(windows)]
+    let process_group = match process_launch.register(&child) {
+        Ok(process_group) => process_group,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(ExtensionRuntimeError::Spawn {
+                extension: descriptor.manifest.name.clone(),
+                message: format!("failed to register Windows process supervision: {error}"),
+            });
+        }
+    };
     let termination = process_group.termination_handle();
     let stdin = child
         .stdin
@@ -9753,7 +11838,7 @@ async fn spawn_connection(
         Arc::clone(&health),
         events.clone(),
         Arc::clone(&child),
-        termination,
+        termination.clone(),
         Arc::clone(&frame_limit),
     ));
     let (presentation_updates, presentation_update_rx) = watch::channel(None);
@@ -9788,6 +11873,7 @@ async fn spawn_connection(
         catalog_updates,
         delegation_service,
         session_lifecycle.clone(),
+        config.event_bus.clone(),
         approval_store,
         config.secret_broker.clone(),
         ExtensionIdentity {
@@ -9857,6 +11943,8 @@ async fn spawn_connection(
         provider_stream_idle_timeout: config.provider_stream_idle_timeout,
         provider_stream_deadline: config.provider_stream_deadline,
         provider_owner_removed: AtomicBool::new(false),
+        event_bus: config.event_bus.clone(),
+        message_deltas: StdMutex::new(MessageDeltaCoalescer::default()),
         process_group,
     });
     artifact_guard.disarm();
@@ -9880,14 +11968,31 @@ async fn spawn_connection(
         .iter()
         .map(|feature| (*feature).to_owned())
         .collect::<Vec<_>>();
+    if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+        && descriptor
+            .manifest
+            .contributes
+            .hooks
+            .contains(&ExtensionHook::CompactionStrategy)
+    {
+        optional_features.push(EXTENSION_FEATURE_COMPACTION_STRATEGY.to_owned());
+    }
     if offered_host_services.agent_sessions {
         optional_features.push(EXTENSION_FEATURE_AGENT_SESSIONS.to_owned());
+        optional_features.push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.to_owned());
     }
     if offered_host_services.approvals {
         optional_features.push(EXTENSION_FEATURE_APPROVALS.to_owned());
     }
     if offered_host_services.secrets {
         optional_features.push(EXTENSION_FEATURE_SECRETS.to_owned());
+    }
+    // A disclosure surface is offered only to an extension that declares the
+    // capability for it: the same posture as `secrets`, but for host-owned
+    // prompt text. An undeclared extension never sees the feature, and echoing
+    // it in the initialize response fails negotiation below.
+    if descriptor.manifest.capabilities.system_prompt {
+        optional_features.push(EXTENSION_FEATURE_SYSTEM_PROMPT_READ.to_owned());
     }
 
     let api_v03_offer = (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_3)
@@ -9896,6 +12001,7 @@ async fn spawn_connection(
                 api_v03_max_frame_bytes,
                 config.max_pending_requests,
                 offered_host_services.session_lifecycle,
+                config.event_bus.is_some(),
             )
         })
         .transpose()
@@ -9933,6 +12039,10 @@ async fn spawn_connection(
         serde_json::to_value(initialize)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?
     } else {
+        let flag_values = projected_initialize_flag_values(
+            &descriptor.manifest.api_version,
+            &config.flag_values,
+        )?;
         let mut initialize_value = serde_json::to_value(InitializeRequest {
             api_version: descriptor.manifest.api_version.clone(),
             octet_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -9941,9 +12051,10 @@ async fn spawn_connection(
             capabilities: descriptor.manifest.capabilities.clone(),
             contributes: descriptor.manifest.contributes.clone(),
             host: host_state,
-            protocol: (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_2).then(|| {
+            flag_values,
+            protocol: (uses_api_0_2_capabilities(&descriptor.manifest.api_version)).then(|| {
                 ExtensionProtocolRequest {
-                    version: EXTENSION_API_VERSION_0_2.to_owned(),
+                    version: descriptor.manifest.api_version.clone(),
                     required_features,
                     optional_features,
                     limits: ExtensionProtocolLimits {
@@ -9961,6 +12072,14 @@ async fn spawn_connection(
                 .and_then(serde_json::Value::as_object_mut)
                 .expect("InitializeRequest contributions serialize as an object")
                 .remove("shortcuts");
+            // API 0.1's frozen initialize payload also predates projected flag
+            // values. `skip_serializing_if` already drops the absent field; the
+            // explicit removal keeps the guarantee even if that attribute goes
+            // away, matching the shortcut removal above.
+            initialize_value
+                .as_object_mut()
+                .expect("InitializeRequest serializes as an object")
+                .remove("flag_values");
         }
         initialize_value
     };
@@ -10138,8 +12257,19 @@ fn api_v03_host_offer_for_services(
     max_frame_bytes: usize,
     max_pending_requests: usize,
     session_lifecycle: bool,
+    event_bus: bool,
 ) -> Result<api_v03::ContractOffer, api_v03::ContractError> {
     let mut offer = api_v03::host_offer(max_frame_bytes, max_pending_requests)?;
+    // Generated optional services are not automatically product services.
+    // Theme selection has no host-owned catalog/namespace binding or handler;
+    // offering it would route a negotiated call into the legacy fallback.
+    offer
+        .optional_capabilities
+        .retain(|capability| capability != "theme_selection");
+    offer.optional_methods.retain(|method| {
+        api_v03::method_spec(method)
+            .is_none_or(|specification| specification.capability != "theme_selection")
+    });
     if !session_lifecycle {
         offer
             .optional_capabilities
@@ -10147,6 +12277,14 @@ fn api_v03_host_offer_for_services(
         offer.optional_methods.retain(|method| {
             api_v03::method_spec(method)
                 .is_none_or(|specification| specification.capability != "session_lifecycle")
+        });
+    }
+    if !event_bus {
+        offer
+            .optional_capabilities
+            .retain(|capability| capability != "event_bus");
+        offer.optional_methods.retain(|method| {
+            api_v03::method_spec(method).is_none_or(|spec| spec.capability != "event_bus")
         });
     }
     api_v03::validate_offer(&offer)?;
@@ -10409,16 +12547,17 @@ fn negotiate_contributions_with_host_services(
             }
             ExtensionNegotiatedProtocol::api_0_1(host_max_concurrent_requests)
         }
-        EXTENSION_API_VERSION_0_2 => {
+        EXTENSION_API_VERSION_0_2 | EXTENSION_API_VERSION_0_4 => {
             let negotiated = response.protocol.clone().ok_or_else(|| {
-                ExtensionRuntimeError::Protocol(
-                    "API 0.2 initialize response requires protocol negotiation".into(),
-                )
+                ExtensionRuntimeError::Protocol(format!(
+                    "API {} initialize response requires protocol negotiation",
+                    manifest.api_version
+                ))
             })?;
-            if negotiated.version != EXTENSION_API_VERSION_0_2 {
+            if negotiated.version != manifest.api_version {
                 return Err(ExtensionRuntimeError::UnsupportedApiVersion {
                     extension: negotiated.version,
-                    host: EXTENSION_API_VERSION_0_2.to_owned(),
+                    host: manifest.api_version.clone(),
                 });
             }
             if negotiated.limits.max_concurrent_requests == 0 {
@@ -10442,8 +12581,17 @@ fn negotiate_contributions_with_host_services(
                 .chain(API_0_2_OPTIONAL_FEATURES)
                 .copied()
                 .collect::<BTreeSet<_>>();
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && manifest
+                    .contributes
+                    .hooks
+                    .contains(&ExtensionHook::CompactionStrategy)
+            {
+                allowed.insert(EXTENSION_FEATURE_COMPACTION_STRATEGY);
+            }
             if offered_host_services.agent_sessions {
                 allowed.insert(EXTENSION_FEATURE_AGENT_SESSIONS);
+                allowed.insert(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1);
                 if manifest.name == "octet-subagents" {
                     allowed.insert(EXTENSION_FEATURE_DELEGATION_TELEMETRY);
                 }
@@ -10453,6 +12601,9 @@ fn negotiate_contributions_with_host_services(
             }
             if offered_host_services.secrets {
                 allowed.insert(EXTENSION_FEATURE_SECRETS);
+            }
+            if manifest.capabilities.system_prompt {
+                allowed.insert(EXTENSION_FEATURE_SYSTEM_PROMPT_READ);
             }
             if let Some(feature) = features
                 .iter()
@@ -10470,6 +12621,17 @@ fn negotiate_contributions_with_host_services(
                     "extension is missing required feature `{feature}`"
                 )));
             }
+            if manifest
+                .contributes
+                .hooks
+                .contains(&ExtensionHook::CompactionStrategy)
+                && !features.contains(EXTENSION_FEATURE_COMPACTION_STRATEGY)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "compaction_strategy hook requires negotiated compaction_strategy feature"
+                        .into(),
+                ));
+            }
             if offered_host_services.agent_sessions
                 && manifest.name == "octet-subagents"
                 && !features.contains(EXTENSION_FEATURE_DELEGATION_TELEMETRY)
@@ -10477,6 +12639,13 @@ fn negotiate_contributions_with_host_services(
                 return Err(ExtensionRuntimeError::Protocol(format!(
                     "first-party octet-subagents requires `{EXTENSION_FEATURE_DELEGATION_TELEMETRY}`; reinstall the current workspace bundle"
                 )));
+            }
+            if features.contains(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
+                && !features.contains(EXTENSION_FEATURE_AGENT_SESSIONS)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "agent_model_selection_v1 negotiation requires agent_sessions".into(),
+                ));
             }
             if features.contains(EXTENSION_FEATURE_APPROVALS)
                 && !features.contains(EXTENSION_FEATURE_POLICY_INTENTS)
@@ -10525,7 +12694,7 @@ fn negotiate_contributions_with_host_services(
                 BTreeSet::new()
             };
             ExtensionNegotiatedProtocol {
-                version: EXTENSION_API_VERSION_0_2.to_owned(),
+                version: manifest.api_version.clone(),
                 features,
                 max_concurrent_requests: negotiated
                     .limits
@@ -10534,7 +12703,7 @@ fn negotiate_contributions_with_host_services(
                 lifecycle_events,
             }
         }
-        _ => unreachable!("manifest validation accepts only API 0.1 or 0.2"),
+        _ => unreachable!("manifest validation accepts only API 0.1, 0.2, or 0.4"),
     };
 
     let tool_names = response
@@ -10631,6 +12800,48 @@ fn negotiate_contributions_with_host_services(
     ))
 }
 
+/// Whether `version` speaks the stateful legacy protocol generation
+/// (cancellation, progress, lifecycle events, agent sessions, UI, presentation,
+/// resource-owner fences). API `0.4` folds API `0.2` and `0.3` into one version,
+/// so every version above `0.1` is stateful: only the frozen API `0.1` text
+/// contract is restricted.
+fn is_stateful_api(version: &str) -> bool {
+    version != EXTENSION_API_VERSION_0_1
+}
+
+/// Whether `version` may use the API `0.2`-generation capabilities directly.
+/// API `0.4` rides the API `0.2` feature-negotiation wire as the union of every
+/// earlier capability, so both API `0.2` and API `0.4` take that generation's
+/// paths; API `0.3` keeps its canonical wire.
+fn uses_api_0_2_capabilities(version: &str) -> bool {
+    version == EXTENSION_API_VERSION_0_2 || version == EXTENSION_API_VERSION_0_4
+}
+
+/// Whether `version` speaks the canonical (schema-generated) API `0.3` wire.
+fn is_canonical_api(version: &str) -> bool {
+    version == EXTENSION_API_VERSION_0_3
+}
+
+// Counts the complete prospective catalog's input AND output schema bytes.
+// Individual register frames are bounded independently; many small mutations
+// must not accumulate an arbitrarily large live catalog.
+const MAX_TOOL_CATALOG_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
+
+struct SchemaByteBudget(usize);
+
+impl Write for SchemaByteBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.checked_sub(bytes.len()).ok_or_else(|| {
+            std::io::Error::other("tool catalog aggregate schema byte limit exceeded")
+        })?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn validate_tool_definitions(
     tools: &[ToolDefinition],
     api_version: &str,
@@ -10640,6 +12851,16 @@ fn validate_tool_definitions(
             "tool catalog contains {} tools; limit is {MAX_DYNAMIC_EXTENSION_TOOLS}",
             tools.len()
         )));
+    }
+    let mut schema_budget = SchemaByteBudget(MAX_TOOL_CATALOG_SCHEMA_BYTES);
+    for tool in tools {
+        for schema in std::iter::once(&tool.parameters).chain(tool.output_schema.iter()) {
+            serde_json::to_writer(&mut schema_budget, schema).map_err(|_| {
+                ExtensionRuntimeError::Protocol(format!(
+                    "tool catalog aggregate schema bytes exceed {MAX_TOOL_CATALOG_SCHEMA_BYTES}"
+                ))
+            })?;
+        }
     }
     let mut names = BTreeSet::new();
     for tool in tools {
@@ -10665,7 +12886,7 @@ fn validate_tool_definitions(
         if let Some(schema) = &tool.output_schema {
             if !matches!(
                 api_version,
-                EXTENSION_API_VERSION_0_2 | EXTENSION_API_VERSION_0_3
+                EXTENSION_API_VERSION_0_2 | EXTENSION_API_VERSION_0_3 | EXTENSION_API_VERSION_0_4
             ) {
                 return Err(ExtensionRuntimeError::Protocol(format!(
                     "API 0.1 tool `{}` cannot declare output_schema",
@@ -11541,6 +13762,7 @@ struct ProtocolReadState {
     catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
     delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
     session_lifecycle: Option<ExtensionSessionLifecycleService>,
+    event_bus: Option<Arc<ExtensionEventBus>>,
     approval_store: Arc<ExtensionApprovalStore>,
     secret_broker: Option<Arc<dyn ExtensionSecretBroker>>,
     extension_identity: ExtensionIdentity,
@@ -11558,13 +13780,17 @@ impl ProtocolReadState {
 }
 
 enum AgentSessionOperation {
+    Models {
+        query: Option<String>,
+        limit: usize,
+    },
     Spawn {
         task_name: String,
         profile: Option<String>,
         fingerprint: Option<String>,
         message: String,
         idempotency_key: String,
-        policy: ExtensionAgentSessionPolicy,
+        policy: Box<ExtensionAgentSessionPolicy>,
     },
     Message {
         target: String,
@@ -11605,7 +13831,7 @@ async fn execute_agent_session_operation(
                 fingerprint,
                 message,
                 idempotency_key,
-                policy,
+                policy: *policy,
             },
         ),
         AgentSessionOperation::Message { target, message } => {
@@ -11615,6 +13841,9 @@ async fn execute_agent_session_operation(
         }
         AgentSessionOperation::FollowUp { target, message } => {
             service.follow_up(&resource_owner, &target, message).await
+        }
+        AgentSessionOperation::Models { query, limit } => {
+            service.models(&resource_owner, query.as_deref(), limit)
         }
         AgentSessionOperation::List => service.list(&resource_owner),
         AgentSessionOperation::Wait { timeout } => {
@@ -11825,6 +14054,7 @@ async fn queue_api_v03_child_response(
                     line: line.0.clone(),
                     state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                     completion: Some(completed),
+                    bus_delivery: None,
                 });
                 tokio::pin!(admission);
                 tokio::select! {
@@ -11849,7 +14079,7 @@ async fn queue_api_v03_child_response(
                         result
                             .map_err(|_| "API 0.3 session lifecycle response write timed out".to_owned())?
                             .map_err(|_| "extension writer closed".to_owned())?
-                            .map_err(|error| pending_error(error).to_string())?;
+                            .map_err(|error| pending_error(error, "request").to_string())?;
                     }
                 };
                 return Ok(ChildResponseAdmission::Queued);
@@ -12185,6 +14415,7 @@ async fn read_protocol_stdout<R>(
     catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
     delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
     session_lifecycle: Option<ExtensionSessionLifecycleService>,
+    event_bus: Option<Arc<ExtensionEventBus>>,
     approval_store: Arc<ExtensionApprovalStore>,
     secret_broker: Option<Arc<dyn ExtensionSecretBroker>>,
     extension_identity: ExtensionIdentity,
@@ -12226,6 +14457,7 @@ async fn read_protocol_stdout<R>(
         catalog_updates,
         delegation_service,
         session_lifecycle,
+        event_bus,
         approval_store,
         secret_broker,
         extension_identity,
@@ -12235,6 +14467,7 @@ async fn read_protocol_stdout<R>(
         child,
         termination,
     };
+    let mut bus_attached = false;
     let mut read_buffer = [0_u8; 8192];
     let mut line = Vec::new();
     let result = 'stream: loop {
@@ -12281,6 +14514,14 @@ async fn read_protocol_stdout<R>(
                     }
                     changed.await;
                 }
+                if !bus_attached {
+                    if let Some(bus) = &state.event_bus {
+                        if let Err(error) = bus.attach(&state) {
+                            break 'stream Err(error.to_string());
+                        }
+                    }
+                    bus_attached = true;
+                }
             } else {
                 line.push(*byte);
                 if line.len() >= state.max_message_bytes() {
@@ -12294,6 +14535,9 @@ async fn read_protocol_stdout<R>(
     };
 
     state.closed.store(true, Ordering::Release);
+    if let Some(bus) = &state.event_bus {
+        bus.remove(&state.instance_id, state.generation);
+    }
     if let Some(registry) = &state.provider_registry {
         registry.remove_owner(&state.provider_owner);
     }
@@ -12539,6 +14783,26 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         match method {
+            "bus/declare" | "bus/subscribe" | "bus/unsubscribe" | "bus/publish" if is_api_v03 => {
+                let id = parse_child_request_id(object, method)?;
+                insert_child_request(state, id.clone(), None, None)?;
+                if let Some(bus) = &state.event_bus {
+                    bus.dispatch_with_response(state, method, params, |result| {
+                        let result = result.map_err(|error| match error.code {
+                            -32012 => ProviderHostResponseError::ResourceExhausted,
+                            -32011 => ProviderHostResponseError::Unavailable,
+                            _ => ProviderHostResponseError::Invalid,
+                        });
+                        queue_provider_host_response(state, &id, result)
+                    })?;
+                } else {
+                    queue_provider_host_response(
+                        state,
+                        &id,
+                        Err(ProviderHostResponseError::Unavailable),
+                    )?;
+                }
+            }
             methods::NOTIFICATION => {
                 require_declared(state.declared.notifications, "notifications")?;
                 let notification = serde_json::from_value(params)
@@ -12738,7 +15002,7 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
             }
             methods::PRESENTATION_UPDATE => {
                 require_declared(state.declared.presentation, "semantic presentation")?;
-                if read_std_lock(&state.protocol).version != EXTENSION_API_VERSION_0_2 {
+                if !is_stateful_api(&read_std_lock(&state.protocol).version) {
                     return Err("semantic presentation requires extension API 0.2".into());
                 }
                 let request: PresentationUpdateRequest = serde_json::from_value(params)
@@ -12789,6 +15053,13 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                     .map_err(|error| format!("invalid cancel request id: {error}"))?;
                 settle_child_request(&state.child_requests, &request_id);
             }
+            // API 0.3 provider catalog reverse requests. The always-running
+            // protocol reader dispatches these inline, so a registration issued
+            // after the initial load phase (for example from a command or tool
+            // handler) mutates the host registry the moment its frame arrives;
+            // it is never queued until a reload. Product catalog projection is a
+            // separate, host-owned synchronization boundary that runs before the
+            // next request, so an in-flight request is never mutated.
             methods::PROVIDERS_COMPLETE => {
                 require_declared(state.declared.providers, "provider catalogs")?;
                 api_v03::parse_provider_catalog_complete_params(params)
@@ -12998,7 +15269,7 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                     })?;
             }
             methods::INPUT_REQUEST => {
-                if read_std_lock(&state.protocol).version != EXTENSION_API_VERSION_0_2 {
+                if !is_stateful_api(&read_std_lock(&state.protocol).version) {
                     return Err("input/request requires API 0.2".into());
                 }
                 let id = parse_child_request_id(object, methods::INPUT_REQUEST)?;
@@ -13149,6 +15420,546 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                 }
                 queue_catalog_update(state, id, CatalogMutation::Unregister(request.names))?;
             }
+            methods::COMPOSER_GET => {
+                let Some((_request, admitted)) = admit_host_request::<ComposerGetRequest>(
+                    state,
+                    object,
+                    methods::COMPOSER_GET,
+                    EXTENSION_FEATURE_COMPOSER,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ComposerRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation: ExtensionComposerOperation::Get,
+                    }
+                })?;
+            }
+            methods::COMPOSER_SET | methods::COMPOSER_INSERT => {
+                let Some((request, admitted)) = admit_host_request::<ComposerTextRequest>(
+                    state,
+                    object,
+                    method,
+                    EXTENSION_FEATURE_COMPOSER,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                if let Err(failure) = bounded_plain_text_failure(
+                    "composer text",
+                    &request.text,
+                    MAX_EXTENSION_COMPOSER_TEXT_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                let operation = if method == methods::COMPOSER_SET {
+                    ExtensionComposerOperation::Set { text: request.text }
+                } else {
+                    ExtensionComposerOperation::Insert { text: request.text }
+                };
+                if let Err(detail) = operation.validate() {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (ExtensionRequestFailure::InvalidRequest, detail),
+                    );
+                }
+                dispatch_host_request_event(state, &admitted, move |admitted| {
+                    ExtensionEvent::ComposerRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation,
+                    }
+                })?;
+            }
+            methods::SHORTCUT_REGISTER => {
+                let Some((request, admitted)) = admit_host_request::<ShortcutRegisterRequest>(
+                    state,
+                    object,
+                    methods::SHORTCUT_REGISTER,
+                    EXTENSION_FEATURE_SHORTCUTS,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                if request.key.trim().is_empty() || request.key.trim() != request.key {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (
+                            ExtensionRequestFailure::InvalidRequest,
+                            "shortcut key must be a non-empty trimmed terminal key spelling"
+                                .to_owned(),
+                        ),
+                    );
+                }
+                if request.description.trim().is_empty() {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (
+                            ExtensionRequestFailure::InvalidRequest,
+                            "shortcut description must not be empty".to_owned(),
+                        ),
+                    );
+                }
+                if let Err(failure) = bounded_plain_text_failure(
+                    "shortcut id",
+                    &request.id,
+                    MAX_EXTENSION_SHORTCUT_ID_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                if let Err(error) = validate_identifier("shortcut", &request.id, true) {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (ExtensionRequestFailure::InvalidRequest, error.to_string()),
+                    );
+                }
+                if let Err(failure) = bounded_plain_text_failure(
+                    "shortcut key",
+                    &request.key,
+                    MAX_EXTENSION_SHORTCUT_KEY_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                if let Err(failure) = bounded_plain_text_failure(
+                    "shortcut description",
+                    &request.description,
+                    MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                dispatch_host_request_event(state, &admitted, move |admitted| {
+                    ExtensionEvent::ShortcutRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        shortcut_id: request.id,
+                        key: request.key,
+                        description: request.description,
+                    }
+                })?;
+            }
+            methods::SESSION_APPEND_ENTRY => {
+                let Some((request, admitted)) = admit_host_request::<SessionAppendEntryRequest>(
+                    state,
+                    object,
+                    methods::SESSION_APPEND_ENTRY,
+                    EXTENSION_FEATURE_SESSION_ENTRIES,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                if request.entry_type.trim().is_empty() {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (
+                            ExtensionRequestFailure::InvalidRequest,
+                            "session entry type must not be empty".to_owned(),
+                        ),
+                    );
+                }
+                if let Err(failure) = bounded_plain_text_failure(
+                    "session entry type",
+                    &request.entry_type,
+                    MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                match serde_json::to_vec(&request.data) {
+                    Ok(bytes) if bytes.len() > MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES => {
+                        return refuse_admitted_request(
+                            state,
+                            &admitted,
+                            (
+                                ExtensionRequestFailure::BoundsExceeded,
+                                format!(
+                                    "session entry data is {} JSON bytes; limit is {MAX_EXTENSION_SESSION_ENTRY_DATA_BYTES}",
+                                    bytes.len()
+                                ),
+                            ),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return refuse_admitted_request(
+                            state,
+                            &admitted,
+                            (
+                                ExtensionRequestFailure::InvalidRequest,
+                                format!("session entry data is not serializable: {error}"),
+                            ),
+                        );
+                    }
+                }
+                let operation = ExtensionSessionEntryOperation::Append {
+                    entry_type: request.entry_type,
+                    data: request.data,
+                };
+                if let Err(detail) = operation.validate() {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (ExtensionRequestFailure::InvalidRequest, detail),
+                    );
+                }
+                dispatch_host_request_event(state, &admitted, move |admitted| {
+                    ExtensionEvent::SessionEntryRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation,
+                    }
+                })?;
+            }
+            methods::SESSION_SET_NAME => {
+                let Some((request, admitted)) = admit_host_request::<SessionSetNameRequest>(
+                    state,
+                    object,
+                    methods::SESSION_SET_NAME,
+                    EXTENSION_FEATURE_SESSION_ENTRIES,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                if let Err(failure) = bounded_plain_text_failure(
+                    "session name",
+                    &request.name,
+                    MAX_EXTENSION_SESSION_NAME_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                let operation = ExtensionSessionEntryOperation::SetName { name: request.name };
+                dispatch_host_request_event(state, &admitted, move |admitted| {
+                    ExtensionEvent::SessionEntryRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation,
+                    }
+                })?;
+            }
+            methods::SESSION_SET_LABEL => {
+                let Some((request, admitted)) = admit_host_request::<SessionSetLabelRequest>(
+                    state,
+                    object,
+                    methods::SESSION_SET_LABEL,
+                    EXTENSION_FEATURE_SESSION_ENTRIES,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                if request.entry_id.trim().is_empty() {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (
+                            ExtensionRequestFailure::InvalidRequest,
+                            "session entry id must not be empty".to_owned(),
+                        ),
+                    );
+                }
+                if let Err(failure) = bounded_plain_text_failure(
+                    "session entry id",
+                    &request.entry_id,
+                    MAX_CONFIRMATION_REQUEST_ID_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                if let Err(failure) = bounded_plain_text_failure(
+                    "session entry label",
+                    &request.label,
+                    MAX_EXTENSION_SESSION_LABEL_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                let operation = ExtensionSessionEntryOperation::SetLabel {
+                    entry_id: request.entry_id,
+                    label: request.label,
+                };
+                if let Err(detail) = operation.validate() {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (ExtensionRequestFailure::InvalidRequest, detail),
+                    );
+                }
+                dispatch_host_request_event(state, &admitted, move |admitted| {
+                    ExtensionEvent::SessionEntryRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation,
+                    }
+                })?;
+            }
+            methods::SESSION_SEND_MESSAGE => {
+                let Some((request, admitted)) = admit_host_request::<SessionSendMessageRequest>(
+                    state,
+                    object,
+                    methods::SESSION_SEND_MESSAGE,
+                    EXTENSION_FEATURE_MESSAGE_INJECTION,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                let injection = match request.role.as_str() {
+                    "assistant" => ExtensionMessageInjection::Assistant { text: request.text },
+                    "system" => ExtensionMessageInjection::System { text: request.text },
+                    role => {
+                        return refuse_admitted_request(
+                            state,
+                            &admitted,
+                            (
+                                ExtensionRequestFailure::InvalidRequest,
+                                format!(
+                                    "session/send_message role `{role}` must be exactly `assistant` or `system`; user text uses session/send_user_message"
+                                ),
+                            ),
+                        );
+                    }
+                };
+                if let Err(failure) = bounded_plain_text_failure(
+                    "injected message",
+                    match &injection {
+                        ExtensionMessageInjection::Assistant { text }
+                        | ExtensionMessageInjection::System { text }
+                        | ExtensionMessageInjection::User { text } => text,
+                    },
+                    MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                dispatch_host_request_event(state, &admitted, move |admitted| {
+                    ExtensionEvent::MessageInjectionRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        injection,
+                    }
+                })?;
+            }
+            methods::SESSION_SEND_USER_MESSAGE => {
+                let Some((request, admitted)) = admit_host_request::<SessionSendUserMessageRequest>(
+                    state,
+                    object,
+                    methods::SESSION_SEND_USER_MESSAGE,
+                    EXTENSION_FEATURE_MESSAGE_INJECTION,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                if let Err(failure) = bounded_plain_text_failure(
+                    "injected message",
+                    &request.text,
+                    MAX_EXTENSION_INJECTED_MESSAGE_BYTES,
+                ) {
+                    return refuse_admitted_request(state, &admitted, failure);
+                }
+                let injection = ExtensionMessageInjection::User { text: request.text };
+                if let Err(detail) = injection.validate() {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (ExtensionRequestFailure::InvalidRequest, detail),
+                    );
+                }
+                dispatch_host_request_event(state, &admitted, move |admitted| {
+                    ExtensionEvent::MessageInjectionRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        injection,
+                    }
+                })?;
+            }
+            methods::TOOLS_SET_ACTIVE => {
+                let Some((request, admitted)) = admit_host_request::<ToolsSetActiveRequest>(
+                    state,
+                    object,
+                    methods::TOOLS_SET_ACTIVE,
+                    EXTENSION_FEATURE_ACTIVE_TOOLS,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                if request.names.len() > MAX_DYNAMIC_EXTENSION_TOOLS {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (
+                            ExtensionRequestFailure::BoundsExceeded,
+                            format!(
+                                "active tool set contains {} names; limit is {MAX_DYNAMIC_EXTENSION_TOOLS}",
+                                request.names.len()
+                            ),
+                        ),
+                    );
+                }
+                if let Err(error) = validate_identifiers("tool", &request.names, true) {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (ExtensionRequestFailure::InvalidRequest, error.to_string()),
+                    );
+                }
+                dispatch_host_request_event(state, &admitted, move |admitted| {
+                    ExtensionEvent::ActiveToolsRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        names: request.names,
+                    }
+                })?;
+            }
+            methods::TERMINAL_ACQUIRE => {
+                let Some((_request, admitted)) = admit_host_request::<TerminalAcquireRequest>(
+                    state,
+                    object,
+                    methods::TERMINAL_ACQUIRE,
+                    EXTENSION_FEATURE_TERMINAL_HANDOFF,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                // The child request stays registered: the frontend that owns
+                // the foreground tty answers later with `{grant_id, columns,
+                // rows}` through the ordinary response path.
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::TerminalRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation: ExtensionTerminalOperation::Acquire,
+                    }
+                })?;
+            }
+            methods::TERMINAL_RELEASE => {
+                let Some((_request, admitted)) = admit_host_request::<TerminalReleaseRequest>(
+                    state,
+                    object,
+                    methods::TERMINAL_RELEASE,
+                    EXTENSION_FEATURE_TERMINAL_HANDOFF,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                // Release is answered on the same child-request path once the
+                // frontend re-entered its own terminal.
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::TerminalRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation: ExtensionTerminalOperation::Release,
+                    }
+                })?;
+            }
+            methods::CONTEXT_SESSION_MANAGER | methods::CONTEXT_PENDING_MESSAGES => {
+                let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
+                    state,
+                    object,
+                    method,
+                    EXTENSION_FEATURE_SESSION_CONTEXT,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                // The child request stays registered: the foreground session
+                // answers later through `respond_to_extension_request`.
+                let operation = if method == methods::CONTEXT_SESSION_MANAGER {
+                    ExtensionContextOperation::SessionManager
+                } else {
+                    ExtensionContextOperation::PendingMessages
+                };
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ContextSnapshotRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation,
+                    }
+                })?;
+            }
+            methods::CONTEXT_SYSTEM_PROMPT => {
+                // `system_prompt_read` is its own negotiated feature because the
+                // reply discloses host-owned prompt text, AND it is capability-
+                // gated: the feature is offered and negotiable only for an
+                // extension whose manifest declares `capabilities.system_prompt`
+                // (mirroring how `capabilities.secrets` allow-lists secret
+                // names). An undeclared extension never sees the feature, and
+                // echoing it in the initialize response fails negotiation as an
+                // unknown feature. An unnegotiated request is refused with
+                // `unsupported_feature` before the owner check.
+                let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
+                    state,
+                    object,
+                    methods::CONTEXT_SYSTEM_PROMPT,
+                    EXTENSION_FEATURE_SYSTEM_PROMPT_READ,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                // The child request stays registered until the frontend answers
+                // with bounded prompt text.
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ContextSnapshotRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation: ExtensionContextOperation::SystemPrompt,
+                    }
+                })?;
+            }
+            methods::CONTEXT_MODEL | methods::CONTEXT_MODEL_CATALOG => {
+                let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
+                    state,
+                    object,
+                    method,
+                    EXTENSION_FEATURE_MODEL_CATALOG,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                // The child request stays registered: the foreground session
+                // answers later through `respond_to_extension_request` with a
+                // bounded, secret-free model view or catalog.
+                let operation = if method == methods::CONTEXT_MODEL {
+                    ExtensionModelOperation::Current
+                } else {
+                    ExtensionModelOperation::Catalog
+                };
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ModelViewRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation,
+                    }
+                })?;
+            }
             methods::AGENT_SPAWN => {
                 require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)?;
                 let id = parse_child_request_id(object, methods::AGENT_SPAWN)?;
@@ -13162,6 +15973,13 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                         )
                     }
                 };
+                if request.policy.model_selection.is_some() {
+                    if let Err(error) =
+                        require_feature(state, EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
+                    {
+                        return reject_unparented_child_request(state, id, error);
+                    }
+                }
                 let policy: ExtensionAgentSessionPolicy = request.policy.into();
                 if let Err(error) = policy.validate() {
                     return reject_unparented_child_request(
@@ -13181,7 +15999,7 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                         fingerprint: request.fingerprint,
                         message: request.message,
                         idempotency_key: request.idempotency_key,
-                        policy,
+                        policy: Box::new(policy),
                     },
                 )?;
             }
@@ -13230,6 +16048,36 @@ fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Result<(), St
                     AgentSessionOperation::FollowUp {
                         target: request.target,
                         message: request.message,
+                    },
+                )?;
+            }
+            methods::AGENT_MODELS => {
+                let id = parse_child_request_id(object, methods::AGENT_MODELS)?;
+                if let Err(error) = require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)
+                    .and_then(|()| {
+                        require_feature(state, EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1)
+                    })
+                {
+                    return reject_unparented_child_request(state, id, error);
+                }
+                let request: AgentSessionModelsRequest = match serde_json::from_value(params) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return reject_unparented_child_request(
+                            state,
+                            id,
+                            format!("invalid model discovery request: {error}"),
+                        )
+                    }
+                };
+                queue_agent_session_operation(
+                    state,
+                    id,
+                    request.parent_request_id,
+                    methods::AGENT_MODELS,
+                    AgentSessionOperation::Models {
+                        query: request.query,
+                        limit: request.limit.unwrap_or(50),
                     },
                 )?;
             }
@@ -13776,6 +16624,249 @@ fn reject_unparented_child_request(
     delivery.map(|_| ())
 }
 
+/// One admitted Wave-1 owner-scoped request awaiting a foreground projection.
+struct AdmittedExtensionRequest {
+    request_id: ExtensionRequestId,
+    generation: u64,
+    owner: ExtensionResourceOwner,
+}
+
+/// The owner-carrying shape every Wave-1 request implements: the authoritative
+/// parent host request plus an optional explicit owner for deferred calls.
+trait OwnerScopedHostRequest: serde::de::DeserializeOwned {
+    /// Active host request that supplies the authoritative resource owner.
+    fn parent_request_id(&self) -> u64;
+    /// Explicit owner sent by a caller that outlived its host request.
+    fn request_resource_owner(&self) -> Option<&ExtensionResourceOwner> {
+        None
+    }
+}
+
+macro_rules! impl_owner_scoped_host_request {
+    ($type:ty) => {
+        impl OwnerScopedHostRequest for $type {
+            fn parent_request_id(&self) -> u64 {
+                self.parent_request_id
+            }
+
+            fn request_resource_owner(&self) -> Option<&ExtensionResourceOwner> {
+                self.resource_owner.as_ref()
+            }
+        }
+    };
+}
+
+impl_owner_scoped_host_request!(ComposerGetRequest);
+impl_owner_scoped_host_request!(ComposerTextRequest);
+impl_owner_scoped_host_request!(ShortcutRegisterRequest);
+impl_owner_scoped_host_request!(SessionAppendEntryRequest);
+impl_owner_scoped_host_request!(SessionSetNameRequest);
+impl_owner_scoped_host_request!(SessionSetLabelRequest);
+impl_owner_scoped_host_request!(SessionSendMessageRequest);
+impl_owner_scoped_host_request!(SessionSendUserMessageRequest);
+impl_owner_scoped_host_request!(ToolsSetActiveRequest);
+impl_owner_scoped_host_request!(TerminalAcquireRequest);
+impl_owner_scoped_host_request!(TerminalReleaseRequest);
+impl_owner_scoped_host_request!(ContextSnapshotRequest);
+
+fn reject_typed_child_request(
+    state: &ProtocolReadState,
+    request_id: ExtensionRequestId,
+    failure: ExtensionRequestFailure,
+    detail: impl Into<String>,
+) -> Result<(), String> {
+    // A refusal can land before the request was registered (feature gate, body
+    // parse) or after (bounds, owner, no consumer). Reserve the child request
+    // first so one response is always deliverable and never left pending.
+    if !lock_std_mutex(&state.child_requests).contains_key(&request_id) {
+        let _registered = insert_child_request(state, request_id.clone(), None, None)?;
+    }
+    let response =
+        ExtensionRequestOutcome::Failed(failure, detail.into()).into_response(request_id.clone());
+    let delivery = try_queue_child_response(
+        &state.child_requests,
+        &request_id,
+        &state.writer,
+        state.max_message_bytes(),
+        response,
+    );
+    if delivery.is_err() {
+        settle_child_request(&state.child_requests, &request_id);
+    }
+    delivery.map(|_| ())
+}
+
+/// Admits one API `0.2` owner-scoped request: parse, feature gate, body parse,
+/// then owner resolution.
+///
+/// `parent_request_id` is the primary carrier: while that host request is
+/// active its owner is authoritative on the wire. A real extension often acts
+/// later (an HTTP callback or server event that outlives the command that
+/// started it), so the request may also carry an explicit, previously issued
+/// [`ExtensionResourceOwner`]. An explicit owner is admitted only when it is
+/// genuine for this process generation and session; every other case is refused
+/// with a typed error and no state change.
+///
+/// Returns `Ok(None)` when the request was already answered with a typed
+/// refusal, so the caller must stop without touching state. A request whose
+/// parent carries no durable session owner is refused with
+/// [`ExtensionRequestFailure::NotForegroundOwner`] rather than coerced.
+fn admit_host_request<T>(
+    state: &ProtocolReadState,
+    object: &serde_json::Map<String, serde_json::Value>,
+    method: &str,
+    feature: &str,
+    params: serde_json::Value,
+) -> Result<Option<(T, AdmittedExtensionRequest)>, String>
+where
+    T: OwnerScopedHostRequest,
+{
+    let request_id = parse_child_request_id(object, method)?;
+    if !read_std_lock(&state.protocol).supports(feature) {
+        reject_typed_child_request(
+            state,
+            request_id,
+            ExtensionRequestFailure::UnsupportedFeature,
+            format!("`{method}` requires the negotiated `{feature}` feature"),
+        )?;
+        return Ok(None);
+    }
+    let request: T = match serde_json::from_value(params) {
+        Ok(request) => request,
+        Err(error) => {
+            reject_typed_child_request(
+                state,
+                request_id,
+                ExtensionRequestFailure::InvalidRequest,
+                format!("invalid {method} request: {error}"),
+            )?;
+            return Ok(None);
+        }
+    };
+    let parent_request_id = request.parent_request_id();
+    let parent_active = lock_std_mutex(&state.pending)
+        .get(&parent_request_id)
+        .is_some_and(|pending| pending.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE);
+    let owner = if parent_active {
+        let Some(registered) =
+            register_child_request(state, request_id.clone(), Some(parent_request_id), method)?
+        else {
+            return Ok(None);
+        };
+        registered.resource_owner
+    } else {
+        match request.request_resource_owner() {
+            Some(owner) => {
+                let owner = match validate_explicit_request_owner(state, owner) {
+                    Ok(owner) => owner,
+                    Err(failure) => {
+                        reject_typed_child_request(state, request_id, failure.0, failure.1)?;
+                        return Ok(None);
+                    }
+                };
+                // The originating host request already settled, so this request
+                // is answered on its own lifetime instead of a dead parent's.
+                let _registered = insert_child_request(state, request_id.clone(), None, None)?;
+                Some(owner)
+            }
+            None => {
+                reject_typed_child_request(
+                    state,
+                    request_id,
+                    ExtensionRequestFailure::NotForegroundOwner,
+                    format!(
+                        "`{method}` carries no live parent request and no explicit resource owner"
+                    ),
+                )?;
+                return Ok(None);
+            }
+        }
+    };
+    let Some(owner) = owner else {
+        reject_typed_child_request(
+            state,
+            request_id,
+            ExtensionRequestFailure::NotForegroundOwner,
+            format!("`{method}` requires a foreground session owner"),
+        )?;
+        return Ok(None);
+    };
+    Ok(Some((
+        request,
+        AdmittedExtensionRequest {
+            request_id,
+            generation: state.generation,
+            owner,
+        },
+    )))
+}
+
+/// Validates one explicit resource owner against this process generation and
+/// the owners actually issued on this wire.
+fn validate_explicit_request_owner(
+    state: &ProtocolReadState,
+    owner: &ExtensionResourceOwner,
+) -> Result<ExtensionResourceOwner, (ExtensionRequestFailure, String)> {
+    let stale = || {
+        (
+            ExtensionRequestFailure::NotForegroundOwner,
+            "resource owner is stale or foreign to this process generation".to_owned(),
+        )
+    };
+    if owner.extension_instance_id != state.instance_id
+        || owner.process_generation != state.generation
+    {
+        return Err(stale());
+    }
+    if owner.session_id.trim().is_empty()
+        || owner.session_id.len() > 512
+        || owner.session_id.chars().any(char::is_control)
+    {
+        return Err((
+            ExtensionRequestFailure::NotForegroundOwner,
+            "resource owner session is invalid".to_owned(),
+        ));
+    }
+    if !lock_std_mutex(&state.issued_resource_owners).contains(owner) {
+        return Err((
+            ExtensionRequestFailure::NotForegroundOwner,
+            "resource owner was not issued to this extension process".to_owned(),
+        ));
+    }
+    Ok(owner.clone())
+}
+
+/// Fans one admitted request out to the foreground consumer, answering with a
+/// typed refusal when no consumer is subscribed instead of hanging.
+fn dispatch_host_request_event<F>(
+    state: &ProtocolReadState,
+    admitted: &AdmittedExtensionRequest,
+    event: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&AdmittedExtensionRequest) -> ExtensionEvent,
+{
+    let event = event(admitted);
+    if state.events.send(event).is_err() {
+        reject_typed_child_request(
+            state,
+            admitted.request_id.clone(),
+            ExtensionRequestFailure::UnsupportedFeature,
+            "no active host consumer for this request",
+        )?;
+    }
+    Ok(())
+}
+
+/// Rejects one admitted request with a typed failure and stops the arm.
+fn refuse_admitted_request(
+    state: &ProtocolReadState,
+    admitted: &AdmittedExtensionRequest,
+    failure: (ExtensionRequestFailure, String),
+) -> Result<(), String> {
+    reject_typed_child_request(state, admitted.request_id.clone(), failure.0, failure.1)
+}
+
 fn register_unparented_api_v03_child_request(
     state: &ProtocolReadState,
     id: ExtensionRequestId,
@@ -14204,6 +17295,7 @@ fn queue_writer_line(
             line,
             state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
             completion: None,
+            bus_delivery: None,
         })
         .map_err(|error| format!("bounded extension writer rejected frame: {error}"))
 }
@@ -14270,12 +17362,12 @@ fn fail_all_pending(pending: &PendingRequests, pending_changed: &Notify, error: 
     pending_changed.notify_waiters();
 }
 
-fn pending_error(error: PendingError) -> ExtensionRuntimeError {
+fn pending_error(error: PendingError, method: &str) -> ExtensionRuntimeError {
     match error {
         PendingError::Closed(message) => ExtensionRuntimeError::Closed(message),
         PendingError::Protocol(message) => ExtensionRuntimeError::Protocol(message),
         PendingError::Cancelled(reason) => ExtensionRuntimeError::Cancelled {
-            method: "request".into(),
+            method: method.to_owned(),
             reason,
         },
         PendingError::Remote {
@@ -14519,6 +17611,63 @@ fn resolve_extension_flag_values(
         .collect()
 }
 
+/// Projects host-resolved CLI flag values into the API `0.2` initialize
+/// payload, bounding every field on the way out.
+///
+/// The host is the sender here, so a flag value that cannot be projected fails
+/// the initialize with a typed protocol error instead of being truncated or
+/// silently dropped. API `0.1` and API `0.3` never use this projection: `0.1`
+/// keeps its frozen payload byte-for-byte and `0.3` carries its own
+/// `flag_values` field.
+fn projected_initialize_flag_values(
+    api_version: &str,
+    flag_values: &BTreeMap<String, serde_json::Value>,
+) -> Result<Option<Vec<api_v03::InitializeFlagValue>>, ExtensionRuntimeError> {
+    if !uses_api_0_2_capabilities(api_version) {
+        return Ok(None);
+    }
+    if flag_values.len() > MAX_EXTENSION_FLAGS {
+        return Err(ExtensionRuntimeError::Protocol(format!(
+            "extension flag projection carries {} flags; limit is {MAX_EXTENSION_FLAGS}",
+            flag_values.len()
+        )));
+    }
+    let mut projected = Vec::with_capacity(flag_values.len());
+    for (name, value) in flag_values {
+        if name.is_empty()
+            || name.len() > MAX_EXTENSION_FLAG_DESCRIPTION_BYTES
+            || name.chars().any(char::is_control)
+        {
+            return Err(ExtensionRuntimeError::Protocol(format!(
+                "extension flag name cannot be projected into API 0.2 initialize: `{name}`"
+            )));
+        }
+        match value {
+            serde_json::Value::Bool(_) => {}
+            serde_json::Value::String(text) if text.len() <= MAX_EXTENSION_FLAG_STRING_BYTES => {}
+            serde_json::Value::String(_) => {
+                return Err(ExtensionRuntimeError::Protocol(format!(
+                    "extension flag `{name}` string value exceeds {MAX_EXTENSION_FLAG_STRING_BYTES} bytes"
+                )));
+            }
+            serde_json::Value::Number(number)
+                if number.as_i64().is_some_and(|value| {
+                    value.unsigned_abs() <= api_v03::MAX_PORTABLE_JSON_INTEGER as u64
+                }) => {}
+            _ => {
+                return Err(ExtensionRuntimeError::Protocol(format!(
+                    "extension flag `{name}` value cannot be projected into API 0.2 initialize"
+                )));
+            }
+        }
+        projected.push(api_v03::InitializeFlagValue {
+            name: name.clone(),
+            value: value.clone(),
+        });
+    }
+    Ok(Some(projected))
+}
+
 fn valid_environment_name(name: &str) -> bool {
     let mut characters = name.chars();
     characters
@@ -14559,7 +17708,7 @@ notifications = true
 confirmations = true
 "#;
 
-    fn protocol_read_state_for_test(
+    pub(super) fn protocol_read_state_for_test(
         declared: ManifestContributions,
         events: broadcast::Sender<ExtensionEvent>,
     ) -> (ProtocolReadState, mpsc::Receiver<WriterFrame>) {
@@ -14604,6 +17753,7 @@ confirmations = true
                 catalog_updates,
                 delegation_service: Arc::new(StdRwLock::new(None)),
                 session_lifecycle: None,
+                event_bus: None,
                 approval_store: Arc::new(ExtensionApprovalStore::new()),
                 secret_broker: None,
                 extension_identity: ExtensionIdentity {
@@ -14645,6 +17795,7 @@ confirmations = true
                 child_interaction_progress: None,
                 resource_owner,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
     }
@@ -14657,9 +17808,1588 @@ confirmations = true
         }
     }
 
+    fn wave1_line(id: u64, method: &str, params: serde_json::Value) -> Vec<u8> {
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
+        .expect("request JSON");
+        line.push(b'\n');
+        line
+    }
+
+    /// Contract name of one typed JSON-RPC error response, i.e. the first token
+    /// of `error.message`, with the numeric code checked alongside it.
+    fn wave1_error(frame: &WriterFrame) -> (i64, String) {
+        let value: serde_json::Value =
+            serde_json::from_slice(&frame.line).expect("error JSON response");
+        let code = value["error"]["code"].as_i64().expect("numeric error code");
+        let message = value["error"]["message"].as_str().expect("error message");
+        let name = message
+            .split(':')
+            .next()
+            .expect("contract name prefix")
+            .to_owned();
+        (code, name)
+    }
+
+    fn wave1_negotiate(state: &ProtocolReadState, features: &[&str]) {
+        let mut protocol = write_std_lock(&state.protocol);
+        protocol.version = EXTENSION_API_VERSION_0_2.into();
+        for feature in features {
+            protocol.features.insert((*feature).to_owned());
+        }
+    }
+
+    #[test]
+    fn wave1_composer_dispatch_requires_feature_owner_and_bounds() {
+        let (events, mut received) = broadcast::channel(16);
+        let (state, mut frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+
+        // Feature gate precedes every other check and stays non-fatal.
+        handle_protocol_line(
+            &wave1_line(
+                100,
+                methods::COMPOSER_SET,
+                serde_json::json!({"parent_request_id": 1, "text": "hi"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("typed refusal")),
+            (-32601, "unsupported_feature".to_owned())
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        wave1_negotiate(&state, &[EXTENSION_FEATURE_COMPOSER]);
+
+        // deny_unknown_fields on the request body.
+        handle_protocol_line(
+            &wave1_line(
+                101,
+                methods::COMPOSER_SET,
+                serde_json::json!({"parent_request_id": 1, "text": "hi", "extra": true}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("unknown-field refusal")),
+            (-32602, "invalid_request".to_owned())
+        );
+
+        // Over-bound text is a bounds refusal, not a silent truncation.
+        handle_protocol_line(
+            &wave1_line(
+                102,
+                methods::COMPOSER_SET,
+                serde_json::json!({
+                    "parent_request_id": 1,
+                    "text": "x".repeat(MAX_EXTENSION_COMPOSER_TEXT_BYTES + 1),
+                }),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("bounds refusal")),
+            (-32602, "bounds_exceeded".to_owned())
+        );
+
+        // A parent without a durable session owner is never coerced.
+        insert_test_parent(&state, 2, None);
+        handle_protocol_line(
+            &wave1_line(
+                103,
+                methods::COMPOSER_INSERT,
+                serde_json::json!({"parent_request_id": 2, "text": "x"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("owner refusal")),
+            (-32002, "not_foreground_owner".to_owned())
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        // Happy path fan-out carries the authoritative owner and generation.
+        handle_protocol_line(
+            &wave1_line(
+                104,
+                methods::COMPOSER_SET,
+                serde_json::json!({"parent_request_id": 1, "text": "@/tmp/x.png"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("composer event") {
+            ExtensionEvent::ComposerRequested {
+                request_id,
+                generation,
+                owner,
+                operation,
+            } => {
+                assert_eq!(request_id, ExtensionRequestId::Number(104));
+                assert_eq!(generation, 1);
+                assert_eq!(owner.expect("owner").session_id, "session-a");
+                assert_eq!(
+                    operation,
+                    ExtensionComposerOperation::Set {
+                        text: "@/tmp/x.png".to_owned()
+                    }
+                );
+            }
+            other => panic!("expected composer request, got {other:?}"),
+        }
+        assert!(
+            frames.try_recv().is_err(),
+            "admitted requests are not answered locally"
+        );
+        assert_eq!(lock_std_mutex(&state.child_requests).len(), 1);
+    }
+
+    #[test]
+    fn wave2_terminal_acquire_is_gated_owned_and_stays_registered() {
+        let (events, mut received) = broadcast::channel(16);
+        let (state, mut frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+
+        // Feature gate precedes the owner check and stays non-fatal.
+        handle_protocol_line(
+            &wave1_line(
+                300,
+                methods::TERMINAL_ACQUIRE,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("typed refusal")),
+            (-32601, "unsupported_feature".to_owned())
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        wave1_negotiate(&state, &[EXTENSION_FEATURE_TERMINAL_HANDOFF]);
+
+        // deny_unknown_fields: neither op carries a parameter beyond the
+        // owner envelope, so an extra field is a refusal and never a coercion.
+        handle_protocol_line(
+            &wave1_line(
+                301,
+                methods::TERMINAL_ACQUIRE,
+                serde_json::json!({"parent_request_id": 1, "mode": "fullscreen"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("unknown-field refusal")),
+            (-32602, "invalid_request".to_owned())
+        );
+
+        // A parent without a durable session owner is never coerced.
+        insert_test_parent(&state, 2, None);
+        handle_protocol_line(
+            &wave1_line(
+                302,
+                methods::TERMINAL_ACQUIRE,
+                serde_json::json!({"parent_request_id": 2}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("owner refusal")),
+            (-32002, "not_foreground_owner".to_owned())
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        // Happy path fans out with the authoritative owner and generation.
+        handle_protocol_line(
+            &wave1_line(
+                303,
+                methods::TERMINAL_ACQUIRE,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("terminal request") {
+            ExtensionEvent::TerminalRequested {
+                request_id,
+                generation,
+                owner,
+                operation,
+            } => {
+                assert_eq!(request_id, ExtensionRequestId::Number(303));
+                assert_eq!(generation, 1);
+                assert_eq!(owner.expect("owner").session_id, "session-a");
+                assert_eq!(operation, ExtensionTerminalOperation::Acquire);
+            }
+            other => panic!("expected terminal acquire, got {other:?}"),
+        }
+        assert!(
+            frames.try_recv().is_err(),
+            "an admitted acquire is answered by the frontend, never locally"
+        );
+        assert_eq!(
+            lock_std_mutex(&state.child_requests).len(),
+            1,
+            "the acquire child request stays registered until the frontend answers"
+        );
+    }
+
+    #[test]
+    fn wave2_terminal_release_dispatch_stays_typed_and_bounded() {
+        let (events, mut received) = broadcast::channel(16);
+        let (state, mut frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+
+        // Release is gated by the same negotiated feature.
+        handle_protocol_line(
+            &wave1_line(
+                400,
+                methods::TERMINAL_RELEASE,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("typed refusal")),
+            (-32601, "unsupported_feature".to_owned())
+        );
+
+        wave1_negotiate(&state, &[EXTENSION_FEATURE_TERMINAL_HANDOFF]);
+
+        handle_protocol_line(
+            &wave1_line(
+                401,
+                methods::TERMINAL_RELEASE,
+                serde_json::json!({"parent_request_id": 1, "grant_id": "g-1"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("unknown-field refusal")),
+            (-32602, "invalid_request".to_owned())
+        );
+
+        insert_test_parent(&state, 2, None);
+        handle_protocol_line(
+            &wave1_line(
+                402,
+                methods::TERMINAL_RELEASE,
+                serde_json::json!({"parent_request_id": 2}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("owner refusal")),
+            (-32002, "not_foreground_owner".to_owned())
+        );
+
+        handle_protocol_line(
+            &wave1_line(
+                403,
+                methods::TERMINAL_RELEASE,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("terminal release") {
+            ExtensionEvent::TerminalRequested {
+                request_id,
+                generation,
+                owner,
+                operation,
+            } => {
+                assert_eq!(request_id, ExtensionRequestId::Number(403));
+                assert_eq!(generation, 1);
+                assert_eq!(owner.expect("owner").session_id, "session-a");
+                assert_eq!(operation, ExtensionTerminalOperation::Release);
+            }
+            other => panic!("expected terminal release, got {other:?}"),
+        }
+        assert!(frames.try_recv().is_err());
+        assert_eq!(lock_std_mutex(&state.child_requests).len(), 1);
+    }
+
+    #[test]
+    fn wave3_context_snapshot_dispatch_requires_feature_owner_and_bounds() {
+        let (events, mut received) = broadcast::channel(16);
+        let (state, mut frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+
+        // Feature gate precedes every other check and stays non-fatal.
+        handle_protocol_line(
+            &wave1_line(
+                600,
+                methods::CONTEXT_SESSION_MANAGER,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("typed refusal")),
+            (-32601, "unsupported_feature".to_owned())
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        wave1_negotiate(&state, &[EXTENSION_FEATURE_SESSION_CONTEXT]);
+
+        // deny_unknown_fields on the shared owner envelope.
+        handle_protocol_line(
+            &wave1_line(
+                601,
+                methods::CONTEXT_SESSION_MANAGER,
+                serde_json::json!({"parent_request_id": 1, "extra": true}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("unknown-field refusal")),
+            (-32602, "invalid_request".to_owned())
+        );
+
+        // A parent without a durable session owner is never coerced.
+        insert_test_parent(&state, 2, None);
+        handle_protocol_line(
+            &wave1_line(
+                602,
+                methods::CONTEXT_PENDING_MESSAGES,
+                serde_json::json!({"parent_request_id": 2}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("owner refusal")),
+            (-32002, "not_foreground_owner".to_owned())
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        // Happy path fans out with the authoritative owner and generation.
+        handle_protocol_line(
+            &wave1_line(
+                603,
+                methods::CONTEXT_SESSION_MANAGER,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("context snapshot") {
+            ExtensionEvent::ContextSnapshotRequested {
+                request_id,
+                generation,
+                owner,
+                operation,
+            } => {
+                assert_eq!(request_id, ExtensionRequestId::Number(603));
+                assert_eq!(generation, 1);
+                assert_eq!(owner.expect("owner").session_id, "session-a");
+                assert_eq!(operation, ExtensionContextOperation::SessionManager);
+            }
+            other => panic!("expected context snapshot, got {other:?}"),
+        }
+        assert!(
+            frames.try_recv().is_err(),
+            "admitted requests are not answered locally"
+        );
+        assert_eq!(lock_std_mutex(&state.child_requests).len(), 1);
+
+        // Pending messages shares the feature but stays a distinct arm.
+        handle_protocol_line(
+            &wave1_line(
+                604,
+                methods::CONTEXT_PENDING_MESSAGES,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("pending messages") {
+            ExtensionEvent::ContextSnapshotRequested { operation, .. } => {
+                assert_eq!(operation, ExtensionContextOperation::PendingMessages);
+            }
+            other => panic!("expected context snapshot, got {other:?}"),
+        }
+        assert_eq!(lock_std_mutex(&state.child_requests).len(), 2);
+    }
+
+    #[test]
+    fn wave3_model_view_dispatch_requires_feature_owner_and_bounds() {
+        let (events, mut received) = broadcast::channel(16);
+        let (state, mut frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+
+        // Feature gate precedes every other check and stays non-fatal.
+        handle_protocol_line(
+            &wave1_line(
+                800,
+                methods::CONTEXT_MODEL,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("typed refusal")),
+            (-32601, "unsupported_feature".to_owned())
+        );
+
+        wave1_negotiate(&state, &[EXTENSION_FEATURE_MODEL_CATALOG]);
+
+        // deny_unknown_fields on the request body.
+        handle_protocol_line(
+            &wave1_line(
+                801,
+                methods::CONTEXT_MODEL,
+                serde_json::json!({"parent_request_id": 1, "unexpected": true}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("unknown-field refusal")),
+            (-32602, "invalid_request".to_owned())
+        );
+
+        // A parent without a durable session owner is never coerced.
+        insert_test_parent(&state, 2, None);
+        handle_protocol_line(
+            &wave1_line(
+                802,
+                methods::CONTEXT_MODEL_CATALOG,
+                serde_json::json!({"parent_request_id": 2}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("owner refusal")),
+            (-32002, "not_foreground_owner".to_owned())
+        );
+
+        // Happy paths fan out with the authoritative owner and operation.
+        handle_protocol_line(
+            &wave1_line(
+                803,
+                methods::CONTEXT_MODEL,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("model view event") {
+            ExtensionEvent::ModelViewRequested {
+                operation, owner, ..
+            } => {
+                assert_eq!(operation, ExtensionModelOperation::Current);
+                assert_eq!(owner.expect("owner").session_id, "session-a");
+            }
+            other => panic!("expected model view request, got {other:?}"),
+        }
+
+        handle_protocol_line(
+            &wave1_line(
+                804,
+                methods::CONTEXT_MODEL_CATALOG,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("catalog event") {
+            ExtensionEvent::ModelViewRequested { operation, .. } => {
+                assert_eq!(operation, ExtensionModelOperation::Catalog);
+            }
+            other => panic!("expected catalog request, got {other:?}"),
+        }
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(lock_std_mutex(&state.child_requests).len(), 2);
+    }
+
+    #[test]
+    fn wave3_model_view_results_are_bounded_and_deny_unknown_fields() {
+        // One shape serves both mechanisms: the pushed host state / `model/selected`
+        // event and the pulled `context/model` / `context/model_catalog` answer.
+        let view = ExtensionModelView {
+            id: "anthropic/claude-sonnet-4".into(),
+            name: Some("Claude Sonnet 4".into()),
+            api: "anthropic-messages".into(),
+            provider: "anthropic".into(),
+            reasoning: true,
+            input: vec!["text".into(), "image".into()],
+            cost: Some(ExtensionModelCost {
+                input: 3_000_000,
+                output: 15_000_000,
+                cache_read: 300_000,
+                cache_write: 3_750_000,
+            }),
+            context_window: 200_000,
+            max_tokens: 64_000,
+        };
+        view.validate().expect("bounded view");
+        let encoded = serde_json::to_value(&view).expect("encode");
+        assert_eq!(encoded["provider"], serde_json::json!("anthropic"));
+        assert_eq!(
+            encoded["reasoning"],
+            serde_json::json!(true),
+            "capability, not level"
+        );
+        assert!(encoded.get("base_url").is_none(), "endpoints stay withheld");
+        assert_eq!(
+            serde_json::from_value::<ExtensionModelView>(encoded.clone()).unwrap(),
+            view
+        );
+        let mut extra = encoded;
+        extra["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ExtensionModelView>(extra).is_err());
+
+        let mut oversized = view.clone();
+        oversized.id = "x".repeat(MAX_EXTENSION_MODEL_FIELD_BYTES + 1);
+        assert!(oversized.validate().is_err());
+        let mut empty = view.clone();
+        empty.provider = String::new();
+        assert!(empty.validate().is_err());
+        let mut bad_api = view.clone();
+        bad_api.api = "x".repeat(MAX_EXTENSION_MODEL_API_BYTES + 1);
+        assert!(bad_api.validate().is_err());
+        let mut bad_input = view.clone();
+        bad_input.input = vec!["audio".into()];
+        assert!(bad_input.validate().is_err());
+
+        let catalog = ContextModelCatalogResult {
+            models: vec![view.clone()],
+            truncated: false,
+        };
+        catalog.validate().expect("bounded catalog");
+        let over_bound = ContextModelCatalogResult {
+            models: vec![view; MAX_EXTENSION_MODEL_CATALOG_ROWS + 1],
+            truncated: true,
+        };
+        assert!(over_bound.validate().is_err());
+    }
+
+    #[test]
+    fn wave3_system_prompt_disclosure_requires_a_declared_capability() {
+        // A disclosure surface is not in the blanket optional list: an extension
+        // must declare `capabilities.system_prompt` before the feature is even
+        // offered, exactly like `capabilities.secrets`.
+        assert!(
+            !API_0_2_OPTIONAL_FEATURES.contains(&EXTENSION_FEATURE_SYSTEM_PROMPT_READ),
+            "prompt disclosure must not be offered to every API 0.2 extension"
+        );
+
+        fn disclosure_manifest(system_prompt: bool) -> ExtensionManifest {
+            ExtensionManifest::parse(&format!(
+                r#"name = "disclosure-probe"
+version = "0.1.0"
+api_version = "0.2"
+[entrypoint]
+command = "probe.sh"
+[capabilities]
+system_prompt = {system_prompt}
+"#
+            ))
+            .expect("disclosure manifest")
+        }
+
+        fn echoing_response() -> InitializeResponse {
+            let mut features = API_0_2_REQUIRED_FEATURES
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect::<Vec<_>>();
+            features.push(EXTENSION_FEATURE_SYSTEM_PROMPT_READ.to_owned());
+            InitializeResponse {
+                api_version: EXTENSION_API_VERSION_0_2.to_owned(),
+                tools: Vec::new(),
+                commands: Vec::new(),
+                tool_renderers: Vec::new(),
+                shortcuts: Vec::new(),
+                protocol: Some(ExtensionProtocolResponse {
+                    version: EXTENSION_API_VERSION_0_2.to_owned(),
+                    features,
+                    limits: ExtensionProtocolLimits {
+                        max_concurrent_requests: 4,
+                    },
+                    lifecycle_events: Vec::new(),
+                }),
+            }
+        }
+
+        let no_services = OfferedHostServices {
+            agent_sessions: false,
+            session_lifecycle: false,
+            approvals: false,
+            secrets: false,
+        };
+
+        // An undeclared extension that echoes the feature fails negotiation, so
+        // it can never negotiate a disclosure it never declared.
+        let refused = negotiate_contributions_with_host_services(
+            &disclosure_manifest(false),
+            echoing_response(),
+            4,
+            no_services,
+        )
+        .expect_err("an undeclared disclosure must not negotiate");
+        assert!(refused.to_string().contains("unknown feature"), "{refused}");
+
+        // Declared: the feature is allowed and lands in the negotiated set.
+        let (_, negotiated) = negotiate_contributions_with_host_services(
+            &disclosure_manifest(true),
+            echoing_response(),
+            4,
+            no_services,
+        )
+        .expect("a declared disclosure negotiates");
+        assert!(negotiated.supports(EXTENSION_FEATURE_SYSTEM_PROMPT_READ));
+    }
+
+    #[test]
+    fn wave3_system_prompt_read_is_its_own_disclosure_feature() {
+        let (events, mut received) = broadcast::channel(16);
+        let (state, mut frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+
+        // Negotiating `session_context` does NOT disclose the system prompt.
+        wave1_negotiate(&state, &[EXTENSION_FEATURE_SESSION_CONTEXT]);
+        handle_protocol_line(
+            &wave1_line(
+                700,
+                methods::CONTEXT_SYSTEM_PROMPT,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("typed refusal")),
+            (-32601, "unsupported_feature".to_owned())
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        wave1_negotiate(&state, &[EXTENSION_FEATURE_SYSTEM_PROMPT_READ]);
+
+        // deny_unknown_fields on the shared owner envelope.
+        handle_protocol_line(
+            &wave1_line(
+                701,
+                methods::CONTEXT_SYSTEM_PROMPT,
+                serde_json::json!({"parent_request_id": 1, "mode": "raw"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("unknown-field refusal")),
+            (-32602, "invalid_request".to_owned())
+        );
+
+        // A parent without a durable session owner is never coerced.
+        insert_test_parent(&state, 2, None);
+        handle_protocol_line(
+            &wave1_line(
+                702,
+                methods::CONTEXT_SYSTEM_PROMPT,
+                serde_json::json!({"parent_request_id": 2}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("owner refusal")),
+            (-32002, "not_foreground_owner".to_owned())
+        );
+
+        // Happy path fans out with the authoritative owner and generation.
+        handle_protocol_line(
+            &wave1_line(
+                703,
+                methods::CONTEXT_SYSTEM_PROMPT,
+                serde_json::json!({"parent_request_id": 1}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("system prompt") {
+            ExtensionEvent::ContextSnapshotRequested {
+                request_id,
+                generation,
+                owner,
+                operation,
+            } => {
+                assert_eq!(request_id, ExtensionRequestId::Number(703));
+                assert_eq!(generation, 1);
+                assert_eq!(owner.expect("owner").session_id, "session-a");
+                assert_eq!(operation, ExtensionContextOperation::SystemPrompt);
+            }
+            other => panic!("expected context snapshot, got {other:?}"),
+        }
+        assert!(
+            frames.try_recv().is_err(),
+            "admitted requests are not answered locally"
+        );
+        assert_eq!(lock_std_mutex(&state.child_requests).len(), 1);
+    }
+
+    #[test]
+    fn wave3_context_structs_round_trip_bound_and_deny_unknown_fields() {
+        fn assert_round_trip<T>(value: T, expected: serde_json::Value)
+        where
+            T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            let encoded = serde_json::to_value(&value).expect("encode");
+            assert_eq!(encoded, expected);
+            let decoded: T = serde_json::from_value(expected.clone()).expect("decode");
+            assert_eq!(decoded, value);
+            let mut extra = expected.clone();
+            extra["unexpected"] = serde_json::json!(true);
+            assert!(
+                serde_json::from_value::<T>(extra).is_err(),
+                "{expected} must deny unknown fields"
+            );
+        }
+
+        assert_round_trip(
+            ContextSnapshotRequest {
+                parent_request_id: 7,
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7}),
+        );
+        assert_round_trip(
+            ContextPendingMessagesResult { pending: 3 },
+            serde_json::json!({"pending": 3}),
+        );
+        assert_round_trip(
+            ContextSessionManagerResult {
+                session_id: "s-1".into(),
+                name: Some("Planning".into()),
+                model: Some("model-a".into()),
+                reasoning: Some("high".into()),
+                active_skills: vec![ContextSkillSummary {
+                    id: "typesafe-ai".into(),
+                    name: "TypeSafe AI".into(),
+                }],
+                cwd: "/workspace".into(),
+            },
+            serde_json::json!({
+                "session_id": "s-1",
+                "name": "Planning",
+                "model": "model-a",
+                "reasoning": "high",
+                "active_skills": [{"id": "typesafe-ai", "name": "TypeSafe AI"}],
+                "cwd": "/workspace"
+            }),
+        );
+        // Absent optional fields stay absent on the wire.
+        assert_round_trip(
+            ContextSessionManagerResult {
+                session_id: "s-1".into(),
+                name: None,
+                model: None,
+                reasoning: None,
+                active_skills: Vec::new(),
+                cwd: "/workspace".into(),
+            },
+            serde_json::json!({
+                "session_id": "s-1",
+                "active_skills": [],
+                "cwd": "/workspace"
+            }),
+        );
+
+        // The disclosed prompt text is bounded, never truncated silently.
+        ContextSystemPromptResult {
+            text: "system prompt".into(),
+        }
+        .validate()
+        .expect("bounded prompt");
+        assert!(matches!(
+            ContextSystemPromptResult {
+                text: "x".repeat(MAX_EXTENSION_SYSTEM_PROMPT_BYTES + 1),
+            }
+            .validate(),
+            Err(message) if message.contains("limit is")
+        ));
+        assert_round_trip(
+            ContextSystemPromptResult {
+                text: "system prompt".into(),
+            },
+            serde_json::json!({"text": "system prompt"}),
+        );
+    }
+
+    #[test]
+    fn wave2_terminal_structs_round_trip_and_deny_unknown_fields() {
+        fn assert_round_trip_strict<T>(value: T, expected: serde_json::Value)
+        where
+            T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            let encoded = serde_json::to_value(&value).expect("encode");
+            assert_eq!(encoded, expected);
+            let decoded: T = serde_json::from_value(expected.clone()).expect("decode");
+            assert_eq!(decoded, value);
+            let mut extra = expected.clone();
+            extra["unexpected"] = serde_json::json!(true);
+            assert!(
+                serde_json::from_value::<T>(extra).is_err(),
+                "{expected} must deny unknown fields"
+            );
+        }
+
+        // Serde ignores `deny_unknown_fields` on internally tagged enums (`tag =
+        // "operation"`), which every Wave-1 request enum shares. The tag itself
+        // is what is dispatch-relevant, so an ignored extra field cannot change
+        // the operation; the strictness claim therefore lives on the request,
+        // result, and notification structs.
+        fn assert_round_trip_tagged<T>(value: T, expected: serde_json::Value)
+        where
+            T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            let encoded = serde_json::to_value(&value).expect("encode");
+            assert_eq!(encoded, expected);
+            let decoded: T = serde_json::from_value(expected.clone()).expect("decode");
+            assert_eq!(decoded, value);
+        }
+
+        assert_round_trip_strict(
+            TerminalAcquireRequest {
+                parent_request_id: 7,
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7}),
+        );
+        assert_round_trip_strict(
+            TerminalReleaseRequest {
+                parent_request_id: 7,
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7}),
+        );
+        assert_round_trip_strict(
+            TerminalAcquireResult {
+                grant_id: "g-1".into(),
+                columns: 120,
+                rows: 40,
+            },
+            serde_json::json!({"grant_id": "g-1", "columns": 120, "rows": 40}),
+        );
+        assert_round_trip_strict(TerminalReleaseResult {}, serde_json::json!({}));
+        assert_round_trip_strict(
+            TerminalGrantLost {
+                reason: "holder exited".into(),
+            },
+            serde_json::json!({"reason": "holder exited"}),
+        );
+        assert_round_trip_tagged(
+            ExtensionTerminalOperation::Acquire,
+            serde_json::json!({"operation": "acquire"}),
+        );
+        assert_round_trip_tagged(
+            ExtensionTerminalOperation::Release,
+            serde_json::json!({"operation": "release"}),
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wave2_terminal_grant_lost_is_a_no_op_when_unnegotiated() {
+        let temp = TempDir::new().expect("tempdir");
+        let script_path = temp.path().join("terminal-grant-lost.sh");
+        write_executable_script(
+            &script_path,
+            r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.1","tools":[],"commands":[]}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$OCTET_WORKSPACE/terminal-grant-lost.log"
+  case "$line" in
+    *'"method":"shutdown"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}' ;;
+  esac
+done
+"#,
+        );
+        let descriptor = trusted_descriptor(
+            temp.path(),
+            minimal_manifest("terminal-grant-lost", "terminal-grant-lost.sh"),
+        );
+        let process = ExtensionProcess::start(descriptor, ExtensionRuntimeConfig::new(temp.path()))
+            .await
+            .expect("start process");
+        let connection = read_std_lock(&process.inner.connection).clone();
+        assert!(
+            !read_std_lock(&connection.protocol).supports(EXTENSION_FEATURE_TERMINAL_HANDOFF),
+            "an API 0.1 generation does not negotiate terminal handoff"
+        );
+
+        process
+            .notify_terminal_grant_lost("holder exited")
+            .expect("an unnegotiated emitter is a best-effort no-op");
+
+        // The only frame this generation may observe afterwards is the shutdown
+        // request, so the no-op really wrote nothing to the wire. The fixture
+        // script may already have exited, so shutdown is best-effort here: the
+        // frame log below is the evidence, not the shutdown acknowledgement.
+        let _ = process.shutdown().await;
+        let frames = std::fs::read_to_string(temp.path().join("terminal-grant-lost.log"))
+            .expect("fixture frame log");
+        let methods = frames
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).expect("frame JSON")["method"]
+                    .as_str()
+                    .expect("frame method")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["shutdown".to_owned()]);
+    }
+
+    #[test]
+    fn wave1_session_tools_and_injection_dispatch_stay_typed_and_bounded() {
+        let (events, mut received) = broadcast::channel(16);
+        let (state, mut frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+        wave1_negotiate(
+            &state,
+            &[
+                EXTENSION_FEATURE_SESSION_ENTRIES,
+                EXTENSION_FEATURE_MESSAGE_INJECTION,
+                EXTENSION_FEATURE_ACTIVE_TOOLS,
+            ],
+        );
+
+        // A role other than assistant/system is refused, never coerced.
+        handle_protocol_line(
+            &wave1_line(
+                200,
+                methods::SESSION_SEND_MESSAGE,
+                serde_json::json!({"parent_request_id": 1, "role": "user", "text": "hi"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("role refusal")),
+            (-32602, "invalid_request".to_owned())
+        );
+
+        handle_protocol_line(
+            &wave1_line(
+                201,
+                methods::SESSION_SEND_MESSAGE,
+                serde_json::json!({"parent_request_id": 1, "role": "system", "text": "note"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("injection event") {
+            ExtensionEvent::MessageInjectionRequested { injection, .. } => assert_eq!(
+                injection,
+                ExtensionMessageInjection::System {
+                    text: "note".to_owned()
+                }
+            ),
+            other => panic!("expected message injection, got {other:?}"),
+        }
+
+        handle_protocol_line(
+            &wave1_line(
+                202,
+                methods::SESSION_SEND_USER_MESSAGE,
+                serde_json::json!({"parent_request_id": 1, "text": "question"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("user injection event") {
+            ExtensionEvent::MessageInjectionRequested { injection, .. } => assert_eq!(
+                injection,
+                ExtensionMessageInjection::User {
+                    text: "question".to_owned()
+                }
+            ),
+            other => panic!("expected user injection, got {other:?}"),
+        }
+
+        // Bounded durable entry append and host-owned naming.
+        handle_protocol_line(
+            &wave1_line(
+                203,
+                methods::SESSION_APPEND_ENTRY,
+                serde_json::json!({
+                    "parent_request_id": 1,
+                    "entry_type": "todo",
+                    "data": {"items": ["one"]},
+                }),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("entry event") {
+            ExtensionEvent::SessionEntryRequested { operation, .. } => assert!(matches!(
+                operation,
+                ExtensionSessionEntryOperation::Append { ref entry_type, .. } if entry_type == "todo"
+            )),
+            other => panic!("expected session entry request, got {other:?}"),
+        }
+
+        handle_protocol_line(
+            &wave1_line(
+                204,
+                methods::SESSION_SET_NAME,
+                serde_json::json!({"parent_request_id": 1, "name": "planning"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("name event") {
+            ExtensionEvent::SessionEntryRequested { operation, .. } => assert_eq!(
+                operation,
+                ExtensionSessionEntryOperation::SetName {
+                    name: "planning".to_owned()
+                }
+            ),
+            other => panic!("expected session name request, got {other:?}"),
+        }
+
+        // Active tool names are validated like `tools/register`.
+        handle_protocol_line(
+            &wave1_line(
+                205,
+                methods::TOOLS_SET_ACTIVE,
+                serde_json::json!({"parent_request_id": 1, "names": ["read", "not a tool"]}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("tool-name refusal")),
+            (-32602, "invalid_request".to_owned())
+        );
+
+        handle_protocol_line(
+            &wave1_line(
+                206,
+                methods::TOOLS_SET_ACTIVE,
+                serde_json::json!({"parent_request_id": 1, "names": ["read", "search"]}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("active tools event") {
+            ExtensionEvent::ActiveToolsRequested { names, .. } => {
+                assert_eq!(names, vec!["read".to_owned(), "search".to_owned()]);
+            }
+            other => panic!("expected active tools request, got {other:?}"),
+        }
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn wave1_deferred_requests_need_a_genuine_owner() {
+        let (events, mut received) = broadcast::channel(16);
+        let (state, mut frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        // The pi-draw `/draw` shape: the command request settles and the insert
+        // happens later in an HTTP callback.
+        insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+        lock_std_mutex(&state.pending)
+            .get(&1)
+            .expect("parent")
+            .terminal
+            .store(REQUEST_COMPLETED, Ordering::Release);
+        wave1_negotiate(&state, &[EXTENSION_FEATURE_COMPOSER]);
+        let owner = |session_id: &str, generation: u64| {
+            serde_json::json!({
+                "session_id": session_id,
+                "extension_instance_id": "instance-test",
+                "process_generation": generation,
+            })
+        };
+
+        // A settled parent without an explicit owner stays refused.
+        handle_protocol_line(
+            &wave1_line(
+                300,
+                methods::COMPOSER_SET,
+                serde_json::json!({"parent_request_id": 1, "text": "@/tmp/x.png"}),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("no-owner refusal")),
+            (-32002, "not_foreground_owner".to_owned())
+        );
+
+        // A stale generation is refused.
+        handle_protocol_line(
+            &wave1_line(
+                301,
+                methods::COMPOSER_SET,
+                serde_json::json!({
+                    "parent_request_id": 1,
+                    "text": "@/tmp/x.png",
+                    "resource_owner": owner("session-a", 9),
+                }),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("stale-owner refusal")),
+            (-32002, "not_foreground_owner".to_owned())
+        );
+
+        // An owner this process never issued is refused.
+        handle_protocol_line(
+            &wave1_line(
+                302,
+                methods::COMPOSER_SET,
+                serde_json::json!({
+                    "parent_request_id": 1,
+                    "text": "@/tmp/x.png",
+                    "resource_owner": owner("session-b", 1),
+                }),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        assert_eq!(
+            wave1_error(&frames.try_recv().expect("foreign-owner refusal")),
+            (-32002, "not_foreground_owner".to_owned())
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        // The genuine owner observed earlier on this wire is admitted, and the
+        // request is answered on its own lifetime rather than a dead parent's.
+        handle_protocol_line(
+            &wave1_line(
+                303,
+                methods::COMPOSER_SET,
+                serde_json::json!({
+                    "parent_request_id": 1,
+                    "text": "@/tmp/x.png",
+                    "resource_owner": owner("session-a", 1),
+                }),
+            ),
+            &state,
+        )
+        .expect("reader loop stays alive");
+        match received.try_recv().expect("deferred composer event") {
+            ExtensionEvent::ComposerRequested {
+                owner: Some(owner),
+                operation,
+                ..
+            } => {
+                assert_eq!(owner.session_id, "session-a");
+                assert_eq!(
+                    operation,
+                    ExtensionComposerOperation::Set {
+                        text: "@/tmp/x.png".to_owned()
+                    }
+                );
+            }
+            other => panic!("expected deferred composer request, got {other:?}"),
+        }
+        assert_eq!(lock_std_mutex(&state.child_requests).len(), 1);
+    }
+
+    #[test]
+    fn wave1_typed_failures_use_contract_codes_and_bounded_names() {
+        for (failure, code, name) in [
+            (
+                ExtensionRequestFailure::UnsupportedFeature,
+                -32601,
+                "unsupported_feature",
+            ),
+            (
+                ExtensionRequestFailure::NotForegroundOwner,
+                -32002,
+                "not_foreground_owner",
+            ),
+            (
+                ExtensionRequestFailure::InvalidRequest,
+                -32602,
+                "invalid_request",
+            ),
+            (
+                ExtensionRequestFailure::BoundsExceeded,
+                -32602,
+                "bounds_exceeded",
+            ),
+        ] {
+            assert_eq!(failure.code(), code);
+            assert_eq!(failure.name(), name);
+            let message = failure.message("detail");
+            assert_eq!(message, format!("{name}: detail"));
+            assert!(message.len() <= name.len() + 2 + MAX_EXTENSION_REQUEST_ERROR_DETAIL_BYTES);
+            // A hostile detail can never inflate the frame beyond the bound.
+            let oversized = failure.message(&"é".repeat(4096));
+            assert!(
+                oversized.len() <= name.len() + 2 + MAX_EXTENSION_REQUEST_ERROR_DETAIL_BYTES,
+                "{oversized:?} exceeded the bounded detail"
+            );
+            assert!(oversized.starts_with(name));
+            assert_eq!(failure.message(""), name.to_owned());
+        }
+    }
+
+    #[test]
+    fn wave1_request_structs_round_trip_and_deny_unknown_fields() {
+        fn assert_round_trip<T>(value: T, expected: serde_json::Value)
+        where
+            T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            let encoded = serde_json::to_value(&value).expect("encode");
+            assert_eq!(encoded, expected);
+            let decoded: T = serde_json::from_value(expected.clone()).expect("decode");
+            assert_eq!(decoded, value);
+            let mut extra = expected.clone();
+            extra["unexpected"] = serde_json::json!(true);
+            assert!(
+                serde_json::from_value::<T>(extra).is_err(),
+                "{expected} must deny unknown fields"
+            );
+        }
+
+        assert_round_trip(
+            ComposerGetRequest {
+                parent_request_id: 7,
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7}),
+        );
+        assert_round_trip(
+            ComposerTextRequest {
+                parent_request_id: 7,
+                text: "draft".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "text": "draft"}),
+        );
+        assert_round_trip(
+            ComposerTextResult {
+                text: "draft".into(),
+            },
+            serde_json::json!({"text": "draft"}),
+        );
+        assert_round_trip(
+            ShortcutRegisterRequest {
+                parent_request_id: 7,
+                id: "draw".into(),
+                key: "ctrl+shift+c".into(),
+                description: "Describe".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({
+                "parent_request_id": 7,
+                "id": "draw",
+                "key": "ctrl+shift+c",
+                "description": "Describe"
+            }),
+        );
+        assert_round_trip(
+            SessionAppendEntryRequest {
+                parent_request_id: 7,
+                entry_type: "todo".into(),
+                data: serde_json::json!({"items": ["one"]}),
+                resource_owner: None,
+            },
+            serde_json::json!({
+                "parent_request_id": 7,
+                "entry_type": "todo",
+                "data": {"items": ["one"]}
+            }),
+        );
+        assert_round_trip(
+            SessionAppendEntryResult {
+                entry_id: "e-1".into(),
+            },
+            serde_json::json!({"entry_id": "e-1"}),
+        );
+        assert_round_trip(
+            SessionSetNameRequest {
+                parent_request_id: 7,
+                name: "planning".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "name": "planning"}),
+        );
+        assert_round_trip(
+            SessionSetLabelRequest {
+                parent_request_id: 7,
+                entry_id: "e-1".into(),
+                label: "done".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "entry_id": "e-1", "label": "done"}),
+        );
+        assert_round_trip(
+            SessionSendMessageRequest {
+                parent_request_id: 7,
+                role: "assistant".into(),
+                text: "hello".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "role": "assistant", "text": "hello"}),
+        );
+        assert_round_trip(
+            SessionSendUserMessageRequest {
+                parent_request_id: 7,
+                text: "hello".into(),
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "text": "hello"}),
+        );
+        assert_round_trip(
+            ToolsSetActiveRequest {
+                parent_request_id: 7,
+                names: vec!["read".into()],
+                resource_owner: None,
+            },
+            serde_json::json!({"parent_request_id": 7, "names": ["read"]}),
+        );
+    }
+
+    #[test]
+    fn wave1_message_delta_coalescer_batches_and_stays_bounded() {
+        let now = Instant::now();
+        let mut coalescer = MessageDeltaCoalescer::default();
+        coalescer.begin_message("m-1");
+
+        // Many small pushes inside one interval produce no notification at all.
+        let mut batches = Vec::new();
+        for _ in 0..32 {
+            batches.extend(coalescer.push("tok ", now));
+        }
+        assert!(batches.is_empty(), "per-delta fan-out is forbidden");
+        let flushed = coalescer.flush(now);
+        assert_eq!(flushed.len(), 1, "one flush is one notification");
+        assert_eq!(flushed[0].deltas, 32);
+        assert_eq!(flushed[0].delta, "tok ".repeat(32));
+        assert_eq!(
+            flushed[0]
+                .clone()
+                .into_updated(coalescer.active_message_id()),
+            ExtensionMessageUpdated {
+                message_id: Some("m-1".to_owned()),
+                delta: "tok ".repeat(32),
+                deltas: 32,
+            }
+        );
+        assert!(
+            coalescer.flush(now).is_empty(),
+            "a flush never repeats a batch"
+        );
+
+        // The byte bound flushes the pending batch before it could overflow,
+        // and every emitted batch stays inside the per-notification cap.
+        let mut coalescer = MessageDeltaCoalescer::default();
+        coalescer.begin_message("m-2");
+        assert!(coalescer.push(&"a".repeat(4000), now).is_empty());
+        let overflow = coalescer.push(&"b".repeat(5000), now);
+        assert_eq!(
+            overflow.len(),
+            2,
+            "the pending batch flushes before overflow"
+        );
+        assert_eq!(overflow[0].delta.len(), 4000);
+        assert_eq!(overflow[0].deltas, 1);
+        assert_eq!(overflow[1].delta.len(), 5000);
+        for batch in &overflow {
+            assert!(batch.delta.len() <= MAX_EXTENSION_MESSAGE_UPDATED_TEXT_BYTES);
+        }
+        assert!(coalescer.flush(now).is_empty());
+
+        // The elapsed-time boundary is honored without any background task.
+        let start = Instant::now();
+        assert!(coalescer.push("late", start).is_empty());
+        let later = start + MESSAGE_DELTA_FLUSH_INTERVAL;
+        let time_flush = coalescer.push("late", later);
+        assert_eq!(time_flush.len(), 1);
+        assert_eq!(time_flush[0].delta, "latelate");
+        assert_eq!(time_flush[0].deltas, 2);
+
+        // 64 deltas force a flush even inside one interval.
+        let mut count = 0;
+        for _ in 0..MESSAGE_DELTA_FLUSH_DELTAS {
+            count += coalescer.push("d", now).len();
+        }
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn progress_decoration_dispatch_requires_feature_active_parent_and_safe_bounded_fields() {
+        let (events, mut diagnostics) = broadcast::channel(16);
+        let (state, _frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        insert_test_parent(&state, 1, Some(test_resource_owner("session")));
+        let (sink, mut progress) = ToolProgressSink::bounded_channel();
+        lock_std_mutex(&state.pending).get_mut(&1).unwrap().progress = Some(sink);
+        let notification = |request_id, sequence, label: String| ExtensionProgressNotification {
+            request_id,
+            sequence,
+            event: ExtensionProgressEvent::Decoration {
+                label,
+                detail: None,
+            },
+        };
+        assert!(dispatch_progress(&state, notification(1, 1, "unnegotiated".into())).is_err());
+        {
+            let mut protocol = write_std_lock(&state.protocol);
+            protocol.version = EXTENSION_API_VERSION_0_2.into();
+            protocol
+                .features
+                .insert(EXTENSION_FEATURE_PROGRESS_DECORATION.into());
+        }
+        dispatch_progress(&state, notification(1, 2, "é".repeat(128))).unwrap();
+        let crate::tool::ToolProgress::Decoration(decoration) = progress.try_recv().unwrap() else {
+            panic!("expected decoration");
+        };
+        assert_eq!(decoration.label().len(), 256);
+        dispatch_progress(&state, notification(1, 2, "duplicate".into())).unwrap();
+        dispatch_progress(&state, notification(99, 1, "foreign".into())).unwrap();
+        assert!(progress.try_recv().is_err());
+        for (sequence, label) in [
+            (3, "é".repeat(129)),
+            (4, "bad\u{001b}[31m".into()),
+            (5, String::new()),
+        ] {
+            assert!(dispatch_progress(&state, notification(1, sequence, label)).is_err());
+            assert!(progress.try_recv().is_err());
+        }
+        lock_std_mutex(&state.pending).remove(&1);
+        dispatch_progress(&state, notification(1, 6, "late".into())).unwrap();
+        assert!(progress.try_recv().is_err());
+        let mut ignored = 0;
+        while let Ok(ExtensionEvent::Diagnostic { .. }) = diagnostics.try_recv() {
+            ignored += 1;
+        }
+        assert_eq!(ignored, 3);
+    }
+
+    #[test]
+    fn pending_cancellation_preserves_original_method_and_reason() {
+        for expected_method in [
+            methods::TOOL_CALL,
+            methods::COMMAND_EXECUTE,
+            methods::HOOK_RUN,
+        ] {
+            for expected_reason in ["shutdown", "reload drain deadline", "user"] {
+                let error = pending_error(
+                    PendingError::Cancelled(expected_reason.into()),
+                    expected_method,
+                );
+                match error {
+                    ExtensionRuntimeError::Cancelled { method, reason } => {
+                        assert_eq!(method, expected_method);
+                        assert_eq!(reason, expected_reason);
+                    }
+                    other => panic!("expected local cancellation, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_remote_cancellation_remains_a_remote_error() {
+        let data = serde_json::json!({"terminal": "cancelled", "reason": "remote"});
+        let error = pending_error(
+            PendingError::Remote {
+                code: -32800,
+                message: "request cancelled".into(),
+                data: Some(data.clone()),
+            },
+            methods::TOOL_CALL,
+        );
+        match error {
+            ExtensionRuntimeError::Remote {
+                code,
+                message,
+                data: actual_data,
+            } => {
+                assert_eq!(code, -32800);
+                assert_eq!(message, "request cancelled");
+                assert_eq!(actual_data, Some(data));
+            }
+            other => panic!("remote terminal error was reclassified: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_v03_theme_selection_is_omitted_without_a_host_handler() {
+        for session_lifecycle in [false, true] {
+            let offer = api_v03_host_offer_for_services(1024, 4, session_lifecycle, false).unwrap();
+            assert!(!offer
+                .optional_capabilities
+                .iter()
+                .any(|capability| capability == "theme_selection"));
+            assert!(!offer
+                .optional_methods
+                .iter()
+                .any(|method| method == "theme/select"));
+            api_v03::validate_offer(&offer).unwrap();
+        }
+    }
+
     #[test]
     fn api_v03_session_lifecycle_offer_is_conditional_on_a_bound_driver() {
-        let unavailable = api_v03_host_offer_for_services(1024, 4, false).unwrap();
+        let unavailable = api_v03_host_offer_for_services(1024, 4, false, false).unwrap();
         assert!(unavailable
             .optional_capabilities
             .iter()
@@ -14670,7 +19400,7 @@ confirmations = true
         }));
         api_v03::validate_offer(&unavailable).unwrap();
 
-        let available = api_v03_host_offer_for_services(1024, 4, true).unwrap();
+        let available = api_v03_host_offer_for_services(1024, 4, true, false).unwrap();
         assert!(available
             .optional_capabilities
             .iter()
@@ -14742,7 +19472,7 @@ confirmations = true
             protocol_read_state_for_test(ManifestContributions::default(), events);
         let (service, mut receiver) = ExtensionSessionLifecycleService::channel(1).unwrap();
         service.activate();
-        let offer = api_v03_host_offer_for_services(1024, 4, true).unwrap();
+        let offer = api_v03_host_offer_for_services(1024, 4, true, false).unwrap();
         let mut selection = api_v03::select_required(&offer).unwrap();
         selection.capabilities.push("session_lifecycle".into());
         selection.methods.extend(
@@ -14880,6 +19610,56 @@ confirmations = true
                 "host-secret",
             )?))
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_subagent_unicode_summary_publishes_through_the_host_reader() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions/octet-subagents");
+        let output = std::process::Command::new("python3")
+            .current_dir(root)
+            .args([
+                "-c",
+                r#"
+import json
+from tests.test_presentation import PresentationTests
+from octet_subagents.model import sanitize_document
+from octet_subagents.presentation import build_snapshot
+worker = PresentationTests().worker('done', summary=sanitize_document(
+    'joined \U0001f469\u200d\U0001f4bb hidden\u200b bidi\u202e done', 8192))
+snapshot = build_snapshot([worker], selected_agent_id=worker.agent_id, now_ms=1700000001000)
+snapshot['revision'] = 1
+print(json.dumps({'jsonrpc':'2.0', 'method':'presentation/update', 'params':{'snapshot':snapshot}}))
+"#,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (events, mut receiver) = broadcast::channel(8);
+        let (state, _frames) = protocol_read_state_for_test(
+            ManifestContributions {
+                presentation: true,
+                commands: vec!["subagents".into()],
+                ..ManifestContributions::default()
+            },
+            events,
+        );
+        write_std_lock(&state.protocol).version = EXTENSION_API_VERSION_0_4.into();
+        handle_protocol_line(&output.stdout, &state)
+            .expect("bundled snapshot passes host validation");
+        let ExtensionEvent::PresentationUpdated { snapshot, .. } = receiver.try_recv().unwrap()
+        else {
+            panic!("host must publish the accepted snapshot");
+        };
+        let body = &snapshot.collection.unwrap().detail.unwrap().body;
+        assert!(body.contains("\\u200d"));
+        assert!(body.contains("\\u200b"));
+        assert!(body.contains("\\u202e"));
+        assert!(!body.contains('\u{200d}'));
     }
 
     #[test]
@@ -15564,6 +20344,7 @@ confirmations = true
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         lock_std_mutex(&state.pending).remove(&7);
@@ -15609,6 +20390,7 @@ confirmations = true
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         let state = Arc::new(state);
@@ -15687,6 +20469,7 @@ confirmations = true
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         handle_protocol_line(
@@ -15735,6 +20518,7 @@ confirmations = true
                 child_interaction_progress: None,
                 resource_owner: None,
                 last_progress_sequence: None,
+                tool_call_policy_digest: None,
             },
         );
         handle_protocol_line(
@@ -15747,6 +20531,49 @@ confirmations = true
         assert_eq!(response["id"], "py:1");
         assert!(response["result"]["value"].is_null());
         assert!(lock_std_mutex(&state.child_requests).is_empty());
+    }
+
+    #[test]
+    fn prospective_tool_catalog_has_one_input_and_output_schema_byte_budget() {
+        let tool = |name: &str, bytes: usize| ToolDefinition {
+            name: name.into(),
+            description: "bounded definition".into(),
+            parameters: serde_json::json!({"type": "object", "description": "x".repeat(bytes)}),
+            output_schema: Some(
+                serde_json::json!({"type": "object", "description": "y".repeat(bytes)}),
+            ),
+        };
+        let mut catalog = Vec::new();
+        for index in 0..6 {
+            let next = tool(&format!("tool_{index}"), 300_000);
+            validate_tool_definitions(std::slice::from_ref(&next), EXTENSION_API_VERSION_0_2)
+                .unwrap();
+            catalog.push(next);
+            validate_tool_definitions(&catalog, EXTENSION_API_VERSION_0_2).unwrap();
+        }
+        let addition = tool("overflow", 300_000);
+        validate_tool_definitions(std::slice::from_ref(&addition), EXTENSION_API_VERSION_0_2)
+            .unwrap();
+        let mut prospective = catalog.clone();
+        prospective.push(addition);
+        assert!(
+            validate_tool_definitions(&prospective, EXTENSION_API_VERSION_0_2)
+                .unwrap_err()
+                .to_string()
+                .contains("aggregate schema bytes")
+        );
+        validate_tool_definitions(&catalog, EXTENSION_API_VERSION_0_2).unwrap();
+        prospective[0] = tool("tool_0", 1);
+        validate_tool_definitions(&prospective, EXTENSION_API_VERSION_0_2).unwrap();
+        // Inclusive exact byte boundary, without allocating a serialized copy.
+        let mut exact = tool("exact", 0);
+        exact.output_schema = None;
+        let overhead = serde_json::to_vec(&exact.parameters).unwrap().len();
+        exact.parameters["description"] =
+            serde_json::Value::String("z".repeat(MAX_TOOL_CATALOG_SCHEMA_BYTES - overhead));
+        validate_tool_definitions(std::slice::from_ref(&exact), EXTENSION_API_VERSION_0_2).unwrap();
+        exact.output_schema = Some(serde_json::json!({}));
+        assert!(validate_tool_definitions(&[exact], EXTENSION_API_VERSION_0_2).is_err());
     }
 
     #[test]
@@ -15846,6 +20673,91 @@ confirmations = true
     }
 
     #[test]
+    fn compaction_strategy_manifest_is_api_v04_only() {
+        let source = include_str!("../../../extensions/octet-snap-compact/extension.toml");
+        let manifest = ExtensionManifest::parse(source).expect("source extension manifest");
+        assert_eq!(manifest.api_version, EXTENSION_API_VERSION_0_4);
+        assert_eq!(
+            manifest.contributes.hooks,
+            vec![ExtensionHook::CompactionStrategy]
+        );
+        let legacy = source.replace("api_version = \"0.4\"", "api_version = \"0.3\"");
+        assert!(matches!(
+            ExtensionManifest::parse(&legacy),
+            Err(ExtensionRuntimeError::InvalidManifest(message))
+                if message.contains("compaction_strategy requires extension API 0.4")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_strategy_negotiates_and_renders_through_host() {
+        let temp = TempDir::new().expect("tempdir");
+        write_executable_script(
+            &temp.path().join("extension.py"),
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+
+def receive():
+    return json.loads(sys.stdin.readline())
+
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+init = receive()
+assert init["params"]["api_version"] == "0.4"
+assert init["params"]["contributes"]["hooks"] == ["compaction_strategy"]
+protocol = init["params"]["protocol"]
+assert protocol["version"] == "0.4", protocol
+assert "compaction_strategy" in protocol["optional_features"]
+send({"jsonrpc": "2.0", "id": init["id"], "result": {
+    "api_version": "0.4", "tools": [], "commands": [],
+    "protocol": {"version": "0.4", "features":
+        protocol["required_features"] + ["compaction_strategy"],
+        "limits": {"max_concurrent_requests": 1}},
+}})
+request = receive()
+assert request["method"] == "hook/run"
+assert request["params"]["hook"] == "compaction_strategy"
+assert request["params"]["payload"] == {"model_id": "vision-model", "text": "history"}
+send({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "disposition": {"action": "continue"}, "context": [], "notifications": [],
+    "compaction_frames": ["iVBORw0KGgo="],
+}})
+shutdown = receive()
+assert shutdown["method"] == "shutdown"
+send({"jsonrpc": "2.0", "id": shutdown["id"], "result": {"terminal": "shutdown"}})
+"#,
+        );
+        let manifest = ExtensionManifest::parse(include_str!(
+            "../../../extensions/octet-snap-compact/extension.toml"
+        ))
+        .expect("source extension manifest");
+        let process = ExtensionProcess::start(
+            trusted_descriptor(temp.path(), manifest),
+            ExtensionRuntimeConfig::new(temp.path()),
+        )
+        .await
+        .expect("start API 0.4 compaction process");
+        assert!(process.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY));
+        let mut host = ExtensionHost::new();
+        process.register(&mut host);
+        assert!(host.compaction_strategy.is_some());
+        let frames = host
+            .compaction_strategy
+            .unwrap()
+            .render("vision-model", "history", "session-owner")
+            .await
+            .expect("render through host");
+        assert_eq!(frames, vec![b"\x89PNG\r\n\x1a\n".to_vec()]);
+        assert!(process.shutdown().await);
+    }
+
+    #[test]
     fn manifest_runtime_profiles_require_explicit_safe_sharing() {
         let workspace_service = VALID_MANIFEST
             .replace("api_version = \"0.1\"", "api_version = \"0.2\"")
@@ -15907,7 +20819,7 @@ confirmations = true
     }
 
     #[test]
-    fn api_v03_session_hooks_require_the_declared_pair_and_no_legacy_hook_surface() {
+    fn session_hooks_are_typed_and_available_to_every_stateful_api() {
         let base = r#"name = "session-hooks"
 version = "0.3.0"
 api_version = "0.3"
@@ -15921,34 +20833,33 @@ hooks = ["session_start", "session_end"]
             manifest.contributes.hooks,
             vec![ExtensionHook::SessionStart, ExtensionHook::SessionEnd]
         );
+        // API 0.4 is the union of every earlier capability: a partial pair and a
+        // mix with non-session hooks are ordinary declarations, exactly as in Pi.
         let missing_end = base.replace(
             "hooks = [\"session_start\", \"session_end\"]",
             "hooks = [\"session_start\"]",
         );
-        assert!(matches!(
-            ExtensionManifest::parse(&missing_end),
-            Err(ExtensionRuntimeError::InvalidManifest(message))
-                if message.contains("must be declared together")
-        ));
+        ExtensionManifest::parse(&missing_end)
+            .expect("a single session hook is a valid declaration");
         let legacy = base.replace("api_version = \"0.3\"", "api_version = \"0.2\"");
-        assert!(matches!(
-            ExtensionManifest::parse(&legacy),
-            Err(ExtensionRuntimeError::InvalidManifest(message))
-                if message.contains("require extension API 0.3")
-        ));
+        ExtensionManifest::parse(&legacy).expect("API 0.2 validates the contribution union");
+        let newest = base.replace("api_version = \"0.3\"", "api_version = \"0.4\"");
+        ExtensionManifest::parse(&newest).expect("API 0.4 validates the contribution union");
         let deferred = base.replace(
             "hooks = [\"session_start\", \"session_end\"]",
             "hooks = [\"session_start\", \"session_end\", \"before_prompt\"]",
         );
+        ExtensionManifest::parse(&deferred).expect("mixed hook surfaces are a valid declaration");
+        let frozen = base.replace("api_version = \"0.3\"", "api_version = \"0.1\"");
         assert!(matches!(
-            ExtensionManifest::parse(&deferred),
+            ExtensionManifest::parse(&frozen),
             Err(ExtensionRuntimeError::InvalidManifest(message))
-                if message.contains("other hooks")
+                if message.contains("require extension API 0.2 or later")
         ));
     }
 
     #[test]
-    fn manifest_cli_flags_are_typed_bounded_and_api_v03_only() {
+    fn manifest_cli_flags_are_typed_bounded_and_require_api_v0_2() {
         let source = r#"
 name = "flag-fixture"
 version = "0.3.0"
@@ -15971,9 +20882,13 @@ flags = [
         assert_eq!(manifest.contributes.flags[2].default, serde_json::json!(2));
 
         let legacy = source.replace("api_version = \"0.3\"", "api_version = \"0.2\"");
+        ExtensionManifest::parse(&legacy).expect("API 0.2 validates the contribution union");
+        let newest = source.replace("api_version = \"0.3\"", "api_version = \"0.4\"");
+        ExtensionManifest::parse(&newest).expect("API 0.4 validates the contribution union");
+        let frozen = source.replace("api_version = \"0.3\"", "api_version = \"0.1\"");
         assert!(matches!(
-            ExtensionManifest::parse(&legacy),
-            Err(ExtensionRuntimeError::InvalidManifest(message)) if message.contains("CLI flags require extension API 0.3")
+            ExtensionManifest::parse(&frozen),
+            Err(ExtensionRuntimeError::InvalidManifest(message)) if message.contains("CLI flags require extension API 0.2 or later")
         ));
 
         let wrong_type = source.replace("default = 2", "default = \"two\"");
@@ -16052,6 +20967,111 @@ flags = [
     }
 
     #[test]
+    fn api_v02_initialize_projects_flag_values_and_api_v01_stays_unchanged() {
+        let values = BTreeMap::from([
+            ("count".to_owned(), serde_json::json!(7)),
+            ("enabled".to_owned(), serde_json::json!(true)),
+            ("label".to_owned(), serde_json::json!("host-resolved")),
+        ]);
+
+        // API 0.2 carries the declared flag values; they are ordered by name.
+        let projected = projected_initialize_flag_values(EXTENSION_API_VERSION_0_2, &values)
+            .expect("bounded projection")
+            .expect("API 0.2 carries flag values");
+        assert_eq!(
+            projected,
+            vec![
+                api_v03::InitializeFlagValue {
+                    name: "count".into(),
+                    value: serde_json::json!(7),
+                },
+                api_v03::InitializeFlagValue {
+                    name: "enabled".into(),
+                    value: serde_json::json!(true),
+                },
+                api_v03::InitializeFlagValue {
+                    name: "label".into(),
+                    value: serde_json::json!("host-resolved"),
+                },
+            ]
+        );
+
+        // API 0.1 and API 0.3 never use the 0.2 projection.
+        assert!(
+            projected_initialize_flag_values(EXTENSION_API_VERSION_0_1, &values)
+                .expect("ok")
+                .is_none()
+        );
+        assert!(
+            projected_initialize_flag_values(EXTENSION_API_VERSION_0_3, &values)
+                .expect("ok")
+                .is_none()
+        );
+
+        // Over-bound string value is refused, never truncated silently.
+        let oversized = BTreeMap::from([(
+            "label".to_owned(),
+            serde_json::json!("x".repeat(MAX_EXTENSION_FLAG_STRING_BYTES + 1)),
+        )]);
+        assert!(matches!(
+            projected_initialize_flag_values(EXTENSION_API_VERSION_0_2, &oversized),
+            Err(ExtensionRuntimeError::Protocol(message)) if message.contains("exceeds")
+        ));
+
+        // An unmodeled value kind is refused rather than coerced.
+        let invalid = BTreeMap::from([("count".to_owned(), serde_json::json!(["seven"]))]);
+        assert!(matches!(
+            projected_initialize_flag_values(EXTENSION_API_VERSION_0_2, &invalid),
+            Err(ExtensionRuntimeError::Protocol(message)) if message.contains("cannot be projected")
+        ));
+
+        // Too many flags are refused up front.
+        let many = (0..=MAX_EXTENSION_FLAGS)
+            .map(|index| (format!("flag{index}"), serde_json::json!(true)))
+            .collect::<BTreeMap<_, _>>();
+        assert!(matches!(
+            projected_initialize_flag_values(EXTENSION_API_VERSION_0_2, &many),
+            Err(ExtensionRuntimeError::Protocol(message)) if message.contains("limit is")
+        ));
+
+        // The initialize field is additive and optional: absent when there are
+        // no flags (and always for API 0.1), present when there are.
+        let base = || InitializeRequest {
+            api_version: EXTENSION_API_VERSION_0_2.to_owned(),
+            octet_version: "0.0.0".to_owned(),
+            extension: ExtensionIdentity {
+                name: "flag-fixture".into(),
+                version: "0.1.0".into(),
+                manifest_path: PathBuf::from("/test/extension.toml"),
+                source: ExtensionSource::Explicit,
+            },
+            workspace: PathBuf::from("/test/workspace"),
+            capabilities: ExtensionCapabilities::default(),
+            contributes: ManifestContributions::default(),
+            host: ExtensionHostState::default(),
+            flag_values: None,
+            protocol: None,
+        };
+        let absent = serde_json::to_value(base()).expect("serialize");
+        assert!(
+            absent.get("flag_values").is_none(),
+            "an API 0.2 host with no flags stays wire-identical: {absent}"
+        );
+        let present = serde_json::to_value(InitializeRequest {
+            flag_values: Some(vec![api_v03::InitializeFlagValue {
+                name: "enabled".into(),
+                value: serde_json::json!(true),
+            }]),
+            ..base()
+        })
+        .expect("serialize");
+        assert_eq!(
+            present["flag_values"],
+            serde_json::json!([{"name": "enabled", "value": true}])
+        );
+    }
+
+    #[test]
     fn extension_provider_protocols_reject_native_unmodeled_routes() {
         assert_eq!(
             provider_protocol_name(Protocol::OpenAiChat),
@@ -16067,6 +21087,7 @@ flags = [
         );
         assert_eq!(provider_protocol_name(Protocol::BedrockConverse), None);
         assert_eq!(provider_protocol_name(Protocol::GoogleGenerativeAi), None);
+        assert_eq!(provider_protocol_name(Protocol::MistralConversations), None);
     }
 
     #[test]
@@ -16334,6 +21355,114 @@ flags = [
     }
 
     #[test]
+    fn api_0_4_is_the_union_version_on_the_legacy_wire() {
+        // API 0.4 validates the whole contribution union in one manifest:
+        // tools, commands, shortcuts, mixed hooks, UI surfaces, notifications,
+        // confirmations, presentation, provider catalogs, and CLI flags.
+        let source = r#"name = "union-fixture"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "union-fixture"
+[contributes]
+tools = ["echo"]
+commands = ["checkpoint"]
+shortcuts = [{ key = "ctrl+shift+p", name = "open_panel", description = "Open the panel" }]
+hooks = ["session_start", "provider_retry", "post_mutation", "before_prompt"]
+ui = ["status", "header", "footer"]
+context = true
+tool_renderers = ["echo"]
+notifications = true
+confirmations = true
+presentation = true
+providers = true
+flags = [{ name = "enabled", type = "boolean", default = true }]
+"#;
+        let manifest = ExtensionManifest::parse(source).expect("API 0.4 accepts the union");
+        assert_eq!(manifest.api_version, EXTENSION_API_VERSION_0_4);
+        assert!(manifest.contributes.providers);
+        assert!(manifest.contributes.presentation);
+        assert_eq!(manifest.contributes.ui.len(), 3);
+
+        // API 0.4 rides the API 0.2 feature-negotiation wire: every version above
+        // the frozen API 0.1 text contract is stateful, API 0.4 is not canonical,
+        // and only API 0.3 keeps the canonical wire.
+        assert!(is_stateful_api(EXTENSION_API_VERSION_0_4));
+        assert!(uses_api_0_2_capabilities(EXTENSION_API_VERSION_0_4));
+        assert!(!is_canonical_api(EXTENSION_API_VERSION_0_4));
+        assert!(!is_stateful_api(EXTENSION_API_VERSION_0_1));
+        assert!(!uses_api_0_2_capabilities(EXTENSION_API_VERSION_0_1));
+        assert!(is_canonical_api(EXTENSION_API_VERSION_0_3));
+
+        // Real host flag projection reaches an API 0.4 process.
+        let values = BTreeMap::from([("enabled".to_owned(), serde_json::json!(true))]);
+        let projected = projected_initialize_flag_values(EXTENSION_API_VERSION_0_4, &values)
+            .expect("API 0.4 flag projection is bounded")
+            .expect("API 0.4 projects declared flags");
+        assert_eq!(projected.len(), 1);
+        assert!(
+            projected_initialize_flag_values(EXTENSION_API_VERSION_0_1, &values)
+                .expect("API 0.1 has no projection")
+                .is_none()
+        );
+
+        // The legacy negotiator accepts an API 0.4 handshake that echoes 0.4 and
+        // records the union under a 0.4 negotiated version.
+        let response = InitializeResponse {
+            api_version: EXTENSION_API_VERSION_0_4.into(),
+            tools: vec![ToolDefinition {
+                name: "echo".into(),
+                description: "Echo".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                output_schema: Some(serde_json::json!({"type": "object"})),
+            }],
+            commands: vec![CommandDefinition {
+                name: "checkpoint".into(),
+                description: "Checkpoint".into(),
+                usage: None,
+            }],
+            tool_renderers: Vec::new(),
+            shortcuts: manifest.contributes.shortcuts.clone(),
+            protocol: Some(ExtensionProtocolResponse {
+                version: EXTENSION_API_VERSION_0_4.into(),
+                features: API_0_2_REQUIRED_FEATURES
+                    .iter()
+                    .map(|feature| (*feature).to_owned())
+                    .collect(),
+                limits: ExtensionProtocolLimits {
+                    max_concurrent_requests: 4,
+                },
+                lifecycle_events: Vec::new(),
+            }),
+        };
+        let (contributions, protocol) = negotiate_contributions_with_host_services(
+            &manifest,
+            response.clone(),
+            DEFAULT_PENDING_REQUESTS,
+            OfferedHostServices::default(),
+        )
+        .expect("API 0.4 negotiates on the legacy wire");
+        assert_eq!(protocol.version, EXTENSION_API_VERSION_0_4);
+        assert!(contributions.presentation);
+
+        // A handshake that claims a different version than its manifest is refused.
+        let mut mismatched = response;
+        mismatched.api_version = EXTENSION_API_VERSION_0_2.into();
+        if let Some(protocol) = mismatched.protocol.as_mut() {
+            protocol.version = EXTENSION_API_VERSION_0_2.into();
+        }
+        assert!(matches!(
+            negotiate_contributions_with_host_services(
+                &manifest,
+                mismatched,
+                DEFAULT_PENDING_REQUESTS,
+                OfferedHostServices::default(),
+            ),
+            Err(ExtensionRuntimeError::UnsupportedApiVersion { .. })
+        ));
+    }
+
+    #[test]
     fn shortcut_contributions_must_match_initialize_and_respect_bounds() {
         let manifest_source = r#"name = "shortcut-test"
 version = "0.1.0"
@@ -16344,18 +21473,21 @@ command = "shortcut-test"
 shortcuts = [{ key = "ctrl+shift+p", name = "open_panel", description = "Open the panel" }]
 "#;
         let manifest = ExtensionManifest::parse(manifest_source).unwrap();
-        for (version, expected_error) in [
-            ("0.1", "shortcuts require extension API 0.2"),
-            ("0.3", "shortcuts are not yet supported"),
-        ] {
-            let unsupported = manifest_source.replace(
+        let unsupported = manifest_source.replace("api_version = \"0.2\"", "api_version = \"0.1\"");
+        assert!(matches!(
+            ExtensionManifest::parse(&unsupported),
+            Err(ExtensionRuntimeError::InvalidManifest(message))
+                if message.contains("shortcuts require extension API 0.2")
+        ));
+        // API 0.4 folds API 0.3, so shortcuts are an ordinary declaration on
+        // every version above the frozen API 0.1 text contract.
+        for version in ["0.2", "0.3", "0.4"] {
+            let supported = manifest_source.replace(
                 "api_version = \"0.2\"",
                 &format!("api_version = \"{version}\""),
             );
-            assert!(matches!(
-                ExtensionManifest::parse(&unsupported),
-                Err(ExtensionRuntimeError::InvalidManifest(message)) if message.contains(expected_error)
-            ));
+            ExtensionManifest::parse(&supported)
+                .unwrap_or_else(|error| panic!("API {version} must accept shortcuts: {error}"));
         }
         let response = |shortcuts: Vec<ShortcutDefinition>| InitializeResponse {
             api_version: EXTENSION_API_VERSION_0_2.into(),
@@ -16753,6 +21885,276 @@ providers = true
             !registry.route_is_active(&route),
             "the original route must be stale after the extension update"
         );
+        assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn late_provider_registration_does_not_disturb_an_in_flight_request() {
+        let temp = TempDir::new().expect("tempdir");
+        let script_path = temp.path().join("late-provider-stream.py");
+        write_executable_script(
+            &script_path,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def receive():
+    line = sys.stdin.readline()
+    assert line, "host closed stdin"
+    value = json.loads(line)
+    assert line.rstrip("\n") == canonical(value), line
+    return value
+
+
+def send(value):
+    sys.stdout.write(canonical(value) + "\n")
+    sys.stdout.flush()
+
+
+def provider(provider_id, model_id):
+    return {
+        "provider": {
+            "id": provider_id,
+            "label": provider_id + " provider",
+            "auth": {"kind": "none"},
+        },
+        "models": [{
+            "id": model_id,
+            "api_name": model_id,
+            "protocol": "openai_chat",
+            "context_window": 8192,
+            "max_output_tokens": 1024,
+            "capabilities": {
+                "tools": False,
+                "parallel_tool_calls": False,
+                "structured_output": False,
+                "reasoning": False,
+            },
+        }],
+    }
+
+
+def reverse_request(identifier, method, params):
+    send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+    response = receive()
+    assert response.get("id") == identifier and "result" in response, response
+    return response["result"]
+
+
+def stream(stream_id, text):
+    events = [
+        ("started", {"response_id": stream_id + "-response"}),
+        ("text_start", {"index": 0}),
+        ("text_delta", {"index": 0, "delta": text}),
+        ("text_end", {"index": 0}),
+        ("finished", {"stop_reason": "stop"}),
+    ]
+    for sequence, (kind, payload) in enumerate(events):
+        send({
+            "jsonrpc": "2.0",
+            "method": "provider/event",
+            "params": {
+                "stream_id": stream_id,
+                "sequence": sequence,
+                "kind": kind,
+                "payload": payload,
+            },
+        })
+
+
+initialize = receive()
+assert initialize["method"] == "initialize", initialize
+contract = initialize["params"]["contract"]
+provider_capabilities = {"provider_catalog", "provider_stream", "provider_auth"}
+provider_methods = {
+    "providers/complete",
+    "providers/register",
+    "providers/update",
+    "providers/unregister",
+    "provider/stream",
+    "provider/event",
+    "provider/cancel",
+    "provider/auth/request",
+    "provider/auth/revoke",
+}
+selection = {
+    "schema": contract["schema"],
+    "encoding": contract["encoding"],
+    "capabilities": [
+        capability
+        for capability in contract["required_capabilities"] + contract["optional_capabilities"]
+        if capability in contract["required_capabilities"] or capability in provider_capabilities
+    ],
+    "methods": [
+        method
+        for method in contract["required_methods"] + contract["optional_methods"]
+        if method in contract["required_methods"] or method in provider_methods
+    ],
+    "limits": contract["limits"],
+}
+send({
+    "jsonrpc": "2.0",
+    "id": initialize["id"],
+    "result": {"api_version": "0.3", "tools": [], "contract": selection},
+})
+reverse_request("initial-register", "providers/register", provider("alpha", "alpha-model"))
+send({"jsonrpc": "2.0", "method": "providers/complete", "params": {}})
+
+while True:
+    message = receive()
+    method = message.get("method")
+    if method == "provider/stream":
+        params = message["params"]
+        if params["provider_id"] == "alpha":
+            # Publish a second provider while alpha's request is already in
+            # flight. The accepted request must keep streaming.
+            reverse_request("late-register", "providers/register", provider("beta", "beta-model"))
+        send({
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {"stream_id": params["stream_id"], "accepted": True},
+        })
+        stream(params["stream_id"], params["provider_id"] + " is live")
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"terminal": "shutdown"}})
+        break
+    else:
+        raise AssertionError(message)
+"#,
+        );
+        let manifest = ExtensionManifest::parse(
+            r#"name = "late-provider-stream"
+version = "0.3.0"
+api_version = "0.3"
+[entrypoint]
+command = "late-provider-stream.py"
+[contributes]
+providers = true
+"#,
+        )
+        .expect("API 0.3 provider manifest");
+        let registry = Arc::new(ExtensionProviderRegistry::new());
+        let mut runtime = ExtensionRuntimeConfig::new(temp.path());
+        runtime.provider_registry = Some(Arc::clone(&registry));
+        let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), runtime)
+            .await
+            .expect("start late-provider fixture");
+        let route = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(route) = registry.resolve("alpha", "alpha-model") {
+                    break route;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("initial provider route");
+
+        let transport = process.provider_stream_transport("alpha", "alpha-model");
+        let mut response = transport
+            .stream(
+                HostStreamModel {
+                    id: octet_ai::ModelId("alpha/alpha-model".into()),
+                    protocol: Protocol::OpenAiChat,
+                    pricing: None,
+                },
+                octet_ai::Request {
+                    system: None,
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                    tool_choice: Default::default(),
+                    max_output_tokens: None,
+                    temperature: None,
+                    stop: Vec::new(),
+                    reasoning: Default::default(),
+                    reasoning_mode: Default::default(),
+                    responses: None,
+                    output_format: Default::default(),
+                    output_modalities: Default::default(),
+                    compatibility: Default::default(),
+                    cache_retention: Default::default(),
+                    session_id: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .expect("the in-flight request is accepted while beta is registered");
+
+        let mut text = String::new();
+        let finished = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match futures_util::StreamExt::next(&mut response).await {
+                    Some(Ok(StreamEvent::TextDelta { delta, .. })) => text.push_str(&delta),
+                    Some(Ok(StreamEvent::Finished(response))) => break Some(response),
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => panic!("canonical stream event failed: {error}"),
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .expect("the in-flight stream settled")
+        .expect("the in-flight stream finished");
+        assert_eq!(text, "alpha is live");
+        assert_eq!(finished.stop_reason, StopReason::EndTurn);
+        assert!(
+            registry.route_is_active(&route),
+            "an unrelated late registration must not invalidate the in-flight route"
+        );
+        assert!(
+            registry.resolve("beta", "beta-model").is_some(),
+            "the late declaration is available to the same session"
+        );
+
+        // The late provider is immediately usable: the next request routes to it.
+        let beta_transport = process.provider_stream_transport("beta", "beta-model");
+        let mut beta_response = beta_transport
+            .stream(
+                HostStreamModel {
+                    id: octet_ai::ModelId("beta/beta-model".into()),
+                    protocol: Protocol::OpenAiChat,
+                    pricing: None,
+                },
+                octet_ai::Request {
+                    system: None,
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                    tool_choice: Default::default(),
+                    max_output_tokens: None,
+                    temperature: None,
+                    stop: Vec::new(),
+                    reasoning: Default::default(),
+                    reasoning_mode: Default::default(),
+                    responses: None,
+                    output_format: Default::default(),
+                    output_modalities: Default::default(),
+                    compatibility: Default::default(),
+                    cache_retention: Default::default(),
+                    session_id: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .expect("the late provider accepts a request");
+        let mut beta_text = String::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = futures_util::StreamExt::next(&mut beta_response).await {
+                match event.expect("canonical stream event") {
+                    StreamEvent::TextDelta { delta, .. } => beta_text.push_str(&delta),
+                    StreamEvent::Finished(_) => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the late provider stream settled");
+        assert_eq!(beta_text, "beta is live");
         assert!(process.shutdown().await);
     }
 
@@ -17252,6 +22654,7 @@ command = "frame-limit.py"
                 line: oversized,
                 state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                 completion: Some(completion_tx),
+                bus_delivery: None,
             })
             .await
             .expect("queue oversized buffered frame");
@@ -17596,9 +22999,16 @@ command = "agent-service"
             ),
             Err(ExtensionRuntimeError::Protocol(message)) if message.contains("agent_sessions")
         ));
+        let mut routing_response = response();
+        routing_response
+            .protocol
+            .as_mut()
+            .unwrap()
+            .features
+            .push(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1.into());
         let (_, protocol) = negotiate_contributions_with_host_services(
             &manifest,
-            response(),
+            routing_response.clone(),
             DEFAULT_PENDING_REQUESTS,
             OfferedHostServices {
                 agent_sessions: true,
@@ -17607,6 +23017,17 @@ command = "agent-service"
         )
         .unwrap();
         assert!(protocol.supports(EXTENSION_FEATURE_AGENT_SESSIONS));
+        assert!(protocol.supports(EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1));
+        routing_response
+            .protocol
+            .as_mut()
+            .unwrap()
+            .features
+            .retain(|f| f != EXTENSION_FEATURE_AGENT_SESSIONS);
+        assert!(matches!(negotiate_contributions_with_host_services(
+            &manifest, routing_response, DEFAULT_PENDING_REQUESTS,
+            OfferedHostServices { agent_sessions: true, ..OfferedHostServices::default() },
+        ), Err(ExtensionRuntimeError::Protocol(message)) if message.contains("requires agent_sessions")));
     }
 
     #[test]
@@ -18317,7 +23738,18 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
         let process = ExtensionProcess::start(descriptor, ExtensionRuntimeConfig::new(temp.path()))
             .await
             .expect("start process");
+        assert!(!process.supports_feature("old-generation-sentinel"));
+        // A synthetic feature on the old connection proves the query does not
+        // capture initialization or an old generation's cloned feature set.
+        {
+            let connection = read_std_lock(&process.inner.connection);
+            write_std_lock(&connection.protocol)
+                .features
+                .insert("old-generation-sentinel".into());
+        }
+        assert!(process.supports_feature("old-generation-sentinel"));
         let report = process.reload().await.expect("reload");
+        assert!(!process.supports_feature("old-generation-sentinel"));
         assert_eq!(report.generation, 2);
         assert!(report.previous_shutdown_graceful);
         assert!(process.is_running());
@@ -18350,8 +23782,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
             .acquire_request_admission()
             .expect("admit before drain");
         let drain_connection = Arc::clone(&connection);
-        let mut drain =
-            tokio::spawn(async move { drain_connection.drain(Duration::from_secs(1)).await });
+        let mut drain = tokio::spawn(async move {
+            drain_connection
+                .drain(Duration::from_secs(1), "reload drain deadline")
+                .await
+        });
 
         assert!(
             tokio::time::timeout(Duration::from_millis(25), &mut drain)
@@ -18365,6 +23800,105 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
             .expect("drain did not observe admission release")
             .expect("drain task failed"));
         assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_shutdown_preserves_each_pending_method_and_wire_envelope() {
+        let temp = TempDir::new().expect("tempdir");
+        let script_path = temp.path().join("cancel-methods.sh");
+        write_executable_script(
+            &script_path,
+            r#"#!/bin/sh
+IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.1","tools":[],"commands":[]}}'
+IFS= read -r first
+IFS= read -r second
+printf '%s\n%s\n' "$first" "$second" > "$OCTET_WORKSPACE/requests.jsonl"
+IFS= read -r shutdown
+case "$shutdown" in
+  *'"method":"shutdown"'*) printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{}}' ;;
+  *) exit 23 ;;
+esac
+"#,
+        );
+        let descriptor = trusted_descriptor(
+            temp.path(),
+            minimal_manifest("cancel-methods", "cancel-methods.sh"),
+        );
+        let process = ExtensionProcess::start(descriptor, ExtensionRuntimeConfig::new(temp.path()))
+            .await
+            .expect("start process");
+        let connection = read_std_lock(&process.inner.connection).clone();
+        let methods = [methods::TOOL_CALL, methods::COMMAND_EXECUTE];
+        let calls = methods.map(|method| {
+            let connection = Arc::clone(&connection);
+            tokio::spawn(async move {
+                connection
+                    .request(
+                        method,
+                        serde_json::json!({"marker": method}),
+                        Duration::from_secs(5),
+                    )
+                    .await
+            })
+        });
+        // Wait for both writes, not a scheduling delay or just queued frames:
+        // cancellation may legitimately skip a frame not yet sent to the child.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let written = {
+                    let pending = lock_std_mutex(&connection.pending);
+                    pending.len() == 2
+                        && pending.values().all(|request| {
+                            request.frame_state.load(Ordering::Acquire) == FRAME_WRITTEN
+                        })
+                };
+                if written {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both requests must be written before shutdown");
+
+        assert!(process.shutdown().await);
+        for (expected_method, call) in methods.into_iter().zip(calls) {
+            match call.await.expect("request task") {
+                Err(ExtensionRuntimeError::Cancelled { method, reason }) => {
+                    assert_eq!(method, expected_method);
+                    assert_eq!(reason, "shutdown");
+                }
+                other => panic!("expected pending cancellation, got {other:?}"),
+            }
+        }
+        assert!(lock_std_mutex(&connection.pending).is_empty());
+
+        let captured = std::fs::read_to_string(temp.path().join("requests.jsonl"))
+            .expect("captured legacy requests");
+        let frames = captured
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("request envelope"))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["id"], 2);
+        assert_eq!(frames[1]["id"], 3);
+        for method in methods {
+            let frame = frames
+                .iter()
+                .find(|frame| frame["method"] == method)
+                .expect("original method on the wire");
+            assert_eq!(
+                *frame,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": frame["id"],
+                    "method": method,
+                    "params": {"marker": method},
+                })
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -18912,6 +24446,7 @@ def send(value):
 
 
 initialize = receive()
+assert initialize["params"]["protocol"]["version"] == "0.2", initialize
 assert "runtime_commands" in initialize["params"]["protocol"]["optional_features"], initialize
 send({
     "jsonrpc": "2.0",
@@ -19077,6 +24612,87 @@ shortcuts = [{ key = "ctrl+shift+p", name = "toggle-panel", description = "Toggl
             .await
             .unwrap();
         assert_eq!(output.text, "shortcut executed");
+        assert!(process.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_catalog_rejects_prospective_schema_overflow_without_publication() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("schema-budget.py");
+        write_executable_script(
+            &script_path,
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+def receive():
+    line = sys.stdin.readline()
+    assert line, "host closed stdin"
+    return json.loads(line)
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+initialize = receive()
+send({"jsonrpc":"2.0", "id":initialize["id"], "result": {
+    "api_version":"0.2", "tools":[], "commands":[],
+    "protocol":{"version":"0.2", "features":["request_cancellation", "content_parts", "dynamic_tools"],
+                "limits":{"max_concurrent_requests":1}}
+}})
+for index in range(7):
+    schema = {"type":"object", "description":"x" * 300000}
+    tool = {"name":"bulk_" + str(index), "description":"bounded", "parameters":schema, "output_schema":schema}
+    send({"jsonrpc":"2.0", "id":"catalog-" + str(index), "method":"tools/register", "params":{"tools":[tool]}})
+    ack = receive()
+    if index < 6:
+        assert ack["result"]["revision"] == index + 1, ack
+        assert ack["result"]["tools"] == ["bulk_" + str(i) for i in range(index + 1)], ack
+    else:
+        assert ack["error"]["code"] == -32602, ack
+        assert "aggregate schema bytes" in ack["error"]["message"], ack
+with open(os.path.join(os.environ["OCTET_WORKSPACE"], "catalog-checked"), "w") as marker:
+    marker.write("checked")
+shutdown = receive()
+assert shutdown["method"] == "shutdown", shutdown
+send({"jsonrpc":"2.0", "id":shutdown["id"], "result":{}})
+"#,
+        );
+        let manifest = ExtensionManifest::parse(
+            r#"name = "schema-budget"
+version = "0.2.0"
+api_version = "0.2"
+[entrypoint]
+command = "schema-budget.py"
+"#,
+        )
+        .unwrap();
+        let process = ExtensionProcess::start(
+            trusted_descriptor(temp.path(), manifest),
+            ExtensionRuntimeConfig::new(temp.path()),
+        )
+        .await
+        .unwrap();
+        let mut host = ExtensionHost::new();
+        host.load(&process);
+        host.finalize_tool_surface();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !temp.path().join("catalog-checked").exists() {
+                assert!(
+                    process.is_running(),
+                    "fixture exited before verifying acknowledgements"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("bounded catalog mutation completion");
+        assert_eq!(host.tool_definitions().len(), 6);
+        {
+            let connection = read_std_lock(&process.inner.connection);
+            assert_eq!(connection.catalog_revision.load(Ordering::Acquire), 6);
+        }
         assert!(process.shutdown().await);
     }
 

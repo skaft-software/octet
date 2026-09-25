@@ -10,12 +10,12 @@ use super::{fit_line, semantic_separator, wrap_hanging, ShellState};
 #[derive(Clone)]
 pub(super) struct ShellChrome {
     pub(super) header: Vec<String>,
-    pub(super) subagents: Vec<String>,
     pub(super) extension_above: Vec<String>,
     pub(super) composer: Vec<String>,
     pub(super) extension_below: Vec<String>,
     pub(super) panel: Vec<String>,
     pub(super) pending: Vec<String>,
+    pub(super) subagents: Vec<String>,
     pub(super) suggestions: Vec<String>,
     pub(super) error: Vec<String>,
     pub(super) transcript_rows: usize,
@@ -94,10 +94,15 @@ fn render_extension_line(state: &ShellState, text: &str, role: Option<&str>, wid
 fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<String>) {
     let mut above = state
         .extension_ui
-        .above_editor
+        .header
         .iter()
         .map(|line| render_extension_line(state, &line.text, line.style_role.as_deref(), width))
         .collect::<Vec<_>>();
+    above.extend(
+        state.extension_ui.above_editor.iter().map(|line| {
+            render_extension_line(state, &line.text, line.style_role.as_deref(), width)
+        }),
+    );
     above.extend(
         state.extension_ui.statuses.iter().map(|line| {
             render_extension_line(state, &line.text, line.style_role.as_deref(), width)
@@ -131,222 +136,18 @@ fn render_extension_ui(state: &ShellState, width: u16) -> (Vec<String>, Vec<Stri
             ));
         }
     }
-    let below = state
+    let mut below = state
         .extension_ui
         .below_editor
         .iter()
         .map(|line| render_extension_line(state, &line.text, line.style_role.as_deref(), width))
-        .collect();
+        .collect::<Vec<_>>();
+    below.extend(
+        state.extension_ui.footer.iter().map(|line| {
+            render_extension_line(state, &line.text, line.style_role.as_deref(), width)
+        }),
+    );
     (above, below)
-}
-
-fn render_subagent_activity(state: &ShellState, width: u16) -> Vec<String> {
-    // Delegated workers now render as persistent transcript tool blocks. Keep
-    // this compatibility path empty so older shell-chrome callers cannot
-    // duplicate the event below the transcript.
-    if state.subagent_activity_block.is_some() {
-        return Vec::new();
-    }
-    let Some(view) = state.subagent_activity.as_ref() else {
-        return Vec::new();
-    };
-    let status_label = view.status_label.clone();
-    let mut lines = vec![fit_line(
-        &state.theme.bold(
-            &state
-                .theme
-                .fg("model_accent", &sanitize_for_terminal(&status_label)),
-        ),
-        width,
-    )];
-    let unicode = state.theme.unicode();
-    // The host bounds the roster, so keep every worker visible even while
-    // ordinary tool disclosure is collapsed.
-    if !view.telemetry.is_empty() {
-        let children = &view.telemetry;
-        for (index, child) in children.iter().rev().enumerate() {
-            let last = index + 1 == children.len();
-            let branch = match (unicode, last) {
-                (true, true) => "└",
-                (true, false) => "├",
-                (false, true) => "\\",
-                (false, false) => "+",
-            };
-            let continuation = if last {
-                "  "
-            } else if unicode {
-                "│ "
-            } else {
-                "| "
-            };
-            let phase = child
-                .current_tool
-                .as_deref()
-                .or_else(|| (!child.phase.is_empty()).then_some(child.phase.as_str()));
-            let summary = match phase {
-                Some(phase) if !matches!(child.state.as_str(), "completed" | "failed") => {
-                    format!("{} · {}", child.task_name, phase.replace('_', " "))
-                }
-                _ => child.task_name.clone(),
-            };
-            let input = child
-                .input_tokens
-                .saturating_add(child.cache_read_tokens)
-                .saturating_add(child.cache_write_tokens);
-            let calls = if child.tool_use_count == 1 {
-                "1 Tool Call".to_owned()
-            } else {
-                format!("{} Tool Calls", child.tool_use_count)
-            };
-            let mut telemetry = if unicode {
-                format!(
-                    "{calls} • ↑{} ↓{}",
-                    crate::tui::composer_surface::compact_token_count(input),
-                    crate::tui::composer_surface::compact_token_count(child.output_tokens),
-                )
-            } else {
-                format!(
-                    "{calls} - in {} out {}",
-                    crate::tui::composer_surface::compact_token_count(input),
-                    crate::tui::composer_surface::compact_token_count(child.output_tokens),
-                )
-            };
-            if let Some(cost) = child.cost_microdollars {
-                telemetry.push_str(if unicode { " • " } else { " - " });
-                telemetry.push_str(&crate::tui::composer_surface::format_microdollars(cost));
-            }
-            lines.push(fit_line(
-                &format!(
-                    "{} {}",
-                    state.theme.fg("muted", branch),
-                    state
-                        .theme
-                        .fg("foreground", &sanitize_for_terminal(&summary))
-                ),
-                width,
-            ));
-            let detail = if let Some(reason) = child.failure_reason.as_deref() {
-                format!("Failed: {}", sanitize_for_terminal(reason))
-            } else if child.state == "completed" {
-                format!("Done · {telemetry}")
-            } else if let Some(tool) = child.current_tool.as_deref() {
-                sanitize_for_terminal(tool)
-            } else {
-                telemetry.clone()
-            };
-            lines.push(fit_line(
-                &format!(
-                    "{}{} {}",
-                    state.theme.fg("muted", continuation),
-                    state.theme.fg("muted", if unicode { "└" } else { "|_" }),
-                    state.theme.fg("muted", &detail),
-                ),
-                width,
-            ));
-            if child.failure_reason.is_none() && child.state != "completed" {
-                lines.push(fit_line(
-                    &format!(
-                        "{}{} {}",
-                        state.theme.fg("muted", continuation),
-                        state.theme.fg("muted", if unicode { "·" } else { "-" }),
-                        state.theme.fg("muted", &telemetry),
-                    ),
-                    width,
-                ));
-            }
-        }
-        if let Some(reason) = view.failure_reason.as_deref() {
-            lines.push(fit_line(
-                &format!(
-                    "{} {}",
-                    state.theme.fg("error", if unicode { "└" } else { "|_" }),
-                    state.theme.fg(
-                        "error",
-                        &format!("Failed: {}", sanitize_for_terminal(reason)),
-                    )
-                ),
-                width,
-            ));
-        }
-    } else if let Some(reason) = view.failure_reason.as_deref() {
-        lines.push(fit_line(
-            &format!(
-                "{} {}",
-                state.theme.fg("error", if unicode { "└" } else { "|_" }),
-                state.theme.fg(
-                    "error",
-                    &format!("Failed: {}", sanitize_for_terminal(reason))
-                )
-            ),
-            width,
-        ));
-    } else {
-        let activities = &view.activities;
-        for (index, activity) in activities.iter().rev().enumerate() {
-            let last = index + 1 == activities.len();
-            let branch = match (unicode, last) {
-                (true, true) => "└",
-                (true, false) => "├",
-                (false, true) => "\\",
-                (false, false) => "+",
-            };
-            let continuation = if last {
-                "  "
-            } else if unicode {
-                "│ "
-            } else {
-                "| "
-            };
-            lines.push(fit_line(
-                &format!(
-                    "{} {}",
-                    state.theme.fg("muted", branch),
-                    state
-                        .theme
-                        .fg("foreground", &sanitize_for_terminal(&activity.summary))
-                ),
-                width,
-            ));
-            if let Some(metrics) = activity.metrics {
-                let input = metrics
-                    .input_tokens
-                    .saturating_add(metrics.cache_read_tokens)
-                    .saturating_add(metrics.cache_write_tokens);
-                let calls = if metrics.tool_calls == 1 {
-                    "1 Tool Call".to_owned()
-                } else {
-                    format!("{} Tool Calls", metrics.tool_calls)
-                };
-                let mut telemetry = if unicode {
-                    format!(
-                        "{calls} • ↑{} ↓{}",
-                        crate::tui::composer_surface::compact_token_count(input),
-                        crate::tui::composer_surface::compact_token_count(metrics.output_tokens),
-                    )
-                } else {
-                    format!(
-                        "{calls} - in {} out {}",
-                        crate::tui::composer_surface::compact_token_count(input),
-                        crate::tui::composer_surface::compact_token_count(metrics.output_tokens),
-                    )
-                };
-                if let Some(cost) = metrics.cost_microdollars {
-                    telemetry.push_str(if unicode { " • " } else { " - " });
-                    telemetry.push_str(&crate::tui::composer_surface::format_microdollars(cost));
-                }
-                lines.push(fit_line(
-                    &format!(
-                        "{}{} {}",
-                        state.theme.fg("muted", continuation),
-                        state.theme.fg("muted", if unicode { "└" } else { "|_" }),
-                        state.theme.fg("muted", &telemetry),
-                    ),
-                    width,
-                ));
-            }
-        }
-    }
-    lines
 }
 
 pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> ShellChrome {
@@ -382,10 +183,12 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         .unwrap_or_default();
 
     if state.startup_pending {
-        // Only the current startup input owner is meaningful before readiness.
-        // Pickers own their own cursor; credential/endpoint prompts use the
-        // existing temporary composer, without its provisional model footer.
-        let mut composer = if state.tool_input_prompt.is_some() {
+        // Pickers own their own cursor. Lifecycle waits own the ordinary draft,
+        // and credential/endpoint prompts own the temporary composer. Neither
+        // should expose a provisional model footer before launch readiness.
+        let mut composer = if state.tool_input_prompt.is_some()
+            || (state.panel.is_none() && state.overlay.is_none())
+        {
             let mut lines =
                 crate::tui::composer_surface::render_composer_surface(state, width, now);
             if crate::tui::composer_surface::status_footer_visible(state, width) {
@@ -396,7 +199,6 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
             Vec::new()
         };
         let rows = usize::from(state.size.1.max(1));
-        composer.truncate(rows);
         let header = if !state.run_label.is_empty() && state.panel.is_none() {
             vec![fit_line(
                 &state.theme.dim(&sanitize_for_terminal(&state.run_label)),
@@ -405,6 +207,7 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         } else {
             Vec::new()
         };
+        composer.truncate(rows.saturating_sub(header.len()));
         error.truncate(
             rows.saturating_sub(header.len() + composer.len() + usize::from(state.panel.is_some())),
         );
@@ -416,10 +219,10 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
             composer,
             transcript_rows: remaining.saturating_sub(panel.len()),
             panel,
-            subagents: Vec::new(),
             extension_above: Vec::new(),
             extension_below: Vec::new(),
             pending: Vec::new(),
+            subagents: Vec::new(),
             suggestions: Vec::new(),
         };
     }
@@ -428,26 +231,20 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
     // Autocomplete can claim that row below once we know it has real matches.
     let footer_visible = crate::tui::composer_surface::status_footer_visible(state, width);
     let mut composer = crate::tui::composer_surface::render_composer_surface(state, width, now);
-    let mut subagents = if state.panel.is_none() {
-        render_subagent_activity(state, width)
-    } else {
-        Vec::new()
-    };
+    if state.transcript_search_active() {
+        // The query, not a tall hidden draft/error, owns the only cursor.
+        composer.truncate(rows.saturating_sub(header.len() + 2));
+        error.truncate(rows.saturating_sub(header.len() + composer.len() + 2));
+    }
     let (mut extension_above, mut extension_below) = if state.panel.is_none() {
         render_extension_ui(state, width)
     } else {
         (Vec::new(), Vec::new())
     };
-    let subagent_limit = rows.saturating_sub(header.len() + error.len() + composer.len() + 1);
-    // The roster is bounded by the host's eight-concurrent-children cap, but
-    // each child renders several rows, so only the viewport bounds how much
-    // of the strip shows.
-    subagents.truncate(subagent_limit);
     let extension_limit = rows.saturating_sub(
         header
             .len()
             .saturating_add(error.len())
-            .saturating_add(subagents.len())
             .saturating_add(composer.len())
             .saturating_add(1),
     );
@@ -468,13 +265,16 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
         header
             .len()
             .saturating_add(error.len())
-            .saturating_add(subagents.len())
             .saturating_add(extension_above.len())
             .saturating_add(composer.len())
             .saturating_add(extension_below.len()),
     );
 
-    let panel = render_panel_with_limit(state, width, remaining);
+    let panel = if state.transcript_search_active() {
+        state.transcript_search_panel(width, remaining)
+    } else {
+        render_panel_with_limit(state, width, remaining)
+    };
     remaining = remaining.saturating_sub(panel.len());
 
     // Let autocomplete reuse the status row, including in a short terminal
@@ -494,14 +294,18 @@ pub(super) fn shell_chrome(state: &ShellState, width: u16, now: Instant) -> Shel
     let pending = render_pending_steering(state, width, pending_limit);
     remaining = remaining.saturating_sub(pending.len());
 
+    // The one orchestration lifecycle is part of the semantic transcript,
+    // never duplicated in pinned composer-adjacent chrome.
+    let subagents = Vec::new();
+
     ShellChrome {
         header,
-        subagents,
         extension_above,
         composer,
         extension_below,
         panel,
         pending,
+        subagents,
         suggestions,
         error,
         transcript_rows: remaining,
@@ -528,8 +332,8 @@ pub(super) fn append_viewport_chrome(lines: &mut Vec<String>, chrome: ShellChrom
     lines.extend(chrome.error);
     lines.extend(chrome.pending);
     lines.extend(chrome.panel);
-    lines.extend(chrome.subagents);
     lines.extend(chrome.extension_above);
+    lines.extend(chrome.subagents);
     lines.extend(chrome.composer);
     lines.extend(chrome.suggestions);
     lines.extend(chrome.extension_below);
@@ -555,8 +359,8 @@ pub(super) fn append_chrome(
     lines.extend(chrome.error);
     lines.extend(chrome.pending);
     lines.extend(chrome.panel);
-    lines.extend(chrome.subagents);
     lines.extend(chrome.extension_above);
+    lines.extend(chrome.subagents);
     lines.extend(chrome.composer);
     // Keep autocomplete adjacent to the composer in terminal-owned mode as
     // well as in the application-owned viewport above.
@@ -568,10 +372,10 @@ pub(super) fn shell_chrome_rows(chrome: &ShellChrome) -> usize {
     chrome
         .header
         .len()
-        .saturating_add(chrome.subagents.len())
         .saturating_add(chrome.extension_above.len())
         .saturating_add(chrome.error.len())
         .saturating_add(chrome.pending.len())
+        .saturating_add(chrome.subagents.len())
         .saturating_add(chrome.suggestions.len())
         .saturating_add(chrome.panel.len())
         .saturating_add(chrome.composer.len())

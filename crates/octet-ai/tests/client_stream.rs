@@ -14,18 +14,20 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use octet_ai::{
     AiClient, AiError, Auth, Capabilities, CompatibilityMode::Strict, Endpoint, EndpointId, Media,
     Message, Modality, ModalitySet, Model, ModelId, ModelLimits, ModelSpec, OutputFormat,
-    OutputModalities, Protocol, ProviderLifecycleState, Request, StreamEvent, UserMessage,
-    UserPart,
+    OutputModalities, Protocol, ProviderLifecycleState, Request, StreamEvent, StreamProtocolError,
+    UserMessage, UserPart,
 };
 
 fn make_test_model(base_url_str: &str, protocol: Protocol, is_audio: bool) -> Model {
     let spec = ModelSpec {
+        preset: Default::default(),
         id: ModelId("test-model".to_string()),
         endpoint: EndpointId("test-ep".to_string()),
         api_name: "gpt-4-test".to_string(),
         display_name: None,
         protocol,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities: ModalitySet::none().with(Modality::Image),
             output_modalities: if is_audio {
                 ModalitySet::none().with(Modality::Audio)
@@ -536,6 +538,9 @@ fn text_request() -> Request {
 enum WebSocketBehavior {
     Complete,
     CloseBeforeEvents,
+    /// The first accepted generation goes half-open before any output; every
+    /// later connection completes normally.
+    StallFirstThenComplete,
     DropAfterOutput,
     CloseAfterOutput,
     InvalidTextAfterOutput,
@@ -681,7 +686,30 @@ async fn handle_test_responses_connection(
 
         match behavior {
             WebSocketBehavior::CloseBeforeEvents => return Ok(()),
+            // `requests` already holds this connection's generation frame, so a
+            // count of one means this is the first attempt.
+            WebSocketBehavior::StallFirstThenComplete if requests.lock().await.len() == 1 => {
+                socket
+                    .send(WebSocketMessage::Text(
+                        serde_json::json!({
+                            "type": "response.created",
+                            "response": {"id": "resp-stalled"}
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await?;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                return Ok(());
+            }
             WebSocketBehavior::Stall => {
+                // A genuinely half-open peer: it accepts `response.create`,
+                // sends the lifecycle prelude, and then holds the connection
+                // open without ever reading a probe (so no Pong is produced)
+                // and without any model progress. This is the failure the
+                // transport heartbeat exists to detect, so the cause of the
+                // surfaced error is the heartbeat deadline and not a socket
+                // reset.
                 socket
                     .send(WebSocketMessage::Text(
                         serde_json::json!({
@@ -692,7 +720,7 @@ async fn handle_test_responses_connection(
                         .into(),
                     ))
                     .await?;
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
                 return Ok(());
             }
             WebSocketBehavior::StallWithPongs => {
@@ -718,6 +746,7 @@ async fn handle_test_responses_connection(
                 return Ok(());
             }
             WebSocketBehavior::Complete
+            | WebSocketBehavior::StallFirstThenComplete
             | WebSocketBehavior::DropAfterOutput
             | WebSocketBehavior::CloseAfterOutput
             | WebSocketBehavior::InvalidTextAfterOutput
@@ -911,6 +940,8 @@ async fn responses_websocket_connection_limit_retires_socket_and_falls_back() {
         )
         .await
         .unwrap();
+    // A connection-limit rejection is classified by the host, never consumed
+    // by a hidden transport-local inference retry.
     assert!(matches!(
         stream.next().await,
         Some(Ok(StreamEvent::Started { .. }))
@@ -931,6 +962,11 @@ async fn responses_websocket_connection_limit_retires_socket_and_falls_back() {
     assert!(progress.first_body_seen);
     assert!(progress.last_event_ms.is_some());
     assert!(stream.next().await.is_none());
+    assert_eq!(
+        server.requests().await.len(),
+        1,
+        "no hidden inference replay"
+    );
 
     // Retirement is authoritative before the provider error is published, so
     // an immediate next request deterministically takes HTTP/SSE.
@@ -954,6 +990,88 @@ async fn responses_websocket_connection_limit_retires_socket_and_falls_back() {
     assert!(requests
         .iter()
         .any(|request| request["transport"] == "http"));
+}
+
+#[tokio::test]
+async fn request_local_codex_transport_controls_sse_and_cached_context() {
+    use octet_ai::declarations::codex::CodexTransport;
+    for selection in [
+        CodexTransport::Sse,
+        CodexTransport::WebSocket,
+        CodexTransport::WebSocketCached,
+    ] {
+        let server =
+            TestResponsesServer::start(WebSocketBehavior::Complete, fallback_responses_body())
+                .await;
+        let model = websocket_test_model(&server.base_url);
+        let client = AiClient::new();
+        client
+            .prewarm_responses(
+                &model,
+                responses_request(vec![user_message("first")], Some("local")),
+            )
+            .await
+            .unwrap();
+        let response = client
+            .complete_with_overrides(
+                &model,
+                responses_request(
+                    vec![user_message("first"), user_message("second")],
+                    Some("local"),
+                ),
+                octet_ai::RequestOverrides {
+                    codex_transport: Some(selection),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 2);
+        match selection {
+            CodexTransport::Sse => {
+                assert_eq!(response.response_id.as_deref(), Some("resp-http"));
+                assert_eq!(requests[1], serde_json::json!({"transport":"http"}));
+            }
+            CodexTransport::WebSocket => {
+                assert!(requests[1].get("previous_response_id").is_none());
+                assert_eq!(requests[1]["input"].as_array().unwrap().len(), 2);
+            }
+            CodexTransport::WebSocketCached => {
+                assert_eq!(requests[1]["previous_response_id"], "resp-prewarm");
+                assert_eq!(requests[1]["input"].as_array().unwrap().len(), 1);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn request_local_codex_connect_timeout_bounds_handshake_not_generation() {
+    let server =
+        TestResponsesServer::start(WebSocketBehavior::StallHandshake, fallback_responses_body())
+            .await;
+    let mut model = websocket_test_model(&server.base_url);
+    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_secs(5);
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        AiClient::new().complete_with_overrides(
+            &model,
+            responses_request(vec![user_message("slow upgrade")], Some("local-timeout")),
+            octet_ai::RequestOverrides {
+                codex_connect_timeout_ms: Some(20),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("request-local connect budget must beat the endpoint timeout")
+    .unwrap();
+    assert_eq!(response.response_id.as_deref(), Some("resp-http"));
+    assert_eq!(
+        server.requests().await,
+        vec![serde_json::json!({"transport":"http"})]
+    );
 }
 
 #[tokio::test]
@@ -1059,6 +1177,7 @@ async fn responses_websocket_failure_after_send_is_terminal() {
     .await;
     let model = websocket_test_model(&server.base_url);
     let mut stream = AiClient::new()
+        .with_stream_timeouts(Duration::from_secs(10), Duration::from_secs(30))
         .stream(
             &model,
             responses_request(vec![user_message("fallback")], Some("session-close")),
@@ -1073,17 +1192,27 @@ async fn responses_websocket_failure_after_send_is_terminal() {
     let AiError::StreamFailure { inner, progress } = &error else {
         panic!("expected annotated stream failure, got {error:?}");
     };
-    assert!(matches!(
-        inner.as_ref(),
-        AiError::Transport(transport)
-            if transport.phase == octet_ai::TransportPhase::Body && !transport.timeout
-    ));
+    assert!(
+        matches!(
+            inner.as_ref(),
+            AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+                attempts, visible_output: false, ..
+            }) if *attempts == 0
+        ),
+        "expected the typed non-resumable error without replay, got {inner:?}"
+    );
     assert!(!progress.first_body_seen);
     assert_eq!(progress.last_event_ms, None);
     assert!(stream.next().await.is_none());
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].get("transport").is_none());
+    assert_eq!(
+        requests.len(),
+        1,
+        "the accepted generation must not be replayed: {requests:?}"
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.get("transport").is_none()));
 }
 
 #[tokio::test]
@@ -1126,10 +1255,24 @@ async fn responses_websocket_failed_output_next_explicit_request_uses_full_http_
         let AiError::StreamFailure { inner, progress } = error else {
             panic!("expected annotated stream failure");
         };
+        // A drop after consumer-visible output is only recoverable by a cursor
+        // resume, and this request is a durable-replay (`store: false`) one, so
+        // the provider retains nothing to resume: the row fails closed with the
+        // typed non-resumable error instead of the pre-row replay-safe
+        // `TransportPhase::Body` timeout, which could not distinguish
+        // "resume impossible" from "transport failed".
         match behavior {
             WebSocketBehavior::DropAfterOutput | WebSocketBehavior::CloseAfterOutput => {
-                assert!(matches!(*inner, AiError::Transport(ref transport)
-                    if transport.phase == octet_ai::TransportPhase::Body && !transport.timeout));
+                assert!(
+                    matches!(
+                        *inner,
+                        AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+                            visible_output: true,
+                            ..
+                        })
+                    ),
+                    "an unresumable mid-stream drop must be typed: {inner:?}"
+                );
             }
             _ => assert!(matches!(*inner, AiError::Decode(_))),
         }
@@ -1171,7 +1314,8 @@ async fn responses_websocket_heartbeat_timeout_after_created_is_terminal() {
         TestResponsesServer::start(WebSocketBehavior::Stall, fallback_responses_body()).await;
     let model = websocket_test_model(&server.base_url);
     let mut stream = AiClient::new()
-        .with_stream_timeouts(Duration::from_millis(100), Duration::from_millis(500))
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(30))
+        .with_initial_stream_timeout(Duration::from_secs(10))
         .stream(
             &model,
             responses_request(vec![user_message("timeout")], Some("session-timeout")),
@@ -1190,17 +1334,33 @@ async fn responses_websocket_heartbeat_timeout_after_created_is_terminal() {
     let AiError::StreamFailure { inner, progress } = &error else {
         panic!("expected annotated stream failure, got {error:?}");
     };
-    assert!(matches!(
-        inner.as_ref(),
-        AiError::Transport(transport)
-            if transport.phase == octet_ai::TransportPhase::Body && transport.timeout
-    ));
+    let detail = match inner.as_ref() {
+        AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+            attempts,
+            detail,
+            ..
+        }) => {
+            assert_eq!(*attempts, 0, "no hidden inference replay");
+            detail.clone()
+        }
+        other => panic!("expected the typed non-resumable error, got {other:?}"),
+    };
+    assert!(
+        detail.contains("heartbeat"),
+        "the heartbeat cause must survive: {detail}"
+    );
     assert!(progress.first_body_seen);
     assert!(progress.last_event_ms.is_some());
     assert!(stream.next().await.is_none());
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].get("transport").is_none());
+    assert_eq!(
+        requests.len(),
+        1,
+        "the heartbeat must not trigger hidden inference: {requests:?}"
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.get("transport").is_none()));
 }
 
 #[tokio::test]
@@ -1208,8 +1368,10 @@ async fn responses_websocket_heartbeat_failure_is_terminal_and_next_request_fall
     let server =
         TestResponsesServer::start(WebSocketBehavior::Stall, fallback_responses_body()).await;
     let model = websocket_test_model(&server.base_url);
-    let client =
-        AiClient::new().with_stream_timeouts(Duration::from_millis(400), Duration::from_secs(1));
+    let client = AiClient::new()
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(30))
+        .with_initial_stream_timeout(Duration::from_secs(10));
+    let started_at = std::time::Instant::now();
     let mut stream = client
         .stream(
             &model,
@@ -1222,23 +1384,34 @@ async fn responses_websocket_heartbeat_failure_is_terminal_and_next_request_fall
         Some(Ok(StreamEvent::Started { .. }))
     ));
 
-    // The heartbeat interval and acknowledgement deadline are each one quarter
-    // of the response-idle bound. A peer that accepts `response.create` but
-    // never reads the Ping must fail before the ordinary 400 ms idle timeout.
-    let error = tokio::time::timeout(Duration::from_millis(350), stream.next())
+    let error = tokio::time::timeout(Duration::from_secs(20), stream.next())
         .await
-        .expect("half-open WebSocket must fail before the response-idle timeout")
+        .expect("the bounded heartbeat recovery must terminate")
         .expect("half-open WebSocket must report an error")
         .expect_err("post-send heartbeat failure must not replay over HTTP");
     let AiError::StreamFailure { inner, progress } = &error else {
         panic!("expected annotated stream failure, got {error:?}");
     };
-    let AiError::Transport(transport) = inner.as_ref() else {
-        panic!("expected transport failure, got {inner:?}");
+    let detail = match inner.as_ref() {
+        AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+            attempts,
+            detail,
+            ..
+        }) => {
+            assert_eq!(*attempts, 0, "no hidden inference replay");
+            detail.clone()
+        }
+        other => panic!("expected the typed non-resumable error, got {other:?}"),
     };
-    assert_eq!(transport.phase, octet_ai::TransportPhase::Body);
-    assert!(transport.timeout);
-    assert!(transport.message.contains("heartbeat"), "{transport:?}");
+    assert!(
+        detail.contains("heartbeat"),
+        "the heartbeat cause must survive: {detail}"
+    );
+    assert!(
+        started_at.elapsed() < Duration::from_secs(10),
+        "the bounded budget must bound the whole recovery: {:?}",
+        started_at.elapsed()
+    );
     assert_eq!(progress.provider_events, 1);
     assert_eq!(progress.decoded_events, 1);
     assert_eq!(progress.content_bytes, 0);
@@ -1249,11 +1422,15 @@ async fn responses_websocket_heartbeat_failure_is_terminal_and_next_request_fall
     assert!(stream.next().await.is_none());
 
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 1, "heartbeat failure must not auto-replay");
-    assert!(requests[0].get("transport").is_none());
+    assert_eq!(
+        requests.len(),
+        1,
+        "the heartbeat must not trigger hidden inference: {requests:?}"
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.get("transport").is_none()));
 
-    // The actor disables the failed pooled session before publishing the error,
-    // so a caller-owned explicit next request can safely use HTTP/SSE.
     let mut fallback = client
         .stream(
             &model,
@@ -1274,10 +1451,15 @@ async fn responses_websocket_heartbeat_failure_is_terminal_and_next_request_fall
     }
     assert_eq!(text, "http");
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 2);
-    assert!(requests
-        .iter()
-        .any(|request| request["transport"] == "http"));
+    // One initial WebSocket attempt plus this explicit host-requested HTTP
+    // replacement; the heartbeat never adds transport-local inference retries.
+    assert_eq!(
+        requests.len(),
+        2,
+        "no hidden inference replay: {requests:?}"
+    );
+    assert!(requests[0].get("transport").is_none());
+    assert_eq!(requests[1]["transport"], "http");
 }
 
 #[tokio::test]
@@ -1295,11 +1477,13 @@ async fn responses_websocket_pongs_do_not_extend_response_idle_timeout() {
         )
         .await
         .unwrap();
-    assert!(matches!(
-        stream.next().await,
-        Some(Ok(StreamEvent::Started { .. }))
-    ));
-
+    // The provider sends `response.created` and then answers control probes
+    // forever without producing model progress. The transport's lifecycle
+    // prelude stays buffered until the attempt produces output or ends (so a
+    // retry cannot publish an abandoned attempt's prelude twice), which means
+    // the consumer sees no event at all here: `Started` is not delivered before
+    // the caller's own bound expires. Its absence is asserted explicitly rather
+    // than assumed away.
     let error = tokio::time::timeout(Duration::from_millis(800), stream.next())
         .await
         .expect("responsive control path must still reach response idle timeout")
@@ -1314,11 +1498,11 @@ async fn responses_websocket_pongs_do_not_extend_response_idle_timeout() {
     assert_eq!(transport.phase, octet_ai::TransportPhase::Body);
     assert!(transport.timeout);
     assert!(
-        transport.message.contains("idle beyond its timeout"),
+        transport.message.contains("idle beyond its"),
         "control Pongs must not reset response progress: {transport:?}"
     );
-    assert!(progress.first_body_seen);
-    assert!(progress.last_event_ms.is_some());
+    assert!(!progress.first_body_seen);
+    assert_eq!(progress.last_event_ms, None);
     assert_eq!(server.requests().await.len(), 1);
     // Do not poll/drop the failed stream before immediately replacing it.
     let mut replacement = client
@@ -1339,6 +1523,42 @@ async fn responses_websocket_pongs_do_not_extend_response_idle_timeout() {
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1]["transport"], "http");
+}
+
+#[tokio::test]
+async fn responses_websocket_heartbeat_failure_never_replays_on_a_fresh_socket() {
+    // Even when the next socket would succeed, replacement requires a host-owned
+    // attempt with accounting. A liveness probe grants no inference authority.
+    let server = TestResponsesServer::start(
+        WebSocketBehavior::StallFirstThenComplete,
+        fallback_responses_body(),
+    )
+    .await;
+    let model = websocket_test_model(&server.base_url);
+    let mut stream = AiClient::new()
+        .with_stream_timeouts(Duration::from_secs(1), Duration::from_secs(30))
+        .with_initial_stream_timeout(Duration::from_secs(10))
+        .stream(
+            &model,
+            responses_request(vec![user_message("resume")], Some("session-resume")),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(StreamEvent::Started { .. }))
+    ));
+    let error = stream.next().await.unwrap().unwrap_err();
+    assert!(matches!(error, AiError::StreamFailure { inner, .. }
+    if matches!(*inner, AiError::StreamProtocol(StreamProtocolError::ResponseNotResumable {
+        attempts: 0, visible_output: false, ..
+    }))));
+    assert!(stream.next().await.is_none());
+    assert_eq!(
+        server.requests().await.len(),
+        1,
+        "no unaccounted generation"
+    );
 }
 
 #[tokio::test]

@@ -13,12 +13,14 @@ use octet_ai::{
 
 fn make_test_model(base_url_str: &str, protocol: Protocol) -> Model {
     let spec = ModelSpec {
+        preset: Default::default(),
         id: ModelId("test-model".to_string()),
         endpoint: EndpointId("test-ep".to_string()),
         api_name: "gpt-4-test".to_string(),
         display_name: None,
         protocol,
         capabilities: Capabilities {
+            responses_features: Default::default(),
             input_modalities: ModalitySet::none(),
             output_modalities: ModalitySet::none(),
             tools: false,

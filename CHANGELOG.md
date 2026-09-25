@@ -1,6 +1,423 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.0] - 2026-09-25
+
+See [release notes](docs/releases/v0.8.0.md) for changes, availability and current limits.
+
+### Release safety
+
+- Update both Rust lockfiles to rustls 0.23.45 for RUSTSEC-2026-0285, retaining
+  dependency security checks rather than suppressing the advisory.
+- Keep Python shutdown hooks and their acknowledgements ahead of a subsequent
+  stdin EOF, while preserving the bounded drain for a non-cooperative hook.
+- Retain Rust 1.86 compatibility in process event-bus response admission.
+
+### Interaction
+
+- Accept owner-bound `/subagents stop <name|all>` during active responses without
+  blocking input or mistaking interruption acknowledgement for worker settlement.
+  Show compact K/M/B/T token counts, visible stop guidance, and continuation rows
+  aligned with Thinking, while preserving exact accounting and native scrollback.
+
+- Offer first-run setup in the order API key, supported OAuth subscription,
+  then local/self-hosted models. API keys use masked input and explicit review,
+  with recoverable owner-private storage rather than hashes or an encryption
+  claim. ChatGPT (Codex) and GitHub Copilot reuse host-owned device login;
+  configured launches and noninteractive modes do not reopen onboarding.
+
+- Silence routine session lookup/replay/fork progress during startup, including
+  resumed launches. Keep input, setup, errors, and coordinated shutdown live.
+  Fresh launches skip the unnecessary session-replay worker and full-config copy.
+
+- Quiet routine reload output: remove the startup arming banner, queued-path
+  chatter, and automatic success summaries. Only explicit reload commands get a
+  completion summary. Host, worker-deferral, extension, provider-catalog, and
+  watch-limit problems appear once per component/condition and reappear after a
+  successful check clears them; skipped components retain their diagnostics.
+  Resource/bootstrap and keybinding checks now use the same checked-component
+  recurrence rule, without hiding explicit command diagnostics.
+  Actual work losses are always reported, counting only discarded
+  extension host requests. Automatic permission paths never open a picker or
+  probe an unconsented replacement; explicit consent remains required.
+  Watch/timing details remain available through `/reload --dry-run`.
+
+- Hide the root elapsed clock while retry status is active, including after its
+  countdown expires, while keeping the interrupt hint. Normal Working/Thinking
+  elapsed clocks are unchanged.
+
+- Ease the resting activity colours off the profile extremes: the dark theme's
+  Working/Thinking label now rests at a slightly greyed off-white (about #f9
+  instead of #fd) and the light theme's rests at a soft near-black (about #16
+  instead of #00), each with the sweep ceiling moved to keep the travelling band
+  and the margin dot's pulse at their previously pinned separations. The light
+  bound is measured, not chosen: a 0.009 rest fails the pinned 1.7:1 worst-case
+  cell separation for a blue identity after ANSI256 quantization, so the rest
+  sits at 0.0085 and the light sweep ceiling moves 0.09 -> 0.095 to preserve the
+  pinned 0.08 relative-luminance travel.
+
+- Add the hidden `/debug` command (exact name only; absent from the popup and
+  `/help`). It writes an owner-private `~/.octet/octet-debug.log` with the
+  terminal size, every rendered line plus its visible width and the agent
+  messages as JSONL, then reports the path; an in-flight run is read through the
+  inspection snapshot, so the dump never disturbs the frame coalescer.
+
+- Add `/session`, reporting the session file, id, title, head, entry and
+  active-branch message counts, checkpoints, usage records, the token buckets
+  and exact cost, and marking unknown exposure as a known subtotal instead of
+  presenting it as exact.
+
+- Add `/settings` (defaults, theme, images and default model/reasoning; the
+  transport and editor padding are reported as read-only route/theme facts) and
+  `/scoped-models` (ordered Ctrl+P scope persisted as the user `models` key),
+  and `!command`/`!!command` local shell escapes that record their result as
+  model-visible or explicitly excluded from model context.
+
+- Withdraw the `/tree` and `/checkout` slash commands (maintainer decision) with
+  their keybinding: the durable connector tree stays available through
+  `octet sessions inspect`, and branch movement stays available through the
+  session surfaces that own it. `/quit` is renamed `/exit`; `/quit` is no longer
+  parsed.
+
+- Restore the full `/model` picker for a launch that pinned a built-in model.
+  Startup narrows the catalog to the selected route for latency, and the picker
+  rendered that narrowed catalog, so a DeepSeek launch listed only DeepSeek
+  models even with other provider credentials in the environment. The picker now
+  completes the deferred provider inventories (and refreshes the scoped-model
+  cycle) before it lists, and an active run defers the picker to the next idle
+  boundary instead of showing a partial provider list.
+
+- Slash commands now work while a run is active. `/help`, `/cost`, `/cache`,
+  `/tree`, `/context`, `/update`, `/name`, `/export`, `/extensions status`,
+  `/extensions inspect` and `/thinking` render or open their real surface
+  immediately instead of being queued to the next idle boundary; `/model` opens
+  its picker inline. Previously these commands were unusable during streaming.
+- Add platform-aware discoverability hints, including the queued-follow-up edit
+  binding (`option+↑` on macOS, `alt+↑` elsewhere).
+- Keep startup silent and the composer editable while extensions initialize;
+  defer model-context notices until terminal teardown.
+- Let `/goal` mutate and report the durable goal during an active response.
+- Give activity shimmer a complete sweep and rest phase. Working and Thinking
+  share a model-derived hue family; neutral identities stay neutral in both
+  appearances. Physical-terminal appearance remains a separate acceptance gate.
+- Display plain-dollar footer costs without weakening durable uncertainty or
+  budget accounting.
+- Redesign the `/subagents` panel: group by state with counts, collapse terminal
+  groups by default, aligned columns with a header row, bounded failure reasons
+  and bounded rendering.
+- Stop rendering absence as text in subagent rows: `no ceiling`,
+  `inherited no ceiling` and every `?` placeholder are gone, elapsed and token
+  counts are human-formatted, and no internal Rust API or operation id is
+  printed into the transcript.
+- Add the interactive live-reload supervisor: the prompt samples the skill,
+  prompt, theme, context-file, keybinding, settings, and extension roots in use
+  plus the resolved executable (`current_exe()` re-resolved every poll) on a
+  bounded 1000 ms metadata poll, and applies a pass only at the idle prompt in
+  the order host eligibility/consent → resources → extensions; an admitted host
+  replacement supersedes in-process rebuilding. Saves are debounced (200 ms,
+  2 s hard ceiling) and coalesced; a pass is never admitted while a run owns the
+  session, so evidence queued behind a busy boundary is applied at the next idle
+  prompt. It is enabled silently by default; `/reload --dry-run` exposes watch
+  settings and per-layer details, while automatic passes omit success summaries;
+  `reload`, `reload_poll_ms`, `reload_debounce_ms`, and `reload_max_files` are
+  user-level settings, `/reload --dry-run` previews a pass without changing
+  anything, and `/reload --force` takes one at the idle boundary while previewing
+  possible interruptions from currently pending host requests and workers.
+  Plain `/reload` rebuilds resources/extensions without selecting the host layer.
+- `/reload` now also reloads the **host binary**. When the executable on disk
+  changed, the candidate is validated first with a side-effect-free internal
+  probe (`--internal-reexec-probe`, which initializes no provider, extension,
+  workspace or network work) and its generation is re-stated immediately before
+  the jump, so a build replaced mid-probe is never executed. The reload happens
+  at an idle boundary only and refuses while a model turn, tool call, shell
+  child, effect approval or in-flight session write is live; live delegated
+  workers become an explicit opt-in that flushes their durable records and
+  detaches them for reattachment. The new image keeps the same PID and resumes
+  exactly the session that was running (`--resume <id>`), extension children are
+  stopped through the bounded path, session-lock descriptors are `CLOEXEC` so
+  the new image can re-lock its own session, and nothing ever locks the
+  executable — so several panes and a running `serve` reload independently.
+- Late `providers/register`, `providers/update` and `providers/unregister`
+  take effect in the running session without a reload. Credentials,
+  endpoints, headers, transports, callbacks and OAuth payloads stay host-owned;
+  a late registration never overrides a built-in the user did not opt into;
+  pricing and capability validation still run before a model becomes routable;
+  and an in-flight request is never mutated — the change applies at the next
+  request boundary.
+
+### Codex subscription behaviour
+
+- Make the deliberate 272K Codex request cap visible and overridable instead of
+  silent. It remains the default because OpenAI recommends a 272K Codex context
+  limit, usage above 272K is double-priced, and oversized long-running sessions
+  can drop the Codex websocket.
+- Emit at most one bounded clamp notice per session, for the effective model
+  only, and only when that model is a Codex route.
+- Add an explicit opt-in override (`--codex-context-window`, the equivalent
+  environment variable, and the reasoning/effort menu) that requires the
+  Pro/ProLite entitlement and a separate acknowledgement naming both
+  consequences; un-acknowledged or above-entitlement values fail closed.
+- Record cost and usage above 272K as uncertain rather than exact
+  (`Session::record_usage_uncertainty`), since the whole request is priced at the
+  long-context tier rather than only the excess.
+- Keep WebSocket connection-limit retries in the host's physical-attempt budget
+  instead of secretly resending inference in the transport. Stored-response
+  cursor recovery is bounded; ordinary non-stored Codex responses cannot be
+  resumed by inventing a new request after output has begun.
+
+### Subagents
+
+- Keep the live worker roster in bounded pinned chrome above the composer while
+  any retained worker is active, independently of root-run activity and app-owned
+  history navigation. Hide it after settlement while retaining telemetry,
+  accounting, and the `/subagents` inspector. Metric changes do not dirty history;
+  raw first-party orchestration calls/results and worker transitions add no
+  automatic transcript or copy notices. Ordinary failures and approvals retain
+  their existing owners. Native-scroll regression coverage retains interleaved
+  commands, results, and answers exactly once, rather than clipping them into a
+  pending-tool preview.
+- Bound the strip to one third of terminal height and available space; omitted
+  rows point to `/subagents`. Native terminal scrollback cannot overlay chrome.
+- Stop truncating worker model ids: worker/state/model are mandatory columns
+  that never ellipsize, optional metrics drop first, and the compact fallback
+  line still prints the full model. The `/subagents` picker header is now the
+  stable surface name `Subagents`, with counts in rows/status rather than the
+  title.
+- Remove the `completed with warnings` state from the TUI: both completed
+  variants render the same `✓ completed · <duration> · <rate> tok/s` line and
+  the same success role, and the counts stay in the model for exit status and
+  telemetry. A completed turn with live workers now shows one subdued
+  `subagents are running; inspect them in the /subagents menu.` line.
+- Add bounded `/subagents open-all tmux|herdr` planning and multiplexer adapters.
+  Product pane execution is disabled for all workers and the parent until the
+  host provides atomic writer claim/settlement. An opaque handle or fresh
+  launchability snapshot is not a writer lease; adapters are directly tested,
+  not qualified live handover.
+- Keep API 0.2 child model execution inherited. Requested provider/model/reasoning
+  metadata does not establish multimodel execution; unsupported selections fail
+  closed rather than silently selecting another model.
+- Workers survive the parent turn: durable child records are owned by the
+  session rather than the run, with reattachment on a later turn and an explicit
+  parent wait. A detached worker parks at the approval boundary in a bounded
+  state instead of mutating unattended.
+
+### Providers, codecs and tools
+
+- Refresh reviewed models.dev metadata to 895 pricing routes, 385 canonical names,
+  and 916 capability routes; preserve the [source provenance](crates/octet-ai/models/SOURCES.md).
+  Builds and runtime remain offline, direct DeepSeek schedule pricing remains
+  excluded/unknown, and public metadata does not establish live inference acceptance.
+- Decode OpenRouter's per-model `reasoning` object (`mandatory`,
+  `default_enabled`, `supported_efforts`, `default_effort`) instead of treating
+  the presence of a `reasoning_effort` parameter as proof that reasoning is
+  optional. A mandatory model no longer receives a disabling
+  `reasoning.effort=none`, which OpenRouter rejected with HTTP 400; it receives
+  the endpoint's default effort or an advertised exact effort, and a saved `off`
+  is clamped to a supported choice. Advertised effort strings are sent verbatim.
+
+- Share a 64 MiB / 32-file Bash spill budget per owner, including active captures;
+  evict oldest files and move disk capture/cleanup off the async path. Keep the
+  16 MiB per-stream cap and distinguish expired, partial, and complete spills.
+- Advance Responses replay/capacity projections by suffix, retain control-queue
+  reservations through delivery, and cap combined extension schemas at 4 MiB.
+
+- Decode the reasoning a provider advertises through accepted request parameters
+  (`supported_parameters` containing `reasoning`, `reasoning_effort` or
+  `reasoning.effort`). It was read as an undecodable assertion, so a newly
+  released gateway model had thinking permanently Off until the pinned metadata
+  snapshot was refreshed and the binary rebuilt. An explicit negative assertion
+  still wins.
+- Name the reasoning-only failure separately: a turn that finishes normally with
+  thinking but no answer text now reports "provider returned reasoning but no
+  answer text" instead of the generic empty-content message.
+
+- Reserve bounded headroom (1% of the window, 256–4096 tokens) between octet's
+  input-token estimate and the provider's own count when deriving a request's
+  output cap. Sizing the request as exactly `window − estimate` put real local
+  servers one token over the limit, which they reject outright.
+- Recover a size rejection instead of failing the turn: local compaction now runs
+  and the request is retried for HTTP 400/413/422 responses that carry a numeric
+  provider code, which previously took the permanent-failure branch. Named
+  policy, auth, quota and rate-limit rejections still fail closed without
+  compacting, and a session with nothing reducible reports the limit.
+
+- Add strict JSON-schema and grammar/regex request declarations, and remove a
+  declared-but-unimplemented deferred-tool capability claim. Grammar custom-call
+  decoding and history/result replay remain incomplete; declarations alone do
+  not establish complete codec support.
+- Land Anthropic caller-beta merge, refusal fallbacks, and the Mistral
+  Conversations finish/base-URL classification fixes that previously failed
+  assertions.
+- Wire the agent's optional service tier into live `ResponsesOptions`, gated by
+  the declared route capability, and select it through `/fast`. Tier-aware
+  settlement applies the declared Codex tariffs to the provider's echoed tier,
+  and the conservative reservation prices the same worst case; the command
+  retains its durable priority-uncertainty marker and does not clear historical
+  exposure.
+- Let sparse built-in inventories inherit the pinned models.dev **input
+  modalities and context/output limits** — but only where the endpoint asserts
+  nothing. Direct DeepSeek publishes identifiers only, so `deepseek-flash`
+  (V4.1 Flash) previously registered without image input (attachments failed
+  closed with "Image input is unsupported") and with the generic 128K/64K
+  placeholder instead of its documented 1M context / 384K output, silently
+  capping the usable window. An endpoint that asserts any modality or limit —
+  including an explicit text-only list or a smaller window — still wins, a
+  snapshot entry that declares text-only input keeps that decision
+  (`deepseek/deepseek-v4-pro` stays text-only), and a model absent from the
+  pinned record keeps the conservative fallback.
+- Add an assistant-message frame encoder/reducer and a bounded partial-message
+  journal. Partial recovery observations do not replace authoritative usage or
+  tool-outcome records.
+- Add typed provider declarations covering sampling params, headers,
+  `vllmPriority`, `supportsMaxOutputTokens`, thinking-token budget fields,
+  `$var` chat-template interpolation and bearer-token credential aliases.
+- Tool behaviours: bash output spill, bounded interval checkpoints and the
+  session environment contract; original-file non-overlapping multi-edit with
+  legacy normalization; preview coalescing and unanimous finalized-result batch
+  termination; invocation-memo and deferred-handle primitives; summarization
+  retry distinct from compaction failure. The agent tool surface stays
+  `read`/`write`/`edit`/`bash` with opt-in ripgrep-backed `search`; `ls`, `find`,
+  and `grep` operations use `search` (rg) or `bash`.
+
+### CLI and sessions
+
+- Remove the 64 MiB session-catalog cliff; use indexed substring search,
+  targeted lookups, and bounded maintenance batches without capping total disk.
+
+- Add `--powershell` (additive Windows `powershell` opt-in, reported inert on
+  other hosts, conflicting with an exclusive `--tools`/`--no-tools` list) and
+  ordered `--models` patterns that resolve a literal `provider/model`/bare-id
+  reference exactly before globs, preserve the requested order and keep each
+  `:level` reasoning suffix.
+- Add `--mode json` session-event JSONL, `--list-models` search,
+  `--session-id`/`--name`, sequential positional prompts with bounded `@file`
+  and media expansion, and piped stdin in every mode.
+- Keep `--no-session` transcripts ephemeral while preserving usage from every
+  RPC session; failed accounting appends retain private accounting-only recovery
+  and retry idempotently without restoring conversation data.
+- Add incremental session/entry search backed by a disposable SQLite projection
+  that re-reads only changed transcripts, and fail-closed catalog publish gates
+  (checksum, count, schema, minimum client version, required providers) with an
+  immutable install path.
+- Add single-file HTML session export with a script-free escaping CSP.
+- Accept a session name when starting `octet serve`.
+- Split configuration diagnostics into a dedicated module without behaviour
+  change.
+
+### Telemetry
+
+- Move optional JSONL writes to an ordered 256-record / 1-MiB worker with
+  observable loss/failure and bounded lifecycle drain; durable accounting stays
+  authoritative and unchanged.
+
+- Add a callback-based, vendor-neutral telemetry substrate
+  (`TelemetryContext`/`TelemetrySpan`, NOOP and InMemory implementations,
+  serializable typed schema and a span-assertion harness) with no global and no
+  exporter, and wire run, turn, provider-request, provider-stream, tool,
+  compaction, summary and delegation span boundaries.
+- Keep accounting independent of observation: the JSONL observer and the
+  fail-closed uncertain-usage path are unchanged, and identical business outcomes
+  are asserted under NOOP and InMemory.
+- Fold tool and summary usage into totals with a cache-hit rate and a distinct
+  `cacheWrite1h` bucket, preserving uncertainty.
+
+### Editor and TUI
+
+- Make Option+Up/Alt+Up recall the newest editable pending message instead of
+  only local follow-ups: a Ctrl+S live-steering submission is now withdrawn from
+  the agent before persistence, releasing its reserved control budget, so the
+  recalled text is never also delivered. Recall is arbitrated by that
+  submission's own receipt rather than the delayed delivery event, so it fails
+  closed once the agent has claimed the input for the session. Sticky `/answer`
+  input remains deliberately non-retractable, and the pending-state hint only
+  advertises the affordance while an editable entry exists.
+
+- Render Pi-style `$…$`, `$$…$$`, `\(…\)`, and `\[…\]` math through the
+  existing LaTeX engine, preserving currency, code, incomplete expressions, and
+  unsupported source rather than displaying partial art. Broaden bounded Mermaid
+  flowcharts with upstream layout, subgraphs, reverse directions, node lists,
+  and labelled links. Unsupported diagrams retain source with a visible reason;
+  diagrams wider than the viewport show source rather than cropped art. Explicit
+  grok-mermaid oracle fixtures do not establish full Pi renderer equivalence.
+
+- Keep active inspection and consent panels inside the polling run loop. Use
+  shared semantic snapshots and renderer-private layout, with post-write
+  revision-fenced geometry and consent receipts instead of a long-held input lock.
+- Bound undo and redo to 64 snapshots / 4 MiB each, with oversized-edit barriers.
+
+- Add reusable keybinding parsing/conflict detection, editor undo/redo,
+  kill/yank, word/line actions and OSC 133 zone primitives. Product key dispatch,
+  user-binding loading and viewport prompt jumps remain incomplete.
+- Preserve focus reporting with focus-out interaction reset.
+- Port LaTeX rendering (symbol tables, parser, fraction/operator/matrix layout)
+  and add a bounded, self-contained Mermaid box-drawing engine; both fail closed
+  on unsupported syntax instead of misrendering it.
+
+### Herdr integration
+
+- Report octet's agent lifecycle to [Herdr](https://herdr.dev) from the
+  interactive frontend, so a pane running octet appears as a first-class agent
+  in the sidebar, agent list, state rollups, notifications, and waits. The
+  implementation follows Herdr's official Pi integration (integration version
+  9) on the documented custom-agent surface: `pane.report_agent` for semantic
+  `idle`/`working`/`blocked` state, `pane.report_agent_session` for session
+  identity, and `pane.release_agent` on exit, with a strictly increasing `seq`
+  seeded from wall-clock milliseconds so a restarted process cannot report
+  stale sequence numbers.
+
+  State comes from the run stream itself — ready at startup, `working` from the
+  moment a prompt is accepted, `blocked` while an approval or input prompt is
+  on screen, and `idle` when the run settles — so the pane cannot disagree with
+  octet. Reporting is bounded to one 500 ms socket attempt plus one 1500 ms
+  retry, silent on every failure, and active only when `HERDR_ENV=1` with a
+  pane id and transport, so it is a complete no-op outside Herdr. A slow Herdr
+  server can add at most the bounded delivery attempts at a report boundary.
+  Only the opaque session id (never a
+  transcript path) and the bounded on-screen approval prompt leave the process;
+  display-only presentation stays with `herdr pane report-metadata`.
+
+  Transports are direct socket IPC on `HERDR_SOCKET_PATH` (Linux/macOS) and the
+  documented `HERDR_BIN_PATH` CLI wrapper (Windows), each as an argv list with
+  no shell.
+
+- Resume octet sessions in restored Herdr panes without a Herdr-side change,
+  using Herdr's documented plugin surface instead of a native agent kind. While
+  octet runs in a pane it keeps one small owner-private record (`pane id`,
+  Herdr session scope, session id, cwd, session-store root, workspace, pid) under
+  `~/.octet/herdr/panes/`, and
+  `octet herdr install-plugin` generates a manifest whose single `[[startup]]`
+  hook is `octet herdr restore` — no events, actions, panes, build steps, or
+  state outside octet's own directories. Herdr runs startup hooks after it
+  restores the session and the API socket is ready, so that pass reopens each
+  recorded pane with `octet --resume <id>` and the recorded `--session-dir` and
+  `--workspace` scope.
+
+  The pass is bounded and fails closed: records are capped, size-limited,
+  owner-private, written atomically, pruned after 14 days or when their pane is
+  gone, and only resumed when the record belongs to this Herdr session, the pane
+  still exists, it currently hosts no agent, and its directory still matches the
+  recorded one. At most 16 panes per start; every skip is reported with its
+  reason; session ids are token-validated and absolute paths are bounded and
+  shell-quoted. The pane-list response is drained concurrently and capped. The
+  record survives a Herdr server stop (`SIGHUP` to the pane, measured against
+  Herdr 0.9.0) and is dropped on a deliberate exit, so a later restore never
+  resurrects a session the user closed. See [`docs/herdr.md`](docs/herdr.md).
+
+### Repository tooling and docs
+
+- Add `scripts/changelog.py` (release extraction and link repair) and
+  `scripts/create-source-archive.py` (deterministic source artifact).
+- Add Codex context documentation; remove obsolete planning, comparison, and
+  task-handoff records from public documentation. Remove accidentally tracked
+  Swift build caches and reject them in deterministic source archives.
+- Keep benchmark measurement verdicts separate from release approval: an external
+  PID snapshot cannot satisfy inference attribution or cross-platform review.
+
+### Candidate limits
+
+This candidate is not published or live-qualified. Native companion apps remain
+source-only; signed installation, real-terminal behavior, Windows PowerShell,
+and live-provider acceptance are not established by deterministic fixtures.
+The [candidate notes](docs/releases/v0.8.0.md) describe remaining scope limits.
 
 ## [0.7.6]
 
@@ -966,3 +1383,5 @@ secret provider. OS-level CPU/RSS/FD/PID quotas also remain future kernel work.
 [0.2.0-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.2.0-alpha
 [0.1.1-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.1.1-alpha
 [0.1.0-alpha]: https://github.com/skaft-software/ygg/releases/tag/v0.1.0-alpha
+
+[0.8.0]: docs/releases/v0.8.0.md

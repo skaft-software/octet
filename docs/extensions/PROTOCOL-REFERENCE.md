@@ -1,17 +1,22 @@
 # octet Extension Protocol Reference
 
-**Identity boundary:** octet 0.7.6 source uses only octet first-party names,
+**Identity boundary:** octet 0.8.0 source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
-Retained API numbers 0.1/0.2/0.3 do not imply aliases for old Ygg wire names or
+Retained API numbers 0.1/0.2/0.3/0.4 do not imply aliases for old Ygg wire names or
 imports. The source SDK distributions and four official executable bundles are
-version `0.7.6`; the Pi compatibility bridge and independent examples keep their
-own versions. This is not SDK registry publication. Version-matched assets and
-public-install verification belong to the
-[v0.7.6 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
+version `0.8.0`; independent examples keep their own versions. Native assets and
+public-install verification are recorded in the
+[v0.8.0 GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0).
+Native publication does not publish SDK registries.
 
-> **Legacy API versions:** `0.1` (frozen compatibility) and `0.2`
-> (supported stateful wire). API `0.3` is defined by the generated
-> [`API-0.3-REFERENCE.md`](API-0.3-REFERENCE.md).
+> **Version scope:** API `0.4` is current and uses the feature-negotiated wire
+> retained from supported API `0.2`; API `0.1` stays frozen. Versioned examples
+> below retain their original IDs. API `0.3` is a distinct canonical wire in the
+> [generated reference](API-0.4-REFERENCE.md); its deferred entries do not remove
+> dynamic tools, presentation, or child sessions from the feature-negotiated wire.
+> These low-level contracts and safety tests remain live, but only an actual
+> host offer and frontend binding make a service available. Pi mappings below
+> are historical implementation notes, not a shipping bridge or a release gate.
 >
 > Every request and response uses the standard JSON-RPC 2.0 envelope with
 > exactly one JSON object per line on **stdout**. Human diagnostics belong on
@@ -33,12 +38,13 @@ carry an exact `requires_octet` requirement in `extension.toml`; it is validated
 before a process can start and is packaging metadata, not an initialization
 field or protocol-version substitute.
 
-This protocol is the bus of a deliberately small agent kernel. octet hosts model
-conversations, session/result persistence, permissions and approvals, process
-supervision/cleanup, and resource limits. MCP, browser use, computer use, web
-search, memory, LSP, subagent orchestration, and caffeinate remain replaceable
-subprocess extensions. Generic host services in this document support those
-extensions without moving their domain protocols into the host.
+This protocol supports bounded integrations in a deliberately small coding host.
+octet hosts model conversations, session/result persistence, permissions and
+approvals, process supervision/cleanup, and resource limits. MCP, browser use,
+computer use, web search, memory, LSP, subagent orchestration, and caffeinate are
+examples of separate domains, not a promise to deliver a package for every
+capability. Generic host services support these integrations without moving
+their domain protocols into the host.
 
 Implemented limits in this reference are protocol, queue, concurrency,
 artifact, timeout, and process-tree cleanup bounds. octet does not yet enforce OS
@@ -89,7 +95,7 @@ The **first** host request, sent immediately after the child process starts.
   "method": "initialize",
   "params": {
     "api_version": "0.1",
-    "octet_version": "0.7.6",
+    "octet_version": "0.8.0",
     "extension": {
       "name": "hello-world",
       "version": "0.1.0",
@@ -246,16 +252,20 @@ service is available independently of the selected reasoning effort; Ultra is
 separately gated on the live provider's V2 metadata. A response may negotiate
 it only when it was offered. The service is bound after the Agent is
 constructed; calls without a bound service/resource owner fail deterministically
-with `-32002`.
+with `-32002`. When `agent_sessions` is offered, the host also offers
+`agent_model_selection_v1`; negotiating the latter requires `agent_sessions`.
+It enables bounded configured-model discovery and explicit child model selection,
+not extension-supplied provider transports or credentials.
 
 The host likewise appends `approvals` only when single-use approval issuance is
 enabled, and appends `secrets` only when a secret broker is configured and the
 manifest's exact `[capabilities].secrets` allowlist is non-empty. Negotiating
 `approvals` also requires `policy_intents`; neither conditional service may be
 returned when it was not offered. The coding product currently leaves
-approvals disabled, configures no secret broker, and supervises generic
-`policy/evaluate` requests with `deny`, so it offers neither conditional
-feature.
+approvals disabled and configures no secret broker, so it offers neither
+conditional feature. Generic `policy/evaluate` requests return `deny`; the
+working-tree `mcp.tool.call` adapter permits exact active owner-scoped MCP calls
+under full access only, as described below.
 
 Secret names are duplicate-free identifiers of at most 64 ASCII bytes. The
 first character is a letter or underscore; subsequent characters may also use
@@ -481,7 +491,12 @@ Invoke a lifecycle hook (declared in `contributes.hooks`).
 }
 ```
 
-`hook` is one of: `"before_prompt"`, `"after_response"`, `"before_tool_call"`, `"after_tool_call"`.
+Both legacy APIs support `"before_prompt"`, `"after_response"`,
+`"before_tool_call"`, and `"after_tool_call"`. API `0.2` additionally supports
+typed `provider_retry`, `before_persistence`, and `post_mutation` hooks. See
+[retry advice](../extensions.md#provider-retry-observations-and-advice) and
+[bounded metadata and rescan enrichments](HOOK-ENRICHMENT.md) for their payloads,
+non-veto boundaries, and current product coverage.
 
 `payload` is hook-specific:
 - `before_prompt`: `{ "prompt": string }`
@@ -765,6 +780,54 @@ bounded writer queue. Host finalizers remain authoritative if delivery fails.
 failure, cancellation, interruption, frontend loss, shutdown, or a turn limit;
 API `0.2` lifecycle settlement covers those terminal outcomes.
 
+### 1.11 Wave-1 notifications (API `0.2`, negotiated)
+
+These notifications are additive and optional. Each is gated by one negotiated
+feature; the host emits it only after `initialize` accepted that feature, and an
+extension that never negotiated it sees nothing. Every payload is a bounded
+plain object: the frame is a JSON-RPC *notification* (no `id`), and an
+unnegotiated method, a non-object payload, or an oversized payload is refused
+with a bounded diagnostic instead of being delivered.
+
+| Notification | Feature | Pi surface |
+|---|---|---|
+| `shortcut/trigger` | `shortcuts` | Dispatches the admitted runtime shortcut whose `id` matches `params.id` |
+| `message/started` | `lifecycle_events_v2` | `message_start` |
+| `message/updated` | `lifecycle_events_v2` | `message_update` |
+| `message/settled` | `lifecycle_events_v2` | `message_end` |
+| `compaction/started` | `lifecycle_events_v2` | `session_before_compact` |
+| `compaction/settled` | `lifecycle_events_v2` | `session_compact` |
+| `compaction/failed` | `lifecycle_events_v2` | `session_compact_failed` |
+| `session/info_changed` | `lifecycle_events_v2` | `session_info_changed` |
+| `dialog/started` | `lifecycle_events_v2` | `ui_prompt_start` |
+| `dialog/settled` | `lifecycle_events_v2` | `ui_prompt_end` |
+| `model/selected` | `lifecycle_events_v2` | `model_select` |
+| `reasoning/selected` | `lifecycle_events_v2` | `thinking_level_select` |
+| `bash/user` | `lifecycle_events_v2` | `user_bash` |
+| `terminal/grant-lost` | `terminal_handoff` | Revokes a ceded terminal grant: the holder must stop owning the tty and restore its own state |
+
+`shortcut/trigger` carries `{"id": "<shortcut id>"}`. The id must match a
+shortcut whose `shortcut/register` was admitted; a trigger for an unknown,
+refused, or stale registration fails closed and never runs a handler.
+
+`message/updated` carries exactly one coalesced host batch:
+`{"message_id": "<bounded id>", "delta": "<coalesced text>", "deltas": <count>}`
+— `delta` is the coalesced text and `deltas` is how many extension-visible
+deltas it represents (a batch is emitted at 4096 accumulated bytes, 64 deltas,
+or 50 ms, whichever comes first, and always before `message/settled`). The
+bridge forwards each batch once, in arrival order, as a single `message_update`
+event: it never splits, re-buffers, or reorders it and never opens a per-delta
+round trip. It also accepts an SDK-shaped batch as a JSON array under `deltas`
+(or the alias `updates`); an array longer than 1024 deltas is refused as
+`bounds_exceeded` and no event is emitted.
+Every other Wave-1 notification forwards its bounded payload as the matching Pi
+event and is never silently dropped: it is either dispatched or refused with a
+typed error name in the diagnostic.
+
+These notifications do **not** change the extension API version. They remain API
+`0.2`; there is no API `0.3` variant, and API `0.3` provider manifests do not
+negotiate any of them.
+
 ---
 
 ## 2. Extension-to-host messages
@@ -773,6 +836,26 @@ Extensions send these after `initialize` completes. API `0.2` operation-scoped
 requests (`confirmation/request`, `input/request`, `artifact/publish`,
 `policy/evaluate`, and `secret/get`, plus every `agent/*` method) must include
 the active numeric host `parent_request_id`.
+
+### Optional Wave-1 `resource_owner`
+
+The ten Wave-1 requests (`composer/get`, `composer/set`, `composer/insert`,
+`shortcut/register`, `session/append_entry`, `session/set_name`,
+`session/set_label`, `session/send_message`, `session/send_user_message`,
+`tools/set_active`) additionally accept one **optional** `resource_owner` object:
+`{ "session_id": "...", "extension_instance_id": "...",
+"process_generation": 3 }`. It is additive: older hosts ignore it, a request
+without it stays valid, and no feature or API version changes because of it.
+
+Precedence is fixed. If `parent_request_id` names a live host request, that
+request's resource owner wins and the explicit field is ignored. If the parent
+request has already settled — a deferred caller such as a later HTTP callback —
+an explicit `resource_owner` that validates (matching process generation, the
+instance id issued to this process, and a session id the host already issued) is
+admitted and answered independently of the settled parent. Anything else, any
+foreign or stale owner, or an absent field with a settled parent is refused with
+`-32002` `not_foreground_owner`. An invalid owner is never coerced into a valid
+one, and no other Wave-1 request admits a caller-supplied owner.
 Global notifications, context, status, and presentation contributions, plus
 process-scoped tool-catalog mutations, do not include it. When the parent
 settles, the host cancels every unresolved operation-scoped child and ignores
@@ -985,14 +1068,15 @@ and active resource owner, ignores or diagnoses stale updates, and retains the
 latest accepted replacement for explicit TUI views, Serve, and bounded headless
 fallbacks. Generic snapshots do not become ambient chrome. The coding TUI
 recognizes owner-fenced `octet-subagents` activities as a first-party observed
-surface, renders the complete bounded roster and its structured metrics in a
-persistent transcript event above the composer during the owning run from
-native `AgentEvent::DelegationUpdated` events, and does not poll a status
-command; the extension cannot supply footer text or terminal rows. It
-clears stale state on owner/process replacement; Serve action identity includes
-the instance fence, generation, and revision before routing the selected
-manifest process's command. The notification never invokes an action, repeats
-work, mutates a tool result, or grants authority.
+surface and updates one bounded tool-like **Subagents** transcript block in place
+from native `AgentEvent::DelegationUpdated` events, including between root turns.
+Its heading counts worker states and up to four active child lines show tasks and
+input/output tokens; `/subagents` retains the complete roster, metrics, and cost.
+The TUI does not poll a status command, and the extension cannot supply footer
+text or terminal rows. It clears stale state on owner/process replacement; Serve
+action identity includes the instance fence, generation, and revision before
+routing the selected manifest process's command. The notification never invokes
+an action, repeats work, mutates a tool result, or grants authority.
 
 ---
 
@@ -1023,6 +1107,8 @@ Event variants are:
 
 - `status {message, current?, total?, unit?}`
 - `output {stream: "stdout"|"stderr", encoding: "utf8"|"base64", data}`
+- `decoration {label, detail?}` additionally requires `progress_decoration`;
+  [bounded ephemeral annotation rules](HOOK-ENRICHMENT.md#bounded-progress-decorations).
 
 Inactive-request and non-monotonic progress is ignored with a diagnostic.
 Accepted output uses octet's existing 8 KiB chunking and bounded progress sink,
@@ -1156,8 +1242,13 @@ generation before its bounded expiry (at most five minutes). Expiry, reuse, or
 intent/parent/generation mismatch returns `deny`; a recognized mismatched token
 is consumed as well. Supplying a token without negotiated `approvals` is
 rejected with `-32602`. Approval capability state is invalidated on generation
-replacement. The coding product currently has approvals off and no domain
-policy adapter, so its policy supervisor returns `deny` without a token.
+replacement. The coding product leaves approval-token issuance off. Its
+working-tree `mcp.tool.call` adapter permits the admitted `octet-mcp` process's
+exact active, owner-scoped tool call under `unsafe_host`, including mutations.
+It verifies the generation, exact published tool identity, and arguments against
+the host-issued call; commands, ownerless/settled parents, changed targets, and
+controlled policies cannot authorize it. Generic operations still return `deny`.
+This is not an annotation-based read-only exemption or an automatic replay grant.
 
 An extension may send `$/cancelRequest` for one of its own outstanding child
 request IDs. The host also sends it automatically when the owning parent
@@ -1333,8 +1424,9 @@ explicit values are 1..=256 turns, 1..=50,000,000 microdollars, and
 5,000..=86,400,000 milliseconds. `max_tokens: null` means exact inheritance
 of the parent's optional cumulative session-token setting, so a parent with no
 ceiling produces a child with no ceiling; a non-null 1,000..=64,000 value may
-request a stricter cap. Every child starts with a fresh context while inheriting
-the parent model's context window and resolved per-request output limit. octet
+request a stricter cap. Every child starts with a fresh context using the
+selected model's context window and an output limit capped by both the parent's
+resolved per-request limit and the selected model's output capacity. octet
 freezes a detached effective tool snapshot containing only the granted tools
 (no collaboration or agent tools), applies the requested ceilings or inherits
 the parent's ceilings when they are omitted, and owns limit settlement even
@@ -1353,6 +1445,61 @@ capped at 128 KiB. Success includes `agent_id`, `agent_path`, caller-visible
 effective `policy`, host-owned `created_at_ms`/`started_at_ms`/
 `completed_at_ms`, and `deadline_at_ms`, plus the path-free extension
 `principal` and durable session `resource_owner` string.
+
+#### Child model selection (`agent_model_selection_v1`)
+
+With the feature negotiated, `policy.model_selection` accepts
+`{"provider":"inherit","model":"inherit","reasoning":"inherit"}`.
+Omitting the object (or using `null`) preserves default inheritance; each omitted
+member defaults to `"inherit"`. Explicit members are non-empty strings of at
+most 256 UTF-8 bytes without control characters; unknown members are rejected.
+An explicit provider requires an explicit model. Model/provider identifiers must
+resolve through the host's configured inventory, not an arbitrary URL, endpoint,
+or credential supplied by the extension. Supplying a non-null selection without
+negotiating the feature is rejected.
+
+The host owns reasoning parsing, compatibility checks, normalization, and child
+lowering. Same-route inheritance preserves parent reasoning; a different route
+uses the host's supported translation or rejects incompatible reasoning rather
+than silently substituting a default. Discovery's reasoning labels are choices,
+not permission to bypass that policy. Astra V2 Ultra child reasoning is lowered
+to `xhigh` by the host. Unsupported routes or reasoning fail before child
+admission. Without a configured resolver, only the inherited binding is available.
+
+Spawn and list records expose host-confirmed `resolved_model`, also included in
+effective `policy.resolved_model`, with `provider`, `model`, and `reasoning`.
+Unlike the requested reasoning string, resolved reasoning is a serialized
+`ReasoningConfig` object (for example `{"type":"off"}`). This secret-free
+metadata contains no credentials, headers, or transport URLs. The host pins
+resolved model/provider/reasoning identity for continuation and recovery; a saved
+selection that no longer resolves to that identity fails closed. This is not a
+promise to detect arbitrary transport configuration changes behind those IDs.
+
+#### `agent/models` (API `0.2`, `agent_model_selection_v1`)
+
+Requires both `agent_sessions` and `agent_model_selection_v1`. Request:
+
+```json
+{"jsonrpc":"2.0","id":"models-1","method":"agent/models",
+ "params":{"parent_request_id":2,"query":"sonnet","limit":50}}
+```
+
+The active host model-tool or declared-command parent supplies the resource
+owner; callers cannot submit an owner. Discovery is root-owner-only and retains
+the same principal, process-generation, and active-parent fences as other
+`agent/*` requests. Missing, foreign, or inactive owners fail closed.
+
+`query` is optional/null, a case-insensitive model/provider/display-name search
+of at most 128 UTF-8 bytes without control characters. `limit` is optional/null,
+defaults to 50, and must be 1..=100. Success returns
+`{"models":[...],"truncated":false}`; each row contains `model`, `provider`,
+nullable `display_name`, `reasoning` (supported string labels), `context_window`,
+and `max_output_tokens`. The host bounds discovery and marks excess matches
+with `truncated`; this is not an unbounded catalog dump. IDs are capped at 256
+bytes, display names at 512 bytes, and reasoning at 32 labels of at most 256
+bytes each. Rows are secret-free configured-route metadata, not transport or
+authentication configuration. Without a configured resolver the view contains
+only the inherited model (subject to the query).
 
 ---
 
@@ -1480,8 +1627,9 @@ Request `{ "parent_request_id": 2, "target": "agent-1" }`. Success returns
 `agent_id`, `agent_path`, `previous_status`, and `interrupt_requested`. The host
 cancels the owned descendant tree when an active interrupt is requested.
 
-All six methods share the child-request and eight-worker bounds. After a
-parseable request ID, malformed parameters return `-32602`. Unavailable
+All `agent/*` methods share the child-request bounds; child creation retains
+the eight-worker bound. After a parseable request ID, malformed parameters
+return `-32602`. Unavailable
 service/owner, invalid ownership, exhausted delegation limits, persistence
 failure, or an invalid operation return `-32002`. The extension's stable
 principal is derived from its manifest name plus a SHA-256 manifest-identity
@@ -1497,7 +1645,124 @@ Observe their state through `agent/list`/`agent/wait`. Delegated child turns do
 not currently emit extension `session/*` or `turn/*` lifecycle notifications;
 that notification stream covers the owning/root product session.
 
+### 2.19 `composer/get`, `composer/set`, `composer/insert` (API `0.2`, feature `composer`)
+
+Host-owned composer access. `composer/get` requests `{ "parent_request_id": 2 }`
+and returns `{ "text": "<bounded composer text>" }`. `composer/set` requests
+`{ "parent_request_id": 2, "text": "..." }` and replaces the whole composer;
+`composer/insert` requests the same shape and inserts the text at the host
+composer cursor. Both mutations return `{}`.
+
+```json
+{ "jsonrpc": "2.0", "id": "pi:4", "method": "composer/set",
+  "params": { "parent_request_id": 7, "text": "hello" } }
+```
+
+The host resolves the foreground resource owner from `parent_request_id`; any
+other owner is refused with `-32002` `not_foreground_owner`. Composer `text` is
+bounded UTF-8 without lone surrogates or terminal control characters, at the
+same 256 KiB cap as the editor handoff. A local refusal is reported to the
+extension with the `bounds_exceeded` or `invalid_request` token before anything
+is written, so an oversized composer mutation never reaches the host.
+`ctx.ui.editor` is a separate, declared reduction: it seeds the requested
+prefill and focuses the host editor through the negotiated `editor_handoff`
+surface, the edited text stays host-owned, and the bridge never fabricates or
+returns one.
+
+### 2.20 `shortcut/register` (API `0.2`, feature `shortcuts`)
+
+Request `{ "parent_request_id": 2, "id": "pi:0:ctrl+shift+p", "key":
+"ctrl+shift+p", "description": "..." }`. Success returns `{}`. Registration is
+written inside the `initialize` request scope, so `parent_request_id` is the
+initialize request and the id is stable for the process generation. At most 64
+runtime shortcuts are admitted per process; the id is at most 128 UTF-8 bytes,
+the key at most 128 bytes, and the description at most 4 KiB. A shortcut without
+a handler, a duplicate id, a refused registration, or a registration arriving
+after the initialize request settled leaves the shortcut unavailable; a
+`shortcut/trigger` for it fails closed.
+
+### 2.21 `session/append_entry`, `session/set_name`, `session/set_label` (API `0.2`, feature `session_entries`)
+
+`session/append_entry` requests `{ "parent_request_id": 2, "entry_type":
+"custom", "data": <bounded JSON> }` and returns `{ "entry_id": "..." }`, the
+host-assigned durable entry identifier. `session/set_name` requests
+`{ "parent_request_id": 2, "name": "..." }`; an empty name clears it.
+`session/set_label` requests `{ "parent_request_id": 2, "entry_id": "...",
+"label": "..." }`; an empty label clears it. Both mutations return `{}`.
+
+`entry_type` is bounded to 128 UTF-8 bytes, the opaque `data` payload to 64 KiB
+of bounded plain JSON (no functions, exotic prototypes, non-finite numbers, or
+nesting beyond the protocol limit), the entry id to 256 bytes, and the name and
+label to 4 KiB. Every method is owner-scoped through `parent_request_id` and is
+refused with `-32002` `not_foreground_owner` for any other owner.
+
+### 2.22 `session/send_message`, `session/send_user_message` (API `0.2`, feature `message_injection`)
+
+`session/send_message` requests `{ "parent_request_id": 2, "role":
+"assistant" | "system", "text": "..." }` and `session/send_user_message`
+requests `{ "parent_request_id": 2, "text": "..." }`; both return `{}` after the
+host admits the bounded injection. Any other role, including `user`, is
+refused locally with `invalid_request` rather than coerced. Injected text is
+bounded at 256 KiB and both methods are owner-scoped through
+`parent_request_id`.
+
+### 2.23 `tools/set_active` (API `0.2`, feature `active_tools`)
+
+Request `{ "parent_request_id": 2, "names": ["tool", ...] }`; success returns
+`{}`. `names` is the complete replacement active tool set, bounded like
+`tools/register` (at most 256 names, each at most 128 UTF-8 bytes). A host build
+that cannot apply dynamic tool policy refuses the request instead of accepting
+an unapplied set. The method is owner-scoped through `parent_request_id`.
+
 ---
+
+### 2.23b `pi.sendMessage` mapping (bridge surface)
+
+`pi.sendMessage` has three shapes in the installed corpus, and the bridge maps each
+one onto a real host op instead of a single coercion:
+
+| call | octet path | notes |
+| --- | --- | --- |
+| `pi.sendMessage({ role: "user", ... })` | `session/send_user_message` | the ordinary user-turn path |
+| `pi.sendMessage({ customType, content, display, details }, { triggerTurn })` | `session/append_entry` (entry type = `customType`) **plus** `session/send_user_message` when a turn is requested | the dominant corpus form (13 of 28 installed packages); needs both `session_entries` and, for the turn, `message_injection` |
+| `pi.sendMessage({ role: "assistant" \| "system", ... })` | refused: `unsupported_feature` | octet never fabricates a provider turn, so an extension-authored assistant/system message is refused rather than coerced |
+
+The custom-message form's `display: true` is **recorded** in the entry payload but
+not yet honored: the shell does not project extension entries into the transcript,
+so rendering a custom message is the entry-renderer tier of P9. This is a declared
+divergence, not a silent drop.
+
+### 2.24 `terminal/acquire`, `terminal/release` (API `0.2`, feature `terminal_handoff`)
+
+Foreground terminal handoff. `terminal/acquire` requests
+`{ "parent_request_id": 2 }` and returns
+`{ "grant_id": "<bounded id>", "columns": <u16>, "rows": <u16> }` once the
+frontend that owns the foreground session's tty has actually ceded it.
+`terminal/release` requests the same shape and returns `{}` once the frontend has
+re-entered its own terminal and input loop.
+
+```json
+{ "jsonrpc": "2.0", "id": "pi:9", "method": "terminal/acquire",
+  "params": { "parent_request_id": 7 } }
+```
+
+The terminal stays host-owned. The grant is exclusive, owner-scoped, and
+revocable at any moment: the host refuses `acquire` while another grant is live
+(`invalid_request`), refuses `release` from a caller that does not hold the
+current grant (`invalid_request`), and refuses both when no foreground terminal
+is available (`not_foreground_owner`/`invalid_request`). `grant_id` is minted by
+the frontend and bounded to 128 UTF-8 bytes; the extension never supplies it.
+The host may take the grant back without being asked — the holder crashed, the
+session or process generation moved, or a coordinated shutdown force-restored the
+terminal — in which case the holder receives `terminal/grant-lost` with a bounded
+`reason` and must stop writing to the tty. A holder that keeps writing after a
+revocation is writing to a terminal the host has already restored.
+
+While a grant is live the host emits no `ui/terminal-input` or `ui/resize`
+observation to the holder (it owns the tty for the duration), and the same
+process must not be handed a second grant. The dispatch-level refusal is typed:
+`unsupported_feature` when `terminal_handoff` was not negotiated, and
+`invalid_request`/`bounds_exceeded`/`not_foreground_owner` for everything else.
 
 ## 3. Standard JSON-RPC errors
 
@@ -1514,6 +1779,24 @@ that notification stream covers the owning/root product session.
 Extensions should use `-32601` for unknown methods and `-32602` for invalid
 parameters. Custom errors in the `-32000` to `-32099` range are reserved for
 extension-specific server errors.
+
+### Wave-1 contract error names
+
+The Wave-1 composer, shortcut, session-entry, message-injection, and
+active-tool requests share one refusal vocabulary. A host refusal carries the
+numeric code and the contract name as the first token of `error.message`:
+
+| Code | Contract name | Meaning |
+|---|---|---|
+| `-32601` | `unsupported_feature` | The method is not negotiated by this host build |
+| `-32602` | `invalid_request` | The params are malformed or outside the admitted shape |
+| `-32602` | `bounds_exceeded` | A string, payload, or batch exceeds its byte/element cap |
+| `-32002` | `not_foreground_owner` | The resource owner of `parent_request_id` is not the foreground owner |
+
+Refusals stay typed at the Pi surface: the extension sees an error whose first
+token is the wire contract it called followed by the contract name, so a void
+Pi setter can never hide a refusal. API `0.3` providers are unaffected and
+do not negotiate these names.
 
 ---
 
@@ -1664,15 +1947,24 @@ reference, safety, parentage, and bound rules.
 | `request_cancellation` | yes | Cooperative `$/cancelRequest`, cancellation errors, tombstones |
 | `content_parts` | yes | Ordered text/media tool-result parts and native result details |
 | `request_progress` | no | Request-scoped `$/progress` |
+| `progress_decoration` | no | Bounded ephemeral semantic annotations; also requires `request_progress` |
 | `artifacts` | no | `artifact/publish` and image/audio content parts |
 | `lifecycle_events` | no | Subscribed session/turn/tool observations |
 | `policy_intents` | no | Correlated `policy/evaluate` requests |
 | `dynamic_tools` | no | Transactional `tools/register`, `tools/unregister`, and revision-pinned `tool/call` |
 | `runtime_commands` | no | Initialize-time authoritative fixed command catalog for compatibility runtimes; no live mutations |
 | `agent_sessions` | conditional | Principal/owner-scoped `agent/*` child model-session service |
+| `agent_model_selection_v1` | conditional | Bounded `agent/models`, `policy.model_selection`, and host-confirmed `resolved_model`; also requires `agent_sessions` |
 | `delegation_telemetry_v1` | conditional first-party requirement | Native owner-run `AgentEvent::DelegationUpdated` child telemetry; required by `octet-subagents` when `agent_sessions` is offered |
 | `approvals` | conditional | Original-intent/active-owner-bound single-use `policy/evaluate` retry tokens; also requires `policy_intents` |
 | `secrets` | conditional | Owner-scoped `secret/get` for exact manifest-allowlisted names |
+| `composer` | no | Host-owned `composer/get`, `composer/set`, and `composer/insert`; the extension API stays `0.2` |
+| `shortcuts` | no | Runtime `shortcut/register` plus admitted `shortcut/trigger` dispatch; at most 64 per process |
+| `session_entries` | no | `session/append_entry`, `session/set_name`, and `session/set_label` durable entry/session metadata |
+| `message_injection` | no | Bounded `session/send_message` (assistant|system) and `session/send_user_message` |
+| `lifecycle_events_v2` | no | Coalesced `message/started`, `message/updated`, `message/settled`, `compaction/*`, `session/info_changed`, `dialog/*`, `model/selected`, `reasoning/selected`, and `bash/user` fan-out |
+| `active_tools` | no | Host-owned `tools/set_active` replacement active tool set |
+| `terminal_handoff` | no | Exclusive, revocable foreground tty grant (`terminal/acquire`/`terminal/release`) with `terminal/grant-lost` revocation |
 
 Parent correlation (including `input/request`), serialized writes, bounded
 drain, and health tracking are base API `0.2` invariants rather than optional
@@ -1753,7 +2045,7 @@ Every extension child receives:
 
 | Variable | Value |
 |---|---|
-| `OCTET_EXTENSION_API_VERSION` | Exact manifest-selected version (`"0.1"` or `"0.2"`) |
+| `OCTET_EXTENSION_API_VERSION` | Exact manifest-selected version (`"0.1"`, `"0.2"`, `"0.3"`, or `"0.4"`) |
 | `OCTET_EXTENSION_NAME` | Extension manifest name |
 | `OCTET_EXTENSION_DIR` | Extension directory (beside manifest) |
 | `OCTET_EXTENSION_MANIFEST` | Absolute path to `extension.toml` |

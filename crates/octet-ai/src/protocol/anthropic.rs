@@ -2,16 +2,16 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AiError, ConfigError, DecodeError, ProviderError};
+use crate::error::{AiError, ConfigError, DecodeError, ProviderError, UnsupportedError};
 use crate::protocol::sse::SseEvent;
 use crate::protocol::{
     cache_control, emit_event, get_canonical_index, Base64Bytes, CacheControl, HttpRequestParts,
 };
 use crate::stream::{ResponseBuilder, StreamEvent};
 use crate::types::{
-    AssistantPart, ImageSource, Media, Message, Protocol, ReasoningConfig, ReasoningState,
-    ReasoningStateKind, Request, StopReason, ToolCallId, ToolChoice, ToolResultPart, Usage,
-    UserPart,
+    AssistantPart, CacheRetention, ImageSource, Media, Message, Protocol, ReasoningConfig,
+    ReasoningState, ReasoningStateKind, Request, StopReason, ToolCallId, ToolChoice,
+    ToolResultPart, Usage, UserPart,
 };
 use crate::validate::{normalize_request_reasoning, validate_request};
 
@@ -50,7 +50,17 @@ struct AnthropicRequest {
     thinking: Option<AnthropicThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<AnthropicOutputConfig>,
+    /// Declared server-side refusal fallback targets. Omitted (never empty)
+    /// when the route declares none, because Anthropic rejects the field for a
+    /// model with no permitted fallback target.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fallbacks: Vec<AnthropicFallback>,
     stream: bool,
+}
+
+#[derive(Serialize)]
+struct AnthropicFallback {
+    model: String,
 }
 
 #[derive(Serialize)]
@@ -70,8 +80,23 @@ struct AnthropicSystemBlock {
 #[derive(Serialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 enum AnthropicMessage {
-    User { content: Vec<AnthropicContentBlock> },
-    Assistant { content: Vec<AnthropicContentBlock> },
+    User {
+        content: Vec<AnthropicContentBlock>,
+    },
+    Assistant {
+        content: Vec<AnthropicContentBlock>,
+    },
+    /// Effort-only system message inserted by the declared mid-conversation
+    /// effort capability (`mid-conversation-output-config-2026-07-01`).
+    System {
+        content: Vec<AnthropicContentBlock>,
+        output_config: AnthropicEffortOnly,
+    },
+}
+
+#[derive(Serialize)]
+struct AnthropicEffortOnly {
+    effort: String,
 }
 
 #[derive(Serialize)]
@@ -131,7 +156,14 @@ enum AnthropicToolResultBlock {
 struct AnthropicTool {
     name: String,
     description: String,
+    /// Emitted by default (`supportsEagerToolInputStreaming ?? true`); a route
+    /// that declares `false` omits it and requests the legacy
+    /// fine-grained-tool-streaming beta instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eager_input_streaming: Option<bool>,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
 }
@@ -166,6 +198,121 @@ struct AnthropicOutputConfig {
 struct AnthropicOutputFormat {
     r#type: String,
     schema: serde_json::Value,
+}
+
+/// OAuth bearer variables for the Anthropic Messages route.
+///
+/// Anthropic documents these as OAuth/subscription token variables rather than
+/// API keys. Keying the rule on the *variable* keeps it declarative: a route
+/// reusing the variable inherits the behavior, no provider name is consulted.
+const ANTHROPIC_OAUTH_BEARER_VARIABLES: [&str; 2] =
+    ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"];
+
+/// Betas a Claude Code client sends when it authenticates with an OAuth token.
+const ANTHROPIC_CLAUDE_CODE_BETA: &str = "claude-code-20250219";
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Interleaved thinking, paired with extended (budget) thinking.
+const ANTHROPIC_INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
+/// Legacy per-tool streaming control, used only when the route does not accept
+/// per-tool `eager_input_streaming` (`supportsEagerToolInputStreaming: false`).
+const ANTHROPIC_FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
+/// Server-side refusal fallback, used only when the route declares at least one
+/// permitted fallback model.
+const ANTHROPIC_SERVER_SIDE_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+/// Mid-conversation effort and its thinking binding control.
+const ANTHROPIC_MID_CONVERSATION_OUTPUT_CONFIG_BETA: &str =
+    "mid-conversation-output-config-2026-07-01";
+const ANTHROPIC_THINKING_BINDING_CONTROLS_BETA: &str = "thinking-binding-controls-2026-08-01";
+
+/// Resolved Anthropic compat for one model: Pi's route defaults with the
+/// declaration's overrides applied.
+struct AnthropicCompat {
+    eager_tool_input_streaming: bool,
+    supports_mid_convo_effort: bool,
+    force_adaptive_thinking: bool,
+    allow_empty_signature: bool,
+}
+
+fn anthropic_compat(model: &crate::catalog::Model) -> AnthropicCompat {
+    let declared = model.spec.preset.anthropic_compat.as_ref();
+    AnthropicCompat {
+        eager_tool_input_streaming: declared
+            .and_then(|compat| compat.supports_eager_tool_input_streaming)
+            .unwrap_or(true),
+        supports_mid_convo_effort: declared
+            .and_then(|compat| compat.supports_mid_convo_effort)
+            .unwrap_or(false),
+        force_adaptive_thinking: declared
+            .and_then(|compat| compat.force_adaptive_thinking)
+            .unwrap_or(false),
+        allow_empty_signature: declared
+            .and_then(|compat| compat.allow_empty_signature)
+            .unwrap_or(false),
+    }
+}
+
+/// Declared fallback model identifiers, in declaration order.
+fn anthropic_fallback_models(model: &crate::catalog::Model) -> Vec<String> {
+    model
+        .spec
+        .preset
+        .anthropic_compat
+        .as_ref()
+        .map(|compat| {
+            compat
+                .allowed_fallback_models
+                .iter()
+                .map(|fallback| fallback.model.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the declared route authenticates with an Anthropic OAuth token.
+fn route_uses_oauth_bearer(model: &crate::catalog::Model) -> bool {
+    matches!(
+        &model.endpoint.auth,
+        crate::auth::Auth::BearerEnv { var }
+            if ANTHROPIC_OAUTH_BEARER_VARIABLES.contains(&var.as_str())
+    )
+}
+
+/// Beta features inferred from the declared route and the request.
+///
+/// These are only used when the caller configured no `anthropic-beta` list at
+/// all: an explicit caller list stays authoritative and replaces (never merges
+/// with) the inferred features, exactly like upstream `getBetaFeatures`.
+///
+/// Every inferred feature comes from a declared route capability, never from a
+/// provider identity: OAuth bearer presentation, tool-enabled routes that do
+/// not accept per-tool eager input streaming, extended thinking on a route that
+/// does not force adaptive thinking, a declared fallback-model list, and a
+/// declared mid-conversation-effort capability.
+fn inferred_anthropic_betas(
+    model: &crate::catalog::Model,
+    extended_thinking: bool,
+    tool_enabled: bool,
+) -> Vec<&'static str> {
+    let compat = anthropic_compat(model);
+    let mut betas = Vec::new();
+    if route_uses_oauth_bearer(model) {
+        betas.push(ANTHROPIC_CLAUDE_CODE_BETA);
+        betas.push(ANTHROPIC_OAUTH_BETA);
+    }
+    if tool_enabled && !compat.eager_tool_input_streaming {
+        betas.push(ANTHROPIC_FINE_GRAINED_TOOL_STREAMING_BETA);
+    }
+    if extended_thinking && !compat.force_adaptive_thinking {
+        betas.push(ANTHROPIC_INTERLEAVED_THINKING_BETA);
+    }
+    if !anthropic_fallback_models(model).is_empty() {
+        betas.push(ANTHROPIC_SERVER_SIDE_FALLBACK_BETA);
+    }
+    if compat.supports_mid_convo_effort {
+        betas.push(ANTHROPIC_MID_CONVERSATION_OUTPUT_CONFIG_BETA);
+        betas.push(ANTHROPIC_THINKING_BINDING_CONTROLS_BETA);
+    }
+    betas
 }
 
 /// Map a portable reasoning effort onto Anthropic's adaptive-thinking effort
@@ -223,6 +370,8 @@ enum AnthropicSseData {
 #[derive(Deserialize)]
 struct AnthropicResponseMessage {
     id: String,
+    #[serde(default)]
+    model: Option<String>,
     usage: AnthropicResponseUsage,
 }
 
@@ -234,8 +383,16 @@ enum AnthropicResponseContentBlock {
     // and the extra wire field is simply ignored on deserialize.
     Text {},
     Thinking {},
-    RedactedThinking { data: String },
-    ToolUse { id: String, name: String },
+    RedactedThinking {
+        data: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+    },
+    /// Server-side fallback marker. A pre-content fallback is transparent; a
+    /// mid-output fallback is rejected (see the content block handler).
+    Fallback {},
 }
 
 // Anthropic content_block_delta uses `*_delta` type tags on the wire (see
@@ -256,6 +413,35 @@ enum AnthropicResponseDelta {
 #[derive(Deserialize)]
 struct AnthropicResponseMsgDelta {
     stop_reason: Option<String>,
+    #[serde(default)]
+    stop_details: Option<AnthropicRefusalStopDetails>,
+}
+
+/// Anthropic `stop_details` for a `refusal` stop reason.
+///
+/// The explanation is provider prose about *why* the model refused. It is
+/// surfaced as a bounded response diagnostic rather than dropped, because a
+/// refusal with no explanation is not actionable for the user.
+#[derive(Deserialize)]
+struct AnthropicRefusalStopDetails {
+    #[serde(default)]
+    explanation: Option<String>,
+}
+
+/// Upper bound on the refusal explanation copied into a diagnostic. Provider
+/// prose is untrusted input; anything longer is truncated on a character
+/// boundary rather than rejected (the refusal itself already happened).
+const MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES: usize = 8192;
+
+fn bounded_refusal_explanation(explanation: &str) -> String {
+    if explanation.len() <= MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES {
+        return explanation.to_owned();
+    }
+    let mut end = MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES;
+    while end > 0 && !explanation.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &explanation[..end])
 }
 
 #[derive(Deserialize)]
@@ -319,6 +505,7 @@ pub(crate) fn build_request(
     )?;
 
     // 2. Map system prompt and allocate one provider-compatible breakpoint.
+    let compat = anthropic_compat(model);
     let cache_marker = cache_control(&req, &model.spec.cache);
     let system = req.system.as_ref().map(|system| {
         AnthropicSystem::Blocks(vec![AnthropicSystemBlock {
@@ -470,10 +657,35 @@ pub(crate) fn build_request(
                                     match &state.kind {
                                         ReasoningStateKind::AnthropicSignature { signature } => {
                                             if let Some(text) = &reasoning.text {
-                                                blocks.push(AnthropicContentBlock::Thinking {
-                                                    thinking: text.clone(),
-                                                    signature: signature.clone(),
-                                                });
+                                                let has_signature = !signature.trim().is_empty();
+                                                if !has_signature && text.trim().is_empty() {
+                                                    // Nothing to replay; an empty
+                                                    // thinking block is never sent.
+                                                } else if !has_signature {
+                                                    // An empty signature (e.g. an
+                                                    // aborted stream) is only a
+                                                    // thinking block on a route
+                                                    // that declares it accepts one;
+                                                    // otherwise it becomes text.
+                                                    if compat.allow_empty_signature {
+                                                        blocks.push(
+                                                            AnthropicContentBlock::Thinking {
+                                                                thinking: text.clone(),
+                                                                signature: String::new(),
+                                                            },
+                                                        );
+                                                    } else {
+                                                        blocks.push(AnthropicContentBlock::Text {
+                                                            text: text.clone(),
+                                                            cache_control: None,
+                                                        });
+                                                    }
+                                                } else {
+                                                    blocks.push(AnthropicContentBlock::Thinking {
+                                                        thinking: text.clone(),
+                                                        signature: signature.clone(),
+                                                    });
+                                                }
                                             }
                                         }
                                         ReasoningStateKind::AnthropicRedacted { data } => {
@@ -512,14 +724,23 @@ pub(crate) fn build_request(
         );
     }
 
-    // Anthropic caches the prefix ending at the final user block. Keep the
-    // marker on the final user turn so every subsequent request can reuse the
-    // preceding conversation prefix without changing the canonical history.
+    // A normal request marks its final user block. A one-off cache warm has a
+    // synthetic final user turn: mark the preceding canonical message instead,
+    // so a subsequent real prompt can reuse the warmed conversation prefix.
     if let Some(marker) = cache_marker {
-        if let Some(AnthropicMessage::User { content }) = messages.last_mut() {
-            if let Some(block) = content.last_mut() {
-                set_content_cache_control(block, marker);
+        let target = if req.cache_retention == CacheRetention::WarmShort {
+            messages.iter_mut().rev().nth(1)
+        } else {
+            messages.last_mut()
+        };
+        let content = match target {
+            Some(AnthropicMessage::User { content } | AnthropicMessage::Assistant { content }) => {
+                Some(content)
             }
+            Some(AnthropicMessage::System { .. }) | None => None,
+        };
+        if let Some(block) = content.and_then(|content| content.last_mut()) {
+            set_content_cache_control(block, marker);
         }
     }
 
@@ -530,22 +751,38 @@ pub(crate) fn build_request(
     {
         None
     } else {
-        Some(
-            req.tools
-                .iter()
-                .enumerate()
-                .map(|(index, t)| AnthropicTool {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    input_schema: t.parameters.clone(),
-                    cache_control: (index + 1 == req.tools.len()
-                        && model.spec.cache.supports_cache_control_on_tools)
-                        .then_some(cache_marker)
-                        .flatten(),
-                })
-                .collect(),
-        )
+        let mut built = Vec::with_capacity(req.tools.len());
+        for (index, t) in req.tools.iter().enumerate() {
+            // Strict JSON-schema constrained sampling rewrites the tool input
+            // schema into Anthropic's enforced subset; otherwise the canonical
+            // schema is sent unchanged.
+            let (parameters, strict) = crate::constrained_sampling::function_tool_parameters(
+                t,
+                super::strict_mode_for(model),
+            )?;
+            let input_schema = if strict {
+                parameters
+            } else {
+                t.parameters.clone()
+            };
+            built.push(AnthropicTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                eager_input_streaming: compat.eager_tool_input_streaming.then_some(true),
+                input_schema,
+                strict: strict.then_some(true),
+                cache_control: (index + 1 == req.tools.len()
+                    && model.spec.cache.supports_cache_control_on_tools)
+                    .then_some(cache_marker)
+                    .flatten(),
+            });
+        }
+        Some(built)
     };
+    // Captured before the request literal below takes ownership of `tools_opt`:
+    // the inferred anthropic-beta list is decided from whether tools are present
+    // at all, not from the moved value.
+    let tools_present = tools_opt.as_ref().is_some_and(|tools| !tools.is_empty());
 
     let tool_choice_opt = if !model.spec.capabilities.tools {
         None
@@ -640,19 +877,37 @@ pub(crate) fn build_request(
         _ => None,
     };
 
+    // Extended (budget) thinking is the only mode upstream pairs with the
+    // interleaved-thinking beta: adaptive thinking is already interleaved by
+    // construction, and a disabled/toggle-off request sends no beta at all.
+    let extended_thinking = matches!(&thinking_opt, Some(config) if config.r#type == "enabled");
+
     let output_config = if format_opt.is_some() || effort_opt.is_some() {
         Some(AnthropicOutputConfig {
             format: format_opt,
-            effort: effort_opt,
+            effort: effort_opt.clone(),
         })
     } else {
         None
     };
 
+    // Mid-conversation effort appends an effort-only system message carrying
+    // the active level, exactly like upstream's `insertThinkingLevelMessages`.
+    // Historical per-turn levels require `AssistantMessage.providerThinkingLevel`
+    // (row 1c.10), so only the active level is inserted today; the route's
+    // declaration is the admission gate for the beta pair.
+    if compat.supports_mid_convo_effort {
+        messages.push(AnthropicMessage::System {
+            content: Vec::new(),
+            output_config: AnthropicEffortOnly {
+                effort: effort_opt.clone().unwrap_or_else(|| "high".to_owned()),
+            },
+        });
+    }
+
     // 6. Max tokens
-    let max_tokens = req
-        .max_output_tokens
-        .unwrap_or(model.spec.limits.max_output_tokens);
+    let max_tokens = crate::effective_output_token_cap(model, req.max_output_tokens)
+        .expect("Anthropic always emits an output cap");
 
     let anth_req = AnthropicRequest {
         model: model.spec.api_name.clone(),
@@ -665,6 +920,10 @@ pub(crate) fn build_request(
         tool_choice: tool_choice_opt,
         thinking: thinking_opt,
         output_config,
+        fallbacks: anthropic_fallback_models(model)
+            .into_iter()
+            .map(|model| AnthropicFallback { model })
+            .collect(),
         stream: true,
     };
 
@@ -678,13 +937,57 @@ pub(crate) fn build_request(
         http::HeaderName::from_static("anthropic-version"),
         http::HeaderValue::from_static("2023-06-01"),
     );
-    if model.spec.cache.send_session_affinity_headers {
+    // Current Pi treats an explicit caller beta list as authoritative (not
+    // additive to inferred defaults). Normalize repeated/comma-separated values
+    // without dropping caller features or introducing OAuth/provider defaults.
+    // When the caller configured no list at all, the route's inferred features
+    // are used instead (see `inferred_anthropic_betas`).
+    let configured_betas = model.endpoint.default_headers.get_all("anthropic-beta");
+    let mut betas = Vec::new();
+    for value in configured_betas.iter() {
+        let value = value
+            .to_str()
+            .map_err(|_| ConfigError::InvalidHeader("anthropic-beta".into()))?;
+        for beta in value
+            .split(',')
+            .map(str::trim)
+            .filter(|beta| !beta.is_empty())
+        {
+            if !betas.contains(&beta) {
+                betas.push(beta);
+            }
+        }
+    }
+    if model
+        .endpoint
+        .default_headers
+        .contains_key("anthropic-beta")
+    {
+        headers.insert(
+            http::HeaderName::from_static("anthropic-beta"),
+            http::HeaderValue::from_str(&betas.join(","))
+                .map_err(|_| ConfigError::InvalidHeader("anthropic-beta".into()))?,
+        );
+    } else {
+        let inferred = inferred_anthropic_betas(model, extended_thinking, tools_present);
+        if !inferred.is_empty() {
+            headers.insert(
+                http::HeaderName::from_static("anthropic-beta"),
+                http::HeaderValue::from_str(&inferred.join(","))
+                    .map_err(|_| ConfigError::InvalidHeader("anthropic-beta".into()))?,
+            );
+        }
+    }
+    if model.spec.cache.send_session_affinity_headers
+        && !crate::protocol::is_opencode_session_route(model)
+    {
         if let Some(session_id) = crate::protocol::cache_session_id(&req) {
             let value = http::HeaderValue::from_str(session_id)
                 .map_err(|_| ConfigError::InvalidHeader("x-session-affinity".into()))?;
             headers.insert(http::HeaderName::from_static("x-session-affinity"), value);
         }
     }
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -744,7 +1047,7 @@ fn push_synthetic_tool_results(
 
 /// Decodes a streaming SSE event from Anthropic, emitting StreamEvents.
 pub(crate) fn decode_stream_event(
-    _model: &crate::catalog::Model,
+    model: &crate::catalog::Model,
     sse_event: &SseEvent,
     builder: &mut ResponseBuilder,
 ) -> Result<Vec<StreamEvent>, AiError> {
@@ -761,6 +1064,36 @@ pub(crate) fn decode_stream_event(
 
     match data {
         AnthropicSseData::MessageStart { message } => {
+            // A relay's model label is not authority to rebind an ordinary
+            // response. Only a route that declared server-side fallbacks may
+            // attribute a different terminal model. Match its price by exact
+            // declared target, never by the requested model's tariff or a
+            // similarly named catalog entry.
+            if let (Some(terminal), Some(compat)) = (
+                message.model.as_deref(),
+                model.spec.preset.anthropic_compat.as_ref(),
+            ) {
+                if terminal != model.spec.api_name && !compat.allowed_fallback_models.is_empty() {
+                    // The echoed id has no separate catalog validation. Keep
+                    // it within the same bound as a declared fallback target.
+                    if terminal.trim().is_empty() || terminal.len() > 256 {
+                        return Err(AiError::Decode(DecodeError::Json(
+                            "invalid terminal fallback model".into(),
+                        )));
+                    }
+                    let mut matches = compat
+                        .allowed_fallback_models
+                        .iter()
+                        .filter(|fallback| fallback.model == terminal);
+                    builder.pricing = match (matches.next(), matches.next()) {
+                        (Some(fallback), None) => {
+                            fallback.cost.as_ref().and_then(|cost| cost.pricing())
+                        }
+                        _ => None,
+                    };
+                    builder.model = crate::types::ModelId(terminal.to_owned());
+                }
+            }
             builder.response_id = Some(message.id.clone());
             emit_event(
                 &mut events,
@@ -825,11 +1158,27 @@ pub(crate) fn decode_stream_event(
                         &mut events,
                         builder,
                         StreamEvent::ToolCallStart {
+                            async_execution: false,
                             index: canonical_idx,
                             id: ToolCallId(id),
                             name,
                         },
                     )?;
+                }
+                AnthropicResponseContentBlock::Fallback {} => {
+                    // A server-side fallback before any content is transparent:
+                    // the replacement model produces the same turn, and the
+                    // marker block carries no content. Once content has already
+                    // streamed, the two models' output cannot be merged into one
+                    // assistant turn, so fail closed instead of corrupting it.
+                    if !builder.observed_indices.is_empty() {
+                        return Err(UnsupportedError::MidOutputModelFallback.into());
+                    }
+                    // Without a distinct terminal model in message_start, the
+                    // marker cannot identify which tariff to apply.
+                    if builder.model == model.spec.id {
+                        builder.pricing = None;
+                    }
                 }
             }
         }
@@ -932,6 +1281,23 @@ pub(crate) fn decode_stream_event(
                 let stop = map_stop_reason(reason);
                 builder.set_stop_reason(stop);
             }
+            // Upstream maps Anthropic `refusal` + `stop_details.explanation` onto
+            // the assistant message's error text. The canonical `Response` has no
+            // error-message field yet (roadmap 1c.10), so the explanation is
+            // carried by the response's diagnostics channel instead of being
+            // dropped: a refusal nobody can explain is not actionable.
+            if let Some(explanation) = delta
+                .stop_details
+                .as_ref()
+                .and_then(|details| details.explanation.as_deref())
+                .map(str::trim)
+                .filter(|explanation| !explanation.is_empty())
+            {
+                builder.add_diagnostic(crate::error::Diagnostic {
+                    code: "anthropic_refusal".to_owned(),
+                    message: bounded_refusal_explanation(explanation),
+                });
+            }
 
             if let Some(u_dto) = usage {
                 // `message_delta` usage is cumulative and authoritative (apidocs
@@ -971,6 +1337,13 @@ pub(crate) fn decode_stream_event(
             }
         }
         AnthropicSseData::MessageStop => {
+            if builder.model != model.spec.id
+                && builder
+                    .usage
+                    .is_some_and(|usage| usage.cache_write_1h_tokens > 0)
+            {
+                builder.pricing = None;
+            }
             // Send final usage if we have one
             if let Some(u) = builder.usage {
                 emit_event(&mut events, builder, StreamEvent::Usage(u))?;
@@ -1066,19 +1439,21 @@ mod tests {
     use crate::types::{
         Capabilities, Endpoint, EndpointId, ImageMedia, ImageSource, Media, Message, ModalitySet,
         ModelId, ModelLimits, ModelSpec, OutputFormat, OutputModalities, ReasoningConfig,
-        ReasoningPart, Request, ToolChoice, UserMessage, UserPart,
+        ReasoningPart, Request, ToolChoice, ToolDef, UserMessage, UserPart,
     };
     use crate::CompatibilityMode;
     use std::sync::Arc;
 
     fn make_test_model(reasoning: bool) -> Model {
         let spec = ModelSpec {
+            preset: Default::default(),
             id: ModelId("test-claude".to_string()),
             endpoint: EndpointId("anthropic-ep".to_string()),
             api_name: "claude-3-5-sonnet".to_string(),
             display_name: None,
             protocol: Protocol::AnthropicMessages,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(crate::types::Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -1183,14 +1558,195 @@ mod tests {
     }
 
     #[test]
+    fn caller_anthropic_beta_list_is_authoritative_and_deduplicated() {
+        let mut model = make_test_model(false);
+        {
+            let endpoint = Arc::make_mut(&mut model.endpoint);
+            // Repeated headers and comma-joined values both occur in practice;
+            // the caller's list replaces inferred defaults and is deduplicated.
+            endpoint.default_headers.append(
+                http::HeaderName::from_static("anthropic-beta"),
+                http::HeaderValue::from_static(
+                    "fine-grained-tool-streaming-2025-05-14, interleaved-thinking-2025-05-14",
+                ),
+            );
+            endpoint.default_headers.append(
+                http::HeaderName::from_static("anthropic-beta"),
+                http::HeaderValue::from_static("fine-grained-tool-streaming-2025-05-14"),
+            );
+        }
+        let req = Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("Hello".to_string())],
+            })],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::None,
+            session_id: None,
+        };
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(
+            parts
+                .headers
+                .get("anthropic-beta")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+        );
+    }
+
+    /// A minimal Anthropic Messages request for beta-header tests.
+    fn beta_test_request(reasoning: ReasoningConfig) -> Request {
+        Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("Hello".to_string())],
+            })],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::None,
+            session_id: None,
+        }
+    }
+
+    fn beta_header(parts: &crate::protocol::HttpRequestParts) -> Option<String> {
+        parts
+            .headers
+            .get("anthropic-beta")
+            .map(|value| value.to_str().unwrap().to_owned())
+    }
+
+    #[test]
+    fn oauth_routes_infer_the_claude_code_betas() {
+        // Upstream `getBetaFeatures`: an OAuth/subscription token implies the
+        // Claude Code betas. The rule keys on the declared credential variable,
+        // so it is data, not a provider-name branch.
+        for var in ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"] {
+            let mut model = make_test_model(false);
+            Arc::make_mut(&mut model.endpoint).auth = crate::auth::Auth::BearerEnv {
+                var: var.to_string(),
+            };
+            let parts = build_request(&model, &beta_test_request(ReasoningConfig::Off)).unwrap();
+            assert_eq!(
+                beta_header(&parts).as_deref(),
+                Some("claude-code-20250219,oauth-2025-04-20"),
+                "{var} must select the OAuth betas"
+            );
+        }
+
+        // An ordinary API-key route infers nothing: the beta header is absent
+        // rather than carrying an empty value.
+        let mut model = make_test_model(false);
+        Arc::make_mut(&mut model.endpoint).auth = crate::auth::Auth::header_env(
+            http::HeaderName::from_static("x-api-key"),
+            "ANTHROPIC_API_KEY",
+        );
+        let parts = build_request(&model, &beta_test_request(ReasoningConfig::Off)).unwrap();
+        assert_eq!(beta_header(&parts), None);
+    }
+
+    #[test]
+    fn extended_thinking_infers_the_interleaved_thinking_beta_only_when_enabled() {
+        use crate::types::ReasoningControl;
+
+        // Budget-controlled model: an effort selection becomes extended thinking.
+        // (`Medium` keeps the derived 4096-token budget under the fixture's
+        // 8192-token output limit; `High` would equal it and fail validation.)
+        let extended = make_test_model(true);
+        let parts = build_request(
+            &extended,
+            &beta_test_request(ReasoningConfig::Effort(
+                crate::types::ReasoningEffort::Medium,
+            )),
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(
+            beta_header(&parts).as_deref(),
+            Some("interleaved-thinking-2025-05-14"),
+            "extended thinking must pair with the interleaved-thinking beta"
+        );
+
+        // Adaptive (effort) thinking is interleaved by construction: upstream
+        // suppresses the beta when the route forces adaptive thinking.
+        let mut adaptive = make_test_model(true);
+        Arc::make_mut(&mut adaptive.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .expect("the fixture model declares reasoning")
+            .control = ReasoningControl::Effort;
+        let parts = build_request(
+            &adaptive,
+            &beta_test_request(ReasoningConfig::Effort(
+                crate::types::ReasoningEffort::Medium,
+            )),
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(beta_header(&parts), None);
+
+        // Thinking disabled: no beta.
+        let parts = build_request(&extended, &beta_test_request(ReasoningConfig::Off)).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(beta_header(&parts), None);
+    }
+
+    #[test]
+    fn an_explicit_caller_beta_list_still_replaces_inferred_features() {
+        let mut model = make_test_model(false);
+        {
+            let endpoint = Arc::make_mut(&mut model.endpoint);
+            endpoint.auth = crate::auth::Auth::BearerEnv {
+                var: "ANTHROPIC_OAUTH_TOKEN".to_string(),
+            };
+            endpoint.default_headers.insert(
+                http::HeaderName::from_static("anthropic-beta"),
+                http::HeaderValue::from_static("caller-feature-2026-01-01"),
+            );
+        }
+        let parts = build_request(&model, &beta_test_request(ReasoningConfig::Off)).unwrap();
+        assert_eq!(
+            beta_header(&parts).as_deref(),
+            Some("caller-feature-2026-01-01"),
+            "an explicit caller list stays authoritative and is never merged with inferred betas"
+        );
+    }
+
+    #[test]
     fn cache_retention_controls_anthropic_wire_markers() {
-        let model = make_test_model(false);
+        let mut model = make_test_model(false);
         let mut req = Request {
             system: Some("stable system".to_string()),
             messages: vec![Message::User(UserMessage {
                 content: vec![UserPart::Text("stable user".to_string())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
+                constrained_sampling: None,
                 name: "lookup".to_string(),
                 description: "lookup".to_string(),
                 parameters: serde_json::json!({"type":"object"}),
@@ -1233,6 +1789,89 @@ mod tests {
             .is_none());
         assert!(body["tools"][0].get("cache_control").is_none());
         assert!(parts.headers.get("x-session-affinity").is_none());
+
+        Arc::make_mut(&mut model.spec)
+            .cache
+            .send_session_affinity_headers = true;
+        Arc::make_mut(&mut model.endpoint).id = EndpointId("opencode-anthropic".into());
+        req.session_id = Some("zen-session".into());
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(parts.headers["x-opencode-session"], "zen-session");
+        assert!(parts.headers.get("x-session-affinity").is_none());
+        req.session_id = None;
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+    }
+
+    #[test]
+    fn warm_breakpoint_covers_reusable_canonical_prefix_not_synthetic_suffix() {
+        let model = make_test_model(false);
+        let mut req = Request {
+            system: Some("stable system".into()),
+            messages: vec![
+                Message::User(UserMessage {
+                    content: vec![UserPart::Text("prior user".into())],
+                }),
+                Message::Assistant(crate::types::AssistantMessage {
+                    content: vec![AssistantPart::Text("prior answer".into())],
+                    model: model.spec.id.clone(),
+                    protocol: Protocol::AnthropicMessages,
+                }),
+            ],
+            tools: vec![ToolDef {
+                async_execution: false,
+                constrained_sampling: None,
+                name: "lookup".into(),
+                description: "lookup".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: Some(1),
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: CacheRetention::WarmShort,
+            session_id: Some("same-session".into()),
+        };
+        req.messages.push(Message::User(UserMessage {
+            content: vec![UserPart::Text("Reply with a single period.".into())],
+        }));
+        let warm = build_request(&model, &req).unwrap();
+        let warm_body: serde_json::Value = serde_json::from_slice(&warm.body).unwrap();
+        req.cache_retention = CacheRetention::Short;
+        req.max_output_tokens = Some(100);
+        req.messages.pop();
+        req.messages.push(Message::User(UserMessage {
+            content: vec![UserPart::Text("real follow-up".into())],
+        }));
+        let follow_up = build_request(&model, &req).unwrap();
+        let follow_up_body: serde_json::Value = serde_json::from_slice(&follow_up.body).unwrap();
+
+        assert_eq!(warm_body["system"], follow_up_body["system"]);
+        assert_eq!(warm_body["tools"], follow_up_body["tools"]);
+        let mut warm_prefix = warm_body["messages"].as_array().unwrap()[..2].to_vec();
+        let follow_up_prefix = &follow_up_body["messages"].as_array().unwrap()[..2];
+        assert_eq!(
+            warm_prefix[1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        warm_prefix[1]["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_control");
+        assert_eq!(&warm_prefix, follow_up_prefix);
+        assert!(warm_body["messages"][2]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            follow_up_body["messages"][2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
@@ -1466,19 +2105,262 @@ mod tests {
         assert_eq!(source1["type"], "url");
         assert_eq!(source1["url"], "https://example.com/test.png");
     }
+
+    fn compat_request(tool_choice: ToolChoice) -> Request {
+        Request {
+            system: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("go".to_string())],
+            })],
+            tools: vec![ToolDef {
+                async_execution: false,
+                name: "lookup".to_string(),
+                description: "Look up a city.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"]
+                }),
+                constrained_sampling: None,
+            }],
+            tool_choice,
+            max_output_tokens: Some(8192),
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::Short,
+            session_id: None,
+        }
+    }
+
+    fn compat_build(model: &Model, req: &Request) -> (serde_json::Value, http::HeaderMap) {
+        let parts = build_request(model, req).unwrap();
+        (serde_json::from_slice(&parts.body).unwrap(), parts.headers)
+    }
+
+    fn compat_beta_header(headers: &http::HeaderMap) -> String {
+        headers
+            .get("anthropic-beta")
+            .map(|value| value.to_str().unwrap().to_string())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn eager_tool_streaming_defaults_on_and_a_declared_false_uses_the_legacy_beta() {
+        let model = make_test_model(false);
+        let (body, headers) = compat_build(&model, &compat_request(ToolChoice::Auto));
+        assert_eq!(body["tools"][0]["eager_input_streaming"], true);
+        assert!(!compat_beta_header(&headers).contains("fine-grained-tool-streaming"));
+
+        let mut legacy = make_test_model(false);
+        Arc::make_mut(&mut legacy.spec).preset.anthropic_compat =
+            Some(crate::declarations::AnthropicCompatPreset {
+                supports_eager_tool_input_streaming: Some(false),
+                ..Default::default()
+            });
+        let (body, headers) = compat_build(&legacy, &compat_request(ToolChoice::Auto));
+        assert!(body["tools"][0].get("eager_input_streaming").is_none());
+        assert!(compat_beta_header(&headers).contains("fine-grained-tool-streaming-2025-05-14"));
+        // A request without tools never needs the legacy per-tool beta.
+        let mut no_tools = compat_request(ToolChoice::Auto);
+        no_tools.tools.clear();
+        let (_body, headers) = compat_build(&legacy, &no_tools);
+        assert!(!compat_beta_header(&headers).contains("fine-grained-tool-streaming"));
+    }
+
+    #[test]
+    fn declared_fallback_models_emit_the_wire_list_and_its_beta() {
+        let model = make_test_model(false);
+        let (_body, headers) = compat_build(&model, &compat_request(ToolChoice::Auto));
+        assert!(!compat_beta_header(&headers).contains("server-side-fallback"));
+
+        let mut fallback = make_test_model(false);
+        Arc::make_mut(&mut fallback.spec).preset.anthropic_compat =
+            Some(crate::declarations::AnthropicCompatPreset {
+                allowed_fallback_models: vec![crate::declarations::AnthropicFallbackModel {
+                    provider: "anthropic".to_string(),
+                    model: "claude-haiku-4-5".to_string(),
+                    cost: Some(crate::declarations::AnthropicFallbackCost {
+                        input: 1.0,
+                        output: 5.0,
+                        cache_read: 0.1,
+                        cache_write: 1.25,
+                    }),
+                }],
+                ..Default::default()
+            });
+        let (body, headers) = compat_build(&fallback, &compat_request(ToolChoice::Auto));
+        assert_eq!(
+            body["fallbacks"],
+            serde_json::json!([{"model": "claude-haiku-4-5"}])
+        );
+        assert!(compat_beta_header(&headers).contains("server-side-fallback-2026-07-01"));
+        // Never an empty array: Anthropic rejects the field with no target.
+        let (body, _headers) =
+            compat_build(&make_test_model(false), &compat_request(ToolChoice::Auto));
+        assert!(body.get("fallbacks").is_none());
+    }
+
+    #[test]
+    fn force_adaptive_thinking_suppresses_the_interleaved_beta() {
+        let mut req = compat_request(ToolChoice::Auto);
+        req.reasoning = ReasoningConfig::Budget(4096);
+        let model = make_test_model(true);
+        let (_body, headers) = compat_build(&model, &req);
+        assert!(compat_beta_header(&headers).contains("interleaved-thinking"));
+
+        let mut forced = make_test_model(true);
+        Arc::make_mut(&mut forced.spec).preset.anthropic_compat =
+            Some(crate::declarations::AnthropicCompatPreset {
+                force_adaptive_thinking: Some(true),
+                ..Default::default()
+            });
+        let (_body, headers) = compat_build(&forced, &req);
+        assert!(!compat_beta_header(&headers).contains("interleaved-thinking"));
+    }
+
+    #[test]
+    fn declared_mid_conversation_effort_appends_the_effort_system_message() {
+        let mut req = compat_request(ToolChoice::Auto);
+        req.reasoning = ReasoningConfig::Budget(4096);
+        let model = make_test_model(true);
+        let (body, headers) = compat_build(&model, &req);
+        assert!(body.get("fallbacks").is_none());
+        assert!(!compat_beta_header(&headers).contains("mid-conversation-output-config"));
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+
+        let mut mid = make_test_model(true);
+        Arc::make_mut(&mut mid.spec).preset.anthropic_compat =
+            Some(crate::declarations::AnthropicCompatPreset {
+                supports_mid_convo_effort: Some(true),
+                ..Default::default()
+            });
+        let (body, headers) = compat_build(&mid, &req);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        // Budget thinking has no adaptive effort, so Pi's active-effort default
+        // ("high") is used rather than inventing a tier.
+        assert_eq!(
+            messages[1],
+            serde_json::json!({"role": "system", "content": [], "output_config": {"effort": "high"}})
+        );
+        assert!(compat_beta_header(&headers).contains("mid-conversation-output-config-2026-07-01"));
+        assert!(compat_beta_header(&headers).contains("thinking-binding-controls-2026-08-01"));
+
+        // Adaptive effort models carry their mapped level.
+        let mut adaptive = mid.clone();
+        let adaptive_reasoning = Arc::make_mut(&mut adaptive.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap();
+        adaptive_reasoning.control = crate::types::ReasoningControl::Effort;
+        adaptive_reasoning.effort_budgets = None;
+        adaptive_reasoning.max_effort = crate::types::ReasoningEffort::Xhigh;
+        let mut effort_req = compat_request(ToolChoice::Auto);
+        effort_req.reasoning = ReasoningConfig::Effort(crate::types::ReasoningEffort::Xhigh);
+        let (body, _headers) = compat_build(&adaptive, &effort_req);
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+        assert_eq!(
+            body["messages"].as_array().unwrap().last().unwrap()["output_config"]["effort"],
+            "xhigh"
+        );
+    }
+
+    #[test]
+    fn empty_thinking_signatures_replay_as_text_unless_the_route_declares_them() {
+        let model = make_test_model(false);
+        let empty_state = ReasoningState {
+            model: ModelId("test-claude".to_string()),
+            protocol: Protocol::AnthropicMessages,
+            kind: ReasoningStateKind::AnthropicSignature {
+                signature: String::new(),
+            },
+        };
+        let request = || Request {
+            system: None,
+            messages: vec![
+                Message::User(UserMessage {
+                    content: vec![UserPart::Text("Hello".to_string())],
+                }),
+                Message::Assistant(crate::types::AssistantMessage {
+                    content: vec![AssistantPart::Reasoning(ReasoningPart {
+                        text: Some("Interrupted thinking".to_string()),
+                        state: Some(empty_state.clone()),
+                    })],
+                    model: ModelId("test-claude".to_string()),
+                    protocol: Protocol::AnthropicMessages,
+                }),
+            ],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: None,
+            temperature: None,
+            stop: vec![],
+            reasoning: ReasoningConfig::Off,
+            reasoning_mode: crate::types::ReasoningMode::Standard,
+            responses: None,
+            output_format: OutputFormat::Text,
+            output_modalities: OutputModalities::Text,
+            compatibility: CompatibilityMode::Strict,
+            cache_retention: crate::types::CacheRetention::Short,
+            session_id: None,
+        };
+        let (body, _headers) = compat_build(&model, &request());
+        // Pi's default: an empty signature becomes plain text for Anthropic.
+        assert_eq!(body["messages"][1]["content"][0]["type"], "text");
+        assert_eq!(
+            body["messages"][1]["content"][0]["text"],
+            "Interrupted thinking"
+        );
+
+        let mut declaring = make_test_model(false);
+        Arc::make_mut(&mut declaring.spec).preset.anthropic_compat =
+            Some(crate::declarations::AnthropicCompatPreset {
+                allow_empty_signature: Some(true),
+                ..Default::default()
+            });
+        let (body, _headers) = compat_build(&declaring, &request());
+        assert_eq!(body["messages"][1]["content"][0]["type"], "thinking");
+        assert_eq!(body["messages"][1]["content"][0]["signature"], "");
+
+        // A fully empty thinking block is never sent at all.
+        let mut silent = request();
+        silent.messages[1] = Message::Assistant(crate::types::AssistantMessage {
+            content: vec![AssistantPart::Reasoning(ReasoningPart {
+                text: Some("   ".to_string()),
+                state: Some(empty_state),
+            })],
+            model: ModelId("test-claude".to_string()),
+            protocol: Protocol::AnthropicMessages,
+        });
+        let (body, _headers) = compat_build(&model, &silent);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    }
 }
 
 /// Offline fixture matrix for the Anthropic Messages stream decoder
 /// (design §19; plan Task 10.2).
 #[cfg(test)]
 mod fixture_tests {
-    use super::decode_stream_event;
+    use super::MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES;
+    use super::{bounded_refusal_explanation, decode_stream_event};
+    use crate::declarations::{
+        AnthropicCompatPreset, AnthropicFallbackCost, AnthropicFallbackModel,
+    };
     use crate::error::{AiError, StreamProtocolError};
+    use crate::pricing::{Pricing, TokenRate};
     use crate::protocol::harness;
     use crate::stream::StreamEvent;
     use crate::types::{
         AssistantPart, Protocol, ReasoningStateKind, StopReason, ToolCallArgumentError, ToolDef,
     };
+    use std::sync::Arc;
 
     macro_rules! fx {
         ($name:literal) => {
@@ -1514,6 +2396,118 @@ mod fixture_tests {
         assert_eq!(resp.usage.input_tokens, 10);
         assert_eq!(resp.usage.output_tokens, 5);
         assert_eq!(resp.usage.total_tokens, 15);
+    }
+
+    // pi anthropic-messages.ts: a `fallback` content block before any content is
+    // transparent; after content it is an unsupported mid-output model switch.
+    #[tokio::test]
+    async fn pre_content_fallback_is_transparent() {
+        let events = run(fx!("fallback_pre_content.sse"), 0).await.unwrap();
+        assert_eq!(text_of(&events), "Hi");
+        let resp = harness::finished(&events);
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+    }
+
+    fn fallback_model() -> crate::Model {
+        let mut model = harness::model(
+            Protocol::AnthropicMessages,
+            Some(Pricing {
+                input: TokenRate(9_000_000),
+                output: TokenRate(9_000_000),
+                cache_read: TokenRate(9_000_000),
+                cache_write_5m: TokenRate(9_000_000),
+                cache_write_1h: None,
+                reasoning: None,
+                tiers: vec![],
+            }),
+        );
+        Arc::make_mut(&mut model.spec).preset.anthropic_compat = Some(AnthropicCompatPreset {
+            allowed_fallback_models: vec![AnthropicFallbackModel {
+                provider: "anthropic".into(),
+                model: "claude-haiku-4-5".into(),
+                cost: Some(AnthropicFallbackCost {
+                    input: 1.0,
+                    output: 5.0,
+                    cache_read: 0.1,
+                    cache_write: 1.25,
+                }),
+            }],
+            ..Default::default()
+        });
+        model
+    }
+
+    #[tokio::test]
+    async fn declared_fallback_uses_terminal_model_and_exact_declared_price() {
+        let model = fallback_model();
+        for chunk in [0, 1] {
+            let events = harness::drive(
+                &model,
+                decode_stream_event,
+                fx!("fallback_priced.sse"),
+                chunk,
+            )
+            .await
+            .unwrap();
+            let response = harness::finished(&events);
+            assert_eq!(response.message.model.0, "claude-haiku-4-5");
+            assert_eq!(response.usage.total_tokens, 2320);
+            assert_eq!(response.cost.unwrap().total, 3035);
+            assert_eq!(text_of(&events), "Done.");
+            let state = response
+                .message
+                .content
+                .iter()
+                .find_map(|part| match part {
+                    AssistantPart::Reasoning(reasoning) => reasoning.state.as_ref(),
+                    _ => None,
+                })
+                .expect("signed fallback reasoning");
+            assert_eq!(state.model.0, "claude-haiku-4-5");
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_with_unmatched_or_incomplete_pricing_never_uses_requested_tariff() {
+        let mut model = fallback_model();
+        let fixture = std::str::from_utf8(fx!("fallback_priced.sse")).unwrap();
+        for data in [
+            fixture.replace("claude-haiku-4-5", "claude-haiku-unknown"),
+            fixture.replace("\"model\":\"claude-haiku-4-5\",", ""),
+            fixture.replace(
+                "\"cache_creation_input_tokens\":20",
+                "\"cache_creation_input_tokens\":20,\"cache_creation\":{\"ephemeral_1h_input_tokens\":20}",
+            ),
+        ] {
+            let events = harness::drive(&model, decode_stream_event, data.as_bytes(), 0)
+                .await
+                .unwrap();
+            assert!(harness::finished(&events).cost.is_none());
+        }
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .anthropic_compat
+            .as_mut()
+            .unwrap()
+            .allowed_fallback_models[0]
+            .cost = None;
+        let events = harness::drive(&model, decode_stream_event, fx!("fallback_priced.sse"), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            harness::finished(&events).message.model.0,
+            "claude-haiku-4-5"
+        );
+        assert!(harness::finished(&events).cost.is_none());
+    }
+
+    #[tokio::test]
+    async fn mid_output_fallback_is_rejected() {
+        let error = run(fx!("fallback_mid_output.sse"), 0).await.unwrap_err();
+        assert!(matches!(
+            error,
+            AiError::Unsupported(crate::error::UnsupportedError::MidOutputModelFallback)
+        ));
     }
 
     // f8: final usage merges the cumulative cache buckets and the documented
@@ -1573,6 +2567,67 @@ mod fixture_tests {
     }
 
     #[tokio::test]
+    async fn relay_model_mismatch_keeps_signed_thinking_bound_to_requested_model() {
+        // A relay can report its upstream model in message_start. Its unsigned
+        // label must not replace the requested model attached to opaque state.
+        let data = br#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_relay","model":"relay-upstream-model","usage":{"input_tokens":15,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Consider the options."}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"c2lnbmF0dXJl"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Final answer."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+        for chunk in [0, 1] {
+            let events = run(data, chunk).await.unwrap();
+            let response = harness::finished(&events);
+            assert_eq!(response.message.model.0, "fixture-model");
+            let reasoning = response
+                .message
+                .content
+                .iter()
+                .find_map(|part| match part {
+                    AssistantPart::Reasoning(reasoning) => Some(reasoning),
+                    _ => None,
+                })
+                .expect("signed thinking block");
+            assert_eq!(reasoning.text.as_deref(), Some("Consider the options."));
+            let state = reasoning.state.as_ref().expect("signature state");
+            assert_eq!(state.model.0, "fixture-model");
+            assert_eq!(state.protocol, Protocol::AnthropicMessages);
+            assert!(matches!(
+                &state.kind,
+                ReasoningStateKind::AnthropicSignature { signature }
+                    if signature == "c2lnbmF0dXJl"
+            ));
+            assert_eq!(text_of(&events), "Final answer.");
+        }
+    }
+
+    #[tokio::test]
     async fn redacted_thinking_has_no_text() {
         let events = run(fx!("redacted_thinking.sse"), 0).await.unwrap();
         let resp = harness::finished(&events);
@@ -1624,6 +2679,8 @@ mod fixture_tests {
     async fn schema_mismatch_is_marked_before_tool_call_end() {
         let model = harness::model(Protocol::AnthropicMessages, None);
         let tools = [ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),
             parameters: serde_json::json!({
@@ -1698,6 +2755,51 @@ mod fixture_tests {
         assert_eq!(
             harness::finished(&run(fx!("pause_turn.sse"), 0).await.unwrap()).stop_reason,
             StopReason::PauseTurn
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_stop_details_explanation_is_surfaced_and_bounded() {
+        let events = run(fx!("refusal.sse"), 0).await.unwrap();
+        let resp = harness::finished(&events);
+        assert_eq!(resp.stop_reason, StopReason::Refusal);
+        let diagnostic = resp
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "anthropic_refusal")
+            .expect("a refusal must carry its stop_details explanation");
+        assert!(
+            diagnostic.message.contains("usage policy prohibits"),
+            "{diagnostic:?}"
+        );
+
+        // A refusal without stop_details still carries the canonical reason and
+        // fabricates no explanation.
+        let data = br#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_r2","usage":{"input_tokens":1,"output_tokens":0}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+        let events = run(data, 0).await.unwrap();
+        let resp = harness::finished(&events);
+        assert_eq!(resp.stop_reason, StopReason::Refusal);
+        assert!(resp.diagnostics.is_empty(), "{:?}", resp.diagnostics);
+
+        // Provider prose is untrusted: the diagnostic is truncated on a
+        // character boundary, never copied whole.
+        let long = "é".repeat(MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES);
+        let bounded = bounded_refusal_explanation(&long);
+        assert!(bounded.len() <= MAX_ANTHROPIC_REFUSAL_EXPLANATION_BYTES + 3);
+        assert!(bounded.ends_with('…'));
+        assert_eq!(
+            bounded_refusal_explanation("short").as_str(),
+            "short",
+            "a short explanation is copied unchanged"
         );
     }
 

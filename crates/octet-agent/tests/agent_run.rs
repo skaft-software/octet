@@ -35,6 +35,8 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 const MAX_CONNECT_ATTEMPTS_FOR_TEST: usize = 6;
+const ONE_PIXEL_PNG: &[u8] =
+    include_bytes!("../../octet-coding-agent/tests/fixtures/export_html/one-pixel.png");
 
 // ── Scripted SSE bodies (Anthropic Messages wire shapes) ───────────────────
 
@@ -743,6 +745,45 @@ impl Respond for AbortableCompactionScript {
     }
 }
 
+struct LocalServerRequestSizeScript {
+    main_calls: Arc<AtomicUsize>,
+}
+
+impl Respond for LocalServerRequestSizeScript {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let tools_empty = match body.get("tools") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(tools) => tools.as_array().is_some_and(Vec::is_empty),
+        };
+        if tools_empty {
+            return ResponseTemplate::new(200)
+                .set_body_string(text_turn("compacted summary"))
+                .insert_header("content-type", "text/event-stream");
+        }
+        let index = self.main_calls.fetch_add(1, Ordering::SeqCst);
+        if index < 2 {
+            return ResponseTemplate::new(200)
+                .set_body_string(tool_turn(&[(
+                    &format!("read_{index}"),
+                    "read",
+                    serde_json::json!({"path": "large.txt"}),
+                )]))
+                .insert_header("content-type", "text/event-stream");
+        }
+        match index {
+            // Verbatim shape of a vLLM context-length rejection, including the
+            // numeric code that used to veto the compaction path.
+            2 => ResponseTemplate::new(400).set_body_string(
+                r#"{"object":"error","message":"This model's maximum context length is 131072 tokens. However, you requested 30896 output tokens and your prompt contains at least 100177 input tokens, for a total of at least 131073 tokens. (parameter=input_tokens, value=100177)","type":"BadRequestError","param":null,"code":400}"#,
+            ),
+            _ => ResponseTemplate::new(200)
+                .set_body_string(text_turn("recovered after compaction"))
+                .insert_header("content-type", "text/event-stream"),
+        }
+    }
+}
+
 impl Respond for ContextAwareScript {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
@@ -785,6 +826,7 @@ fn scripted_model(uri: &str) -> Model {
             display_name: None,
             protocol: Protocol::AnthropicMessages,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -801,6 +843,7 @@ fn scripted_model(uri: &str) -> Model {
             },
             pricing: None,
             cache: octet_ai::CacheCompatibility::default(),
+            preset: Default::default(),
         }),
         endpoint: Arc::new(Endpoint {
             id: EndpointId("test".to_string()),
@@ -897,8 +940,18 @@ fn scripted_model_for_protocol(uri: &str, protocol: Protocol) -> Model {
         Protocol::OpenAiResponses => scripted_responses_model(uri),
         Protocol::OpenAiChat => openai_multimodal_model(uri),
         Protocol::AnthropicMessages => scripted_model(uri),
-        Protocol::BedrockConverse | Protocol::GoogleGenerativeAi => {
+        Protocol::BedrockConverse
+        | Protocol::GoogleGenerativeAi
+        | Protocol::MistralConversations => {
             panic!("{protocol:?} requires a codec-specific provider fixture")
+        }
+        // `pi-messages` is the native host codec (the Pi gateway request
+        // document plus its serialized assistant-message stream), not another
+        // provider alias, and this target has no Pi route fixture. Asking for
+        // one is a test setup error, so it is named explicitly instead of being
+        // folded into a catch-all that would swallow a future protocol.
+        Protocol::PiMessages => {
+            panic!("{protocol:?} is the native host codec and has no scripted fixture")
         }
     }
 }
@@ -1165,6 +1218,14 @@ async fn collect(run: &mut octet_agent::Run<'_>) -> Vec<AgentEvent> {
 }
 
 fn session_with_authoritative_pressure(path: &Path, total_tokens: u64) -> Session {
+    session_with_authoritative_pressure_and_pricing(path, total_tokens, None)
+}
+
+fn session_with_authoritative_pressure_and_pricing(
+    path: &Path,
+    total_tokens: u64,
+    pricing: Option<&Pricing>,
+) -> Session {
     let mut session = Session::create(path).unwrap();
     let mut latest_assistant = None;
     for index in 0..5 {
@@ -1183,18 +1244,22 @@ fn session_with_authoritative_pressure(path: &Path, total_tokens: u64) -> Sessio
                 .unwrap(),
         );
     }
+    let usage = Usage {
+        input_tokens: total_tokens.saturating_sub(1_000),
+        output_tokens: 1_000,
+        total_tokens,
+        ..Usage::default()
+    };
+    // Pricing is declared when the synthetic historical response is created;
+    // never retrofit a known price onto previously unpriced durable history.
+    let cost = pricing.map(|pricing| octet_ai::pricing::cost_of(pricing, &usage).unwrap());
     session
         .record_assistant_usage(
             latest_assistant.unwrap(),
             EndpointId("test".into()),
             ModelId("scripted".into()),
-            Usage {
-                input_tokens: total_tokens.saturating_sub(1_000),
-                output_tokens: 1_000,
-                total_tokens,
-                ..Usage::default()
-            },
-            None,
+            usage,
+            cost,
         )
         .unwrap();
     session
@@ -1232,6 +1297,21 @@ fn count_tool_results(message: &serde_json::Value) -> usize {
         .unwrap_or(0)
 }
 
+/// The exact system prompt text a wire request carried, across the shapes the
+/// Messages and Responses encoders emit (string, or a block list).
+fn wire_system_text(request: &serde_json::Value) -> String {
+    match request.get("system") {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .map(|block| block["text"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Some(other) => panic!("unexpected system encoding: {other}"),
+    }
+}
+
 fn request_has_no_tools(request: &serde_json::Value) -> bool {
     match request.get("tools").and_then(serde_json::Value::as_array) {
         None => true,
@@ -1243,7 +1323,15 @@ fn request_has_no_tools(request: &serde_json::Value) -> bool {
 
 #[tokio::test]
 async fn normal_terminal_turn_without_user_visible_content_fails_loudly() {
-    for body in [empty_turn(), reasoning_only_turn("private trace only")] {
+    // Distinguish the observed response shapes without inferring why the
+    // provider ended the turn without an answer.
+    for (body, expected) in [
+        (empty_turn(), "no user-visible content"),
+        (
+            reasoning_only_turn("private trace only"),
+            "reasoning but no answer text",
+        ),
+    ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("messages"))
@@ -1265,8 +1353,8 @@ async fn normal_terminal_turn_without_user_visible_content_fails_loudly() {
         match assert_single_run_finished(&events) {
             FinishReason::Failed(error) => {
                 assert!(
-                    error.to_string().contains("no user-visible content"),
-                    "unexpected failure: {error}"
+                    error.to_string().contains(expected),
+                    "expected {expected:?}, got: {error}"
                 );
             }
             other => panic!("empty terminal response must fail, got {other:?}"),
@@ -1278,6 +1366,176 @@ async fn normal_terminal_turn_without_user_visible_content_fails_loudly() {
             "an empty turn must not be presented as a completed model turn"
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn chat_reasoning_only_diagnostic_retains_usage_without_retry() {
+    for (report_stop, report_usage) in [(true, true), (false, true), (true, false), (false, false)]
+    {
+        let response_id = "private-response-id\u{1b}[31m\n";
+        let reasoning = "private-reasoning\u{1b}[31m\n";
+        let mut chunks = vec![serde_json::json!({
+            "id": response_id,
+            "choices": [{"delta": {"reasoning": reasoning}}],
+        })];
+        if report_stop {
+            chunks.push(serde_json::json!({
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+            }));
+        }
+        if report_usage {
+            chunks.push(serde_json::json!({
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 12,
+                    "completion_tokens_details": {"reasoning_tokens": 12},
+                },
+            }));
+        }
+        let body = chunks
+            .into_iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(Script {
+                bodies: vec![body],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let session_path = sessions.path().join("session.jsonl");
+        let mut model = openai_multimodal_model(&server.uri());
+        Arc::make_mut(&mut model.spec).limits = ModelLimits {
+            context_window: 32_768,
+            max_output_tokens: 32_768,
+        };
+        let mut agent = build_agent_with_reasoning(
+            model,
+            &session_path,
+            workspace.path(),
+            ReasoningConfig::Off,
+            Some(4),
+        );
+        let mut run = agent.prompt("return an answer").await.unwrap();
+        let events = collect(&mut run).await;
+        drop(run);
+        let requests = wire_requests(&server).await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "completed reasoning-only turns must not be replayed"
+        );
+        let error = match assert_single_run_finished(&events) {
+            FinishReason::Failed(error @ octet_agent::AgentError::IncompleteResponse { .. }) => {
+                error
+            }
+            other => panic!("reasoning-only completion must fail, got {other:?}"),
+        };
+        let diagnostic = octet_agent::public_error_diagnostic(error, "test", "scripted");
+        assert!(diagnostic.contains("provider returned reasoning but no answer text"));
+        assert!(diagnostic.contains("stop=end_turn"));
+        assert!(diagnostic.contains(&format!("chat_stop_defaulted={}", !report_stop)));
+        let requested_cap = requests[0]["max_completion_tokens"].as_u64().unwrap();
+        assert!(requested_cap > 0 && requested_cap < 32_768);
+        assert!(diagnostic.contains(&format!("request_max_output_tokens={requested_cap}")));
+        assert!(diagnostic.contains("not automatically retried"));
+        if report_usage {
+            assert!(diagnostic.contains("output_tokens=12; reasoning_tokens=12"));
+            assert!(!diagnostic.contains("usage=not_reported"));
+        } else {
+            assert!(diagnostic.contains("usage=not_reported"));
+            assert!(!diagnostic.contains("reasoning_tokens="));
+            assert!(!diagnostic.contains("; output_tokens="));
+        }
+        for forbidden in ["private-response-id", "private-reasoning", "\u{1b}", "\n"] {
+            assert!(!diagnostic.contains(forbidden));
+        }
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TurnFinished { .. } | AgentEvent::ProviderRetry { .. }
+        )));
+        let reopened = Session::open_read_only(&session_path).unwrap();
+        assert!(reopened.context().unwrap().iter().any(|message| matches!(
+            message,
+            Message::Assistant(assistant) if assistant.content.iter().any(|part| matches!(
+                part,
+                AssistantPart::Reasoning(part) if part.text.as_deref() == Some(reasoning)
+            ))
+        )));
+        let records = reopened.usage_records();
+        assert_eq!(records.len(), 1);
+        assert!(matches!(
+            records[0].kind,
+            UsageRecordKind::AssistantTurn { .. }
+        ));
+        assert_eq!(records[0].stop_reason, Some(octet_ai::StopReason::EndTurn));
+        let expected_usage = if report_usage {
+            Usage {
+                input_tokens: 5,
+                output_tokens: 12,
+                reasoning_tokens: 12,
+                total_tokens: 17,
+                ..Usage::default()
+            }
+        } else {
+            // Preserve the existing accounting representation, not a billing claim.
+            Usage::default()
+        };
+        assert_eq!(records[0].usage, expected_usage);
+    }
+}
+
+#[tokio::test]
+async fn chat_reasoning_answer_and_length_continuation_remain_successful() {
+    for finish_reason in ["stop", "length"] {
+        let chunk = serde_json::json!({
+            "id": "chat-reasoning-answer",
+            "choices": [{
+                "delta": {"reasoning": "private reasoning", "content": "answer"},
+                "finish_reason": finish_reason,
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 12},
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(Script {
+                bodies: vec![
+                    format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+                    openai_text_turn("continued"),
+                ],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let mut agent = build_agent_with_reasoning(
+            openai_multimodal_model(&server.uri()),
+            &sessions.path().join("session.jsonl"),
+            workspace.path(),
+            ReasoningConfig::Off,
+            Some(4),
+        );
+        let output = agent.complete("return an answer").await.unwrap();
+        assert!(matches!(output.reason, FinishReason::Completed));
+        let requests = wire_requests(&server).await;
+        if finish_reason == "length" {
+            assert_eq!(output.text, "answercontinued");
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]
+                .to_string()
+                .contains("truncated at the token limit"));
+        } else {
+            assert_eq!(output.text, "answer");
+            assert_eq!(requests.len(), 1);
+        }
     }
 }
 
@@ -2263,6 +2521,53 @@ async fn provider_context_error_forces_one_compaction_before_retry() {
         .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
 }
 
+/// A strict self-hosted/local server answers HTTP 400 with a machine-readable
+/// `"code":400` inside a provider-shaped error body. Before this regression the
+/// numeric code selected the permanent branch, so the request failed instead of
+/// compacting; a real vLLM deployment rejected a 131072-token window this way.
+#[tokio::test]
+async fn local_server_request_size_rejection_compacts_once_and_retries() {
+    let server = MockServer::start().await;
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(LocalServerRequestSizeScript {
+            main_calls: Arc::clone(&main_calls),
+        })
+        .mount(&server)
+        .await;
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    // The session must hold a reducible episode before the rejection, exactly
+    // like a real run; otherwise there is legitimately nothing to compact.
+    std::fs::write(workspace.join("large.txt"), "small\n").unwrap();
+    let mut agent = build_agent(
+        &server.uri(),
+        &workspace,
+        &sessions.path().join("local-request-size.jsonl"),
+        Some(6),
+    );
+    let output = agent.complete("compact and retry").await.unwrap();
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "{output:?}"
+    );
+    assert!(
+        agent
+            .session()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })),
+        "the rejection must commit exactly the one compaction it used"
+    );
+    assert_eq!(
+        main_calls.load(Ordering::SeqCst),
+        4,
+        "two tool turns, one rejected request, then one successful retry"
+    );
+}
+
 #[tokio::test]
 async fn abort_cancels_compaction_without_late_usage_or_summary_commits() {
     let server = MockServer::start().await;
@@ -2593,7 +2898,7 @@ async fn openai_compatible_agent_sends_inline_image_end_to_end() {
     let input = UserInput::from(vec![
         InputPart::Text("describe this image".into()),
         InputPart::Media(Media::image_bytes(
-            bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\n"),
+            bytes::Bytes::from_static(ONE_PIXEL_PNG),
             "image/png".parse().unwrap(),
         )),
     ]);
@@ -2613,7 +2918,7 @@ async fn openai_compatible_agent_sends_inline_image_end_to_end() {
     assert_eq!(content[1]["type"], "image_url");
     assert_eq!(
         content[1]["image_url"]["url"],
-        "data:image/png;base64,iVBORw0KGgo="
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
     );
     assert!(matches!(
         &agent.session().context().unwrap()[0],
@@ -2916,6 +3221,7 @@ async fn resumed_agent_reexecutes_only_missing_tool_results() {
         .session_mut()
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("crashed_call".into()),
                 name: "read".into(),
                 arguments_json: serde_json::json!({"path": "recover.txt"}).to_string(),
@@ -2970,6 +3276,7 @@ async fn restart_never_replays_a_mutating_tool_without_an_idempotency_contract()
         .session_mut()
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("possibly_committed".into()),
                 name: "unsafe_recovery".into(),
                 arguments_json: "{}".into(),
@@ -2980,12 +3287,22 @@ async fn restart_never_replays_a_mutating_tool_without_an_idempotency_contract()
         })))
         .unwrap();
 
+    agent
+        .session()
+        .tool_invocation(0)
+        .unwrap()
+        .replace_partial_output("latest checkpoint: effect outcome not known")
+        .unwrap();
     let output = agent.complete("continue after restart").await.unwrap();
     assert_eq!(output.text, "reconciled");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert!(body.to_string().contains("indeterminate after restart"));
+    assert!(body
+        .to_string()
+        .contains("latest checkpoint: effect outcome not known"));
+    assert!(body.to_string().contains("external outcome is unknown"));
 }
 
 #[tokio::test]
@@ -3123,7 +3440,7 @@ async fn prompt_with_media_persists_media_user_part() {
     let input = UserInput::from(vec![
         InputPart::Text("what is in this image?".into()),
         InputPart::Media(Media::image_bytes(
-            bytes::Bytes::from_static(&[0x89, 0x50, 0x4e, 0x47]),
+            bytes::Bytes::from_static(ONE_PIXEL_PNG),
             "image/png".parse().unwrap(),
         )),
     ]);
@@ -3317,9 +3634,11 @@ struct ParallelOverlapProbe {
 impl Tool for ParallelOverlapProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "parallel_overlap_probe".into(),
             description: "Records whether independent calls overlap".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -3390,7 +3709,7 @@ async fn parallel_safe_tool_implementations_really_overlap() {
 }
 
 #[tokio::test]
-async fn host_classification_overrides_a_parallel_tool_claim() {
+async fn network_classification_overrides_a_parallel_tool_claim() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("messages"))
@@ -3413,12 +3732,12 @@ async fn host_classification_overrides_a_parallel_tool_claim() {
     let probe = ParallelOverlapProbe {
         active: Arc::clone(&active),
         maximum: Arc::clone(&maximum),
-        effect: ToolEffect::HostRead,
+        effect: ToolEffect::Network,
     };
     let mut agent = build_agent_with_extra_tool(
         &server.uri(),
         workspace.path(),
-        &sessions.path().join("host-effect-sequential.jsonl"),
+        &sessions.path().join("network-effect-sequential.jsonl"),
         Some(4),
         probe,
     );
@@ -4169,9 +4488,11 @@ struct ProgressTool {
 impl Tool for ProgressTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "progress_test".to_string(),
             description: "Emits progress and sleeps".to_string(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4208,9 +4529,11 @@ struct QueuedActivationTool {
 impl Tool for QueuedActivationTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "queued_activation".into(),
             description: "Queues a semantic activation event".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4265,9 +4588,11 @@ struct LargeOutputTool;
 impl Tool for LargeOutputTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "large_output".into(),
             description: "Returns a large result".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4294,9 +4619,11 @@ struct RichErrorTool;
 impl Tool for RichErrorTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "rich_error".into(),
             description: "Returns a structured error with supported media".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4335,9 +4662,11 @@ struct RegisteredToolsProbe {
 impl Tool for RegisteredToolsProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "registered_tools_probe".into(),
             description: "Records the final registered tool set".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4429,9 +4758,11 @@ struct UnsafeRecoveryTool {
 impl Tool for UnsafeRecoveryTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "unsafe_recovery".into(),
             description: "Represents an irreversible external mutation".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4457,9 +4788,11 @@ impl Tool for UnsafeRecoveryTool {
 impl Tool for CountingRecoveryTool {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "count_recovery".into(),
             description: "Counts crash-recovery executions".into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            constrained_sampling: None,
         }
     }
 
@@ -4668,6 +5001,49 @@ async fn marked_tool_output_remains_rich_across_lowering_events_and_session_reop
         .any(|part| matches!(part, octet_ai::ToolResultPart::Media(Media::Image(_)))));
 }
 
+fn assert_bounded_invocation_batch(path: &Path, expected_calls: usize, prefix: &str) {
+    let records = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<octet_agent::SessionRecord>(line).unwrap())
+        .collect::<Vec<_>>();
+    let scopes = records
+        .iter()
+        .filter_map(|record| match record {
+            octet_agent::SessionRecord::ToolInvocation { scope, .. } => Some(scope),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!scopes.is_empty());
+    assert!(
+        scopes
+            .iter()
+            .all(|scope| scope.invocation_id().parse::<usize>().unwrap() < 32),
+        "refused calls must not allocate live-effect slots"
+    );
+    let reopened = Session::open_read_only(path).unwrap();
+    let results = reopened
+        .entries()
+        .iter()
+        .flat_map(|entry| match &entry.value {
+            EntryValue::Message(Message::User(user)) => user
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    UserPart::ToolResult(result) => Some(result),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), expected_calls);
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(result.tool_call_id.0, format!("{prefix}{index}"));
+        assert_eq!(result.is_error, index >= 32);
+    }
+}
+
 #[tokio::test]
 async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
     let server = MockServer::start().await;
@@ -4692,9 +5068,10 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
         .unwrap();
     session
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
-            content: (0..35)
+            content: (0..65)
                 .map(|index| {
                     AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: octet_ai::ToolCallId(format!("recover-{index}")),
                         name: "count_recovery".into(),
                         arguments_json: "{}".into(),
@@ -4751,8 +5128,8 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(results.len(), 35);
-    for index in 32..35 {
+    assert_eq!(results.len(), 65);
+    for index in 32..65 {
         let id = format!("recover-{index}");
         let result = results
             .iter()
@@ -4764,6 +5141,7 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
             Some(octet_ai::ToolResultPart::Text(text)) if text.contains("per-turn tool-call limit")
         ));
     }
+    assert_bounded_invocation_batch(&session_path, 65, "recover-");
 }
 
 #[tokio::test]
@@ -4787,6 +5165,7 @@ async fn host_classification_overrides_a_safe_replay_claim() {
     session
         .append(EntryValue::Message(Message::Assistant(AssistantMessage {
             content: vec![AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
                 id: octet_ai::ToolCallId("classified-recovery".into()),
                 name: "count_recovery".into(),
                 arguments_json: "{}".into(),
@@ -4820,6 +5199,12 @@ async fn host_classification_overrides_a_safe_replay_claim() {
     })
     .unwrap();
 
+    agent
+        .session()
+        .tool_invocation(0)
+        .unwrap()
+        .replace_partial_output("checkpoint from host-classified observation")
+        .unwrap();
     let output = agent.complete("continue").await.unwrap();
 
     assert_eq!(output.text, "reconciled");
@@ -4829,6 +5214,10 @@ async fn host_classification_overrides_a_safe_replay_claim() {
     assert!(body
         .to_string()
         .contains("did not replay this host-classified effect"));
+    assert!(body
+        .to_string()
+        .contains("checkpoint from host-classified observation"));
+    assert!(body.to_string().contains("external outcome is unknown"));
 }
 
 #[tokio::test]
@@ -4914,10 +5303,13 @@ async fn websocket_connection_limit_is_retried_by_agent() {
         ReasoningConfig::Off,
     );
 
-    let output = agent
-        .complete("continue after the socket refresh")
-        .await
-        .unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        agent.complete("continue after the socket refresh"),
+    )
+    .await
+    .expect("socket refresh recovery must remain bounded")
+    .unwrap();
     assert_eq!(output.text, "recovered");
     assert_eq!(server.websocket_requests.load(Ordering::SeqCst), 1);
     assert_eq!(server.http_requests.load(Ordering::SeqCst), 1);
@@ -5553,6 +5945,7 @@ struct ClassifiedEffectProbe {
 impl Tool for ClassifiedEffectProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: self.name.to_owned(),
             description: "effect admission probe".to_owned(),
             parameters: serde_json::json!({
@@ -5560,6 +5953,7 @@ impl Tool for ClassifiedEffectProbe {
                 "properties": {},
                 "additionalProperties": false
             }),
+            constrained_sampling: None,
         }
     }
 
@@ -5594,6 +5988,7 @@ struct SchemaMismatchBashProbe {
 impl Tool for SchemaMismatchBashProbe {
     fn definition(&self) -> octet_ai::ToolDef {
         octet_ai::ToolDef {
+            async_execution: false,
             name: "bash".into(),
             description: "Records schema-rejected Bash calls".into(),
             parameters: serde_json::json!({
@@ -5604,6 +5999,7 @@ impl Tool for SchemaMismatchBashProbe {
                 "required": ["command"],
                 "additionalProperties": false,
             }),
+            constrained_sampling: None,
         }
     }
 
@@ -5990,6 +6386,7 @@ async fn resumed_schema_rejection_skips_hooks_effects_and_replay() {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: octet_ai::ToolCallId("persisted_schema_rejection".into()),
                     name: "bash".into(),
                     arguments_json: r#"{"command":"provider-secret-value"}"#.into(),
@@ -6671,7 +7068,11 @@ impl GatedToolTurnServer {
         let requests = Arc::new(AtomicUsize::new(0));
         let server_requests = Arc::clone(&requests);
         let task = tokio::spawn(async move {
-            let head = head + &text_block(64, &[TOOL_TURN_PENDING]);
+            // The marker must occupy a fresh content-block index. Deriving it
+            // from the supplied head keeps fixtures with different block counts
+            // from colliding with an existing block.
+            let marker_index = highest_block_index(&head) + 1;
+            let head = head + &text_block(marker_index, &[TOOL_TURN_PENDING]);
             for (index, body) in [head, text_turn("done")].into_iter().enumerate() {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
@@ -6731,6 +7132,21 @@ impl Drop for GatedToolTurnServer {
     }
 }
 
+/// Highest `content_block_start`/`content_block_delta` index present in a
+/// fixture stream, so generated follow-up blocks never reuse an index.
+fn highest_block_index(frames: &str) -> usize {
+    let mut highest = None;
+    let mut rest = frames;
+    while let Some(position) = rest.find("\"index\":") {
+        rest = &rest[position + "\"index\":".len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(index) = digits.parse::<usize>() {
+            highest = Some(highest.map_or(index, |current: usize| current.max(index)));
+        }
+    }
+    highest.unwrap_or(0)
+}
+
 fn recon_bash_head() -> String {
     msg_start()
         + &tool_block(
@@ -6767,6 +7183,7 @@ async fn observe_unfinished_tool_turn(run: &mut octet_agent::Run<'_>) -> Vec<Age
 }
 
 struct DurableBashProbe {
+    bash: octet_agent::BashTool,
     effect: ToolEffect,
     effect_calls: Arc<AtomicUsize>,
     executions: Arc<AtomicUsize>,
@@ -6776,7 +7193,7 @@ struct DurableBashProbe {
 #[async_trait::async_trait]
 impl Tool for DurableBashProbe {
     fn definition(&self) -> octet_ai::ToolDef {
-        octet_agent::BashTool.definition()
+        self.bash.definition()
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -6813,7 +7230,7 @@ impl Tool for DurableBashProbe {
             std::fs::write(ctx.workspace.join("mutation.txt"), "executed").unwrap();
             Ok(ToolOutput::new("mutation executed"))
         } else {
-            octet_agent::BashTool.execute(args, ctx).await
+            self.bash.execute(args, ctx).await
         }
     }
 }
@@ -6834,6 +7251,7 @@ fn bash_probe_harness(
     // Deliberately register an arbitrary sequential implementation named bash,
     // with no tool hooks that could suppress an unsafe streaming fast path.
     extensions.tool(DurableBashProbe {
+        bash: octet_agent::BashTool,
         effect,
         effect_calls: Arc::clone(&effect_calls),
         executions: Arc::clone(&executions),
@@ -7044,7 +7462,7 @@ async fn recon_bash_max_tokens_and_abort_never_execute() {
 #[tokio::test]
 async fn recon_bash_obeys_per_turn_call_limit() {
     let mut head = msg_start();
-    for index in 0..35 {
+    for index in 0..65 {
         head += &tool_block(
             index,
             &format!("call_{index}"),
@@ -7073,7 +7491,7 @@ async fn recon_bash_obeys_per_turn_call_limit() {
             _ => None,
         })
         .collect();
-    assert_eq!(results.len(), 35);
+    assert_eq!(results.len(), 65);
     for (index, (id, result)) in results.iter().enumerate() {
         assert_eq!(id.0, format!("call_{index}"));
         if index < 32 {
@@ -7090,6 +7508,7 @@ async fn recon_bash_obeys_per_turn_call_limit() {
         assert_single_run_finished(&events),
         FinishReason::Completed
     ));
+    assert_bounded_invocation_batch(&h.session_path, 65, "call_");
 }
 
 #[tokio::test]
@@ -7454,6 +7873,13 @@ fn recovery_provider_error(code: &str) -> String {
 }
 
 async fn recovery_harness(bodies: Vec<String>) -> (Agent, MockServer, tempfile::TempDir, PathBuf) {
+    recovery_harness_with_output_cap(bodies, false).await
+}
+
+async fn recovery_harness_with_output_cap(
+    bodies: Vec<String>,
+    capped: bool,
+) -> (Agent, MockServer, tempfile::TempDir, PathBuf) {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("responses"))
@@ -7466,8 +7892,13 @@ async fn recovery_harness(bodies: Vec<String>) -> (Agent, MockServer, tempfile::
     let workspace = tempfile::tempdir().unwrap();
     let session_path = workspace.path().join("session.jsonl");
     std::fs::write(workspace.path().join("lifecycle.txt"), "local result").unwrap();
+    let mut model = recovery_codex_model(&server.uri());
+    if capped {
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Default;
+    }
     let agent = build_responses_agent_from_session(
-        recovery_codex_model(&server.uri()),
+        model,
         Session::create(&session_path).unwrap(),
         workspace.path(),
         Some(4),
@@ -7593,11 +8024,14 @@ async fn qualified_codex_permanent_failures_do_not_replace() {
 }
 
 #[tokio::test]
-async fn qualified_codex_hard_cost_budget_fails_closed_on_unknown_interrupted_usage() {
-    let (mut agent, server, _workspace, _) = recovery_harness(vec![
-        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
-        responses_text_turn("no", "must not replay", "response.completed", "no"),
-    ])
+async fn cap_supported_hard_cost_budget_fails_closed_on_unknown_interrupted_usage() {
+    let (mut agent, server, _workspace, _) = recovery_harness_with_output_cap(
+        vec![
+            interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+            responses_text_turn("no", "must not replay", "response.completed", "no"),
+        ],
+        true,
+    )
     .await;
     agent.set_max_session_cost_microdollars(Some(u64::MAX));
     let mut run = agent.prompt("bounded spending").await.unwrap();
@@ -7808,13 +8242,10 @@ async fn qualified_codex_terminal_gate_recovery_does_not_discard_main_answer() {
 }
 
 // Keep Tokio from auto-advancing provider I/O deadlines while the loopback
-// server is scheduled by the OS. Only observed retry delays advance the clock.
+// server is scheduled by the OS. Only observed host retry delays advance the
+// clock. A hidden transport timer is a regression, not permission to spin
+// forever: use a real-time per-event watchdog even with Tokio time paused.
 async fn collect_virtual_recovery(run: &mut octet_agent::Run<'_>) -> Vec<AgentEvent> {
-    let runnable = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
     let mut delay = None;
     let mut events = Vec::new();
     loop {
@@ -7824,7 +8255,23 @@ async fn collect_virtual_recovery(run: &mut octet_agent::Run<'_>) -> Vec<AgentEv
             assert!(futures_util::poll!(&mut next).is_pending());
             tokio::time::advance(wait).await;
         }
-        let Some(event) = next.await else { break };
+        let started = std::time::Instant::now();
+        let event = loop {
+            if let std::task::Poll::Ready(event) = futures_util::poll!(&mut next) {
+                break event;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "no event after 15s wall time with provider clock paused; hidden transport wait? last event: {:?}",
+                events.last(),
+            );
+            // Stay runnable to prevent virtual auto-advance, but do not burn a
+            // core while the OS services the loopback socket. No detached
+            // spinner survives a panic or cancellation of this collector.
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let Some(event) = event else { break };
         delay = match &event {
             AgentEvent::ProviderRetry { delay, .. }
             | AgentEvent::ProviderWaitingForNetwork { delay, .. }
@@ -7833,7 +8280,6 @@ async fn collect_virtual_recovery(run: &mut octet_agent::Run<'_>) -> Vec<AgentEv
         };
         events.push(event);
     }
-    runnable.abort();
     events
 }
 
@@ -7856,6 +8302,12 @@ async fn qualified_codex_four_eofs_then_success_preserves_unknown_usage() {
     );
     assert_eq!(wire_requests(&server).await.len(), 5);
     assert_eq!(agent.session().usage_uncertainty_records().len(), 4);
+    let mut recovered_session = Session::open(&session_path).unwrap();
+    assert!(recovered_session
+        .take_partial_assistant()
+        .unwrap()
+        .is_none());
+    drop(recovered_session);
     drop(agent);
     let mut agent = build_responses_agent_from_session(
         recovery_codex_model(&server.uri()),
@@ -7976,6 +8428,13 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
         request: octet_ai::Request,
         _: Vec<octet_ai::Diagnostic>,
     ) -> Result<octet_ai::ResponseStream, octet_ai::AiError> {
+        // These synthetic successful responses explicitly report zero tokens.
+        // Preserve their declared zero price rather than fabricate unpriced
+        // history that prevents the auxiliary HTTP-budget test from dispatching.
+        let response_cost = model
+            .pricing
+            .as_ref()
+            .map(|pricing| octet_ai::pricing::cost_of(pricing, &Usage::default()).unwrap());
         self.requests.lock().unwrap().push(request);
         let step = self
             .steps
@@ -7992,7 +8451,8 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                 yield Ok(octet_ai::StreamEvent::Finished(octet_ai::Response {
                     message: AssistantMessage { content: vec![AssistantPart::Text("R".into())], model: model.id, protocol: model.protocol },
                     stop_reason: octet_ai::StopReason::EndTurn, usage: octet_ai::Usage::default(),
-                    cost: None, response_id: None, responses_output: None, diagnostics: Vec::new(),
+                    deferred: None,
+                    cost: response_cost, response_id: None, responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
             RecoveryStep::Opening(phase) => {
@@ -8023,22 +8483,36 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                 yield Ok(octet_ai::StreamEvent::Finished(octet_ai::Response {
                     message: AssistantMessage { content: vec![AssistantPart::Text(text.into())], model: model.id, protocol: model.protocol },
                     stop_reason: octet_ai::StopReason::EndTurn,
-                    usage: octet_ai::Usage::default(), cost: None, response_id: None,
+                    usage: octet_ai::Usage::default(), cost: response_cost, response_id: None,
+                    deferred: None,
                     responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
         }
     }
 }
+
 fn operation_recovery_agent(
     steps: Vec<RecoveryStep>,
     extensions: ExtensionHost,
+) -> (Agent, Arc<OperationRecoveryTransport>, tempfile::TempDir) {
+    operation_recovery_agent_with_output_cap(steps, extensions, false)
+}
+
+fn operation_recovery_agent_with_output_cap(
+    steps: Vec<RecoveryStep>,
+    extensions: ExtensionHost,
+    capped: bool,
 ) -> (Agent, Arc<OperationRecoveryTransport>, tempfile::TempDir) {
     let transport = Arc::new(OperationRecoveryTransport {
         steps: std::sync::Mutex::new(steps.into()),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let model = recovery_codex_model("http://127.0.0.1:1/");
+    let mut model = recovery_codex_model("http://127.0.0.1:1/");
+    if capped {
+        Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+            octet_ai::ResponsesRuntimeProfile::Default;
+    }
     let client = AiClient::new();
     client.register_host_stream_transport(model.endpoint.id.clone(), transport.clone());
     let workspace = tempfile::tempdir().unwrap();
@@ -8482,7 +8956,8 @@ async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_adm
         (429, "insufficient_quota", false),
         (401, "invalid_api_key", false),
     ] {
-        let (mut agent, server, _workspace, _) = recovery_harness(vec![]).await;
+        let (mut agent, server, _workspace, _) =
+            recovery_harness_with_output_cap(vec![], hard_budget).await;
         server.reset().await;
         Mock::given(method("POST"))
             .and(path("responses"))
@@ -8505,7 +8980,11 @@ async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_adm
             matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
             "{events:?}"
         );
-        assert_eq!(wire_requests(&server).await.len(), 1);
+        let requests = wire_requests(&server).await;
+        assert_eq!(requests.len(), 1);
+        if hard_budget {
+            assert!(requests[0]["max_output_tokens"].as_u64().is_some());
+        }
         assert!(!events
             .iter()
             .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
@@ -8513,6 +8992,36 @@ async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_adm
             assert!(agent.session().has_uncertain_usage());
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unpriced_history_blocks_auxiliary_cost_reservation_before_dispatch() {
+    let (mut agent, transport, workspace) =
+        operation_recovery_agent(Vec::new(), ExtensionHost::new());
+    agent
+        .replace_session_at_idle(session_with_authoritative_pressure(
+            &workspace.path().join("unpriced-pressure.jsonl"),
+            180_000,
+        ))
+        .unwrap();
+    agent
+        .set_compaction_token_mode(octet_agent::AgentCompactionMode::Local, 0.85, 1)
+        .unwrap();
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    let error = agent
+        .complete("cannot price historical exposure")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, octet_agent::AgentError::CostUnavailable { .. }),
+        "{error:?}"
+    );
+    assert!(transport.requests.lock().unwrap().is_empty());
+    assert!(agent.session().has_unpriced_usage());
+    assert!(
+        !agent.session().has_uncertain_usage(),
+        "known tokens without pricing are not unknown token usage"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -8533,21 +9042,29 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                 if !gate {
                     steps.push(RecoveryStep::Reply("answer", Duration::ZERO));
                 }
-                let (mut agent, transport, workspace) =
-                    operation_recovery_agent(steps, ExtensionHost::new());
+                let (mut agent, transport, workspace) = operation_recovery_agent_with_output_cap(
+                    steps,
+                    ExtensionHost::new(),
+                    hard_budget,
+                );
                 if gate {
                     agent.set_completion_policy(CompletionPolicy::TerminalGate);
                 } else {
                     agent
-                        .replace_session_at_idle(session_with_authoritative_pressure(
+                        .replace_session_at_idle(session_with_authoritative_pressure_and_pricing(
                             &workspace.path().join("pressure.jsonl"),
                             180_000,
+                            agent.model().spec.pricing.as_ref(),
                         ))
                         .unwrap();
                     agent
                         .set_compaction_token_mode(octet_agent::AgentCompactionMode::Local, 0.85, 1)
                         .unwrap();
                 }
+                assert!(
+                    !agent.session().has_unpriced_usage(),
+                    "this fixture must reach HTTP admission, not stop at pricing preflight"
+                );
                 if hard_budget {
                     agent.set_max_session_cost_microdollars(Some(u64::MAX));
                 }
@@ -8584,7 +9101,7 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
 }
 
 #[tokio::test]
-async fn manual_native_http_503_with_hard_budget_records_uncertainty_and_never_replaces() {
+async fn manual_native_with_hard_budget_refuses_uncapped_dispatch() {
     let (mut agent, server, _workspace, _) = recovery_harness(vec![responses_text_turn(
         "main",
         "prior answer",
@@ -8595,25 +9112,21 @@ async fn manual_native_http_503_with_hard_budget_records_uncertainty_and_never_r
     Mock::given(method("POST"))
         .and(path("responses/compact"))
         .respond_with(ResponseTemplate::new(503))
-        .expect(1)
+        .expect(0)
         .mount(&server)
         .await;
     agent.complete("initial task").await.unwrap();
     agent.set_max_session_cost_microdollars(Some(u64::MAX));
     assert!(matches!(
         agent.compact_responses_native().await,
-        Err(octet_agent::AgentError::ProviderRecovery {
-            retries: 0,
-            usage_unknown: true,
-            ..
-        })
+        Err(octet_agent::AgentError::OutputLimitUnavailable)
     ));
-    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert!(!agent.session().has_uncertain_usage());
     assert_eq!(
-        agent.session().usage_uncertainty_records()[0].operation,
-        "native_compaction"
+        wire_requests(&server).await.len(),
+        1,
+        "only the earlier unbounded main answer was dispatched"
     );
-    assert_eq!(wire_requests(&server).await.len(), 2);
 }
 
 struct HeldOutageRetryHook(Arc<AtomicUsize>);
@@ -8725,10 +9238,10 @@ async fn qualified_provider_stream_json_recovery_never_dispatches_provisional_to
         "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":7}\n\n",
     ] {
         for hard_budget in [false, true] {
-            let (mut agent, server, _workspace, _) = recovery_harness(vec![
+            let (mut agent, server, _workspace, _) = recovery_harness_with_output_cap(vec![
                 interrupted_responses_prefix("tool") + malformed,
                 responses_text_turn("ok", "recovered", "response.completed", "accepted"),
-            ]).await;
+            ], hard_budget).await;
             if hard_budget { agent.set_max_session_cost_microdollars(Some(u64::MAX)); }
             let mut run = agent.prompt("recover malformed provider frame").await.unwrap();
             let events = collect_virtual_recovery(&mut run).await;
@@ -8818,6 +9331,26 @@ async fn terminal_gate_final_poll_and_turn_finished_submission_boundaries_preser
                     .filter(|event| matches!(event, AgentEvent::TurnFinished { .. }))
                     .count(),
                 2
+            );
+            let emitted_costs = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::TurnFinished { turn_cost, .. } => Some(*turn_cost),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let durable_costs = agent
+                .session()
+                .usage_records()
+                .iter()
+                .filter_map(|record| match record.kind {
+                    UsageRecordKind::AssistantTurn { .. } => Some(record.cost),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                emitted_costs, durable_costs,
+                "control admission must retain each immutable assistant cost"
             );
             let delivered: usize = events
                 .iter()
@@ -9152,11 +9685,14 @@ async fn native_compaction_calls_bound_reopening_but_not_healthy_reconnected_bod
                     )
                     .unwrap();
                 let output = drive_native_virtual(agent.complete("continue")).await;
-                output.and_then(|output| match output.reason {
-                    FinishReason::Completed => Ok(()),
-                    FinishReason::Failed(error) => Err(error),
-                    other => panic!("unexpected native outcome {other:?}"),
-                })
+                match output {
+                    Ok(output) => match output.reason {
+                        FinishReason::Completed => Ok(()),
+                        FinishReason::Failed(error) => Err(error),
+                        other => panic!("unexpected native outcome {other:?}"),
+                    },
+                    Err(error) => Err(error),
+                }
             } else {
                 drive_native_virtual(agent.compact_responses_native())
                     .await
@@ -9378,3 +9914,2076 @@ async fn opening_outage_deadlines_preserve_unknown_usage_in_main_local_and_gate(
         assert_eq!(transport.requests.lock().unwrap().len(), request_count);
     }
 }
+
+// ── Row 3.5: typed provider/turn/tool/compaction/delegation spans ──────────
+
+fn recorded_span_names(
+    spans: &[octet_agent::telemetry::spans::RecordedTelemetrySpan],
+) -> Vec<&str> {
+    spans.iter().map(|span| span.name.as_str()).collect()
+}
+
+fn span_index(spans: &[octet_agent::telemetry::spans::RecordedTelemetrySpan], name: &str) -> usize {
+    spans
+        .iter()
+        .position(|span| span.name == name)
+        .unwrap_or_else(|| panic!("span {name} missing from {:?}", recorded_span_names(spans)))
+}
+
+#[tokio::test]
+async fn typed_spans_nest_run_turn_provider_and_tool_boundaries() {
+    use octet_agent::telemetry::spans::{AttributeValue, InMemoryTelemetryContext, SpanStatus};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[(
+                    "call_span",
+                    "read",
+                    serde_json::json!({"path": "probe.txt"}),
+                )]),
+                text_turn("read it"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    std::fs::write(workspace.join("probe.txt"), b"probe contents").unwrap();
+    let session_path = session_dir.path().join("span-boundaries.jsonl");
+    let mut agent = build_agent(&server.uri(), &workspace, &session_path, Some(4));
+    let fixture = InMemoryTelemetryContext::default();
+    agent.set_telemetry_context(fixture.context());
+
+    let mut run = agent.prompt("read the probe").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+
+    let spans = fixture.get_spans();
+    assert_eq!(
+        recorded_span_names(&spans),
+        vec![
+            "octet.agent.run",
+            "octet.agent.turn",
+            "octet.ai.request",
+            "octet.ai.stream",
+            "octet.agent.tool",
+            "octet.agent.turn",
+            "octet.ai.request",
+            "octet.ai.stream",
+        ],
+        "one run, one turn per provider turn, and a nested provider stream and tool"
+    );
+    assert_eq!(spans[0].parent_id, None, "the run span is the root");
+    for index in [1usize, 5] {
+        assert_eq!(
+            spans[index].parent_id,
+            Some(spans[0].id),
+            "turns nest under the run"
+        );
+    }
+    for index in [2usize, 6] {
+        let turn = if index == 2 { 1 } else { 5 };
+        assert_eq!(spans[index].parent_id, Some(spans[turn].id));
+    }
+    assert_eq!(
+        spans[3].parent_id,
+        Some(spans[2].id),
+        "the stream nests under its request"
+    );
+    assert_eq!(spans[7].parent_id, Some(spans[6].id));
+    assert_eq!(
+        spans[4].parent_id,
+        Some(spans[1].id),
+        "the tool nests under its turn"
+    );
+
+    assert!(
+        spans.iter().all(|span| span.settled),
+        "every boundary settles when the run finishes: {spans:#?}"
+    );
+    assert!(
+        spans.iter().all(|span| span.status == SpanStatus::Ok),
+        "a tool-continuation turn is a completed turn, not a dropped guard: {spans:#?}"
+    );
+    assert_eq!(
+        spans[4].attributes.get("name"),
+        Some(&AttributeValue::String("read".to_string())),
+        "the tool span carries the registered name and never arguments"
+    );
+    let request = &spans[2].attributes;
+    assert_eq!(
+        request.get("input_tokens"),
+        Some(&AttributeValue::Number(5.0))
+    );
+    assert_eq!(
+        request.get("output_tokens"),
+        Some(&AttributeValue::Number(3.0))
+    );
+    assert_eq!(
+        request.get("has_uncertain_usage"),
+        Some(&AttributeValue::Boolean(false)),
+        "reported usage is recorded with its uncertainty flag"
+    );
+
+    // Settlement order follows the nested boundaries: the stream closes before
+    // its request, the tool before its turn, and the run last of all.
+    assert!(spans[3].end_sequence < spans[2].end_sequence);
+    assert!(spans[4].end_sequence < spans[1].end_sequence);
+    assert!(spans[1].end_sequence < spans[5].end_sequence);
+    assert_eq!(
+        spans[0].end_sequence,
+        Some(spans.len() as u64),
+        "the run span settles last"
+    );
+}
+
+/// The same scripted failure twice: the inert context must not lose accounting,
+/// and the recording context must label the failed boundaries as errors while
+/// leaving the provider attempt that actually completed marked ok.
+#[tokio::test]
+async fn typed_spans_label_failed_runs_without_changing_accounting() {
+    use octet_agent::telemetry::spans::{InMemoryTelemetryContext, SpanStatus};
+
+    let mut observed: Vec<(String, usize, bool, usize)> = Vec::new();
+    for record in [false, true] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(Script {
+                bodies: vec![empty_turn()],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let workspace = workspace_dir.path().canonicalize().unwrap();
+        let session_path = session_dir.path().join("span-failure.jsonl");
+        let mut agent = build_agent(&server.uri(), &workspace, &session_path, Some(4));
+        let fixture = InMemoryTelemetryContext::default();
+        if record {
+            agent.set_telemetry_context(fixture.context());
+        }
+
+        let mut run = agent.prompt("answer nothing").await.unwrap();
+        let events = collect(&mut run).await;
+        drop(run);
+        let reason = format!("{:?}", assert_single_run_finished(&events));
+        assert!(reason.contains("no user-visible content"), "got {reason}");
+        observed.push((
+            reason,
+            agent.session().entries().len(),
+            agent.session().has_uncertain_usage(),
+            agent.session().usage_records().len(),
+        ));
+
+        if record {
+            let spans = fixture.get_spans();
+            assert_eq!(
+                recorded_span_names(&spans),
+                vec![
+                    "octet.agent.run",
+                    "octet.agent.turn",
+                    "octet.ai.request",
+                    "octet.ai.stream",
+                ]
+            );
+            assert_eq!(
+                spans[0].status,
+                SpanStatus::Error,
+                "a failed run is an error span"
+            );
+            assert_eq!(
+                spans[1].status,
+                SpanStatus::Error,
+                "a failed turn is an error span"
+            );
+            assert_eq!(
+                spans[2].status,
+                SpanStatus::Ok,
+                "the provider attempt itself completed"
+            );
+            assert_eq!(spans[3].status, SpanStatus::Ok);
+            assert!(spans.iter().all(|span| span.settled));
+        }
+    }
+    assert_eq!(
+        observed[0], observed[1],
+        "an installed observer must not change the durable outcome or accounting"
+    );
+}
+
+/// The telemetry hard gate: the inert and recording adapters are business
+/// neutral. The identical scripted two-turn run is replayed under
+/// `NOOP_TELEMETRY_CONTEXT` and under the recording adapter, and their full
+/// business projections — streamed deltas, finish reasons, durable entries with
+/// timing stripped, usage numbers, and cost totals — must match exactly while
+/// the recording adapter really recorded every boundary.
+#[tokio::test]
+async fn noop_and_in_memory_telemetry_keep_identical_business_outcomes() {
+    use octet_agent::telemetry::spans::{InMemoryTelemetryContext, NOOP_TELEMETRY_CONTEXT};
+
+    /// Timing-free business projection of one scripted two-turn run.
+    #[derive(Debug, PartialEq)]
+    struct Outcome {
+        deltas: Vec<(OutputChannel, String)>,
+        finishes: Vec<String>,
+        entries: Vec<(String, Option<String>, String)>,
+        record_types: Vec<String>,
+        usage: Vec<(String, u64, u64, u64)>,
+        assistant_texts: Vec<String>,
+        cost_microdollars: u64,
+        cost_picodollars_remainder: u32,
+        uncertain: bool,
+    }
+
+    async fn run_under(context: octet_agent::telemetry::spans::TelemetryContext) -> Outcome {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(Script {
+                bodies: vec![text_turn("first answer"), text_turn("second answer")],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let workspace = workspace_dir.path().canonicalize().unwrap();
+        let session_path = session_dir.path().join("noop-vs-in-memory.jsonl");
+        let mut agent = build_agent(&server.uri(), &workspace, &session_path, Some(4));
+        agent.set_telemetry_context(context);
+
+        let mut deltas = Vec::new();
+        let mut finishes = Vec::new();
+        for prompt in ["first prompt", "second prompt"] {
+            let mut run = agent.prompt(prompt).await.unwrap();
+            let events = collect(&mut run).await;
+            drop(run);
+            finishes.push(format!("{:?}", assert_single_run_finished(&events)));
+            for event in &events {
+                if let AgentEvent::OutputDelta { channel, text } = event {
+                    deltas.push((*channel, text.clone()));
+                }
+            }
+        }
+        let entries = agent
+            .session()
+            .entries()
+            .iter()
+            .map(|entry| {
+                let mut metadata = entry.metadata.clone();
+                if let Some(metadata) = metadata.as_mut() {
+                    metadata.tool_started_unix_ms = None;
+                    metadata.tool_finished_unix_ms = None;
+                    metadata.run_outcome = None;
+                }
+                (
+                    entry.id.0.clone(),
+                    entry.parent.as_ref().map(|parent| parent.0.clone()),
+                    format!("{:?}|{:?}", entry.value, metadata),
+                )
+            })
+            .collect::<Vec<_>>();
+        let usage = agent
+            .session()
+            .usage_records()
+            .iter()
+            .map(|record| {
+                (
+                    format!("{:?}", record.kind),
+                    record.usage.input_tokens,
+                    record.usage.output_tokens,
+                    record.usage.total_tokens,
+                )
+            })
+            .collect();
+        let assistant_texts = agent
+            .session()
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.value {
+                EntryValue::Message(Message::Assistant(assistant)) => Some(
+                    assistant
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            AssistantPart::Text(text) => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect();
+        let outcome = Outcome {
+            deltas,
+            finishes,
+            entries,
+            record_types: Vec::new(),
+            usage,
+            assistant_texts,
+            cost_microdollars: agent.session().total_cost_microdollars(),
+            cost_picodollars_remainder: agent.session().total_cost_picodollars_remainder(),
+            uncertain: agent.session().has_uncertain_usage(),
+        };
+        drop(agent);
+        // Durable record shape, timing excluded: the two adapters must write the
+        // same session log records, and a telemetry adapter must never add one.
+        let record_types = std::fs::read_to_string(&session_path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        Outcome {
+            record_types,
+            ..outcome
+        }
+    }
+
+    let fixture = InMemoryTelemetryContext::default();
+    let recorded = run_under(fixture.context()).await;
+    let inert = run_under(NOOP_TELEMETRY_CONTEXT).await;
+    assert_eq!(
+        inert, recorded,
+        "NOOP and InMemory must keep identical business outcomes"
+    );
+
+    // The equality above is only meaningful because the run really happened and
+    // the recording adapter really observed it.
+    assert_eq!(inert.deltas.len(), 2, "both scripted turns streamed");
+    assert_eq!(
+        inert.entries.len(),
+        4,
+        "two prompts and two assistant turns were durably compared"
+    );
+    assert_eq!(inert.assistant_texts, ["first answer", "second answer"]);
+    assert!(!inert.usage.is_empty(), "usage must be accounted");
+    assert!(inert.record_types.iter().any(|kind| kind == "usage"));
+    let spans = fixture.get_spans();
+    assert!(
+        !spans.is_empty() && spans.iter().all(|span| span.settled),
+        "the recording adapter observes every settled boundary: {spans:#?}"
+    );
+}
+
+struct CompactionThenAnswer;
+
+impl Respond for CompactionThenAnswer {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let tools_empty = body
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty);
+        let body = if tools_empty {
+            text_turn("compacted summary")
+        } else {
+            text_turn("answer after compaction")
+        };
+        ResponseTemplate::new(200)
+            .set_body_string(body)
+            .insert_header("content-type", "text/event-stream")
+    }
+}
+
+#[tokio::test]
+async fn typed_spans_cover_compaction_and_summary_boundaries() {
+    use octet_agent::telemetry::spans::{InMemoryTelemetryContext, SpanStatus};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(CompactionThenAnswer)
+        .mount(&server)
+        .await;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let session = session_with_authoritative_pressure(
+        &sessions.path().join("span-compaction.jsonl"),
+        180_000,
+    );
+    let mut agent = build_agent_from_session(&server.uri(), workspace.path(), session, Some(4));
+    agent
+        .set_compaction_token_policy(true, 0.85, 10_000)
+        .unwrap();
+    let fixture = InMemoryTelemetryContext::default();
+    agent.set_telemetry_context(fixture.context());
+
+    let mut run = agent.prompt("new work").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+
+    let spans = fixture.get_spans();
+    let compaction = span_index(&spans, "octet.agent.compaction");
+    let summary = span_index(&spans, "octet.agent.summary");
+    assert!(
+        compaction < summary,
+        "the summary nests inside the compaction: {:?}",
+        recorded_span_names(&spans)
+    );
+    assert_eq!(spans[summary].parent_id, Some(spans[compaction].id));
+    let summary_request = (summary + 1..spans.len())
+        .find(|index| spans[*index].name == "octet.ai.request")
+        .expect("the summary issues one provider request");
+    assert_eq!(
+        spans[summary_request].parent_id,
+        Some(spans[summary].id),
+        "the summary request nests under the summary span"
+    );
+    assert_eq!(
+        spans[compaction].parent_id,
+        Some(spans[1].id),
+        "compaction nests under the turn"
+    );
+    assert!(
+        spans
+            .iter()
+            .all(|span| span.settled && span.status == SpanStatus::Ok),
+        "a completed compaction settles every boundary: {spans:#?}"
+    );
+}
+#[path = "support/extension_hooks.rs"]
+mod extension_hooks;
+
+// ── roadmap #175: the selected service tier reaches the wire, or is refused ──
+
+/// One scripted one-turn Responses harness; `codex` selects the declared
+/// Codex runtime profile, `false` keeps the plain OpenAI Responses profile.
+async fn tier_harness(
+    codex: bool,
+    name: &str,
+) -> (Agent, MockServer, tempfile::TempDir, tempfile::TempDir) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(Script {
+            bodies: vec![responses_text_turn(
+                name,
+                "tier answer",
+                "response.completed",
+                name,
+            )],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let model = if codex {
+        recovery_codex_model(&server.uri())
+    } else {
+        scripted_responses_model(&server.uri())
+    };
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    let session_path = session_dir.path().join("session.jsonl");
+    let agent = build_responses_agent_from_session(
+        model,
+        Session::create(&session_path).unwrap(),
+        &workspace,
+        Some(4),
+        "You are a test agent.",
+        ReasoningConfig::Off,
+    );
+    (agent, server, workspace_dir, session_dir)
+}
+
+/// `/fast` is only real when the selected tier reaches the provider request.
+#[tokio::test]
+async fn service_tier_reaches_the_request_only_on_a_route_that_declares_it() {
+    // ── Codex route: the tier is selected, then emitted on the wire ────────
+    let (mut agent, server, _workspace, _session) = tier_harness(true, "codex").await;
+    assert_eq!(agent.service_tier(), None, "no tier is sent by default");
+
+    agent
+        .set_service_tier(Some(octet_ai::ServiceTier::Priority))
+        .expect("the Codex profile declares the Responses service_tier field");
+    assert_eq!(
+        agent.service_tier(),
+        Some(octet_ai::ServiceTier::Priority),
+        "the selection is readable by a frontend that renders `/fast`"
+    );
+
+    let output = agent.complete("answer quickly").await.unwrap();
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "the tiered run must complete: {:?}",
+        output.reason
+    );
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 1, "one model turn");
+    assert_eq!(
+        requests[0]["service_tier"], "priority",
+        "the requested tier must be on the request: {}",
+        requests[0]
+    );
+
+    // Clearing the selection stops sending the field on the next request.
+    agent.set_service_tier(None).unwrap();
+    agent.complete("answer normally").await.unwrap();
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].get("service_tier").is_none(),
+        "a cleared tier must not linger: {}",
+        requests[1]
+    );
+
+    // ── Non-Codex route: the selection is refused, never sent ─────────────
+    let (mut agent, server, _workspace, _session) = tier_harness(false, "plain").await;
+    let rejection = agent
+        .set_service_tier(Some(octet_ai::ServiceTier::Priority))
+        .expect_err("a route that does not declare the field must fail closed");
+    assert_eq!(
+        rejection.to_string(),
+        "ai error: Unsupported error: Responses service tier is unsupported on this route",
+        "the rejection is the codec's typed unsupported error"
+    );
+    assert_eq!(
+        agent.service_tier(),
+        None,
+        "a refused selection never becomes agent state"
+    );
+
+    let output = agent.complete("answer without a tier").await.unwrap();
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "the untiered run must complete: {:?}",
+        output.reason
+    );
+    let requests = wire_requests(&server).await;
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].get("service_tier").is_none(),
+        "an undeclared route must never carry the field: {}",
+        requests[0]
+    );
+}
+
+// ── parity 1e.2 durability half: a killed stream republishes its partial ──
+
+/// A completing Responses turn that streams `text` as two deltas, so a kill
+/// between them leaves a genuine prefix behind.
+fn responses_two_delta_turn(response_id: &str, first: &str, second: &str) -> String {
+    let terminal = serde_json::json!({
+        "type": "response.completed",
+        "response": {
+            "output": [{
+                "type": "message",
+                "id": format!("msg_{response_id}"),
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": format!("{first}{second}"), "annotations": []}],
+                "unknown_provider_field": response_id,
+            }],
+            "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+        },
+    });
+    [
+        serde_json::json!({"type": "response.created", "response": {"id": response_id}}),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"id": format!("msg_{response_id}"), "type": "message"},
+        }),
+        serde_json::json!({"type": "response.output_text.delta", "output_index": 0, "delta": first}),
+        serde_json::json!({"type": "response.output_text.delta", "output_index": 0, "delta": second}),
+        serde_json::json!({"type": "response.output_text.done", "output_index": 0}),
+        terminal,
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect()
+}
+
+/// Kills a run mid-stream and proves the durable partial is republished exactly
+/// once on the next start, matching the frame prefix rather than the whole turn.
+#[tokio::test]
+async fn a_killed_stream_republishes_its_partial_assistant_prefix_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(Script {
+            bodies: vec![
+                // 1: the attempt that is killed after its first text delta.
+                responses_two_delta_turn("killed", "KILLED-PREFIX ", "KILLED-TAIL"),
+                // 2: the restart's own turn.
+                responses_text_turn("second", "SECOND-TURN", "response.completed", "second"),
+                // 3: the third start, after the second one settled terminally.
+                responses_text_turn("third", "THIRD-TURN", "response.completed", "third"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    let session_path = session_dir.path().join("killed-stream.jsonl");
+    let frames_path = session_dir
+        .path()
+        .join("killed-stream.jsonl.partial-assistant-frames");
+    let model = scripted_responses_model(&server.uri());
+
+    // ── 1. Kill the run after the first streamed delta ────────────────────
+    let mut first = build_responses_agent_from_session(
+        model.clone(),
+        Session::create(&session_path).unwrap(),
+        &workspace,
+        Some(4),
+        "You are a test agent.",
+        ReasoningConfig::Off,
+    );
+    let mut run = first.prompt("first prompt").await.unwrap();
+    let mut observed_prefix = String::new();
+    while let Some(event) = run.next().await {
+        if let AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text,
+        } = &event
+        {
+            observed_prefix.push_str(text);
+            break;
+        }
+    }
+    drop(run);
+    drop(first);
+    assert_eq!(
+        observed_prefix, "KILLED-PREFIX ",
+        "the killed attempt streamed only its first delta"
+    );
+    assert!(
+        frames_path.exists(),
+        "a killed attempt must leave its durable frame journal behind"
+    );
+    assert!(
+        !std::fs::read_to_string(&session_path)
+            .unwrap()
+            .contains("KILLED-TAIL"),
+        "an unsettled attempt is never committed to the session log"
+    );
+
+    // ── 2. Restart: the partial frame prefix is republished first ─────────
+    let mut second = build_responses_agent_from_session(
+        model.clone(),
+        Session::open(&session_path).unwrap(),
+        &workspace,
+        Some(4),
+        "You are a test agent.",
+        ReasoningConfig::Off,
+    );
+    let mut run = second.prompt("second prompt").await.unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        events.push(event);
+    }
+    drop(run);
+    drop(second);
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text,
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text, "SECOND-TURN",
+        "historical progress must not enter the next answer"
+    );
+    let recovered: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::RecoveredOutput {
+                channel: OutputChannel::Text,
+                text,
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recovered, observed_prefix);
+    assert!(
+        !text.contains("KILLED-TAIL"),
+        "a partial must never grow into the whole killed turn: {text:?}"
+    );
+    assert!(
+        text.contains("SECOND-TURN"),
+        "the restart still produced its own turn: {text:?}"
+    );
+    assert!(
+        !frames_path.exists(),
+        "a republished partial is consumed exactly once"
+    );
+
+    // ── 3. A settled turn is never republished as progress ────────────────
+    let mut third = build_responses_agent_from_session(
+        model,
+        Session::open(&session_path).unwrap(),
+        &workspace,
+        Some(4),
+        "You are a test agent.",
+        ReasoningConfig::Off,
+    );
+    let mut run = third.prompt("third prompt").await.unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        events.push(event);
+    }
+    drop(run);
+    drop(third);
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text,
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text, "THIRD-TURN",
+        "a terminally settled turn leaves no partial to republish"
+    );
+}
+
+// ── row 4.10: the run loop consumes the batch termination request ─────────
+
+/// A real tool that asks the run to stop once its work is complete.
+struct TerminateProbe;
+
+#[async_trait::async_trait]
+impl Tool for TerminateProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            async_execution: false,
+            name: "terminate_probe".into(),
+            description: "Requests run termination when `stop` is true".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"stop": {"type": "boolean"}},
+                "required": ["stop"],
+                "additionalProperties": false
+            }),
+            constrained_sampling: None,
+        }
+    }
+
+    fn effect(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::Pure)
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let output = ToolOutput::new(if args["stop"].as_bool().unwrap_or(false) {
+            "batch complete"
+        } else {
+            "batch continues"
+        });
+        Ok(if args["stop"].as_bool().unwrap_or(false) {
+            output.requesting_termination()
+        } else {
+            output
+        })
+    }
+}
+
+#[tokio::test]
+async fn tool_termination_drains_controls_accepted_at_tool_finished() {
+    for kind in 0..3 {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(Script {
+                bodies: vec![
+                    tool_turn(&[(
+                        "call_done",
+                        "terminate_probe",
+                        serde_json::json!({"stop":true}),
+                    )]),
+                    text_turn("accepted control delivered"),
+                ],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let mut agent = build_agent_with_extra_tool(
+            &server.uri(),
+            workspace.path(),
+            &workspace.path().join("termination.jsonl"),
+            Some(4),
+            TerminateProbe,
+        );
+        let mut run = agent.prompt("finish").await.unwrap();
+        let control = run.control();
+        let mut submitted = false;
+        let mut events = Vec::new();
+        while let Some(event) = run.next().await {
+            if matches!(event, AgentEvent::ToolFinished { .. }) && !submitted {
+                submit_gate_boundary_control(&control, kind).await;
+                submitted = true;
+            }
+            events.push(event);
+        }
+        assert!(submitted);
+        assert!(
+            matches!(assert_single_run_finished(&events), FinishReason::Completed),
+            "{events:?}"
+        );
+        assert!(matches!(
+            control.steer("too late").await,
+            Err(octet_agent::AgentError::RunEnded)
+        ));
+        drop(run);
+        let requests = wire_requests(&server).await;
+        assert_eq!(requests.len(), 2, "control kind {kind}");
+        assert!(requests[1].to_string().contains("final-boundary-sentinel"));
+        assert!(serde_json::to_string(&agent.session().context().unwrap())
+            .unwrap()
+            .contains("final-boundary-sentinel"));
+    }
+}
+
+/// A unanimous batch ends the run with the results already durable; one
+/// sibling that did not ask to stop keeps the batch going.
+#[tokio::test]
+async fn unanimous_tool_termination_ends_the_run_and_a_lone_request_does_not() {
+    // ── Unanimous single-call batch: no second model turn ─────────────────
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[(
+                    "call_done",
+                    "terminate_probe",
+                    serde_json::json!({"stop": true}),
+                )]),
+                text_turn("SHOULD-NOT-BE-REQUESTED"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &sessions.path().join("unanimous-termination.jsonl"),
+        Some(4),
+        TerminateProbe,
+    );
+
+    let output = agent.complete("finish the work").await.unwrap();
+
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "a unanimous termination completes the run: {:?}",
+        output.reason
+    );
+    assert!(
+        !output.text.contains("SHOULD-NOT-BE-REQUESTED"),
+        "the loop must not open another model turn: {}",
+        output.text
+    );
+    let requests = wire_requests(&server).await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "exactly one model turn for a unanimous batch"
+    );
+    let durable = serde_json::to_string(&agent.session().context().unwrap()).unwrap();
+    assert!(
+        durable.contains("batch complete"),
+        "the finalized result is durable before the run ends: {durable}"
+    );
+    let replayed = serde_json::to_string(&requests[0]).unwrap();
+    assert!(
+        replayed.contains("terminate_probe"),
+        "the probe was really called: {replayed}"
+    );
+
+    // ── Non-unanimous batch: one stop request cannot discard a sibling ────
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[
+                    (
+                        "call_stop",
+                        "terminate_probe",
+                        serde_json::json!({"stop": true}),
+                    ),
+                    (
+                        "call_keep",
+                        "terminate_probe",
+                        serde_json::json!({"stop": false}),
+                    ),
+                ]),
+                text_turn("CONTINUED-WITH-BOTH-RESULTS"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &sessions.path().join("mixed-termination.jsonl"),
+        Some(4),
+        TerminateProbe,
+    );
+
+    let output = agent.complete("finish the work").await.unwrap();
+
+    assert!(
+        matches!(output.reason, FinishReason::Completed),
+        "the batch continues to a normal completion: {:?}",
+        output.reason
+    );
+    assert!(
+        output.text.contains("CONTINUED-WITH-BOTH-RESULTS"),
+        "a lone stop request must not end the run early: {}",
+        output.text
+    );
+    let requests = wire_requests(&server).await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "a non-unanimous batch keeps going to the next model turn"
+    );
+    let follow_up = serde_json::to_string(&requests[1]).unwrap();
+    assert!(
+        follow_up.contains("batch complete") && follow_up.contains("batch continues"),
+        "both finalized sibling results must reach the next request: {follow_up}"
+    );
+}
+
+// ── row 4.8: the live panel's replaceable state is really paced ────────────
+
+/// A real tool that publishes a burst of replaceable decorations plus
+/// append-only output, then finishes.
+///
+/// The burst is far larger than the panel's pace budget and is published
+/// without an await point, so the run path—not the tool—decides what the panel
+/// sees: one immediate state, collapsed intermediates, and the latest state at
+/// the terminal boundary.
+struct PreviewProbe;
+
+#[async_trait::async_trait]
+impl Tool for PreviewProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            async_execution: false,
+            name: "preview_probe".into(),
+            description: "Publishes a burst of replaceable panel state".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            constrained_sampling: None,
+        }
+    }
+
+    fn effect(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::Pure)
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        ctx.progress
+            .output(OutputStream::Stdout, "probe-output-chunk\n");
+        for step in 0..12 {
+            assert!(
+                ctx.progress
+                    .decoration(format!("step {step}"), Some(format!("detail {step}"))),
+                "decoration {step} is accepted"
+            );
+        }
+        Ok(ToolOutput::new("preview probe finished"))
+    }
+}
+
+/// The run path coalesces replaceable panel state, never collapses append-only
+/// chunks, and settles the latest state before the call is reported finished.
+#[tokio::test]
+async fn live_panel_decorations_are_coalesced_and_settle_the_latest_state() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[("call_preview", "preview_probe", serde_json::json!({}))]),
+                text_turn("preview probe finished"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let session_path = sessions.path().join("live-preview.jsonl");
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &session_path,
+        Some(4),
+        PreviewProbe,
+    );
+
+    let mut run = agent.prompt("watch the panel").await.unwrap();
+    let mut decorations = Vec::new();
+    let mut chunks = 0usize;
+    let mut finished_after = None;
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        match &event {
+            AgentEvent::ToolProgress {
+                id,
+                progress: octet_agent::ToolProgress::Decoration(decoration),
+            } if id.0 == "call_preview" => decorations.push(decoration.clone()),
+            AgentEvent::ToolProgress {
+                id,
+                progress: octet_agent::ToolProgress::Output { stream, bytes },
+            } if id.0 == "call_preview" && *stream == OutputStream::Stdout => {
+                chunks += 1;
+                assert_eq!(bytes.as_ref(), b"probe-output-chunk\n");
+            }
+            AgentEvent::ToolFinished { id, .. } if id.0 == "call_preview" => {
+                finished_after = Some(decorations.len());
+            }
+            _ => {}
+        }
+        events.push(event);
+    }
+    drop(run);
+
+    assert_eq!(chunks, 1, "the append-only chunk is forwarded exactly once");
+    assert!(
+        !decorations.is_empty(),
+        "the coalescer never drops the whole burst"
+    );
+    assert!(
+        decorations.len() < 12,
+        "the run path actually paced the burst: {} of 12 published",
+        decorations.len()
+    );
+    assert_eq!(
+        decorations[0].label(),
+        "step 0",
+        "the first state after idle is immediate"
+    );
+    assert_eq!(
+        decorations.last().expect("at least one decoration").label(),
+        "step 11",
+        "the terminal boundary publishes the latest state, never a stale one"
+    );
+    assert_eq!(
+        finished_after,
+        Some(decorations.len()),
+        "every decoration is published before the call is reported finished"
+    );
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+
+    // Panel state is presentation only: it never becomes durable state or the
+    // model-visible tool result.
+    let durable = std::fs::read_to_string(&session_path).unwrap();
+    assert!(durable.contains("preview probe finished"), "{durable}");
+    assert!(
+        !durable.contains("step 11") && !durable.contains("detail 11"),
+        "a decoration must never be persisted: {durable}"
+    );
+}
+
+// ── row 4.7: the run path publishes bounded partial-output checkpoints ─────
+
+#[cfg(any(unix, windows))]
+#[derive(Default)]
+struct RecordingRunCheckpointSink {
+    snapshots: std::sync::Mutex<Vec<String>>,
+}
+
+#[cfg(any(unix, windows))]
+impl RecordingRunCheckpointSink {
+    fn snapshots(&self) -> Vec<String> {
+        self.snapshots.lock().unwrap().clone()
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl octet_agent::tool::PartialOutputCheckpointSink for RecordingRunCheckpointSink {
+    fn checkpoint_partial_output(&self, snapshot: &str) -> Result<(), ToolError> {
+        assert!(
+            snapshot.len() <= octet_agent::tools::BASH_CHECKPOINT_MAX_BYTES,
+            "a checkpoint snapshot is bounded: {} bytes",
+            snapshot.len()
+        );
+        self.snapshots.lock().unwrap().push(snapshot.to_owned());
+        Ok(())
+    }
+}
+
+/// A real tool that streams output across the checkpoint interval before it
+/// returns, so the run path must publish while the call is still live.
+#[cfg(any(unix, windows))]
+struct StreamingProbe;
+
+#[cfg(any(unix, windows))]
+#[async_trait::async_trait]
+impl Tool for StreamingProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            async_execution: false,
+            name: "stream_probe".into(),
+            description: "Streams bounded partial output".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            constrained_sampling: None,
+        }
+    }
+
+    fn effect(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::Pure)
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        ctx.progress.output(OutputStream::Stdout, "ckpt-alpha\n");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        ctx.progress.output(OutputStream::Stderr, "ckpt-beta\n");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        Ok(ToolOutput::new("stream probe finished"))
+    }
+}
+
+/// Checkpoints land on the live run path, stay bounded and non-terminal, and
+/// are never durable state or a tool result; an unopted agent publishes none.
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn live_run_path_publishes_bounded_partial_output_checkpoints() {
+    let checkpoint_interval = Duration::from_millis(10);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[("call_stream", "stream_probe", serde_json::json!({}))]),
+                text_turn("stream probe finished"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let session_path = sessions.path().join("checkpointed.jsonl");
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &session_path,
+        Some(4),
+        StreamingProbe,
+    );
+    let sink = Arc::new(RecordingRunCheckpointSink::default());
+    agent.enable_partial_output_checkpoints(
+        "stream_probe",
+        Arc::clone(&sink) as Arc<dyn octet_agent::tool::PartialOutputCheckpointSink>,
+        checkpoint_interval,
+    );
+
+    agent.complete("stream the output").await.unwrap();
+
+    let snapshots = sink.snapshots();
+    assert!(
+        snapshots.len() >= 2,
+        "the live call publishes across the interval: {snapshots:?}"
+    );
+    assert!(
+        snapshots[0].contains("ckpt-alpha"),
+        "the first observation publishes immediately: {snapshots:?}"
+    );
+    let last = snapshots.last().unwrap();
+    assert!(
+        last.contains("ckpt-alpha") && last.contains("ckpt-beta"),
+        "a later checkpoint is a complete replacement snapshot: {last}"
+    );
+    for snapshot in &snapshots {
+        assert!(
+            !snapshot.contains("complete_stdout=true")
+                && !snapshot.contains("complete_stderr=true"),
+            "a checkpoint never claims the command finished: {snapshot}"
+        );
+    }
+    let stats = agent
+        .partial_output_checkpoint_stats()
+        .expect("the consumer is enabled");
+    assert_eq!(stats.published as usize, snapshots.len());
+    assert!(stats.failures == 0);
+
+    // Checkpoints are auxiliary observation data: the durable log carries the
+    // settled result and none of the partial snapshots.
+    let durable = std::fs::read_to_string(&session_path).unwrap();
+    assert!(durable.contains("stream probe finished"), "{durable}");
+    assert!(
+        !durable.contains("ckpt-alpha") && !durable.contains("ckpt-beta"),
+        "a checkpoint must never be persisted: {durable}"
+    );
+
+    // Unopted: the same tool publishes nothing and business output is identical.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn(&[("call_stream", "stream_probe", serde_json::json!({}))]),
+                text_turn("stream probe finished"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let mut unopted = build_agent_with_extra_tool(
+        &server.uri(),
+        workspace.path(),
+        &sessions.path().join("unopted.jsonl"),
+        Some(4),
+        StreamingProbe,
+    );
+    let unopted_sink = Arc::new(RecordingRunCheckpointSink::default());
+    let unopted_output = unopted.complete("stream the output").await.unwrap();
+    assert_eq!(unopted_output.text, "stream probe finished");
+    assert!(
+        matches!(unopted_output.reason, FinishReason::Completed),
+        "checkpointing changes no business outcome: {:?}",
+        unopted_output.reason
+    );
+    assert!(unopted_sink.snapshots().is_empty());
+    assert!(unopted.partial_output_checkpoint_stats().is_none());
+}
+
+#[tokio::test]
+async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools() {
+    // Row 4.13's prompt consumer: the registered tools' `promptSnippet` /
+    // `promptGuidelines` reach the model request's system prompt through
+    // `collect_tool_prompt_contributions`, and only when a host opts in.
+    let mut default_off = harness(vec![text_turn("answer")], Some(1)).await;
+    default_off.agent.complete("hello").await.unwrap();
+    let requests = wire_requests(default_off.server.as_ref().unwrap()).await;
+    assert_eq!(requests.len(), 1);
+    let default_system = wire_system_text(&requests[0]);
+    assert_eq!(
+        default_system, "You are a scripted test agent.",
+        "the tool section is opt-in: an unopted host keeps a byte-identical prompt"
+    );
+
+    let mut enabled = harness(vec![text_turn("answer")], Some(1)).await;
+    enabled.agent.set_tool_prompt_section_enabled(true);
+    assert!(enabled.agent.tool_prompt_section_enabled());
+    let contributions = enabled.agent.tool_prompt_contributions();
+    let declared = contributions
+        .iter()
+        .map(|contribution| contribution.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declared,
+        vec!["read", "edit", "write", "bash", "search"],
+        "contributions follow wire order for exactly the tools that declare a snippet"
+    );
+    // Search contributes its own snippet and stays callable. Rendering does
+    // not reintroduce any of the withdrawn ls/find/grep aliases.
+    assert!(
+        enabled
+            .agent
+            .registered_tool_names()
+            .iter()
+            .any(|name| name == "search"),
+        "search stays registered"
+    );
+    assert!(
+        declared.contains(&"search"),
+        "the real search contribution reaches the section"
+    );
+    enabled.agent.complete("hello").await.unwrap();
+    let requests = wire_requests(enabled.server.as_ref().unwrap()).await;
+    assert_eq!(requests.len(), 1);
+    let system = wire_system_text(&requests[0]);
+    assert!(
+        system.starts_with("You are a scripted test agent.\n\nAvailable tools:"),
+        "the section is appended once after the host prompt: {system}"
+    );
+    for contribution in &contributions {
+        let line = format!("- {}: {}", contribution.name, contribution.snippet);
+        assert_eq!(
+            system.matches(&line).count(),
+            1,
+            "each registered tool appears exactly once with its own snippet: {line}"
+        );
+    }
+    assert!(
+        system.contains("- bash: ") && system.contains("ripgrep"),
+        "the bash snippet names rg, not the withdrawn search tools: {system}"
+    );
+    for withdrawn in ["\n- ls:", "\n- find:", "\n- grep:"] {
+        assert!(
+            !system.contains(withdrawn),
+            "a withdrawn tool must never be advertised: {system}"
+        );
+    }
+    // The same composed prompt is what the idle context APIs report, so an
+    // estimate cannot disagree with the request the run actually sends.
+    let disabled_instruction_tokens = default_off
+        .agent
+        .request_context_breakdown()
+        .unwrap()
+        .instruction_tokens;
+    let enabled_breakdown = enabled.agent.request_context_breakdown().unwrap();
+    assert!(
+        enabled_breakdown.instruction_tokens > disabled_instruction_tokens,
+        "the enabled section must be accounted for in the same prompt the request uses: \
+         {} vs {disabled_instruction_tokens}",
+        enabled_breakdown.instruction_tokens
+    );
+
+    // A tool-free run never advertises tools, even with the section enabled.
+    let mut answer_only = harness(vec![text_turn("answer")], Some(1)).await;
+    answer_only.agent.set_tool_prompt_section_enabled(true);
+    let mut run = answer_only
+        .agent
+        .prompt_without_tools("hello")
+        .await
+        .unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+    let requests = wire_requests(answer_only.server.as_ref().unwrap()).await;
+    assert_eq!(
+        wire_system_text(&requests[0]),
+        "You are a scripted test agent.",
+        "a run that exposes no tools must not advertise them"
+    );
+    assert!(request_has_no_tools(&requests[0]));
+}
+
+struct DurableMemoProbe {
+    handles: Arc<std::sync::Mutex<Vec<octet_agent::tools::durability::InvocationHandle>>>,
+}
+
+#[async_trait::async_trait]
+impl Tool for DurableMemoProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            async_execution: false,
+            name: "durable_memo_probe".into(),
+            description: "Records a session-backed memo".into(),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            constrained_sampling: None,
+        }
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
+    }
+    fn replay_safety(&self) -> ReplaySafety {
+        ReplaySafety::Safe
+    }
+    fn effect(&self, _: &serde_json::Value, _: &ToolContext<'_>) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::Pure)
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let handle = context
+            .invocation()
+            .expect("agent must inject the durable capability");
+        let value: String =
+            handle.replay_step("step/read", || "recorded observation".to_owned())?;
+        self.handles.lock().unwrap().push(handle.clone());
+        Ok(ToolOutput::new(value))
+    }
+}
+
+#[tokio::test]
+async fn immutable_tool_results_recover_torn_heads_and_branch_checkout_without_reexecution() {
+    for torn_head in [false, true] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(text_turn("recovered"))
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("orphan.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("original request".into())],
+            })))
+            .unwrap();
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::ToolCall(ToolCall {
+                    id: octet_ai::ToolCallId("same-id".into()),
+                    name: "unavailable_side_effect".into(),
+                    arguments_json: "{}".into(),
+                    argument_error: None,
+                    async_execution: false,
+                })],
+                model: scripted_model(&server.uri()).spec.id.clone(),
+                protocol: Protocol::AnthropicMessages,
+            })))
+            .unwrap();
+        let handle = session.tool_invocation(0).unwrap();
+        handle
+            .set_memo("step", serde_json::json!("already executed"))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(octet_ai::ToolResult {
+                    tool_call_id: octet_ai::ToolCallId("same-id".into()),
+                    content: vec![octet_ai::ToolResultPart::Text(
+                        "immutable original result".into(),
+                    )],
+                    is_error: false,
+                    added_tool_names: None,
+                })],
+            })))
+            .unwrap();
+        if !torn_head {
+            session.checkout(assistant).unwrap();
+        }
+        drop(session);
+        if torn_head {
+            let bytes = std::fs::read_to_string(&path).unwrap();
+            let last_record = bytes.trim_end_matches('\n').rfind('\n').unwrap() + 1;
+            std::fs::write(&path, &bytes[..last_record]).unwrap();
+        }
+        let mut agent = build_agent_from_session(
+            &server.uri(),
+            workspace.path(),
+            Session::open(&path).unwrap(),
+            Some(2),
+        );
+        assert_eq!(
+            agent.complete("new prompt").await.unwrap().text,
+            "recovered"
+        );
+        let requests = wire_requests(&server).await;
+        assert_eq!(requests.len(), 1);
+        let wire = requests[0].to_string();
+        assert!(
+            wire.contains("immutable original result") && wire.contains("new prompt"),
+            "{wire}"
+        );
+        assert!(!wire.contains("unavailable tool"), "{wire}");
+        drop(agent);
+        let reopened = Session::open(&path).unwrap();
+        assert!(serde_json::to_string(&reopened.context().unwrap())
+            .unwrap()
+            .contains("immutable original result"));
+        assert!(handle.get_memo("step").is_err());
+    }
+}
+
+#[tokio::test]
+async fn durable_memos_are_injected_into_sequential_and_parallel_calls() {
+    for width in [1, 2, 65] {
+        let server = MockServer::start().await;
+        let ids = (0..width)
+            .map(|index| format!("memo-{index}"))
+            .collect::<Vec<_>>();
+        let script = [
+            tool_turn(
+                &(0..width)
+                    .map(|index| {
+                        (
+                            ids[index].as_str(),
+                            "durable_memo_probe",
+                            serde_json::json!({}),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            text_turn("done"),
+        ];
+        let cursor = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("messages"))
+            .respond_with(move |_: &wiremock::Request| {
+                ResponseTemplate::new(200)
+                    .set_body_string(script[cursor.fetch_add(1, Ordering::SeqCst)].clone())
+                    .insert_header("content-type", "text/event-stream")
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("memo.jsonl");
+        let handles = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = build_agent_with_extra_tool(
+            &server.uri(),
+            workspace.path(),
+            &path,
+            Some(4),
+            DurableMemoProbe {
+                handles: handles.clone(),
+            },
+        );
+        assert_eq!(agent.complete("observe").await.unwrap().text, "done");
+        let handles = handles.lock().unwrap();
+        assert_eq!(handles.len(), width.min(32));
+        assert_bounded_invocation_batch(&path, width, "memo-");
+        assert!(handles
+            .iter()
+            .all(|handle| handle.get_memo("step/read").is_err()));
+        let bytes = std::fs::read_to_string(&path).unwrap();
+        assert!(bytes.contains("tool_invocation"));
+        assert!(bytes.contains("step/read"));
+        assert!(bytes.contains("recorded observation"));
+        drop(agent);
+        assert!(Session::open(path).unwrap().tool_invocation(0).is_err());
+    }
+}
+
+struct RetrySummaryOnce(AtomicUsize);
+impl Respond for RetrySummaryOnce {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let summary = body
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty);
+        let body = if summary && self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            msg_start() + &text_block(0, &["unfinished summary"])
+        } else if summary {
+            text_turn("recovered summary")
+        } else {
+            text_turn("answer")
+        };
+        ResponseTemplate::new(200)
+            .set_body_string(body)
+            .insert_header("content-type", "text/event-stream")
+    }
+}
+
+#[tokio::test]
+async fn ordinary_route_summary_retry_keeps_boundary_live_and_commits_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(RetrySummaryOnce(AtomicUsize::new(0)))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("summary.jsonl");
+    let session = session_with_authoritative_pressure(&path, 180_000);
+    let mut agent = build_agent_from_session(&server.uri(), directory.path(), session, Some(4));
+    agent
+        .set_compaction_token_policy(true, 0.85, 10_000)
+        .unwrap();
+    let mut run = agent.prompt("continue").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::ProviderOperationRetry { operation: octet_agent::ProviderOperation::LocalCompaction, error, .. }
+            if error.contains("summarization retry scheduled"))));
+    assert_eq!(
+        agent
+            .session()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.value, EntryValue::Compaction { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        agent
+            .session()
+            .usage_records()
+            .iter()
+            .filter(|record| matches!(record.kind, UsageRecordKind::Compaction))
+            .count(),
+        2,
+        "history and split-turn prefix each have one completed usage record"
+    );
+    let requests = wire_requests(&server).await;
+    let summaries = requests
+        .iter()
+        .filter(|request| {
+            request
+                .get("tools")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(Vec::is_empty)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requests.len(),
+        4,
+        "failed history + history retry + prefix + answer"
+    );
+    assert_eq!(summaries.len(), 3);
+    assert_eq!(
+        summaries[0], summaries[1],
+        "retry reuses the same history request"
+    );
+    assert_ne!(
+        summaries[1]["messages"], summaries[2]["messages"],
+        "prefix is a separate grounded summary, not duplicate history"
+    );
+    assert!(summaries[2].to_string().contains("PREFIX of a turn"));
+    assert!(agent.session().entries().iter().any(|entry| matches!(&entry.value,
+        EntryValue::Compaction { summary, .. } if summary.contains("**Turn Context (split turn):**"))));
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert!(agent.session().has_uncertain_usage());
+    drop(agent);
+    assert!(Session::open(path).unwrap().has_uncertain_usage());
+}
+
+#[tokio::test]
+async fn branch_summary_uses_real_retry_consumer_and_keeps_one_caller_commit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(RetrySummaryOnce(AtomicUsize::new(0)))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = build_agent(
+        &server.uri(),
+        directory.path(),
+        &directory.path().join("branch.jsonl"),
+        Some(4),
+    );
+    let preparation = octet_agent::prepare_branch_handoff(
+        vec![Message::User(UserMessage {
+            content: vec![UserPart::Text("abandoned branch evidence".into())],
+        })],
+        &octet_agent::CompactionDetails::default(),
+    );
+    let mut events = Vec::new();
+    let summary = agent
+        .summarize_branch_with_retry(
+            &preparation,
+            octet_agent::CancellationToken::default(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap();
+    assert!(summary.contains("recovered summary"));
+    assert!(
+        agent.session().entries().is_empty(),
+        "retry consumer must not commit the branch on its own"
+    );
+    assert_eq!(agent.session().usage_records().len(), 1);
+    assert!(agent.session().has_uncertain_usage());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderOperationRetry {
+            operation: octet_agent::ProviderOperation::BranchSummary,
+            ..
+        }
+    )));
+    agent
+        .session_mut()
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text(summary)],
+        })))
+        .unwrap();
+    assert_eq!(agent.session().entries().len(), 1);
+}
+
+#[tokio::test]
+async fn session_checkpoint_consumer_writes_auxiliary_records_and_expires_them() {
+    let server = MockServer::start().await;
+    let script = [scripted_tool_turn("progress_test"), text_turn("done")];
+    let cursor = AtomicUsize::new(0);
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(move |_: &wiremock::Request| {
+            ResponseTemplate::new(200)
+                .set_body_string(script[cursor.fetch_add(1, Ordering::SeqCst)].clone())
+                .insert_header("content-type", "text/event-stream")
+        })
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checkpoint.jsonl");
+    let mut agent = build_agent_with_extra_tool(
+        &server.uri(),
+        directory.path(),
+        &path,
+        Some(4),
+        ProgressTool {
+            duration_ms: 100,
+            abortable: true,
+        },
+    );
+    agent.enable_session_partial_output_checkpoints("progress_test", Duration::from_millis(10));
+    assert_eq!(agent.complete("checkpoint").await.unwrap().text, "done");
+    assert!(agent.partial_output_checkpoint_stats().unwrap().published > 0);
+    let bytes = std::fs::read_to_string(&path).unwrap();
+    assert!(bytes.contains("pi.pending.tool_output"));
+    for line in bytes.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        if value["type"] == "tool_invocation" {
+            assert!(!line.contains("complete_stdout=true"));
+        }
+    }
+    drop(agent);
+    let reopened = Session::open(path).unwrap();
+    assert!(!reopened
+        .context()
+        .unwrap()
+        .iter()
+        .any(|message| serde_json::to_string(message)
+            .unwrap()
+            .contains("pi.pending.tool_output")));
+}
+
+#[tokio::test]
+async fn dropping_manual_summary_after_dispatch_persists_unknown_usage_without_fictional_totals() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(60))
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(text_turn("late summary")),
+        )
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("dropped-summary.jsonl");
+    let mut agent = build_agent(&server.uri(), directory.path(), &path, Some(4));
+    let preparation =
+        octet_agent::prepare_branch_handoff(Vec::new(), &octet_agent::CompactionDetails::default());
+    let mut pending = Box::pin(agent.summarize_branch_with_retry(
+        &preparation,
+        octet_agent::CancellationToken::default(),
+        std::mem::drop,
+    ));
+    tokio::select! {
+        result = &mut pending => panic!("request unexpectedly settled: {result:?}"),
+        _ = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !server.received_requests().await.unwrap().is_empty() { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }) => {},
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    drop(pending);
+    assert!(agent.session().has_uncertain_usage());
+    assert!(agent.session().usage_records().is_empty());
+    assert_eq!(agent.session().total_cost_microdollars(), 0);
+    assert!(agent.session().entries().is_empty());
+    drop(agent);
+    assert!(Session::open_read_only(path).unwrap().has_uncertain_usage());
+}
+
+#[tokio::test]
+async fn cancelled_summary_before_dispatch_does_not_invent_exposure() {
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = build_agent(
+        &server.uri(),
+        directory.path(),
+        &directory.path().join("presend.jsonl"),
+        Some(4),
+    );
+    let preparation =
+        octet_agent::prepare_branch_handoff(Vec::new(), &octet_agent::CompactionDetails::default());
+    let cancel = octet_agent::CancellationToken::default();
+    cancel.cancel();
+    assert!(matches!(
+        agent
+            .summarize_branch_with_retry(&preparation, cancel, std::mem::drop)
+            .await,
+        Err(octet_agent::AgentError::Cancelled)
+    ));
+    assert!(!agent.session().has_uncertain_usage());
+    assert!(agent.session().usage_records().is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+fn response_with_tier_echo(body: String, tier: &str) -> String {
+    body.lines()
+        .map(|line| {
+            if let Some(json) = line.strip_prefix("data: ") {
+                let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+                if value["type"] == "response.completed" {
+                    value["response"]["service_tier"] = serde_json::json!(tier);
+                }
+                format!("data: {value}\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn turn_finished_cost_is_the_exact_settled_tier_cost_not_catalog_or_gate_cost() {
+    use octet_ai::{ResponsesRuntimeProfile as Profile, ServiceTier};
+    for (api, requested, echoed, profile, expected) in [
+        (
+            "gpt-5.5",
+            Some(ServiceTier::Priority),
+            "default",
+            Profile::Codex,
+            Some((62, 500_045)),
+        ),
+        (
+            "gpt-5.4",
+            Some(ServiceTier::Priority),
+            "default",
+            Profile::Codex,
+            Some((50, 36)),
+        ),
+        (
+            "gpt-5.5",
+            Some(ServiceTier::Flex),
+            "default",
+            Profile::Codex,
+            Some((12, 500_009)),
+        ),
+        (
+            "gpt-5.5",
+            Some(ServiceTier::Priority),
+            "flex",
+            Profile::Codex,
+            Some((12, 500_009)),
+        ),
+        (
+            "gpt-5.5",
+            Some(ServiceTier::Priority),
+            "future-tier",
+            Profile::Codex,
+            None,
+        ),
+        ("gpt-5.5", None, "priority", Profile::Default, None),
+    ] {
+        for gated in [false, true] {
+            let server = MockServer::start().await;
+            let mut bodies = vec![response_with_tier_echo(
+                responses_text_turn("answer", "answer", "response.completed", "answer"),
+                echoed,
+            )];
+            if gated {
+                bodies.push(response_with_tier_echo(
+                    responses_text_turn("gate", "R", "response.completed", "gate"),
+                    "default",
+                ));
+            }
+            Mock::given(method("POST"))
+                .and(path("responses"))
+                .respond_with(Script {
+                    bodies,
+                    next: AtomicUsize::new(0),
+                })
+                .mount(&server)
+                .await;
+            let workspace = tempfile::tempdir().unwrap();
+            let session_path = workspace.path().join("tier-cost.jsonl");
+            let mut model = recovery_codex_model(&server.uri());
+            Arc::make_mut(&mut model.spec).api_name = api.into();
+            let pricing = Arc::make_mut(&mut model.spec).pricing.as_mut().unwrap();
+            pricing.input = TokenRate(3_000_002);
+            pricing.output = TokenRate(5_000_004);
+            Arc::make_mut(&mut model.endpoint).runtime.responses_profile = profile;
+            let base_pricing = model.spec.pricing.clone().unwrap();
+            let mut agent = build_responses_agent_from_session(
+                model,
+                Session::create(&session_path).unwrap(),
+                workspace.path(),
+                Some(3),
+                "test",
+                ReasoningConfig::Off,
+            );
+            agent.set_service_tier(requested).unwrap();
+            if gated {
+                agent.set_completion_policy(CompletionPolicy::TerminalGate);
+            }
+            let mut run = agent.prompt("account this exact response").await.unwrap();
+            let events = collect(&mut run).await;
+            drop(run);
+            assert!(
+                matches!(assert_single_run_finished(&events), FinishReason::Completed),
+                "{events:?}"
+            );
+            let turns = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::TurnFinished {
+                        turn_usage,
+                        turn_cost,
+                        run_cost_microdollars,
+                        ..
+                    } => Some((*turn_usage, *turn_cost, *run_cost_microdollars)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(turns.len(), 1);
+            let (usage, cost, run_subtotal) = turns[0];
+            assert_eq!(
+                cost.map(|cost| (cost.total, cost.total_picodollars_remainder)),
+                expected,
+                "{api}/{requested:?}/{echoed}/gate={gated}"
+            );
+            let durable = agent
+                .session()
+                .usage_records()
+                .iter()
+                .find(|record| matches!(record.kind, UsageRecordKind::AssistantTurn { .. }))
+                .unwrap();
+            assert_eq!(cost, durable.cost);
+            assert_eq!(usage, durable.usage);
+            assert_ne!(
+                cost,
+                Some(octet_ai::pricing::cost_of(&base_pricing, &usage).unwrap())
+            );
+            let gate_cost = agent
+                .session()
+                .usage_records()
+                .iter()
+                .find_map(|record| match record.kind {
+                    UsageRecordKind::TerminalGate { .. } => Some(record.cost.unwrap()),
+                    _ => None,
+                });
+            assert_eq!(gate_cost.is_some(), gated);
+            let exact_subtotal = cost
+                .into_iter()
+                .chain(gate_cost)
+                .map(|cost| {
+                    u128::from(cost.total) * 1_000_000
+                        + u128::from(cost.total_picodollars_remainder)
+                })
+                .sum::<u128>();
+            assert_eq!(u128::from(run_subtotal), exact_subtotal / 1_000_000);
+            let requests = wire_requests(&server).await;
+            if gated {
+                assert!(requests[1].get("service_tier").is_none());
+            }
+            if cost.is_none() {
+                assert!(agent.session().has_unpriced_usage());
+                agent.set_max_session_cost_microdollars(Some(u64::MAX));
+                assert!(matches!(
+                    agent.ensure_request_cost_capacity(agent.model(), 1, 1),
+                    Err(octet_agent::AgentError::CostUnavailable { .. })
+                ));
+            }
+            drop(agent);
+            let reopened = Session::open_read_only(&session_path).unwrap();
+            let durable = reopened
+                .usage_records()
+                .iter()
+                .find(|record| matches!(record.kind, UsageRecordKind::AssistantTurn { .. }))
+                .unwrap();
+            assert_eq!(cost, durable.cost);
+        }
+    }
+}
+
+#[tokio::test]
+async fn turn_cost_after_retry_excludes_failed_attempt_uncertainty() {
+    let (mut agent, server, _workspace, _) = recovery_harness(vec![
+        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+        responses_text_turn("settled", "settled", "response.completed", "settled"),
+    ])
+    .await;
+    let mut run = agent
+        .prompt("retry without fictional pricing")
+        .await
+        .unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(matches!(
+        assert_single_run_finished(&events),
+        FinishReason::Completed
+    ));
+    let costs = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnFinished { turn_cost, .. } => Some(*turn_cost),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(costs.len(), 1);
+    assert_eq!(agent.session().usage_records().len(), 1);
+    assert_eq!(costs[0], agent.session().usage_records()[0].cost);
+    assert!(costs[0].is_some());
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert_eq!(wire_requests(&server).await.len(), 2);
+}
+
+#[path = "agent_run/gpt6.rs"]
+mod gpt6;

@@ -116,8 +116,8 @@ if not isinstance(manifest["version"], str) or re.fullmatch(
     manifest["version"],
 ) is None:
     raise SystemExit("extension.toml version is not semantic versioning")
-if manifest["api_version"] != "0.2":
-    raise SystemExit("release bundles must declare api_version = '0.2'")
+if manifest["api_version"] not in ("0.2", "0.3", "0.4"):
+    raise SystemExit("release bundles must declare api_version = '0.2', '0.3', or '0.4'")
 expected_octet = f"={octet_version}"
 if manifest["requires_octet"] != expected_octet:
     raise SystemExit(
@@ -129,9 +129,11 @@ if not isinstance(entrypoint, dict) or not isinstance(entrypoint.get("command"),
 command = pathlib.PurePosixPath(entrypoint["command"])
 if not command.is_absolute() and (not command.parts or ".." in command.parts or "." in command.parts):
     raise SystemExit("relative entrypoint.command is not portable")
+local_entrypoint = None
 if not command.is_absolute():
     local_command = source.joinpath(*command.parts)
     if local_command.exists():
+        local_entrypoint = command
         command_metadata = local_command.lstat()
         if not stat.S_ISREG(command_metadata.st_mode) or not command_metadata.st_mode & 0o111:
             raise SystemExit("local entrypoint.command must be a regular executable file")
@@ -155,7 +157,9 @@ if tracked_manifest:
             raise SystemExit(f"tracked path escaped extension root: {relative_to_repo}") from error
         files.append(source.joinpath(*relative.parts))
 else:
-    files = [path for path in source.rglob("*") if not path.is_dir()]
+    # is_dir follows links: retain linked directories so the regular-file
+    # admission below rejects them instead of silently omitting their contents.
+    files = [path for path in source.rglob("*") if path.is_symlink() or not path.is_dir()]
 
 files = [
     path
@@ -177,6 +181,11 @@ for path in files:
         raise SystemExit(f"extension file escaped source root: {path}") from error
     if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
         raise SystemExit(f"extension path is not portable: {relative}")
+    for parent in path.parents:
+        if parent == source:
+            break
+        if parent.is_symlink():
+            raise SystemExit(f"release bundle cannot contain linked ancestors: {path}")
     relative_text = relative.as_posix()
     relative_text.encode("utf-8")
     if any(ord(character) < 32 or ord(character) == 127 for character in relative_text):
@@ -186,6 +195,11 @@ for path in files:
 relative_files.sort(key=lambda item: item[0].as_posix())
 if [relative.as_posix() for relative, _, _ in relative_files].count("extension.toml") != 1:
     raise SystemExit("release bundle must contain exactly one extension.toml")
+
+if local_entrypoint is not None and local_entrypoint.as_posix() not in {
+    relative.as_posix() for relative, _, _ in relative_files
+}:
+    raise SystemExit("local entrypoint.command is missing from the bundle")
 
 directories = {pathlib.PurePosixPath()}
 for relative, _, _ in relative_files:

@@ -192,6 +192,13 @@ impl ExtensionProviderRegistry {
     }
 
     /// Atomically registers a previously absent provider declaration.
+    ///
+    /// A registration issued after the owner's initial catalog completed (a
+    /// late registration from a command or tool handler) is published to
+    /// [`Self::snapshot`]/[`Self::resolve`] the moment this call returns; it is
+    /// never queued behind a reload. An owner that has not yet completed its
+    /// initial batch stays withheld so a partial catalog cannot become
+    /// callable.
     pub fn register(
         &self,
         owner: ExtensionProviderOwner,
@@ -201,6 +208,10 @@ impl ExtensionProviderRegistry {
     }
 
     /// Atomically replaces the complete model set for an owned provider.
+    ///
+    /// A late update replaces the live declaration immediately and invalidates
+    /// every previously resolved route through [`Self::route_is_active`], so a
+    /// withdrawn transport can never stay callable.
     pub fn update(
         &self,
         owner: ExtensionProviderOwner,
@@ -210,6 +221,10 @@ impl ExtensionProviderRegistry {
     }
 
     /// Removes a provider only when it belongs to the calling generation.
+    ///
+    /// Removal is immediate for late callers: the declaration disappears from
+    /// [`Self::snapshot`]/[`Self::resolve`] and every resolved route stops being
+    /// active before this call returns.
     pub fn unregister(
         &self,
         owner: &ExtensionProviderOwner,
@@ -286,14 +301,30 @@ impl ExtensionProviderRegistry {
             .providers
             .values()
             .filter(|record| state.initial_catalog_complete.contains(&record.owner))
-            .map(|record| ExtensionProviderCatalogEntry {
-                owner: record.owner.clone(),
-                provider: record.provider.clone(),
-                models: record.models.values().cloned().collect(),
-                authorization: record.authorization,
-            })
+            .map(catalog_entry)
             .collect();
         (state.revision, entries)
+    }
+
+    /// Returns every recorded declaration with whether its owning generation
+    /// completed its initial registration batch.
+    ///
+    /// Unlike [`Self::snapshot`] this includes owners that are still collecting
+    /// their initial batch, so an inspection surface can tell a parked
+    /// declaration from a callable one. `complete == false` entries are never
+    /// live and must not be projected.
+    pub fn recorded_providers(&self) -> Vec<(ExtensionProviderCatalogEntry, bool)> {
+        let state = lock_registry(&self.state);
+        state
+            .providers
+            .values()
+            .map(|record| {
+                (
+                    catalog_entry(record),
+                    state.initial_catalog_complete.contains(&record.owner),
+                )
+            })
+            .collect()
     }
 
     /// Waits for every supplied process owner to complete its initial provider
@@ -535,6 +566,15 @@ fn lock_registry(state: &Arc<Mutex<RegistryState>>) -> std::sync::MutexGuard<'_,
     state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn catalog_entry(record: &ProviderRecord) -> ExtensionProviderCatalogEntry {
+    ExtensionProviderCatalogEntry {
+        owner: record.owner.clone(),
+        provider: record.provider.clone(),
+        models: record.models.values().cloned().collect(),
+        authorization: record.authorization,
+    }
 }
 
 fn catalog_result(
@@ -816,6 +856,143 @@ mod tests {
             },
             display_name: None,
         }
+    }
+
+    fn register_params(provider_id: &str, model_id: &str) -> api_v03::ProviderRegisterParams {
+        let mut provider = provider();
+        provider.id = provider_id.into();
+        let mut model = model();
+        model.id = model_id.into();
+        model.api_name = model_id.into();
+        api_v03::ProviderRegisterParams {
+            provider,
+            models: vec![model],
+        }
+    }
+
+    #[test]
+    fn late_registration_after_initial_completion_is_callable_without_reload() {
+        let registry = ExtensionProviderRegistry::new();
+        registry
+            .register(owner(1), register_params("alpha", "alpha-model"))
+            .expect("initial registration");
+        registry.complete_initial_catalog(&owner(1));
+        let initial_revision = registry.snapshot().0;
+
+        // A declaration published after the owner's batch settled is a late
+        // registration: it becomes callable immediately, with no second
+        // `providers/complete` and no reload.
+        registry
+            .register(owner(1), register_params("beta", "beta-model"))
+            .expect("late registration");
+        let route = registry
+            .resolve("beta", "beta-model")
+            .expect("late route is callable");
+        assert_eq!(route.owner, owner(1));
+        assert!(registry.route_is_active(&route));
+
+        let (revision, entries) = registry.snapshot();
+        assert!(revision > initial_revision);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.owner == owner(1)));
+        assert!(registry
+            .recorded_providers()
+            .iter()
+            .all(|(_, complete)| *complete));
+    }
+
+    #[test]
+    fn late_registration_stays_withheld_until_the_initial_batch_completes() {
+        let registry = ExtensionProviderRegistry::new();
+        registry
+            .register(owner(1), register_params("late", "late-model"))
+            .expect("recording before completion");
+
+        // Recording is not publication: an owner still collecting its initial
+        // batch can never expose a partial catalog.
+        assert!(registry.snapshot().1.is_empty());
+        assert!(registry.resolve("late", "late-model").is_none());
+        let recorded = registry.recorded_providers();
+        assert_eq!(recorded.len(), 1);
+        assert!(
+            !recorded[0].1,
+            "an incomplete initial batch must be reported as not live"
+        );
+
+        registry.complete_initial_catalog(&owner(1));
+        assert!(registry.resolve("late", "late-model").is_some());
+        assert_eq!(registry.snapshot().1.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_and_foreign_late_registrations_cannot_replace_the_original_route() {
+        let registry = ExtensionProviderRegistry::new();
+        registry
+            .register(owner(1), register_params("fixture", "model"))
+            .expect("initial registration");
+        registry.complete_initial_catalog(&owner(1));
+
+        // Repeated `providers/register` for the same owner is a conflict, not
+        // an implicit update. A late replacement must use `providers/update`.
+        assert_eq!(
+            registry
+                .register(owner(1), register_params("fixture", "model"))
+                .unwrap_err(),
+            ExtensionProviderRegistryError::ProviderConflict
+        );
+
+        // Another extension instance cannot adopt the identifier, and it cannot
+        // unregister through a forged owner.
+        let foreign = ExtensionProviderOwner {
+            extension_instance_id: "extension-2".into(),
+            generation: 9,
+        };
+        assert_eq!(
+            registry
+                .register(foreign.clone(), register_params("fixture", "model"))
+                .unwrap_err(),
+            ExtensionProviderRegistryError::ProviderConflict
+        );
+        assert_eq!(
+            registry.unregister(&foreign, "fixture").unwrap_err(),
+            ExtensionProviderRegistryError::StaleOwner
+        );
+        assert_eq!(
+            registry.resolve("fixture", "model").unwrap().owner,
+            owner(1)
+        );
+    }
+
+    #[test]
+    fn late_update_and_unregister_apply_immediately_to_resolved_routes() {
+        let registry = ExtensionProviderRegistry::new();
+        registry
+            .register(owner(1), register_params("fixture", "model"))
+            .expect("initial registration");
+        registry.complete_initial_catalog(&owner(1));
+        let original = registry.resolve("fixture", "model").expect("initial route");
+
+        let mut replacement = model();
+        replacement.max_output_tokens = 2_048;
+        registry
+            .update(
+                owner(1),
+                api_v03::ProviderUpdateParams {
+                    provider: provider(),
+                    models: vec![replacement],
+                },
+            )
+            .expect("late update");
+        assert!(!registry.route_is_active(&original));
+        let current = registry.resolve("fixture", "model").expect("late route");
+        assert_eq!(current.model.max_output_tokens, 2_048);
+
+        registry
+            .unregister(&owner(1), "fixture")
+            .expect("late unregister");
+        assert!(registry.resolve("fixture", "model").is_none());
+        assert!(!registry.route_is_active(&current));
+        assert!(registry.recorded_providers().is_empty());
     }
 
     #[test]

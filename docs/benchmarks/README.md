@@ -6,10 +6,8 @@ exclusions are retained.
 
 The current methods below cover [optional telemetry](#optional-agent-telemetry),
 [systems measurements](#systems-measurements), and [usability checks](#usability-checks).
-The [Pi runtime fixture](#pi-runtime-fixture-evidence) is hold-only, not a published
-performance result. The [performance philosophy and execution contract](../design/performance.md)
-defines work budgets, distinct latency clocks, qualification stages, and the
-remaining ownership work. For project tracking, see the
+The [performance and measurement contract](../design/performance.md)
+defines distinct latency clocks and correctness boundaries. For project tracking, see the
 [project](https://github.com/orgs/skaft-software/projects/5).
 
 ## Historical results
@@ -185,8 +183,8 @@ records executable/fixture identities and raw trials, validates summaries,
 retains failures, and refuses to overwrite an evidence file. Its build-profile
 label and observed checkout/compiler do not alone establish binary provenance.
 Use a release qualification manifest before making comparative timing claims.
-See the [performance contract](../design/performance.md) for the next real-shell
-and matched-client replay stages and currently unmeasured targets.
+See the [performance contract](../design/performance.md) for metric boundaries
+and measurement limits.
 
 ## Usability checks
 
@@ -216,18 +214,6 @@ form. Record:
 Report the numerator, denominator, exclusions, and reason categories. Do not hide
 an unresolved crash or data-loss issue in an average, or turn a small usability
 sample into a superiority claim. Follow the [diagnostic sharing rules](#voluntary-diagnostics).
-
-## Pi runtime fixture evidence
-
-[`scripts/bench-pi-runtime.py`](../../scripts/bench-pi-runtime.py) is the
-checked-in, stdlib-only driver for Pi aggregate lifecycle evidence. It runs no
-network/provider/model request, inherits no credentials, uses a temporary home,
-and writes bounded raw resource samples plus a checksum. It measures fixture
-representations of no-extension, legacy-eager, lazy activation, shared-workspace,
-and ordered-Pi-aggregate paths; it is intentionally hold-only until a real API
-0.3 runtime-manager adapter is available. See [Pi runtime evidence
-harness](pi-runtime-evidence.md) for invocation, exact candidate/fixture identity,
-Linux/macOS limits, separate inference/GPU attribution, and publication rules.
 
 ## Publication boundary
 

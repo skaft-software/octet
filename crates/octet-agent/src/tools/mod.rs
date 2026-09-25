@@ -1,20 +1,65 @@
-//! The built-in tools (`read`, `edit`, `write`, `bash`, `search`) and the [`CoreTools`]
-//! extension that registers them.
+//! The built-in tools (`read`, `edit`, `write`, `bash`, `search`), the [`CoreTools`]
+//! extension that registers them, and the tool-layer durability primitives they
+//! need.
 //!
 //! Core tools are not special: they implement the same [`Tool`](crate::Tool)
 //! trait and register through the same [`ExtensionHost::tool`] method as any
 //! third-party tool.
+//!
+//! The model-visible surface is deliberately narrow: `read`/`write`/`edit`/
+//! `bash` plus the ripgrep-backed `search` tool (available to embedders and
+//! explicit allowlists; the coding product leaves it out of its default
+//! allowlist). File discovery and content search are served by `rg` through
+//! `search` or `bash` — there is deliberately no separate `ls`/`find`/`grep`
+//! tool (maintainer decision, matching the v0.7.6 release surface).
+//!
+//! Three modules here are not tools but the harness-side primitives Pi defines
+//! next to them, landed in the tool layer because `session.rs`/`agent.rs` are
+//! outside this change's scope: [`durability`] (durable invocation-scoped
+//! partial-output checkpoints and replay memos), [`deferred`] (durable
+//! suspend/resume with poll permits), and [`summarization`] (the shared
+//! summarization retry policy and its typed outcomes). Each documents the
+//! consumer that still has to be wired.
 
 mod bash;
 mod edit;
+mod powershell;
 mod read;
 mod search;
+mod shell_environment;
 mod write;
 
-pub use bash::BashTool;
+pub mod deferred;
+pub mod durability;
+pub mod summarization;
+
+pub use bash::{
+    BashCheckpointPublisher, BashCheckpointStats, BashTool, CheckpointedBashTool,
+    BASH_CHECKPOINT_INTERVAL, BASH_CHECKPOINT_MAX_BYTES, MIN_BASH_CHECKPOINT_INTERVAL,
+};
+pub use deferred::{
+    prepare_deferred_poll, suspend_deferred_response, DeferredHandle, DeferredHandleRejection,
+    DeferredPhase, DeferredPollIntent, DeferredPollOutcome, DeferredPollPermit,
+    DeferredPollPreparation, DeferredPollRefusal, DeferredPollRefusalKind,
+    DeferredResponseDeclaration, DeferredResume, DeferredStopReason, DeferredSuspendDecision,
+    DeferredSuspendFailure, DeferredSuspendFailureKind, DeferredSuspended, ModelIdentity,
+    SuspendedRunObservation, UnknownPollReplacement, INVALID_DEFERRED_HANDLE_DIAGNOSTIC,
+};
+pub use durability::{
+    DurableInvocationStore, InterruptedInvocation, InvocationError, InvocationHandle,
+    InvocationOutcome, InvocationScope, InvocationState, MemoLookup, Settlement, StoreLimits,
+    UnsafeRecovery, INTERRUPTED_OUTCOME_UNKNOWN_MARKER, MEMO_NAMESPACE, PARTIAL_OUTPUT_NAMESPACE,
+};
 pub use edit::EditTool;
+pub use powershell::PowerShellTool;
 pub use read::ReadTool;
 pub use search::SearchTool;
+pub use shell_environment::{SessionShellTool, ShellSessionEnvironment};
+pub use summarization::{
+    run_summarization_with_retry, CompactionFailure, CompactionFailureKind, CompactionStepOutcome,
+    SummarizationAttempt, SummarizationDiagnostic, SummarizationFailure, SummarizationFailureKind,
+    SummarizationOutcome, SummarizationRetryPolicy, SummarizationRetryScheduled, SummarizationRun,
+};
 pub use write::WriteTool;
 
 use crate::effect::ToolPolicyDenialCode;
@@ -120,6 +165,9 @@ impl Extension for CoreTools {
         // The coding product disables this redundant schema by default, while
         // keeping it available to embedders and explicit tool allowlists.
         host.tool(SearchTool);
+        // Optional at the product allowlist boundary; never a bash fallback.
+        #[cfg(windows)]
+        host.tool(PowerShellTool::default());
     }
 }
 

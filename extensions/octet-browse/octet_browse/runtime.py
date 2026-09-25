@@ -14,6 +14,7 @@ from octet_extension import (
     tool_result,
 )
 
+from .adapters import MAX_BACKEND_ID_CHARS, MAX_SELECTION_ID_CHARS
 from .controller import BrowseController
 from .presentation import BrowsePresentation, PresentationPublisher
 from .safety import (
@@ -30,11 +31,56 @@ from .safety import (
 from .worker import KEY_ALLOWLIST
 
 
+BACKEND_SELECTION_PROPERTIES: Dict[str, Any] = {
+    "connector_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_BACKEND_ID_CHARS,
+        "description": "Exact connector ID explicitly registered by the host integration.",
+    },
+    "browser_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_SELECTION_ID_CHARS,
+        "description": "Exact browser identity supplied by the connector integration.",
+    },
+    "session_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_SELECTION_ID_CHARS,
+        "description": "Exact existing browser-session identity; no session discovery is performed.",
+    },
+    "window_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_SELECTION_ID_CHARS,
+        "description": "Exact existing browser-window identity.",
+    },
+    "tab_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_SELECTION_ID_CHARS,
+        "description": "Exact existing browser-tab identity.",
+    },
+    "target_revision": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_SELECTION_ID_CHARS,
+        "description": "Optional connector-issued revision; stale revisions fail closed.",
+    },
+}
+BACKEND_SELECTION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": dict(BACKEND_SELECTION_PROPERTIES),
+    "required": ["connector_id", "browser_id", "session_id", "window_id", "tab_id"],
+    "additionalProperties": False,
+}
 EMPTY_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {},
     "additionalProperties": False,
 }
+
 TAB_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -135,6 +181,10 @@ WAIT_SCHEMA: Dict[str, Any] = {
 
 TOOL_DESCRIPTIONS = {
     "browser_status": "Report bounded setup/browser health and the local install-log path without returning log contents, page text, query strings, typed values, credentials, or profile paths.",
+    "browser_backend_select": "Attach Browse to one exact target supplied by an explicitly injected browser-session connector. No browser discovery, enumeration, or native-browser substitution is performed.",
+    "browser_backend_revoke": "Release one exact explicitly selected connector target after rechecking its identity and owner claim.",
+    "browser_backend_stop": "Stop and release one exact explicitly selected connector target when the injected connector exposes that capability.",
+    "browser_backend_status": "Report bounded explicitly registered connector descriptors and selected-target state without discovering browsers or returning connector internals.",
     "browser_launch": "Open Playwright's pinned Chromium visibly with the isolated persistent octet Browse profile. Headless/background launch and normal user profiles are unavailable.",
     "browser_tabs": "List explicit opaque tab IDs with bounded sanitized titles and URLs. Page-derived fields are marked as untrusted content.",
     "browser_open_url": "Create a tab or navigate one explicit tab to an absolute HTTP(S) URL. Userinfo, relative/non-HTTP schemes, unsafe redirects/popups, and downloads are blocked.",
@@ -154,7 +204,7 @@ def create_runtime(
     *, controller_factory: Optional[Any] = None
 ) -> Tuple[Extension, BrowseController, BrowsePresentation, PresentationPublisher]:
     extension = Extension(
-        api_version="0.2",
+        api_version="0.4",
         max_concurrent_requests=8,
         max_pending_requests=32,
         supported_features=("request_cancellation", "content_parts", "artifacts"),
@@ -189,6 +239,36 @@ def create_runtime(
             if name == "browser_status":
                 _shape(values, set())
                 result = controller.browser_status(owner, cancellation=cancellation)
+            elif name == "browser_backend_select":
+                _shape(
+                    values,
+                    set(BACKEND_SELECTION_PROPERTIES),
+                    {"connector_id", "browser_id", "session_id", "window_id", "tab_id"},
+                )
+                result = controller.browser_backend_select(
+                    owner, _backend_selection(values), cancellation=cancellation
+                )
+            elif name == "browser_backend_revoke":
+                _shape(
+                    values,
+                    set(BACKEND_SELECTION_PROPERTIES),
+                    {"connector_id", "browser_id", "session_id", "window_id", "tab_id"},
+                )
+                result = controller.browser_backend_revoke(
+                    owner, _backend_selection(values), cancellation=cancellation
+                )
+            elif name == "browser_backend_stop":
+                _shape(
+                    values,
+                    set(BACKEND_SELECTION_PROPERTIES),
+                    {"connector_id", "browser_id", "session_id", "window_id", "tab_id"},
+                )
+                result = controller.browser_backend_stop(
+                    owner, _backend_selection(values), cancellation=cancellation
+                )
+            elif name == "browser_backend_status":
+                _shape(values, set())
+                result = controller.browser_backend_status(owner, cancellation=cancellation)
             elif name == "browser_launch":
                 _shape(values, set())
                 result = controller.browser_launch(owner, cancellation=cancellation)
@@ -335,6 +415,22 @@ def create_runtime(
     @extension.tool(name="browser_status", description=TOOL_DESCRIPTIONS["browser_status"], parameters=EMPTY_SCHEMA)
     def browser_status(arguments: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
         return invoke("browser_status", arguments, context)
+
+    @extension.tool(name="browser_backend_select", description=TOOL_DESCRIPTIONS["browser_backend_select"], parameters=BACKEND_SELECTION_SCHEMA)
+    def browser_backend_select(arguments: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+        return invoke("browser_backend_select", arguments, context)
+
+    @extension.tool(name="browser_backend_revoke", description=TOOL_DESCRIPTIONS["browser_backend_revoke"], parameters=BACKEND_SELECTION_SCHEMA)
+    def browser_backend_revoke(arguments: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+        return invoke("browser_backend_revoke", arguments, context)
+
+    @extension.tool(name="browser_backend_stop", description=TOOL_DESCRIPTIONS["browser_backend_stop"], parameters=BACKEND_SELECTION_SCHEMA)
+    def browser_backend_stop(arguments: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+        return invoke("browser_backend_stop", arguments, context)
+
+    @extension.tool(name="browser_backend_status", description=TOOL_DESCRIPTIONS["browser_backend_status"], parameters=EMPTY_SCHEMA)
+    def browser_backend_status(arguments: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
+        return invoke("browser_backend_status", arguments, context)
 
     @extension.tool(name="browser_launch", description=TOOL_DESCRIPTIONS["browser_launch"], parameters=EMPTY_SCHEMA)
     def browser_launch(arguments: Mapping[str, Any], context: Mapping[str, Any]) -> Dict[str, Any]:
@@ -489,6 +585,16 @@ def _shape(
     missing = (required or set()) - set(values)
     if unknown or missing:
         raise BrowseError("invalid_arguments", "Tool arguments do not match the declared schema.")
+
+
+def _backend_selection(values: Mapping[str, Any]) -> Dict[str, Any]:
+    selection = {
+        field: values[field]
+        for field in ("connector_id", "browser_id", "session_id", "window_id", "tab_id")
+    }
+    if "target_revision" in values:
+        selection["target_revision"] = values["target_revision"]
+    return selection
 
 
 def _tab(values: Mapping[str, Any]) -> str:

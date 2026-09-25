@@ -11,18 +11,22 @@ from __future__ import annotations
 
 import codecs
 import copy
+import errno
 import hashlib
 import hmac
 import html
 from html.parser import HTMLParser
 import http.client
+import io
 import ipaddress
 import json
 import math
 import os
+import queue
 from pathlib import Path
 import re
 import secrets
+import select
 import socket
 import ssl
 import stat
@@ -77,6 +81,9 @@ REDIRECT_STATUSES = frozenset((301, 302, 303, 307, 308))
 HTML_TYPES = frozenset(("text/html", "application/xhtml+xml"))
 PLAIN_TYPES = frozenset(("text/plain",))
 SEARCH_TYPES = frozenset(("application/json", "text/json"))
+# A blocking OS resolver call cannot be force-cancelled; cap abandoned daemon
+# lookups to the extension's maximum concurrent request count.
+_DNS_SLOTS = threading.BoundedSemaphore(4)
 
 
 class WebError(Exception):
@@ -195,6 +202,8 @@ class CacheEntry:
 
 
 class Deadline:
+    """One absolute budget shared by transport and post-HTTP result work."""
+
     def __init__(self, seconds: float, cancellation: Any = None) -> None:
         self._end = time.monotonic() + seconds
         self._cancellation = cancellation
@@ -209,10 +218,17 @@ class Deadline:
         self.checkpoint()
         return max(0.001, self._end - time.monotonic())
 
-    def socket_timeout(self) -> float:
-        # API 0.2 gives a two-second cancellation grace.  No individual socket
-        # operation is allowed to consume that whole interval.
-        return max(0.05, min(0.75, self.remaining()))
+    def wait_for_socket(self, sock: socket.socket, *, writing: bool = False) -> None:
+        # Poll cancellation below API 0.2's two-second grace, without treating
+        # a quiet interval as the end of the overall request budget.
+        while True:
+            readable, writable, _ = select.select(
+                [] if writing else [sock], [sock] if writing else [], [],
+                min(0.1, self.remaining()),
+            )
+            self.checkpoint()
+            if readable or writable:
+                return
 
 
 class BoundedCache:
@@ -237,41 +253,53 @@ class BoundedCache:
             self._entries.clear()
             self._bytes = 0
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str, deadline: Optional["Deadline"] = None) -> Optional[Any]:
+        if deadline is not None:
+            deadline.checkpoint()
         now = time.monotonic()
+        value = None
         with self._lock:
             entry = self._entries.get(key)
-            if entry is None:
-                return None
-            if entry.expires_at <= now:
-                self._remove(key)
-                return None
-            self._entries.move_to_end(key)
-            return copy.deepcopy(entry.value)
+            if entry is not None:
+                if entry.expires_at <= now:
+                    self._remove(key)
+                else:
+                    self._entries.move_to_end(key)
+                    value = copy.deepcopy(entry.value)
+        if deadline is not None:
+            deadline.checkpoint()
+        return value
 
-    def put(self, key: str, value: Any) -> None:
+    def put(
+        self,
+        key: str,
+        value: Any,
+        deadline: Optional["Deadline"] = None,
+    ) -> None:
+        if deadline is not None:
+            deadline.checkpoint()
         with self._lock:
             max_entries, max_bytes, ttl_seconds = self._limits
-            if max_entries <= 0 or max_bytes <= 0 or ttl_seconds <= 0:
-                return
-            encoded = json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            size = len(encoded)
-            if size > max_bytes:
-                return
-            if key in self._entries:
-                self._remove(key)
-            self._entries[key] = CacheEntry(
-                copy.deepcopy(value), time.monotonic() + ttl_seconds, size
-            )
-            self._bytes += size
-            while len(self._entries) > max_entries or self._bytes > max_bytes:
-                oldest = next(iter(self._entries))
-                self._remove(oldest)
+            if max_entries > 0 and max_bytes > 0 and ttl_seconds > 0:
+                encoded = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                size = len(encoded)
+                if size <= max_bytes:
+                    if key in self._entries:
+                        self._remove(key)
+                    self._entries[key] = CacheEntry(
+                        copy.deepcopy(value), time.monotonic() + ttl_seconds, size
+                    )
+                    self._bytes += size
+                    while len(self._entries) > max_entries or self._bytes > max_bytes:
+                        oldest = next(iter(self._entries))
+                        self._remove(oldest)
+        if deadline is not None:
+            deadline.checkpoint()
 
     def _remove(self, key: str) -> None:
         entry = self._entries.pop(key, None)
@@ -517,8 +545,6 @@ def _parse_searxng_provider(value: Any, label_prefix: str) -> ProviderConfig:
             "%s.endpoint must be a credential-free HTTP(S) URL" % label_prefix
         ) from error
     parsed_endpoint = urlsplit(endpoint_with_fragment)
-    if parsed_endpoint.query:
-        raise ConfigError("%s.endpoint cannot contain a query" % label_prefix)
     if parsed_endpoint.fragment:
         raise ConfigError("%s.endpoint cannot contain a fragment" % label_prefix)
     endpoint = sanitize_url(endpoint_with_fragment, keep_fragment=False)
@@ -993,17 +1019,62 @@ def validate_url_policy(
     return sanitized, host, port
 
 
+def _system_resolver_worker(host: str, port: int, result_queue: Any) -> None:
+    try:
+        try:
+            result_queue.put_nowait(
+                (True, socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+            )
+        except BaseException as error:
+            try:
+                result_queue.put_nowait((False, error))
+            except queue.Full:
+                pass
+    finally:
+        _DNS_SLOTS.release()
+
+
 def system_resolver(host: str, port: int, deadline: Deadline) -> List[ResolvedAddress]:
     deadline.checkpoint()
-    try:
-        records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as error:
+    while not _DNS_SLOTS.acquire(blocking=False):
         deadline.checkpoint()
-        raise Offline("the destination host could not be resolved") from error
-    deadline.checkpoint()
+        time.sleep(min(0.05, deadline.remaining()))
+
+    result_queue = queue.Queue(maxsize=1)
+    worker = threading.Thread(
+        target=_system_resolver_worker,
+        args=(host, port, result_queue),
+        name="octet-web-search-dns",
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except BaseException:
+        _DNS_SLOTS.release()
+        raise
+
+    while True:
+        deadline.checkpoint()
+        try:
+            succeeded, value = result_queue.get(timeout=min(0.1, deadline.remaining()))
+        except queue.Empty:
+            continue
+        deadline.checkpoint()
+        if not succeeded:
+            if isinstance(value, socket.gaierror):
+                raise Offline("the destination host could not be resolved") from value
+            if isinstance(value, socket.timeout):
+                raise RequestTimedOut("the web request reached its time limit") from value
+            if isinstance(value, OSError):
+                raise Offline("the destination host could not be resolved") from value
+            raise value
+        records = value
+        break
+
     addresses: List[ResolvedAddress] = []
     seen = set()
     for family, socktype, _protocol, _canonname, sockaddr in records:
+        deadline.checkpoint()
         if socktype != socket.SOCK_STREAM or family not in (socket.AF_INET, socket.AF_INET6):
             continue
         try:
@@ -1017,6 +1088,7 @@ def system_resolver(host: str, port: int, deadline: Deadline) -> List[ResolvedAd
         addresses.append(ResolvedAddress(family, sockaddr, address))
     if not addresses:
         raise Offline("the destination host has no usable address")
+    deadline.checkpoint()
     return addresses
 
 
@@ -1028,26 +1100,105 @@ def _address_allowed(address: ipaddress._BaseAddress, allow_private: bool) -> bo
     return address.is_global
 
 
+def _connect_socket(resolved: ResolvedAddress, deadline: Deadline) -> socket.socket:
+    sock = socket.socket(resolved.family, socket.SOCK_STREAM)
+    try:
+        deadline.checkpoint()
+        sock.setblocking(False)
+        error = sock.connect_ex(resolved.sockaddr)
+        if error in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, errno.EINTR):
+            deadline.wait_for_socket(sock, writing=True)
+            error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        if error:
+            raise OSError(error, os.strerror(error))
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+class _DeadlineReader(io.RawIOBase):
+    """Poll below HTTP buffering; socket timeouts would poison makefile readers."""
+
+    def __init__(self, sock: socket.socket, deadline: Deadline) -> None:
+        super().__init__()
+        self._socket = sock
+        self._deadline = deadline
+        # Retain makefile's socket ownership: HTTPConnection may close its own
+        # reference after headers, before HTTPResponse has consumed the body.
+        self._raw = sock.makefile("rb", buffering=0)
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        while True:
+            self._deadline.checkpoint()
+            writing = False
+            try:
+                count = self._raw.readinto(buffer)
+                if count is not None:
+                    return count
+            except ssl.SSLWantReadError:
+                pass
+            except ssl.SSLWantWriteError:
+                writing = True
+            self._deadline.wait_for_socket(self._socket, writing=writing)
+
+    def close(self) -> None:
+        try:
+            self._raw.close()
+        finally:
+            super().close()
+
+
+class _DeadlineSocket:
+    """Cooperative I/O for the sendall/makefile/close surface used by http.client."""
+
+    def __init__(self, sock: socket.socket, deadline: Deadline) -> None:
+        self._socket = sock
+        self._deadline = deadline
+
+    def sendall(self, data: bytes) -> None:
+        pending = memoryview(data)
+        while pending:
+            self._deadline.checkpoint()
+            writing = True
+            try:
+                sent = self._socket.send(pending)
+                if sent == 0:
+                    raise OSError("the connection closed during the request")
+                pending = pending[sent:]
+                continue
+            except (BlockingIOError, ssl.SSLWantWriteError):
+                pass
+            except ssl.SSLWantReadError:
+                writing = False
+            self._deadline.wait_for_socket(self._socket, writing=writing)
+
+    def makefile(self, mode: str) -> io.BufferedReader:
+        return io.BufferedReader(_DeadlineReader(self._socket, self._deadline))
+
+    def close(self) -> None:
+        self._socket.close()
+
+
 class _PinnedHTTPConnection(http.client.HTTPConnection):
     def __init__(
         self,
         host: str,
         port: int,
         resolved: ResolvedAddress,
-        timeout: float,
+        deadline: Deadline,
     ) -> None:
-        super().__init__(host, port=port, timeout=timeout)
+        super().__init__(host, port=port, timeout=deadline.remaining())
         self._resolved = resolved
+        self._deadline = deadline
 
     def connect(self) -> None:
-        sock = socket.socket(self._resolved.family, socket.SOCK_STREAM)
-        try:
-            sock.settimeout(self.timeout)
-            sock.connect(self._resolved.sockaddr)
-            self.sock = sock
-        except BaseException:
-            sock.close()
-            raise
+        self.sock = _DeadlineSocket(
+            _connect_socket(self._resolved, self._deadline), self._deadline,
+        )
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -1056,20 +1207,31 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         host: str,
         port: int,
         resolved: ResolvedAddress,
-        timeout: float,
+        deadline: Deadline,
         context: ssl.SSLContext,
     ) -> None:
-        super().__init__(host, port=port, timeout=timeout, context=context)
+        super().__init__(host, port=port, timeout=deadline.remaining(), context=context)
         self._resolved = resolved
+        self._deadline = deadline
 
     def connect(self) -> None:
-        raw = socket.socket(self._resolved.family, socket.SOCK_STREAM)
+        sock = _connect_socket(self._resolved, self._deadline)
         try:
-            raw.settimeout(self.timeout)
-            raw.connect(self._resolved.sockaddr)
-            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+            sock = self._context.wrap_socket(
+                sock, server_hostname=self.host, do_handshake_on_connect=False,
+            )
+            while True:
+                self._deadline.checkpoint()
+                try:
+                    sock.do_handshake()
+                    break
+                except ssl.SSLWantReadError:
+                    self._deadline.wait_for_socket(sock)
+                except ssl.SSLWantWriteError:
+                    self._deadline.wait_for_socket(sock, writing=True)
+            self.sock = _DeadlineSocket(sock, self._deadline)
         except BaseException:
-            raw.close()
+            sock.close()
             raise
 
 
@@ -1095,7 +1257,9 @@ class HttpClient:
         accept: str = "text/html, text/plain;q=0.9, application/xhtml+xml;q=0.8",
         headers: Optional[Mapping[str, str]] = None,
     ) -> HttpPayload:
+        deadline.checkpoint()
         current = sanitize_url(url, keep_fragment=False)
+        deadline.checkpoint()
         redirects = 0
         previous_scheme: Optional[str] = None
         while True:
@@ -1104,7 +1268,17 @@ class HttpClient:
             parsed = urlsplit(current)
             if previous_scheme == "https" and parsed.scheme == "http":
                 raise RedirectRejected("an HTTPS-to-HTTP redirect was rejected")
-            addresses = self._resolver(host, port, deadline)
+            try:
+                addresses = self._resolver(host, port, deadline)
+            except socket.timeout as error:
+                deadline.checkpoint()
+                raise RequestTimedOut("the web request reached its time limit") from error
+            except socket.gaierror as error:
+                deadline.checkpoint()
+                raise Offline("the destination host could not be resolved") from error
+            except OSError as error:
+                deadline.checkpoint()
+                raise Offline("the destination host could not be resolved") from error
             if any(not _address_allowed(item.address, allow_private) for item in addresses):
                 raise DestinationRejected("loopback, private, link-local, and reserved destinations are rejected")
             payload = self._fetch_once(
@@ -1141,6 +1315,7 @@ class HttpClient:
         accept: str,
         headers: Optional[Mapping[str, str]],
     ) -> HttpPayload:
+        deadline.checkpoint()
         parsed = urlsplit(url)
         host = parsed.hostname or ""
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -1159,16 +1334,16 @@ class HttpClient:
             if "\r" in name or "\n" in name or "\r" in value or "\n" in value:
                 raise ProviderFailed("the provider request headers are invalid")
             request_headers[name] = value
+        deadline.checkpoint()
         last_error: Optional[BaseException] = None
         for resolved in addresses:
             deadline.checkpoint()
-            timeout = deadline.socket_timeout()
             if parsed.scheme == "https":
                 connection: http.client.HTTPConnection = _PinnedHTTPSConnection(
-                    host, port, resolved, timeout, self._ssl_context
+                    host, port, resolved, deadline, self._ssl_context
                 )
             else:
-                connection = _PinnedHTTPConnection(host, port, resolved, timeout)
+                connection = _PinnedHTTPConnection(host, port, resolved, deadline)
             response: Optional[http.client.HTTPResponse] = None
             try:
                 connection.request(
@@ -1201,6 +1376,7 @@ class HttpClient:
                     except socket.timeout as error:
                         deadline.checkpoint()
                         raise RequestTimedOut("the web request reached its time limit") from error
+                    deadline.checkpoint()
                     if not chunk:
                         break
                     size += len(chunk)
@@ -1332,14 +1508,35 @@ class PageExtractor(HTMLParser):
             self.title_parts.append(data)
 
 
-def _sanitize_search_fragment(value: Any, maximum: int) -> str:
+def _feed_parser(
+    parser: PageExtractor,
+    value: str,
+    deadline: Optional[Deadline] = None,
+) -> None:
+    if deadline is None:
+        parser.feed(value)
+        return
+    for start in range(0, len(value), 16 * 1024):
+        deadline.checkpoint()
+        parser.feed(value[start : start + 16 * 1024])
+    deadline.checkpoint()
+
+
+def _sanitize_search_fragment(
+    value: Any,
+    maximum: int,
+    deadline: Optional[Deadline] = None,
+) -> str:
     parser = PageExtractor()
+    raw = str(value or "")
     try:
-        parser.feed(str(value or ""))
+        _feed_parser(parser, raw, deadline)
         parser.close()
         text = " ".join(parser.parts)
     except (ValueError, AssertionError):
-        text = str(value or "")
+        text = raw
+    if deadline is not None:
+        deadline.checkpoint()
     return sanitize_text(text, maximum)
 
 
@@ -1351,37 +1548,56 @@ def _media_type(headers: Mapping[str, str]) -> Tuple[str, Optional[str]]:
     for section in sections[1:]:
         key, separator, item = section.partition("=")
         if separator and key.strip().lower() == "charset":
-            charset = item.strip().strip('"\'')
+            charset = item.strip().strip("\"'")
     return media_type, charset
 
 
-def _decode_text(body: bytes, charset: Optional[str]) -> str:
+def _decode_text(
+    body: bytes,
+    charset: Optional[str],
+    deadline: Optional[Deadline] = None,
+) -> str:
+    if deadline is not None:
+        deadline.checkpoint()
     encoding = charset or "utf-8"
     try:
         codecs.lookup(encoding)
     except LookupError as error:
         raise UnsupportedContent("the response uses an unsupported character encoding") from error
-    return body.decode(encoding, errors="replace")
+    decoded = body.decode(encoding, errors="replace")
+    if deadline is not None:
+        deadline.checkpoint()
+    return decoded
 
 
-def normalize_page(payload: HttpPayload, content_bytes: int) -> Dict[str, Any]:
+def normalize_page(
+    payload: HttpPayload,
+    content_bytes: int,
+    deadline: Optional[Deadline] = None,
+) -> Dict[str, Any]:
+    if deadline is not None:
+        deadline.checkpoint()
     media_type, charset = _media_type(payload.headers)
     if media_type not in HTML_TYPES and media_type not in PLAIN_TYPES:
         raise UnsupportedContent("the response is not supported HTML or plain text")
-    decoded = _decode_text(payload.body, charset)
+    decoded = _decode_text(payload.body, charset, deadline)
     title = ""
     publication = None
     if media_type in HTML_TYPES:
         parser = PageExtractor()
         try:
-            parser.feed(decoded)
+            _feed_parser(parser, decoded, deadline)
             parser.close()
         except (ValueError, AssertionError) as error:
             raise UnsupportedContent("the HTML response could not be normalized") from error
+        if deadline is not None:
+            deadline.checkpoint()
         content = " ".join("".join(parser.parts).split())
         title = sanitize_text(" ".join(parser.title_parts), MAX_TITLE_BYTES)
         publication = parser.publication
     else:
+        if deadline is not None:
+            deadline.checkpoint()
         content = " ".join(decoded.split())
     content = strip_controls(content)
     content, truncated = truncate_utf8(content, content_bytes)
@@ -1401,6 +1617,8 @@ def normalize_page(payload: HttpPayload, content_bytes: int) -> Dict[str, Any]:
     }
     if publication:
         result["published_at"] = publication
+    if deadline is not None:
+        deadline.checkpoint()
     return result
 
 
@@ -1448,20 +1666,27 @@ def _normalize_search_results(
     domains: Sequence[str],
     max_results: int,
     provider_kind: str,
+    deadline: Optional[Deadline] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+    if deadline is not None:
+        deadline.checkpoint()
     media_type, charset = _media_type(payload.headers)
     if media_type not in SEARCH_TYPES:
         raise ProviderFailed("the configured provider did not return JSON")
     try:
-        value = json.loads(_decode_text(payload.body, charset))
+        value = json.loads(_decode_text(payload.body, charset, deadline))
     except (json.JSONDecodeError, UnicodeError) as error:
         raise ProviderFailed("the configured provider returned invalid JSON") from error
+    if deadline is not None:
+        deadline.checkpoint()
     raw_results = _raw_search_results(value, provider_kind)
     normalized: List[Dict[str, Any]] = []
     sources: List[Dict[str, Any]] = []
     seen = set()
     dropped = 0
     for raw in raw_results[: max(MAX_RESULTS * 5, max_results)]:
+        if deadline is not None:
+            deadline.checkpoint()
         if len(normalized) >= max_results:
             break
         if not isinstance(raw, dict):
@@ -1486,7 +1711,7 @@ def _normalize_search_results(
                 dropped += 1
                 continue
             seen.add(identifier)
-            title = _sanitize_search_fragment(raw.get("title"), MAX_TITLE_BYTES)
+            title = _sanitize_search_fragment(raw.get("title"), MAX_TITLE_BYTES, deadline)
             if not title:
                 title = host or "Untitled source"
             snippet = _sanitize_search_fragment(
@@ -1495,6 +1720,7 @@ def _normalize_search_results(
                 or raw.get("snippet")
                 or "",
                 MAX_SNIPPET_BYTES,
+                deadline,
             )
             result: Dict[str, Any] = {
                 "citation_id": identifier,
@@ -1511,6 +1737,8 @@ def _normalize_search_results(
                 or raw.get("date")
             )
             if published:
+                if deadline is not None:
+                    deadline.checkpoint()
                 result["published_at"] = sanitize_text(published, MAX_PUBLICATION_BYTES)
             normalized.append(result)
             engine_values = raw.get("engines")
@@ -1520,12 +1748,18 @@ def _normalize_search_results(
                 engine_values = [raw.get("engine")] if raw.get("engine") else []
             engines = []
             for engine in engine_values[:8]:
+                if deadline is not None:
+                    deadline.checkpoint()
                 safe = sanitize_text(engine, 64)
                 if safe and safe not in engines:
                     engines.append(safe)
             sources.append({"citation_id": identifier, "engines": engines})
+        except RequestTimedOut:
+            raise
         except (WebError, ValueError, TypeError):
             dropped += 1
+    if deadline is not None:
+        deadline.checkpoint()
     return normalized, sources, dropped
 
 
@@ -1583,13 +1817,16 @@ class WebService:
         cancellation: Any = None,
         progress: Optional[Callable[[str, Optional[int], Optional[int], Optional[str]], None]] = None,
     ) -> Dict[str, Any]:
+        timeout = bounded_timeout(timeout_seconds, config.limits.default_timeout_seconds)
+        deadline = Deadline(timeout, cancellation)
+        deadline.checkpoint()
         self.configure_cache(config)
+        deadline.checkpoint()
         clean_query = bounded_query(query)
         selected_domains = requested_domains(domains, config.limits.allowed_domains)
         result_limit = bounded_int(
             max_results, config.limits.default_results, 1, MAX_RESULTS, "max_results"
         )
-        timeout = bounded_timeout(timeout_seconds, config.limits.default_timeout_seconds)
         validated_api_key: Optional[str] = None
         credential_scope: Optional[str] = None
         if config.provider.kind == "brave":
@@ -1613,13 +1850,15 @@ class WebService:
                 "credential_scope": credential_scope,
             },
         )
-        cached = self.cache.get(key)
+        deadline.checkpoint()
+        cached = self.cache.get(key, deadline)
         if cached is not None:
             cached["cache"] = "hit"
             return cached
         if progress:
+            deadline.checkpoint()
             progress("searching", 0, result_limit, "results")
-        deadline = Deadline(timeout, cancellation)
+            deadline.checkpoint()
         provider_query = _provider_query(clean_query, selected_domains)
         request_headers: Optional[Mapping[str, str]] = None
         max_redirects = config.limits.max_redirects
@@ -1631,6 +1870,7 @@ class WebService:
             max_redirects = 0
         else:
             endpoint = _search_url(config.provider.endpoint, provider_query)
+        deadline.checkpoint()
         provider_host = urlsplit(config.provider.endpoint).hostname or ""
         payload = self.http.fetch(
             endpoint,
@@ -1643,6 +1883,7 @@ class WebService:
             accept="application/json",
             headers=request_headers,
         )
+        deadline.checkpoint()
         _check_status(payload, provider=True, provider_kind=config.provider.kind)
         deadline.checkpoint()
         results, sources, dropped = _normalize_search_results(
@@ -1650,27 +1891,32 @@ class WebService:
             selected_domains,
             result_limit,
             config.provider.kind,
+            deadline,
         )
         if progress:
+            deadline.checkpoint()
             progress("normalizing", len(results), result_limit, "results")
+            deadline.checkpoint()
         normalized_bytes = sum(
             len((item["title"] + item["snippet"] + item["url"]).encode("utf-8"))
             for item in results
         )
+        deadline.checkpoint()
+        raw_results = value_results(payload, config.provider.kind, deadline)
         value: Dict[str, Any] = {
             "results": results,
             "sources": sources,
             "result_count": len(results),
             "normalized_bytes": normalized_bytes,
-            "truncated": dropped > 0
-            or len(value_results(payload, config.provider.kind)) > len(results),
+            "truncated": dropped > 0 or len(raw_results) > len(results),
             "dropped_results": dropped,
             "cache": "miss",
             "redirects": payload.redirects,
         }
         stored = copy.deepcopy(value)
         stored.pop("cache", None)
-        self.cache.put(key, stored)
+        self.cache.put(key, stored, deadline)
+        deadline.checkpoint()
         return value
 
     def open(
@@ -1683,8 +1929,13 @@ class WebService:
         max_redirects: Any = None,
         cancellation: Any = None,
         progress: Optional[Callable[[str, Optional[int], Optional[int], Optional[str]], None]] = None,
+        _deadline: Optional[Deadline] = None,
     ) -> Dict[str, Any]:
+        timeout = bounded_timeout(timeout_seconds, config.limits.default_timeout_seconds)
+        deadline = _deadline or Deadline(timeout, cancellation)
+        deadline.checkpoint()
         self.configure_cache(config)
+        deadline.checkpoint()
         clean_url = sanitize_url(url, keep_fragment=False)
         content_limit = bounded_int(
             max_bytes,
@@ -1693,7 +1944,6 @@ class WebService:
             config.limits.max_content_bytes,
             "max_bytes",
         )
-        timeout = bounded_timeout(timeout_seconds, config.limits.default_timeout_seconds)
         redirects = bounded_int(
             max_redirects,
             config.limits.max_redirects,
@@ -1706,29 +1956,37 @@ class WebService:
             config.fingerprint,
             {"url": clean_url, "bytes": content_limit, "redirects": redirects},
         )
-        cached = self.cache.get(key)
+        deadline.checkpoint()
+        cached = self.cache.get(key, deadline)
         if cached is not None:
             cached["cache"] = "hit"
             return cached
         if progress:
+            deadline.checkpoint()
             progress("fetching", 0, None, "bytes")
+            deadline.checkpoint()
         payload = self.http.fetch(
             clean_url,
-            deadline=Deadline(timeout, cancellation),
+            deadline=deadline,
             max_bytes=config.limits.max_download_bytes,
             max_redirects=redirects,
             allowed_domains=config.limits.allowed_domains,
             allowed_ports=OPEN_PORTS,
             allow_private=False,
         )
+        deadline.checkpoint()
         _check_status(payload, provider=False)
-        document = normalize_page(payload, content_limit)
+        deadline.checkpoint()
+        document = normalize_page(payload, content_limit, deadline)
         if progress:
+            deadline.checkpoint()
             progress("normalizing", document["normalized_bytes"], content_limit, "bytes")
+            deadline.checkpoint()
         value = {"document": document, "cache": "miss"}
         stored = copy.deepcopy(value)
         stored.pop("cache", None)
-        self.cache.put(key, stored)
+        self.cache.put(key, stored, deadline)
+        deadline.checkpoint()
         return value
 
     def find(
@@ -1744,22 +2002,30 @@ class WebService:
         cancellation: Any = None,
         progress: Optional[Callable[[str, Optional[int], Optional[int], Optional[str]], None]] = None,
     ) -> Dict[str, Any]:
+        timeout = bounded_timeout(timeout_seconds, config.limits.default_timeout_seconds)
+        deadline = Deadline(timeout, cancellation)
+        deadline.checkpoint()
         clean_pattern = bounded_pattern(pattern)
         match_limit = bounded_int(max_matches, 8, 1, MAX_FIND_MATCHES, "max_matches")
         opened = self.open(
             config,
             url=url,
             max_bytes=max_bytes,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=timeout,
             max_redirects=max_redirects,
             cancellation=cancellation,
             progress=progress,
+            _deadline=deadline,
         )
+        deadline.checkpoint()
         document = opened["document"]
         content = document["content"]
         expression = re.compile(re.escape(clean_pattern), re.IGNORECASE)
         matches = []
+        total_matches = 0
         for found in expression.finditer(content):
+            deadline.checkpoint()
+            total_matches += 1
             if len(matches) >= match_limit:
                 break
             start = max(0, found.start() - 160)
@@ -1773,8 +2039,9 @@ class WebService:
                     "excerpt": excerpt,
                 }
             )
-        total_matches = sum(1 for _ in expression.finditer(content))
-        return {
+        normalized_bytes = sum(len(item["excerpt"].encode("utf-8")) for item in matches)
+        deadline.checkpoint()
+        result = {
             "document": {
                 key: value
                 for key, value in document.items()
@@ -1783,18 +2050,31 @@ class WebService:
             "matches": matches,
             "match_count": len(matches),
             "truncated": total_matches > len(matches) or document["truncated"],
-            "normalized_bytes": sum(len(item["excerpt"].encode("utf-8")) for item in matches),
+            "normalized_bytes": normalized_bytes,
             "cache": opened["cache"],
             "source_truncated": document["truncated"],
             "redirects": document["redirects"],
         }
+        deadline.checkpoint()
+        return result
 
 
-def value_results(payload: HttpPayload, provider_kind: str = "searxng") -> List[Any]:
+def value_results(
+    payload: HttpPayload,
+    provider_kind: str = "searxng",
+    deadline: Optional[Deadline] = None,
+) -> List[Any]:
     """Best-effort raw result count used only for truncation metadata."""
 
+    if deadline is not None:
+        deadline.checkpoint()
     try:
         value = json.loads(payload.body.decode("utf-8"))
-        return _raw_search_results(value, provider_kind)
+        results = _raw_search_results(value, provider_kind)
     except (UnicodeError, json.JSONDecodeError, ProviderFailed):
+        if deadline is not None:
+            deadline.checkpoint()
         return []
+    if deadline is not None:
+        deadline.checkpoint()
+    return results

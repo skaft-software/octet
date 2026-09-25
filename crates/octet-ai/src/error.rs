@@ -47,6 +47,9 @@ pub enum AiError {
     /// Request uses a capability unsupported by the model/protocol.
     #[error("Unsupported error: {0}")]
     Unsupported(#[from] UnsupportedError),
+    /// A deferred poll was refused before any provider work.
+    #[error("Deferred poll: {0}")]
+    Deferred(#[from] crate::deferred::DeferredPollRefusalKind),
     /// Non-2xx HTTP response from provider.
     #[error("HTTP error: {0}")]
     Http(#[from] HttpError),
@@ -262,6 +265,23 @@ pub enum StreamProtocolError {
     /// Stream closed prematurely.
     #[error("Premature end-of-file")]
     PrematureEof,
+    /// The provider stream died and the route offers no primitive to resume
+    /// that exact generation, or the bounded reconnect budget was spent. The
+    /// assistant turn is incomplete: the partial output must not be treated as
+    /// a finished response. The transport never replays the request: a host
+    /// may separately admit a qualified fresh inference under its replacement
+    /// budget and unknown-usage accounting policy.
+    #[error(
+        "Provider stream was interrupted and could not be resumed (reconnect attempts: {attempts}, visible output: {visible_output}): {detail}; the turn is incomplete"
+    )]
+    ResponseNotResumable {
+        /// Bounded reconnect attempts spent before giving up.
+        attempts: u32,
+        /// Whether consumer-visible output had already been forwarded.
+        visible_output: bool,
+        /// Bounded, credential-redacted cause of the interruption.
+        detail: String,
+    },
     /// Unexpected event type received.
     #[error("Unexpected event: {0}")]
     UnexpectedEvent(String),
@@ -308,13 +328,38 @@ pub enum UnsupportedError {
     /// Structured output formats are not supported.
     #[error("Structured output format is unsupported")]
     StructuredOutput,
+    /// A required constrained-sampling request cannot be honored.
+    #[error("Constrained sampling: {0}")]
+    ConstrainedSampling(String),
     /// Custom stop sequences are not supported by the target protocol.
     #[error("Stop sequences are unsupported")]
     StopSequences,
+    /// The provider switched to a fallback model after content had already
+    /// streamed, so the response cannot be represented as one assistant turn.
+    #[error("Provider performed an unsupported mid-output model fallback")]
+    MidOutputModelFallback,
     /// Responses continuation/replay options are not supported by other
     /// protocols.
     #[error("Responses request options are unsupported")]
     ResponsesOptions,
+    /// The selected route does not declare the Responses `service_tier`
+    /// request field.
+    #[error("Responses service tier is unsupported on this route")]
+    ServiceTier,
+    /// The selected route does not declare the Responses computer-use tool.
+    ///
+    /// The codec carries the protocol only; declaring the tool is an endpoint
+    /// declaration and a route without it fails closed rather than silently
+    /// dropping the caller's declaration.
+    #[error("Responses computer use is unsupported on this route")]
+    ComputerUse,
+    /// The selected transport cannot park or poll deferred provider responses.
+    ///
+    /// Failing closed is deliberate: a transport that cannot resume a
+    /// provider-parked turn must never fabricate a completed response or
+    /// silently re-send the generation request.
+    #[error("Deferred provider responses are unsupported on this transport")]
+    Deferred,
 }
 
 /// Configuration loading or resolution error.
@@ -335,6 +380,14 @@ pub enum ConfigError {
     /// Model resolution failure.
     #[error("Unknown model: {0:?}")]
     UnknownModel(crate::types::ModelId),
+    /// Image-generation model resolution failure.
+    #[error("Unknown image model: {provider}/{model}")]
+    UnknownImageModel {
+        /// Provider id the caller selected.
+        provider: String,
+        /// Image model id the caller selected.
+        model: String,
+    },
     /// Environment variable not set.
     #[error("Missing environment variable: {0}")]
     MissingEnv(String),
@@ -358,6 +411,9 @@ pub enum ConfigError {
     /// Invalid header name or value.
     #[error("Invalid header format: {0}")]
     InvalidHeader(String),
+    /// A runtime hook tried to touch a reserved authentication/framing header.
+    #[error("Reserved header cannot be transformed by a runtime hook: {0}")]
+    ReservedHeader(http::HeaderName),
     /// Base URL violates the absolute trailing-slash constraint.
     #[error("Invalid base URL: {0}")]
     InvalidBaseUrl(String),

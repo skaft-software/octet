@@ -1,0 +1,2 @@
+model: &selected openai/gpt-4o
+other: *selected

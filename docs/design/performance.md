@@ -1,7 +1,7 @@
-# Performance philosophy and execution contract
+# Performance and measurement contract
 
-**Status:** Engineering direction and qualification plan, not a published speed
-ranking or a claim that every target below is already implemented.
+This reference describes implementation boundaries and measurement semantics,
+not a published speed ranking.
 
 ## Product promise
 
@@ -15,34 +15,123 @@ boundaries: provider deltas, committed Markdown, cached layout, stable terminal
 rows, and durable session entries. A downstream consumer should not reconstruct
 or rescan an unchanged prefix just to discover that it is unchanged.
 
-This is not a language comparison. Other agents also use native renderers,
-incremental parsing, batching, and caches. Sustainable differentiation is an
-observable responsiveness contract, adversarial regression coverage, and
-repeatable evidence under realistic load—not permanent ownership of an
-optimization competitors can adopt.
-
 ## Current implementation boundary
 
-The first patches carry append-local scanning/literal-preview work into eligible
-plain/open-code row layout, skip unused commit metadata on the default Pi
-renderer path, distinguish answer/reasoning telemetry, provide repeated
-credential-free renderer replay, and remove premature Bash effects. These are
-specific improvements, not completion of the latency targets below.
+The renderer carries append-local scanning/literal-preview work into eligible
+plain/open-code row layout and skips unused commit metadata on the default
+renderer path. Telemetry distinguishes answer and reasoning deltas, and a
+credential-free renderer replay driver measures bounded synthetic workloads.
+Tool effects occur only after the required persistence and admission boundaries.
 
-Tabs, CR/control normalization, general semantic previews, fenced diffs, and some
+Eligible open-code previews now expand tabs and sanitize character-local controls
+incrementally, retaining column state and the last grapheme. Expanded reasoning
+uses the assistant suffix-update path; tool-result hydration indexes pending calls
+once per batch instead of scanning the transcript for each result. These are
+work-reduction changes, not measured end-to-end latency claims.
+
+The same pass polls RPC control admission alongside the run, constructs JSON-mode
+deltas without discarded cumulative snapshots, and bounds retained RPC tool
+progress to 64 KiB (authoritative results remain unchanged). Provider work removes
+repeated argument decoding/prefix copying and adds a 64 MiB serialized-event
+queue budget to Responses WebSockets; this is not an exact parsed-JSON heap cap.
+Bash spills stop storing after 16 MiB per stream while still draining pipes.
+Active and completed spills share a 64 MiB / 32-file owner budget with oldest-first
+expiry and lifecycle cleanup; bounded blocking capture workers keep disk work
+off the async path. Undo and redo each retain at most 64 snapshots / 4 MiB.
+Fleet restart summaries share the existing 256 KiB roster budget, preserving full
+committed answers in child sessions.
+
+Responses replay projections and opaque-item capacity estimates advance over
+new suffixes and invalidate on route/branch changes; final request encoding still
+materializes full input. Accepted run controls hold their 64-input / 64-MiB
+reservations through delivery or termination, with explicit admission failure
+and independent abort. Those bytes measure retained logical payload, not RSS.
+Prospective extension catalogs share a 4-MiB input/output-schema budget and
+feature checks no longer clone negotiated catalogs.
+
+Session catalog maintenance uses targeted lookups and 32-summary batches.
+Entry reconciliation streams directory entries without sorting and batches up to
+32 changed sessions with an 8-MiB projection target. It still enumerates/stats
+workspace transcripts on each search: directory mtime alone cannot safely detect
+in-place edits, and no cross-process change feed is claimed. Maintained gram
+cardinalities select rare postings without query-time posting counts. Each
+session has a 524,288-posting quota; overflow sessions retain the complete existing
+bounded text projection and use substring-scan fallback. The quota bounds logical
+posting rows, not SQLite file bytes or free pages; overflow searches can be slower.
+SQLite residency remains bounded.
+
+Search projection consumes JSONL without constructing complete lines or JSON
+values. A 64-KiB input buffer and 12-byte scalar staging validate string suffixes
+even when discarded; non-ID strings forward at most 512 Unicode scalars to the
+projection deserializer. Existing file/record limits and malformed-line recovery
+are retained, without new record-size or ID restrictions. Exact entry IDs still
+require output-sized memory; this is not a total process-memory bound.
+
+Optional JSONL telemetry uses an ordered off-path writer with 256-record / 1-MiB
+admission and observable loss/failure; it is not an accounting authority. See
+[telemetry](../telemetry.md) for drain boundaries.
+
+Ephemeral accounting retains its locked, fsynced ledger as authority. A disposable
+private SQLite ID/offset index avoids warm whole-ledger parsing on Unix; ledger
+identity/size/mtime/ctime changes cause a streaming rebuild. Other platforms use
+the conservative streaming path. The cache is published after ledger durability,
+and duplicate receipts are checked against the authoritative record. This is
+not protection against external mutations with indistinguishable metadata.
+
+Active model/thinking/subagent panels and tool consent are states of the main
+run loop, not nested loops that stop caller-driven inference. The renderer uses
+shared semantic transcript roots and private layout caches, releasing semantic
+ownership before layout and terminal writes. Post-write geometry and approval
+receipts are revision-fenced; accepted text is retained even when paints coalesce.
+
+The follow-up cost audit adds narrower bounds, not measured latency claims:
+
+- Ordinary Chat SSE frames decode directly into the typed DTO once; error-bearing
+  and malformed frames retain a permissive error fallback. Locked-marker removal
+  advances a cursor and compacts once. Responses request construction moves
+  already-owned input trees instead of serializing them into extra JSON trees;
+  final wire encoding still visits the complete request.
+- Small Bash output starts no spill writer or file. Promotion occurs before the
+  first lost raw byte, including truncation caused only by the final shared
+  stdout/stderr budget; pipe draining and cancellation coverage remain intact.
+- Natural runs collect no terminal-gate evidence. TerminalGate retains the first
+  12 and latest 12 bounded action receipts, plus the initial/latest request
+  evidence within 8 entries / 32 KiB. Omission counts are explicit; authoritative
+  inputs, tool results, and accounting are unchanged.
+- Reload enumeration stops at its work budget and reports skipped counts as lower
+  bounds. Partial layers cannot infer deletions or advance their baseline. Skill
+  descriptors share count/payload limits and a separate rendered-catalog bound;
+  this is not a total discovery-work or RSS bound. See [resources](../resources.md).
+- Serve borrows posting sets, retains only top-K scored candidates, and creates
+  snippets only for winners; it still scores every eligible document. Git status
+  is aggregated once per listing. Filesystem search stops on the proven 101st
+  match, not merely on reaching 100 results.
+- Browse bounds DOM body traversal and substring reads before host-side redaction
+  and clipping, with explicit truncation notices. Interactive metadata extraction
+  retains its separate existing behavior; these are not whole-page work bounds.
+- Select-list filtering retains one exact-content-keyed normalization snapshot
+  per calling thread, bounded to 4,096 items / 2 MiB. It still compares source
+  content and scans candidates; oversized panels use complete uncached filtering.
+
+These changes and their regression fixtures require qualification on the final
+candidate. They do not establish real-terminal stability or provider-side speed.
+
+CR/CRLF normalization, general semantic previews, fenced diffs, and some
 content-fitting code geometry still use general tail layout. A bounded rich
 paragraph prefix followed by append-only literal text retains styled rows and
 replays only its wrapping frontier; prefix flattening and copied layout bytes
 have separate work counters. Unbounded individual graphemes can also require
 unbounded frontier work. Full-document and
-full-lines APIs necessarily materialize their requested output. The input/layout
-shared lock and complete five-client interactive replay remain outstanding.
-Report these boundaries alongside improvements; no end-to-end constant-time or
-all-open-code linearity claim is supported.
+full-lines APIs necessarily materialize their requested output. On-demand
+session/export/debug helpers and local shell escapes are not all background jobs;
+this pass does not claim every command is latency-independent. Complete
+five-client interactive replay remains outstanding. Report these boundaries
+alongside improvements; no end-to-end constant-time or all-open-code linearity
+claim is supported.
 
 ## Visual stability is separate from throughput
 
-Streaming regressions also record actual Shell → Pi → ANSI/vt100 frames. They
+Streaming regressions also record actual shell/renderer ANSI/vt100 frames. They
 check saved-line erasure (`ED 3`), full redraws, historical sentinel duplication,
 and live content—not just final-frame equality or parser timing. Current cases
 cover table body growth, rich paragraphs crossing the inline budget, fragmented
@@ -57,7 +146,7 @@ uses viewport-sized code/table geometry and a stable compact subagent roster.
 These tests establish composed frames and protocol output, not actual emulator
 paint timing or native wheel-offset preservation. Terminal.app, Ghostty, and
 Ghostty-over-SSH journeys on the exact candidate remain separate qualification;
-issues #392/#393 are not closed merely by these deterministic checks.
+these deterministic checks do not qualify physical terminal behavior.
 
 ## Non-negotiable rules
 
@@ -123,6 +212,32 @@ adds `first_text_delta_ms` and `first_reasoning_delta_ms`, with
 supply these timings. Missing timings remain missing. These clocks include work
 before the observer sees a delta and do not expose exact provider headers or
 terminal paint. See [benchmark methods](../benchmarks/README.md).
+
+## Startup attribution (opt-in)
+
+`OCTET_STARTUP_TRACE=1` emits monotonic phase boundaries to stderr without
+putting timing text on the TUI. `process.enter` is after Tokio runtime creation;
+`cli.configured` includes CLI/config loading; `selection.resolved` includes
+`--models` scope and resume selector resolution. Catalog phases separate base,
+selected-route, Codex credential/inventory, and deferred fleet work;
+`session.resolve`, `session.replay`, `app.build`, `history.hydrate`, and
+`frame.ready` cover later readiness. Differences between adjacent phase times
+attribute *in-process* work, not process spawn, a physical keypress, or terminal
+paint. Measure spawn-to-first-editable-frame and input-to-PTY separately with a
+PTY; record cold/warm caches, selected route, resumed route, custom inventory,
+terminal, extensions, and executable hash for each run. No latency target is
+established by the presence of these traces alone.
+
+A valid positive custom-model cache is now used for the current catalog even
+when stale; an online refresh updates the private cache in the background for a
+later catalog build and cannot overwrite a newer cache snapshot. Missing or
+negative inventories retain their existing discovery behavior. A narrowed
+interactive launch opens `/model` using its current routes and loads deferred
+fleet inventories while the picker accepts input. A successful refresh keeps the
+typed filter and highlighted `ModelId`; cancellation or a failed fetch retains
+the current app catalog. Neither step changes the active model without explicit
+selection. Provider/route readiness and actual latency still require a matched
+startup campaign.
 
 ## Work budgets before wall-clock budgets
 

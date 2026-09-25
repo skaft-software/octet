@@ -69,7 +69,7 @@ const background = () => ({
 });
 
 describe("attention notification manager", () => {
-  it("notifies once for a background attention transition and deep-links", async () => {
+  it("notifies once for a background attention transition and opens the session", async () => {
     const { adapter, handles, show } = grantedAdapter();
     const manager = new AttentionNotificationManager(
       "host",
@@ -86,6 +86,7 @@ describe("attention notification manager", () => {
       expect.objectContaining({
         body: "Review the release is ready to review.",
         tag: "octet-session-session-one",
+        renotify: true,
       }),
     );
 
@@ -189,6 +190,109 @@ describe("attention notification manager", () => {
       ),
     ).toBe(true);
     expect(show).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies for supported PR state transitions without PR details", async () => {
+    const storage = memoryStorage();
+    const { adapter, show } = grantedAdapter();
+    const manager = new AttentionNotificationManager("host", adapter, storage);
+    await manager.enable();
+
+    expect(
+      manager.observe(
+        summary({
+          status: "working",
+          unread: false,
+          pullRequest: { state: "in_progress" },
+        }),
+        background(),
+      ),
+    ).toBe(true);
+    expect(
+      manager.observe(
+        summary({
+          status: "working",
+          unread: false,
+          updatedAt: "2026-07-27T03:31:00Z",
+          pullRequest: { state: "ready" },
+        }),
+        background(),
+      ),
+    ).toBe(true);
+    expect(
+      manager.observe(
+        summary({
+          status: "working",
+          unread: false,
+          updatedAt: "2026-07-27T03:32:00Z",
+          pullRequest: { state: "merged" },
+        }),
+        background(),
+      ),
+    ).toBe(true);
+    expect(show).toHaveBeenNthCalledWith(
+      1,
+      "octet pull request opened",
+      expect.objectContaining({
+        body: "Review the release has a pull request in progress.",
+      }),
+    );
+    expect(show).toHaveBeenNthCalledWith(
+      2,
+      "octet pull request ready for review",
+      expect.objectContaining({
+        body: "Review the release has a pull request ready for review.",
+      }),
+    );
+    expect(show).toHaveBeenNthCalledWith(
+      3,
+      "octet pull request merged",
+      expect.objectContaining({
+        body: "Review the release's pull request was merged.",
+      }),
+    );
+
+    const reloaded = grantedAdapter();
+    const reloadedManager = new AttentionNotificationManager(
+      "host",
+      reloaded.adapter,
+      storage,
+    );
+    await reloadedManager.enable();
+    expect(
+      reloadedManager.observe(
+        summary({
+          status: "working",
+          unread: false,
+          updatedAt: "2026-07-27T03:32:00Z",
+          pullRequest: { state: "merged" },
+        }),
+        background(),
+      ),
+    ).toBe(false);
+    expect(reloaded.show).not.toHaveBeenCalled();
+  });
+
+  it("does not notify while focused for a PR transition", async () => {
+    const { adapter, show } = grantedAdapter();
+    const manager = new AttentionNotificationManager("host", adapter);
+    await manager.enable();
+
+    expect(
+      manager.observe(
+        summary({
+          status: "working",
+          unread: false,
+          pullRequest: { state: "ready" },
+        }),
+        {
+          ...background(),
+          hidden: false,
+          focused: true,
+        },
+      ),
+    ).toBe(false);
+    expect(show).not.toHaveBeenCalled();
   });
 
   it("degrades gracefully when permission is denied or unsupported", async () => {

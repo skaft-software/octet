@@ -1,10 +1,9 @@
 # Architecture
 
-Maintainer reference for experimental Serve in the octet 0.7.6 source, not a
+Maintainer reference for experimental Serve in octet 0.8.0, not a
 release-qualification result. Start with the [Serve guide](README.md) for local
 use and version-matched package availability.
-[LAN pairing](lan-pairing.md), native shells, and production live previews remain
-design-only. The graphical protocol described here is separate from extension
+LAN pairing and production live previews are unavailable. The graphical protocol described here is separate from extension
 API 0.3 and native-host protocol 1.
 
 ## Shape
@@ -20,12 +19,10 @@ apps/web
                                 └─ one private App/Agent owner
 ```
 
-The frontend knows only the versioned protocol. It must not know whether its
-transport is same-host HTTP/WebSocket, a future native bridge, or an
-authenticated LAN connection.
+The frontend knows only the versioned protocol; the production transport is
+same-host HTTP/WebSocket.
 
-The shared React client lives in `apps/web/`; future native shells belong under
-`apps/`. The client uses the compiled default theme and canonical octet
+The React client lives in `apps/web/`. The client uses the compiled default theme and canonical octet
 `01101111` byte mark. It does not host or synchronize a TUI.
 
 ## Extension packages
@@ -41,8 +38,7 @@ The first-party extension owns:
 - session actor and supervisor orchestration;
 - loopback HTTP/WebSocket transport;
 - preview and artifact capability handles;
-- production web assets;
-- future device identities and LAN transport.
+- production web assets.
 
 It must not expose `App`, provider credentials, unrestricted paths, raw process
 handles, or internal TUI state over the wire.
@@ -67,8 +63,7 @@ The adapter:
 
 The feature-enabled package runtime keeps the internal dispatch into this
 adapter tiny. The ordinary octet binary instead keeps a tiny external `octet serve`
-dispatch into the installed runtime. Source-level extraction behind a stable
-Runtime API is deferred. The default TUI, agent, AI, and `sexy-tui-rs` must not
+dispatch into the installed runtime. The default TUI, agent, AI, and `sexy-tui-rs` must not
 depend on the web surface.
 
 The adapter and client are presentation-only boundaries. They must not add

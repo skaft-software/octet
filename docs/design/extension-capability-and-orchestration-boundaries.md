@@ -1,6 +1,6 @@
 # Extension capability and orchestration boundaries
 
-This document defines how octet assigns capability ownership across host, extension, and delegated execution. It is the non-goals and ownership artifact for issue `#142`.
+This document defines how octet assigns capability ownership across host, extension, and delegated execution.
 
 > Scope: non-`octet-serve` extension-capability ownership. This reference does **not** revise protocol contracts.
 
@@ -55,7 +55,10 @@ This document defines how octet assigns capability ownership across host, extens
   behind the extension's owner-bound `agent_sessions` service.
 - **State model:** each child has its own append-only session and durable
   delegation state; child runs inherit the parent’s approval, sandbox policy,
-  model/reasoning settings, compaction policy, and output/turn policy.
+  compaction policy, and output/turn policy. Model/reasoning inherit by default;
+  explicit worker selections are resolved by the coding host against its
+  configured provider catalog, then pinned by the kernel for continuation and
+  recovery. The extension never chooses credentials or endpoint URLs.
 - **Failure and cancellation:** parent outcomes and shutdown requests propagate
   through delegation tokens and cancellation paths; child failures do not
   terminate sibling trees unless resource/queue policy requires.
@@ -82,30 +85,24 @@ For non-`octet-serve` extension workflows, octet keeps ownership of policy and l
 - **No implicit process isolation from trust alone.** All extension and delegated work still uses the host’s existing security model unless containment is added outside octet.
 - **Telemetry redaction constraints:** host/extension telemetry should carry bounded, non-secret fields; capability/provenance metadata (delegation kind, owner/request lineage, lifecycle outcome, cancellation source, timeout source) is allowed only where bounded and redacted.
 
-## Explicit non-goals for unimplemented capabilities
+## Non-goals
 
-These do **not** move into octet core unless a separate issue is opened with a distinct contract:
+These capabilities are outside this core contract:
 
 - octet kernel implementing browser automation directly.
 - octet kernel implementing computer-use tooling directly.
-- Universal in-kernel graph/runtime orchestration for arbitrary agent topologies (`#119` is a spike with narrow scope and explicit stop criteria).
+- Universal in-kernel graph/runtime orchestration for arbitrary agent topologies.
 - File-tree/worktree isolation for delegated children by virtue of delegation alone.
 - Automatic trust transfer between hosted and in-harness execution.
-
-<a id="cross-links-to-backlog-work"></a>
 
 ## Integration requirements
 
 - Documentation of continuation state transitions and anti-spin behavior must use
-  this ownership model (`#73`).
+  this ownership model.
 - Telemetry and diagnostics should emit bounded, capability-aware data under this
-  provenance model (`#109`, `#110`).
+  provenance model.
 - Browser capability remains extension-owned (executable bundle + skill), not a
-  core-browser capability (`#121`).
+  core-browser capability.
 - Extension lifecycle integration should rely on shared lifecycle contracts
   (`extensions/*/settle_turn`, terminal lifecycle outcomes) and this ownership
-  boundary (`#133`).
-
-## Project
-
-[Roadmap and backlog](https://github.com/orgs/skaft-software/projects/5)
+  boundary.

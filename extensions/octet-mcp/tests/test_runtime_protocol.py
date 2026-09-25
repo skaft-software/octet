@@ -78,7 +78,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "api_version": "0.2",
+                    "api_version": "0.4",
                     "octet_version": "0.7.0",
                     "extension": {
                         "name": "octet-mcp",
@@ -106,7 +106,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                         "active_skills": [],
                     },
                     "protocol": {
-                        "version": "0.2",
+                        "version": "0.4",
                         "required_features": ["request_cancellation", "content_parts"],
                         "optional_features": [
                             "request_progress",

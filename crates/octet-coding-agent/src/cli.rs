@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use clap::{
@@ -21,8 +20,16 @@ use crate::config::{
 };
 use crate::extension_package::ExtensionCommand;
 use crate::migrate::MigrationCommand;
-use crate::pi::PiCommand;
 use crate::session_commands::SessionCommand;
+
+pub(crate) mod catalog_publish;
+mod config_diagnostics;
+pub(crate) mod eval;
+pub(crate) mod parity;
+
+use config_diagnostics::{
+    read_layer, report_config_diagnostics, ConfigSourceKind, LoadedConfigLayer,
+};
 
 /// Deterministic, non-interactive setup input for one OpenAI-compatible endpoint.
 #[derive(Clone, Debug, Args)]
@@ -92,6 +99,11 @@ pub enum TopLevelCommand {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// Integrate with the Herdr terminal workspace manager.
+    Herdr {
+        #[command(subcommand)]
+        command: crate::herdr::HerdrCommand,
+    },
     /// Install and manage extension packages.
     Extension {
         #[command(subcommand)]
@@ -101,11 +113,6 @@ pub enum TopLevelCommand {
     Migrate {
         #[command(subcommand)]
         command: MigrationCommand,
-    },
-    /// Link existing Pi extensions through octet's compatibility host.
-    Pi {
-        #[command(subcommand)]
-        command: PiCommand,
     },
     /// Check for, and install, a newer octet release.
     Update {
@@ -117,6 +124,19 @@ pub enum TopLevelCommand {
     Batch {
         #[command(subcommand)]
         command: BatchCommand,
+    },
+    /// Validate every publish gate and install a catalog document immutably.
+    Catalog {
+        #[command(subcommand)]
+        command: catalog_publish::CatalogCommand,
+    },
+    /// Run isolated, fixture-backed evaluation suites and record their deltas.
+    ///
+    /// The harness injects its own loopback provider, writes its own artifact
+    /// directory, and never makes a live or paid provider call.
+    Eval {
+        #[command(subcommand)]
+        command: eval::EvalCommand,
     },
     /// Check local prerequisites, configured providers, and model visibility.
     Doctor,
@@ -140,6 +160,10 @@ pub enum TopLevelCommand {
         /// Directory containing a development graphical shell.
         #[arg(long, value_name = "DIR")]
         web_root: Option<PathBuf>,
+        /// Name for the first provisional session created by this Serve launch.
+        /// Empty or whitespace-only input means "no name".
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
     },
 }
 
@@ -157,16 +181,21 @@ pub struct Cli {
     /// An initial prompt. In interactive mode it is submitted after startup.
     #[arg(value_name = "PROMPT")]
     pub message: Option<String>,
-    /// Sign in to a subscription provider (e.g. `codex`) and exit.
+    /// Additional prompts submitted sequentially in print/JSON mode.
+    #[arg(value_name = "PROMPTS")]
+    pub additional_messages: Vec<String>,
+    #[command(flatten)]
+    pub parity: parity::ParityOptions,
+    /// Sign in to a subscription provider (`codex` or `copilot`) and exit.
     #[arg(long, value_name = "PROVIDER")]
     pub login: Option<String>,
-    /// Sign out of a subscription provider (e.g. `codex`) and exit.
+    /// Sign out of a subscription provider (`codex` or `copilot`) and exit.
     #[arg(long, value_name = "PROVIDER")]
     pub logout: Option<String>,
     /// With `--login`, print the device URL/code without opening a browser.
     #[arg(long)]
     pub headless: bool,
-    /// Frontend mode: interactive or rpc.
+    /// Frontend mode: interactive, json (session events), or rpc.
     #[arg(long, value_name = "MODE", conflicts_with = "print")]
     pub mode: Option<String>,
     /// Use headless print mode instead of the full-screen TUI.
@@ -208,9 +237,8 @@ pub struct Cli {
     /// Workspace root override.
     #[arg(long)]
     pub workspace: Option<PathBuf>,
-    /// Terminal appearance selector: auto, light, or dark. Arbitrary theme
-    /// names remain compatibility inputs and never load filesystem themes.
-    #[arg(long, value_name = "NAME", hide = true)]
+    /// Terminal theme: auto, light, or dark.
+    #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,
     /// Legacy theme directory option; the current runtime does not load custom themes.
     #[arg(long = "theme-dir", value_name = "DIR", hide = true)]
@@ -297,6 +325,12 @@ pub struct Cli {
     /// Load only these tools (comma-separated).
     #[arg(long, value_name = "NAMES", value_delimiter = ',', num_args = 1..)]
     pub tools: Option<Vec<String>>,
+    /// Add the Windows PowerShell tool to the model-visible allowlist.
+    ///
+    /// Opt-in only, additive to the default allowlist, and never a `bash`
+    /// fallback: the entry stays inert on a host that cannot run it.
+    #[arg(long, conflicts_with_all = ["tools", "no_tools"])]
+    pub powershell: bool,
     /// Remove tools from the active set (comma-separated).
     #[arg(long, value_name = "NAMES", value_delimiter = ',', num_args = 1..)]
     pub exclude_tools: Vec<String>,
@@ -888,6 +922,10 @@ struct ConfigLayer {
     mouse: Option<String>,
     plain: Option<bool>,
     show_images: Option<bool>,
+    /// User-level `/scoped-models` pattern list. Interactive cycling scope
+    /// only; headless modes never consume it and a trusted project layer may
+    /// not override it.
+    models: Option<String>,
     allow_external_paths: Option<bool>,
     allow_edit: Option<bool>,
     allow_write: Option<bool>,
@@ -905,6 +943,18 @@ struct ConfigLayer {
     context_files: Option<bool>,
     offline: Option<bool>,
     strict_config: Option<bool>,
+    /// Live-reload policy. User level only: `merge_project` never copies these
+    /// keys, so a trusted project cannot arm automatic reload or change its
+    /// cadence on the user's behalf.
+    reload: Option<bool>,
+    reload_poll_ms: Option<u64>,
+    reload_debounce_ms: Option<u64>,
+    reload_max_files: Option<usize>,
+    /// Host re-exec opt-in. Separate from `reload` on purpose: resources and
+    /// extensions may auto-reload by default, but replacing the running image
+    /// (`execve` of a replaced `current_exe`) needs this explicit bool or an
+    /// explicit `/reload --force`.
+    reload_host: Option<bool>,
     telemetry: Option<PathBuf>,
     enabled_extensions: Option<Vec<String>>,
     trusted_extensions: Option<Vec<String>>,
@@ -931,6 +981,7 @@ impl ConfigLayer {
         override_some!(mouse);
         override_some!(plain);
         override_some!(show_images);
+        override_some!(models);
         override_some!(allow_external_paths);
         override_some!(allow_edit);
         override_some!(allow_write);
@@ -947,6 +998,11 @@ impl ConfigLayer {
         override_some!(context_files);
         override_some!(offline);
         override_some!(strict_config);
+        override_some!(reload);
+        override_some!(reload_poll_ms);
+        override_some!(reload_debounce_ms);
+        override_some!(reload_max_files);
+        override_some!(reload_host);
         override_some!(telemetry);
         override_some!(enabled_extensions);
         override_some!(trusted_extensions);
@@ -1063,12 +1119,16 @@ impl ConfigLayer {
             self.strict_config = Some(true);
         }
         // A trusted project may suggest activation, but executable trust is a
-        // user-level decision and can never be granted by project config.
+        // user-level decision and can never be granted by project config. The
+        // interactive cycling scope is likewise a user-level preference.
         let trusted_extensions = self.trusted_extensions.clone();
         project.trusted_extensions = None;
+        let scoped_models = self.models.clone();
+        project.models = None;
         tighten_effect_policy(&mut self.effect_policy, project.effect_policy.take());
         self.merge(project);
         self.trusted_extensions = trusted_extensions;
+        self.models = scoped_models;
     }
 }
 
@@ -1081,11 +1141,108 @@ fn global_config_path_from_home(home: Option<PathBuf>) -> Option<PathBuf> {
         .map(|home| home.join(".octet").join("config.toml"))
 }
 
+/// Owner-private diagnostics log written by the hidden `/debug` command.
+///
+/// Mirrors the release-notes convention of deriving from the same home
+/// directory as the global config, so a relocated `HOME` relocates both.
+pub fn debug_log_path() -> Option<PathBuf> {
+    dirs::home_dir()
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".octet").join("octet-debug.log"))
+}
+
 pub fn persist_model(model: &str) -> anyhow::Result<()> {
     let path = global_config_path().ok_or_else(|| {
         anyhow::anyhow!("cannot persist model: user home directory is unavailable")
     })?;
     persist_key_to_path("model", model, &path)
+}
+
+/// Persist the user-level interactive model scope as one comma-separated
+/// `--models` pattern list. `None` removes the key so the next launch cycles
+/// the complete catalog again.
+///
+/// This is the same structural, compare-and-swap writer every other user
+/// preference uses; a trusted project layer can never override the value.
+pub fn persist_scoped_models(patterns: Option<&str>) -> anyhow::Result<()> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist the model scope: user home directory is unavailable")
+    })?;
+    let patterns = patterns.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(patterns) = patterns {
+        if patterns.chars().any(char::is_control) {
+            anyhow::bail!("model scope patterns must not contain control characters");
+        }
+    }
+    match patterns {
+        Some(patterns) => persist_key_to_path("models", patterns, &path),
+        None => remove_key_from_path("models", &path),
+    }
+}
+
+/// Read the persisted interactive model scope without rebuilding a full
+/// configuration. Interactive-only by construction: headless frontends never
+/// consult it.
+pub fn persisted_scoped_models() -> Option<String> {
+    let path = global_config_path()?;
+    let layer = read_layer(&path, ConfigSourceKind::Global).ok()?;
+    layer
+        .values
+        .models
+        .map(|patterns| patterns.trim().to_owned())
+        .filter(|patterns| !patterns.is_empty())
+}
+
+/// Live-reload policy for the interactive frontend.
+///
+/// Read from the user level only (`reload`, `reload_poll_ms`,
+/// `reload_debounce_ms`, `reload_max_files`, `reload_host`), because automatic
+/// reload and its cadence are user decisions a trusted project must not make on
+/// the user's behalf. Values are range-clamped, and a missing or unreadable
+/// file leaves the defaults in place — the same fail-open shape
+/// `persisted_scoped_models` uses, since `build_config` already reports a broken
+/// configuration.
+///
+/// Enabled by default for resources and extensions: the interactive prompt arms
+/// the supervisor, announces itself once in the transcript, and applies reloads
+/// only at the idle prompt. `reload = false` disables it for good. The host
+/// layer (`execve` of a changed `current_exe`) is **off** unless the user opted
+/// in with `reload_host = true`; `/reload --force` can always take a host pass
+/// now, and the deployed host may additionally require a confirmation for a
+/// retargeted image (`reexec.rs`).
+pub fn live_reload_settings() -> crate::reload::ReloadSettings {
+    let Some(path) = global_config_path() else {
+        return crate::reload::ReloadSettings::default();
+    };
+    let Ok(layer) = read_layer(&path, ConfigSourceKind::Global) else {
+        return crate::reload::ReloadSettings::default();
+    };
+    let values = layer.values;
+    crate::reload::ReloadSettings {
+        enabled: values.reload.unwrap_or(true),
+        host_enabled: values.reload_host.unwrap_or(false),
+        poll_interval: values
+            .reload_poll_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(crate::reload::DEFAULT_POLL_INTERVAL),
+        debounce: values
+            .reload_debounce_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(crate::reload::DEFAULT_DEBOUNCE),
+        max_inspections_per_poll: values
+            .reload_max_files
+            .unwrap_or(crate::reload::DEFAULT_MAX_INSPECTIONS_PER_POLL),
+    }
+    .sanitized()
+}
+
+/// Persist the opt-in inline-image rendering preference as a real TOML
+/// boolean, matching the `show_images: bool` configuration reader.
+pub fn persist_show_images(enabled: bool) -> anyhow::Result<()> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist image display: user home directory is unavailable")
+    })?;
+    persist_bool_key_to_path("show_images", enabled, &path)
 }
 
 pub fn persist_reasoning(reasoning: &str) -> anyhow::Result<()> {
@@ -1337,6 +1494,52 @@ fn persist_key_to_path(key: &str, value: &str, path: &std::path::Path) -> anyhow
     write_config_atomically(path, &new_content, original.as_deref())
 }
 
+/// Persist one structural user-config boolean. `toml_edit::value(&str)` would
+/// write a string, so boolean-valued settings must not reuse the string path.
+fn persist_bool_key_to_path(key: &str, value: bool, path: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _config_lock = config_update_lock(path)?;
+
+    let original = match std::fs::read_to_string(path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut document = original
+        .as_deref()
+        .unwrap_or_default()
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| {
+            anyhow::anyhow!("cannot update invalid config {}: {error}", path.display())
+        })?;
+    document[key] = toml_edit::value(value);
+    write_config_atomically(path, &document.to_string(), original.as_deref())
+}
+
+/// Remove one structural user-config key while retaining comments and layout.
+/// A missing file is already in the desired state.
+fn remove_key_from_path(key: &str, path: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _config_lock = config_update_lock(path)?;
+
+    let original = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut document = original
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| {
+            anyhow::anyhow!("cannot update invalid config {}: {error}", path.display())
+        })?;
+    document.remove(key);
+    write_config_atomically(path, &document.to_string(), Some(&original))
+}
+
 #[cfg(test)]
 fn persist_model_to_path(model: &str, path: &std::path::Path) -> anyhow::Result<()> {
     persist_key_to_path("model", model, path)
@@ -1413,293 +1616,6 @@ fn normalize_extension_trust_grants(
     Ok(normalized.into_iter().collect())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConfigSourceKind {
-    Global,
-    Project,
-}
-
-impl fmt::Display for ConfigSourceKind {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Global => "global",
-            Self::Project => "project",
-        })
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ConfigDiagnostic {
-    source_kind: ConfigSourceKind,
-    path: PathBuf,
-    key: String,
-    line: usize,
-    column: usize,
-    suggestion: Option<&'static str>,
-}
-
-impl fmt::Display for ConfigDiagnostic {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} config {}:{}:{}: unknown configuration key {:?}",
-            self.source_kind,
-            self.path.display(),
-            self.line,
-            self.column,
-            self.key
-        )?;
-        if let Some(suggestion) = self.suggestion {
-            write!(formatter, "; did you mean {suggestion:?}?")?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Default)]
-struct LoadedConfigLayer {
-    values: ConfigLayer,
-    diagnostics: Vec<ConfigDiagnostic>,
-}
-
-const CONFIG_KEYS: &[&str] = &[
-    "model",
-    "reasoning",
-    "effect_policy",
-    "reasoning_mode",
-    "cache_retention",
-    "theme",
-    "color",
-    "mouse",
-    "plain",
-    "show_images",
-    "allow_external_paths",
-    "allow_edit",
-    "allow_write",
-    "allow_process",
-    "allow_shell",
-    "allow_remote_read",
-    "shell_path",
-    "bash_timeout_secs",
-    "exec_timeout_secs",
-    "max_output_bytes",
-    "session_dir",
-    "max_turns",
-    "max_cost_microdollars",
-    "cost_warning_microdollars",
-    "context_files",
-    "offline",
-    "strict_config",
-    "telemetry",
-    "enabled_extensions",
-    "trusted_extensions",
-    "system_prompt",
-    "compaction",
-];
-
-/// Legacy configuration keys accepted and ignored for backward
-/// compatibility. Removed settings must be listed here so older configs keep
-/// loading without unknown-key warnings or strict-mode rejections.
-const IGNORED_CONFIG_KEYS: &[&str] = &["show_turn_cost"];
-
-const COMPACTION_KEYS: &[&str] = &[
-    "mode",
-    "policy",
-    "enabled",
-    "threshold_fraction",
-    "max_active_tokens",
-    "keep_recent_tokens",
-    "keep_recent_turns",
-    "compact_model",
-];
-
-fn edit_distance(left: &str, right: &str) -> usize {
-    let mut previous = (0..=right.chars().count()).collect::<Vec<_>>();
-    let mut current = vec![0; previous.len()];
-    for (left_index, left_character) in left.chars().enumerate() {
-        current[0] = left_index + 1;
-        for (right_index, right_character) in right.chars().enumerate() {
-            current[right_index + 1] = (previous[right_index + 1] + 1)
-                .min(current[right_index] + 1)
-                .min(previous[right_index] + usize::from(left_character != right_character));
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-    previous[right.chars().count()]
-}
-
-fn config_key_suggestion(key: &str) -> Option<&'static str> {
-    let (prefix, leaf, candidates) = match key.rsplit_once('.') {
-        Some(("compaction", leaf)) => ("compaction.", leaf, COMPACTION_KEYS),
-        Some(_) => return None,
-        None => ("", key, CONFIG_KEYS),
-    };
-    let (candidate, distance) = candidates
-        .iter()
-        .map(|candidate| (*candidate, edit_distance(leaf, candidate)))
-        .min_by_key(|(_, distance)| *distance)?;
-    let threshold = 2.max(leaf.chars().count() / 3);
-    (distance <= threshold).then(|| {
-        if prefix.is_empty() {
-            candidate
-        } else {
-            match candidate {
-                "mode" => "compaction.mode",
-                "policy" => "compaction.policy",
-                "enabled" => "compaction.enabled",
-                "threshold_fraction" => "compaction.threshold_fraction",
-                "max_active_tokens" => "compaction.max_active_tokens",
-                "keep_recent_tokens" => "compaction.keep_recent_tokens",
-                "keep_recent_turns" => "compaction.keep_recent_turns",
-                "compact_model" => "compaction.compact_model",
-                _ => unreachable!("compaction suggestion came from the fixed schema"),
-            }
-        }
-    })
-}
-
-fn table_key_offset(table: &toml_edit::Table, segments: &[&str]) -> Option<usize> {
-    let (segment, remaining) = segments.split_first()?;
-    let key = table.key(segment)?;
-    if remaining.is_empty() {
-        return key.span().map(|span| span.start);
-    }
-    let item = table.get(segment)?;
-    if let Some(table) = item.as_table() {
-        table_key_offset(table, remaining)
-    } else {
-        inline_table_key_offset(item.as_inline_table()?, remaining)
-    }
-}
-
-fn inline_table_key_offset(table: &toml_edit::InlineTable, segments: &[&str]) -> Option<usize> {
-    let (segment, remaining) = segments.split_first()?;
-    let key = table.key(segment)?;
-    if remaining.is_empty() {
-        return key.span().map(|span| span.start);
-    }
-    inline_table_key_offset(table.get(segment)?.as_inline_table()?, remaining)
-}
-
-fn ignored_config_path(path: &serde_ignored::Path<'_>, segments: &mut Vec<String>) {
-    match path {
-        serde_ignored::Path::Root => {}
-        serde_ignored::Path::Map { parent, key } => {
-            ignored_config_path(parent, segments);
-            segments.push(key.clone());
-        }
-        serde_ignored::Path::Seq { parent, index } => {
-            ignored_config_path(parent, segments);
-            segments.push(index.to_string());
-        }
-        serde_ignored::Path::Some { parent }
-        | serde_ignored::Path::NewtypeStruct { parent }
-        | serde_ignored::Path::NewtypeVariant { parent } => {
-            ignored_config_path(parent, segments);
-        }
-    }
-}
-
-fn config_key_location(source: &str, segments: &[String]) -> (usize, usize) {
-    let offset = toml_edit::ImDocument::parse(source.to_owned())
-        .ok()
-        .and_then(|document| {
-            let segments = segments.iter().map(String::as_str).collect::<Vec<_>>();
-            table_key_offset(document.as_table(), &segments)
-        })
-        .unwrap_or(0);
-    let prefix = &source[..offset.min(source.len())];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let column = prefix
-        .rsplit_once('\n')
-        .map_or(prefix, |(_, tail)| tail)
-        .chars()
-        .count()
-        + 1;
-    (line, column)
-}
-
-fn report_config_diagnostics(diagnostics: &[ConfigDiagnostic], strict: bool) -> anyhow::Result<()> {
-    if diagnostics.is_empty() {
-        return Ok(());
-    }
-    if strict {
-        let details = diagnostics
-            .iter()
-            .map(|diagnostic| format!("  - {diagnostic}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        anyhow::bail!("strict configuration rejected unknown keys:\n{details}");
-    }
-    for diagnostic in diagnostics {
-        crate::output::stderr_line(format!("warning: {diagnostic}"));
-    }
-    Ok(())
-}
-
-fn read_layer(path: &Path, source_kind: ConfigSourceKind) -> anyhow::Result<LoadedConfigLayer> {
-    const MAX_CONFIG_BYTES: usize = 1024 * 1024;
-    let Some(name) = path.file_name() else {
-        anyhow::bail!("config path {} has no file name", path.display());
-    };
-    let Some(parent) = path.parent() else {
-        anyhow::bail!("config path {} has no parent", path.display());
-    };
-    let parent = match parent.canonicalize() {
-        Ok(parent) => parent,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LoadedConfigLayer::default())
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let source = match octet_agent::secure_fs::read_regular_file_bounded(
-        &parent.join(name),
-        MAX_CONFIG_BYTES,
-    ) {
-        Ok(bytes) => String::from_utf8(bytes)
-            .map_err(|_| anyhow::anyhow!("config {} is not valid UTF-8", path.display()))?,
-        Err(octet_agent::secure_fs::SecureFileError::Io(error))
-            if error.kind() == std::io::ErrorKind::NotFound =>
-        {
-            return Ok(LoadedConfigLayer::default())
-        }
-        Err(error) => anyhow::bail!("cannot read config {}: {error}", path.display()),
-    };
-
-    let mut unknown_keys = Vec::new();
-    let deserializer = toml::Deserializer::new(&source);
-    let values = serde_ignored::deserialize(deserializer, |path| {
-        let mut segments = Vec::new();
-        ignored_config_path(&path, &mut segments);
-        unknown_keys.push(segments);
-    })
-    .map_err(|error| anyhow::anyhow!("invalid config {}: {error}", path.display()))?;
-    unknown_keys.retain(|segments| {
-        segments.len() != 1 || !IGNORED_CONFIG_KEYS.contains(&segments[0].as_str())
-    });
-    unknown_keys.sort();
-    unknown_keys.dedup();
-    let diagnostics = unknown_keys
-        .into_iter()
-        .map(|segments| {
-            let (line, column) = config_key_location(&source, &segments);
-            let key = segments.join(".");
-            ConfigDiagnostic {
-                source_kind,
-                path: path.to_path_buf(),
-                suggestion: config_key_suggestion(&key),
-                key,
-                line,
-                column,
-            }
-        })
-        .collect();
-    Ok(LoadedConfigLayer {
-        values,
-        diagnostics,
-    })
-}
-
 #[cfg(not(test))]
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -1739,6 +1655,10 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         theme: env_value("OCTET_THEME"),
         color: env_value("OCTET_COLOR"),
         mouse: env_value("OCTET_MOUSE"),
+        // The interactive `/scoped-models` scope is a user-configuration
+        // concern: the environment layer deliberately provides none of it, so a
+        // headless run can never inherit an interactive selection by accident.
+        models: None,
         plain: env_parse("OCTET_PLAIN")?,
         show_images: env_parse("OCTET_SHOW_IMAGES")?,
         allow_external_paths: env_parse("OCTET_ALLOW_EXTERNAL_PATHS")?,
@@ -1759,6 +1679,15 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         offline: env_parse("OCTET_OFFLINE")?,
         strict_config: env_parse("OCTET_STRICT_CONFIG")?,
         telemetry: env_value("OCTET_TELEMETRY").map(PathBuf::from),
+        // Live reload is an interactive, user-level policy: `merge_project`
+        // never copies it and the environment layer never arms it, so a
+        // project or a stray variable cannot turn automatic reload on — and
+        // host re-exec in particular has no environment switch at all.
+        reload: None,
+        reload_poll_ms: None,
+        reload_debounce_ms: None,
+        reload_max_files: None,
+        reload_host: None,
         enabled_extensions: env_value("OCTET_EXTENSIONS").map(split_names),
         trusted_extensions: env_value("OCTET_TRUSTED_EXTENSIONS").map(split_names),
         system_prompt: env_value("OCTET_SYSTEM_PROMPT"),
@@ -1860,10 +1789,12 @@ fn build_config_with_global_path_and_diagnostics(
         values.model.clone().map(octet_ai::ModelId),
         None,
     );
-    let reasoning = match cli.reasoning.as_deref().or(values.reasoning.as_deref()) {
-        Some(value) => config::parse_reasoning(value)?,
-        None => octet_ai::ReasoningConfig::Off,
-    };
+    let reasoning = cli
+        .reasoning
+        .as_deref()
+        .or(values.reasoning.as_deref())
+        .map(config::parse_reasoning)
+        .transpose()?;
     let reasoning_mode = match cli
         .reasoning_mode
         .as_deref()
@@ -2046,6 +1977,16 @@ fn build_config_with_global_path_and_diagnostics(
         None if cli.no_tools => ToolPolicy::only(Vec::new())?,
         None => ToolPolicy::default(),
     };
+    if cli.powershell {
+        // Additive opt-in: this registers one extra allowlist entry and never
+        // replaces or degrades `bash`. The tool itself remains Windows-gated.
+        tools.include("powershell")?;
+        if !cfg!(windows) {
+            crate::output::stderr_line(
+                "warning: --powershell is inert on this host; the PowerShell tool requires Windows",
+            );
+        }
+    }
     for name in &cli.exclude_tools {
         tools.exclude(name)?;
     }
@@ -2106,9 +2047,14 @@ fn build_config_with_global_path_and_diagnostics(
 
     let mode = match cli.mode.as_deref() {
         Some(value) if value.eq_ignore_ascii_case("rpc") => Mode::Rpc,
+        Some(value) if value.eq_ignore_ascii_case("json") => Mode::Print {
+            prompt: cli.message.clone().unwrap_or_default(),
+        },
         Some(value) if value.eq_ignore_ascii_case("interactive") => Mode::Interactive,
         Some(value) => {
-            anyhow::bail!("invalid frontend mode {value:?}; use interactive or rpc (or --print)")
+            anyhow::bail!(
+                "invalid frontend mode {value:?}; use interactive, json or rpc (or --print)"
+            )
         }
         None if cli.print => {
             let prompt = cli.message.clone().unwrap_or_default();
@@ -2216,7 +2162,6 @@ pub fn build_config(cli: Cli, cwd: &Path) -> anyhow::Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pi::PiBridgeApiVersion;
 
     fn cwd() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -2226,6 +2171,8 @@ mod tests {
         Cli {
             command: None,
             message: None,
+            additional_messages: Vec::new(),
+            parity: Default::default(),
             login: None,
             logout: None,
             headless: false,
@@ -2261,6 +2208,7 @@ mod tests {
             safe_mode: false,
             effect_policy: None,
             tools: None,
+            powershell: false,
             exclude_tools: vec![],
             no_tools: false,
             no_edit: false,
@@ -2295,6 +2243,47 @@ mod tests {
         let model = catalog.resolve(config.model.as_ref().unwrap()).unwrap();
         assert_eq!(model.spec.api_name, "gpt-6-astra");
         assert_eq!(model.endpoint.id.0, "openai");
+    }
+
+    #[test]
+    fn codex_context_window_flag_parses_and_fails_closed_above_the_cap() {
+        let parsed = Cli::try_parse_from([
+            "octet",
+            "--codex-context-window",
+            "500000",
+            "--codex-context-window-acknowledge-cost-cliff",
+        ])
+        .unwrap();
+        assert!(parsed.parity.validate().is_ok());
+        let override_ = parsed.parity.codex_context_override().unwrap();
+        assert_eq!(override_.requested_tokens, Some(500_000));
+        assert!(override_.acknowledge_cost_cliff);
+
+        // Garbage is refused by clap before validation runs.
+        assert!(Cli::try_parse_from(["octet", "--codex-context-window", "garbage"]).is_err());
+        // Zero, oversized and above-cap-without-acknowledgement fail validation.
+        let zero = Cli::try_parse_from(["octet", "--codex-context-window", "0"]).unwrap();
+        assert!(zero.parity.validate().is_err(), "zero must fail closed");
+        let oversized =
+            Cli::try_parse_from(["octet", "--codex-context-window", "2000000"]).unwrap();
+        assert!(
+            oversized.parity.validate().is_err(),
+            "above every entitlement must fail"
+        );
+        let unacknowledged =
+            Cli::try_parse_from(["octet", "--codex-context-window", "500000"]).unwrap();
+        let error = unacknowledged.parity.validate().unwrap_err();
+        assert!(error.to_string().contains("double-priced"), "{error}");
+        assert!(error.to_string().contains("websocket"), "{error}");
+        // The acknowledgement flag requires the window flag.
+        assert!(
+            Cli::try_parse_from(["octet", "--codex-context-window-acknowledge-cost-cliff"])
+                .is_err()
+        );
+        // No flag leaves the deliberate default untouched (no override).
+        let absent = Cli::try_parse_from(["octet", "--offline"]).unwrap();
+        assert!(absent.parity.validate().is_ok());
+        assert!(absent.parity.codex_context_override().is_none());
     }
 
     fn extension_flag(
@@ -2497,23 +2486,23 @@ mod tests {
         let os = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
 
         assert!(!invocation_has_top_level_subcommand(
-            &os(&["octet", "--fixture-label", "pi"]),
+            &os(&["octet", "--fixture-label", "migrate"]),
             &registered,
         ));
         assert!(invocation_has_top_level_subcommand(
-            &os(&["octet", "--fixture-enabled", "pi", "--help"]),
+            &os(&["octet", "--fixture-enabled", "migrate", "--help"]),
             &registered,
         ));
         assert!(invocation_has_top_level_subcommand(
-            &os(&["octet", "--fixture-count", "-7", "pi"]),
+            &os(&["octet", "--fixture-count", "-7", "migrate"]),
             &registered,
         ));
         assert!(invocation_has_top_level_subcommand(
-            &os(&["octet", "--workspace", "/tmp", "pi", "list"]),
+            &os(&["octet", "--workspace", "/tmp", "migrate", "pi"]),
             &registered,
         ));
         assert!(invocation_has_top_level_subcommand(
-            &os(&["octet", "--unknown-extension-flag", "pi", "--help"]),
+            &os(&["octet", "--unknown-extension-flag", "migrate", "--help"]),
             &registered,
         ));
     }
@@ -2528,8 +2517,8 @@ mod tests {
             "octet",
             "--workspace",
             "/tmp",
+            "migrate",
             "pi",
-            "list",
         ])));
         assert!(!uses_runtime_extension_flag_parser(&os(&[
             "octet",
@@ -2538,19 +2527,21 @@ mod tests {
         assert!(uses_runtime_extension_flag_parser(&os(&[
             "octet",
             "--extension-flag",
-            "pi",
+            "migrate",
         ])));
         assert!(!uses_runtime_extension_flag_parser(&os(&[
             "octet",
             "--extension-flag",
-            "pi",
+            "migrate",
             "--login",
             "codex",
         ])));
         assert!(uses_runtime_extension_flag_parser(&os(&[
             "octet", "--", "--login"
         ])));
-        assert!(!uses_runtime_extension_flag_parser(&os(&["octet", "pi"])));
+        assert!(!uses_runtime_extension_flag_parser(&os(&[
+            "octet", "migrate"
+        ])));
     }
 
     #[test]
@@ -3057,6 +3048,20 @@ max_output_bytes = 4096
     }
 
     #[test]
+    fn unset_reasoning_is_distinct_from_explicit_off() {
+        let directory = cwd();
+        let config = config_with_empty_global(base(), directory.path()).unwrap();
+        assert_eq!(config.reasoning, None);
+        assert!(!config.reasoning_explicit);
+
+        let mut cli = base();
+        cli.reasoning = Some("off".into());
+        let config = config_with_empty_global(cli, directory.path()).unwrap();
+        assert_eq!(config.reasoning, Some(octet_ai::ReasoningConfig::Off));
+        assert!(config.reasoning_explicit);
+    }
+
+    #[test]
     fn reasoning_is_parsed_and_invalid_values_fail() {
         let directory = cwd();
         let mut cli = base();
@@ -3102,99 +3107,9 @@ max_output_bytes = 4096
     }
 
     #[test]
-    fn unknown_config_keys_report_source_location_and_suggestion() {
-        let directory = cwd();
-        let global = directory.path().join("global.toml");
-        std::fs::write(
-            &global,
-            "model = 'known'\nmodle = 'ignored'\n[compaction]\nkeep_recent_turn = 2\n",
-        )
-        .unwrap();
-
-        let loaded = read_layer(&global, ConfigSourceKind::Global).unwrap();
-
-        assert_eq!(loaded.values.model.as_deref(), Some("known"));
-        assert_eq!(loaded.diagnostics.len(), 2);
-        assert_eq!(loaded.diagnostics[0].key, "compaction.keep_recent_turn");
-        assert_eq!(loaded.diagnostics[0].line, 4);
-        assert_eq!(loaded.diagnostics[0].column, 1);
-        assert_eq!(
-            loaded.diagnostics[0].suggestion,
-            Some("compaction.keep_recent_turns")
-        );
-        assert_eq!(loaded.diagnostics[1].key, "modle");
-        assert_eq!(loaded.diagnostics[1].line, 2);
-        assert_eq!(loaded.diagnostics[1].column, 1);
-        assert_eq!(loaded.diagnostics[1].suggestion, Some("model"));
-        assert_eq!(loaded.diagnostics[1].source_kind, ConfigSourceKind::Global);
-        assert_eq!(loaded.diagnostics[1].path, global);
-    }
-
-    #[test]
-    fn unknown_config_keys_warn_by_default_and_fail_in_cli_strict_mode() {
-        let directory = cwd();
-        let global = directory.path().join("global.toml");
-        std::fs::write(&global, "modle = 'ignored'\n").unwrap();
-        let mut cli = base();
-        cli.workspace = Some(directory.path().into());
-        assert!(build_config_with_global_path(cli, directory.path(), Some(&global)).is_ok());
-
-        let mut cli = base();
-        cli.workspace = Some(directory.path().into());
-        cli.strict_config = true;
-        let error = build_config_with_global_path(cli, directory.path(), Some(&global))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("strict configuration rejected unknown keys"));
-        assert!(error.contains("global config"));
-        assert!(error.contains(&format!("{}:1:1", global.display())));
-        assert!(error.contains("unknown configuration key \"modle\""));
-        assert!(error.contains("did you mean \"model\"?"));
-    }
-
-    #[test]
-    fn project_config_can_opt_into_strict_diagnostics() {
-        let directory = cwd();
-        std::fs::create_dir_all(directory.path().join(".octet")).unwrap();
-        let project = directory.path().join(".octet/config.toml");
-        std::fs::write(&project, "strict_config = true\nthemee = 'ignored'\n").unwrap();
-        let mut cli = base();
-        cli.workspace = Some(directory.path().into());
-        cli.workspace_trusted = true;
-
-        let error = config_with_empty_global(cli, directory.path())
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("project config"));
-        assert!(error.contains(&format!("{}:2:1", project.display())));
-        assert!(error.contains("themee"));
-    }
-
-    #[test]
     fn strict_config_flag_is_parsed() {
         let cli = Cli::try_parse_from(["octet", "--strict-config"]).unwrap();
         assert!(cli.strict_config);
-    }
-
-    #[test]
-    fn accepted_config_aliases_do_not_emit_unknown_key_diagnostics() {
-        let directory = cwd();
-        let global = directory.path().join("global.toml");
-        std::fs::write(
-            &global,
-            "exec_timeout_secs = 30\n[compaction]\npolicy = 'local'\n",
-        )
-        .unwrap();
-
-        let loaded = read_layer(&global, ConfigSourceKind::Global).unwrap();
-
-        assert!(loaded.diagnostics.is_empty());
-        assert_eq!(loaded.values.bash_timeout_secs, Some(30));
-        assert_eq!(
-            loaded.values.compaction.unwrap().mode.as_deref(),
-            Some("local")
-        );
     }
 
     #[test]
@@ -3671,6 +3586,39 @@ max_output_bytes = 4096
         assert_eq!(std::fs::read_to_string(path).unwrap(), invalid);
     }
 
+    // --- persist_bool_key_to_path / remove_key_from_path ---
+
+    #[test]
+    fn bool_settings_persist_as_toml_booleans_and_removable_keys_disappear() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        persist_bool_key_to_path("show_images", true, &path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let document = content.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            document["show_images"].as_bool(),
+            Some(true),
+            "boolean settings must not round-trip as strings: {content}"
+        );
+        persist_bool_key_to_path("show_images", false, &path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let document = content.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(document["show_images"].as_bool(), Some(false));
+
+        // A string-valued key round-trips, then removal restores the rest of
+        // the document untouched.
+        persist_key_to_path("models", "a:high,b", &path).unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("models = \"a:high,b\""));
+        remove_key_from_path("models", &path).unwrap();
+        let remaining = std::fs::read_to_string(&path).unwrap();
+        assert!(!remaining.contains("models"), "{remaining}");
+        assert!(remaining.contains("show_images = false"), "{remaining}");
+        // Removing a key from a missing file is already the desired state.
+        remove_key_from_path("models", &dir.path().join("absent.toml")).unwrap();
+    }
+
     // --- persist_model_to_path ---
 
     fn read_model_from_config(path: &std::path::Path) -> Option<String> {
@@ -3735,17 +3683,25 @@ max_output_bytes = 4096
         )
         .unwrap();
 
-        persist_theme_to_path("light", &path).unwrap();
+        for choice in ["light", "dark", "auto"] {
+            persist_theme_to_path(choice, &path).unwrap();
 
-        let content = std::fs::read_to_string(&path).unwrap();
-        let parsed: toml::Value = toml::from_str(&content).unwrap();
-        assert_eq!(parsed["theme"].as_str(), Some("light"));
-        assert_eq!(parsed["model"].as_str(), Some("gpt-4o-mini"));
-        assert_eq!(
-            parsed["compaction"]["keep_recent_tokens"].as_integer(),
-            Some(8)
-        );
-        assert!(content.contains("# keep this comment"), "{content}");
+            let content = std::fs::read_to_string(&path).unwrap();
+            let parsed: toml::Value = toml::from_str(&content).unwrap();
+            assert_eq!(parsed["theme"].as_str(), Some(choice));
+            assert_eq!(parsed["model"].as_str(), Some("gpt-4o-mini"));
+            assert_eq!(
+                parsed["compaction"]["keep_recent_tokens"].as_integer(),
+                Some(8)
+            );
+            assert!(content.contains("# keep this comment"), "{content}");
+        }
+    }
+
+    #[test]
+    fn removed_cutline_theme_cannot_be_persisted() {
+        let error = persist_theme_choice("compact").unwrap_err();
+        assert!(error.to_string().contains("use auto, light, or dark"));
     }
 
     #[test]
@@ -4027,100 +3983,54 @@ max_output_bytes = 4096
     }
 
     #[test]
-    fn pi_install_parses_without_a_prompt() {
-        let cli = Cli::try_parse_from([
-            "octet",
-            "pi",
-            "install",
-            "./private-extension.ts",
-            "--pi-home",
-            "./pi/agent",
-            "--pi-package",
-            "./node_modules/@earendil-works/pi-coding-agent",
-        ])
-        .unwrap();
-        assert!(cli.message.is_none());
+    fn pi_compatibility_command_is_not_exposed_and_bridge_options_are_rejected() {
+        let mut command = Cli::command();
+        assert!(command.find_subcommand("pi").is_none());
+        assert!(command.find_subcommand("migrate").is_some());
+        let help = command.render_long_help().to_string();
+        assert!(!help
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some("pi")));
+        for arguments in [
+            vec![
+                "octet",
+                "pi",
+                "install",
+                "./extension.ts",
+                "--pi-package",
+                "./pi",
+            ],
+            vec!["octet", "pi", "list", "--extension-root", "./extensions"],
+            vec!["octet", "pi", "publish", "--plan", "./plan.json"],
+        ] {
+            let error = Cli::try_parse_from(arguments).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
+
+    #[test]
+    fn pi_is_an_ordinary_prompt_not_a_compatibility_command() {
+        // Removing a subcommand does not reserve or reject ordinary prompt text.
+        for arguments in [vec!["octet", "pi"], vec!["octet", "pi", "list"]] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(cli.command.is_none());
+            assert_eq!(cli.message.as_deref(), Some("pi"));
+        }
+    }
+
+    #[test]
+    fn pi_import_remains_available_without_the_compatibility_bridge() {
+        let cli = Cli::try_parse_from(["octet", "migrate", "import", "pi", "--dry-run"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(TopLevelCommand::Pi {
-                command: PiCommand::Install {
-                    pi_home: Some(_),
-                    pi_package: Some(_),
-                    ..
-                }
+            Some(TopLevelCommand::Migrate {
+                command: MigrationCommand::Import {
+                    command: crate::migrate::MigrationImportCommand::Pi { dry_run: true, .. },
+                },
             })
         ));
-    }
-
-    #[test]
-    fn pi_install_selects_api_03_only_when_explicit() {
-        let default =
-            Cli::try_parse_from(["octet", "pi", "install", "./private-extension.ts"]).unwrap();
-        let explicit = Cli::try_parse_from([
-            "octet",
-            "pi",
-            "install",
-            "./private-extension.ts",
-            "--api-version",
-            "0.3",
-        ])
-        .unwrap();
-        let Some(TopLevelCommand::Pi {
-            command:
-                PiCommand::Install {
-                    api_version: default_api_version,
-                    ..
-                },
-        }) = default.command
-        else {
-            panic!("expected default pi install command");
-        };
-        let Some(TopLevelCommand::Pi {
-            command:
-                PiCommand::Install {
-                    api_version: explicit_api_version,
-                    ..
-                },
-        }) = explicit.command
-        else {
-            panic!("expected explicit pi install command");
-        };
-        assert_eq!(default_api_version, PiBridgeApiVersion::V02);
-        assert_eq!(explicit_api_version, PiBridgeApiVersion::V03);
-    }
-
-    #[test]
-    fn pi_install_preserves_explicit_aggregate_source_order() {
-        let cli = Cli::try_parse_from([
-            "octet",
-            "pi",
-            "install",
-            "./first.ts",
-            "--with",
-            "./second.ts",
-            "--with",
-            "./third-package",
-        ])
-        .unwrap();
-        let Some(TopLevelCommand::Pi {
-            command:
-                PiCommand::Install {
-                    source,
-                    additional_sources,
-                    ..
-                },
-        }) = cli.command
-        else {
-            panic!("expected pi install command");
-        };
-        assert_eq!(source, PathBuf::from("./first.ts"));
-        assert_eq!(
-            additional_sources,
-            [
-                PathBuf::from("./second.ts"),
-                PathBuf::from("./third-package"),
-            ]
-        );
+        let cli = Cli::try_parse_from(["octet", "explain pi migration"]).unwrap();
+        assert_eq!(cli.message.as_deref(), Some("explain pi migration"));
     }
 
     #[test]
@@ -4142,8 +4052,28 @@ max_output_bytes = 4096
                 no_open: true,
                 port: 0,
                 web_root: Some(_),
+                name: None,
             })
         ));
+    }
+
+    #[test]
+    fn serve_command_accepts_a_startup_session_name() {
+        let cli = Cli::try_parse_from(["octet", "serve", "--name", "  release review  "]).unwrap();
+        match cli.command {
+            Some(TopLevelCommand::Serve {
+                no_open: false,
+                port: 31415,
+                web_root: None,
+                name: Some(name),
+            }) => assert_eq!(name, "  release review  "),
+            other => panic!("unexpected parse result {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_command_rejects_a_name_without_a_value() {
+        assert!(Cli::try_parse_from(["octet", "serve", "--name"]).is_err());
     }
 
     #[test]

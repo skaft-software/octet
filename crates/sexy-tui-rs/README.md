@@ -11,6 +11,8 @@ updates stable, and degrades to deterministic escape-free text.
 - Typed `Document` / `Block` / `Inline` rich text; raw ANSI is not the content model.
 - CommonMark + GFM Markdown: headings, emphasis, links, quotes, nested/task lists,
   fenced code, rules, tables, autolinks, and visible fallback text.
+- Pi-style inline/display math and bounded Mermaid flowchart/group layout, with
+  original-source fallback for incomplete, unsupported, or too-wide diagrams.
 - Stable-prefix, bounded-tail streaming Markdown with arbitrary UTF-8 byte chunks.
 - Optional `syntect` highlighting mapped to semantic theme roles.
 - Unified diffs with visible `+`/`-` prefixes and optional line numbers.
@@ -345,22 +347,21 @@ Rich components include `RichText`, `Markdown`, and
 structured cursor metadata to place a trusted hardware-cursor marker without
 inspecting source text.
 
-Interactive rendering defaults to a direct Rust port of Pi's retained-frame
-algorithm at the pinned revision. It writes the complete first frame, tracks
-Pi's logical/hardware cursor and viewport state, updates the exact first-to-last
+Interactive rendering uses a retained-frame algorithm. It writes the complete
+first frame, tracks logical/hardware cursor and viewport state, updates the exact first-to-last
 changed range, lets pure CRLF appends enter native scrollback, and clears saved
 lines plus replays the complete frame on width/height changes or changes above
-the old viewport. Every interactive frame uses Pi's CSI 2026 delimiters. The
-legacy embedded-Kitty compatibility path retains Pi's image row reservation,
+the old viewport. Every interactive frame uses CSI 2026 delimiters. The
+legacy embedded-Kitty compatibility path retains image row reservation,
 changed-range expansion, targeted deletion, and fallback replay behavior; new
 image callers should use the out-of-band `ImageRenderPlan` foundation above.
 `set_clear_on_shrink`,
 `set_show_hardware_cursor`, and `request_render_force` expose the corresponding
-Pi policies.
+rendering policies.
 
 `set_inline_scrollback(true)` retains the older octet-specific pinned-frame
-experiment as an explicit compatibility extension. It is not the Pi-equivalent
-core and octet's coding-agent frontend no longer enables it.
+experiment as an explicit compatibility extension. The coding-agent frontend
+does not enable it.
 
 Terminal event-loop ownership is intentionally backend-specific: construct a
 `Terminal`, feed input to `TUI::handle_input`, call `request_render` after state
@@ -386,12 +387,16 @@ explicit legacy inline extension.
 
 ## Scope and provenance
 
-The semantic rich renderer is a Rust-specific extension. Pi TUI remains the
-normative reference for shared core behavior, and complete editor, autocomplete,
-widget, and test parity has not been claimed. The pinned source, import history,
-and current port status are recorded in [`VENDORED.md`](VENDORED.md) and
-[`UPSTREAM-PARITY.md`](UPSTREAM-PARITY.md).
+The semantic rich renderer and octet integration are maintained in this
+workspace. Source attribution, license notices, and import history are recorded
+in [`VENDORED.md`](VENDORED.md).
 
 ## License
 
-MIT
+`MIT AND Apache-2.0`: the crate combines MIT-licensed code (including the Pi
+ports; see [`LICENSE`](LICENSE)) with Apache-2.0 Mermaid layout and label-cleanup
+adaptations from grok-build/grok-mermaid. This is not a choice of either license.
+The Apache copyright notices and license are retained alongside the adapted
+modules in `src/rich_text/mermaid/LICENSE-APACHE`.
+See [`VENDORED.md`](VENDORED.md) for provenance and
+[`docs/rich-rendering.md`](docs/rich-rendering.md#math-and-diagrams) for scope.

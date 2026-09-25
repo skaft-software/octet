@@ -125,6 +125,8 @@ pub enum StreamEvent {
 
     /// Tool call generation started.
     ToolCallStart {
+        /// Provider scheduling metadata, not tool-execution authority.
+        async_execution: bool,
         /// Canonical part index.
         index: usize,
         /// Tool call identifier.
@@ -169,6 +171,7 @@ pub type ResponseStream =
     std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<StreamEvent, AiError>> + Send>>;
 
 pub(crate) struct ToolCallBuilder {
+    pub(crate) async_execution: bool,
     pub(crate) id: ToolCallId,
     pub(crate) name: String,
     pub(crate) arguments_json: String,
@@ -212,15 +215,22 @@ pub(crate) struct ResponseBuilder {
     pub(crate) model: ModelId,
     pub(crate) protocol: Protocol,
     pub(crate) pricing: Option<Pricing>,
+    /// The exact tier carried by this physical Responses request.
+    pub(crate) requested_service_tier: Option<crate::types::ServiceTier>,
+    /// None until a codec settles pricing; Some(None) explicitly means unpriced.
+    pub(crate) response_cost: Option<Option<crate::pricing::Cost>>,
     /// The request's exact tool-definition snapshot. `None` is reserved for
     /// direct schema-less codec fixtures; production assembly sets `Some`, even
     /// when the request has no tools, so known response tools are validated
     /// against the exact snapshot while unknown names remain available for
     /// the agent's bounded unknown-tool recovery path.
     pub(crate) tool_definitions: Option<Vec<ToolDef>>,
+    pub(crate) strict_tool_sampling: bool,
     pub(crate) response_id: Option<String>,
     /// Authoritative terminal OpenAI Responses output, if supplied.
     pub(crate) responses_output: Option<crate::responses::ResponsesOutput>,
+    /// Deferred provider handle when the provider parked this turn.
+    pub(crate) deferred: Option<crate::deferred::DeferredHandle>,
     pub(crate) text_buffers: HashMap<usize, String>,
     pub(crate) reasoning_text_buffers: HashMap<usize, String>,
     pub(crate) reasoning_states: HashMap<usize, ReasoningState>,
@@ -244,6 +254,8 @@ pub(crate) struct ResponseBuilder {
     pub(crate) provider_event_count: usize,
     pub(crate) provider_to_canonical_indices: HashMap<String, usize>,
     pub(crate) temp_buffers: HashMap<String, String>,
+    /// Parsed cumulative Google arguments and their reserved serialized size.
+    pub(crate) google_function_args: HashMap<usize, (serde_json::Value, usize)>,
     /// Content buffered by a compatibility parser until it is known whether it
     /// is ordinary assistant text or a Qwen XML tool call. This is only used by
     /// the OpenAI Chat codec; keeping it in the shared builder avoids losing a
@@ -278,6 +290,12 @@ pub(crate) struct ResponseBuilder {
     /// `response_id` so a first chunk with an empty/absent provider id does
     /// not re-arm the start gate.
     pub(crate) started: bool,
+    /// Request translation policy for native codecs with non-canonical output.
+    pub(crate) compatibility: crate::types::CompatibilityMode,
+    /// Native Conversations terminal latch survives `finish_mut` replacement.
+    pub(crate) mistral_finished: bool,
+    /// Highest native entry index first observed, fencing reordered tool effects.
+    pub(crate) mistral_last_output_index: Option<u64>,
 }
 
 impl ResponseBuilder {
@@ -287,9 +305,13 @@ impl ResponseBuilder {
             model,
             protocol,
             pricing,
+            requested_service_tier: None,
+            response_cost: None,
             tool_definitions: None,
+            strict_tool_sampling: false,
             response_id: None,
             responses_output: None,
+            deferred: None,
             text_buffers: HashMap::with_capacity(4),
             reasoning_text_buffers: HashMap::with_capacity(2),
             reasoning_states: HashMap::with_capacity(2),
@@ -306,6 +328,7 @@ impl ResponseBuilder {
             provider_event_count: 0,
             provider_to_canonical_indices: HashMap::with_capacity(4),
             temp_buffers: HashMap::with_capacity(2),
+            google_function_args: HashMap::new(),
             qwen_xml_pending: String::new(),
             qwen_xml_state: OpenAiChatCompatibilityState::default(),
             buffer_ambiguous_compatibility_content: false,
@@ -316,6 +339,9 @@ impl ResponseBuilder {
             ended_indices: HashSet::with_capacity(4),
             next_canonical_index: 0,
             started: false,
+            compatibility: crate::types::CompatibilityMode::Strict,
+            mistral_finished: false,
+            mistral_last_output_index: None,
         }
     }
 
@@ -372,7 +398,11 @@ impl ResponseBuilder {
         self.buffered_content_bytes = self.buffered_content_bytes.saturating_sub(bytes);
     }
 
-    fn resize_buffered_content(&mut self, old: usize, new: usize) -> Result<(), AiError> {
+    pub(crate) fn resize_buffered_content(
+        &mut self,
+        old: usize,
+        new: usize,
+    ) -> Result<(), AiError> {
         let without_old = self
             .buffered_content_bytes
             .checked_sub(old)
@@ -499,12 +529,31 @@ impl ResponseBuilder {
                     buf.push_str(delta);
                 }
             }
-            StreamEvent::ToolCallStart { index, id, name } => {
+            StreamEvent::ToolCallStart {
+                index,
+                id,
+                name,
+                async_execution,
+            } => {
+                if *async_execution
+                    && (self.protocol != Protocol::OpenAiResponses
+                        || !self.tool_definitions.as_ref().is_some_and(|tools| {
+                            tools
+                                .iter()
+                                .any(|tool| tool.async_execution && tool.name == *name)
+                        }))
+                {
+                    return Err(DecodeError::InvalidProviderField(
+                        "async call is not advertised by the request".into(),
+                    )
+                    .into());
+                }
                 self.observe_index(*index)?;
                 self.add_content_bytes(id.0.len().saturating_add(name.len()))?;
                 self.tool_call_builders.insert(
                     *index,
                     ToolCallBuilder {
+                        async_execution: *async_execution,
                         id: id.clone(),
                         name: name.clone(),
                         arguments_json: String::new(),
@@ -559,6 +608,11 @@ impl ResponseBuilder {
         self.stop_reason = Some(reason);
     }
 
+    /// Sets the deferred handle describing a [`StopReason::Deferred`] terminal.
+    pub(crate) fn set_deferred(&mut self, deferred: crate::deferred::DeferredHandle) {
+        self.deferred = Some(deferred);
+    }
+
     /// Replaces retained reasoning continuation state within the response budget.
     /// A rejected replacement leaves both the prior state and accounting intact.
     pub(crate) fn set_reasoning_state(
@@ -600,14 +654,49 @@ impl ResponseBuilder {
         Ok(())
     }
 
+    /// Atomically replace a provider's argument preview within both limits.
+    pub(crate) fn replace_tool_arguments(
+        &mut self,
+        index: usize,
+        arguments: String,
+    ) -> Result<(), AiError> {
+        if arguments.len() > MAX_TOOL_ARGUMENT_BYTES {
+            return Err(AiError::Decode(DecodeError::ResponseTooLarge));
+        }
+        let old = self.tool_call_builders[&index].arguments_json.len();
+        let aggregate = (self.aggregate_content_bytes - old)
+            .checked_add(arguments.len())
+            .ok_or(AiError::Decode(DecodeError::ResponseTooLarge))?;
+        aggregate
+            .checked_add(self.buffered_content_bytes)
+            .filter(|total| *total <= MAX_RESPONSE_CONTENT_BYTES)
+            .ok_or(AiError::Decode(DecodeError::ResponseTooLarge))?;
+        self.aggregate_content_bytes = aggregate;
+        let call = self
+            .tool_call_builders
+            .get_mut(&index)
+            .expect("open tool call");
+        call.arguments_json = arguments;
+        call.arguments_normalized = false;
+        Ok(())
+    }
+
     fn apply_normalized_tool_arguments(
         builder: &mut ToolCallBuilder,
-        arguments_json: String,
+        mut arguments_json: String,
         tool_definitions: Option<&[ToolDef]>,
+        strict_tool_sampling: bool,
     ) -> Result<(), AiError> {
         let argument_error = if let Some(definitions) = tool_definitions {
-            let arguments = serde_json::from_str(&arguments_json)
+            let mut arguments = serde_json::from_str(&arguments_json)
                 .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+            crate::constrained_sampling::normalize_tool_arguments(
+                &builder.name,
+                &mut arguments,
+                definitions,
+                strict_tool_sampling,
+            )?;
+            arguments_json = arguments.to_string();
             match crate::json_repair::validate_tool_arguments(
                 &builder.name,
                 &arguments,
@@ -654,7 +743,12 @@ impl ResponseBuilder {
                 Err(_) => return Ok(()),
             }
         };
-        Self::apply_normalized_tool_arguments(builder, arguments_json, tool_definitions)
+        Self::apply_normalized_tool_arguments(
+            builder,
+            arguments_json,
+            tool_definitions,
+            self.strict_tool_sampling,
+        )
     }
 
     /// Returns the schema-mismatch marker computed for an explicitly completed
@@ -731,7 +825,12 @@ impl ResponseBuilder {
                     }
                     Err(error) => return Err(AiError::Decode(error)),
                 };
-                Self::apply_normalized_tool_arguments(builder, arguments_json, tool_definitions)?;
+                Self::apply_normalized_tool_arguments(
+                    builder,
+                    arguments_json,
+                    tool_definitions,
+                    self.strict_tool_sampling,
+                )?;
             }
         }
         if discarded_truncated_arguments {
@@ -783,6 +882,7 @@ impl ResponseBuilder {
                 }));
             } else if let Some(builder) = self.tool_call_builders.remove(&index) {
                 content.push(AssistantPart::ToolCall(ToolCall {
+                    async_execution: builder.async_execution,
                     id: builder.id,
                     name: builder.name,
                     arguments_json: builder.arguments_json,
@@ -800,11 +900,14 @@ impl ResponseBuilder {
         };
 
         let usage = self.usage.unwrap_or_default();
-        let cost = self
-            .pricing
-            .as_ref()
-            .map(|p| crate::pricing::cost_of(p, &usage).map_err(AiError::Pricing))
-            .transpose()?;
+        let cost = match self.response_cost {
+            Some(cost) => cost,
+            None => self
+                .pricing
+                .as_ref()
+                .map(|p| crate::pricing::cost_of(p, &usage).map_err(AiError::Pricing))
+                .transpose()?,
+        };
 
         Ok(Response {
             message,
@@ -813,6 +916,7 @@ impl ResponseBuilder {
             cost,
             response_id: self.response_id,
             responses_output: self.responses_output,
+            deferred: self.deferred,
             diagnostics: self.diagnostics,
         })
     }
@@ -879,6 +983,15 @@ impl CanonicalStreamAssembler {
     pub fn observe_transport_event(&mut self) -> Result<(), AiError> {
         self.ensure_open()?;
         self.builder.observe_provider_stream_event()
+    }
+
+    /// Sets the deferred handle for a provider-parked response.
+    ///
+    /// Callers pair this with [`Self::finish`] and [`StopReason::Deferred`]: the
+    /// handle is transport data and never becomes assistant content. The
+    /// host/kernel layer owns the durable suspension decision.
+    pub fn set_deferred(&mut self, deferred: crate::deferred::DeferredHandle) {
+        self.builder.set_deferred(deferred);
     }
 
     /// Validates and records a canonical event.
@@ -1423,6 +1536,7 @@ mod tests {
 
         builder
             .on_event(&StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call_1".to_string()),
                 name: "grep".to_string(),
@@ -1445,8 +1559,103 @@ mod tests {
     }
 
     #[test]
+    fn strict_optional_nulls_are_omitted_in_streamed_and_completed_calls() {
+        let definition = ToolDef {
+            async_execution: false,
+            name: "lookup".into(),
+            description: String::new(),
+            constrained_sampling: Some(crate::types::ConstrainedSampling::JsonSchema {
+                strict: crate::types::ConstrainedSamplingStrict::Require,
+            }),
+            parameters: serde_json::json!({"type":"object", "properties":{
+                "city":{"type":"string"}, "note":{"type":"string"},
+                "nullable":{"type":["string","null"]},
+                "rows":{"type":"array", "items":{"type":"object", "properties":{"optional":{"type":"integer"}}}},
+                "variant":{"anyOf":[{"type":"string"},{"type":"null"}]}
+            }, "required":["city"]}),
+        };
+        for explicit_end in [false, true] {
+            for strict in [false, true] {
+                let mut builder =
+                    ResponseBuilder::new(ModelId("test".into()), Protocol::OpenAiChat, None);
+                builder
+                    .set_tool_definitions(std::slice::from_ref(&definition))
+                    .unwrap();
+                builder.strict_tool_sampling = strict;
+                builder
+                    .on_event(&StreamEvent::ToolCallStart {
+                        index: 0,
+                        id: ToolCallId("call".into()),
+                        name: "lookup".into(),
+                        async_execution: false,
+                    })
+                    .unwrap();
+                builder.on_event(&StreamEvent::ToolCallArgsDelta { index:0,
+                    delta: serde_json::json!({"city":"Paris","note":null,"nullable":null,"rows":[{"optional":null}],"variant":null}).to_string() }).unwrap();
+                if explicit_end {
+                    builder
+                        .on_event(&StreamEvent::ToolCallEnd {
+                            index: 0,
+                            argument_error: None,
+                        })
+                        .unwrap();
+                }
+                builder.set_stop_reason(StopReason::ToolUse);
+                let response = builder.finish().unwrap();
+                let AssistantPart::ToolCall(call) = &response.message.content[0] else {
+                    panic!("tool call");
+                };
+                if strict {
+                    assert!(call.argument_error.is_none());
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&call.arguments_json).unwrap(),
+                        serde_json::json!({"city":"Paris","nullable":null,"rows":[{}],"variant":null})
+                    );
+                } else {
+                    assert_eq!(
+                        call.argument_error,
+                        Some(ToolCallArgumentError::SchemaMismatch)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_tool_arguments_reclaims_preview_budget_and_fails_atomically() {
+        let mut builder = ResponseBuilder::new(ModelId("test".into()), Protocol::PiMessages, None);
+        builder
+            .on_event(&StreamEvent::ToolCallStart {
+                index: 0,
+                id: ToolCallId("id".into()),
+                name: "t".into(),
+                async_execution: false,
+            })
+            .unwrap();
+        builder
+            .on_event(&StreamEvent::ToolCallArgsDelta {
+                index: 0,
+                delta: "1234".into(),
+            })
+            .unwrap();
+        builder
+            .reserve_buffered_content(MAX_RESPONSE_CONTENT_BYTES - builder.aggregate_content_bytes)
+            .unwrap();
+        assert!(builder.replace_tool_arguments(0, "12345".into()).is_err());
+        assert_eq!(builder.tool_call_builders[&0].arguments_json, "1234");
+        builder.replace_tool_arguments(0, "{}".into()).unwrap();
+        builder.replace_tool_arguments(0, "1234".into()).unwrap();
+        assert!(builder
+            .replace_tool_arguments(0, "x".repeat(MAX_TOOL_ARGUMENT_BYTES + 1))
+            .is_err());
+        assert_eq!(builder.tool_call_builders[&0].arguments_json, "1234");
+    }
+
+    #[test]
     fn schema_mismatch_marks_the_completed_event_and_retains_normalized_call() {
         let definitions = [ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "strict".to_owned(),
             description: String::new(),
             parameters: serde_json::json!({
@@ -1467,6 +1676,7 @@ mod tests {
             &mut events,
             &mut builder,
             StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call-canonical".to_owned()),
                 name: "strict".to_owned(),
@@ -1524,6 +1734,7 @@ mod tests {
         );
         builder
             .on_event(&StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call_truncated".to_string()),
                 name: "write".to_string(),
@@ -1567,6 +1778,7 @@ mod tests {
         builder.observe_provider_stream_event().unwrap();
         builder
             .on_event(&StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call_bad".to_string()),
                 name: "write".to_string(),
@@ -1595,6 +1807,7 @@ mod tests {
 
         builder
             .on_event(&StreamEvent::ToolCallStart {
+                async_execution: false,
                 index: 0,
                 id: ToolCallId("call_1".to_string()),
                 name: "grep".to_string(),
@@ -1759,6 +1972,7 @@ mod tests {
                 cost: None,
                 response_id: None,
                 responses_output: None,
+                deferred: None,
                 diagnostics: vec![],
             })),
             Ok(StreamEvent::TextStart { index: 0 }),

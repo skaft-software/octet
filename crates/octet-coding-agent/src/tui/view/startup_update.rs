@@ -318,7 +318,11 @@ splash_box = "#d97757"
                         height,
                         Instant::now(),
                     );
-                    assert!(rows.len() <= height);
+                    assert!(
+                        rows.len() <= height,
+                        "{width}x{height}: {} rows",
+                        rows.len()
+                    );
                     assert!(rows
                         .iter()
                         .all(|row| visible_width(row) <= usize::from(width)));

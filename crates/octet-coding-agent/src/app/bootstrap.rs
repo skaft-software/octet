@@ -24,15 +24,21 @@ use octet_ai::{
 use sha2::{Digest as _, Sha256};
 
 use crate::app::{
-    level_from_reasoning, model_supports_ultra, normalize_reasoning_for_model,
-    normalize_reasoning_selection_for_model_with_subagents, thinking_to_reasoning, App,
+    default_reasoning_for_model, level_from_reasoning, model_supports_ultra,
+    normalize_reasoning_for_model, normalize_reasoning_selection_for_model_with_subagents,
+    thinking_to_reasoning, App,
+};
+use crate::codex_context::{
+    resolve_codex_context_window, CodexContextOverride, CodexContextTier,
+    CODEX_ASTRA_MAX_CONTEXT_WINDOW, CODEX_CONTEXT_ACKNOWLEDGE_ENV, CODEX_CONTEXT_OVERRIDE_ENV,
+    CODEX_MAX_OUTPUT_TOKENS,
 };
 use crate::config::{CompactionMode, Config, ResumeSelector};
 use crate::extensions::{
     provider_preflight_config, ExecutableExtensions, ExtensionProviderRuntime,
     SUBAGENTS_EXTENSION_NAME,
 };
-use crate::modes::interactive::run_blocking_lifecycle;
+use crate::modes::interactive::run_blocking_startup_lifecycle;
 use crate::prompts::PromptRegistry;
 use crate::providers::{
     ModelDiscovery, ModelFilter, ProviderAuthentication, ProviderDeclaration, ProviderRoute,
@@ -59,9 +65,86 @@ pub struct Bootstrap {
     /// Interactive startup can remain useful as a read-only session viewer
     /// when no configured model exists.
     modeless: std::cell::Cell<bool>,
+    /// The one Codex context note each catalog model needs, recorded while the
+    /// catalog was built. Catalog enumeration never prints; only the effective
+    /// session model's note is ever shown.
+    codex_context_notes: CodexContextNotes,
+    /// Which provider inventories readiness initialized for this launch.
+    ///
+    /// Kept so [`Bootstrap::enrich_catalog`] can complete exactly what the plan
+    /// deferred, without re-running the fleet initialization a second time.
+    readiness: CatalogReadiness,
+}
+
+/// The single user-facing Codex context note for every catalog model that needs
+/// one, recorded during catalog construction.
+///
+/// Recording is not printing, and startup no longer prints either: a frontend
+/// pulls the note with [`CodexContextNotes::note_for`] when the user can
+/// act on it (the first assistant turn, or an on-demand status/context surface),
+/// and the latch here makes it a once-per-session note even if a later pull
+/// repeats the lookup. See [`crate::codex_context::codex_context_session_note`]
+/// for the wording contract.
+#[derive(Clone, Debug, Default)]
+pub struct CodexContextNotes {
+    notes: std::collections::HashMap<ModelId, String>,
+    /// Set by the first delivery, so the note can never be shown twice in one
+    /// session (and never for a second, different model).
+    delivered: std::cell::Cell<bool>,
+}
+
+impl CodexContextNotes {
+    fn record(&mut self, model: ModelId, note: String) {
+        self.notes.insert(model, note);
+    }
+
+    /// The note for one model, if its window needs one. A non-Codex model has no
+    /// note, so a non-Codex session prints nothing.
+    ///
+    /// This is the non-consuming peek: it neither delivers nor latches.
+    pub fn note_for(&self, model: &ModelId) -> Option<&str> {
+        self.notes.get(model).map(String::as_str)
+    }
+
+    /// Take the note for `model`, at most once per session.
+    ///
+    /// Returns `None` when this model needs no note (a non-Codex route) or when
+    /// a note was already delivered for this session, so a lazy surface can be
+    /// re-entered freely without ever repeating the note.
+    #[cfg(test)]
+    pub fn take_for(&self, model: &ModelId) -> Option<String> {
+        let note = self.notes.get(model)?;
+        if self.delivered.replace(true) {
+            return None;
+        }
+        Some(note.clone())
+    }
+
+    /// Merge notes recorded by a later catalog build (catalog enrichment).
+    ///
+    /// Only missing entries are added: a note already delivered or already
+    /// recorded for this session is never replaced, so enrichment cannot unset
+    /// or rewrite the one note the session owes. The delivery latch is not
+    /// touched.
+    pub fn merge(&mut self, other: Self) {
+        for (model, note) in other.notes {
+            self.notes.entry(model).or_insert(note);
+        }
+    }
 }
 
 impl Bootstrap {
+    /// The single Codex context note for the effective session model, if any.
+    ///
+    /// This is a read-only peek for tests and diagnostics; frontends deliver the
+    /// note with [`CodexContextNotes::note_for`]. It returns nothing for a
+    /// non-Codex model, so a session on another provider prints no Codex note at
+    /// all. See [`crate::codex_context::codex_context_session_note`] for the
+    /// wording contract.
+    pub fn codex_context_note(&self, model: &ModelId) -> Option<&str> {
+        self.codex_context_notes.note_for(model)
+    }
+
     /// Starts only provider-capable API 0.3 extensions when their declarations
     /// are required to resolve an otherwise unknown initial model.
     ///
@@ -83,11 +166,16 @@ impl Bootstrap {
         let session = Session::create(temporary.path().join("provider-bootstrap.jsonl"))
             .context("could not create temporary extension-provider bootstrap session")?;
         let model = extension_provider_bootstrap_model(&self.catalog);
+        let reasoning = self
+            .config
+            .reasoning
+            .clone()
+            .unwrap_or_else(|| default_reasoning_for_model(&model));
         let (host, mut extensions) = configured_extensions_with_runtime_manager(
             &config,
             &session,
             &model,
-            &self.config.reasoning,
+            &reasoning,
             &self.sessions,
             None,
             self.provider_runtime.clone(),
@@ -97,6 +185,7 @@ impl Bootstrap {
         let mut catalog = self.catalog.clone();
         extensions.synchronize_provider_catalog(&mut catalog, &self.client);
         *self.prestarted_extensions.borrow_mut() = Some((host, extensions));
+        startup_phase("extensions.provider-preflight");
         Ok(())
     }
 
@@ -154,6 +243,7 @@ fn extension_provider_bootstrap_model(catalog: &ModelCatalog) -> Model {
     });
     Model {
         spec: Arc::new(ModelSpec {
+            preset: Default::default(),
             id: ModelId("extension-provider-bootstrap".to_owned()),
             endpoint: endpoint.id.clone(),
             api_name: "extension-provider-bootstrap".to_owned(),
@@ -169,6 +259,7 @@ fn extension_provider_bootstrap_model(catalog: &ModelCatalog) -> Model {
                 agent_delegation: None,
                 structured_output: false,
                 deferred_tool_loading: false,
+                responses_features: Default::default(),
             },
             limits: ModelLimits {
                 context_window: 128_000,
@@ -279,7 +370,8 @@ const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 // discovery. Version 7 invalidates inventories created before the built-in
 // Apple Foundation Models metadata was applied to sparse model responses.
 // Version 8 gives PCC its distinct 32,768-token context window.
-const CUSTOM_MODEL_CACHE_VERSION: u8 = 8;
+// Version 9 decodes endpoint-owned v1 self-descriptions instead of sparse defaults.
+const CUSTOM_MODEL_CACHE_VERSION: u8 = 9;
 const PROVIDER_INVENTORY_CACHE_VERSION: u8 = 1;
 const MAX_PROVIDER_INVENTORY_CACHE_BYTES: usize = MAX_DISCOVERY_BODY_BYTES + 1024 * 1024;
 const PROVIDER_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -378,6 +470,22 @@ struct ProviderInventoryCache {
     inventory_url: String,
     credential_fingerprint: String,
     body: Option<serde_json::Value>,
+    /// An opaque HTTP validator; preserve quotes and weak-validator prefixes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    etag: Option<String>,
+    /// Unix milliseconds of the last successful 200/304 catalog check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checked_at: Option<u64>,
+}
+
+enum ProviderInventoryResponse {
+    Modified {
+        body: serde_json::Value,
+        etag: Option<String>,
+    },
+    NotModified {
+        etag: Option<String>,
+    },
 }
 
 enum CachedProviderInventory {
@@ -475,6 +583,21 @@ fn load_provider_inventory_cache(
     inventory_url: &str,
     credential_fingerprint: &str,
 ) -> anyhow::Result<Option<CachedProviderInventory>> {
+    Ok(
+        load_provider_inventory_record(path, provider_id, inventory_url, credential_fingerprint)?
+            .map(|cache| match cache.body {
+                Some(body) => CachedProviderInventory::Available(body),
+                None => CachedProviderInventory::Unavailable,
+            }),
+    )
+}
+
+fn load_provider_inventory_record(
+    path: &std::path::Path,
+    provider_id: &str,
+    inventory_url: &str,
+    credential_fingerprint: &str,
+) -> anyhow::Result<Option<ProviderInventoryCache>> {
     let Some(bytes) = crate::auth::read_bounded_private(path, MAX_PROVIDER_INVENTORY_CACHE_BYTES)?
     else {
         return Ok(None);
@@ -488,12 +611,17 @@ fn load_provider_inventory_cache(
     {
         return Ok(None);
     }
-    Ok(Some(match cache.body {
-        Some(body) => CachedProviderInventory::Available(body),
-        None => CachedProviderInventory::Unavailable,
-    }))
+    Ok(Some(cache))
 }
 
+fn inventory_checked_at() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[cfg(test)]
 fn save_provider_inventory_cache(
     path: &std::path::Path,
     provider_id: &str,
@@ -507,6 +635,8 @@ fn save_provider_inventory_cache(
         inventory_url: inventory_url.to_owned(),
         credential_fingerprint: credential_fingerprint.to_owned(),
         body: body.cloned(),
+        etag: None,
+        checked_at: body.map(|_| inventory_checked_at()),
     };
     crate::auth::write_private_atomic(path, &serde_json::to_vec(&cache)?, ".provider-models-")
 }
@@ -527,11 +657,40 @@ fn provider_inventory_cache_is_stale(path: &std::path::Path) -> bool {
         })
 }
 
+fn inventory_etag(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 4096
+                && value.is_ascii()
+                && http::HeaderValue::from_str(value).is_ok()
+        })
+        .map(str::to_owned)
+}
+
 fn fetch_provider_inventory(
     inventory_url: String,
     headers: http::HeaderMap,
-) -> anyhow::Result<serde_json::Value> {
-    get_models_json_blocking(&inventory_url, headers)
+) -> anyhow::Result<ProviderInventoryResponse> {
+    let response = blocking_discovery_client(DISCOVERY_TIMEOUT)?
+        .get(inventory_url)
+        .headers(headers)
+        .send()
+        .map_err(|_| anyhow::anyhow!("model discovery request failed"))?;
+    let etag = inventory_etag(
+        response
+            .headers()
+            .get(http::header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+    );
+    match response.status() {
+        http::StatusCode::NOT_MODIFIED => Ok(ProviderInventoryResponse::NotModified { etag }),
+        http::StatusCode::OK => Ok(ProviderInventoryResponse::Modified {
+            body: bounded_discovery_json(response, "model discovery")?,
+            etag,
+        }),
+        _ => anyhow::bail!("model discovery request was rejected"),
+    }
 }
 
 fn schedule_provider_inventory_refresh(
@@ -548,19 +707,18 @@ fn schedule_provider_inventory_refresh(
     let _ = std::thread::Builder::new()
         .name(format!("octet-{provider_id}-catalog-refresh"))
         .spawn(move || {
-            if let Ok(body) = get_models_json_blocking(&inventory_url, headers) {
-                let _ = save_provider_inventory_cache(
-                    &path,
-                    provider_id,
-                    &inventory_url,
-                    &credential_fingerprint,
-                    Some(&body),
-                );
-            }
+            let _ = refresh_provider_inventory_with(
+                &path,
+                provider_id,
+                inventory_url,
+                headers,
+                &credential_fingerprint,
+                fetch_provider_inventory,
+            );
         });
 }
 
-fn fetch_and_cache_provider_inventory_with<F>(
+fn refresh_provider_inventory_with<F>(
     path: &std::path::Path,
     provider_id: &'static str,
     inventory_url: String,
@@ -569,23 +727,61 @@ fn fetch_and_cache_provider_inventory_with<F>(
     fetch: F,
 ) -> anyhow::Result<serde_json::Value>
 where
-    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value>,
+    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<ProviderInventoryResponse>,
 {
-    match fetch(inventory_url.clone(), headers) {
-        Ok(body) => {
-            if let Err(error) = save_provider_inventory_cache(
-                path,
-                provider_id,
-                &inventory_url,
-                credential_fingerprint,
-                Some(&body),
-            ) {
-                crate::output::stderr!(
-                    "warning: could not persist {provider_id} model metadata: {error}"
-                );
+    // Validators are scoped to the same provider, URL and credential as the body.
+    // A corrupt/foreign cache must never send its validator to another endpoint.
+    let cached =
+        load_provider_inventory_record(path, provider_id, &inventory_url, credential_fingerprint)
+            .ok()
+            .flatten();
+    let validator = cached
+        .as_ref()
+        .filter(|cache| cache.body.is_some())
+        .and_then(|cache| inventory_etag(cache.etag.as_deref()));
+    let mut headers = headers;
+    headers.remove(http::header::IF_NONE_MATCH);
+    if let Some(etag) = &validator {
+        headers.insert(
+            http::header::IF_NONE_MATCH,
+            http::HeaderValue::from_str(etag)?,
+        );
+    }
+    let fetched = fetch(inventory_url.clone(), headers).and_then(|response| {
+        let (body, etag) = match response {
+            ProviderInventoryResponse::Modified { body, etag } => {
+                (body, inventory_etag(etag.as_deref()))
             }
-            Ok(body)
-        }
+            ProviderInventoryResponse::NotModified { etag } => {
+                let Some(cache) = cached.filter(|_| validator.is_some()) else {
+                    anyhow::bail!("model discovery returned 304 without a scoped validator");
+                };
+                let body = cache.body.expect("validator requires a cached body");
+                (body, inventory_etag(etag.as_deref()).or(validator))
+            }
+        };
+        let cache = ProviderInventoryCache {
+            version: PROVIDER_INVENTORY_CACHE_VERSION,
+            provider_id: provider_id.to_owned(),
+            inventory_url: inventory_url.clone(),
+            credential_fingerprint: credential_fingerprint.to_owned(),
+            body: Some(body.clone()),
+            etag,
+            checked_at: Some(inventory_checked_at()),
+        };
+        let _ = bootstrap_check(
+            format!("inventory-write:{provider_id}"),
+            crate::auth::write_private_atomic(
+                path,
+                &serde_json::to_vec(&cache)?,
+                ".provider-models-",
+            ),
+            |error| format!("warning: could not persist {provider_id} model metadata: {error}"),
+        );
+        Ok(body)
+    });
+    match fetched {
+        Ok(body) => Ok(body),
         // Never replace a last-good inventory with failure state. A concurrent
         // refresh may have installed one while this request was in flight, so
         // re-read once and use it before surfacing the transient error. Legacy
@@ -609,7 +805,7 @@ fn cached_provider_inventory(
     credential: &str,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let path = provider_inventory_cache_path(provider_id);
-    cached_provider_inventory_with_fetch(
+    cached_provider_inventory_with_response_fetch(
         path,
         provider_id,
         inventory_url,
@@ -619,7 +815,7 @@ fn cached_provider_inventory(
     )
 }
 
-fn cached_provider_inventory_with_fetch<F>(
+fn cached_provider_inventory_with_response_fetch<F>(
     path: PathBuf,
     provider_id: &'static str,
     inventory_url: String,
@@ -628,10 +824,14 @@ fn cached_provider_inventory_with_fetch<F>(
     fetch: F,
 ) -> anyhow::Result<Option<serde_json::Value>>
 where
-    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value>,
+    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<ProviderInventoryResponse>,
 {
     let fingerprint = credential_fingerprint(credential);
-    match load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint) {
+    match bootstrap_check(
+        format!("inventory-cache:{provider_id}"),
+        load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint),
+        |error| format!("warning: {provider_id} model cache unavailable: {error}"),
+    ) {
         Ok(Some(CachedProviderInventory::Available(body))) => {
             schedule_provider_inventory_refresh(
                 path,
@@ -648,7 +848,7 @@ where
             // Retry in the foreground so a recovered endpoint becomes usable
             // in this launch, rather than refreshing a file that only a later
             // process could observe.
-            fetch_and_cache_provider_inventory_with(
+            refresh_provider_inventory_with(
                 &path,
                 provider_id,
                 inventory_url,
@@ -658,7 +858,7 @@ where
             )
             .map(Some)
         }
-        Ok(None) => fetch_and_cache_provider_inventory_with(
+        Ok(None) => refresh_provider_inventory_with(
             &path,
             provider_id,
             inventory_url,
@@ -668,8 +868,8 @@ where
         )
         .map(Some),
         Err(cache_error) => {
-            crate::output::stderr!("warning: {provider_id} model cache unavailable: {cache_error}");
-            fetch_and_cache_provider_inventory_with(
+            let _ = cache_error;
+            refresh_provider_inventory_with(
                 &path,
                 provider_id,
                 inventory_url,
@@ -680,6 +880,54 @@ where
             .map(Some)
         }
     }
+}
+
+#[cfg(test)]
+fn fetch_and_cache_provider_inventory_with<F>(
+    path: &std::path::Path,
+    provider_id: &'static str,
+    inventory_url: String,
+    headers: http::HeaderMap,
+    fingerprint: &str,
+    fetch: F,
+) -> anyhow::Result<serde_json::Value>
+where
+    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value>,
+{
+    refresh_provider_inventory_with(
+        path,
+        provider_id,
+        inventory_url,
+        headers,
+        fingerprint,
+        |url, headers| {
+            fetch(url, headers).map(|body| ProviderInventoryResponse::Modified { body, etag: None })
+        },
+    )
+}
+
+#[cfg(test)]
+fn cached_provider_inventory_with_fetch<F>(
+    path: PathBuf,
+    provider_id: &'static str,
+    inventory_url: String,
+    headers: http::HeaderMap,
+    credential: &str,
+    fetch: F,
+) -> anyhow::Result<Option<serde_json::Value>>
+where
+    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<serde_json::Value>,
+{
+    cached_provider_inventory_with_response_fetch(
+        path,
+        provider_id,
+        inventory_url,
+        headers,
+        credential,
+        |url, headers| {
+            fetch(url, headers).map(|body| ProviderInventoryResponse::Modified { body, etag: None })
+        },
+    )
 }
 
 fn cached_provider_inventory_offline(
@@ -702,11 +950,15 @@ fn cached_provider_inventory_offline_at(
     credential: &str,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let fingerprint = credential_fingerprint(credential);
-    match load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint) {
+    match bootstrap_check(
+        format!("inventory-cache:{provider_id}"),
+        load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint),
+        |error| format!("warning: {provider_id} model cache unavailable: {error}"),
+    ) {
         Ok(Some(CachedProviderInventory::Available(body))) => Ok(Some(body)),
         Ok(Some(CachedProviderInventory::Unavailable)) | Ok(None) => Ok(None),
         Err(error) => {
-            crate::output::stderr!("warning: {provider_id} model cache unavailable: {error}");
+            let _ = error;
             Ok(None)
         }
     }
@@ -724,7 +976,11 @@ fn cached_provider_inventory_or_schedule(
 ) -> Option<serde_json::Value> {
     let path = provider_inventory_cache_path(provider_id);
     let fingerprint = credential_fingerprint(credential);
-    match load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint) {
+    match bootstrap_check(
+        format!("inventory-cache:{provider_id}"),
+        load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint),
+        |error| format!("warning: {provider_id} model cache unavailable: {error}"),
+    ) {
         Ok(Some(CachedProviderInventory::Available(body))) => {
             schedule_provider_inventory_refresh(
                 path,
@@ -759,7 +1015,7 @@ fn cached_provider_inventory_or_schedule(
             None
         }
         Err(error) => {
-            crate::output::stderr!("warning: {provider_id} model cache unavailable: {error}");
+            let _ = error;
             schedule_provider_inventory_refresh(
                 path,
                 provider_id,
@@ -1119,14 +1375,6 @@ fn has_metadata_assertion(entry: &serde_json::Value, names: &[&str]) -> bool {
     })
 }
 
-const CONTEXT_FIELDS: &[&str] = &[
-    "context_window",
-    "context_length",
-    "max_model_len",
-    "max_context_tokens",
-    "limit/context",
-];
-const OUTPUT_FIELDS: &[&str] = &["max_output_tokens", "max_completion_tokens", "limit/output"];
 const MODALITY_FIELDS: &[&str] = &[
     "architecture",
     "input_modalities",
@@ -1142,6 +1390,17 @@ const TOOL_FIELDS: &[&str] = &[
     "function_calling",
     "supported_parameters",
 ];
+/// Fields an endpoint may publish instead of, or in addition to, `limit`.
+const LIMIT_FIELDS: &[&str] = &[
+    "limit",
+    "top_provider",
+    "context_window",
+    "context_length",
+    "max_model_len",
+    "max_context_tokens",
+    "max_output_tokens",
+    "max_completion_tokens",
+];
 const REASONING_FIELDS: &[&str] = &[
     "reasoning",
     "supports_reasoning",
@@ -1154,28 +1413,82 @@ const REASONING_FIELDS: &[&str] = &[
     "interleaved",
 ];
 
-fn enriched_builtin_entry(
+/// One documented limit from the pinned provider record, if it publishes one.
+fn pinned_limit(snapshot: Option<&serde_json::Value>, field: &str) -> Option<u64> {
+    snapshot
+        .and_then(|snapshot| snapshot.get("limit"))
+        .and_then(|limit| positive_u64(limit, &[field]))
+}
+
+/// `builtin_display_entry` itself stays name-only. Its caller additionally uses
+/// the pinned record for input modalities and, when the endpoint asserts none,
+/// documented limits: a sparse inventory that says nothing must not silently
+/// downgrade a 1M-token model to a generic placeholder. Operational limits,
+/// capability flags and reasoning controls declared by the endpoint (or by a
+/// declaration-owned standardized surface) always take precedence, and a model
+/// absent from the pinned record gains nothing.
+fn builtin_display_entry(
     entry: &serde_json::Value,
     snapshot: &serde_json::Value,
 ) -> serde_json::Value {
     let mut result = entry.clone();
-    for (aliases, target, value) in [
+    if !has_metadata_assertion(entry, &["display_name", "name"]) {
+        if let Some(name) = snapshot.get("name") {
+            result["display_name"] = name.clone();
+        }
+    }
+    result
+}
+
+/// Normalize only a declaration returned by the selected endpoint. Legacy
+/// assertions (including null/false/malformed) retain precedence per leaf; the
+/// pinned display/pricing supplement never enters this authority boundary.
+fn self_described_entry(
+    entry: &serde_json::Value,
+    endpoint: EndpointId,
+    api_name: &str,
+    protocol: Protocol,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    use octet_ai::discovery::{DiscoverySource, ModelSelfDescription};
+    let Some(description) = ModelSelfDescription::from_entry(
+        entry,
+        DiscoverySource {
+            endpoint,
+            api_name: api_name.to_owned(),
+            protocol,
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+    let capabilities = description.capabilities();
+    let mut result = entry.clone();
+    for (names, key, value) in [
         (
-            &["display_name", "name"][..],
-            "display_name",
-            snapshot.get("name"),
-        ),
-        (
-            CONTEXT_FIELDS,
+            &[
+                "context_window",
+                "context_length",
+                "max_model_len",
+                "max_context_tokens",
+                "limit/context",
+                "meta/n_ctx",
+                "meta/n_ctx_train",
+                "status",
+            ][..],
             "context_window",
-            snapshot.pointer("/limit/context"),
+            serde_json::json!(description.limits().context_window),
         ),
         (
-            OUTPUT_FIELDS,
+            &["max_output_tokens", "max_completion_tokens", "limit/output"][..],
             "max_output_tokens",
-            snapshot.pointer("/limit/output"),
+            serde_json::json!(description.limits().max_output_tokens),
         ),
-        (TOOL_FIELDS, "tools", snapshot.get("tool_call")),
+        (TOOL_FIELDS, "tools", serde_json::json!(capabilities.tools)),
+        (
+            &["parallel_tool_calls", "supported_parameters"][..],
+            "parallel_tool_calls",
+            serde_json::json!(capabilities.parallel_tool_calls),
+        ),
         (
             &[
                 "structured_output",
@@ -1183,21 +1496,36 @@ fn enriched_builtin_entry(
                 "supported_parameters",
             ][..],
             "structured_output",
-            snapshot.get("structured_output"),
-        ),
-        (
-            MODALITY_FIELDS,
-            "input_modalities",
-            snapshot.pointer("/modalities/input"),
+            serde_json::json!(capabilities.structured_output),
         ),
     ] {
-        if !has_metadata_assertion(entry, aliases) {
-            if let Some(value) = value {
-                result[target] = value.clone();
-            }
+        if !has_metadata_assertion(entry, names) {
+            result[key] = value;
         }
     }
-    result
+    if !has_metadata_assertion(entry, MODALITY_FIELDS) {
+        result["input_modalities"] = if capabilities
+            .input_modalities
+            .contains(octet_ai::Modality::Image)
+        {
+            serde_json::json!(["text", "image"])
+        } else {
+            serde_json::json!(["text"])
+        };
+    }
+    if !has_reasoning_assertion(entry) {
+        result["reasoning"] = match &capabilities.reasoning {
+            Some(reasoning) => {
+                let options = reasoning
+                    .options
+                    .as_ref()
+                    .expect("validated exact effort description");
+                serde_json::json!({"supported":true,"control":"effort","values":options.values,"default":options.default})
+            }
+            None => serde_json::json!(false),
+        };
+    }
+    Ok(Some(result))
 }
 
 fn has_reasoning_assertion(entry: &serde_json::Value) -> bool {
@@ -1227,122 +1555,145 @@ fn has_reasoning_assertion(entry: &serde_json::Value) -> bool {
         })
 }
 
+/// Decode endpoint reasoning metadata without importing semantic controls from
+/// the pinned catalog. Declaration-owned profiles are applied later, only when
+/// the endpoint did not assert an unknown or malformed reasoning surface.
 fn builtin_discovery_reasoning(
     entry: &serde_json::Value,
     declaration: Option<&ProviderDeclaration>,
-    id: &str,
-    snapshot: Option<&serde_json::Value>,
 ) -> anyhow::Result<DiscoveredReasoning> {
     let mut metadata = decode_reasoning_metadata(entry)?;
-    if declaration.is_none() {
-        return Ok(metadata);
-    }
-    if !has_reasoning_assertion(entry) {
-        if let (Some(declaration), Some(snapshot)) = (declaration, snapshot) {
-            if let Some(route) = declaration.route_for_model(id) {
-                if let Some(supplement) =
-                    snapshot_reasoning_metadata(declaration, route.protocol, id, snapshot)
-                {
-                    return Ok(supplement);
-                }
-                if has_metadata_assertion(snapshot, REASONING_FIELDS) {
-                    metadata.source = octet_ai::types::ReasoningMetadataSource::Unknown;
-                }
-            }
+    if declaration.is_some_and(|declaration| declaration.id == "openrouter")
+        && metadata.supported != Some(false)
+    {
+        if let Some(reasoning) = entry.get("reasoning").filter(|value| {
+            [
+                "mandatory",
+                "supported_efforts",
+                "default_effort",
+                "default_enabled",
+            ]
+            .iter()
+            .any(|key| value.get(*key).is_some())
+        }) {
+            return decode_openrouter_reasoning(reasoning);
         }
-    } else if metadata.source == octet_ai::types::ReasoningMetadataSource::Absent {
-        metadata.source = octet_ai::types::ReasoningMetadataSource::Unknown;
+    }
+    if metadata.source == octet_ai::types::ReasoningMetadataSource::Absent {
+        if advertised_reasoning_parameter(entry)
+            && declaration.is_some_and(|declaration| declaration.id == "openrouter")
+        {
+            // OpenRouter publishes its reasoning primitive through the accepted
+            // parameter list rather than a `reasoning` field. Treating that as
+            // an undecodable assertion is what left a newly released model with
+            // thinking permanently Off until the pinned snapshot was refreshed
+            // and the binary rebuilt; the parameter list is the endpoint
+            // asserting the capability, so decode it.
+            metadata.source = octet_ai::types::ReasoningMetadataSource::Explicit;
+            metadata.supported = Some(true);
+        } else if has_reasoning_assertion(entry) {
+            metadata.source = octet_ai::types::ReasoningMetadataSource::Unknown;
+        }
     }
     Ok(metadata)
 }
 
-/// models.dev describes semantic controls, not a universal compatible encoding.
-/// Only declaration-owned, implemented wire profiles may consume its reasoning
-/// supplement. Custom/Codex routes never call this boundary.
-fn snapshot_reasoning_metadata(
-    declaration: &ProviderDeclaration,
-    protocol: Protocol,
-    id: &str,
-    snapshot: &serde_json::Value,
-) -> Option<DiscoveredReasoning> {
-    let known = sparse_route_reasoning(declaration, protocol, id)
-        .or_else(|| declaration.static_reasoning_for(id, protocol));
-    let toggle_profile = protocol == Protocol::OpenAiChat
-        && (matches!(declaration.id, "deepseek" | "openrouter" | "together")
-            || known.as_ref().is_some_and(|capability| {
-                matches!(
-                    capability.openai_chat_mode,
-                    OpenAiChatReasoningMode::DeepSeekThinking
-                        | OpenAiChatReasoningMode::DeepSeekToggle
-                        | OpenAiChatReasoningMode::OpenRouter
-                        | OpenAiChatReasoningMode::Together { .. }
-                )
-            }));
-    let supported_profile = toggle_profile
-        || (protocol == Protocol::OpenAiChat && declaration.id == "cerebras")
-        || (protocol == Protocol::OpenAiResponses && declaration.id == "openai")
-        || known.is_some();
-    if !supported_profile {
-        return None;
-    }
-    let mut metadata = decode_reasoning_metadata(snapshot).ok()?;
-    if metadata.supported == Some(false) {
-        return Some(metadata);
-    }
-    if protocol == Protocol::AnthropicMessages
-        && known.is_some()
-        && snapshot
-            .get("reasoning")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-    {
-        // Preserve an existing declaration-owned native contract when only its
-        // semantic source supplement is present. A catalog boolean did not
-        // create this codec profile; explicit endpoint assertions bypass here.
-        metadata.source = octet_ai::types::ReasoningMetadataSource::Explicit;
-        metadata.supported = Some(true);
-        metadata.options = None;
-        metadata.control = None;
-        return Some(metadata);
-    }
-    let toggle = snapshot
-        .get("reasoning_options")?
-        .as_array()?
-        .iter()
-        .any(|option| option.get("type").and_then(serde_json::Value::as_str) == Some("toggle"));
-    if declaration.id == "deepseek"
-        && snapshot
-            .pointer("/interleaved/field")
-            .and_then(serde_json::Value::as_str)
-            != Some("reasoning_content")
-    {
-        return None;
-    }
-    if toggle && toggle_profile {
-        let options = metadata
-            .options
-            .get_or_insert_with(|| octet_ai::types::ReasoningOptions {
-                values: vec!["default".into()],
-                default: None,
-            });
-        if !options.choices().contains(&ReasoningConfig::Off) {
-            options.values.insert(0, "none".into());
+/// OpenRouter's endpoint contract is not the generic `reasoning.values` schema.
+/// In particular, accepting a reasoning parameter does not prove that Off (or
+/// any particular effort) is supported. Keep the advertised efforts exact.
+fn decode_openrouter_reasoning(value: &serde_json::Value) -> anyhow::Result<DiscoveredReasoning> {
+    use octet_ai::types::{ReasoningMetadataSource, ReasoningOptions};
+    let mandatory = value
+        .get("mandatory")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| anyhow::anyhow!("invalid OpenRouter reasoning mandatory flag"))?;
+    let enabled = value
+        .get("default_enabled")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("invalid OpenRouter reasoning default_enabled flag"))
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        !mandatory || enabled != Some(false),
+        "mandatory reasoning cannot default to disabled"
+    );
+    let (control, options) = if let Some(efforts) = value.get("supported_efforts") {
+        let mut options = decode_reasoning_options(efforts, value.get("default_effort"))?;
+        anyhow::ensure!(options.values.iter().all(|value| {
+            value == "none" || matches!(ReasoningConfig::from_provider_value(value), Some(ReasoningConfig::Effort(e)) if e != octet_ai::ReasoningEffort::Ultra)
+        }), "invalid OpenRouter reasoning effort");
+        let has_off = options.choices().contains(&ReasoningConfig::Off);
+        anyhow::ensure!(
+            !mandatory || !has_off,
+            "mandatory reasoning cannot advertise Off"
+        );
+        if !mandatory && !has_off {
+            // Optionality explicitly permits Off, but does not advertise an
+            // effort named `none`. Keep it separate from the exact effort set.
+            options.values.insert(0, "false".into());
         }
-        metadata.control.get_or_insert(ReasoningControl::Toggle);
-        metadata.source = octet_ai::types::ReasoningMetadataSource::Explicit;
-        metadata.supported = Some(true);
-    }
-    // Preserve separately documented route defaults only when the refreshed
-    // exact set still supports them. Never fill effort holes or invent defaults.
-    if let Some(options) = &mut metadata.options {
-        if options.default.is_none() {
-            options.default = known
-                .and_then(|c| c.options)
-                .and_then(|o| o.default)
-                .filter(|default| options.values.contains(default));
+        if enabled == Some(false) {
+            options.default = Some(if has_off { "none" } else { "false" }.into());
         }
-    }
-    Some(metadata)
+        // `default_enabled: true` does not override an exact `none` default:
+        // OpenRouter publishes that combination for optional GPT-5.1 routes.
+        (ReasoningControl::Effort, options)
+    } else {
+        anyhow::ensure!(
+            value.get("default_effort").is_none(),
+            "reasoning default_effort requires supported_efforts"
+        );
+        if mandatory {
+            (
+                ReasoningControl::AlwaysOn,
+                ReasoningOptions {
+                    values: vec!["default".into()],
+                    default: Some("default".into()),
+                },
+            )
+        } else {
+            (
+                ReasoningControl::Toggle,
+                ReasoningOptions {
+                    values: vec!["false".into(), "true".into()],
+                    default: enabled.map(|enabled| enabled.to_string()),
+                },
+            )
+        }
+    };
+    Ok(DiscoveredReasoning {
+        source: ReasoningMetadataSource::Explicit,
+        supported: Some(true),
+        control: Some(control),
+        options: Some(options),
+        profile: None,
+    })
+}
+
+/// Whether an inventory advertises a reasoning request parameter.
+fn advertised_reasoning_parameter(entry: &serde_json::Value) -> bool {
+    [
+        Some(entry),
+        entry.get("top_provider"),
+        entry.get("provider"),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|metadata| {
+        metadata
+            .get("supported_parameters")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|parameters| {
+                parameters.iter().any(|parameter| {
+                    matches!(
+                        parameter.as_str(),
+                        Some("reasoning" | "reasoning_effort" | "reasoning.effort")
+                    )
+                })
+            })
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1351,6 +1702,7 @@ struct DiscoveredApiModel {
     context_window: Option<u64>,
     max_output_tokens: Option<u64>,
     tools: bool,
+    parallel_tool_calls: Option<bool>,
     #[cfg(test)]
     reasoning: bool,
     reasoning_metadata: DiscoveredReasoning,
@@ -1557,18 +1909,51 @@ fn api_models_from_response_for(
         else {
             continue;
         };
+        let described = declaration
+            .and_then(|d| d.route_for_model(id))
+            .map(|route| {
+                self_described_entry(
+                    entry,
+                    EndpointId(route.endpoint_id.into()),
+                    id,
+                    route.protocol,
+                )
+            })
+            .transpose()?
+            .flatten();
+        let entry = described.as_ref().unwrap_or(entry);
         let snapshot = declaration.and_then(|d| {
             d.route_for_model(id)?;
             octet_ai::model_metadata::model_capability_metadata(d.id, id)
         });
-        let reasoning_metadata =
-            builtin_discovery_reasoning(entry, declaration, id, snapshot.as_ref())?;
+        let reasoning_metadata = builtin_discovery_reasoning(entry, declaration)?;
         let enriched = snapshot
             .as_ref()
-            .map(|snapshot| enriched_builtin_entry(entry, snapshot));
+            .map(|snapshot| builtin_display_entry(entry, snapshot));
         let entry = enriched.as_ref().unwrap_or(entry);
-        let input_modalities = input_modalities_from_entry(entry);
+        // Input modalities are resolved before the enrichment swap so a live
+        // assertion always wins. Sparse inventories (for example DeepSeek's
+        // model list) assert nothing, so the pinned snapshot may then supply the
+        // documented image/audio input; every other pinned field stays out of
+        // this authority boundary.
         let modalities_asserted = has_metadata_assertion(entry, MODALITY_FIELDS);
+        let input_modalities = if modalities_asserted {
+            input_modalities_from_entry(entry)
+        } else {
+            let asserted = input_modalities_from_entry(entry);
+            let pinned = snapshot
+                .as_ref()
+                .map(input_modalities_from_entry)
+                .unwrap_or_else(octet_ai::ModalitySet::none);
+            let mut modalities = asserted;
+            for candidate in [octet_ai::Modality::Image, octet_ai::Modality::Audio] {
+                if pinned.contains(candidate) {
+                    modalities = modalities.with(candidate);
+                }
+            }
+            modalities
+        };
+        let limits_asserted = has_metadata_assertion(entry, LIMIT_FIELDS);
         let vision = asserted_capability(entry, &["vision"]).unwrap_or_else(|| {
             input_modalities.contains(octet_ai::Modality::Image)
                 || (!modalities_asserted && model_id_implies_vision(id))
@@ -1590,6 +1975,16 @@ fn api_models_from_response_for(
                 entry
                     .get("limit")
                     .and_then(|limit| positive_u64(limit, &["context"]))
+            })
+            // Sparse inventories publish identifiers only. When the endpoint
+            // asserts no limit field at all, the pinned provider-scoped snapshot
+            // supplies its documented window instead of a generic placeholder.
+            // A partially asserting endpoint keeps independent leaves and is
+            // never mixed with snapshot values.
+            .or_else(|| {
+                (!limits_asserted)
+                    .then(|| pinned_limit(snapshot.as_ref(), "context"))
+                    .flatten()
             }),
             max_output_tokens: positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
                 .or_else(|| {
@@ -1601,8 +1996,14 @@ fn api_models_from_response_for(
                     entry
                         .get("top_provider")
                         .and_then(|provider| positive_u64(provider, &["max_completion_tokens"]))
+                })
+                .or_else(|| {
+                    (!limits_asserted)
+                        .then(|| pinned_limit(snapshot.as_ref(), "output"))
+                        .flatten()
                 }),
             tools: custom_model_metadata_supports_tools(entry),
+            parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"]),
             #[cfg(test)]
             reasoning: model_metadata_supports_reasoning(entry),
             reasoning_metadata,
@@ -1618,6 +2019,7 @@ fn api_models_from_response_for(
     Ok(models)
 }
 
+#[cfg(test)]
 fn get_models_json_blocking(
     url: &str,
     headers: http::HeaderMap,
@@ -1684,7 +2086,7 @@ fn gpt_6_family_model(id: &str) -> bool {
 /// Sparse public OpenAI inventory entries may use the documented GPT-6 family
 /// fallback. Other compatible providers must supply capability metadata.
 fn public_openai_gpt_6_model(declaration: &ProviderDeclaration, id: &str) -> bool {
-    declaration.id == "openai" && gpt_6_family_model(id)
+    declaration.id == "openai" && matches!(id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
 }
 
 fn effort_capability(
@@ -1760,8 +2162,33 @@ fn sparse_route_reasoning(
             _ => return None,
         });
     }
+    if declaration.id == "anthropic"
+        && protocol == Protocol::AnthropicMessages
+        && id == "claude-opus-5-5"
+    {
+        // https://platform.claude.com/docs/en/models/opus-5-5/overview
+        // Adaptive thinking is always on; omitting effort defaults to medium.
+        return Some(effort_capability(
+            Mode::Standard,
+            &["low", "medium", "high", "xhigh", "max"],
+            Some("medium"),
+        ));
+    }
+    if declaration.id == "xai" && protocol == Protocol::OpenAiResponses && id == "grok-4.7" {
+        // https://docs.x.ai/developers/grok-4-7
+        return Some(effort_capability(
+            Mode::Standard,
+            &["low", "medium", "high", "xhigh"],
+            Some("high"),
+        ));
+    }
     if declaration.id == "deepseek" && protocol == Protocol::OpenAiChat {
         return Some(match id {
+            "deepseek-flash" => effort_capability(
+                Mode::DeepSeekThinking,
+                &["none", "low", "high", "max"],
+                None,
+            ),
             "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-v4" => effort_capability(
                 Mode::DeepSeekThinking,
                 &["none", "high", "xhigh"],
@@ -1786,10 +2213,14 @@ fn sparse_route_reasoning(
                 Some("low"),
             ));
         }
-        if id.starts_with("gpt-5")
-            || public_openai_gpt_6_model(declaration, id)
-            || matches!(id, "o1" | "o3" | "o3-mini" | "o4-mini")
-        {
+        if matches!(id, "gpt-6-sol" | "gpt-6-luna") {
+            return Some(effort_capability(
+                Mode::Standard,
+                &["none", "low", "medium", "high", "xhigh", "max"],
+                Some("medium"),
+            ));
+        }
+        if id.starts_with("gpt-5") || matches!(id, "o1" | "o3" | "o3-mini" | "o4-mini") {
             return Some(effort_capability(
                 Mode::Standard,
                 &["low", "medium", "high"],
@@ -1848,9 +2279,18 @@ fn discovered_reasoning_capability(
                 .unwrap_or(OpenAiChatReasoningMode::SystemMessage),
         },
         Protocol::OpenAiResponses => OpenAiChatReasoningMode::Standard,
+        // This codec does not support Conversations reasoning controls yet.
+        // Discovery must not manufacture a Chat control for the native route.
+        Protocol::MistralConversations => return None,
         // Native codecs need a declaration-owned control/budget contract, but
         // that must not broaden an endpoint's narrower exact choices/default.
-        Protocol::AnthropicMessages | Protocol::GoogleGenerativeAi | Protocol::BedrockConverse => {
+        // Pi-messages is native in the same sense: its reasoning state is
+        // carried on the wire, so the declaration owns the contract rather than
+        // a manufactured Chat control.
+        Protocol::AnthropicMessages
+        | Protocol::GoogleGenerativeAi
+        | Protocol::BedrockConverse
+        | Protocol::PiMessages => {
             let mut capability = known?;
             if metadata.control.is_some_and(|control| {
                 control != ReasoningControl::Effort && control != capability.control
@@ -1870,6 +2310,13 @@ fn discovered_reasoning_capability(
             return Some(capability);
         }
     };
+    // A parameter-only OpenRouter inventory proves neither optionality nor
+    // effort choices. Use the endpoint default, not a fabricated disabling value.
+    if declaration.id == "openrouter" && metadata.options.is_none() {
+        let mut capability = effort_capability(mode, &["default"], Some("default"));
+        capability.control = ReasoningControl::AlwaysOn;
+        return Some(capability);
+    }
     let mut capability = known.unwrap_or_else(|| {
         effort_capability(
             mode.clone(),
@@ -1916,6 +2363,44 @@ fn discovered_preset_binding<'a>(
     model_id: &str,
 ) -> Option<&'a ProviderRoute> {
     declaration.route_for_model(model_id)
+}
+
+/// Official public-API quotes for inventory-returned models missing from the
+/// older models.dev snapshot. Never share these rates with subscription or
+/// third-party routes, and never turn pricing into an availability assertion.
+fn current_direct_model_pricing(provider: &str, id: &str) -> Option<Pricing> {
+    match (provider, id) {
+        ("anthropic", "claude-opus-5-5") => Some(Pricing {
+            // https://platform.claude.com/docs/en/models/opus-5-5/overview
+            input: TokenRate(4_000_000),
+            output: TokenRate(20_000_000),
+            cache_read: TokenRate(200_000),
+            cache_write_5m: TokenRate(5_000_000),
+            cache_write_1h: Some(TokenRate(8_000_000)),
+            reasoning: None,
+            tiers: vec![],
+        }),
+        ("xai", "grok-4.7") => Some(Pricing {
+            // https://docs.x.ai/developers/pricing (global, standard tier).
+            input: TokenRate(2_000_000),
+            output: TokenRate(6_000_000),
+            cache_read: TokenRate(500_000),
+            // xAI quotes no separate write rate; new prompt tokens use input.
+            cache_write_5m: TokenRate(2_000_000),
+            cache_write_1h: None,
+            reasoning: None,
+            tiers: vec![PricingTier {
+                min_input_tokens: 200_000,
+                input: Some(TokenRate(4_000_000)),
+                output: Some(TokenRate(12_000_000)),
+                cache_read: Some(TokenRate(1_000_000)),
+                cache_write_5m: Some(TokenRate(4_000_000)),
+                cache_write_1h: None,
+                reasoning: None,
+            }],
+        }),
+        _ => None,
+    }
 }
 
 fn register_openai_compatible_models(
@@ -1967,29 +2452,49 @@ fn register_openai_compatible_models_from_response(
             continue;
         }
         let protocol = route.protocol;
+        let public_gpt_6 = protocol == Protocol::OpenAiResponses
+            && public_openai_gpt_6_model(declaration, api_name);
+        let direct_grok_4_7 = declaration.id == "xai"
+            && protocol == Protocol::OpenAiResponses
+            && api_name == "grok-4.7";
+        let context_window = model.context_window.unwrap_or(if public_gpt_6 {
+            1_050_000
+        } else if direct_grok_4_7 {
+            500_000
+        } else {
+            128_000
+        });
+        let max_output_tokens = model
+            .max_output_tokens
+            .unwrap_or(if public_gpt_6 { 128_000 } else { 32_768 })
+            .min(context_window);
         let reasoning = discovered_reasoning_capability(
             declaration,
             protocol,
             api_name,
             &model.reasoning_metadata,
-        );
-        let context_window = model.context_window.unwrap_or(128_000);
-        let max_output_tokens = model
-            .max_output_tokens
-            .unwrap_or(32_768)
-            .min(context_window);
+        )
+        .filter(|capability| {
+            // A native declaration's budget table may not fit the discovered
+            // ceiling (or the sparse fallback). Do not enlarge that ceiling or
+            // invent a different budget contract to make registration succeed.
+            capability
+                .effort_budgets
+                .is_none_or(|budgets| budgets.max < max_output_tokens)
+        });
         // GPT-6 family fallbacks belong only to the verified public OpenAI
         // declaration. Other providers must advertise image input directly.
         let gpt_vision_fallback = declaration
             .discovery_capabilities
             .gpt_vision_fallback(api_name)
             && (!gpt_6_family_model(api_name) || public_openai_gpt_6_model(declaration, api_name));
-        let mut input_modalities =
-            if model.vision || (!model.modalities_asserted && gpt_vision_fallback) {
-                ModalitySet::none().with(octet_ai::Modality::Image)
-            } else {
-                ModalitySet::none()
-            };
+        let mut input_modalities = if model.vision
+            || (!model.modalities_asserted && (gpt_vision_fallback || direct_grok_4_7))
+        {
+            ModalitySet::none().with(octet_ai::Modality::Image)
+        } else {
+            ModalitySet::none()
+        };
         // Audio inventory metadata is only actionable on the Chat codec; the
         // Responses and Anthropic codecs intentionally have no audio mapping.
         if model.audio && protocol == Protocol::OpenAiChat {
@@ -1999,12 +2504,18 @@ fn register_openai_compatible_models_from_response(
             catalog,
             declaration,
             api_name,
-            model.display_name.clone(),
+            model
+                .display_name
+                .clone()
+                .or_else(|| direct_grok_4_7.then(|| "Grok 4.7".into())),
             Capabilities {
                 input_modalities,
                 output_modalities: ModalitySet::none(),
                 tools: model.tools,
-                parallel_tool_calls: model.tools && protocol != Protocol::OpenAiChat,
+                parallel_tool_calls: model.tools
+                    && model
+                        .parallel_tool_calls
+                        .unwrap_or(protocol != Protocol::OpenAiChat),
                 reasoning,
                 responses_lite: false,
                 agent_delegation: None,
@@ -2012,12 +2523,18 @@ fn register_openai_compatible_models_from_response(
                     .structured_output
                     .unwrap_or(protocol != Protocol::OpenAiChat),
                 deferred_tool_loading: false,
+                responses_features: octet_ai::ResponsesFeatures {
+                    async_tools: public_gpt_6 && model.tools,
+                    steering: public_gpt_6,
+                    reasoning_effort_updates: public_gpt_6,
+                    compact_reasoning_effort_updates: false,
+                },
             },
             ModelLimits {
                 context_window,
                 max_output_tokens,
             },
-            None,
+            current_direct_model_pricing(declaration.id, api_name),
         )?;
     }
     Ok(())
@@ -2065,16 +2582,23 @@ fn register_anthropic_compatible_models_from_response(
         {
             continue;
         }
-        let context_window = model.context_window.unwrap_or(200_000);
+        let direct_opus_5_5 = declaration.id == "anthropic" && api_name == "claude-opus-5-5";
+        let context_window =
+            model
+                .context_window
+                .unwrap_or(if direct_opus_5_5 { 1_000_000 } else { 200_000 });
         let max_output_tokens = model
             .max_output_tokens
-            .unwrap_or(64_000)
+            .unwrap_or(if direct_opus_5_5 { 128_000 } else { 64_000 })
             .min(context_window);
         crate::providers::register_discovered_model(
             catalog,
             declaration,
             api_name,
-            model.display_name.clone(),
+            model
+                .display_name
+                .clone()
+                .or_else(|| direct_opus_5_5.then(|| "Claude Opus 5.5".into())),
             Capabilities {
                 input_modalities: if model.vision
                     || (!model.modalities_asserted
@@ -2086,7 +2610,7 @@ fn register_anthropic_compatible_models_from_response(
                 },
                 output_modalities: ModalitySet::none(),
                 tools: model.tools,
-                parallel_tool_calls: model.tools,
+                parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(true),
                 // Only a separately declared native contract is a fallback;
                 // a source boolean cannot invent adaptive-thinking support.
                 reasoning: discovered_reasoning_capability(
@@ -2094,17 +2618,25 @@ fn register_anthropic_compatible_models_from_response(
                     route.protocol,
                     api_name,
                     &model.reasoning_metadata,
-                ),
+                )
+                .filter(|capability| {
+                    // Keep the declaration's budgets only when the endpoint's
+                    // effective output ceiling can accommodate the full table.
+                    capability
+                        .effort_budgets
+                        .is_none_or(|budgets| budgets.max < max_output_tokens)
+                }),
                 responses_lite: false,
                 agent_delegation: None,
                 structured_output: model.structured_output.unwrap_or(true),
                 deferred_tool_loading: false,
+                responses_features: Default::default(),
             },
             ModelLimits {
                 context_window,
                 max_output_tokens,
             },
-            None,
+            current_direct_model_pricing(declaration.id, api_name),
         )?;
     }
     Ok(())
@@ -2228,6 +2760,7 @@ fn register_deepseek_legacy_alias(
         crate::providers::cache_compatibility(declaration.compatibility, api_name, route.protocol);
     let pricing = crate::providers::pricing_for(declaration, api_name);
     catalog.register_model(ModelSpec {
+        preset: Default::default(),
         id: ModelId(DEEPSEEK_MODEL_ID.into()),
         endpoint: endpoint_id,
         api_name: api_name.to_owned(),
@@ -2253,6 +2786,8 @@ fn register_deepseek_legacy_alias(
             structured_output: false,
 
             deferred_tool_loading: false,
+
+            responses_features: Default::default(),
         },
         limits: ModelLimits {
             context_window,
@@ -2314,13 +2849,15 @@ fn register_deepseek_models_from_response(
                 },
                 output_modalities: ModalitySet::none(),
                 tools: model.tools,
-                parallel_tool_calls: false,
+                parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(false),
                 reasoning,
                 responses_lite: false,
                 agent_delegation: None,
                 structured_output: model.structured_output.unwrap_or(false),
 
                 deferred_tool_loading: false,
+
+                responses_features: Default::default(),
             },
             ModelLimits {
                 context_window,
@@ -2523,13 +3060,22 @@ fn openrouter_models_from_response(
         if api_name.trim().is_empty() {
             continue;
         }
+        let Some(route) = declaration.route_for_model(api_name) else {
+            continue;
+        };
+        let described = self_described_entry(
+            entry,
+            EndpointId(route.endpoint_id.into()),
+            api_name,
+            route.protocol,
+        )?;
+        let entry = described.as_ref().unwrap_or(entry);
         let snapshot =
             octet_ai::model_metadata::model_capability_metadata(declaration.id, api_name);
-        let reasoning_metadata =
-            builtin_discovery_reasoning(entry, Some(declaration), api_name, snapshot.as_ref())?;
+        let reasoning_metadata = builtin_discovery_reasoning(entry, Some(declaration))?;
         let enriched = snapshot
             .as_ref()
-            .map(|snapshot| enriched_builtin_entry(entry, snapshot));
+            .map(|snapshot| builtin_display_entry(entry, snapshot));
         let entry = enriched.as_ref().unwrap_or(entry);
         let context_window = entry
             .get("context_length")
@@ -2546,8 +3092,8 @@ fn openrouter_models_from_response(
             .filter(|value| *value > 0)
             .map(|value| value.min(context_window))
         else {
-            // Without a provider assertion or pinned route ceiling, do not
-            // guess a completion limit.
+            // Only the endpoint can supply this ceiling; the pinned display/
+            // pricing supplement must not make an incomplete route admissible.
             continue;
         };
         // OpenRouter may expose modality metadata under architecture or at
@@ -2559,10 +3105,8 @@ fn openrouter_models_from_response(
         }
         let supports_tools = model_metadata_supports_tools(entry);
 
-        let Some(route) = declaration.route_for_model(api_name) else {
-            continue;
-        };
         models.push(ModelSpec {
+            preset: Default::default(),
             id: ModelId(format!("{}/{api_name}", declaration.id)),
             endpoint: EndpointId(route.endpoint_id.into()),
             api_name: api_name.into(),
@@ -2572,7 +3116,8 @@ fn openrouter_models_from_response(
                 input_modalities,
                 output_modalities: ModalitySet::none(),
                 tools: supports_tools,
-                parallel_tool_calls: false,
+                parallel_tool_calls: supports_tools
+                    && asserted_capability(entry, &["parallel_tool_calls"]).unwrap_or(false),
                 reasoning: discovered_reasoning_capability(
                     declaration,
                     route.protocol,
@@ -2584,6 +3129,8 @@ fn openrouter_models_from_response(
                 structured_output: discovered_structured_output(entry).unwrap_or(false),
 
                 deferred_tool_loading: false,
+
+                responses_features: Default::default(),
             },
             limits: ModelLimits {
                 context_window,
@@ -2723,6 +3270,7 @@ fn register_azure_openai(
             agent_delegation: None,
             structured_output: true,
             deferred_tool_loading: false,
+            responses_features: Default::default(),
         },
         ModelLimits {
             context_window: 128_000,
@@ -2773,8 +3321,7 @@ fn try_register_declaration(
             try_register_environment_declaration(catalog, declaration)
         }
         ProviderAuthentication::ApplicationDefaultCredentials => {
-            let Some(configuration) = crate::providers::resolve_application_default_credentials()?
-            else {
+            let Some(configuration) = crate::providers::resolve_vertex_configuration()? else {
                 return Ok(());
             };
             match declaration.model_discovery {
@@ -2873,7 +3420,293 @@ fn merge_provider_catalog(target: &mut ModelCatalog, source: ModelCatalog) -> an
     Ok(())
 }
 
+#[cfg(test)]
+mod stored_api_key_catalog_tests {
+    use super::*;
+    use crate::provider_setup::BuiltinApiKeyStore;
+
+    fn saved_keys() -> (tempfile::TempDir, BuiltinApiKeyStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("credentials/api-keys");
+        let store = BuiltinApiKeyStore::for_test(root.clone());
+        for provider in ["openai", "anthropic", "gemini"] {
+            store
+                .save(provider, "synthetic-stored-key".into(), false)
+                .unwrap();
+        }
+        // Subsequent startup resolves a fresh store, not an in-memory key.
+        (directory, BuiltinApiKeyStore::for_test(root))
+    }
+
+    fn offline_catalog(store: &BuiltinApiKeyStore) -> ModelCatalog {
+        let mut catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(None),
+                    |id| store.load(id).map_err(Into::into),
+                )
+            },
+        )
+        .unwrap();
+        // Exactly the production ordering: bind existing endpoints, then prune.
+        // Both embedded endpoints have synthetic stored credentials, so this
+        // does not consult ambient environment values or make network requests.
+        catalog.retain_configured_models();
+        catalog
+    }
+
+    #[test]
+    fn offline_stored_keys_preserve_exact_embedded_inventory_and_native_auth() {
+        let (_directory, store) = saved_keys();
+        let catalog = offline_catalog(&store);
+        let embedded = ModelCatalog::builtin().unwrap();
+        assert_eq!(catalog.models().count(), embedded.models().count());
+        assert!(catalog.models().count() > 0);
+        for spec in embedded.models() {
+            let model = catalog.resolve(&spec.id).unwrap();
+            assert_eq!(model.spec.protocol, spec.protocol);
+            assert_eq!(model.spec.api_name, spec.api_name);
+            assert_eq!(
+                model.endpoint.base_url,
+                embedded.resolve(&spec.id).unwrap().endpoint.base_url
+            );
+            match spec.endpoint.0.as_str() {
+                "openai" => assert!(matches!(model.endpoint.auth, Auth::Bearer(_))),
+                "anthropic" => assert!(
+                    matches!(&model.endpoint.auth, Auth::Header { name, .. } if name == "x-api-key")
+                ),
+                other => panic!("unexpected embedded endpoint: {other}"),
+            }
+            assert!(!format!("{:?}", model.endpoint.auth).contains("synthetic-stored-key"));
+        }
+        // Saved Gemini credentials do not authorize expanding offline inventory.
+        assert!(!catalog.models().any(|model| model.endpoint.0 == "gemini"));
+    }
+
+    #[test]
+    fn online_discovery_failure_keeps_stored_key_embedded_fallback() {
+        let (_directory, store) = saved_keys();
+        let mut catalog = offline_catalog(&store);
+        let expected = catalog
+            .models()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>();
+        merge_declaration_inventory(
+            &mut catalog,
+            &crate::providers::OPENAI,
+            Ok(Err(anyhow::anyhow!("synthetic discovery failure"))),
+        );
+        catalog.retain_configured_models();
+        for id in expected {
+            assert!(catalog.resolve(&id).is_ok());
+        }
+    }
+
+    #[test]
+    fn embedded_binding_reads_only_readiness_selected_credential_sources() {
+        let (_directory, store) = saved_keys();
+        let mut consulted = Vec::new();
+        let catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Routes(vec!["openai"]),
+            |declaration| {
+                consulted.push(declaration.id);
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(None),
+                    |id| store.load(id).map_err(Into::into),
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(consulted, ["openai"]);
+        for spec in catalog.models() {
+            let model = catalog.resolve(&spec.id).unwrap();
+            match spec.endpoint.0.as_str() {
+                "openai" => assert!(matches!(model.endpoint.auth, Auth::Bearer(_))),
+                "anthropic" => assert!(matches!(model.endpoint.auth, Auth::HeaderEnv { .. })),
+                other => panic!("unexpected embedded endpoint: {other}"),
+            }
+        }
+        bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Routes(vec!["codex"]),
+            |_| panic!("Codex readiness cannot inspect unrelated API-key stores"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn embedded_binding_preserves_environment_precedence_and_dynamic_aliases() {
+        let catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(Some("synthetic-environment-key".into())),
+                    |_| panic!("a configured environment must never access stored keys"),
+                )
+            },
+        )
+        .unwrap();
+        for spec in catalog.models() {
+            let model = catalog.resolve(&spec.id).unwrap();
+            assert!(matches!(&model.endpoint.auth, Auth::BearerEnv { var }
+                if var == "OPENAI_API_KEY" || var == "ANTHROPIC_AUTH_TOKEN"));
+        }
+    }
+
+    #[test]
+    fn embedded_binding_isolates_invalid_environment_without_stored_fallback() {
+        let (_directory, store) = saved_keys();
+        let mut catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |variable| {
+                        if declaration.id == "openai" {
+                            Err(octet_ai::ConfigError::InvalidEnv(variable.to_owned()))
+                        } else {
+                            Ok(None)
+                        }
+                    },
+                    |id| {
+                        assert_ne!(id, "openai", "invalid environment must not change identity");
+                        store.load(id).map_err(Into::into)
+                    },
+                )
+            },
+        )
+        .unwrap();
+        catalog.retain_configured_models();
+        assert!(catalog
+            .models()
+            .any(|model| model.endpoint.0 == "anthropic"));
+        assert!(!catalog.models().any(|model| model.endpoint.0 == "openai"));
+    }
+
+    #[test]
+    fn embedded_binding_isolates_invalid_stored_credentials_from_valid_accounts() {
+        let (_directory, store) = saved_keys();
+        octet_agent::secure_fs::write_private_atomic(
+            &store.path("openai").unwrap(),
+            b"synthetic-secret-invalid-json",
+            8192,
+        )
+        .unwrap();
+        let mut consulted = Vec::new();
+        let mut catalog = bind_embedded_provider_credentials(
+            ModelCatalog::builtin().unwrap(),
+            &CatalogReadiness::Fleet,
+            |declaration| {
+                consulted.push(declaration.id);
+                crate::providers::resolve_environment_with(
+                    declaration,
+                    |_| Ok(None),
+                    |id| store.load(id).map_err(Into::into),
+                )
+            },
+        )
+        .unwrap();
+        catalog.retain_configured_models();
+        consulted.sort_unstable();
+        assert_eq!(consulted, ["anthropic", "openai"]);
+        assert!(catalog
+            .models()
+            .any(|model| model.endpoint.0 == "anthropic"));
+        assert!(!catalog.has_endpoint(&EndpointId("openai".into())));
+        assert!(!catalog.models().any(|model| model.endpoint.0 == "openai"));
+    }
+}
+
+/// Declarations whose configuration was consulted while building a catalog.
+///
+/// Test-only observability for the readiness plan: an unrelated provider being
+/// *not consulted at all* is the property under test, and that is a request
+/// count rather than a wall-clock threshold.
+#[cfg(test)]
+pub(crate) fn readiness_declarations_consulted() -> Vec<&'static str> {
+    READINESS_DECLARATIONS_CONSULTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_readiness_declarations_consulted() {
+    READINESS_DECLARATIONS_CONSULTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+#[cfg(test)]
+static READINESS_DECLARATIONS_CONSULTED: std::sync::Mutex<Vec<&'static str>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn readiness_note_declaration(provider_id: &'static str) {
+    READINESS_DECLARATIONS_CONSULTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(provider_id);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only fail-closed probe for the readiness plan.
+    ///
+    /// While this is set, consulting that declaration panics. The narrowed plan
+    /// is initialized sequentially on the calling thread, so a thread-local is
+    /// exactly the assertion "this provider was never entered" — the strongest
+    /// form of "an unrelated provider cannot delay readiness", with no timing
+    /// threshold and no cross-test interference.
+    static READINESS_FORBIDDEN_CONSULTATION: std::cell::RefCell<Option<&'static str>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only guard that makes one declaration's consultation fail closed.
+///
+/// See [`READINESS_FORBIDDEN_CONSULTATION`]; dropping the guard restores the
+/// previous value so guards nest safely.
+#[cfg(test)]
+pub(crate) struct ForbiddenReadinessConsultation(Option<&'static str>);
+
+#[cfg(test)]
+impl ForbiddenReadinessConsultation {
+    pub(crate) fn new(provider_id: &'static str) -> Self {
+        READINESS_FORBIDDEN_CONSULTATION
+            .with(|forbidden| Self(forbidden.replace(Some(provider_id))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForbiddenReadinessConsultation {
+    fn drop(&mut self) {
+        READINESS_FORBIDDEN_CONSULTATION.with(|forbidden| {
+            *forbidden.borrow_mut() = self.0;
+        });
+    }
+}
+
 fn declaration_is_configured(declaration: &ProviderDeclaration) -> anyhow::Result<bool> {
+    #[cfg(test)]
+    readiness_note_declaration(declaration.id);
+    #[cfg(test)]
+    READINESS_FORBIDDEN_CONSULTATION.with(|forbidden| {
+        if forbidden.borrow().as_deref() == Some(declaration.id) {
+            panic!(
+                "readiness consulted `{}` although the plan never named it; an unrelated provider must not be entered",
+                declaration.id
+            );
+        }
+    });
     match declaration.runtime_configuration {
         // The AWS chain includes EC2 instance metadata, which has no local
         // configuration marker. Schedule one bounded private registration job;
@@ -2891,7 +3724,7 @@ fn declaration_is_configured(declaration: &ProviderDeclaration) -> anyhow::Resul
                 Ok(crate::providers::resolve_environment(declaration)?.is_some())
             }
             ProviderAuthentication::ApplicationDefaultCredentials => {
-                Ok(crate::providers::resolve_application_default_credentials()?.is_some())
+                Ok(crate::providers::resolve_vertex_configuration()?.is_some())
             }
             // A host-owned integration must call CopilotProvider explicitly;
             // environment/configuration bootstrap has no authority to enable it.
@@ -2904,54 +3737,173 @@ fn declaration_is_configured(declaration: &ProviderDeclaration) -> anyhow::Resul
     }
 }
 
+/// Spawn one declaration's bounded inventory discovery on its own thread.
+///
+/// A fleet sweep runs all configured providers at once; the narrowed readiness
+/// path runs exactly the route the selection proved, through this same body, so
+/// both initialize a provider identically.
+fn spawn_declaration_inventory(
+    declaration: &'static ProviderDeclaration,
+) -> std::io::Result<std::thread::JoinHandle<anyhow::Result<ModelCatalog>>> {
+    std::thread::Builder::new()
+        .name(format!("octet-{}-catalog", declaration.id))
+        .spawn(move || {
+            let mut provider_catalog = ModelCatalog::default();
+            try_register_declaration(&mut provider_catalog, declaration)?;
+            Ok::<_, anyhow::Error>(provider_catalog)
+        })
+}
+
+/// Attach a diagnostic to the operation that was actually checked. Calling a
+/// different provider, or skipping discovery, cannot clear this component.
+fn bootstrap_check<T, E: std::fmt::Display>(
+    component: impl Into<String>,
+    result: Result<T, E>,
+    message: impl FnOnce(&E) -> String,
+) -> Result<T, E> {
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap(component.into()),
+        result.as_ref().err().map(message).into_iter().collect(),
+        true,
+    );
+    result
+}
+
+/// Merge one provider inventory into the launch catalog.
+///
+/// Discovery is always non-fatal: a provider that cannot authenticate, times
+/// out, or panics must not block the other routes, and the same bounded warning
+/// is reported on every path.
+fn merge_declaration_inventory(
+    catalog: &mut ModelCatalog,
+    declaration: &ProviderDeclaration,
+    outcome: std::thread::Result<anyhow::Result<ModelCatalog>>,
+) {
+    let mut diagnostics = crate::output::DiagnosticCheck::new(
+        crate::output::DiagnosticComponent::Bootstrap(format!("provider-merge:{}", declaration.id)),
+    );
+    match outcome {
+        Ok(Ok(provider_catalog)) => {
+            if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
+                diagnostics.problem(format!(
+                    "warning: {} unavailable: {error}",
+                    declaration.name
+                ));
+            }
+        }
+        Ok(Err(error)) => diagnostics.problem(format!(
+            "warning: {} unavailable: {error}",
+            declaration.name
+        )),
+        Err(_) => diagnostics.problem(format!(
+            "warning: {} unavailable: model discovery thread panicked",
+            declaration.name
+        )),
+    }
+    diagnostics.finish(true);
+}
+
+/// Initialize one declaration's inventory on the readiness path.
+///
+/// Only reached for a route the launch proved it needs (or, below, for one
+/// configured compaction override), so this wait is attributable to the user's
+/// own selection. It is never the fleet sweep: an unrelated configured provider
+/// is not consulted here at all.
+fn register_declaration_inventory(
+    catalog: &mut ModelCatalog,
+    declaration: &'static ProviderDeclaration,
+) {
+    match bootstrap_check(
+        format!("provider-credential:{}", declaration.id),
+        declaration_is_configured(declaration),
+        |error| format!("warning: {} unavailable: {error}", declaration.name),
+    ) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            let _ = error;
+            return;
+        }
+    }
+    if let Ok(handle) = bootstrap_check(
+        format!("provider-spawn:{}", declaration.id),
+        spawn_declaration_inventory(declaration),
+        |error| {
+            format!(
+                "warning: could not start {} model discovery: {error}",
+                declaration.name
+            )
+        },
+    ) {
+        merge_declaration_inventory(catalog, declaration, handle.join());
+    }
+}
+
+/// Initialize exactly the named declarations, in order.
+///
+/// The narrowed plan is normally one entry, so the calls are sequential: a
+/// wait that cannot be attributed to a single route is worse than a slightly
+/// longer one, and the plan already excludes everything the launch cannot use.
+/// A named subscription route (Codex) has no environment credential to probe:
+/// `declaration_is_configured` returns `false` and the route is initialized by
+/// its own catalog-registration branch instead.
+fn register_selected_preset_inventories(catalog: &mut ModelCatalog, routes: &[&'static str]) {
+    for route in routes {
+        if let Some(declaration) =
+            readiness_declarations().find(|declaration| declaration.id == *route)
+        {
+            register_declaration_inventory(catalog, declaration);
+        }
+    }
+    // One boundary for the selected-route inventory wait. `catalog.base` is
+    // emitted before it, so the harness reads the delta as the time readiness
+    // may attribute to the user's own selection; with a Codex route this phase
+    // is skipped because that route initializes inside `catalog.codex`.
+    if routes
+        .iter()
+        .any(|route| *route != crate::providers::CODEX.id)
+    {
+        startup_phase("catalog.selected");
+    }
+}
+
 /// Discover configured provider catalogs concurrently, then merge them on the
 /// launch thread. A fleet outage therefore costs at most one bounded discovery
 /// interval instead of one interval per configured account.
 fn register_configured_presets_parallel(catalog: &mut ModelCatalog) {
     let mut jobs = Vec::new();
     for declaration in BUILTIN_PROVIDER_DECLARATIONS {
-        match declaration_is_configured(declaration) {
+        match bootstrap_check(
+            format!("provider-credential:{}", declaration.id),
+            declaration_is_configured(declaration),
+            |error| format!("warning: {} unavailable: {error}", declaration.name),
+        ) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(error) => {
                 // An invalid/oversized optional credential must not become a
                 // request, but one unusable provider must not block other
                 // configured providers from starting.
-                crate::output::stderr!("warning: {} unavailable: {error}", declaration.name);
+                let _ = error;
                 continue;
             }
         }
-        let declaration = *declaration;
-        match std::thread::Builder::new()
-            .name(format!("octet-{}-catalog", declaration.id))
-            .spawn(move || {
-                let mut provider_catalog = ModelCatalog::default();
-                try_register_declaration(&mut provider_catalog, &declaration)?;
-                Ok::<_, anyhow::Error>(provider_catalog)
-            }) {
-            Ok(handle) => jobs.push((declaration, handle)),
-            Err(error) => crate::output::stderr!(
-                "warning: could not start {} model discovery: {error}",
-                declaration.name
-            ),
+        if let Ok(handle) = bootstrap_check(
+            format!("provider-spawn:{}", declaration.id),
+            spawn_declaration_inventory(declaration),
+            |error| {
+                format!(
+                    "warning: could not start {} model discovery: {error}",
+                    declaration.name
+                )
+            },
+        ) {
+            jobs.push((declaration, handle));
         }
     }
 
     for (declaration, job) in jobs {
-        match job.join() {
-            Ok(Ok(provider_catalog)) => {
-                if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
-                    crate::output::stderr!("warning: {} unavailable: {error}", declaration.name);
-                }
-            }
-            Ok(Err(error)) => {
-                crate::output::stderr!("warning: {} unavailable: {error}", declaration.name)
-            }
-            Err(_) => crate::output::stderr!(
-                "warning: {} unavailable: model discovery thread panicked",
-                declaration.name
-            ),
-        }
+        merge_declaration_inventory(catalog, declaration, job.join());
     }
 }
 
@@ -2977,13 +3929,18 @@ fn load_custom_model_cache_for(
     let Some(bytes) = store.load_model_cache_for(provider_id)? else {
         return Ok(None);
     };
-    let cache: CustomModelCache =
+    let mut cache: CustomModelCache =
         serde_json::from_slice(&bytes).context("invalid custom model cache")?;
     if cache.version != CUSTOM_MODEL_CACHE_VERSION
         || cache.base_url != base_url
         || cache.credential_fingerprint != credential_fingerprint
     {
         return Ok(None);
+    }
+    // Only the private configured registry can supply credential-bearing model
+    // headers, even if an older or edited inventory cache contains that field.
+    for model in &mut cache.models {
+        model.preset.headers.clear();
     }
     Ok(Some(if cache.models.is_empty() {
         CachedCustomInventory::Unavailable
@@ -3006,6 +3963,26 @@ fn load_custom_model_cache(
     )
 }
 
+fn custom_model_cache_bytes(
+    base_url: &str,
+    credential_fingerprint: &str,
+    models: &[crate::auth::custom::CustomModel],
+) -> anyhow::Result<Vec<u8>> {
+    // Cache a redacted copy, never mutate the credential registry's configured
+    // model: those private headers must remain available to actual requests.
+    let mut models = models.to_vec();
+    for model in &mut models {
+        model.preset.headers.clear();
+    }
+    let cache = CustomModelCache {
+        version: CUSTOM_MODEL_CACHE_VERSION,
+        base_url: base_url.to_owned(),
+        credential_fingerprint: credential_fingerprint.to_owned(),
+        models,
+    };
+    serde_json::to_vec_pretty(&cache).map_err(Into::into)
+}
+
 fn save_custom_model_cache_for(
     store: &crate::auth::custom::CredentialStore,
     provider_id: &str,
@@ -3013,13 +3990,10 @@ fn save_custom_model_cache_for(
     credential_fingerprint: &str,
     models: &[crate::auth::custom::CustomModel],
 ) -> anyhow::Result<()> {
-    let cache = CustomModelCache {
-        version: CUSTOM_MODEL_CACHE_VERSION,
-        base_url: base_url.to_owned(),
-        credential_fingerprint: credential_fingerprint.to_owned(),
-        models: models.to_vec(),
-    };
-    store.save_model_cache_for(provider_id, &serde_json::to_vec_pretty(&cache)?)
+    store.save_model_cache_for(
+        provider_id,
+        &custom_model_cache_bytes(base_url, credential_fingerprint, models)?,
+    )
 }
 
 #[cfg(test)]
@@ -3054,81 +4028,29 @@ fn schedule_custom_model_cache_refresh_for(
     }
     let configured = configured_custom_models(&cred);
     let cache_fingerprint = custom_model_cache_fingerprint(&credential_fingerprint, &configured);
+    let expected = match store.load_model_cache_for(&provider_id) {
+        Ok(Some(bytes)) => bytes,
+        _ => return,
+    };
     let _ = std::thread::Builder::new()
         .name(format!("octet-custom-{provider_id}-catalog-refresh"))
         .spawn(move || {
             let discovered = apply_configured_custom_model_overrides(
-                apply_known_custom_model_defaults(&cred, discover_models_blocking(&cred, false)),
+                apply_known_custom_model_defaults(
+                    &cred,
+                    discover_models_blocking(&cred, &provider_id, false),
+                ),
                 &configured,
             );
             if !discovered.is_empty() {
-                let _ = save_custom_model_cache_for(
-                    &store,
-                    &provider_id,
-                    &cred.base_url,
-                    &cache_fingerprint,
-                    &discovered,
-                );
+                if let Ok(bytes) =
+                    custom_model_cache_bytes(&cred.base_url, &cache_fingerprint, &discovered)
+                {
+                    let _ =
+                        store.save_model_cache_if_unchanged_for(&provider_id, &expected, &bytes);
+                }
             }
         });
-}
-
-fn refresh_stale_custom_models_with_for<F>(
-    store: &crate::auth::custom::CredentialStore,
-    provider_id: &str,
-    cred: &crate::auth::custom::CustomCredential,
-    credential_fingerprint: &str,
-    cached: Vec<crate::auth::custom::CustomModel>,
-    refresh_interval: Duration,
-    discover: F,
-) -> Vec<crate::auth::custom::CustomModel>
-where
-    F: FnOnce(&crate::auth::custom::CustomCredential) -> Vec<crate::auth::custom::CustomModel>,
-{
-    if !store
-        .model_cache_is_stale_for(provider_id, refresh_interval)
-        .unwrap_or(true)
-    {
-        return cached;
-    }
-
-    let discovered = discover_and_cache_custom_models_with_for(
-        store,
-        provider_id,
-        cred,
-        credential_fingerprint,
-        false,
-        discover,
-    );
-    if discovered.is_empty() {
-        // A transient discovery failure must not discard a last-good catalog.
-        cached
-    } else {
-        discovered
-    }
-}
-
-#[cfg(test)]
-fn refresh_stale_custom_models_with<F>(
-    store: &crate::auth::custom::CredentialStore,
-    cred: &crate::auth::custom::CustomCredential,
-    credential_fingerprint: &str,
-    cached: Vec<crate::auth::custom::CustomModel>,
-    refresh_interval: Duration,
-    discover: F,
-) -> Vec<crate::auth::custom::CustomModel>
-where
-    F: FnOnce(&crate::auth::custom::CustomCredential) -> Vec<crate::auth::custom::CustomModel>,
-{
-    refresh_stale_custom_models_with_for(
-        store,
-        crate::auth::custom::ENDPOINT_ID,
-        cred,
-        credential_fingerprint,
-        cached,
-        refresh_interval,
-        discover,
-    )
 }
 
 fn discover_and_cache_custom_models_with_for<F>(
@@ -3147,15 +4069,17 @@ where
         &configured_custom_models(cred),
     );
     if persist_empty || !discovered.is_empty() {
-        if let Err(error) = save_custom_model_cache_for(
-            store,
-            provider_id,
-            &cred.base_url,
-            credential_fingerprint,
-            &discovered,
-        ) {
-            crate::output::stderr!("warning: could not persist custom model metadata: {error}");
-        }
+        let _ = bootstrap_check(
+            format!("custom-cache-write:{provider_id}"),
+            save_custom_model_cache_for(
+                store,
+                provider_id,
+                &cred.base_url,
+                credential_fingerprint,
+                &discovered,
+            ),
+            |error| format!("warning: could not persist custom model metadata: {error}"),
+        );
     }
     discovered
 }
@@ -3494,6 +4418,7 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
         reasoning_default,
         reasoning_uses_system_message: true,
         pricing: None,
+        preset: Default::default(),
     })
 }
 
@@ -3662,21 +4587,20 @@ fn register_custom_openai_endpoints_from_store(
                     }),
                     None => build(provider_id, provider),
                 };
-                match result {
-                    Ok(provider_catalog) => {
-                        if let Err(error) = merge_provider_catalog(catalog, provider_catalog) {
-                            crate::output::stderr!(
-                                "warning: custom provider {provider_id:?} unavailable: {error}"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        let label = provider.label.trim();
-                        let label = if label.is_empty() { provider_id } else { label };
-                        crate::output::stderr!(
-                            "warning: custom provider {label:?} unavailable: {error}"
-                        );
-                    }
+                let label = provider.label.trim();
+                let label = if label.is_empty() { provider_id } else { label };
+                if let Ok(provider_catalog) =
+                    bootstrap_check(format!("custom-provider:{provider_id}"), result, |error| {
+                        format!("warning: custom provider {label:?} unavailable: {error}")
+                    })
+                {
+                    let _ = bootstrap_check(
+                        format!("custom-merge:{provider_id}"),
+                        merge_provider_catalog(catalog, provider_catalog),
+                        |error| {
+                            format!("warning: custom provider {provider_id:?} unavailable: {error}")
+                        },
+                    );
                 }
             }
         });
@@ -3790,31 +4714,30 @@ fn register_custom_openai_provider(
     let cache_fingerprint =
         custom_model_cache_fingerprint(&custom_credential_fingerprint, &configured);
     let cached = if cred.auto_discover {
-        match load_custom_model_cache_for(store, provider_id, &cred.base_url, &cache_fingerprint) {
-            Ok(models) => models,
-            Err(error) => {
-                crate::output::stderr!("warning: custom provider model cache unavailable: {error}");
-                None
-            }
-        }
+        bootstrap_check(
+            format!("custom-cache:{provider_id}"),
+            load_custom_model_cache_for(store, provider_id, &cred.base_url, &cache_fingerprint),
+            |error| format!("warning: custom provider model cache unavailable: {error}"),
+        )
+        .unwrap_or_default()
     } else {
         None
     };
     let models: Vec<CustomModel> = match cached {
         Some(CachedCustomInventory::Available(models)) => {
-            if offline {
-                models
-            } else {
-                refresh_stale_custom_models_with_for(
-                    store,
-                    provider_id,
-                    &cred,
-                    &cache_fingerprint,
-                    models,
+            // A positive, identity-matched cache is usable immediately. Refresh
+            // stale metadata off the startup path; a later catalog build reads
+            // the completed cache, while this launch retains its last good list.
+            if !offline {
+                schedule_custom_model_cache_refresh_for(
+                    store.clone(),
+                    provider_id.to_owned(),
+                    cred.clone(),
+                    custom_credential_fingerprint.clone(),
                     PROVIDER_INVENTORY_REFRESH_INTERVAL,
-                    discover_models,
-                )
+                );
             }
+            models
         }
         Some(CachedCustomInventory::Unavailable)
             if cred.auto_discover && !offline && configured.is_empty() =>
@@ -3825,7 +4748,7 @@ fn register_custom_openai_provider(
                 &cred,
                 &cache_fingerprint,
                 false,
-                discover_models,
+                |cred| discover_models(cred, provider_id),
             );
             if !discovered.is_empty() {
                 discovered
@@ -3852,7 +4775,7 @@ fn register_custom_openai_provider(
                 &cred,
                 &cache_fingerprint,
                 true,
-                discover_models,
+                |cred| discover_models(cred, provider_id),
             );
             if discovered.is_empty() {
                 configured
@@ -3897,6 +4820,7 @@ fn register_custom_openai_provider(
         };
 
         catalog.register_model(ModelSpec {
+            preset: model.preset.clone(),
             id: ModelId(custom_model_id(provider_id, legacy_single_endpoint, model)),
             endpoint: endpoint_id.clone(),
             api_name: model.api_name.clone(),
@@ -3913,6 +4837,8 @@ fn register_custom_openai_provider(
                 structured_output: model.structured_output,
 
                 deferred_tool_loading: false,
+
+                responses_features: Default::default(),
             },
             limits: ModelLimits {
                 context_window: model.context_window,
@@ -3929,6 +4855,7 @@ fn register_custom_openai_provider(
 /// `CustomModel` entries. Returns an empty Vec on any error (non-fatal).
 fn discover_models(
     cred: &crate::auth::custom::CustomCredential,
+    provider_id: &str,
 ) -> Vec<crate::auth::custom::CustomModel> {
     // Apple Foundation Models is an optional local integration. Its health
     // endpoint gives us a cheap, exact readiness signal, so do not issue the
@@ -3945,165 +4872,198 @@ fn discover_models(
     // outer #[tokio::main] async context, avoiding:
     //   "Cannot drop a runtime in a context where blocking is not allowed."
     let cred = cred.clone();
-    std::thread::spawn(move || discover_models_blocking(&cred, true))
+    let provider_id = provider_id.to_owned();
+    std::thread::spawn(move || discover_models_blocking(&cred, &provider_id, true))
         .join()
         .unwrap_or_default()
 }
 
 fn discover_models_blocking(
     cred: &crate::auth::custom::CustomCredential,
+    provider_id: &str,
     report_errors: bool,
 ) -> Vec<crate::auth::custom::CustomModel> {
-    use crate::auth::custom::CustomModel;
+    let mut diagnostics = crate::output::DiagnosticCheck::new(
+        crate::output::DiagnosticComponent::Bootstrap(format!("custom-discovery:{provider_id}")),
+    );
+    let result = (|| {
+        use crate::auth::custom::CustomModel;
 
-    // Build the models URL following octet's convention: base_url is versioned
-    // (e.g. http://host/v1/) and we join the path segment.
-    let base = if cred.base_url.ends_with('/') {
-        cred.base_url.clone()
-    } else {
-        format!("{}/", cred.base_url)
-    };
-    let models_url = match url::Url::parse(&base).and_then(|u| u.join("models")) {
-        Ok(u) => u.to_string(),
-        Err(e) => {
-            if report_errors {
-                crate::output::stderr!("warning: auto-discover URL parse failed: {e}");
-            }
-            return Vec::new();
-        }
-    };
-
-    let client = match blocking_discovery_client(std::time::Duration::from_secs(10)) {
-        Ok(c) => c,
-        Err(e) => {
-            if report_errors {
-                crate::output::stderr!("warning: auto-discover client build failed: {e}");
-            }
-            return Vec::new();
-        }
-    };
-
-    let mut req = client.get(&models_url);
-    let discovery_key = (!cred.api_key.trim().is_empty()).then(|| cred.api_key.clone());
-    if let Some(key) = discovery_key {
-        req = req.header("Authorization", format!("Bearer {key}"));
-    }
-    for h in &cred.headers {
-        req = req.header(&h.name, &h.value);
-    }
-
-    let resp = match req
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            if report_errors {
-                crate::output::stderr!("warning: auto-discover GET {} failed: {e}", models_url);
-            }
-            return Vec::new();
-        }
-    };
-
-    let status = resp.status();
-    let body = match bounded_discovery_json(resp, "custom models") {
-        Ok(value) => value,
-        Err(error) => {
-            if report_errors {
-                crate::output::stderr!(
-                    "warning: auto-discover {} returned HTTP {} with an invalid or oversized body: {error}",
-                    models_url,
-                    status.as_u16()
-                );
-            }
-            return Vec::new();
-        }
-    };
-
-    let data = match body
-        .get("data")
-        .or_else(|| body.get("models"))
-        .and_then(serde_json::Value::as_array)
-        .or_else(|| body.as_array())
-    {
-        Some(arr) => arr,
-        None => {
-            if report_errors {
-                crate::output::stderr!(
-                    "warning: auto-discover {} missing 'data'/'models' array",
-                    models_url
-                );
-            }
-            return Vec::new();
-        }
-    };
-
-    let mut models = Vec::new();
-    for entry in data {
-        let id = entry
-            .get("id")
-            .or_else(|| entry.get("slug"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        if id.is_empty() || id == "default" {
-            continue;
-        }
-
-        let ctx = extract_ctx_from_model_entry(entry);
-        let vision = entry
-            .get("architecture")
-            .and_then(|a| a.get("input_modalities"))
-            .and_then(|m| m.as_array())
-            .map(|arr| arr.iter().any(|v| v.as_str() == Some("image")))
-            .unwrap_or(false)
-            || model_id_implies_vision(id);
-
-        let supported_parameters = entry
-            .get("supported_parameters")
-            .and_then(serde_json::Value::as_array);
-        let supports = |name: &str| {
-            supported_parameters.is_some_and(|parameters| {
-                parameters
-                    .iter()
-                    .any(|parameter| parameter.as_str() == Some(name))
-            })
+        // Build the models URL following octet's convention: base_url is versioned
+        // (e.g. http://host/v1/) and we join the path segment.
+        let base = if cred.base_url.ends_with('/') {
+            cred.base_url.clone()
+        } else {
+            format!("{}/", cred.base_url)
         };
-        let max_output_tokens =
-            positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
-                .unwrap_or(16_384)
-                .min(ctx);
-        let mut model = CustomModel {
-            api_name: id.to_string(),
-            display_name: discovered_display_name(entry, id).unwrap_or_default(),
-            context_window: ctx,
-            max_output_tokens,
-            tools: custom_model_metadata_supports_tools(entry),
-            parallel_tool_calls: supports("parallel_tool_calls"),
-            vision,
-            structured_output: supports("response_format"),
-            reasoning: false,
-            reasoning_configurable: true,
-            reasoning_values: Vec::new(),
-            reasoning_default: String::new(),
-            reasoning_profile: None,
-            reasoning_source: None,
-            // Auto-discovered local models are not guaranteed to implement
-            // OpenAI's newer `developer` role. vLLM Qwen chat templates, in
-            // particular, reject it while still accepting `system`.
-            reasoning_uses_system_message: true,
-            pricing: None,
-        };
-        if apply_discovered_reasoning(entry, &mut model).is_err() {
-            if report_errors {
-                crate::output::stderr!(
-                    "warning: model discovery contains invalid reasoning metadata"
-                );
+        let models_url = match url::Url::parse(&base).and_then(|u| u.join("models")) {
+            Ok(u) => u.to_string(),
+            Err(e) => {
+                if report_errors {
+                    diagnostics.problem(format!("warning: auto-discover URL parse failed: {e}"));
+                }
+                return Vec::new();
             }
-            continue;
+        };
+
+        let client = match blocking_discovery_client(std::time::Duration::from_secs(10)) {
+            Ok(c) => c,
+            Err(e) => {
+                if report_errors {
+                    diagnostics.problem(format!("warning: auto-discover client build failed: {e}"));
+                }
+                return Vec::new();
+            }
+        };
+
+        let mut req = client.get(&models_url);
+        let discovery_key = (!cred.api_key.trim().is_empty()).then(|| cred.api_key.clone());
+        if let Some(key) = discovery_key {
+            req = req.header("Authorization", format!("Bearer {key}"));
         }
-        models.push(model);
-    }
-    apply_known_custom_model_defaults(cred, models)
+        for h in &cred.headers {
+            req = req.header(&h.name, &h.value);
+        }
+
+        let resp = match req
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if report_errors {
+                    diagnostics.problem(format!(
+                        "warning: auto-discover GET {} failed: {e}",
+                        models_url
+                    ));
+                }
+                return Vec::new();
+            }
+        };
+
+        let status = resp.status();
+        let body = match bounded_discovery_json(resp, "custom models") {
+            Ok(value) => value,
+            Err(error) => {
+                if report_errors {
+                    diagnostics.problem(format!(
+                        "warning: auto-discover {} returned HTTP {} with an invalid or oversized body: {error}",
+                        models_url,
+                        status.as_u16())
+                    );
+                }
+                return Vec::new();
+            }
+        };
+
+        let data = match body
+            .get("data")
+            .or_else(|| body.get("models"))
+            .and_then(serde_json::Value::as_array)
+            .or_else(|| body.as_array())
+        {
+            Some(arr) => arr,
+            None => {
+                if report_errors {
+                    diagnostics.problem(format!(
+                        "warning: auto-discover {} missing 'data'/'models' array",
+                        models_url
+                    ));
+                }
+                return Vec::new();
+            }
+        };
+
+        let mut models = Vec::new();
+        for entry in data {
+            let id = entry
+                .get("id")
+                .or_else(|| entry.get("slug"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if id.is_empty() || id == "default" {
+                continue;
+            }
+
+            let described = match self_described_entry(
+                entry,
+                EndpointId(crate::auth::custom::endpoint_id(provider_id)),
+                id,
+                Protocol::OpenAiChat,
+            ) {
+                Ok(value) => value,
+                Err(_) => {
+                    if report_errors {
+                        diagnostics
+                            .problem("warning: invalid endpoint capability self-description");
+                    }
+                    continue;
+                }
+            };
+            let entry = described.as_ref().unwrap_or(entry);
+            let ctx = extract_ctx_from_model_entry(entry);
+            let vision = entry
+                .get("architecture")
+                .and_then(|a| a.get("input_modalities"))
+                .and_then(|m| m.as_array())
+                .map(|arr| arr.iter().any(|v| v.as_str() == Some("image")))
+                .unwrap_or(false)
+                || input_modalities_from_entry(entry).contains(octet_ai::Modality::Image)
+                || (!has_metadata_assertion(entry, MODALITY_FIELDS) && model_id_implies_vision(id));
+            let vision = asserted_capability(entry, &["vision"]).unwrap_or(vision);
+
+            let supported_parameters = entry
+                .get("supported_parameters")
+                .and_then(serde_json::Value::as_array);
+            let supports = |name: &str| {
+                supported_parameters.is_some_and(|parameters| {
+                    parameters
+                        .iter()
+                        .any(|parameter| parameter.as_str() == Some(name))
+                })
+            };
+            let max_output_tokens =
+                positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
+                    .unwrap_or(16_384)
+                    .min(ctx);
+            let mut model = CustomModel {
+                api_name: id.to_string(),
+                display_name: discovered_display_name(entry, id).unwrap_or_default(),
+                context_window: ctx,
+                max_output_tokens,
+                tools: custom_model_metadata_supports_tools(entry),
+                parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"])
+                    .unwrap_or_else(|| supports("parallel_tool_calls")),
+                vision,
+                structured_output: discovered_structured_output(entry)
+                    .unwrap_or_else(|| supports("response_format")),
+                reasoning: false,
+                reasoning_configurable: true,
+                reasoning_values: Vec::new(),
+                reasoning_default: String::new(),
+                reasoning_profile: None,
+                reasoning_source: None,
+                // Auto-discovered local models are not guaranteed to implement
+                // OpenAI's newer `developer` role. vLLM Qwen chat templates, in
+                // particular, reject it while still accepting `system`.
+                reasoning_uses_system_message: true,
+                pricing: None,
+                // Inventory is not authority for request headers or wire overrides.
+                preset: Default::default(),
+            };
+            if apply_discovered_reasoning(entry, &mut model).is_err() {
+                if report_errors {
+                    diagnostics
+                        .problem("warning: model discovery contains invalid reasoning metadata");
+                }
+                continue;
+            }
+            models.push(model);
+        }
+        apply_known_custom_model_defaults(cred, models)
+    })();
+    diagnostics.finish(report_errors);
+    result
 }
 
 /// Walk the model metadata looking for a context length. vLLM emits
@@ -4169,22 +5129,21 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
 
 // Codex's checked-in defaults are only a discovery fallback. The authenticated
 // `/models` response is authoritative for plan-specific advertised limits; octet
-// then applies the bounded working-window policy below.
-const CODEX_LEGACY_CONTEXT_WINDOW: u64 = 272_000;
-const CODEX_5_6_CONTEXT_WINDOW: u64 = 372_000;
-const CODEX_ASTRA_MAX_CONTEXT_WINDOW: u64 = 872_000;
-const CODEX_PRO_CONTEXT_WINDOW: u64 = 1_000_000;
-const CODEX_CONTEXT_WINDOW_CAP: u64 = 272_000;
-const CODEX_MAX_OUTPUT_TOKENS: u64 = 128_000;
+// then applies the bounded working-window policy implemented by
+// `crate::codex_context` (the deliberate 272K cap with its `gpt-5.6-luna` 372K
+// exception, the per-family entitlement ceiling, the explicit opt-in override,
+// and the clamp notice), so frontends and bootstrap share one definition.
 /// Codex retains the provider-advertised maximum as discovery metadata, while
 /// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
 /// Luna uses its 372K default; smaller advertised windows remain authoritative.
-const CODEX_MODEL_CACHE_VERSION: u8 = 6;
+/// Version 8 invalidates inventories filtered by the pre-0.155 Codex client
+/// version, so a fresh cache cannot hide GPT-6 Sol/Luna after upgrading.
+const CODEX_MODEL_CACHE_VERSION: u8 = 8;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
 // filter out models that require a contemporary Codex client.
-const CODEX_MODELS_CLIENT_VERSION: &str = "0.153.2";
+const CODEX_MODELS_CLIENT_VERSION: &str = "0.156.1";
 
 pub(crate) fn effective_compaction_threshold_fraction(config: &Config, model: &Model) -> f64 {
     let Some(max_active_tokens) = config
@@ -4207,10 +5166,17 @@ struct DiscoveredCodexModel {
     display_name: Option<String>,
     reasoning_options: octet_ai::types::ReasoningOptions,
     context_window: u64,
+    /// Backend default window before octet's deliberate working cap. Kept so the
+    /// explicit override and its clamp notice can be re-resolved exactly.
+    #[serde(default)]
+    default_context_window: u64,
     max_context_window: u64,
     max_output_tokens: u64,
     min_effort: octet_ai::ReasoningEffort,
     max_effort: octet_ai::ReasoningEffort,
+    /// Positive account-inventory authority, never inferred from a model name.
+    #[serde(default)]
+    reasoning_effort_updates: bool,
     responses_lite: bool,
     // `Option<T>` normally treats a missing key as `None`; the custom decoder
     // keeps explicit null valid while making incomplete dynamic metadata fail.
@@ -4235,6 +5201,7 @@ struct CodexModelCache {
     models: Vec<DiscoveredCodexModel>,
 }
 
+#[derive(Clone)]
 struct CodexDiscovery {
     claims: crate::auth::codex::SubscriptionClaims,
     models: Vec<DiscoveredCodexModel>,
@@ -4250,13 +5217,25 @@ fn positive_u64(entry: &serde_json::Value, names: &[&str]) -> Option<u64> {
 }
 
 fn codex_fallback_reasoning_options(model_id: &str) -> octet_ai::types::ReasoningOptions {
-    // Sparse Codex metadata cannot establish Off or Ultra. Keep the existing
-    // ordinary fallback range, without inventing a disabling wire value.
+    // Sparse Codex metadata cannot establish Off or Ultra for generic fallback
+    // models. The observed Luna route has an exact supported set of
+    // none/low/medium/high/xhigh/max; keep that narrow evidence scoped to Luna.
     let floor = codex_min_effort(model_id);
     let ceiling = codex_max_effort(model_id);
-    let values = ["minimal", "low", "medium", "high", "xhigh", "max"].into_iter()
-        .filter(|v| matches!(ReasoningConfig::from_provider_value(v), Some(ReasoningConfig::Effort(e)) if e >= floor && e <= ceiling))
-        .map(str::to_owned).collect();
+    let candidates = if model_id == "gpt-5.6-luna" {
+        ["none", "low", "medium", "high", "xhigh", "max"]
+    } else {
+        ["minimal", "low", "medium", "high", "xhigh", "max"]
+    };
+    let values = candidates
+        .into_iter()
+        .filter(|value| match ReasoningConfig::from_provider_value(value) {
+            Some(ReasoningConfig::Off) => true,
+            Some(ReasoningConfig::Effort(effort)) => effort >= floor && effort <= ceiling,
+            _ => false,
+        })
+        .map(str::to_owned)
+        .collect();
     octet_ai::types::ReasoningOptions {
         values,
         default: None,
@@ -4343,26 +5322,29 @@ fn codex_models_from_response(
                 (None, Some(maximum)) => (maximum, maximum),
                 (None, None) => fallback,
             };
-        if id == "gpt-6-astra" {
-            // Keep Astra's larger advertised input envelope distinct from the
+        if matches!(id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna") {
+            // Keep the observed GPT-6 input envelope distinct from the
             // conservative Codex working budget, and never overstate the
             // provider's 872K input allowance when only a total window appears.
             max_context_window = max_context_window.min(CODEX_ASTRA_MAX_CONTEXT_WINDOW);
             default_context_window = default_context_window.min(max_context_window);
         }
-        let context_window =
-            codex_context_window_for_plan(id, default_context_window, max_context_window, plan);
-        let max_output_tokens =
-            positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
-                .unwrap_or(CODEX_MAX_OUTPUT_TOKENS)
-                .min(context_window);
-        let max_output_tokens = if id == "gpt-6-astra" {
-            // Astra's advertised input envelope never changes its 128K output
-            // contract, while lower live metadata remains authoritative.
-            max_output_tokens.min(CODEX_MAX_OUTPUT_TOKENS)
-        } else {
-            max_output_tokens
-        };
+        // The plan-selected, pre-cap backend window for this model. octet's
+        // deliberate working cap is applied by `crate::codex_context`, which also
+        // reports the clamp and applies the explicit opt-in override.
+        let resolution = resolve_codex_context_window(
+            id,
+            codex_context_tier(plan),
+            default_context_window,
+            max_context_window,
+            positive_u64(entry, &["max_output_tokens", "max_completion_tokens"]),
+            CodexContextOverride::NONE,
+        )
+        .expect("resolving a Codex context window without a user override cannot fail");
+        let context_window = resolution.context_window;
+        // Astra's advertised input envelope never changes its 128K output
+        // contract, while lower live metadata remains authoritative.
+        let max_output_tokens = resolution.max_output_tokens;
         let agent_delegation = entry
             .get("multi_agent_version")
             .and_then(serde_json::Value::as_str)
@@ -4396,10 +5378,15 @@ fn codex_models_from_response(
             display_name: discovered_display_name(entry, id),
             reasoning_options,
             context_window,
+            default_context_window,
             max_context_window,
             max_output_tokens,
             min_effort,
             max_effort,
+            reasoning_effort_updates: entry
+                .get("supports_reasoning_effort_updates")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
             responses_lite,
             agent_delegation,
         });
@@ -4412,38 +5399,39 @@ fn codex_models_from_response(
     Ok(models)
 }
 
+/// Checked-in discovery fallback windows for a Codex family. The policy itself
+/// (working cap and entitlement ceiling) is owned by `crate::codex_context`.
 fn codex_model_context_limits(model_id: &str) -> (u64, u64) {
-    if model_id == "gpt-6-astra" {
-        (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_ASTRA_MAX_CONTEXT_WINDOW)
-    } else if model_id == "gpt-5.4" || model_id == "codex-auto-review" {
-        (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_PRO_CONTEXT_WINDOW)
-    } else if model_id.starts_with("gpt-5.6-") {
-        (CODEX_5_6_CONTEXT_WINDOW, CODEX_5_6_CONTEXT_WINDOW)
-    } else {
-        (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_LEGACY_CONTEXT_WINDOW)
-    }
+    crate::codex_context::entitled_context_windows(model_id)
 }
 
-fn codex_context_window_cap(model_id: &str) -> u64 {
-    if model_id == "gpt-5.6-luna" {
-        CODEX_5_6_CONTEXT_WINDOW
-    } else {
-        CODEX_CONTEXT_WINDOW_CAP
-    }
+/// The plan tier that selects between the backend default and advertised maximum.
+fn codex_context_tier(plan: Option<&crate::auth::codex::ChatGptPlan>) -> CodexContextTier {
+    CodexContextTier::from_plan_entitlement(
+        plan.is_some_and(crate::auth::codex::ChatGptPlan::uses_max_context_window),
+    )
 }
 
+/// Resolve one Codex model's context envelope without a user override.
+///
+/// Used by discovery and the conservative fallback catalog. The explicit opt-in
+/// override is applied once, where discovered metadata becomes catalog limits.
 fn codex_context_window_for_plan(
     model_id: &str,
     default_context_window: u64,
     max_context_window: u64,
     plan: Option<&crate::auth::codex::ChatGptPlan>,
 ) -> u64 {
-    let selected = if plan.is_some_and(crate::auth::codex::ChatGptPlan::uses_max_context_window) {
-        max_context_window
-    } else {
-        default_context_window
-    };
-    selected.min(codex_context_window_cap(model_id))
+    resolve_codex_context_window(
+        model_id,
+        codex_context_tier(plan),
+        default_context_window,
+        max_context_window,
+        None,
+        CodexContextOverride::NONE,
+    )
+    .expect("resolving a Codex context window without a user override cannot fail")
+    .context_window
 }
 
 fn codex_model_limits(
@@ -4466,7 +5454,10 @@ fn codex_model_limits(
 }
 
 fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if model_id == "gpt-6-astra" {
+    if matches!(
+        model_id,
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" | "gpt-5.6-luna"
+    ) {
         octet_ai::ReasoningEffort::Low
     } else {
         octet_ai::ReasoningEffort::Minimal
@@ -4476,7 +5467,9 @@ fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
 // New Codex families accept the top `max` effort tier. Live discovery narrows
 // this range when the backend publishes explicit supported reasoning levels.
 fn codex_max_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if model_id == "gpt-6-astra" || model_id.starts_with("gpt-5.6-") {
+    if matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
+        || model_id.starts_with("gpt-5.6-")
+    {
         octet_ai::ReasoningEffort::Max
     } else {
         octet_ai::ReasoningEffort::High
@@ -4489,7 +5482,7 @@ fn codex_max_effort(model_id: &str) -> octet_ai::ReasoningEffort {
 /// OAuth model to text-only.
 fn codex_supports_image_input(model_id: &str) -> bool {
     model_id == "codex-mini-latest"
-        || model_id == "gpt-6-astra"
+        || matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
         || model_id.starts_with("gpt-5.4")
         || model_id.starts_with("gpt-5.5")
         || model_id.starts_with("gpt-5.6")
@@ -4532,9 +5525,12 @@ fn load_codex_model_cache(
         return Ok(None);
     }
     for model in &mut cache.models {
-        if model.id == "gpt-6-astra" {
+        if matches!(
+            model.id.as_str(),
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        ) {
             // Current-schema caches can still contain a previously accepted
-            // over-cap Astra entry; normalize it to the fixed contract.
+            // over-cap GPT-6 entry; normalize it to the fixed contract.
             model.max_output_tokens = model.max_output_tokens.min(CODEX_MAX_OUTPUT_TOKENS);
         }
     }
@@ -4544,6 +5540,8 @@ fn load_codex_model_cache(
             || model.id.is_empty()
             || !ids.insert(model.id.as_str())
             || model.context_window == 0
+            || model.default_context_window == 0
+            || model.default_context_window > model.max_context_window
             || model.max_context_window < model.context_window
             || model.max_output_tokens == 0
             || model.max_output_tokens > model.context_window
@@ -4560,10 +5558,146 @@ fn load_codex_model_cache(
     Ok(Some(cache.models))
 }
 
+/// Which source produced the Codex inventory for one registration.
+///
+/// Kept as a typed outcome (not a log line) so the freshness and
+/// account-binding rules can be asserted directly: a fresh, account- and
+/// plan-matched cache must not trigger a discovery request, and a cache that is
+/// stale, invalid, or bound to another account must never be trusted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodexInventorySource {
+    /// A fresh, account- and plan-matched cache file. Dynamic capability
+    /// metadata from this source is validated by the freshness boundary.
+    FreshCache,
+    /// One synchronous online discovery, which also seeds the cache.
+    OnlineDiscovery,
+    /// The checked-in conservative fallback catalog. Used when the cache is
+    /// missing, stale, invalid, or unusable and no discovery could complete:
+    /// carries no dynamic capability and keeps the plan's entitlement ceiling.
+    ConservativeFallback,
+    /// The unit-test registration path: no ambient HOME and no network. A
+    /// fresh, account- and plan-matched cache is still authoritative, but it is
+    /// reduced to the conservative contract (see [`conservative_offline_codex_models`]),
+    /// so a test can never advertise dynamic capability that was not
+    /// revalidated online.
+    Fixture,
+}
+
+/// Decide the Codex model inventory for one registration.
+///
+/// The paths deliberately have different freshness behaviour, and this is the
+/// only place that decides which one applies:
+///
+/// * offline never refreshes: a fresh cache is *reduced* to the conservative
+///   contract ([`conservative_offline_codex_models`]), because a cache that
+///   cannot be revalidated must not advertise dynamic capability;
+/// * online uses a fresh, account- and plan-matched cache as-is (its dynamic
+///   capability was validated within the freshness window) and otherwise
+///   performs exactly one bounded discovery, which also seeds the cache;
+/// * a unit-test (fixture) registration never contacts the provider, but a
+///   fresh account- and plan-matched cache is still authoritative: skipping it
+///   would make the freshness, account-binding and reduction rules untestable
+///   through the real registration path;
+/// * any failure — invalid cache, discovery error, timeout — falls back to the
+///   checked-in catalog, never to a partly-trusted cache.
+fn codex_inventory_models(
+    store: &crate::auth::codex::CredentialStore,
+    initial_claims: &crate::auth::codex::SubscriptionClaims,
+    offline: bool,
+    fixture: bool,
+    discover: impl FnOnce(crate::auth::codex::CredentialStore) -> anyhow::Result<CodexDiscovery>,
+) -> (Vec<DiscoveredCodexModel>, CodexInventorySource) {
+    let cache = bootstrap_check(
+        "codex-cache",
+        load_codex_model_cache(store, initial_claims),
+        |error| {
+            format!("warning: Codex model cache was unusable ({error}); using discovery or conservative fallback")
+        },
+    );
+    if fixture || offline {
+        // No provider request on either path. A fresh, account- and
+        // plan-matched cache is still used, reduced to the conservative
+        // contract because it cannot be revalidated online; only a missing or
+        // unusable cache uses the checked-in catalog. The source label keeps
+        // the two paths distinguishable.
+        let fallback_source = if fixture {
+            CodexInventorySource::Fixture
+        } else {
+            CodexInventorySource::ConservativeFallback
+        };
+        return match cache {
+            Ok(Some(models)) => (
+                conservative_offline_codex_models(models),
+                CodexInventorySource::FreshCache,
+            ),
+            Ok(None) => (
+                fallback_codex_models(initial_claims.plan.as_ref()),
+                fallback_source,
+            ),
+            Err(error) => {
+                let _ = error;
+                (
+                    fallback_codex_models(initial_claims.plan.as_ref()),
+                    fallback_source,
+                )
+            }
+        };
+    }
+    match cache {
+        Ok(Some(models)) => (models, CodexInventorySource::FreshCache),
+        _cache_result => {
+            match bootstrap_check("codex-discovery", discover(store.clone()), |error| {
+                format!("warning: Codex model auto-discovery failed; using conservative fallback catalog: {error}")
+            }) {
+                Ok(discovery) => {
+                    let _ = bootstrap_check(
+                        "codex-cache-write",
+                        save_codex_model_cache(store, &discovery),
+                        |error| format!("warning: could not persist Codex model metadata: {error}"),
+                    );
+                    (discovery.models, CodexInventorySource::OnlineDiscovery)
+                }
+                Err(_) => {
+                    // Discovery may have refreshed a token before the inventory
+                    // request failed, so re-read claims for the fallback limits.
+                    let current_claims = crate::auth::codex::usable_subscription_claims(store)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| initial_claims.clone());
+                    (
+                        fallback_codex_models(current_claims.plan.as_ref()),
+                        CodexInventorySource::ConservativeFallback,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// The bounded readiness step for a selected Codex route.
+///
+/// Credential refresh and inventory fetch share one deadline, so the wait the
+/// user sees is the advertised one. A timeout is typed
+/// ([`RouteReadinessTimeout`]) and returns no partial inventory.
+fn discover_codex_models_within_envelope(
+    store: crate::auth::codex::CredentialStore,
+) -> anyhow::Result<CodexDiscovery> {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    run_route_readiness(
+        "codex route readiness",
+        CODEX_READINESS_ENVELOPE,
+        cancel,
+        move |cancel| {
+            discover_codex_models_with(store, cancel, crate::auth::codex::REFRESH_LOCK_WAIT)
+        },
+    )
+}
+
 fn conservative_offline_codex_models(
     mut models: Vec<DiscoveredCodexModel>,
 ) -> Vec<DiscoveredCodexModel> {
     for model in &mut models {
+        model.reasoning_effort_updates = false;
         model.responses_lite = false;
         model.agent_delegation = None;
         strip_codex_ultra(&mut model.reasoning_options);
@@ -4580,16 +5714,19 @@ fn fallback_codex_models(
     crate::auth::codex::MODELS
         .iter()
         .map(|model_id| {
+            let (default_context_window, _) = codex_model_context_limits(model_id);
             let (limits, max_context_window) = codex_model_limits(model_id, plan);
             DiscoveredCodexModel {
                 id: (*model_id).to_owned(),
                 display_name: None,
                 reasoning_options: codex_fallback_reasoning_options(model_id),
                 context_window: limits.context_window,
+                default_context_window,
                 max_context_window,
                 max_output_tokens: limits.max_output_tokens,
                 min_effort: codex_min_effort(model_id),
                 max_effort: codex_max_effort(model_id),
+                reasoning_effort_updates: false,
                 responses_lite: false,
                 agent_delegation: None,
             }
@@ -4604,42 +5741,143 @@ fn codex_models_url() -> anyhow::Result<url::Url> {
     Ok(url)
 }
 
-fn discover_codex_models(
-    store: crate::auth::codex::CredentialStore,
-) -> anyhow::Result<CodexDiscovery> {
-    std::thread::spawn(move || -> anyhow::Result<CodexDiscovery> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        runtime.block_on(async move {
-            let resolver = crate::auth::codex::CodexResolver::new(store);
-            let (mut headers, claims) = resolver.discovery_headers().await?;
-            let static_headers =
-                crate::providers::public_headers(crate::providers::CODEX.extra_headers)?;
-            for (name, value) in &static_headers {
-                headers.insert(name.clone(), value.clone());
-            }
-            headers.insert(
-                http::header::USER_AGENT,
-                http::HeaderValue::from_str(&codex_user_agent())?,
-            );
+/// Wall-clock envelope for the SELECTED route's Codex inventory work.
+///
+/// The inventory request is bounded at ten seconds and a token refresh at sixty,
+/// so their sum used to be the real wait even though discovery advertised ten.
+/// Readiness gives the whole selected-route initialization one deadline instead:
+/// a subscription route that cannot become usable inside it is reported as a
+/// timeout and the conservative fallback catalog is used, rather than blocking
+/// the launch on an unrelated wait.
+pub(crate) const CODEX_READINESS_ENVELOPE: Duration = Duration::from_secs(10);
 
-            let url = codex_models_url()?;
-            let response = discovery_client(DISCOVERY_TIMEOUT)?
-                .get(url)
-                .headers(headers)
-                .send()
-                .await
-                .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?
-                .error_for_status()
-                .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?;
-            let body = bounded_discovery_json_async(response, "Codex models").await?;
-            let models = codex_models_from_response(&body, claims.plan.as_ref())?;
-            Ok(CodexDiscovery { claims, models })
-        })
+/// Typed, bounded cause for a selected-route wait that did not finish in time.
+///
+/// Carries the phase name and the deadline, never a path or a credential, and
+/// its message is the whole diagnosis a user needs to retry.
+#[derive(Debug)]
+pub(crate) struct RouteReadinessTimeout {
+    pub phase: &'static str,
+    pub waited: Duration,
+}
+
+impl std::fmt::Display for RouteReadinessTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} did not finish within {} ms",
+            self.phase,
+            self.waited.as_millis()
+        )
+    }
+}
+
+impl std::error::Error for RouteReadinessTimeout {}
+
+/// Run one selected-route initialization step under a bounded, cancellable
+/// envelope.
+///
+/// The worker checks `cancel` between its own bounded steps, and every step that
+/// can block is already bounded (the inventory request, the token refresh, and
+/// the cross-process refresh lock via
+/// [`crate::auth::codex::store::REFRESH_LOCK_WAIT`]). A timeout therefore never
+/// abandons an indefinitely blocked worker: the worker either observes the
+/// cancellation or finishes its own bounded step and exits. A timed-out attempt
+/// holds nothing and rotates nothing, so the next launch finds the credential
+/// store exactly as the other owner left it.
+///
+/// The deadline signals cancellation before it returns: without that, a timed-out
+/// envelope would leave the worker's own `cancel` flag clear, so the credential
+/// step could still start an inventory request the launch no longer wants. The
+/// worker is never detached from its bound — it is only ever *asked* to stop
+/// between bounded steps, because interrupting a token refresh in flight can
+/// strand a rotated refresh token.
+pub(crate) fn run_route_readiness<T: Send + 'static>(
+    phase: &'static str,
+    envelope: Duration,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    work: impl FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> anyhow::Result<T>
+        + Send
+        + 'static,
+) -> anyhow::Result<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker_cancel = std::sync::Arc::clone(&cancel);
+    let worker = std::thread::Builder::new()
+        .name(format!("octet-route-{phase}"))
+        .spawn(move || {
+            let _ = sender.send(work(worker_cancel));
+        })?;
+    match receiver.recv_timeout(envelope) {
+        Ok(result) => {
+            let _ = worker.join();
+            result
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::Error::new(RouteReadinessTimeout {
+                phase,
+                waited: envelope,
+            }))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("{phase} worker stopped without reporting a result")
+        }
+    }
+}
+
+/// The bounded online discovery body.
+///
+/// `refresh_lock_wait` bounds the cross-process refresh-lock acquisition; it is
+/// a parameter so tests never depend on a production deadline. `cancel` is
+/// observed between the credential step and the inventory request, so a
+/// readiness timeout stops the sequence instead of starting a request the
+/// launch no longer wants.
+fn discover_codex_models_with(
+    store: crate::auth::codex::CredentialStore,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    refresh_lock_wait: Duration,
+) -> anyhow::Result<CodexDiscovery> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        #[cfg(test)]
+        let resolver =
+            crate::auth::codex::CodexResolver::with_refresh_lock_wait(store, refresh_lock_wait);
+        #[cfg(not(test))]
+        let resolver = {
+            let _ = refresh_lock_wait;
+            crate::auth::codex::CodexResolver::new(store)
+        };
+        let (mut headers, claims) = resolver.discovery_headers().await?;
+        startup_phase("codex.credentials");
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("Codex model discovery cancelled before the inventory request");
+        }
+        let static_headers =
+            crate::providers::public_headers(crate::providers::CODEX.extra_headers)?;
+        for (name, value) in &static_headers {
+            headers.insert(name.clone(), value.clone());
+        }
+        headers.insert(
+            http::header::USER_AGENT,
+            http::HeaderValue::from_str(&codex_user_agent())?,
+        );
+
+        let url = codex_models_url()?;
+        startup_phase("codex.inventory");
+        let response = discovery_client(DISCOVERY_TIMEOUT)?
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?
+            .error_for_status()
+            .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?;
+        let body = bounded_discovery_json_async(response, "Codex models").await?;
+        let models = codex_models_from_response(&body, claims.plan.as_ref())?;
+        Ok(CodexDiscovery { claims, models })
     })
-    .join()
-    .map_err(|_| anyhow::anyhow!("Codex model discovery thread panicked"))?
 }
 
 fn codex_user_agent() -> String {
@@ -4650,14 +5888,152 @@ fn codex_user_agent() -> String {
     )
 }
 
+/// Read the explicit opt-in Codex context-window override.
+///
+/// Fail-closed: an unreadable, unrecognised, or out-of-range value leaves the
+/// deliberate cap in force and reports why.
+fn codex_context_override_from_env() -> anyhow::Result<CodexContextOverride> {
+    let mut diagnostics = crate::output::DiagnosticCheck::new(
+        crate::output::DiagnosticComponent::Bootstrap("codex-context-override".into()),
+    );
+    let result = (|| {
+        let requested = optional_env(CODEX_CONTEXT_OVERRIDE_ENV)?;
+        let acknowledged = optional_env(CODEX_CONTEXT_ACKNOWLEDGE_ENV)?;
+        match CodexContextOverride::parse(requested.as_deref(), acknowledged.as_deref()) {
+            Ok(user_override) => Ok(user_override),
+            Err(error) => {
+                diagnostics.problem(format!(
+                    "warning: {error}; keeping the deliberate Codex context cap"
+                ));
+                Ok(CodexContextOverride::NONE)
+            }
+        }
+    })();
+    diagnostics.finish(result.is_ok());
+    result
+}
+
+/// Resolve the context envelope for one discovered Codex model.
+///
+/// The deliberate working cap is applied here as it always has been; a
+/// deliberate reduction is reported through the typed [`CodexContextClamp`] the
+/// caller observes, and the explicit opt-in override can raise the window (never
+/// past the model's entitlement) when the operator acknowledged it. A refused
+/// override keeps the deliberate cap.
+fn codex_context_resolve_for_registration(
+    model: &DiscoveredCodexModel,
+    tier: CodexContextTier,
+    user_override: CodexContextOverride,
+) -> crate::codex_context::CodexContextWindow {
+    let mut diagnostics = crate::output::DiagnosticCheck::new(
+        crate::output::DiagnosticComponent::Bootstrap(format!("codex-context:{}", model.id)),
+    );
+    let result = match resolve_codex_context_window(
+        &model.id,
+        tier,
+        model.default_context_window,
+        model.max_context_window,
+        Some(model.max_output_tokens),
+        user_override,
+    ) {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            diagnostics.problem(format!(
+                "warning: {error}; keeping the deliberate Codex context cap"
+            ));
+            resolve_codex_context_window(
+                &model.id,
+                tier,
+                model.default_context_window,
+                model.max_context_window,
+                Some(model.max_output_tokens),
+                CodexContextOverride::NONE,
+            )
+            .expect("resolving a Codex context window without a user override cannot fail")
+        }
+    };
+    diagnostics.finish(true);
+    result
+}
+
+/// Record the single user-facing note one catalog model needs, if any.
+///
+/// Catalog enumeration must never print: a user running a non-Codex model would
+/// otherwise read a note about every Codex model in the catalog. The note is
+/// shown by [`Bootstrap::codex_context_note`] for the effective session model
+/// only. Above the standard tier the whole request is metered differently, which
+/// is why such a route carries a note at all.
+fn codex_context_record_note(
+    notes: &mut CodexContextNotes,
+    catalog_id: &ModelId,
+    model_id: &str,
+    resolution: &crate::codex_context::CodexContextWindow,
+) {
+    if let Some(note) = crate::codex_context::codex_context_session_note(model_id, resolution) {
+        notes.record(catalog_id.clone(), note);
+    }
+}
+
+/// The durable uncertainty operation for one resolved catalog model, if any.
+///
+/// `Some` only for a Codex route whose effective window is above the 272K
+/// standard tier, where the whole request is priced differently. A public
+/// provider with a large context window (1M Gemini, for example) is not a Codex
+/// route and keeps exact accounting, so the endpoint is part of the decision.
+fn codex_context_uncertainty_operation(model: &Model) -> Option<&'static str> {
+    (model.endpoint.id.0 == crate::auth::codex::ENDPOINT_ID
+        && model.spec.limits.context_window > crate::codex_context::CODEX_CONTEXT_WINDOW_CAP)
+        .then_some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
+}
+
+/// Mark a route whose effective Codex context window is above the 272K standard
+/// tier as uncertain on the session before the first request.
+///
+/// Above 272K the whole request is priced differently, so the durable session
+/// record must say the known totals are only a subtotal instead of letting an
+/// exact-looking cost stand. The uncertainty record is sticky and written at
+/// most once per session; a route at or below 272K, or any non-Codex route, is
+/// left exact. Called at every launch boundary, including a mid-session model
+/// switch, so a switch onto a raised Codex route cannot leave an exact-looking
+/// cost behind.
+fn record_codex_context_uncertainty(session: &mut Session, model: &Model) -> anyhow::Result<()> {
+    let Some(operation) = codex_context_uncertainty_operation(model) else {
+        return Ok(());
+    };
+    // This deduplicates durable exposure markers, not a cost-exactness report.
+    // Unpriced completed receipts alone must not suppress this route exposure.
+    if session.has_uncertain_usage() {
+        return Ok(());
+    }
+    session.record_usage_uncertainty(
+        model.endpoint.id.clone(),
+        model.spec.id.clone(),
+        operation,
+    )?;
+    Ok(())
+}
+
 /// Register the OpenAI Codex (Sign in with ChatGPT) endpoint and discover the
 /// account's current model inventory, but only for a validated subscription
 /// credential. Codex-specific headers are composed from static endpoint
 /// headers, request-scoped session affinity, and resolver account routing.
+#[cfg(test)]
 fn register_openai_codex(
     catalog: &mut ModelCatalog,
     store: crate::auth::codex::CredentialStore,
     offline: bool,
+) -> anyhow::Result<()> {
+    let mut discarded = CodexContextNotes::default();
+    register_openai_codex_with_notes(catalog, store, offline, &mut discarded)
+}
+
+/// Register the Codex route while recording the one note each registered model
+/// needs. See [`codex_context_record_note`].
+fn register_openai_codex_with_notes(
+    catalog: &mut ModelCatalog,
+    store: crate::auth::codex::CredentialStore,
+    offline: bool,
+    notes: &mut CodexContextNotes,
 ) -> anyhow::Result<()> {
     use crate::auth::codex;
 
@@ -4682,52 +6058,13 @@ fn register_openai_codex(
     // online and reduced to the conservative fallback offline, so dynamic
     // capabilities can never survive past the freshness boundary. A first
     // launch performs one bounded discovery to seed the cache.
-    let models = if offline {
-        match load_codex_model_cache(&store, &initial_claims) {
-            Ok(Some(models)) => conservative_offline_codex_models(models),
-            Ok(None) => fallback_codex_models(initial_claims.plan.as_ref()),
-            Err(error) => {
-                crate::output::stderr!(
-                    "warning: Codex model cache was unusable ({error}); using conservative offline fallback catalog"
-                );
-                fallback_codex_models(initial_claims.plan.as_ref())
-            }
-        }
-    } else if cfg!(test) {
-        fallback_codex_models(initial_claims.plan.as_ref())
-    } else {
-        match load_codex_model_cache(&store, &initial_claims) {
-            Ok(Some(models)) => models,
-            cache_result => match discover_codex_models(store.clone()) {
-                Ok(discovery) => {
-                    if let Err(error) = save_codex_model_cache(&store, &discovery) {
-                        crate::output::stderr!(
-                            "warning: could not persist Codex model metadata: {error}"
-                        );
-                    }
-                    discovery.models
-                }
-                Err(discovery_error) => {
-                    if let Err(cache_error) = cache_result {
-                        crate::output::stderr!(
-                            "warning: Codex model cache was unusable ({cache_error}); live discovery also failed ({discovery_error}); using conservative fallback catalog"
-                        );
-                    } else {
-                        crate::output::stderr!(
-                            "warning: Codex model auto-discovery failed; using conservative fallback catalog: {discovery_error}"
-                        );
-                    }
-                    // Discovery may have refreshed a token before the inventory
-                    // request failed, so re-read claims for the fallback limits.
-                    let current_claims = codex::usable_subscription_claims(&store)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| initial_claims.clone());
-                    fallback_codex_models(current_claims.plan.as_ref())
-                }
-            },
-        }
-    };
+    let (models, _source) = codex_inventory_models(
+        &store,
+        &initial_claims,
+        offline,
+        cfg!(test),
+        discover_codex_models_within_envelope,
+    );
     let resolver = std::sync::Arc::new(codex::CodexResolver::new(store));
 
     let mut default_headers = crate::providers::public_headers(declaration.extra_headers)?;
@@ -4749,16 +6086,32 @@ fn register_openai_codex(
         timeout: PROVIDER_RESPONSE_HEADER_TIMEOUT,
     })?;
 
+    let user_override = codex_context_override_from_env()?;
+    let tier = codex_context_tier(initial_claims.plan.as_ref());
+
     for model in models {
-        // Astra is always namespaced so an OAuth selection cannot be confused
-        // with the direct public OpenAI route when credentials change. Other
+        // GPT-6 routes are always namespaced so an OAuth selection cannot be
+        // confused with the public OpenAI route when credentials change. Other
         // Codex ids retain their historical collision-based compatibility.
-        let catalog_id =
-            if model.id == "gpt-6-astra" || catalog.resolve(&ModelId(model.id.clone())).is_ok() {
-                ModelId(format!("{}/{}", declaration.id, model.id))
-            } else {
-                ModelId(model.id.clone())
-            };
+        let catalog_id = if matches!(
+            model.id.as_str(),
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        ) || catalog.resolve(&ModelId(model.id.clone())).is_ok()
+        {
+            ModelId(format!("{}/{}", declaration.id, model.id))
+        } else {
+            ModelId(model.id.clone())
+        };
+        let limits = {
+            let resolution = codex_context_resolve_for_registration(&model, tier, user_override);
+            // Recording is not printing: the note is shown once, for the
+            // effective session model only (see `codex_context_note`).
+            codex_context_record_note(notes, &catalog_id, &model.id, &resolution);
+            ModelLimits {
+                context_window: resolution.context_window,
+                max_output_tokens: resolution.max_output_tokens,
+            }
+        };
         let pricing = crate::providers::pricing_for(declaration, &model.id);
         let supports_image_input = codex_supports_image_input(&model.id);
         // The declaration keeps application session identity separate from the
@@ -4769,6 +6122,7 @@ fn register_openai_codex(
             route.protocol,
         );
         catalog.register_model(ModelSpec {
+            preset: Default::default(),
             id: catalog_id,
             endpoint: EndpointId(route.endpoint_id.into()),
             api_name: model.id,
@@ -4798,11 +6152,13 @@ fn register_openai_codex(
                 structured_output: false,
 
                 deferred_tool_loading: false,
+
+                responses_features: octet_ai::ResponsesFeatures {
+                    reasoning_effort_updates: model.reasoning_effort_updates,
+                    ..Default::default()
+                },
             },
-            limits: ModelLimits {
-                context_window: model.context_window,
-                max_output_tokens: model.max_output_tokens,
-            },
+            limits,
             pricing,
             cache,
         })?;
@@ -4851,6 +6207,7 @@ pub(crate) fn register_offline_openrouter_model(
     // when an explicit offline batch model cannot be found in the inventory
     // cache, where the provider remains the authority on actual availability.
     catalog.register_model(ModelSpec {
+        preset: Default::default(),
         id: catalog_id,
         endpoint: endpoint_id,
         api_name: api_name.to_owned(),
@@ -4866,6 +6223,7 @@ pub(crate) fn register_offline_openrouter_model(
             agent_delegation: None,
             structured_output: false,
             deferred_tool_loading: false,
+            responses_features: Default::default(),
         },
         limits: ModelLimits {
             context_window: 131_072,
@@ -4877,21 +6235,230 @@ pub(crate) fn register_offline_openrouter_model(
     Ok(true)
 }
 
+/// The provider inventories a launch must initialize before it is usable.
+///
+/// Readiness is deliberately narrower than discovery. A launch that already
+/// names its route must not wait for unrelated configured providers: an AWS
+/// credential-chain probe, a subscription inventory fetch, or a local-server
+/// probe belongs to a route this launch cannot use. Anything the plan does not
+/// name is still available — the embedded static catalog is built in full and
+/// every skipped inventory can be completed later by
+/// [`Bootstrap::enrich_catalog`] — and the plan falls back to
+/// [`CatalogReadiness::Fleet`] whenever it cannot name the route, so narrowing
+/// is an optimization and never a selector.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogReadiness {
+    /// Nothing could be named (a model-less launch, first-run setup, a resumed
+    /// session whose provenance only the session file knows) or the selection
+    /// may belong to more than one route (an un-namespaced id, a custom
+    /// OpenAI-compatible registry, an extension-provided model). The historical
+    /// full inventory initialization, unchanged.
+    Fleet,
+    /// Exactly these builtin provider declarations participate in readiness,
+    /// in order. Used only when the selection proves the route, so the user's
+    /// chosen model is always initialized before it is resolved.
+    Routes(Vec<&'static str>),
+}
+
+impl CatalogReadiness {
+    /// Whether the plan includes one builtin provider declaration.
+    pub(crate) fn includes(&self, provider_id: &str) -> bool {
+        match self {
+            Self::Fleet => true,
+            Self::Routes(routes) => routes.contains(&provider_id),
+        }
+    }
+
+    /// Whether this plan is the full historical initialization.
+    pub(crate) fn is_fleet(&self) -> bool {
+        matches!(self, Self::Fleet)
+    }
+
+    /// Route ids named by the plan, for diagnostics and tests.
+    #[cfg(test)]
+    pub(crate) fn route_ids(&self) -> Vec<&'static str> {
+        match self {
+            Self::Fleet => Vec::new(),
+            Self::Routes(routes) => routes.clone(),
+        }
+    }
+}
+
+/// Declarations the readiness plan may name as a proven route.
+///
+/// The generated [`BUILTIN_PROVIDER_DECLARATIONS`] carries the environment/ADC
+/// built-ins only; the product-owned subscription routes whose credentials are
+/// owned by another module (Codex today) are appended here. Every entry must
+/// have a matching catalog-registration branch in
+/// [`model_catalog_for_readiness`], otherwise naming it would prove a route that
+/// nothing initializes. Copilot is deliberately absent: host-owned integrations
+/// are not nameable by a builtin id, so a Copilot selection stays on the fleet
+/// plan.
+fn readiness_declarations() -> impl Iterator<Item = &'static ProviderDeclaration> {
+    BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .chain([&crate::providers::CODEX])
+}
+
+/// Resolve the builtin declaration that provably owns one selected model id.
+///
+/// Only an explicit `<declaration-id>/<model>` namespace is trusted. Every
+/// other id — un-namespaced, a custom registry, an extension provider, an
+/// unknown namespace — returns `None`, which makes the caller take
+/// [`CatalogReadiness::Fleet`]: a wrong narrowing would silently drop the route
+/// the model actually needs, so ambiguity always falls back to the full path.
+fn builtin_declaration_for_model(model: &ModelId) -> Option<&'static str> {
+    let (prefix, _) = model.0.split_once('/')?;
+    readiness_declarations()
+        .find(|declaration| declaration.id == prefix)
+        .map(|declaration| declaration.id)
+}
+
+/// Which provider inventories readiness must initialize for this launch.
+///
+/// Order of guarantees:
+/// 1. an explicit CLI selection always wins and names its own route, even when
+///    a session is resumed (the session's provenance is overridden);
+/// 2. a resumed/continued/forked session without an explicit selection may
+///    carry provenance only the session file knows, so readiness stays full;
+/// 3. a configuration-level selection on a NEW session is the effective
+///    selection (nothing can override it), so it may narrow;
+/// 4. no selection at all needs the fleet: the picker, model-less mode and
+///    first-run setup all enumerate every provider;
+/// 5. a configured compaction route is retained even when the session model is
+///    on another provider, so compaction can never point at a missing route.
+pub(crate) fn catalog_readiness(config: &Config) -> CatalogReadiness {
+    let provenance_possible = !matches!(config.resume, ResumeSelector::New);
+    if provenance_possible && !config.model_explicit {
+        // A session may have stored a model that config cannot see yet.
+        return CatalogReadiness::Fleet;
+    }
+    let Some(selection) = config.model.as_ref() else {
+        // Model-less launch: setup and the picker enumerate every provider.
+        return CatalogReadiness::Fleet;
+    };
+    let Some(provider_id) = builtin_declaration_for_model(selection) else {
+        // Un-namespaced, custom, or extension-provided: ambiguous on purpose.
+        return CatalogReadiness::Fleet;
+    };
+    let mut routes = vec![provider_id];
+    // Native compaction can be pinned to a different provider than the session
+    // model; that route has to exist before the first turn, not after. An
+    // un-namespaced or extension-provided compaction id cannot be proven to be
+    // a builtin route, and `build_app` fails closed when it does not resolve, so
+    // ambiguity here is the fleet rather than a narrowed plan that drops it.
+    if let Some(compaction_model) = config.compaction.compact_model.as_ref() {
+        let Some(compaction_provider) = builtin_declaration_for_model(compaction_model) else {
+            return CatalogReadiness::Fleet;
+        };
+        if !routes.contains(&compaction_provider) {
+            routes.push(compaction_provider);
+        }
+    }
+    CatalogReadiness::Routes(routes)
+}
+
 fn base_model_catalog_with_custom_store(
     offline: bool,
     explicit_custom_store: Option<&crate::auth::custom::CredentialStore>,
 ) -> anyhow::Result<ModelCatalog> {
+    base_model_catalog_with_readiness(offline, explicit_custom_store, &CatalogReadiness::Fleet)
+}
+
+/// Bind only the embedded catalog's existing endpoints, before credential
+/// pruning. This is local credential resolution, not discovery or registration
+/// of additional static inventories. Only readiness-selected declarations may
+/// access their private credential source; protocol/model metadata stays intact.
+fn bind_embedded_provider_credentials(
+    embedded: ModelCatalog,
+    readiness: &CatalogReadiness,
+    mut resolve: impl FnMut(
+        &ProviderDeclaration,
+    ) -> anyhow::Result<Option<crate::providers::EnvironmentCredential>>,
+) -> anyhow::Result<ModelCatalog> {
+    let mut catalog = ModelCatalog::default();
+    let mut unavailable = std::collections::HashSet::new();
+    for spec in embedded.models() {
+        if unavailable.contains(&spec.endpoint) {
+            continue;
+        }
+        let model = embedded.resolve(&spec.id)?;
+        if !catalog.has_endpoint(&model.endpoint.id) {
+            let mut endpoint = (*model.endpoint).clone();
+            if let Some((declaration, route)) = BUILTIN_PROVIDER_DECLARATIONS
+                .iter()
+                .filter(|declaration| readiness.includes(declaration.id))
+                .find_map(|declaration| {
+                    declaration
+                        .routes
+                        .iter()
+                        .find(|route| route.endpoint_id == endpoint.id.0)
+                        .map(|route| (declaration, route))
+                })
+            {
+                let authentication = resolve(declaration).and_then(|credential| {
+                    credential
+                        .map(|credential| crate::providers::environment_auth(route, &credential))
+                        .transpose()
+                });
+                match bootstrap_check(
+                    format!("provider-credential:{}", declaration.id),
+                    authentication,
+                    |_| {
+                        format!(
+                            "warning: {} unavailable: could not resolve provider credentials",
+                            declaration.name
+                        )
+                    },
+                ) {
+                    Ok(Some(authentication)) => endpoint.auth = authentication,
+                    Ok(None) => {}
+                    Err(_) => {
+                        // An invalid source cannot fall back to another identity.
+                        // Omit only this account's embedded models; other accounts
+                        // and later custom-provider registration remain usable.
+                        unavailable.insert(endpoint.id.clone());
+                        continue;
+                    }
+                }
+            }
+            catalog.register_endpoint(endpoint)?;
+            if let Some(label) = embedded.endpoint_label(&model.endpoint.id) {
+                catalog.set_endpoint_label(model.endpoint.id.clone(), label)?;
+            }
+        }
+        catalog.register_model(spec.clone())?;
+    }
+    Ok(catalog)
+}
+
+fn base_model_catalog_with_readiness(
+    offline: bool,
+    explicit_custom_store: Option<&crate::auth::custom::CredentialStore>,
+    readiness: &CatalogReadiness,
+) -> anyhow::Result<ModelCatalog> {
     let mut catalog = ModelCatalog::builtin()?;
     // The embedded catalog describes supported integrations, not enabled
     // accounts. Do not offer a cloud model until its endpoint can resolve a
-    // credential from this process's environment. Unit tests intentionally
-    // retain the complete fixture catalog so they can exercise protocol and
-    // session behavior without ambient secrets.
+    // credential from the environment or owner-private key store. Bind existing
+    // native endpoints before pruning so offline startup and discovery failure
+    // retain exactly the same embedded fallback models for either key source.
+    // Unit tests use injected local stores rather than ambient credentials.
     #[cfg(not(test))]
-    catalog.retain_configured_models();
-    if cfg!(test) {
+    {
+        catalog = bind_embedded_provider_credentials(
+            catalog,
+            readiness,
+            crate::providers::resolve_environment,
+        )?;
+        catalog.retain_configured_models();
+    }
+    startup_phase("catalog.base");
+    if cfg!(test) && readiness.is_fleet() {
         // Tests keep the historical deterministic DeepSeek fixture and never
-        // use ambient credentials or contact provider discovery endpoints.
+        // use ambient credentials or contact provider discovery endpoints. A
+        // narrowed plan is exercised through the runtime path so tests assert
+        // the readiness decision itself, not a fixture shortcut.
         let declaration = &crate::providers::DEEPSEEK;
         let credential = crate::providers::EnvironmentCredential::for_test(
             "DEEPSEEK_API_KEY",
@@ -4907,42 +6474,66 @@ fn base_model_catalog_with_custom_store(
         )?;
         register_deepseek_v4_pro(&mut catalog, declaration)?;
     } else if offline {
-        if let Err(error) = register_cached_openrouter_models_offline(&mut catalog) {
-            crate::output::stderr!("warning: OpenRouter model cache unavailable: {error}");
-        }
+        let _ = bootstrap_check(
+            "openrouter-offline",
+            register_cached_openrouter_models_offline(&mut catalog),
+            |error| format!("warning: OpenRouter model cache unavailable: {error}"),
+        );
     } else {
-        register_configured_presets_parallel(&mut catalog);
+        match readiness {
+            // The historical full initialization: every detected provider.
+            CatalogReadiness::Fleet => register_configured_presets_parallel(&mut catalog),
+            // Only the route the selection proves it needs. The other
+            // declarations are deliberately not touched: their credential
+            // chains, inventory probes and local-server scans cannot serve this
+            // launch, and waiting for one of them is what makes startup slow.
+            CatalogReadiness::Routes(routes) => {
+                register_selected_preset_inventories(&mut catalog, routes)
+            }
+        }
     }
 
     // Explicit custom models remain usable offline; only auto-discovery is skipped.
     // Normal tests never inspect ambient HOME credentials, while provider setup
     // passes its explicit existing store so it can rebuild the same catalog
     // immediately without introducing a second registry or catalog type.
-    if let Some(store) = explicit_custom_store {
-        if let Err(error) =
-            register_custom_openai_endpoints_from_store(&mut catalog, store, offline)
-        {
-            crate::output::stderr!("warning: custom provider registry unavailable: {error}");
-        }
+    //
+    // A narrowed plan skips both registries: a custom OpenAI-compatible model is
+    // never namespaced by a builtin declaration (it would have failed the route
+    // proof in [`catalog_readiness`]), and the caller falls back to the fleet
+    // whenever the selected model still does not resolve.
+    if !readiness.is_fleet() {
         if !cfg!(test) {
-            if let Err(error) =
-                register_default_apple_foundation_models(&mut catalog, store, offline)
-            {
-                crate::output::stderr!("warning: Apple Foundation Models unavailable: {error}");
-            }
+            catalog.retain_configured_models();
+        }
+        return Ok(catalog);
+    }
+    if let Some(store) = explicit_custom_store {
+        let _ = bootstrap_check(
+            "custom-registry",
+            register_custom_openai_endpoints_from_store(&mut catalog, store, offline),
+            |error| format!("warning: custom provider registry unavailable: {error}"),
+        );
+        if !cfg!(test) {
+            let _ = bootstrap_check(
+                "apple-foundation",
+                register_default_apple_foundation_models(&mut catalog, store, offline),
+                |error| format!("warning: Apple Foundation Models unavailable: {error}"),
+            );
             catalog.retain_configured_models();
         }
     } else if !cfg!(test) {
         let store = crate::auth::custom::CredentialStore::new(crate::auth::custom::default_path());
-        if let Err(error) =
-            register_custom_openai_endpoints_from_store(&mut catalog, &store, offline)
-        {
-            crate::output::stderr!("warning: custom provider registry unavailable: {error}");
-        }
-        if let Err(error) = register_default_apple_foundation_models(&mut catalog, &store, offline)
-        {
-            crate::output::stderr!("warning: Apple Foundation Models unavailable: {error}");
-        }
+        let _ = bootstrap_check(
+            "custom-registry",
+            register_custom_openai_endpoints_from_store(&mut catalog, &store, offline),
+            |error| format!("warning: custom provider registry unavailable: {error}"),
+        );
+        let _ = bootstrap_check(
+            "apple-foundation",
+            register_default_apple_foundation_models(&mut catalog, &store, offline),
+            |error| format!("warning: Apple Foundation Models unavailable: {error}"),
+        );
         // Custom providers may use provider-scoped environment credentials;
         // hide models whose referenced variable is not configured, just as the
         // built-in provider catalog does above.
@@ -4955,16 +6546,110 @@ fn base_model_catalog(offline: bool) -> anyhow::Result<ModelCatalog> {
     base_model_catalog_with_custom_store(offline, None)
 }
 
-/// Build the runtime model catalog, exposing ChatGPT subscription models only
-/// when octet owns a usable OAuth credential.
+/// Environment switch for the off-screen startup phase trace.
+///
+/// This is the one timing channel every frontend shares for the "startup shows
+/// nothing, but latency must stay attributable" contract: set to a non-empty
+/// value other than `0` and `startup_phase` writes one
+/// `octet-startup: <phase> elapsed=<micros>us` line per boundary to stderr.
+/// Frontends that own a phase boundary (`history.hydrate`, `frame.ready`) call
+/// [`startup_phase`] with their stable name; they never render the trace.
+pub(crate) const STARTUP_TRACE_ENV: &str = "OCTET_STARTUP_TRACE";
+/// Monotonic origin for the phase trace, shared by every phase in this process.
+static STARTUP_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Whether the startup phase trace is enabled for one env value.
+///
+/// Off unless the switch is explicitly set to something other than empty/`0`, so
+/// the default startup prints nothing.
+fn startup_trace_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// One stable, single-line phase record. No timestamps are asserted anywhere:
+/// the harness compares *which* phases ran and how often.
+fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
+    format!("octet-startup: {phase} elapsed={}us", elapsed.as_micros())
+}
+
+/// Report one startup phase boundary out of band.
+///
+/// Startup renders nothing, but the latency acceptance criteria still need the
+/// phases to be distinguishable, so `OCTET_STARTUP_TRACE=1` writes one line per
+/// boundary to stderr (`octet-startup: <phase> elapsed=<micros>us`) and the
+/// default (unset) prints nothing and changes no behavior.
+///
+/// This trace is the off-screen timing signal every frontend shares; nothing in
+/// it is ever rendered on the startup screen. Stable phase names:
+/// `process.enter`, `cli.configured`, `selection.resolved`, `catalog.base`,
+/// `catalog.selected`, `catalog.codex`, `catalog.copilot`,
+/// `catalog.fallback`, `catalog.enrich`, `codex.credentials`, `codex.inventory`,
+/// `bootstrap.ready`, `session.resolve`, `session.replay`,
+/// `extensions.provider-preflight`, `extensions.prestart`, `extensions.activate`,
+/// `app.build`, `history.hydrate`, `frame.ready`. `process.enter` starts after
+/// the Tokio runtime has initialized; spawn-to-first-editable-frame latency must
+/// be measured outside the process on a PTY, not inferred from this trace.
+/// `codex.credentials` and `codex.inventory` separate credential refresh from
+/// the inventory request inside one selected-route wait, and
+/// `catalog.selected` bounds the selected-route inventory wait itself (the
+/// delta after `catalog.base`) so a configured but unselected provider's
+/// discovery is never attributed to readiness.
+pub(crate) fn startup_phase(phase: &str) {
+    if !startup_trace_enabled(std::env::var_os(STARTUP_TRACE_ENV).as_deref()) {
+        return;
+    }
+    let started = STARTUP_STARTED.get_or_init(std::time::Instant::now);
+    crate::output::stderr_line(startup_phase_line(phase, started.elapsed()));
+}
+
+/// Build the runtime model catalog, exposing subscription models only through
+/// their authenticated product-owned registration boundary.
 pub fn model_catalog() -> anyhow::Result<ModelCatalog> {
     model_catalog_with_offline(false)
 }
 
 pub fn model_catalog_with_offline(offline: bool) -> anyhow::Result<ModelCatalog> {
-    let mut catalog = base_model_catalog(offline)?;
-    register_codex_catalog(&mut catalog, offline);
-    Ok(catalog)
+    Ok(model_catalog_with_offline_and_codex_notes(offline)?.0)
+}
+
+/// Build the runtime catalog and the Codex context notes recorded for it.
+///
+/// Recording happens here because the deliberate cap, the entitlement ceiling
+/// and the explicit override are all resolved while Codex models are registered.
+/// Nothing is printed: frontends ask [`Bootstrap::codex_context_note`] for the
+/// effective session model's single note instead.
+pub fn model_catalog_with_offline_and_codex_notes(
+    offline: bool,
+) -> anyhow::Result<(ModelCatalog, CodexContextNotes)> {
+    model_catalog_for_readiness(offline, &CatalogReadiness::Fleet)
+}
+
+/// Build the catalog for one readiness plan.
+///
+/// The plan decides *which provider inventories are initialized now*:
+/// [`CatalogReadiness::Fleet`] keeps the historical full initialization, while a
+/// narrowed plan touches only the route the selection proved. The embedded
+/// static catalog is built in full either way, so a narrowed plan can never
+/// remove a model that was listed before; it only defers subscription/host
+/// inventories until [`Bootstrap::enrich_catalog`].
+pub(crate) fn model_catalog_for_readiness(
+    offline: bool,
+    readiness: &CatalogReadiness,
+) -> anyhow::Result<(ModelCatalog, CodexContextNotes)> {
+    let mut catalog = base_model_catalog_with_readiness(offline, None, readiness)?;
+    let mut notes = CodexContextNotes::default();
+    if readiness.includes(crate::providers::CODEX.id) {
+        register_codex_catalog(&mut catalog, offline, &mut notes);
+    }
+    startup_phase("catalog.codex");
+    // Copilot is a host-owned subscription route: no builtin declaration id ever
+    // names it, so a narrowed plan can never include it and it stays on the
+    // historical fleet path (see `catalog_readiness`'s proof rule).
+    if readiness.is_fleet() {
+        register_copilot_catalog(&mut catalog, offline);
+    }
+    startup_phase("catalog.copilot");
+    Ok((catalog, notes))
 }
 
 /// Rebuild the canonical catalog against one explicit existing custom store.
@@ -4975,11 +6660,17 @@ pub(crate) fn model_catalog_with_setup_store(
     offline: bool,
 ) -> anyhow::Result<ModelCatalog> {
     let mut catalog = base_model_catalog_with_custom_store(offline, Some(custom_store))?;
-    register_codex_catalog(&mut catalog, offline);
+    let mut notes = CodexContextNotes::default();
+    register_codex_catalog(&mut catalog, offline, &mut notes);
+    register_copilot_catalog(&mut catalog, offline);
     Ok(catalog)
 }
 
-fn register_codex_catalog(catalog: &mut ModelCatalog, offline: bool) {
+fn register_codex_catalog(
+    catalog: &mut ModelCatalog,
+    offline: bool,
+    notes: &mut CodexContextNotes,
+) {
     // Unit tests use explicit temporary credential stores and must never inspect
     // the developer's ambient HOME. Runtime offline mode still registers a
     // locally authenticated Codex endpoint, but never discovers or refreshes
@@ -4987,28 +6678,77 @@ fn register_codex_catalog(catalog: &mut ModelCatalog, offline: bool) {
     if !cfg!(test) {
         let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
         // Non-fatal: a stale or malformed OAuth file must never block octet startup.
-        if let Err(error) = register_openai_codex(catalog, store, offline) {
-            crate::output::stderr!("warning: OpenAI Codex models unavailable: {error}");
-        }
+        let _ = bootstrap_check(
+            "codex-registration",
+            register_openai_codex_with_notes(catalog, store, offline, notes),
+            |error| format!("warning: OpenAI Codex models unavailable: {error}"),
+        );
     }
 }
 
-/// Build the catalog without subscription models, used to make `/logout`
-/// atomic when the active model itself belongs to ChatGPT.
+fn register_copilot_catalog(catalog: &mut ModelCatalog, offline: bool) {
+    // No ambient credential access in unit tests. Unlike Codex, this adapter has
+    // no offline inventory: offline must return before even resolving its store.
+    if cfg!(test) || offline {
+        return;
+    }
+    let _ = bootstrap_check(
+        "copilot-registration",
+        crate::auth::copilot::register_available_models_blocking(catalog, offline),
+        |error| format!("warning: GitHub Copilot models unavailable: {error}"),
+    );
+}
+
+/// Build the catalog without ChatGPT models, used to make `/logout` atomic when
+/// its active model belongs to ChatGPT. Other authenticated providers are kept.
 pub fn model_catalog_without_codex() -> anyhow::Result<ModelCatalog> {
-    base_model_catalog(false)
+    let mut catalog = base_model_catalog(false)?;
+    register_copilot_catalog(&mut catalog, false);
+    Ok(catalog)
 }
 
 /// Build bootstrap state from resolved configuration.
+///
+/// Startup order is: (1) cheap local provider availability — the embedded
+/// catalog filtered by which endpoints can already resolve a credential, no
+/// network; (2) the session/model selection this configuration already proves
+/// ([`catalog_readiness`]); (3) initialization of the SELECTED route only; and
+/// (4) optional enrichment of every other provider, later and never awaited by
+/// readiness ([`Bootstrap::enrich_catalog`]). A launch that cannot name its
+/// route takes the fleet plan, which is the historical behavior.
 pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
-    let catalog = model_catalog_with_offline(config.offline)?;
+    let mut readiness = catalog_readiness(&config);
+    let (mut catalog, mut codex_context_notes) =
+        model_catalog_for_readiness(config.offline, &readiness)?;
+    // The plan is a proof about configuration, not a promise: the selection can
+    // still belong to a route the plan could not name (an extension provider, a
+    // custom registry, an inventory the provider no longer offers). Complete the
+    // catalog instead of failing the launch or switching the user's model.
+    if !readiness.is_fleet()
+        && config
+            .model
+            .as_ref()
+            .is_some_and(|model| catalog.resolve(model).is_err())
+    {
+        startup_phase("catalog.fallback");
+        let (fleet_catalog, fleet_notes) =
+            model_catalog_for_readiness(config.offline, &CatalogReadiness::Fleet)?;
+        catalog = fleet_catalog;
+        codex_context_notes = fleet_notes;
+        // The catalog is already the fleet one, so record that: a later
+        // `enrich_catalog` must not rebuild it a second time.
+        readiness = CatalogReadiness::Fleet;
+    }
     let sessions = SessionStore::new(&config.session_dir, &config.workspace);
     // Record the workspace path so cross-workspace browsing can name each
     // session's home. Non-fatal: pickers fall back to directory names.
-    if let Err(error) = sessions.write_workspace_marker() {
-        crate::output::stderr!("warning: could not write session workspace marker: {error}");
-    }
+    let _ = bootstrap_check(
+        "session-workspace-marker",
+        sessions.write_workspace_marker(),
+        |error| format!("warning: could not write session workspace marker: {error}"),
+    );
     let client = AiClient::try_new()?;
+    startup_phase("bootstrap.ready");
     Ok(Bootstrap {
         config,
         catalog,
@@ -5018,7 +6758,43 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
         prestarted_extensions: RefCell::new(None),
         prepared_session: RefCell::new(None),
         modeless: std::cell::Cell::new(false),
+        codex_context_notes,
+        readiness,
     })
+}
+
+impl Bootstrap {
+    /// Whether this launch initialized the full provider fleet.
+    #[cfg(test)]
+    pub(crate) fn readiness_plan(&self) -> &CatalogReadiness {
+        &self.readiness
+    }
+
+    /// Complete the catalog with every provider the readiness plan deferred.
+    ///
+    /// This is enrichment, not readiness: nothing the launch needs for its first
+    /// turn waits on it. A frontend calls it before opening a surface that
+    /// enumerates every route (the model picker, `/model`, a status page) — the
+    /// provider inventories skipped at startup are exactly the ones such a
+    /// surface must list, and each keeps its own freshness rules.
+    ///
+    /// Idempotent: a launch that already took the fleet plan (or one that has
+    /// already been enriched) returns immediately, so a second call can never
+    /// duplicate a provider registration or re-run credential refresh.
+    pub fn enrich_catalog(&mut self) -> anyhow::Result<()> {
+        if self.readiness.is_fleet() {
+            return Ok(());
+        }
+        startup_phase("catalog.enrich");
+        let (catalog, notes) =
+            model_catalog_for_readiness(self.config.offline, &CatalogReadiness::Fleet)?;
+        self.catalog = catalog;
+        // Notes were recorded for the deferred Codex route; merge rather than
+        // replace so a note already delivered for this session stays delivered.
+        self.codex_context_notes.merge(notes);
+        self.readiness = CatalogReadiness::Fleet;
+        Ok(())
+    }
 }
 
 /// Resolve model configuration precedence. The caller supplies values from
@@ -5046,6 +6822,34 @@ fn persisted_session_config(session: &Session) -> anyhow::Result<PersistedSessio
         let entry = session
             .entry(id)
             .ok_or_else(|| anyhow::anyhow!("session head references missing entry {}", id.0))?;
+        if let EntryValue::ResponsesReasoning {
+            model,
+            baseline,
+            update,
+            ..
+        } = &entry.value
+        {
+            // A host-issued update is the effective selection, not the pinned
+            // request baseline. Newer route selections must never inherit an
+            // older route's effort while walking the active ancestry backwards.
+            if persisted
+                .model
+                .as_ref()
+                .is_none_or(|selected| selected == model)
+            {
+                if persisted.model.is_none() {
+                    persisted.model = Some(model.clone());
+                }
+                if persisted.reasoning.is_none() {
+                    persisted.reasoning = Some(
+                        update
+                            .as_ref()
+                            .map(|update| update.reasoning.clone())
+                            .unwrap_or_else(|| baseline.clone()),
+                    );
+                }
+            }
+        }
         if let EntryValue::Config {
             model,
             reasoning,
@@ -5120,15 +6924,18 @@ fn append_config_if_changed(
     Ok(())
 }
 
+/// Invocation/session preferences, before model-specific defaults are resolved.
+struct LaunchConfiguration {
+    model: Option<ModelId>,
+    reasoning: Option<ReasoningConfig>,
+    reasoning_mode: ReasoningMode,
+}
+
 fn launch_configuration_parts(
     config: &Config,
     session: &SessionSelection,
-) -> anyhow::Result<(
-    Option<Session>,
-    Option<ModelId>,
-    ReasoningConfig,
-    ReasoningMode,
-)> {
+) -> anyhow::Result<(Option<Session>, LaunchConfiguration)> {
+    startup_phase("session.resolve");
     let prepared = match session {
         SessionSelection::OpenExisting(path) => {
             let descriptor_path = descriptor_session_path(path)?;
@@ -5150,9 +6957,7 @@ fn launch_configuration_parts(
     let reasoning = if config.reasoning_explicit {
         config.reasoning.clone()
     } else {
-        persisted
-            .reasoning
-            .unwrap_or_else(|| config.reasoning.clone())
+        persisted.reasoning.or_else(|| config.reasoning.clone())
     };
     let reasoning_mode = if config.reasoning_mode_explicit {
         config.reasoning_mode
@@ -5164,7 +6969,14 @@ fn launch_configuration_parts(
     } else {
         persisted.reasoning_mode.unwrap_or(config.reasoning_mode)
     };
-    Ok((prepared, model, reasoning, reasoning_mode))
+    Ok((
+        prepared,
+        LaunchConfiguration {
+            model,
+            reasoning,
+            reasoning_mode,
+        },
+    ))
 }
 
 fn should_pick_interactive_model(
@@ -5188,11 +7000,10 @@ fn should_pick_interactive_model(
 fn launch_configuration(
     boot: &Bootstrap,
     session: &SessionSelection,
-) -> anyhow::Result<(Option<ModelId>, ReasoningConfig, ReasoningMode)> {
-    let (prepared, model, reasoning, reasoning_mode) =
-        launch_configuration_parts(&boot.config, session)?;
+) -> anyhow::Result<LaunchConfiguration> {
+    let (prepared, configuration) = launch_configuration_parts(&boot.config, session)?;
     *boot.prepared_session.borrow_mut() = prepared;
-    Ok((model, reasoning, reasoning_mode))
+    Ok(configuration)
 }
 
 fn resolve_fork_source_path(
@@ -5271,7 +7082,7 @@ pub async fn resolve_launch_interactive(
         ResumeSelector::Continue => {
             let sessions = boot.sessions.clone();
             let path =
-                run_blocking_lifecycle(shell, input, "finding latest session…", move || {
+                run_blocking_startup_lifecycle(shell, input, "latest session lookup", move || {
                     Ok(sessions.latest()?.path)
                 })
                 .await?;
@@ -5279,7 +7090,7 @@ pub async fn resolve_launch_interactive(
         }
         ResumeSelector::Resume(Some(id)) => {
             let sessions = boot.sessions.clone();
-            let path = run_blocking_lifecycle(shell, input, "opening session…", move || {
+            let path = run_blocking_startup_lifecycle(shell, input, "session lookup", move || {
                 sessions.path_by_id(&id)
             })
             .await?;
@@ -5289,14 +7100,14 @@ pub async fn resolve_launch_interactive(
             let source_path = if let Some(id) = source_id {
                 let sessions = boot.sessions.clone();
                 let config = boot.config.clone();
-                run_blocking_lifecycle(shell, input, "opening source session…", move || {
+                run_blocking_startup_lifecycle(shell, input, "source session lookup", move || {
                     resolve_fork_source_path(&config, &sessions, &id)
                 })
                 .await?
             } else {
                 let sessions = boot.sessions.clone();
                 let available =
-                    run_blocking_lifecycle(shell, input, "discovering sessions…", move || {
+                    run_blocking_startup_lifecycle(shell, input, "session discovery", move || {
                         Ok(sessions.list())
                     })
                     .await?;
@@ -5306,7 +7117,7 @@ pub async fn resolve_launch_interactive(
             };
             let store = boot.sessions.clone();
             let destination = boot.sessions.new_path(&crate::modes::timestamp());
-            let path = run_blocking_lifecycle(shell, input, "forking session…", move || {
+            let path = run_blocking_startup_lifecycle(shell, input, "session fork", move || {
                 fork_session_into(&store, &source_path, destination)
             })
             .await?;
@@ -5315,7 +7126,7 @@ pub async fn resolve_launch_interactive(
         ResumeSelector::Resume(None) => {
             let sessions = boot.sessions.clone();
             let available =
-                run_blocking_lifecycle(shell, input, "discovering sessions…", move || {
+                run_blocking_startup_lifecycle(shell, input, "session discovery", move || {
                     Ok(sessions.list())
                 })
                 .await?;
@@ -5325,13 +7136,26 @@ pub async fn resolve_launch_interactive(
                 .ok_or_else(|| anyhow::anyhow!("session selection cancelled"))?
         }
     };
-    let config = boot.config.clone();
-    let selected_session = session.clone();
-    let (prepared, model, reasoning, reasoning_mode) =
-        run_blocking_lifecycle(shell, input, "replaying session…", move || {
+    let (
+        prepared,
+        LaunchConfiguration {
+            model,
+            reasoning,
+            reasoning_mode,
+        },
+    ) = if matches!(&session, SessionSelection::CreateNew(_)) {
+        // A fresh launch only copies configuration: no file exists to replay.
+        // Avoid cloning the whole Config and dispatching a blocking worker.
+        launch_configuration_parts(&boot.config, &session)?
+    } else {
+        let config = boot.config.clone();
+        let selected_session = session.clone();
+        run_blocking_startup_lifecycle(shell, input, "session replay", move || {
             launch_configuration_parts(&config, &selected_session)
         })
-        .await?;
+        .await?
+    };
+    startup_phase("session.replay");
     *boot.prepared_session.borrow_mut() = prepared;
     // Provider declarations are only needed before launch when no static model
     // can satisfy the restored/explicit selection. Do not start ordinary
@@ -5361,6 +7185,16 @@ pub async fn resolve_launch_interactive(
             None => model_picker(shell, input, &catalog).await?,
         }
     };
+    let reasoning = match reasoning {
+        Some(reasoning) => reasoning,
+        None if boot.is_modeless() => ReasoningConfig::Off,
+        None => default_reasoning_for_model(&catalog.resolve(&model)?),
+    };
+    // The Codex context note is NOT emitted here: startup shows nothing, so the
+    // note is delivered lazily by whoever owns the transcript
+    // (`CodexContextNotes::note_for`: the first assistant turn after
+    // readiness, or an on-demand context surface). Recording it stayed in
+    // catalog construction, so the wording is still effective-model-only.
     Ok(LaunchSelection {
         model,
         session,
@@ -5389,7 +7223,11 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
             anyhow::bail!("--resume needs a session id in print mode")
         }
     };
-    let (model, reasoning, reasoning_mode) = launch_configuration(boot, &session)?;
+    let LaunchConfiguration {
+        model,
+        reasoning,
+        reasoning_mode,
+    } = launch_configuration(boot, &session)?;
     let catalog = if model
         .as_ref()
         .is_some_and(|model| boot.catalog.resolve(model).is_err())
@@ -5437,6 +7275,16 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
         );
     }
 
+    let reasoning = match reasoning {
+        Some(reasoning) => reasoning,
+        None => default_reasoning_for_model(&catalog.resolve(&model)?),
+    };
+    // Headless print/RPC launches have no lazy surface to deliver the note on,
+    // and stderr is neither the TUI frame nor the transcript, so the one bounded
+    // line still goes there. The interactive launch above stays silent.
+    if let Some(note) = boot.codex_context_note(&model) {
+        crate::output::stderr!("{note}");
+    }
     Ok(LaunchSelection {
         model,
         session,
@@ -5532,14 +7380,22 @@ fn apply_extension_tool_policy(host: &mut ExtensionHost, config: &Config, model:
     host.finalize_tool_surface();
 }
 
-fn configured_extension_host(config: &Config, model: &Model) -> anyhow::Result<ExtensionHost> {
+fn configured_extension_host(
+    config: &Config,
+    model: &Model,
+) -> anyhow::Result<(ExtensionHost, Option<TelemetryObserver>)> {
     let mut host = ExtensionHost::new();
     host.load(&CoreTools);
     apply_extension_tool_policy(&mut host, config, model);
-    if let Some(path) = config.telemetry.as_deref() {
-        host.observe(TelemetryObserver::new(path, env!("CARGO_PKG_VERSION"))?);
+    let telemetry = config
+        .telemetry
+        .as_deref()
+        .map(|path| TelemetryObserver::new(path, env!("CARGO_PKG_VERSION")))
+        .transpose()?;
+    if let Some(observer) = &telemetry {
+        host.observe(observer.clone());
     }
-    Ok(host)
+    Ok((host, telemetry))
 }
 
 #[cfg(test)]
@@ -5570,8 +7426,8 @@ fn configured_extensions_with_runtime_manager(
     runtime_manager: Option<ExtensionRuntimeManager>,
     provider_runtime: ExtensionProviderRuntime,
 ) -> anyhow::Result<(ExtensionHost, ExecutableExtensions)> {
-    let mut extensions = configured_extension_host(config, model)?;
-    let executable_extensions = ExecutableExtensions::discover_and_start_with_provider_runtime(
+    let (mut extensions, telemetry) = configured_extension_host(config, model)?;
+    let mut executable_extensions = ExecutableExtensions::discover_and_start_with_provider_runtime(
         config,
         session,
         model,
@@ -5581,6 +7437,8 @@ fn configured_extensions_with_runtime_manager(
         runtime_manager,
         provider_runtime,
     );
+    executable_extensions.set_telemetry(telemetry);
+    startup_phase("extensions.activate");
     Ok((extensions, executable_extensions))
 }
 
@@ -5620,6 +7478,27 @@ fn subagents_surface_available(
             .tool_definitions()
             .iter()
             .any(|definition| definition.name == "subagent_spawn")
+}
+
+/// A live worker surface can select any configured provider while the root run
+/// borrows the App. Complete deferred inventories at this idle boundary, not in
+/// a model tool on a Tokio worker. Disabled/unavailable extensions retain the
+/// ordinary narrow startup. Extension routes are reprojected by the caller.
+fn complete_delegation_catalog(
+    service_available: bool,
+    config: &Config,
+    catalog: &mut ModelCatalog,
+    readiness: &mut CatalogReadiness,
+    notes: &mut CodexContextNotes,
+) -> anyhow::Result<()> {
+    if service_available && !readiness.is_fleet() {
+        let (complete, additional_notes) =
+            model_catalog_for_readiness(config.offline, &CatalogReadiness::Fleet)?;
+        *catalog = complete;
+        notes.merge(additional_notes);
+        *readiness = CatalogReadiness::Fleet;
+    }
+    Ok(())
 }
 
 fn configure_v2_delegation(
@@ -5710,11 +7589,15 @@ pub(crate) fn build_app_with_runtime_manager(
         prestarted_extensions,
         prepared_session,
         modeless: _,
+        mut codex_context_notes,
+        mut readiness,
     } = boot;
     let mut system = system;
+    startup_phase("app.build");
     let mut prestarted_extensions = prestarted_extensions.into_inner();
     if let Some((_, extensions)) = prestarted_extensions.as_mut() {
         extensions.synchronize_provider_catalog(&mut catalog, &client);
+        startup_phase("extensions.prestart");
     }
     // A temporary provider preflight has just enough catalog state to identify
     // the requested model. Keep that snapshot only as an initialization input;
@@ -5725,6 +7608,10 @@ pub(crate) fn build_app_with_runtime_manager(
     let requested_reasoning_mode = launch.reasoning_mode;
     let mut prepared_session = prepared_session.into_inner();
     let mut session = open_launch_session(&mut prepared_session, launch.session)?;
+    // Above 272K the whole request is priced differently, so the durable record
+    // must mark the route uncertain at launch rather than let a later
+    // exact-looking cost claim stand. Sticky, and written at most once.
+    record_codex_context_uncertainty(&mut session, &bootstrap_model)?;
 
     if let Some((_, mut extensions)) = prestarted_extensions.take() {
         extensions.clear_provider_catalog(&mut catalog, &client);
@@ -5752,14 +7639,24 @@ pub(crate) fn build_app_with_runtime_manager(
         runtime_manager,
         provider_runtime,
     )?;
+    complete_delegation_catalog(
+        executable_extensions.has_agent_session_service(),
+        &config,
+        &mut catalog,
+        &mut readiness,
+        &mut codex_context_notes,
+    )?;
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
     let model = catalog.resolve(&launch.model)?;
-    let requested_reasoning = normalize_reasoning_for_model(&launch.reasoning, &model)?;
+    // Keep the original persisted/explicit choice until the diagnostic boundary;
+    // pre-normalizing it there would silently hide an unsupported Off selection.
+    let requested_reasoning = launch.reasoning;
+    let normalized_reasoning = normalize_reasoning_for_model(&requested_reasoning, &model)?;
     // `bootstrap_model` can be an old provider generation. The extension host
     // state exposes only the selected model identity, but refresh both the
     // policy surface and snapshots from the final catalog before any App work.
     apply_extension_tool_policy(&mut extensions, &config, &model);
-    executable_extensions.refresh_host_state(&session, &model, &requested_reasoning, &sessions);
+    executable_extensions.refresh_host_state(&session, &model, &normalized_reasoning, &sessions);
     let compact_model = config
         .compaction
         .compact_model
@@ -5779,11 +7676,16 @@ pub(crate) fn build_app_with_runtime_manager(
             &model,
             subagents_available,
         )?;
-    if let Some(diagnostic) = migration_diagnostic {
-        crate::output::stderr!("warning: {diagnostic}");
-    }
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap("reasoning-migration".into()),
+        migration_diagnostic
+            .into_iter()
+            .map(|diagnostic| format!("warning: {diagnostic}"))
+            .collect(),
+        true,
+    );
     config.model = Some(model.spec.id.clone());
-    config.reasoning = reasoning.clone();
+    config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
     append_config_if_changed(&mut session, &model.spec.id, &reasoning, reasoning_mode)?;
     validate_explicit_tool_policy(
@@ -5809,6 +7711,11 @@ pub(crate) fn build_app_with_runtime_manager(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
+    #[cfg(any(unix, windows))]
+    agent.enable_session_partial_output_checkpoints(
+        "bash",
+        octet_agent::tools::BASH_CHECKPOINT_INTERVAL,
+    );
     agent.set_prompt_model_source(Some(crate::tui::theme::model_lab(&model).key().to_owned()));
     agent.set_prompt_color(Some(crate::tui::theme::prompt_color_for_model(&model)));
     agent.set_compaction_model(compact_model);
@@ -5818,8 +7725,19 @@ pub(crate) fn build_app_with_runtime_manager(
         config.compaction.keep_recent_tokens,
     )?;
     agent.set_max_session_cost_microdollars(config.max_cost_microdollars);
+    if service_available {
+        agent.set_delegation_model_resolver(Arc::new(
+            super::delegation_models::CodingAgentModelResolver::new(catalog.clone()),
+        ));
+    }
     configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
     executable_extensions.bind_agent_sessions(&agent)?;
+    if agent.reasoning() != &reasoning {
+        // Construction restores durable effort. Install and bind observation
+        // before applying an explicit override that may enter Ultra; the setter
+        // also synchronizes the delegation template for future workers.
+        agent.set_reasoning(reasoning.clone())?;
+    }
     agent.finalize_tool_surface();
     let system_tokens = estimate_text_tokens(agent.system_prompt());
 
@@ -5829,6 +7747,7 @@ pub(crate) fn build_app_with_runtime_manager(
         client,
         config,
         catalog,
+        model_scope: None,
         sessions,
         reasoning,
         reasoning_mode,
@@ -5840,6 +7759,8 @@ pub(crate) fn build_app_with_runtime_manager(
         goal_store,
         goal_driver,
         goal_session_id,
+        codex_context_notes,
+        readiness,
     })
 }
 
@@ -5885,6 +7806,7 @@ pub fn rebuild_app(
     app.synchronize_extension_provider_catalog();
     let mut config = app.config.clone();
     let mut catalog = app.catalog.clone();
+    let model_scope = app.model_scope.clone();
     let sessions = app.sessions.clone();
     let client = app.client.clone();
     let model = app.model.clone();
@@ -5893,6 +7815,19 @@ pub fn rebuild_app(
     let system = app.system.clone();
     let old_skills = Arc::clone(&app.skills);
     let goal_store = Arc::clone(&app.goal_store);
+    // Idle rebuilds of the same session preserve delivery. A new or resumed
+    // different session owns a fresh latch; the previous session's notice must
+    // not suppress the effective-model note in the newly opened transcript.
+    let mut codex_context_notes = app.codex_context_notes.clone();
+    if selection.as_ref().is_some_and(|selection| {
+        let path = match selection {
+            SessionSelection::CreateNew(path) | SessionSelection::OpenExisting(path) => path,
+        };
+        path != app.agent.session().path()
+    }) {
+        codex_context_notes.delivered.set(false);
+    }
+    let mut readiness = app.readiness.clone();
     let compact_model = config
         .compaction
         .compact_model
@@ -5901,6 +7836,11 @@ pub fn rebuild_app(
         .transpose()
         .with_context(|| "configured compaction model could not be resolved")?;
     let current_path = app.agent.session().path().to_owned();
+    let same_session = selection.as_ref().is_none_or(|selection| match selection {
+        SessionSelection::CreateNew(_) => false,
+        SessionSelection::OpenExisting(path) => path == &current_path,
+    });
+    let service_tier = same_session.then(|| app.agent.service_tier()).flatten();
     let old_skill_metadata = format_skills_for_prompt(&old_skills.descriptors());
     let mut system = system;
     if !old_skill_metadata.is_empty() && system.ends_with(&old_skill_metadata) {
@@ -5928,16 +7868,30 @@ pub fn rebuild_app(
     let model = new_model
         .or(restored_model)
         .unwrap_or_else(|| old_model.clone());
+    // A tier cannot leak across routes. A compatible same-session rebuild
+    // retains it; changing to an unsupported route clears it explicitly.
+    let service_tier = if crate::commands::codex_fast_tier_endpoint(&model) {
+        service_tier
+    } else {
+        if service_tier.is_some() {
+            crate::output::stderr!(
+                "warning: fast mode disabled: the selected model route does not support it"
+            );
+        }
+        None
+    };
     validate_compaction_route(config.compaction.mode, &model, compact_model.as_ref())?;
     let requested_reasoning = match (new_reasoning, persisted.reasoning) {
-        (Some(reasoning), _) => normalize_reasoning_for_model(&reasoning, &model)?,
-        (None, Some(reasoning)) => normalize_reasoning_for_model(&reasoning, &model)?,
+        (Some(reasoning), _) | (None, Some(reasoning)) => reasoning,
         (None, None) if changing_model => {
             let level = level_from_reasoning(&reasoning, &old_model)?;
             thinking_to_reasoning(level, &model)?
         }
-        (None, None) => normalize_reasoning_for_model(&reasoning, &model)?,
+        (None, None) => reasoning,
     };
+    // Validate before releasing the old agent, but retain the original choice
+    // for the visible migration diagnostic after extension gates are known.
+    let normalized_reasoning = normalize_reasoning_for_model(&requested_reasoning, &model)?;
     let requested_reasoning_mode = if let Some(mode) = new_reasoning_mode {
         mode
     } else if explicit_reasoning {
@@ -5965,6 +7919,12 @@ pub fn rebuild_app(
     let provider_runtime = released_extensions.provider_runtime();
     released_extensions.clear_provider_catalog(&mut catalog, &client);
     released_extensions.release_binding_blocking();
+    // These are actual queue discards, not inferred interruption risks. Use the
+    // existing terminal-aware diagnostic route: interactive lifecycle callers
+    // defer this queue through final hydration; never print into the raw frame.
+    for notice in released_extensions.discard_stale_host_requests() {
+        crate::output::stderr!("{notice}");
+    }
     let released_extensions = ReleasedExtensionBindingCleanup::new(released_extensions);
     drop(app);
     let mut session = match selection {
@@ -5990,6 +7950,10 @@ pub fn rebuild_app(
             Session::open_with_file(current_path, file)?
         }
     };
+    // A mid-session switch onto a raised Codex route must not leave an
+    // exact-looking cost behind; the record is sticky, so an ordinary rebuild is
+    // a no-op.
+    record_codex_context_uncertainty(&mut session, &model)?;
     let goal_session_id = terminal_goal_session_id(&session)?;
     let goal_driver = GoalDriver::new(goal_store.clone(), goal_session_id.clone());
 
@@ -6009,10 +7973,17 @@ pub fn rebuild_app(
         &config,
         &session,
         &model,
-        &requested_reasoning,
+        &normalized_reasoning,
         &sessions,
         runtime_manager,
         provider_runtime,
+    )?;
+    complete_delegation_catalog(
+        executable_extensions.has_agent_session_service(),
+        &config,
+        &mut catalog,
+        &mut readiness,
+        &mut codex_context_notes,
     )?;
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
     let service_available = executable_extensions.has_agent_session_service();
@@ -6025,11 +7996,16 @@ pub fn rebuild_app(
             &model,
             subagents_available,
         )?;
-    if let Some(diagnostic) = migration_diagnostic {
-        crate::output::stderr!("warning: {diagnostic}");
-    }
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap("reasoning-migration".into()),
+        migration_diagnostic
+            .into_iter()
+            .map(|diagnostic| format!("warning: {diagnostic}"))
+            .collect(),
+        true,
+    );
     config.model = Some(model.spec.id.clone());
-    config.reasoning = reasoning.clone();
+    config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
     append_config_if_changed(&mut session, &model.spec.id, &reasoning, reasoning_mode)?;
     validate_explicit_tool_policy(
@@ -6052,6 +8028,12 @@ pub fn rebuild_app(
         cache_retention: config.cache_retention,
         session_id: None,
     })?;
+    agent.set_service_tier(service_tier)?;
+    #[cfg(any(unix, windows))]
+    agent.enable_session_partial_output_checkpoints(
+        "bash",
+        octet_agent::tools::BASH_CHECKPOINT_INTERVAL,
+    );
     agent.set_prompt_model_source(Some(crate::tui::theme::model_lab(&model).key().to_owned()));
     agent.set_prompt_color(Some(crate::tui::theme::prompt_color_for_model(&model)));
     agent.set_compaction_model(compact_model);
@@ -6061,8 +8043,19 @@ pub fn rebuild_app(
         config.compaction.keep_recent_tokens,
     )?;
     agent.set_max_session_cost_microdollars(config.max_cost_microdollars);
+    if service_available {
+        agent.set_delegation_model_resolver(Arc::new(
+            super::delegation_models::CodingAgentModelResolver::new(catalog.clone()),
+        ));
+    }
     configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
     executable_extensions.bind_agent_sessions(&agent)?;
+    if agent.reasoning() != &reasoning {
+        // Construction restores durable effort. Install and bind observation
+        // before applying an explicit override that may enter Ultra; the setter
+        // also synchronizes the delegation template for future workers.
+        agent.set_reasoning(reasoning.clone())?;
+    }
     agent.finalize_tool_surface();
     let system_tokens = estimate_text_tokens(agent.system_prompt());
 
@@ -6073,6 +8066,7 @@ pub fn rebuild_app(
         client,
         config,
         catalog,
+        model_scope,
         sessions,
         reasoning,
         reasoning_mode,
@@ -6084,6 +8078,8 @@ pub fn rebuild_app(
         goal_store,
         goal_driver,
         goal_session_id,
+        codex_context_notes,
+        readiness,
     })
 }
 
@@ -6249,3 +8245,331 @@ mod reasoning_ingress_review_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod codex_context_note_regression_tests {
+    use super::tests::codex_discovered_model;
+    use super::*;
+    use crate::codex_context::codex_context_session_note;
+
+    /// A synthetic, non-localhost subscription credential (the shape
+    /// `crate::auth::codex` accepts) so registration produces the full fallback
+    /// Codex inventory without any network access.
+    fn write_codex_credential(path: &std::path::Path, plan: &str) {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_test",
+                "chatgpt_plan_type": plan,
+                "localhost": false
+            }
+        });
+        let access = format!(
+            "h.{}.s",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+        );
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "tokens": {
+                "access_token": access,
+                "refresh_token": "refresh",
+                "account_id": "acct_test"
+            },
+            "expires_at": u64::MAX
+        }))
+        .unwrap();
+        octet_agent::secure_fs::write_private_atomic(path, &bytes, 1024 * 1024).unwrap();
+    }
+
+    fn registered_notes(plan: &str) -> (ModelCatalog, CodexContextNotes) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("codex.json");
+        write_codex_credential(&path, plan);
+        let store = crate::auth::codex::CredentialStore::new(&path);
+        let mut catalog = base_model_catalog(true).unwrap();
+        let mut notes = CodexContextNotes::default();
+        register_openai_codex_with_notes(&mut catalog, store, true, &mut notes).unwrap();
+        (catalog, notes)
+    }
+
+    /// The catalog id a Codex api id was registered under.
+    ///
+    /// Registration namespaces by collision (`codex/gpt-6-astra` is always
+    /// namespaced; other ids only when the bare id was already taken), so the
+    /// test resolves the actual catalog id from the Codex endpoint instead of
+    /// re-deriving the rule after the fact.
+    fn catalog_id(catalog: &ModelCatalog, model_id: &str) -> ModelId {
+        let codex_endpoint = EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned());
+        catalog
+            .models()
+            .find(|model| model.endpoint == codex_endpoint && model.api_name == model_id)
+            .map(|model| model.id.clone())
+            .unwrap_or_else(|| panic!("{model_id} is registered on the Codex endpoint"))
+    }
+
+    /// Catalog enumeration must never print. It records at most one note for the
+    /// models whose effective window needs one, and nothing for a route whose
+    /// window is the deliberate cap itself.
+    ///
+    /// A "reduced" route is one whose effective window is below what the plan
+    /// advertises, or above the 272K standard tier (`gpt-5.6-luna`). On a Plus
+    /// plan the backend applies its own default window, so `gpt-6-astra` is not
+    /// reduced even though its entitlement ceiling is 872K; on a Pro plan the
+    /// advertised window is raised and every 872K/1M family is reduced.
+    #[test]
+    fn registration_records_one_note_per_reduced_model_and_none_for_an_unreduced_route() {
+        for (plan, reduced, plain) in [
+            (
+                "plus",
+                &["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"][..],
+                &["gpt-6-astra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"][..],
+            ),
+            (
+                "pro",
+                &[
+                    "gpt-6-astra",
+                    "gpt-5.4",
+                    "gpt-5.6-luna",
+                    "gpt-5.6-sol",
+                    "gpt-5.6-terra",
+                ][..],
+                &["gpt-5.5", "gpt-5.4-mini"][..],
+            ),
+        ] {
+            let (catalog, notes) = registered_notes(plan);
+            let codex_endpoint = EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned());
+            assert!(
+                catalog
+                    .models()
+                    .any(|model| model.endpoint == codex_endpoint),
+                "the fallback Codex inventory is registered"
+            );
+            for model_id in crate::auth::codex::MODELS {
+                assert!(
+                    reduced.contains(model_id) || plain.contains(model_id),
+                    "{plan}: {model_id} is not covered by the expectation table"
+                );
+                let id = catalog_id(&catalog, model_id);
+                let note = notes.note_for(&id);
+                if reduced.contains(model_id) {
+                    let note = note.unwrap_or_else(|| {
+                        panic!("{plan}: {model_id} is reduced and needs a note")
+                    });
+                    assert!(note.starts_with("note: Codex model"), "{note}");
+                    assert!(!note.contains("Session::"), "{note}");
+                    assert!(!note.contains("record_usage_uncertainty"), "{note}");
+                    assert!(
+                        !note.contains(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION),
+                        "{note}"
+                    );
+                    // Exactly one note per model: the lookup is stable.
+                    assert_eq!(notes.note_for(&id), Some(note));
+                } else {
+                    assert_eq!(
+                        note, None,
+                        "{plan}: {model_id} is not reduced and needs no note"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A session whose effective model is not a Codex route prints nothing, even
+    /// though the catalog is full of Codex models.
+    #[test]
+    fn a_non_codex_effective_model_has_no_note_while_the_catalog_has_codex_models() {
+        let (catalog, notes) = registered_notes("plus");
+        let codex_endpoint = EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned());
+        assert!(
+            catalog
+                .models()
+                .any(|model| model.endpoint == codex_endpoint),
+            "the catalog carries Codex models"
+        );
+
+        let mut non_codex = catalog
+            .models()
+            .filter(|model| model.endpoint != codex_endpoint)
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>();
+        non_codex.sort_by(|left, right| left.0.cmp(&right.0));
+        assert!(!non_codex.is_empty(), "the catalog carries other providers");
+        for id in &non_codex {
+            assert_eq!(
+                notes.note_for(id),
+                None,
+                "{} is not a Codex route and must print no Codex note",
+                id.0
+            );
+        }
+
+        // `Bootstrap::codex_context_note` is exactly this lookup, so the
+        // effective-model boundary returns one note for a reduced Codex route
+        // and nothing for any other model. The process-boundary test in
+        // `tests/parity_cli.rs` asserts the same through the real CLI.
+        let effective = catalog_id(&catalog, "gpt-5.6-sol");
+        let note = notes
+            .note_for(&effective)
+            .expect("a reduced Codex model has one note")
+            .to_owned();
+        assert_eq!(notes.note_for(&effective), Some(note.as_str()));
+    }
+
+    /// Above the 272K standard tier the session is durably marked uncertain
+    /// before its first request, so no exact-looking cost is ever claimed. The
+    /// record is sticky and written at most once; a route at or below the
+    /// standard tier stays exact.
+    #[test]
+    fn an_above_standard_tier_route_marks_the_session_uncertain_once() {
+        let (catalog, notes) = registered_notes("plus");
+        let directory = tempfile::tempdir().unwrap();
+
+        // `gpt-5.6-luna`'s documented 372K working window is above the tier.
+        let luna_id = catalog_id(&catalog, "gpt-5.6-luna");
+        let luna = catalog.resolve(&luna_id).unwrap();
+        assert!(
+            notes.note_for(&luna_id).is_some(),
+            "an above-tier route carries the one session note"
+        );
+        assert_eq!(
+            codex_context_uncertainty_operation(&luna),
+            Some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
+        );
+        let mut session = Session::create(directory.path().join("luna.jsonl")).unwrap();
+        assert!(!session.has_uncertain_usage());
+        record_codex_context_uncertainty(&mut session, &luna).unwrap();
+        assert!(
+            session.has_uncertain_usage(),
+            "372K must route cost/usage through has_uncertain_usage"
+        );
+        let records = session.usage_uncertainty_records().to_vec();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(
+            records[0].operation,
+            crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
+        );
+        assert_eq!(records[0].endpoint.0, crate::auth::codex::ENDPOINT_ID);
+        assert_eq!(records[0].model, luna_id);
+
+        // Sticky: a second launch of the same session appends nothing.
+        record_codex_context_uncertainty(&mut session, &luna).unwrap();
+        assert_eq!(session.usage_uncertainty_records().len(), 1);
+
+        // A route whose effective window is the deliberate 272K cap is exact.
+        let capped_id = catalog_id(&catalog, "gpt-5.5");
+        let capped = catalog.resolve(&capped_id).unwrap();
+        assert_eq!(codex_context_uncertainty_operation(&capped), None);
+        let mut exact = Session::create(directory.path().join("exact.jsonl")).unwrap();
+        record_codex_context_uncertainty(&mut exact, &capped).unwrap();
+        assert!(!exact.has_uncertain_usage());
+        assert!(exact.usage_uncertainty_records().is_empty());
+
+        // A non-Codex route is never marked uncertain, even when its context
+        // window is far above 272K: the cap is a Codex policy, not a global one.
+        let non_codex_id = catalog
+            .models()
+            .find(|model| model.endpoint != EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned()))
+            .map(|model| model.id.clone())
+            .expect("the catalog carries other providers");
+        let non_codex = catalog.resolve(&non_codex_id).unwrap();
+        assert_eq!(codex_context_uncertainty_operation(&non_codex), None);
+        record_codex_context_uncertainty(&mut exact, &non_codex).unwrap();
+        assert!(!exact.has_uncertain_usage());
+    }
+
+    /// The note the effective model needs is produced from the same resolution
+    /// every route in the catalog is recorded from.
+    #[test]
+    fn the_recorded_note_matches_the_effective_resolution() {
+        let luna = codex_discovered_model(
+            "gpt-5.6-luna",
+            crate::codex_context::CODEX_5_6_CONTEXT_WINDOW,
+            crate::codex_context::CODEX_5_6_CONTEXT_WINDOW,
+            128_000,
+        );
+        let resolution = codex_context_resolve_for_registration(
+            &luna,
+            CodexContextTier::Default,
+            CodexContextOverride::NONE,
+        );
+        let note = codex_context_session_note("gpt-5.6-luna", &resolution).unwrap();
+        assert!(note.contains("effective 372K"), "{note}");
+        let mut notes = CodexContextNotes::default();
+        codex_context_record_note(
+            &mut notes,
+            &ModelId("gpt-5.6-luna".to_owned()),
+            "gpt-5.6-luna",
+            &resolution,
+        );
+        assert_eq!(
+            notes.note_for(&ModelId("gpt-5.6-luna".to_owned())),
+            Some(note.as_str())
+        );
+    }
+
+    /// The note is delivered lazily and at most once per session, and a route
+    /// that needs no note never consumes the delivery.
+    #[test]
+    fn the_codex_context_note_is_delivered_lazily_and_at_most_once() {
+        let (catalog, notes) = registered_notes("plus");
+        let effective = catalog_id(&catalog, "gpt-5.6-sol");
+        let expected = notes
+            .note_for(&effective)
+            .expect("a reduced Codex route has one note")
+            .to_owned();
+
+        // A model with no note never consumes the once-per-session delivery, so
+        // a non-Codex first turn cannot swallow the Codex route's note.
+        let other = catalog
+            .models()
+            .map(|model| model.id.clone())
+            .find(|id| notes.note_for(id).is_none())
+            .expect("the catalog carries non-Codex models");
+        assert_eq!(notes.take_for(&other), None);
+        assert_eq!(notes.note_for(&effective), Some(expected.as_str()));
+
+        // The first pull delivers exactly the recorded wording, still without any
+        // internal API name or operation id, and still naming the deliberate cap.
+        let delivered = notes
+            .take_for(&effective)
+            .expect("the first pull delivers the note");
+        assert_eq!(delivered, expected);
+        assert!(delivered.starts_with("note: Codex model"), "{delivered}");
+        assert!(!delivered.contains("Session::"), "{delivered}");
+        assert!(
+            !delivered.contains(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION),
+            "{delivered}"
+        );
+        assert!(delivered.contains("deliberate"), "{delivered}");
+        assert!(delivered.contains("double-priced"), "{delivered}");
+
+        // Startup showed nothing, and every later pull stays silent: the note can
+        // never be repeated in one session, and the peek is still available to
+        // diagnostics.
+        assert_eq!(notes.take_for(&effective), None);
+        assert_eq!(notes.take_for(&effective), None);
+        assert_eq!(notes.note_for(&effective), Some(expected.as_str()));
+    }
+
+    /// The startup phase trace is off by default, and its gate plus line format
+    /// are stable for the latency acceptance harness.
+    #[test]
+    fn the_startup_phase_trace_is_off_by_default_and_named_consistently() {
+        assert!(!startup_trace_enabled(None));
+        assert!(!startup_trace_enabled(Some(std::ffi::OsStr::new(""))));
+        assert!(!startup_trace_enabled(Some(std::ffi::OsStr::new("0"))));
+        assert!(startup_trace_enabled(Some(std::ffi::OsStr::new("1"))));
+        let line = startup_phase_line("catalog.codex", std::time::Duration::from_micros(1_250));
+        assert_eq!(line, "octet-startup: catalog.codex elapsed=1250us");
+        assert!(!line.contains('\n'));
+    }
+}
+
+#[cfg(test)]
+#[path = "../providers/self_description_tests.rs"]
+mod provider_self_description_tests;
+
+#[cfg(test)]
+#[path = "../providers/conditional_inventory_tests.rs"]
+mod provider_conditional_inventory_tests;

@@ -10,7 +10,7 @@ octet -p "Explain the code" --tools read,search
 This is the documented source surface, not generated help or release
 qualification. Uppercase metavariables are values you supply; square brackets
 mark optional arguments. Use `octet --help`, `octet sessions --help`,
-`octet migrate pi --help`, and `octet pi --help` for authoritative parser details.
+and `octet migrate pi --help` for authoritative parser details.
 The frozen docs are supplemented by a source inventory of static `octet` and
 `octet setup` declarations, not a captured `--help` dump. Unlisted nested-command
 choices, generated extension flags, and defaults are not inferred here.
@@ -20,7 +20,7 @@ choices, generated extension flags, and defaults are not inferred here.
 | Form | Contract |
 | --- | --- |
 | `--print` / `-p`, followed by prompt text | Final response on stdout; does not itself remove tool authority. |
-| `--mode rpc` | Pi-compatible JSONL automation frontend; conflicts with `--print`. Separate from native-host protocol 1 and extension API 0.3; [interface limits](terminal.md#choose-a-frontend). |
+| `--mode rpc` | Pi-compatible JSONL automation frontend; conflicts with `--print`. Separate from native-host protocol 1 and extension API 0.4; [interface limits](terminal.md#choose-a-frontend). |
 | `--plain` | Chronological frontend without cursor control. |
 | `--color VALUE` | Terminal color selection; documented example `auto`; capability fallbacks still apply. |
 | `--mouse auto\|terminal\|off\|app` | Default `auto`; only `app` captures mouse and selects the semantic viewport from startup. |
@@ -39,11 +39,20 @@ choices, generated extension flags, and defaults are not inferred here.
 [Terminal behavior](terminal.md), [provider setup](providers.md), and
 [configuration values](configuration.md#settings) are separate guides.
 
+RPC assistant messages use the completed response's settled cost, not a fresh
+calculation from the current catalog. Their `usage.cost` is `null` when pricing
+is unknown; a known zero is distinct. Known total-dollar projections include
+sub-microdollar remainder, while exact integer cost remains in the session
+ledger. Aggregate scalar costs are known subtotals whenever usage is uncertain
+or an operation is unpriced.
+
 ## Tools and limits
 
 | Form | Contract |
 | --- | --- |
 | `--tools NAMES`, `--exclude-tools NAMES` | Final comma-separated allowlist/exclusions; e.g. `read,search`. Model schemas match the executable registry. |
+| `--powershell` | Additive opt-in for the Windows `powershell` tool; never replaces `bash`, conflicts with an exclusive `--tools`/`--no-tools` list, and reports itself inert on hosts without PowerShell. |
+| `--models PATTERNS` | Ordered, comma-separated model scope for selection and Ctrl+P cycling: `provider/*`, a literal `provider/model`, or a bare-id glob, each with an optional real `:level` suffix. The first requested match is the default for a new session; a miss warns without discarding the rest. `/scoped-models` persists the same ordered patterns. |
 | `--no-tools` | Disable tools; conflicts with `--tools`. |
 | `--no-edit` | Disable edit and write. |
 | `--no-write` | Disable complete-file write. |
@@ -58,8 +67,24 @@ choices, generated extension flags, and defaults are not inferred here.
 | `--telemetry PATH` | Owner-only opt-in telemetry, separate from sessions; no raw prompts/tool payloads. |
 
 [Tools and permissions](tools.md) explains why full access is not a sandbox.
+Hard token/cost ceilings also require an enforceable provider output limit.
+Routes that omit that bound, including Codex Responses, presets explicitly
+omitting `max_output_tokens`, and native Responses compaction, refuse hard-ceiling
+admission before dispatch. A catalog output maximum is not a substitute for a
+wire-enforced bound. Without those ceilings, the ordinary uncapped route remains
+available; this does not clear historical usage uncertainty.
 
 ## Provider setup
+
+In the interactive first-run flow, an empty catalog with no explicit
+model selection opens **Add an API key** first, then **Sign in with ChatGPT /
+other supported OAuth subscriptions**, **Local/self-hosted models**, and
+**Continue without a provider**. API-key entry is masked and saved only after
+review to owner-private, recoverable storage; it is not a command-line secret
+argument. Subscription choices are ChatGPT (Codex) and GitHub Copilot. See
+[first-run behavior and credential privacy](providers.md#first-run-setup-unreleased).
+The `octet setup` subcommand below still configures explicit custom endpoints;
+print/RPC modes never open onboarding.
 
 ```text
 octet --login codex
@@ -70,8 +95,14 @@ octet setup --preset lm-studio --manual-model ID [--yes]
 octet setup --endpoint URL [--api-key-env VAR] [--model ID|--manual-model ID] [--offline] [--yes]
 ```
 
-`--headless` is the documented provider-auth option; consult generated help for
-its exact login interaction. Copilot is not a CLI login/configuration provider.
+`--headless` prints the device verification URL/code without opening a browser.
+The Copilot integration accepts `--login copilot [--headless]` and
+`--logout copilot`, also under the alias `github-copilot`. It uses only its private
+OAuth store, not environment or editor credentials. Online shared catalogs can
+then discover eligible `github-copilot/<id>` models; offline adds none. First-run
+subscription setup also offers this device flow, but TUI slash auth commands
+are not yet integrated. Native-host protocol 1 gains no auth command or
+credential field. [Limits and unrun live qualification](providers.md#github-copilot-unreleased-candidate).
 
 Setup reviews without writing by default. `--yes` commits only the reviewed
 transaction; `--cancel` leaves the registry unchanged. An explicit `--preset
@@ -109,7 +140,7 @@ octet sessions list [--query TEXT]
 octet sessions inspect ID
 octet sessions rename ID "NAME"
 octet sessions tag ID TAG...
-octet sessions export ID [--output PATH] [--force] [--include-secrets]
+octet sessions export ID [--format json|html] [--output PATH] [--force] [--include-secrets]
 octet sessions delete ID
 octet sessions repair ID
 octet doctor
@@ -121,8 +152,58 @@ with both. Fork creates a new session before startup. Listing and
 inspection are read-only. Delete moves to recoverable trash; repair backs up
 before removing only a torn final append. Export redacts by default, refuses an
 existing destination without `--force`, and warns for `--include-secrets`.
+Both formats always exclude private extension metadata; opting out of credential
+scrubbing does not widen that visibility boundary.
 `doctor` performs read-mostly prerequisite/provider/model checks without an Agent
 or executable-extension startup. [Sessions](sessions.md).
+
+## Local evaluation
+
+```text
+octet eval run SUITE [--artifact-dir DIR] [--baseline REPORT.json]
+octet eval run SUITE --model-profile /absolute/private-model.json
+```
+
+The default is a harness-owned scripted fixture, **not** a model benchmark.
+`--model-profile` explicitly selects an independently running local model server.
+The owner-private regular JSON file (maximum 16 KiB, no symlinks/hardlinks) has
+this shape:
+
+```json
+{
+  "schema": "octet-eval-model-1",
+  "base_url": "http://127.0.0.1:8000/v1/",
+  "model": "operator-selected-model",
+  "api_key": "",
+  "context_window": 32768,
+  "max_output_tokens": 1024,
+  "pricing": {"input": 0, "output": 0, "cache_read": 0, "cache_write_5m": 0}
+}
+```
+
+The endpoint must be literal-loopback HTTP, with an explicit non-default port
+and `/v1/` path: no DNS names, remote destinations, redirects, query strings,
+custom headers or ambient credentials. `api_key` is required; empty means none.
+Pricing is optional. When present, all four integer rates are required, in
+microdollars per million tokens; explicit zeros declare a free server. Missing
+pricing remains **unknown**, not free. Local routing does not prove the server
+itself avoids downstream paid inference. Model mode rejects scripted fixture
+replies in the suite.
+
+Each case uses a new private HOME/workspace/session, cleared environment, no
+tools/context files, one model turn, and the literal prompt on stdin. The
+profile's token limit and any known-price case cost ceiling constrain admission;
+unknown pricing with a cost ceiling refuses before inference. There is no
+aggregate run-wide cost ceiling.
+
+`--case-timeout-ms N` defaults to 60000 (range 1–120000);
+`--max-output-bytes N` defaults to 262144 per stdout/stderr stream (range
+1–1048576). Exceeding either bound terminates/reaps the case. A suite is bounded
+to 1 MiB, 64 cases and 32 KiB per prompt. Private reports record backend, selected
+model, pass/latency/token/cost measurements and baseline deltas. Failed or
+interrupted calls retain available durable accounting; missing usage or pricing
+is uncertain, never a fabricated exact zero. Failed cases are observations in
+the report, not necessarily a nonzero harness exit.
 
 ## Instructions and resources
 
@@ -151,9 +232,11 @@ octet extension list
 ```
 
 The four official executable bundles and the separate Serve application must
-match octet 0.7.6. Availability, signed assets, and public-install verification
-are recorded on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
-Catalog forms select the package matching the running host version:
+match the running host exactly. Current source packages are `0.8.0` with
+`requires_octet = "=0.8.0"`. The
+[0.8.0 release](https://github.com/skaft-software/octet/releases/tag/v0.8.0)
+records signed assets and public-install evidence. Catalog forms below require
+verified published assets matching the running host version:
 
 ```text
 octet extension install NAME
@@ -183,8 +266,6 @@ before use; this is not stable transport qualification.
 
 ```text
 octet migrate pi --dry-run [--json] [--pi-home PATH] [--project PATH] [--npm-root PATH]
-octet pi install PATH
-octet pi list
 ```
 
 Inventory reads bounded Pi settings/manifests and local/npm/git package locations,
@@ -195,9 +276,10 @@ only an explicit legacy `node_modules` search root.
 
 Separate explicit `octet migrate import pi` and `octet migrate restore` cover a
 bounded portable subset without copying credentials or modifying Pi sources.
-`pi install` links reviewed local sources inertly; the pinned bridge remains
-disabled and untrusted until activated. Exact import/restore, plan/preflight,
-compatibility profile, bounds, and gaps stay in [Pi migration](pi-migration.md).
+Pi extension execution and its former install/plan/preflight/publish commands are
+not supported. Inventory classifications are not runtime compatibility claims.
+Import/restore bounds stay in [Pi migration](pi-migration.md); [native provider
+support](providers.md) is independent of Pi extensions.
 
 ## Updates and legacy inputs
 

@@ -11,8 +11,8 @@ use crate::protocol::{
 use crate::stream::{ResponseBuilder, StreamEvent};
 use crate::types::{
     AssistantPart, CacheRetention, ImageSource, Media, Message, OutputFormat, Protocol,
-    ReasoningConfig, ReasoningMode, ReasoningState, ReasoningStateKind, Request, StopReason,
-    ToolCallId, ToolChoice, ToolDef, ToolResultPart, Usage, UserPart,
+    ReasoningConfig, ReasoningMode, ReasoningState, ReasoningStateKind, Request, ServiceTier,
+    StopReason, ToolCallId, ToolChoice, ToolDef, ToolResultPart, Usage, UserPart,
 };
 use crate::validate::{
     normalize_request_reasoning, validate_reasoning_selection, validate_request,
@@ -23,6 +23,9 @@ use crate::validate::{
 #[derive(Serialize)]
 struct ResponsesRequest {
     model: String,
+    // Already-owned opaque trees are inserted by into_json, not serialized
+    // through the typed metadata DTO into a second tree.
+    #[serde(skip_serializing)]
     input: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
@@ -31,7 +34,7 @@ struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     context_management: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ResponsesTool>>,
+    tools: Option<Vec<ResponsesToolWire>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,6 +44,8 @@ struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<ServiceTier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ResponsesReasoningConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<ResponsesTextConfig>,
@@ -48,6 +53,8 @@ struct ResponsesRequest {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: Option<ResponsesPromptCacheOptions>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     include: Vec<String>,
     store: bool,
@@ -57,6 +64,72 @@ struct ResponsesRequest {
     // This codec is always-streamed (there is no non-streaming Responses decode
     // path — see `decode_stream_event`), so it is unconditionally true.
     stream: bool,
+}
+
+/// The explicit cache-mode contract is distinct from legacy 24h retention.
+#[derive(Serialize)]
+struct ResponsesPromptCacheOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
+}
+
+fn supports_explicit_prompt_cache_mode(model: &crate::catalog::Model) -> bool {
+    let url = &model.endpoint.base_url;
+    // A copied model record must not assert this public-API contract for a
+    // compatible gateway, Azure, or the subscription route.
+    model.spec.cache.supports_explicit_prompt_cache_mode
+        && model.endpoint.runtime.responses_profile
+            == crate::types::ResponsesRuntimeProfile::Default
+        && url.scheme() == "https"
+        && url.host_str() == Some("api.openai.com")
+        && url.path() == "/v1/"
+}
+
+fn prompt_cache_options(
+    model: &crate::catalog::Model,
+    retention: CacheRetention,
+) -> Option<ResponsesPromptCacheOptions> {
+    if !supports_explicit_prompt_cache_mode(model) {
+        return None;
+    }
+    match retention {
+        CacheRetention::None => Some(ResponsesPromptCacheOptions {
+            // No explicit breakpoints are emitted by this route, so this
+            // disables prompt caching instead of merely omitting affinity.
+            mode: Some("explicit"),
+            ttl: None,
+        }),
+        CacheRetention::Long if model.spec.cache.supports_long_retention => {
+            Some(ResponsesPromptCacheOptions {
+                mode: None,
+                ttl: Some("30m"),
+            })
+        }
+        CacheRetention::Short | CacheRetention::WarmShort | CacheRetention::Long => None,
+    }
+}
+
+impl ResponsesRequest {
+    fn into_json(self) -> Result<serde_json::Value, AiError> {
+        let mut body = serde_json::to_value(&self)
+            .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+        body.as_object_mut()
+            .expect("the Responses request DTO serializes to an object")
+            .insert("input".to_owned(), self.input);
+        Ok(body)
+    }
+}
+
+fn into_wire_input(input: crate::responses::ResponsesInput) -> serde_json::Value {
+    serde_json::Value::Array(
+        input
+            .into_items()
+            .into_iter()
+            .map(crate::responses::ResponsesItem::into_json)
+            .collect(),
+    )
 }
 
 #[derive(Serialize)]
@@ -71,6 +144,8 @@ enum ResponsesInputItem {
         content: Vec<ResponsesContentPart>,
     },
     FunctionCall {
+        #[serde(rename = "async", skip_serializing_if = "is_false")]
+        async_execution: bool,
         call_id: String,
         name: String,
         arguments: String,
@@ -78,6 +153,18 @@ enum ResponsesInputItem {
     FunctionCallOutput {
         call_id: String,
         output: Vec<ResponsesToolResultBlock>,
+    },
+    /// Authoritative `computer_call` input item, replayed from canonical
+    /// history. Pairing uses the same `call_id` as the matching
+    /// `computer_call_output`.
+    ComputerCall {
+        call_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<serde_json::Value>,
+    },
+    ComputerCallOutput {
+        call_id: String,
+        output: ResponsesComputerScreenshot,
     },
     Reasoning {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,6 +214,57 @@ enum ResponsesToolResultBlock {
     },
 }
 
+/// The single documented output of a `computer_call_output` item.
+///
+/// The Responses schema types this as one `computer_screenshot` object, so the
+/// codec never forwards arbitrary canonical parts here: only the first usable
+/// screenshot source is sent, and an oversized inline image is dropped rather
+/// than forwarded unbounded.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResponsesComputerScreenshot {
+    ComputerScreenshot {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        image_url: Option<WireImageUrl>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+    },
+}
+
+impl ResponsesComputerScreenshot {
+    /// Empty screenshot: the wire schema makes both sources optional, so a
+    /// caller with no screenshot authority still returns a well-formed pairing.
+    fn empty() -> Self {
+        Self::ComputerScreenshot {
+            image_url: None,
+            file_id: None,
+        }
+    }
+
+    /// First usable screenshot source from canonical tool-result blocks.
+    fn from_blocks(blocks: &[ResponsesToolResultBlock]) -> Self {
+        for block in blocks {
+            match block {
+                ResponsesToolResultBlock::InputText { .. } => {}
+                ResponsesToolResultBlock::InputImage { image_url, file_id } => {
+                    if let Some(WireImageUrl::Inline { data, .. }) = image_url {
+                        if data.len() > MAX_COMPUTER_SCREENSHOT_BYTES {
+                            continue;
+                        }
+                    }
+                    if image_url.is_some() || file_id.is_some() {
+                        return Self::ComputerScreenshot {
+                            image_url: image_url.clone(),
+                            file_id: file_id.clone(),
+                        };
+                    }
+                }
+            }
+        }
+        Self::empty()
+    }
+}
+
 #[derive(Serialize)]
 struct ResponsesReasoningSummary {
     r#type: String,
@@ -134,11 +272,95 @@ struct ResponsesReasoningSummary {
 }
 
 #[derive(Serialize)]
+#[serde(untagged)]
+enum ResponsesToolWire {
+    Function(ResponsesTool),
+    Custom(ResponsesCustomTool),
+    Computer(ResponsesComputerTool),
+}
+
+/// OpenAI Responses `computer_use_preview` built-in tool declaration.
+///
+/// The declaration carries no programmable schema: the provider's model answers
+/// with `computer_call` items carrying an `action`, which this codec maps to a
+/// canonical tool call named [`COMPUTER_TOOL_NAME`].
+#[derive(Serialize)]
+struct ResponsesComputerTool {
+    r#type: &'static str,
+    display_width: u32,
+    display_height: u32,
+    environment: &'static str,
+}
+
+/// Canonical tool name assigned to a provider `computer_call` item.
+///
+/// A `computer_call` has no function name on the wire, so the codec synthesizes
+/// this stable name for the canonical tool call and recognizes it again when
+/// replaying canonical history. It is the documented wire tool type, not a
+/// provider identity.
+pub(crate) const COMPUTER_TOOL_NAME: &str = "computer_use_preview";
+
+/// Documented OpenAI computer action discriminators.
+///
+/// The codec refuses every other action type (including a missing one) instead
+/// of handing an unvetted action to a caller: computer-use authority lives
+/// outside this crate, and an unknown action cannot be represented safely.
+const COMPUTER_ACTION_TYPES: &[&str] = &[
+    "click",
+    "double_click",
+    "drag",
+    "keypress",
+    "move",
+    "screenshot",
+    "scroll",
+    "type",
+    "wait",
+];
+
+/// Bounded size of the canonical argument payload built from a computer action.
+const MAX_COMPUTER_ACTION_BYTES: usize = 16 * 1024;
+
+/// Bounded size of one inline screenshot replayed in a `computer_call_output`.
+const MAX_COMPUTER_SCREENSHOT_BYTES: usize = 4 * 1024 * 1024;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Serialize)]
 struct ResponsesTool {
-    r#type: String,
+    #[serde(rename = "async", skip_serializing_if = "is_false")]
+    async_execution: bool,
+    r#type: &'static str,
     name: String,
     description: String,
     parameters: serde_json::Value,
+    /// `true` only when the caller asked for strict JSON-schema sampling and
+    /// the route could enforce the rewritten schema. The field is omitted
+    /// entirely when the route cannot enforce strict tools at all, mirroring
+    /// Pi's `convertResponsesTools` (`if (supportsStrictMode) functionTool.strict = strict`);
+    /// a route that rejects unknown fields must not receive a misleading
+    /// `strict: false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
+}
+
+/// OpenAI Responses `custom` tool constrained by a Lark/regex grammar.
+#[derive(Serialize)]
+struct ResponsesCustomTool {
+    #[serde(rename = "async", skip_serializing_if = "is_false")]
+    async_execution: bool,
+    r#type: &'static str,
+    name: String,
+    description: String,
+    format: ResponsesGrammarFormat,
+}
+
+#[derive(Serialize)]
+struct ResponsesGrammarFormat {
+    r#type: &'static str,
+    syntax: String,
+    definition: String,
 }
 
 #[derive(Serialize)]
@@ -184,61 +406,273 @@ fn opaque_input_item(item: ResponsesInputItem) -> crate::responses::ResponsesIte
     .expect("private Responses input item is always an object")
 }
 
+fn validate_terminal_async_markers(
+    builder: &ResponseBuilder,
+    output: &[crate::ResponsesItem],
+) -> Result<(), AiError> {
+    crate::responses::validate_provider_output_items(output)?;
+    for item in output {
+        let item = item.as_json();
+        let Some(marker) = item.get("async") else {
+            continue;
+        };
+        let marker = marker
+            .as_bool()
+            .ok_or_else(|| DecodeError::InvalidProviderField("invalid async call marker".into()))?;
+        let call_id = item.get("call_id").and_then(serde_json::Value::as_str);
+        let call = builder
+            .tool_call_builders
+            .values()
+            .find(|call| Some(call.id.0.as_str()) == call_id);
+        if call.is_some_and(|call| call.async_execution != marker) || (marker && call.is_none()) {
+            return Err(DecodeError::InvalidProviderField(
+                "terminal async call marker disagrees with call start".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_async_tools(model: &crate::Model, tools: &[ToolDef]) -> Result<(), AiError> {
+    if tools.iter().any(|tool| tool.async_execution) && !model.responses_features().async_tools {
+        return Err(
+            ConfigError::Parse("async tools are not qualified for this route".into()).into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_async_input(
+    model: &crate::Model,
+    input: &crate::ResponsesInput,
+    tools: &[ToolDef],
+) -> Result<(), AiError> {
+    validate_async_tools(model, tools)?;
+    // Only the ordered walk can accept these prospective historical pairs.
+    // This index does not waive duplicate IDs or output-before-call checks.
+    let historical_results: std::collections::HashSet<&str> = input
+        .items()
+        .iter()
+        .filter_map(|item| {
+            let item = item.as_json();
+            match item.get("type").and_then(serde_json::Value::as_str) {
+                Some("function_call_output" | "custom_tool_call_output") => {
+                    item.get("call_id").and_then(serde_json::Value::as_str)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    let mut call_ids = std::collections::HashSet::new();
+    let mut invalid_pending = std::collections::HashSet::new();
+    let mut completed = std::collections::HashSet::new();
+    for item in input.items() {
+        let item = item.as_json();
+        let kind = item.get("type").and_then(serde_json::Value::as_str);
+        // Delta continuation may legitimately carry outputs for calls in the
+        // server's retained prefix. Still record every visible result, so later
+        // calls cannot reuse that identity or hide an output-before-call pair.
+        let id = item.get("call_id").and_then(serde_json::Value::as_str);
+        if matches!(
+            kind,
+            Some("function_call" | "custom_tool_call" | "computer_call")
+        ) {
+            if let Some(id) = id {
+                if !call_ids.insert(id) || completed.contains(id) {
+                    return Err(ConfigError::Parse(
+                        "duplicate or out-of-order tool call ID in Responses input".into(),
+                    )
+                    .into());
+                }
+            }
+        } else if matches!(
+            kind,
+            Some("function_call_output" | "custom_tool_call_output" | "computer_call_output")
+        ) {
+            if let Some(id) = id {
+                if !completed.insert(id) {
+                    return Err(ConfigError::Parse(
+                        "duplicate tool result in Responses input".into(),
+                    )
+                    .into());
+                }
+                invalid_pending.remove(id);
+            }
+        }
+        let Some(marker) = item.get("async") else {
+            continue;
+        };
+        let enabled = marker
+            .as_bool()
+            .ok_or_else(|| ConfigError::Parse("invalid async call marker".into()))?;
+        if !enabled {
+            continue;
+        }
+        let name = item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !model.responses_features().async_tools
+            || !matches!(kind, Some("function_call" | "custom_tool_call"))
+            || name.is_empty()
+        {
+            return Err(
+                ConfigError::Parse("unadvertised async call in Responses input".into()).into(),
+            );
+        }
+        let id = item
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ConfigError::Parse("async call requires a call_id".into()))?;
+        if historical_results.contains(id) {
+            // Retain envelope validation, but do not use a later tool schema or
+            // advertisement as authority over already completed provider work.
+            if kind == Some("custom_tool_call") {
+                item.get("input")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        ConfigError::Parse("async custom call requires string input".into())
+                    })?;
+            } else {
+                let arguments = item
+                    .get("arguments")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        ConfigError::Parse("async function call requires arguments".into())
+                    })?;
+                crate::json_repair::normalize_json_object_value(arguments)?;
+            }
+            continue;
+        }
+        if !tools
+            .iter()
+            .any(|tool| tool.async_execution && tool.name == name)
+        {
+            return Err(ConfigError::Parse(
+                "pending async call was not advertised for this tool".into(),
+            )
+            .into());
+        }
+        let arguments = if kind == Some("custom_tool_call") {
+            let property =
+                super::grammar::input_property(tools, name, super::grammar_tools_for(model))?
+                    .ok_or_else(|| {
+                        ConfigError::Parse("async custom call requires its declared grammar".into())
+                    })?;
+            let text = item
+                .get("input")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ConfigError::Parse("async custom call requires string input".into())
+                })?;
+            serde_json::json!({property: text})
+        } else {
+            let arguments = item
+                .get("arguments")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ConfigError::Parse("async function call requires arguments".into())
+                })?;
+            crate::json_repair::normalize_json_object_value(arguments)?
+        };
+        if !matches!(
+            crate::json_repair::validate_tool_arguments(name, &arguments, tools)?,
+            crate::ToolArgumentValidation::Valid
+        ) {
+            invalid_pending.insert(id);
+        }
+    }
+    if let Some(id) = invalid_pending.into_iter().next() {
+        return Err(crate::ValidationError::MissingToolResult(ToolCallId(id.to_owned())).into());
+    }
+    Ok(())
+}
+
 fn map_responses_tools(
     model: &crate::catalog::Model,
     tools: &[ToolDef],
-) -> Option<Vec<ResponsesTool>> {
+) -> Result<Option<Vec<ResponsesToolWire>>, AiError> {
     if tools.is_empty() || !model.spec.capabilities.tools {
-        return None;
+        return Ok(None);
     }
-    Some(
-        tools
-            .iter()
-            .map(|tool| ResponsesTool {
-                r#type: "function".to_owned(),
+    let mut mapped = Vec::with_capacity(tools.len());
+    for tool in tools {
+        // Grammar-constrained tools are caller-opted OpenAI `custom` tools;
+        // every other tool is a strict-resolved function tool.
+        if let Some(grammar) =
+            crate::constrained_sampling::resolve_grammar(tool, super::grammar_tools_for(model))?
+        {
+            mapped.push(ResponsesToolWire::Custom(ResponsesCustomTool {
+                async_execution: tool.async_execution,
+                r#type: "custom",
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: tool.parameters.clone(),
-            })
-            .collect(),
-    )
+                format: ResponsesGrammarFormat {
+                    r#type: "grammar",
+                    syntax: grammar.format.to_owned(),
+                    definition: grammar.definition,
+                },
+            }));
+            continue;
+        }
+        let supports_strict = super::strict_mode_for(model);
+        let (parameters, strict) =
+            crate::constrained_sampling::function_tool_parameters(tool, supports_strict)?;
+        mapped.push(ResponsesToolWire::Function(ResponsesTool {
+            async_execution: tool.async_execution,
+            r#type: "function",
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters,
+            strict: supports_strict.then_some(strict),
+        }));
+    }
+    Ok(Some(mapped))
 }
 
 fn map_responses_lite_tools(
     model: &crate::catalog::Model,
     tools: &[ToolDef],
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, AiError> {
     if tools.is_empty() || !model.spec.capabilities.tools {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let tools = tools
         .iter()
         .map(|tool| {
-            serde_json::json!({
+            let (parameters, strict) =
+                crate::constrained_sampling::function_tool_parameters(tool, false)?;
+            let mut value = serde_json::json!({
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
-                "strict": false,
-                "parameters": tool.parameters,
-            })
+                "strict": strict,
+                "parameters": parameters,
+            });
+            if tool.async_execution {
+                value["async"] = true.into();
+            }
+            Ok(value)
         })
-        .collect::<Vec<_>>();
-    vec![serde_json::json!({
+        .collect::<Result<Vec<_>, AiError>>()?;
+    Ok(vec![serde_json::json!({
         "type": "namespace",
         "name": "functions",
         "description": "",
         "tools": tools,
-    })]
+    })])
 }
 
 fn responses_lite_prefix(
     model: &crate::catalog::Model,
     instructions: Option<&str>,
     tools: &[ToolDef],
-) -> Vec<crate::responses::ResponsesItem> {
+) -> Result<Vec<crate::responses::ResponsesItem>, AiError> {
     let mut prefix = vec![opaque_input_item(ResponsesInputItem::AdditionalTools {
         role: "developer".to_owned(),
-        tools: map_responses_lite_tools(model, tools),
+        tools: map_responses_lite_tools(model, tools)?,
     })];
     if let Some(instructions) = instructions.filter(|instructions| !instructions.is_empty()) {
         prefix.push(opaque_input_item(ResponsesInputItem::Message {
@@ -248,7 +682,7 @@ fn responses_lite_prefix(
             }],
         }));
     }
-    prefix
+    Ok(prefix)
 }
 
 fn responses_reasoning_effort(effort: crate::types::ReasoningEffort) -> &'static str {
@@ -341,6 +775,8 @@ pub(crate) fn build_compact_request(
         return Err(crate::error::UnsupportedError::ReasoningMode.into());
     }
     validate_reasoning_selection(reasoning, &model.spec.capabilities, model.spec.protocol)?;
+    crate::responses::validate_responses_input(model, &input, reasoning, true)?;
+    validate_async_tools(model, tools)?;
     // The private ChatGPT Codex compact route accepts the same active tool and
     // generation controls as normal Responses calls. Public OpenAI compact
     // currently exposes a narrower schema and may reject these extra fields.
@@ -353,18 +789,15 @@ pub(crate) fn build_compact_request(
         || model.spec.cache.session_affinity_format
             == Some(crate::types::SessionAffinityFormat::Codex)
         || responses_lite;
-    let mapped_tools = if responses_lite {
+    let mapped_tools = if responses_lite || !rich_codex_schema {
         None
     } else {
-        rich_codex_schema
-            .then(|| map_responses_tools(model, tools))
-            .flatten()
-            .map(|tools| {
-                tools
-                    .into_iter()
-                    .map(|tool| serde_json::to_value(tool).expect("Responses tool serializes"))
-                    .collect()
-            })
+        map_responses_tools(model, tools)?.map(|tools| {
+            tools
+                .into_iter()
+                .map(|tool| serde_json::to_value(tool).expect("Responses tool serializes"))
+                .collect()
+        })
     };
     let parallel_tool_calls = if responses_lite {
         // The internal Responses Lite route requires an explicit false even
@@ -377,7 +810,7 @@ pub(crate) fn build_compact_request(
     };
     let (input, instructions) = if responses_lite {
         input.strip_image_details_for_responses_lite();
-        let mut items = responses_lite_prefix(model, instructions.as_deref(), tools);
+        let mut items = responses_lite_prefix(model, instructions.as_deref(), tools)?;
         items.extend(input.into_items());
         (crate::responses::ResponsesInput::new(items), None)
     } else {
@@ -546,6 +979,7 @@ fn map_user_input(
     preserve_tool_call_ids: bool,
     pending_tool_calls: &mut std::collections::BTreeSet<String>,
     synthetic_tool_results: &std::collections::HashSet<String>,
+    computer_call_ids: &std::collections::BTreeSet<String>,
 ) -> Vec<ResponsesInputItem> {
     let mut input = Vec::new();
     let mut content = Vec::new();
@@ -660,10 +1094,21 @@ fn map_user_input(
                 } else {
                     crate::protocol::normalize_tool_call_id(&result.tool_call_id.0)
                 };
-                input.push(ResponsesInputItem::FunctionCallOutput {
-                    call_id,
-                    output: outputs,
-                });
+                if computer_call_ids.contains(&result.tool_call_id.0) {
+                    // A tool result for a computer call is a
+                    // `computer_call_output`, never a `function_call_output`:
+                    // the provider pairs it with the earlier `computer_call`
+                    // item by `call_id` and rejects the function shape.
+                    input.push(ResponsesInputItem::ComputerCallOutput {
+                        call_id,
+                        output: ResponsesComputerScreenshot::from_blocks(&outputs),
+                    });
+                } else {
+                    input.push(ResponsesInputItem::FunctionCallOutput {
+                        call_id,
+                        output: outputs,
+                    });
+                }
             }
         }
     }
@@ -675,6 +1120,7 @@ fn map_assistant_input(
     assistant: &crate::types::AssistantMessage,
     model: &crate::catalog::Model,
     pending_tool_calls: &mut std::collections::BTreeSet<String>,
+    computer_call_ids: &mut std::collections::BTreeSet<String>,
 ) -> Vec<ResponsesInputItem> {
     let mut input = Vec::new();
     // Preserve canonical part order: buffered assistant text is flushed as a
@@ -685,12 +1131,29 @@ fn map_assistant_input(
             AssistantPart::Text(text) => text_parts.push(text.clone()),
             AssistantPart::ToolCall(tool_call) => {
                 flush_assistant_text(&mut input, &mut text_parts);
-                pending_tool_calls.insert(tool_call.id.0.clone());
-                input.push(ResponsesInputItem::FunctionCall {
-                    call_id: crate::protocol::normalize_tool_call_id(&tool_call.id.0),
-                    name: tool_call.name.clone(),
-                    arguments: tool_call.arguments_json.clone(),
-                });
+                if !tool_call.async_execution {
+                    pending_tool_calls.insert(tool_call.id.0.clone());
+                }
+                let call_id = crate::protocol::normalize_tool_call_id(&tool_call.id.0);
+                if tool_call.name == COMPUTER_TOOL_NAME {
+                    // Canonical history replays a computer call as a
+                    // `computer_call` item, not as a function call the route
+                    // never declared. The action is carried in the call's
+                    // canonical arguments and is re-emitted only when it is a
+                    // documented action type.
+                    computer_call_ids.insert(tool_call.id.0.clone());
+                    input.push(ResponsesInputItem::ComputerCall {
+                        call_id,
+                        action: canonical_computer_action(&tool_call.arguments_json),
+                    });
+                } else {
+                    input.push(ResponsesInputItem::FunctionCall {
+                        async_execution: tool_call.async_execution,
+                        call_id,
+                        name: tool_call.name.clone(),
+                        arguments: tool_call.arguments_json.clone(),
+                    });
+                }
             }
             AssistantPart::Reasoning(reasoning) => {
                 if let Some(state) = &reasoning.state {
@@ -736,6 +1199,7 @@ pub(crate) fn encode_canonical_input(
     let mut input = map_system_input(model, system);
     let mut pending_tool_calls = std::collections::BTreeSet::new();
     let mut synthetic_tool_results = std::collections::HashSet::new();
+    let mut computer_call_ids = std::collections::BTreeSet::new();
     for message in messages {
         match message {
             Message::User(user) => input.extend(map_user_input(
@@ -744,6 +1208,7 @@ pub(crate) fn encode_canonical_input(
                 false,
                 &mut pending_tool_calls,
                 &synthetic_tool_results,
+                &computer_call_ids,
             )),
             Message::Assistant(assistant) => {
                 if compatibility == crate::CompatibilityMode::Lossy {
@@ -757,6 +1222,7 @@ pub(crate) fn encode_canonical_input(
                     assistant,
                     model,
                     &mut pending_tool_calls,
+                    &mut computer_call_ids,
                 ));
             }
         }
@@ -775,7 +1241,7 @@ pub(crate) fn encode_replay_input(
     model: &crate::catalog::Model,
     system: Option<&str>,
     replay: &[crate::responses::ResponsesReplayItem],
-) -> crate::responses::ResponsesInput {
+) -> Result<crate::responses::ResponsesInput, AiError> {
     let compacted_base = matches!(
         replay.first(),
         Some(crate::responses::ResponsesReplayItem::Compacted(_))
@@ -790,8 +1256,12 @@ pub(crate) fn encode_replay_input(
     };
     let mut pending_tool_calls = std::collections::BTreeSet::new();
     let synthetic_tool_results = std::collections::HashSet::new();
+    let mut computer_call_ids = std::collections::BTreeSet::new();
     for item in replay {
         match item {
+            crate::responses::ResponsesReplayItem::ConfigurationUpdate(update) => {
+                input.push(update.to_item())
+            }
             crate::responses::ResponsesReplayItem::User(user) => {
                 input.extend(
                     map_user_input(
@@ -800,6 +1270,7 @@ pub(crate) fn encode_replay_input(
                         true,
                         &mut pending_tool_calls,
                         &synthetic_tool_results,
+                        &computer_call_ids,
                     )
                     .into_iter()
                     .map(opaque_input_item),
@@ -807,18 +1278,44 @@ pub(crate) fn encode_replay_input(
             }
             crate::responses::ResponsesReplayItem::LocalAssistant(assistant) => {
                 input.extend(
-                    map_assistant_input(assistant, model, &mut pending_tool_calls)
-                        .into_iter()
-                        .map(opaque_input_item),
+                    map_assistant_input(
+                        assistant,
+                        model,
+                        &mut pending_tool_calls,
+                        &mut computer_call_ids,
+                    )
+                    .into_iter()
+                    .map(opaque_input_item),
                 );
             }
             crate::responses::ResponsesReplayItem::Output(output)
             | crate::responses::ResponsesReplayItem::Compacted(output) => {
+                output.validate_provider_output()?;
+                // Authoritative provider output carries the only trustworthy
+                // computer-call provenance: recognize `computer_call` items
+                // verbatim so the caller's tool result for that `call_id` is
+                // replayed as `computer_call_output`.
+                for item in output.items() {
+                    if item
+                        .as_json()
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("computer_call")
+                    {
+                        if let Some(call_id) = item
+                            .as_json()
+                            .get("call_id")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            computer_call_ids.insert(call_id.to_owned());
+                        }
+                    }
+                }
                 input.extend(output.items().iter().cloned());
             }
         }
     }
-    crate::responses::ResponsesInput::new(input)
+    Ok(crate::responses::ResponsesInput::new(input))
 }
 
 /// Builds the OpenAI Responses HTTP request parts.
@@ -827,10 +1324,13 @@ pub(crate) fn build_request(
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
     // 1. Normalize model-gated reasoning, then run validation.
-    let req = normalize_request_reasoning(req, &model.spec.capabilities);
+    let defaults = super::preset::request_defaults(model, req)?;
+    let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);
+    let mut effective_capabilities = model.spec.capabilities.clone();
+    effective_capabilities.responses_features = model.responses_features();
     let diagnostics = validate_request(
         &req,
-        &model.spec.capabilities,
+        &effective_capabilities,
         &model.spec.limits,
         Protocol::OpenAiResponses,
         &model.spec.id,
@@ -847,20 +1347,47 @@ pub(crate) fn build_request(
         .into());
     }
 
-    // 2–3. Encode the request prompt and canonical history through the same
-    // mapper used by durable opaque replay.
-    let canonical_input = crate::responses::encode_canonical_responses_input(
-        model,
-        req.system.as_deref(),
-        &req.messages,
-        req.compatibility,
-    );
-
     // 4. Map tools & tool_choice
+    let grammar_tools = super::grammar_tools_for(model);
     let responses_lite = model.spec.capabilities.responses_lite;
-    let tools_opt = (!responses_lite)
-        .then(|| map_responses_tools(model, &req.tools))
-        .flatten();
+    let mut tools_opt = if responses_lite {
+        None
+    } else {
+        map_responses_tools(model, &req.tools)?
+    };
+
+    // 4b. Declared computer-use tool. The declaration is endpoint-gated data,
+    // never a provider-name branch: a route whose profile does not declare the
+    // tool fails closed instead of silently dropping the caller's declaration.
+    // Responses Lite cannot carry tools at all, so it fails closed too.
+    let computer_use = req
+        .responses
+        .as_ref()
+        .and_then(|options| options.computer_use);
+    if let Some(tool) = computer_use {
+        if responses_lite {
+            return Err(ConfigError::Parse(
+                "computer use cannot be declared on a Responses Lite route".to_owned(),
+            )
+            .into());
+        }
+        if !model
+            .endpoint
+            .runtime
+            .responses_profile
+            .accepts_computer_use()
+        {
+            return Err(crate::error::UnsupportedError::ComputerUse.into());
+        }
+        tools_opt
+            .get_or_insert_with(Vec::new)
+            .push(ResponsesToolWire::Computer(ResponsesComputerTool {
+                r#type: COMPUTER_TOOL_NAME,
+                display_width: tool.display_width,
+                display_height: tool.display_height,
+                environment: tool.environment.wire_value(),
+            }));
+    }
 
     let tool_choice_opt = if !model.spec.capabilities.tools {
         None
@@ -870,7 +1397,7 @@ pub(crate) fn build_request(
             ToolChoice::Required => Some(serde_json::Value::String("required".to_string())),
             ToolChoice::None => Some(serde_json::Value::String("none".to_string())),
             ToolChoice::Named(name) => Some(serde_json::json!({
-                "type": "function",
+                "type": if super::grammar::input_property(&req.tools, name, grammar_tools)?.is_some() { "custom" } else { "function" },
                 "name": name
             })),
         }
@@ -901,31 +1428,68 @@ pub(crate) fn build_request(
     // synthesize a default from the local capacity limit. Subscription
     // endpoints that reject this parameter select omission through runtime
     // metadata rather than a codec-side provider identity check.
-    let max_output_tokens = (!model
-        .endpoint
-        .runtime
-        .responses_profile
-        .omits_max_output_tokens())
-    .then_some(req.max_output_tokens)
-    .flatten();
+    let max_output_tokens = crate::effective_output_token_cap(model, req.max_output_tokens);
 
     let responses_options = req.responses.as_ref();
+    // Codex `service_tier`: a declared endpoint capability, never a provider
+    // identity. A route whose profile does not declare the field fails closed
+    // instead of silently dropping a caller's billing-changing control.
+    let service_tier = responses_options.and_then(|options| options.service_tier);
+    if service_tier.is_some()
+        && !model
+            .endpoint
+            .runtime
+            .responses_profile
+            .accepts_service_tier()
+    {
+        return Err(crate::error::UnsupportedError::ServiceTier.into());
+    }
     let raw_input = responses_options.and_then(|options| options.input.as_ref());
     let refresh_instructions = raw_input
         .is_some_and(crate::responses::ResponsesInput::contains_compaction)
         .then(|| req.system.clone())
         .flatten();
-    let mut input = raw_input.cloned().unwrap_or(canonical_input);
+    // Opaque replay is authoritative: do not encode canonical history only to
+    // discard it when a raw input is present.
+    let mut input = raw_input.cloned().unwrap_or_else(|| {
+        crate::responses::encode_canonical_responses_input(
+            model,
+            req.system.as_deref(),
+            &req.messages,
+            req.compatibility,
+        )
+    });
+    crate::responses::validate_responses_input(model, &input, &req.reasoning, false)?;
+    if input.contains_configuration_updates()
+        && responses_options
+            .and_then(|options| options.context_management.as_ref())
+            .is_some()
+    {
+        return Err(ConfigError::Parse(
+            "configuration updates cannot be combined with automatic context management".into(),
+        )
+        .into());
+    }
+    validate_async_input(model, &input, &req.tools)?;
     let instructions = if responses_lite {
         input.strip_image_details_for_responses_lite();
-        let mut items = responses_lite_prefix(model, refresh_instructions.as_deref(), &req.tools);
+        let mut items = responses_lite_prefix(model, refresh_instructions.as_deref(), &req.tools)?;
         items.extend(input.into_items());
         input = crate::responses::ResponsesInput::new(items);
         None
     } else {
         refresh_instructions
     };
-    let wire_input = serde_json::to_value(input).expect("Responses input serializes");
+    let mut wire_input = into_wire_input(input);
+    if !responses_lite {
+        map_grammar_replay(
+            &mut wire_input,
+            &req,
+            raw_input.is_none(),
+            super::grammar_tools_for(model),
+        )?;
+    }
+    let explicit_cache_mode = supports_explicit_prompt_cache_mode(model);
     let responses_req = ResponsesRequest {
         model: model.spec.api_name.clone(),
         input: wire_input,
@@ -945,34 +1509,30 @@ pub(crate) fn build_request(
                 .then_some(model.spec.capabilities.parallel_tool_calls)
         },
         max_output_tokens,
-        // Verified Astra routes reject sampling controls; all other Responses
-        // models remain unchanged. `top_p` and `logprobs` have no Responses
-        // DTO fields and remain absent.
-        temperature: if matches!(
-            model.spec.id.0.as_str(),
-            "gpt-6-astra" | "codex/gpt-6-astra"
-        ) {
-            None
-        } else {
-            req.temperature
-        },
+        temperature: req.temperature,
         reasoning: reasoning_opt,
         text: text_opt,
+        service_tier,
         prompt_cache_key: prompt_cache_key(&req),
-        prompt_cache_retention: (req.cache_retention == crate::types::CacheRetention::Long
-            && model.spec.cache.supports_long_retention)
+        prompt_cache_retention: (req.cache_retention == CacheRetention::Long
+            && model.spec.cache.supports_long_retention
+            && !explicit_cache_mode)
             .then_some("24h"),
+        prompt_cache_options: prompt_cache_options(model, req.cache_retention),
         include,
         store: responses_options.is_some_and(|options| options.store),
         stream: true,
     };
 
-    let body_bytes = serde_json::to_vec(&responses_req)
-        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let mut body = responses_req.into_json()?;
+    super::preset::sampling(model, &req, &mut body)?;
+    let body_bytes =
+        serde_json::to_vec(&body).map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "responses")?;
 
-    let headers = responses_affinity_headers(model, cache_session_id(&req))?;
+    let mut headers = responses_affinity_headers(model, cache_session_id(&req))?;
+    crate::protocol::add_opencode_session_header(model, &req, &mut headers)?;
 
     Ok(HttpRequestParts {
         url,
@@ -981,6 +1541,74 @@ pub(crate) fn build_request(
         streaming: true,
         diagnostics,
     })
+}
+
+/// Convert canonical function-shaped history using the immutable request tool
+/// schema, and preserve authoritative custom-call provenance on opaque replay.
+/// Results are paired by call id, never inferred from their text payload.
+fn map_grammar_replay(
+    input: &mut serde_json::Value,
+    req: &Request,
+    canonical_calls: bool,
+    grammar_tools: bool,
+) -> Result<(), AiError> {
+    let mut custom_ids = std::collections::HashSet::new();
+    for message in req.messages.iter().filter(|_| canonical_calls) {
+        if let Message::Assistant(assistant) = message {
+            for part in &assistant.content {
+                if let AssistantPart::ToolCall(call) = part {
+                    if super::grammar::input_property(&req.tools, &call.name, grammar_tools)?
+                        .is_some()
+                    {
+                        custom_ids.insert(call.id.0.clone());
+                        custom_ids.insert(crate::protocol::normalize_tool_call_id(&call.id.0));
+                    }
+                }
+            }
+        }
+    }
+    let items = input.as_array_mut().expect("Responses input is an array");
+    for item in items.iter_mut() {
+        if canonical_calls
+            && item.get("type").and_then(serde_json::Value::as_str) == Some("function_call")
+        {
+            if let Some(name) = item.get("name").and_then(serde_json::Value::as_str) {
+                if let Some(property) =
+                    super::grammar::input_property(&req.tools, name, grammar_tools)?
+                {
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            DecodeError::InvalidProviderField(
+                                "custom replay call has no arguments".to_owned(),
+                            )
+                        })?;
+                    let text = super::grammar::replay_input(arguments, &property)?;
+                    let object = item.as_object_mut().expect("a function call is an object");
+                    object.remove("arguments");
+                    object.insert("type".to_owned(), "custom_tool_call".into());
+                    object.insert("input".to_owned(), text.into());
+                }
+            }
+        }
+        if item.get("type").and_then(serde_json::Value::as_str) == Some("custom_tool_call") {
+            if let Some(id) = item.get("call_id").and_then(serde_json::Value::as_str) {
+                custom_ids.insert(id.to_owned());
+            }
+        }
+    }
+    for item in items {
+        if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call_output")
+            && item
+                .get("call_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| custom_ids.contains(id))
+        {
+            item["type"] = "custom_tool_call_output".into();
+        }
+    }
+    Ok(())
 }
 
 /// Flush buffered user content parts as a `message` item, preserving canonical
@@ -1065,6 +1693,10 @@ enum ResponsesSseEvent {
     ReasoningTextDelta { output_index: usize, delta: String },
     #[serde(rename = "response.reasoning_summary_text.delta")]
     ReasoningSummaryDelta { output_index: usize, delta: String },
+    #[serde(rename = "response.custom_tool_call_input.delta")]
+    CustomToolInputDelta { output_index: usize, delta: String },
+    #[serde(rename = "response.custom_tool_call_input.done")]
+    CustomToolInputDone { output_index: usize, input: String },
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta { output_index: usize, delta: String },
     #[serde(rename = "response.function_call_arguments.done")]
@@ -1127,6 +1759,8 @@ struct ResponsesContentPartAdded {
 
 #[derive(Deserialize)]
 struct ResponsesResponseItem {
+    #[serde(default, rename = "async")]
+    async_execution: bool,
     id: String,
     r#type: String,
     #[serde(default)]
@@ -1141,10 +1775,22 @@ struct ResponsesResponseItem {
     /// not silently dropped by serde (unknown-field ignore).
     #[serde(default)]
     arguments: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
+    /// Provider computer-use action (`computer_call` items only). Retained as
+    /// raw JSON so the codec can validate the action discriminator and bound
+    /// the canonical payload before surfacing it.
+    #[serde(default)]
+    action: Option<serde_json::Value>,
+    /// Provider-reported pending safety checks for a computer call.
+    #[serde(default)]
+    pending_safety_checks: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct ResponsesResponseItemDone {
+    #[serde(default, rename = "async")]
+    async_execution: Option<bool>,
     id: String,
     r#type: String,
     #[serde(default)]
@@ -1154,10 +1800,20 @@ struct ResponsesResponseItemDone {
     /// shape as well as the documented `function_call_arguments.done` form.
     #[serde(default)]
     arguments: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
+    /// Terminal computer-use action; see [`ResponsesResponseItem::action`].
+    #[serde(default)]
+    action: Option<serde_json::Value>,
+    /// Terminal pending safety checks for a computer call.
+    #[serde(default)]
+    pending_safety_checks: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct ResponsesResponseCompletedBlock {
+    #[serde(default)]
+    service_tier: Option<String>,
     /// Full terminal output is the only authoritative raw replay source. Added
     /// events are intentionally not used because some servers send skeletons.
     #[serde(default)]
@@ -1172,6 +1828,8 @@ struct ResponsesResponseCompletedBlock {
 
 #[derive(Deserialize)]
 struct ResponsesResponseIncompleteBlock {
+    #[serde(default)]
+    service_tier: Option<String>,
     /// Incomplete terminal responses carry the authoritative output produced
     /// before the limit/refusal stopped generation. Preserve it for exact
     /// Responses replay just as we do for completed responses.
@@ -1252,6 +1910,54 @@ struct ResponsesOutputTokensDetails {
 // OpenAI Responses is always streamed (design §12.2); there is no non-streaming
 // decode path, so this codec deliberately exposes none.
 
+/// Backfill opaque encrypted reasoning from the authoritative terminal output.
+///
+/// Some Responses-compatible gateways (Azure OpenAI, xAI) omit
+/// `reasoning.encrypted_content` from `response.output_item.done` and provide it
+/// only in `response.completed.response.output`. Without this, `store:false`
+/// multi-turn replay would drop the reasoning continuation for those turns.
+/// Only an existing opaque reasoning state is enriched; a missing item is left
+/// alone rather than inventing one.
+fn backfill_reasoning_signatures(
+    builder: &mut ResponseBuilder,
+    output: &[crate::responses::ResponsesItem],
+) -> Result<(), AiError> {
+    for item in output {
+        let json = item.as_json();
+        if json.get("type").and_then(serde_json::Value::as_str) != Some("reasoning") {
+            continue;
+        }
+        let Some(encrypted) = json
+            .get("encrypted_content")
+            .and_then(serde_json::Value::as_str)
+            .filter(|content| !content.is_empty())
+        else {
+            continue;
+        };
+        let item_id = json.get("id").and_then(serde_json::Value::as_str);
+        let target = builder
+            .reasoning_states
+            .iter()
+            .find_map(|(index, state)| match &state.kind {
+                ReasoningStateKind::OpenAiReasoning {
+                    item_id: stored_id,
+                    encrypted_content,
+                } if encrypted_content.is_none() && stored_id.as_deref() == item_id => Some(*index),
+                _ => None,
+            });
+        let Some(index) = target else { continue };
+        let mut state = builder.reasoning_states[&index].clone();
+        if let ReasoningStateKind::OpenAiReasoning {
+            encrypted_content, ..
+        } = &mut state.kind
+        {
+            *encrypted_content = Some(encrypted.to_owned());
+        }
+        builder.set_reasoning_state(index, state)?;
+    }
+    Ok(())
+}
+
 /// Close any tool-call parts that a provider left open before its terminal
 /// response event. Some Responses-compatible gateways send complete arguments
 /// in `output_item.added` and omit `function_call_arguments.done`; closing here
@@ -1268,6 +1974,18 @@ fn close_open_tool_calls(
         .filter(|index| !builder.ended_indices.contains(index))
         .collect();
     for index in open {
+        if super::grammar::is_open(builder, index) {
+            super::grammar::finish(events, builder, index, None)?;
+            continue;
+        }
+        // A computer call whose action never validated is not a representable
+        // exchange: fail closed before the terminal response instead of
+        // surfacing an actionless call for a caller to guess at.
+        if builder.tool_call_builders.get(&index).is_some_and(|call| {
+            call.name == COMPUTER_TOOL_NAME && call.arguments_json.trim().is_empty()
+        }) {
+            return Err(computer_action_error("missing"));
+        }
         emit_event(
             events,
             builder,
@@ -1280,9 +1998,143 @@ fn close_open_tool_calls(
     Ok(())
 }
 
+/// Terminal opaque custom input must agree with the call exposed to the host.
+/// A late monotonic suffix can complete an open call; changed closed input is
+/// rejected rather than leaving canonical execution and opaque replay divergent.
+fn reconcile_custom_output(
+    events: &mut Vec<StreamEvent>,
+    builder: &mut ResponseBuilder,
+    output: &[crate::responses::ResponsesItem],
+) -> Result<(), AiError> {
+    for item in output {
+        let item = item.as_json();
+        if item.get("type").and_then(serde_json::Value::as_str) != Some("custom_tool_call") {
+            continue;
+        }
+        let invalid = || {
+            DecodeError::InvalidProviderField(
+                "terminal custom tool call disagrees with its streamed envelope".to_owned(),
+            )
+        };
+        let id = item
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let name = item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let input = item
+            .get("input")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        let index = builder
+            .tool_call_builders
+            .iter()
+            .find(|(_, call)| call.id.0 == id && call.name == name)
+            .map(|(index, _)| *index)
+            .ok_or_else(invalid)?;
+        super::grammar::finish(events, builder, index, Some(input))?;
+    }
+    Ok(())
+}
+
+/// Settle tier-aware pricing only after authoritative terminal usage/tier.
+/// Missing usage or an undeclared tariff is unpriced, never fabricated as zero.
+fn settle_responses_cost(
+    model: &crate::catalog::Model,
+    builder: &mut ResponseBuilder,
+    echoed: Option<&str>,
+) -> Result<(), AiError> {
+    let cost = match (&builder.pricing, &builder.usage) {
+        (Some(pricing), Some(usage)) => crate::pricing::responses_cost_of(
+            pricing,
+            usage,
+            model.endpoint.runtime.responses_profile,
+            &model.spec.api_name,
+            builder.requested_service_tier,
+            echoed,
+        )?,
+        _ => None,
+    };
+    builder.response_cost = Some(cost);
+    if cost.is_none() && builder.pricing.is_some() {
+        builder.add_diagnostic(crate::Diagnostic {
+            code: "unpriced_responses_tier".to_owned(),
+            message:
+                "Responses cost is unknown: missing usage or an unqualified service-tier tariff"
+                    .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Validates and bounds a provider computer action into the canonical argument
+/// payload (`{"action": …, "pending_safety_checks": …}`).
+///
+/// The codec fails closed on a missing or unknown action: computer-use
+/// authority lives outside this crate, so an unrecognized action must never be
+/// handed to a caller as if it were a known, bounded instruction.
+fn computer_call_arguments(
+    action: Option<&serde_json::Value>,
+    pending_safety_checks: Option<&serde_json::Value>,
+) -> Result<String, AiError> {
+    let kind = action
+        .and_then(|action| action.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("missing");
+    if !COMPUTER_ACTION_TYPES.contains(&kind) {
+        return Err(computer_action_error(kind));
+    }
+    let action = action.expect("validated action is present");
+    if pending_safety_checks.is_some_and(|checks| !checks.is_array()) {
+        return Err(AiError::Decode(DecodeError::Json(
+            "OpenAI Responses computer safety checks must be an array".to_owned(),
+        )));
+    }
+    let mut payload = serde_json::Map::with_capacity(2);
+    payload.insert("action".to_owned(), action.clone());
+    if let Some(checks) =
+        pending_safety_checks.filter(|checks| checks.as_array().is_some_and(|c| !c.is_empty()))
+    {
+        payload.insert("pending_safety_checks".to_owned(), checks.clone());
+    }
+    let arguments = serde_json::to_string(&serde_json::Value::Object(payload))
+        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+    if arguments.len() > MAX_COMPUTER_ACTION_BYTES {
+        return Err(AiError::Decode(DecodeError::Json(format!(
+            "OpenAI Responses computer action is {} bytes, over the {} byte bound",
+            arguments.len(),
+            MAX_COMPUTER_ACTION_BYTES
+        ))));
+    }
+    Ok(arguments)
+}
+
+fn computer_action_error(kind: &str) -> AiError {
+    AiError::Decode(DecodeError::Json(format!(
+        "unsupported OpenAI Responses computer action `{kind}`"
+    )))
+}
+
+/// Extracts a replayable action from canonical computer-call arguments.
+///
+/// The codec emits `{"action": …, "pending_safety_checks": …}`, but a caller
+/// may hand back a bare action object. Anything that is not a documented action
+/// type yields no action at all, so canonical replay never re-sends an
+/// unrecognized instruction as if the provider had produced it.
+fn canonical_computer_action(arguments_json: &str) -> Option<serde_json::Value> {
+    let parsed: serde_json::Value = serde_json::from_str(arguments_json).ok()?;
+    let action = parsed.get("action").unwrap_or(&parsed);
+    let kind = action.get("type").and_then(serde_json::Value::as_str)?;
+    COMPUTER_ACTION_TYPES
+        .contains(&kind)
+        .then(|| action.clone())
+}
+
 /// Decodes a streaming SSE event from OpenAI Responses, emitting StreamEvents.
 pub(crate) fn decode_stream_event(
-    _model: &crate::catalog::Model,
+    model: &crate::catalog::Model,
     sse_event: &SseEvent,
     builder: &mut ResponseBuilder,
 ) -> Result<Vec<StreamEvent>, AiError> {
@@ -1329,7 +2181,50 @@ pub(crate) fn decode_stream_event(
             )?;
         }
         ResponsesSseEvent::OutputItemAdded { output_index, item } => {
-            if item.r#type == "function_call" {
+            crate::responses::validate_provider_output_type(&item.r#type)?;
+            if item.async_execution
+                && (!matches!(item.r#type.as_str(), "function_call" | "custom_tool_call")
+                    || !model.responses_features().async_tools
+                    || !builder.tool_definitions.as_ref().is_some_and(|tools| {
+                        tools.iter().any(|tool| {
+                            tool.async_execution && Some(&tool.name) == item.name.as_ref()
+                        })
+                    }))
+            {
+                return Err(DecodeError::InvalidProviderField(
+                    "unadvertised async tool call".into(),
+                )
+                .into());
+            }
+            if item.r#type == "custom_tool_call" {
+                let key = format!("item_{output_index}");
+                let index = get_canonical_index(builder, &key);
+                let name = item.name.ok_or_else(|| {
+                    DecodeError::InvalidProviderField(
+                        "custom tool call is missing its name".to_owned(),
+                    )
+                })?;
+                if builder.tool_call_builders.contains_key(&index) {
+                    return Err(DecodeError::InvalidProviderField(
+                        "custom tool call started more than once".to_owned(),
+                    )
+                    .into());
+                }
+                emit_event(
+                    &mut events,
+                    builder,
+                    StreamEvent::ToolCallStart {
+                        async_execution: item.async_execution,
+                        index,
+                        id: ToolCallId(item.call_id.unwrap_or(item.id)),
+                        name,
+                    },
+                )?;
+                super::grammar::start(builder, index)?;
+                if let Some(input) = item.input {
+                    super::grammar::delta(&mut events, builder, index, &input)?;
+                }
+            } else if item.r#type == "function_call" {
                 let key = format!("item_{}", output_index);
                 let canonical_idx = get_canonical_index(builder, &key);
                 if let Some(name) = item.name {
@@ -1338,6 +2233,7 @@ pub(crate) fn decode_stream_event(
                         &mut events,
                         builder,
                         StreamEvent::ToolCallStart {
+                            async_execution: item.async_execution,
                             index: canonical_idx,
                             id: ToolCallId(call_id),
                             name,
@@ -1360,6 +2256,37 @@ pub(crate) fn decode_stream_event(
                             )?;
                         }
                     }
+                }
+            } else if item.r#type == "computer_call" {
+                let key = format!("item_{}", output_index);
+                let canonical_idx = get_canonical_index(builder, &key);
+                let call_id = item.call_id.clone().unwrap_or_else(|| item.id.clone());
+                emit_event(
+                    &mut events,
+                    builder,
+                    StreamEvent::ToolCallStart {
+                        async_execution: false,
+                        index: canonical_idx,
+                        id: ToolCallId(call_id),
+                        name: COMPUTER_TOOL_NAME.to_owned(),
+                    },
+                )?;
+                // The action may be deferred to `output_item.done`; when it is
+                // present here the terminal check in `close_open_tool_calls`
+                // only accepts a payload that already validated.
+                if item.action.is_some() || item.pending_safety_checks.is_some() {
+                    let arguments = computer_call_arguments(
+                        item.action.as_ref(),
+                        item.pending_safety_checks.as_ref(),
+                    )?;
+                    emit_event(
+                        &mut events,
+                        builder,
+                        StreamEvent::ToolCallArgsDelta {
+                            index: canonical_idx,
+                            delta: arguments,
+                        },
+                    )?;
                 }
             }
         }
@@ -1478,6 +2405,20 @@ pub(crate) fn decode_stream_event(
                 )?;
             }
         }
+        ResponsesSseEvent::CustomToolInputDelta {
+            output_index,
+            delta,
+        } => {
+            let index = get_canonical_index(builder, &format!("item_{output_index}"));
+            super::grammar::delta(&mut events, builder, index, &delta)?;
+        }
+        ResponsesSseEvent::CustomToolInputDone {
+            output_index,
+            input,
+        } => {
+            let index = get_canonical_index(builder, &format!("item_{output_index}"));
+            super::grammar::finish(&mut events, builder, index, Some(&input))?;
+        }
         ResponsesSseEvent::FunctionCallArgumentsDelta {
             output_index,
             delta,
@@ -1485,6 +2426,12 @@ pub(crate) fn decode_stream_event(
             if !delta.is_empty() {
                 let key = format!("item_{}", output_index);
                 let canonical_idx = get_canonical_index(builder, &key);
+                if super::grammar::is_open(builder, canonical_idx) {
+                    return Err(DecodeError::InvalidProviderField(
+                        "custom tool call received function arguments".to_owned(),
+                    )
+                    .into());
+                }
                 emit_event(
                     &mut events,
                     builder,
@@ -1501,6 +2448,12 @@ pub(crate) fn decode_stream_event(
         } => {
             let key = format!("item_{}", output_index);
             let canonical_idx = get_canonical_index(builder, &key);
+            if super::grammar::is_open(builder, canonical_idx) {
+                return Err(DecodeError::InvalidProviderField(
+                    "custom tool call received function arguments".to_owned(),
+                )
+                .into());
+            }
             // Providers are allowed to send the complete argument payload
             // only on the terminal event. If no deltas populated the builder,
             // feed that payload before closing the call. If deltas already
@@ -1538,7 +2491,24 @@ pub(crate) fn decode_stream_event(
             }
         }
         ResponsesSseEvent::OutputItemDone { output_index, item } => {
-            if item.r#type == "reasoning" {
+            crate::responses::validate_provider_output_type(&item.r#type)?;
+            if let Some(marker) = item.async_execution {
+                let index = get_canonical_index(builder, &format!("item_{output_index}"));
+                if builder
+                    .tool_call_builders
+                    .get(&index)
+                    .is_none_or(|call| call.async_execution != marker)
+                {
+                    return Err(DecodeError::InvalidProviderField(
+                        "async call marker changed after call start".into(),
+                    )
+                    .into());
+                }
+            }
+            if item.r#type == "custom_tool_call" {
+                let index = get_canonical_index(builder, &format!("item_{output_index}"));
+                super::grammar::finish(&mut events, builder, index, item.input.as_deref())?;
+            } else if item.r#type == "reasoning" {
                 let key = format!("reasoning_{}", output_index);
                 let canonical_idx = get_canonical_index(builder, &key);
                 // A duplicated `output_item.done` must not re-emit End (§8).
@@ -1575,7 +2545,12 @@ pub(crate) fn decode_stream_event(
                     )?;
                 }
 
-                if item.encrypted_content.is_some() {
+                // Persist opaque reasoning state for an observed reasoning part
+                // even when `encrypted_content` is absent here: a few gateways
+                // (Azure OpenAI, xAI) send it only in the terminal
+                // `response.completed` output, where `backfill_reasoning_signatures`
+                // merges it into this state for `store:false` replay.
+                if item.encrypted_content.is_some() || had_visible_text {
                     builder.set_reasoning_state(
                         canonical_idx,
                         ReasoningState {
@@ -1623,6 +2598,57 @@ pub(crate) fn decode_stream_event(
                         },
                     )?;
                 }
+            } else if item.r#type == "computer_call" {
+                // A terminal action/check must not silently replace an already
+                // published payload. The canonical stream has no replacement
+                // event, so refuse a changed instruction before ToolCallEnd
+                // rather than losing a late safety check or executing stale data.
+                let key = format!("item_{}", output_index);
+                let canonical_idx = get_canonical_index(builder, &key);
+                if let Some(call) = builder.tool_call_builders.get(&canonical_idx) {
+                    if item.action.is_some() || item.pending_safety_checks.is_some() {
+                        let prior: Option<serde_json::Value> =
+                            serde_json::from_str(&call.arguments_json).ok();
+                        let arguments = computer_call_arguments(
+                            item.action
+                                .as_ref()
+                                .or_else(|| prior.as_ref()?.get("action")),
+                            item.pending_safety_checks
+                                .as_ref()
+                                .or_else(|| prior.as_ref()?.get("pending_safety_checks")),
+                        )?;
+                        if let Some(prior) = prior {
+                            let terminal: serde_json::Value = serde_json::from_str(&arguments)
+                                .expect("computer_call_arguments produces JSON");
+                            if prior != terminal {
+                                return Err(AiError::Decode(DecodeError::Json(
+                                    "OpenAI Responses terminal computer action or safety checks changed after publication".to_owned(),
+                                )));
+                            }
+                        } else {
+                            emit_event(
+                                &mut events,
+                                builder,
+                                StreamEvent::ToolCallArgsDelta {
+                                    index: canonical_idx,
+                                    delta: arguments,
+                                },
+                            )?;
+                        }
+                    }
+                }
+                if builder.tool_call_builders.contains_key(&canonical_idx)
+                    && !builder.ended_indices.contains(&canonical_idx)
+                {
+                    emit_event(
+                        &mut events,
+                        builder,
+                        StreamEvent::ToolCallEnd {
+                            index: canonical_idx,
+                            argument_error: None,
+                        },
+                    )?;
+                }
             }
         }
         ResponsesSseEvent::ResponseCompleted { response } => {
@@ -1635,6 +2661,9 @@ pub(crate) fn decode_stream_event(
             };
             builder.set_stop_reason(stop);
             if let Some(output) = response.output.filter(|output| !output.is_empty()) {
+                validate_terminal_async_markers(builder, &output)?;
+                backfill_reasoning_signatures(builder, &output)?;
+                reconcile_custom_output(&mut events, builder, &output)?;
                 builder.responses_output = Some(crate::responses::ResponsesOutput::new(output));
             }
             close_open_tool_calls(&mut events, builder)?;
@@ -1646,6 +2675,7 @@ pub(crate) fn decode_stream_event(
                 emit_event(&mut events, builder, StreamEvent::Usage(u))?;
             }
 
+            settle_responses_cost(model, builder, response.service_tier.as_deref())?;
             let resp = builder.finish_mut()?;
             emit_event(&mut events, builder, StreamEvent::Finished(resp))?;
         }
@@ -1653,10 +2683,14 @@ pub(crate) fn decode_stream_event(
             let stop = match response.incomplete_details.reason.as_str() {
                 "max_output_tokens" => StopReason::MaxTokens,
                 "content_filter" => StopReason::Refusal,
+                "steered" => StopReason::Steered,
                 other => StopReason::Other(other.to_string()),
             };
             builder.set_stop_reason(stop);
             if let Some(output) = response.output.filter(|output| !output.is_empty()) {
+                validate_terminal_async_markers(builder, &output)?;
+                backfill_reasoning_signatures(builder, &output)?;
+                reconcile_custom_output(&mut events, builder, &output)?;
                 builder.responses_output = Some(crate::responses::ResponsesOutput::new(output));
             }
             close_open_tool_calls(&mut events, builder)?;
@@ -1666,6 +2700,7 @@ pub(crate) fn decode_stream_event(
                 emit_event(&mut events, builder, StreamEvent::Usage(u))?;
             }
 
+            settle_responses_cost(model, builder, response.service_tier.as_deref())?;
             let resp = builder.finish_mut()?;
             emit_event(&mut events, builder, StreamEvent::Finished(resp))?;
         }
@@ -1786,12 +2821,14 @@ mod tests {
 
     fn make_test_model(reasoning: bool) -> Model {
         let spec = ModelSpec {
+            preset: Default::default(),
             id: ModelId("test-o1".to_string()),
             endpoint: EndpointId("responses-ep".to_string()),
             api_name: "o1-2024-12-17".to_string(),
             display_name: None,
             protocol: Protocol::OpenAiResponses,
             capabilities: Capabilities {
+                responses_features: Default::default(),
                 input_modalities: ModalitySet::none().with(crate::types::Modality::Image),
                 output_modalities: ModalitySet::none(),
                 tools: true,
@@ -1901,6 +2938,8 @@ mod tests {
         req.temperature = Some(0.7);
         assert!(build_request(&model, &req).is_err()); // Astra cannot honor Off.
         req.reasoning = ReasoningConfig::Effort(crate::types::ReasoningEffort::Low);
+        assert!(build_request(&model, &req).is_err()); // Non-none reasoning rejects sampling.
+        req.temperature = None;
         let body: serde_json::Value =
             serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
         assert_eq!(body["model"], "gpt-6-astra");
@@ -1942,6 +2981,8 @@ mod tests {
         req.system = Some("System instructions".to_owned());
         req.reasoning = ReasoningConfig::Effort(crate::types::ReasoningEffort::Ultra);
         req.tools.push(ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "read".to_owned(),
             description: "Read a file".to_owned(),
             parameters: serde_json::json!({
@@ -1980,6 +3021,35 @@ mod tests {
     }
 
     #[test]
+    fn responses_lite_refuses_required_strict_tool_constraints() {
+        let mut model = make_test_model(true);
+        Arc::make_mut(&mut model.spec).capabilities.responses_lite = true;
+        let mut req = user_req(
+            vec![UserPart::Text("hello".into())],
+            CompatibilityMode::Strict,
+        );
+        req.tools.push(ToolDef {
+            name: "strict".into(),
+            async_execution: false,
+            description: "required strict schema".into(),
+            parameters: serde_json::json!({"type":"object", "properties":{}}),
+            constrained_sampling: Some(crate::ConstrainedSampling::JsonSchema {
+                strict: crate::ConstrainedSamplingStrict::Require,
+            }),
+        });
+        assert!(matches!(
+            build_request(&model, &req),
+            Err(AiError::Unsupported(
+                crate::UnsupportedError::ConstrainedSampling(_)
+            ))
+        ));
+        req.tools[0].constrained_sampling = Some(crate::ConstrainedSampling::JsonSchema {
+            strict: crate::ConstrainedSamplingStrict::Prefer,
+        });
+        assert!(build_request(&model, &req).is_ok());
+    }
+
+    #[test]
     fn responses_lite_honors_disabled_parallel_tool_capability() {
         let mut model = make_test_model(true);
         let mut spec = (*model.spec).clone();
@@ -1992,6 +3062,8 @@ mod tests {
             CompatibilityMode::Strict,
         );
         req.tools.push(ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "read".to_owned(),
             description: "Read a file".to_owned(),
             parameters: serde_json::json!({"type": "object"}),
@@ -2065,7 +3137,8 @@ mod tests {
             }),
         ];
 
-        let input = crate::responses::encode_responses_replay(&model, Some("be precise"), &replay);
+        let input =
+            crate::responses::encode_responses_replay(&model, Some("be precise"), &replay).unwrap();
         let value = serde_json::to_value(input).unwrap();
         assert_eq!(value[0]["role"], "developer");
         assert_eq!(value[2], raw);
@@ -2101,7 +3174,8 @@ mod tests {
             &model,
             Some("must not be reinserted"),
             &replay,
-        );
+        )
+        .unwrap();
         let value = serde_json::to_value(input).unwrap();
         assert_eq!(value[0]["id"], "leading-preserved-output");
         assert_eq!(value[1], compacted);
@@ -2131,6 +3205,239 @@ mod tests {
         assert_eq!(body["input"][1], compacted);
         assert_eq!(body["instructions"], "current instructions");
         assert!(!body["input"].to_string().contains("current instructions"));
+    }
+
+    #[test]
+    fn owned_responses_input_moves_through_both_tree_boundaries() {
+        use crate::responses::{ResponsesInput, ResponsesItem};
+        fn allocations(value: &serde_json::Value) -> (*const u8, *const serde_json::Value) {
+            (
+                value["encrypted_content"].as_str().unwrap().as_ptr(),
+                value["future_field"].as_array().unwrap().as_ptr(),
+            )
+        }
+        for count in [1, 128] {
+            let input = ResponsesInput::new(
+                (0..count)
+                    .map(|index| {
+                        ResponsesItem::new(serde_json::json!({
+                            "type": "reasoning", "id": format!("opaque-{index}"),
+                            "encrypted_content": "opaque-🙂".repeat(1024),
+                            "future_field": [{"nested": [null, true, 42, "exact"]}]
+                        }))
+                        .unwrap()
+                    })
+                    .collect(),
+            );
+            let original_allocations: Vec<_> = input
+                .items()
+                .iter()
+                .map(|item| allocations(item.as_json()))
+                .collect();
+            let input = into_wire_input(input);
+            let array_allocation = input.as_array().unwrap().as_ptr();
+            assert_eq!(
+                input
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(allocations)
+                    .collect::<Vec<_>>(),
+                original_allocations
+            );
+            let dto = ResponsesRequest {
+                model: "model".to_owned(),
+                input,
+                instructions: None,
+                previous_response_id: None,
+                context_management: None,
+                tools: None,
+                tool_choice: None,
+                parallel_tool_calls: None,
+                max_output_tokens: None,
+                temperature: None,
+                service_tier: None,
+                reasoning: None,
+                text: None,
+                prompt_cache_key: None,
+                prompt_cache_retention: None,
+                prompt_cache_options: None,
+                include: vec![],
+                store: false,
+                stream: true,
+            };
+            // The metadata serialization must never traverse the owned input,
+            // even if the original input would subsequently overwrite a clone.
+            assert_eq!(
+                serde_json::to_value(&dto).unwrap(),
+                serde_json::json!({
+                    "model": "model", "store": false, "stream": true
+                })
+            );
+            let body = dto.into_json().unwrap();
+            assert_eq!(body.as_object().unwrap().len(), 4);
+            let items = body["input"].as_array().unwrap();
+            assert_eq!(items.as_ptr(), array_allocation);
+            assert_eq!(
+                items.iter().map(allocations).collect::<Vec<_>>(),
+                original_allocations
+            );
+        }
+    }
+
+    #[test]
+    fn raw_replay_and_lite_rebuild_without_mutating_opaque_input() {
+        use crate::responses::{ResponsesInput, ResponsesItem, ResponsesOptions};
+        let raw = vec![
+            serde_json::json!({"type":"compaction", "encrypted_content":"opaque-🙂".repeat(4096), "future":{"null":null, "array":[true, 3]}}),
+            serde_json::json!({"type":"message", "role":"user", "content":[
+                {"type":"input_image", "image_url":"https://example.com/image.png", "detail":"high", "future":[1,2]},
+                {"type":"input_text", "text":"original", "detail":"keep"}
+            ], "detail":"keep-root"}),
+            serde_json::json!({"type":"function_call_output", "call_id":"call|verbatim", "output":[
+                {"type":"input_image", "image_url":"https://example.com/result.png", "detail":"low", "future":{"keep":true}}
+            ], "future":"retain"}),
+            serde_json::json!({"type":"custom_tool_call_output", "call_id":"custom|verbatim", "output":[
+                {"type":"input_image", "image_url":"https://example.com/custom.png", "detail":"auto"}
+            ]}),
+        ];
+        for lite in [false, true] {
+            let mut model = make_test_model(true);
+            Arc::make_mut(&mut model.spec).capabilities.responses_lite = lite;
+            let mut req = user_req(
+                vec![UserPart::Text("unused canonical input".to_owned())],
+                CompatibilityMode::Strict,
+            );
+            req.system = Some("fresh instructions".to_owned());
+            req.tools.push(ToolDef {
+                async_execution: false,
+                name: "read".to_owned(),
+                description: "read".to_owned(),
+                parameters: serde_json::json!({"type":"object"}),
+                constrained_sampling: None,
+            });
+            req.responses = Some(ResponsesOptions::full_replay(ResponsesInput::new(
+                raw.iter()
+                    .cloned()
+                    .map(|item| ResponsesItem::new(item).unwrap())
+                    .collect(),
+            )));
+            let original_request = serde_json::to_value(&req).unwrap();
+            let first = build_request(&model, &req).unwrap();
+            let second = build_request(&model, &req).unwrap();
+            assert_eq!(first.body, second.body);
+            assert_eq!(serde_json::to_value(&req).unwrap(), original_request);
+            let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+            let mut expected = raw.clone();
+            if lite {
+                expected[1]["content"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("detail");
+                expected[2]["output"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("detail");
+                expected[3]["output"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("detail");
+                assert_eq!(&body["input"].as_array().unwrap()[2..], expected.as_slice());
+                assert_eq!(body["input"][0]["type"], "additional_tools");
+                assert_eq!(body["input"][1]["content"][0]["text"], "fresh instructions");
+                assert_eq!(body["reasoning"]["context"], "all_turns");
+                assert_eq!(body["parallel_tool_calls"], false);
+                assert!(body.get("instructions").is_none());
+                assert!(body.get("tools").is_none());
+            } else {
+                assert_eq!(body["input"], serde_json::Value::Array(expected));
+                assert_eq!(body["instructions"], "fresh instructions");
+                assert_eq!(body["tools"][0]["name"], "read");
+                assert_eq!(body["parallel_tool_calls"], true);
+            }
+            assert_eq!(body["store"], false);
+            assert_eq!(body["stream"], true);
+            for omitted in [
+                "previous_response_id",
+                "max_output_tokens",
+                "temperature",
+                "text",
+                "service_tier",
+            ] {
+                assert!(body.get(omitted).is_none(), "{omitted}");
+            }
+        }
+    }
+
+    #[test]
+    fn moved_input_keeps_canonical_and_opaque_grammar_replay_distinct() {
+        use crate::responses::{ResponsesInput, ResponsesItem, ResponsesOptions};
+        let mut model = make_test_model(false);
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .supports_openai_grammar_tools = Some(true);
+        let mut req = user_req(
+            vec![UserPart::Text("go".to_owned())],
+            CompatibilityMode::Strict,
+        );
+        req.tools.push(ToolDef {
+            async_execution: false,
+            name: "language".to_owned(), description: "grammar".to_owned(),
+            parameters: serde_json::json!({"type":"object", "properties":{"source":{"type":"string"}}, "required":["source"], "additionalProperties":false}),
+            constrained_sampling: Some(crate::types::ConstrainedSampling::Grammar {
+                variants: crate::types::GrammarVariants { openai_lark: Some("start: /.+/".to_owned()), openai_regex: None },
+            }),
+        });
+        let source = "println(\"🙂\")\n";
+        req.messages
+            .push(Message::Assistant(crate::types::AssistantMessage {
+                content: vec![AssistantPart::ToolCall(crate::types::ToolCall {
+                    async_execution: false,
+                    id: ToolCallId("call_canonical".to_owned()),
+                    name: "language".to_owned(),
+                    arguments_json: serde_json::json!({"source":source}).to_string(),
+                    argument_error: None,
+                })],
+                model: model.spec.id.clone(),
+                protocol: Protocol::OpenAiResponses,
+            }));
+        req.messages.push(Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(crate::types::ToolResult {
+                tool_call_id: ToolCallId("call_canonical".to_owned()),
+                content: vec![ToolResultPart::Text("ok".to_owned())],
+                is_error: false,
+                added_tool_names: None,
+            })],
+        }));
+        let original = serde_json::to_value(&req).unwrap();
+        let first = build_request(&model, &req).unwrap();
+        assert_eq!(first.body, build_request(&model, &req).unwrap().body);
+        assert_eq!(serde_json::to_value(&req).unwrap(), original);
+        let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+        assert_eq!(body["input"][1]["type"], "custom_tool_call");
+        assert_eq!(body["input"][1]["input"], source);
+        assert!(body["input"][1].get("arguments").is_none());
+        assert_eq!(body["input"][2]["type"], "custom_tool_call_output");
+
+        let mut raw = vec![
+            serde_json::json!({"type":"function_call", "name":"language", "call_id":"function|exact", "arguments":"{\"source\":\"unchanged\"}", "future":true}),
+            serde_json::json!({"type":"custom_tool_call", "name":"language", "call_id":"custom|exact", "input":source, "future":[null, true]}),
+            serde_json::json!({"type":"function_call_output", "call_id":"custom|exact", "output":"ok", "future":{"keep":true}}),
+            serde_json::json!({"type":"function_call_output", "call_id":"function|exact", "output":"unconverted"}),
+        ];
+        req.responses = Some(ResponsesOptions::full_replay(ResponsesInput::new(
+            raw.iter()
+                .cloned()
+                .map(|item| ResponsesItem::new(item).unwrap())
+                .collect(),
+        )));
+        let original = serde_json::to_value(&req).unwrap();
+        let first = build_request(&model, &req).unwrap();
+        assert_eq!(first.body, build_request(&model, &req).unwrap().body);
+        assert_eq!(serde_json::to_value(&req).unwrap(), original);
+        let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+        raw[2]["type"] = "custom_tool_call_output".into();
+        assert_eq!(body["input"], serde_json::Value::Array(raw));
     }
 
     #[test]
@@ -2385,6 +3692,35 @@ mod tests {
     }
 
     #[test]
+    fn opencode_responses_session_header_is_independent_of_cache_retention() {
+        let mut model = make_test_model(false);
+        Arc::make_mut(&mut model.endpoint).id = crate::EndpointId("opencode".into());
+        Arc::make_mut(&mut model.spec)
+            .cache
+            .send_session_affinity_headers = true;
+        let mut req = user_req(
+            vec![UserPart::Text("hello".into())],
+            CompatibilityMode::Strict,
+        );
+        req.session_id = Some("stable-session".into());
+        req.cache_retention = CacheRetention::None;
+        let parts = build_request(&model, &req).unwrap();
+        assert_eq!(parts.headers["x-opencode-session"], "stable-session");
+        assert!(parts.headers.get("x-client-request-id").is_none());
+
+        Arc::make_mut(&mut model.spec)
+            .preset
+            .headers
+            .insert("X-OpenCode-Session".into(), "caller-value".into());
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+        req.session_id = None;
+        Arc::make_mut(&mut model.spec).preset.headers.clear();
+        let parts = build_request(&model, &req).unwrap();
+        assert!(parts.headers.get("x-opencode-session").is_none());
+    }
+
+    #[test]
     fn responses_codex_affinity_uses_the_request_session_id() {
         let mut model = make_test_model(false);
         let cache = &mut Arc::make_mut(&mut model.spec).cache;
@@ -2433,6 +3769,8 @@ mod tests {
                 content: vec![UserPart::Text("hello".to_string())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
+                constrained_sampling: None,
                 name: "lookup".to_string(),
                 description: "lookup data".to_string(),
                 parameters: serde_json::json!({"type":"object"}),
@@ -2487,6 +3825,8 @@ mod tests {
             CompatibilityMode::Strict,
         );
         req.tools = vec![crate::types::ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "lookup".to_string(),
             description: "lookup data".to_string(),
             parameters: serde_json::json!({"type":"object"}),
@@ -2669,13 +4009,355 @@ mod tests {
             .iter()
             .any(|d| d.code == "dropped_image_media_type"));
     }
+
+    // --- Codex `service_tier` (declared endpoint capability) ---
+
+    fn with_responses_profile(model: &Model, profile: ResponsesRuntimeProfile) -> Model {
+        let mut endpoint = (*model.endpoint).clone();
+        endpoint.runtime.responses_profile = profile;
+        Model {
+            spec: model.spec.clone(),
+            endpoint: Arc::new(endpoint),
+        }
+    }
+
+    fn body_of(parts: &HttpRequestParts) -> serde_json::Value {
+        serde_json::from_slice(&parts.body).unwrap()
+    }
+
+    #[test]
+    fn service_tier_is_absent_unless_the_caller_requests_it() {
+        let model = with_responses_profile(&make_test_model(true), ResponsesRuntimeProfile::Codex);
+        let parts = build_request(&model, &user_req(vec![], CompatibilityMode::Lossy)).unwrap();
+        assert!(body_of(&parts).get("service_tier").is_none());
+    }
+
+    #[test]
+    fn codex_service_tier_wire_values_match_the_declared_tiers() {
+        let model = with_responses_profile(&make_test_model(true), ResponsesRuntimeProfile::Codex);
+        for tier in [
+            crate::types::ServiceTier::Auto,
+            crate::types::ServiceTier::Default,
+            crate::types::ServiceTier::Flex,
+            crate::types::ServiceTier::Priority,
+        ] {
+            let mut req = user_req(vec![], CompatibilityMode::Lossy);
+            req.responses =
+                Some(crate::responses::ResponsesOptions::default().with_service_tier(tier));
+            let parts = build_request(&model, &req).unwrap();
+            assert_eq!(body_of(&parts)["service_tier"], tier.wire_value());
+        }
+    }
+
+    #[test]
+    fn service_tier_fails_closed_on_a_profile_that_does_not_declare_it() {
+        // The default (public OpenAI Responses) profile does not declare the
+        // field, so a caller request is rejected instead of silently dropped.
+        let model = make_test_model(true);
+        assert!(!model
+            .endpoint
+            .runtime
+            .responses_profile
+            .accepts_service_tier());
+        let mut req = user_req(vec![], CompatibilityMode::Lossy);
+        req.responses = Some(
+            crate::responses::ResponsesOptions::default()
+                .with_service_tier(crate::types::ServiceTier::Priority),
+        );
+        let err = match build_request(&model, &req) {
+            Err(err) => err,
+            Ok(_) => panic!("expected a fail-closed service tier error"),
+        };
+        assert!(
+            matches!(
+                err,
+                AiError::Unsupported(crate::error::UnsupportedError::ServiceTier)
+            ),
+            "expected a fail-closed service tier error, got {err:?}"
+        );
+    }
+
+    // --- Responses computer use (roadmap #388): declaration + dispatch ---
+
+    fn declared_computer_use() -> crate::responses::ComputerUseTool {
+        crate::responses::ComputerUseTool {
+            display_width: 1024,
+            display_height: 768,
+            environment: crate::responses::ComputerUseEnvironment::Browser,
+        }
+    }
+
+    fn computer_use_req() -> Request {
+        let mut req = user_req(vec![], CompatibilityMode::Lossy);
+        req.responses = Some(
+            crate::responses::ResponsesOptions::default()
+                .with_computer_use(declared_computer_use()),
+        );
+        req
+    }
+
+    #[test]
+    fn computer_use_declaration_matches_the_documented_wire_tool() {
+        let model = make_test_model(true);
+        let parts = build_request(&model, &computer_use_req()).unwrap();
+        assert_eq!(
+            body_of(&parts)["tools"],
+            serde_json::json!([{
+                "type": "computer_use_preview",
+                "display_width": 1024,
+                "display_height": 768,
+                "environment": "browser"
+            }])
+        );
+
+        // The declaration composes with ordinary function tools.
+        let mut req = computer_use_req();
+        req.tools = vec![ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
+            name: "grep".to_owned(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let body = body_of(&build_request(&model, &req).unwrap());
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2, "function tools plus the computer tool");
+        assert_eq!(tools[1]["type"], "computer_use_preview");
+    }
+
+    #[test]
+    fn computer_use_fails_closed_on_a_profile_that_does_not_declare_it() {
+        let model = with_responses_profile(&make_test_model(true), ResponsesRuntimeProfile::Codex);
+        assert!(!model
+            .endpoint
+            .runtime
+            .responses_profile
+            .accepts_computer_use());
+        let err = match build_request(&model, &computer_use_req()) {
+            Err(err) => err,
+            Ok(_) => panic!("expected a fail-closed computer-use error"),
+        };
+        assert!(
+            matches!(
+                err,
+                AiError::Unsupported(crate::error::UnsupportedError::ComputerUse)
+            ),
+            "expected a fail-closed computer-use error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn computer_use_is_absent_unless_the_caller_declares_it() {
+        let model = make_test_model(true);
+        let parts = build_request(&model, &user_req(vec![], CompatibilityMode::Lossy)).unwrap();
+        let body = body_of(&parts);
+        let wire = body.to_string();
+        assert!(!wire.contains("computer_use_preview"), "{wire}");
+        assert!(!wire.contains("computer_call"), "{wire}");
+    }
+
+    fn computer_tool_result(tool_call_id: &str, image: Option<Media>) -> Message {
+        Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(crate::types::ToolResult {
+                tool_call_id: ToolCallId(tool_call_id.to_owned()),
+                content: image
+                    .into_iter()
+                    .map(ToolResultPart::Media)
+                    .chain(std::iter::once(ToolResultPart::Text(
+                        "no screenshot authority".to_owned(),
+                    )))
+                    .collect(),
+                is_error: false,
+                added_tool_names: None,
+            })],
+        })
+    }
+
+    fn computer_call_message(arguments_json: &str) -> Message {
+        let model = make_test_model(true);
+        Message::Assistant(crate::types::AssistantMessage {
+            content: vec![AssistantPart::ToolCall(crate::types::ToolCall {
+                async_execution: false,
+                id: ToolCallId("call_comp_1".to_owned()),
+                name: COMPUTER_TOOL_NAME.to_owned(),
+                arguments_json: arguments_json.to_owned(),
+                argument_error: None,
+            })],
+            model: model.spec.id.clone(),
+            protocol: Protocol::OpenAiResponses,
+        })
+    }
+
+    #[test]
+    fn computer_call_history_replays_as_computer_call_and_output() {
+        let model = make_test_model(true);
+        let mut req = user_req(vec![], CompatibilityMode::Strict);
+        req.messages = vec![
+            computer_call_message(r#"{"action":{"type":"screenshot"}}"#),
+            computer_tool_result(
+                "call_comp_1",
+                Some(Media::Image(ImageMedia {
+                    source: ImageSource::Inline(bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\n")),
+                    media_type: Some(mime::IMAGE_PNG),
+                    detail: None,
+                })),
+            ),
+        ];
+        let body = body_of(&build_request(&model, &req).unwrap());
+        let input = body["input"].as_array().unwrap();
+        let rendered = serde_json::to_string(input).unwrap();
+
+        // The assistant turn replays as a computer_call item, not a function
+        // call the route never declared.
+        let call_index = input
+            .iter()
+            .position(|item| item["type"] == "computer_call")
+            .unwrap_or_else(|| panic!("no computer_call item in {rendered}"));
+        assert_eq!(input[call_index]["call_id"], "call_comp_1");
+        assert_eq!(input[call_index]["action"]["type"], "screenshot");
+
+        // The caller's result replays as computer_call_output with the single
+        // documented computer_screenshot object.
+        let output_index = input
+            .iter()
+            .position(|item| item["type"] == "computer_call_output")
+            .unwrap_or_else(|| panic!("no computer_call_output item in {rendered}"));
+        assert!(call_index < output_index, "call must precede its output");
+        assert_eq!(input[output_index]["call_id"], "call_comp_1");
+        assert_eq!(input[output_index]["output"]["type"], "computer_screenshot");
+        assert_eq!(
+            input[output_index]["output"]["image_url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+        assert!(
+            !rendered.contains("function_call_output"),
+            "computer results must never use the function shape: {rendered}"
+        );
+    }
+
+    #[test]
+    fn computer_call_output_stays_bounded_when_no_screenshot_is_available() {
+        let model = make_test_model(true);
+        let mut req = user_req(vec![], CompatibilityMode::Strict);
+        req.messages = vec![
+            computer_call_message(r#"{"action":{"type":"wait"}}"#),
+            computer_tool_result("call_comp_1", None),
+        ];
+        let body = body_of(&build_request(&model, &req).unwrap());
+        let input = body["input"].as_array().unwrap();
+        let output = input
+            .iter()
+            .find(|item| item["type"] == "computer_call_output")
+            .expect("computer_call_output item");
+        // Canonical text has no wire slot in a screenshot-only output, so the
+        // item stays a well-formed, empty screenshot rather than unbounded prose
+        // or a fabricated image.
+        assert_eq!(
+            output["output"],
+            serde_json::json!({"type": "computer_screenshot"})
+        );
+    }
+
+    #[test]
+    fn oversized_inline_screenshot_is_not_forwarded() {
+        let model = make_test_model(true);
+        let mut req = user_req(vec![], CompatibilityMode::Strict);
+        req.messages = vec![
+            computer_call_message(r#"{"action":{"type":"screenshot"}}"#),
+            computer_tool_result(
+                "call_comp_1",
+                Some(Media::Image(ImageMedia {
+                    source: ImageSource::Inline(bytes::Bytes::from(vec![
+                        0_u8;
+                        MAX_COMPUTER_SCREENSHOT_BYTES
+                            + 1
+                    ])),
+                    media_type: Some(mime::IMAGE_PNG),
+                    detail: None,
+                })),
+            ),
+        ];
+        let parts = build_request(&model, &req).unwrap();
+        let body = body_of(&parts);
+        let input = body["input"].as_array().unwrap();
+        let output = input
+            .iter()
+            .find(|item| item["type"] == "computer_call_output")
+            .expect("computer_call_output item");
+        assert_eq!(
+            output["output"],
+            serde_json::json!({"type": "computer_screenshot"})
+        );
+    }
+
+    #[test]
+    fn undocumented_canonical_computer_action_is_not_replayed() {
+        let model = make_test_model(true);
+        let mut req = user_req(vec![], CompatibilityMode::Strict);
+        req.messages = vec![
+            computer_call_message(r#"{"action":{"type":"shell_exec","command":"rm -rf /"}}"#),
+            computer_tool_result("call_comp_1", None),
+        ];
+        let parts = build_request(&model, &req).unwrap();
+        let rendered = body_of(&parts).to_string();
+        assert!(
+            !rendered.contains("shell_exec"),
+            "an undocumented action must not be re-echoed as provider input: {rendered}"
+        );
+    }
+
+    #[test]
+    fn opaque_replay_dispatches_computer_results_by_authoritative_output() {
+        use crate::responses::{ResponsesItem, ResponsesOutput, ResponsesReplayItem};
+        let model = make_test_model(true);
+        let output = ResponsesOutput::new(vec![ResponsesItem::new(serde_json::json!({
+            "id": "cc_1",
+            "type": "computer_call",
+            "call_id": "call_comp_1",
+            "status": "completed",
+            "action": {"type": "screenshot"}
+        }))
+        .unwrap()]);
+        let input = crate::responses::encode_responses_replay(
+            &model,
+            None,
+            &[
+                ResponsesReplayItem::Output(output),
+                ResponsesReplayItem::User(UserMessage {
+                    content: vec![UserPart::ToolResult(crate::types::ToolResult {
+                        tool_call_id: ToolCallId("call_comp_1".to_owned()),
+                        content: vec![ToolResultPart::Text("screenshot unavailable".to_owned())],
+                        is_error: true,
+                        added_tool_names: None,
+                    })],
+                }),
+            ],
+        );
+        let input = input.unwrap();
+        let rendered = serde_json::to_string(input.items()).unwrap();
+        assert!(
+            rendered.contains("\"type\":\"computer_call\""),
+            "{rendered}"
+        );
+        let output = input
+            .items()
+            .iter()
+            .find(|item| item.as_json()["type"] == "computer_call_output")
+            .unwrap_or_else(|| panic!("no computer_call_output item in {rendered}"));
+        assert_eq!(output.as_json()["call_id"], "call_comp_1");
+        assert_eq!(
+            output.as_json()["output"],
+            serde_json::json!({"type": "computer_screenshot"})
+        );
+        assert!(!rendered.contains("function_call_output"), "{rendered}");
+    }
 }
 
 /// Offline fixture matrix for the OpenAI Responses stream decoder
 /// (design §19; plan Task 11.2).
 #[cfg(test)]
 mod fixture_tests {
-    use super::decode_stream_event;
+    use super::{decode_stream_event, COMPUTER_TOOL_NAME, MAX_COMPUTER_ACTION_BYTES};
     use crate::error::{AiError, StreamProtocolError};
     use crate::protocol::harness;
     use crate::stream::StreamEvent;
@@ -2760,6 +4442,39 @@ mod fixture_tests {
     }
 
     #[tokio::test]
+    async fn terminal_encrypted_reasoning_backfills_missing_item_payload() {
+        // Azure OpenAI / xAI omit `encrypted_content` from `output_item.done`
+        // and provide it only on `response.completed`. The stored reasoning
+        // state must be enriched from the terminal output for replay.
+        let events = run(fx!("reasoning_backfill.sse"), 0).await.unwrap();
+        let resp = harness::finished(&events);
+        let reasoning = resp
+            .message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                AssistantPart::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .expect("reasoning part");
+        assert_eq!(reasoning.text.as_deref(), Some("Trace it"));
+        match &reasoning.state.as_ref().unwrap().kind {
+            ReasoningStateKind::OpenAiReasoning {
+                item_id,
+                encrypted_content,
+            } => {
+                assert_eq!(item_id.as_deref(), Some("rs_backfill"));
+                assert_eq!(
+                    encrypted_content.as_deref(),
+                    Some("VEVSTUlOQUxfRU5DUllQVEVE")
+                );
+            }
+            other => panic!("expected OpenAiReasoning, got {other:?}"),
+        }
+        assert_eq!(text_of(&events), "done");
+    }
+
+    #[tokio::test]
     async fn reasoning_summary_deltas_stream_and_preserve_state() {
         let events = run(fx!("reasoning_summary.sse"), 0).await.unwrap();
         let resp = harness::finished(&events);
@@ -2815,6 +4530,8 @@ mod fixture_tests {
     async fn schema_mismatch_is_marked_before_tool_call_end() {
         let model = harness::model(Protocol::OpenAiResponses, None);
         let tools = [ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "grep".to_owned(),
             description: String::new(),
             parameters: serde_json::json!({
@@ -3160,4 +4877,187 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
         assert_eq!(resp.usage, crate::types::Usage::default());
         assert_eq!(text_of(&events), "hi");
     }
+
+    // --- Responses computer use (roadmap #388): wire protocol only ---
+
+    fn computer_call_of(resp: &crate::types::Response) -> &crate::types::ToolCall {
+        resp.message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                AssistantPart::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .expect("response must contain one computer tool call")
+    }
+
+    #[tokio::test]
+    async fn computer_call_round_trips_action_call_id_and_safety_checks() {
+        let events = run(fx!("computer_call.sse"), 0).await.unwrap();
+        let resp = harness::finished(&events);
+        assert_eq!(resp.stop_reason, StopReason::ToolUse);
+        let call = computer_call_of(resp);
+        assert_eq!(call.id.0, "call_comp_1");
+        assert_eq!(call.name, COMPUTER_TOOL_NAME);
+        // The action is bounded into one canonical argument object and the
+        // provider's pending safety checks ride along with it.
+        assert_eq!(
+            call.arguments_value().unwrap(),
+            serde_json::json!({
+                "action": {"type": "click", "button": "left", "x": 120, "y": 340},
+                "pending_safety_checks": [{
+                    "id": "sc_1",
+                    "code": "malicious_instruction",
+                    "message": "Possible prompt injection"
+                }],
+            })
+        );
+        // The authoritative terminal item stays available for opaque replay.
+        let output = resp.responses_output.as_ref().unwrap();
+        assert_eq!(output.items().len(), 1);
+        assert_eq!(output.items()[0].as_json()["type"], "computer_call");
+        assert_eq!(output.items()[0].as_json()["call_id"], "call_comp_1");
+    }
+
+    #[tokio::test]
+    async fn computer_call_decodes_identically_across_byte_boundaries() {
+        let data = fx!("computer_call.sse");
+        let base = format!("{:?}", run(data, 0).await.unwrap());
+        for chunk in [1, 3, 17] {
+            assert_eq!(format!("{:?}", run(data, chunk).await.unwrap()), base);
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_computer_action_fails_closed() {
+        let data = br#"data: {"type":"response.created","response":{"id":"resp_x"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"cc_1","type":"computer_call","call_id":"call_c1","action":{"type":"shell_exec","command":"rm -rf /"}}}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#;
+        let error = run(data, 0).await.unwrap_err();
+        assert!(
+            format!("{error}")
+                .contains("unsupported OpenAI Responses computer action `shell_exec`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn computer_call_without_an_action_fails_closed() {
+        // No action in `output_item.added` and no `output_item.done` at all:
+        // the terminal check must refuse an actionless computer call.
+        let data = br#"data: {"type":"response.created","response":{"id":"resp_x"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"cc_1","type":"computer_call","call_id":"call_c1"}}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#;
+        let error = run(data, 0).await.unwrap_err();
+        assert!(
+            format!("{error}").contains("unsupported OpenAI Responses computer action `missing`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_computer_action_fails_closed() {
+        let text = "a".repeat(MAX_COMPUTER_ACTION_BYTES + 1);
+        let data = format!(
+            "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_x\"}}}}\n\n\
+             data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"id\":\"cc_1\",\"type\":\"computer_call\",\"call_id\":\"call_c1\",\"action\":{{\"type\":\"type\",\"text\":\"{text}\"}}}}}}\n\n\
+             data: {{\"type\":\"response.completed\",\"response\":{{\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}}}\n\n"
+        );
+        let error = run(data.as_bytes(), 0).await.unwrap_err();
+        assert!(
+            format!("{error}").contains("over the 16384 byte bound"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_computer_call_action_is_used_when_added_omits_it() {
+        let data = br#"data: {"type":"response.created","response":{"id":"resp_x"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"cc_1","type":"computer_call","call_id":"call_c1"}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"cc_1","type":"computer_call","call_id":"call_c1","action":{"type":"screenshot"}}}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}
+
+"#;
+        let events = run(data, 0).await.unwrap();
+        let resp = harness::finished(&events);
+        assert_eq!(
+            computer_call_of(resp).arguments_value().unwrap(),
+            serde_json::json!({"action": {"type": "screenshot"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn computer_safety_checks_must_be_an_array() {
+        for checks in [
+            serde_json::json!({"id":"check"}),
+            serde_json::json!("check"),
+        ] {
+            let item = serde_json::json!({
+                "type":"computer_call", "id":"cc_1", "call_id":"call_c1",
+                "action":{"type":"screenshot"}, "pending_safety_checks":checks,
+            });
+            let data = format!(
+                "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_x\"}}}}\n\n\
+                 data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{item}}}\n\n"
+            );
+            let error = run(data.as_bytes(), 0).await.unwrap_err();
+            assert!(
+                error.to_string().contains("safety checks must be an array"),
+                "{error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_computer_payload_changes_fail_before_executable_completion() {
+        for terminal in [
+            serde_json::json!({"action":{"type":"wait"}}),
+            serde_json::json!({"pending_safety_checks":[{"id":"late-check"}]}),
+            serde_json::json!({"pending_safety_checks":{"id":"malformed-check"}}),
+        ] {
+            let mut item = terminal;
+            item["type"] = serde_json::json!("computer_call");
+            item["id"] = serde_json::json!("cc_1");
+            item["call_id"] = serde_json::json!("call_c1");
+            let data = format!(
+                "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_x\"}}}}\n\n\
+                 data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"computer_call\",\"id\":\"cc_1\",\"call_id\":\"call_c1\",\"action\":{{\"type\":\"screenshot\"}}}}}}\n\n\
+                 data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{item}}}\n\n\
+                 data: {{\"type\":\"response.completed\",\"response\":{{\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}}}\n\n"
+            );
+            let error = run(data.as_bytes(), 1).await.unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("changed after publication")
+                    || message.contains("safety checks must be an array"),
+                "{error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replayed_terminal_action_is_not_appended_twice() {
+        // A duplicated action (added + done) must not concatenate two payloads:
+        // the action is already asserted exactly once, with the safety checks,
+        // in `computer_call_round_trips_action_call_id_and_safety_checks`.
+        let events = run(fx!("computer_call.sse"), 0).await.unwrap();
+        let resp = harness::finished(&events);
+        let raw = computer_call_of(resp).arguments_json.clone();
+        assert_eq!(raw.matches("\"type\":\"click\"").count(), 1, "{raw}");
+    }
 }
+
+#[cfg(test)]
+#[path = "openai_responses_gpt6_tests.rs"]
+mod gpt6_tests;

@@ -10,6 +10,7 @@ use crate::effect::{EffectAuthorization, ToolEffect, ToolPolicyDenialCode};
 use crate::sandbox::EffectiveToolPolicy;
 use crate::session::EntryId;
 use crate::tool::{ToolError, ToolOutput, ToolProgress};
+use crate::tools::deferred::{DeferredHandle, DeferredStopReason};
 
 /// Whether a delegated child inherited an orchestration setting or supplied a
 /// host-admitted child-session override.
@@ -93,8 +94,12 @@ pub struct DelegationTelemetryChild {
     pub cache_read_tokens: u64,
     /// Prompt tokens written to cache.
     pub cache_write_tokens: u64,
-    /// Generated output tokens.
+    /// Generated output tokens reported by the provider for settled turns.
     pub output_tokens: u64,
+    /// UI-only estimate including the current provisional text/reasoning stream.
+    /// Never used for billing, budgets, or durable usage; absent between streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_output_tokens: Option<u64>,
     /// Reasoning tokens, a subset of output tokens.
     pub reasoning_tokens: u64,
     /// Provider-reported total tokens for the child session.
@@ -164,6 +169,8 @@ pub struct ToolPolicyDecision {
 pub enum ProviderOperation {
     /// Local handoff-summary inference.
     LocalCompaction,
+    /// Tool-free abandoned-branch handoff summary.
+    BranchSummary,
     /// Native Responses compact endpoint.
     NativeCompaction,
     /// Tool-free final-answer acceptance gate.
@@ -192,6 +199,16 @@ pub enum AgentEvent {
         /// Whether this is visible text or reasoning output.
         channel: OutputChannel,
         /// The delta text.
+        text: String,
+    },
+
+    /// Uncommitted text recovered from an interrupted previous attempt.
+    /// This is historical progress, never part of the current answer, usage,
+    /// or provider replay. Consumers may display it in a separate recovery view.
+    RecoveredOutput {
+        /// The recovered content's channel.
+        channel: OutputChannel,
+        /// The durable partial prefix, not a completed assistant response.
         text: String,
     },
 
@@ -385,7 +402,7 @@ pub enum AgentEvent {
     CandidateRejected {
         /// Cumulative billable token usage, including terminal-gate calls.
         usage: Usage,
-        /// Cost accrued during this run, including terminal-gate calls.
+        /// Known cost subtotal during this run, including terminal-gate calls.
         run_cost_microdollars: u64,
         /// Cumulative host-session cost when pricing is known, so owner
         /// surfaces can track spend between accepted turns.
@@ -405,13 +422,18 @@ pub enum AgentEvent {
         /// `output_tokens`. `total_tokens` is therefore the actual context
         /// consumed by this turn, not a session or run total.
         turn_usage: Usage,
+        /// Exact settled cost of this assistant response, as persisted with its
+        /// usage. Includes fractional total cost; excludes auxiliary requests,
+        /// children and other turns. `None` means unpriced, never a known zero.
+        turn_cost: Option<Cost>,
         /// Cumulative billable token usage across the run so far. This is for
         /// run accounting only and must not be used as context-window usage.
         usage: Usage,
         /// Cumulative session cost in microdollars (1/1,000,000 USD).
-        /// `None` when pricing is not configured for the active model.
+        /// `None` when pricing is unavailable for any completed operation.
         session_cost_microdollars: Option<u64>,
-        /// Cost accrued during this run only, in microdollars.
+        /// Known cost subtotal for this run only, in microdollars; unpriced
+        /// operations and uncertain attempts are not fictional zero charges.
         run_cost_microdollars: u64,
     },
 
@@ -422,6 +444,49 @@ pub enum AgentEvent {
         /// How the run ended.
         reason: FinishReason,
     },
+}
+
+/// `run_suspend`: one provider response durably parked a deferred run.
+///
+/// This is a host-lifecycle notification rather than a frontend stream event:
+/// the parked run does no provider work until a later permitted pass polls it,
+/// and the durable leaf is the authority across a restart. It carries only
+/// host-selected identities and the provider's own handle; it is never
+/// model-visible context and never usage accounting.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DeferredRunSuspended {
+    /// Durable operation identity of the parked request.
+    pub operation_id: String,
+    /// Assistant entry whose response most recently carried the handle.
+    pub source_entry_id: String,
+    /// Normalized stop reason that parked the run.
+    pub stop_reason: DeferredStopReason,
+    /// Provider handle the next permitted pass must poll.
+    pub handle: DeferredHandle,
+    /// Poll number the parked leaf is at (`0` after the first suspension).
+    pub poll: u64,
+    /// Durable generation of the parked leaf.
+    pub generation: u64,
+}
+
+/// `run_resume`: one admitted poll durably resumed a parked deferred run.
+///
+/// Exactly one permit was consumed for this driving pass, and the poll's
+/// effect-pending intent was durable before this notification. `recovery` is
+/// true when the admitted poll replaced an unknown-outcome
+/// `deferred.effect_pending` leaf under fresh reserved ids.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DeferredRunResumed {
+    /// Durable operation identity of the parked request.
+    pub operation_id: String,
+    /// Unique driving pass that owned the single poll permit.
+    pub pass_id: String,
+    /// Poll number being polled (unchanged from the parked leaf).
+    pub poll: u64,
+    /// Generation the permit was minted for.
+    pub generation: u64,
+    /// Whether the poll replaced an unknown-outcome poll.
+    pub recovery: bool,
 }
 
 /// Reason an autonomous run compacted its active context.
@@ -458,6 +523,8 @@ pub struct CompactionInfo {
 pub enum CompactionKind {
     /// A local canonical summary and retained full-fidelity tail.
     Local,
+    /// A deterministic bitmap checkpoint and retained full-fidelity tail.
+    Snapcompact,
     /// A route-affine opaque Responses checkpoint.
     NativeResponses {
         /// Session entry containing the opaque compact output.

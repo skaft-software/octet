@@ -13,6 +13,16 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::width::WidthPolicy;
 
+mod kill_ring;
+mod prompt_zones;
+mod undo;
+mod word_nav;
+
+pub use kill_ring::KillRing;
+pub use prompt_zones::{strip_zone_markers, zone_markers, PromptZone, PromptZones};
+pub use undo::UndoStack;
+pub use word_nav::{find_word_backward, find_word_forward};
+
 /// A text mutation understood by [`TextEditor`].
 ///
 /// Event/key translation is intentionally outside this enum. Applications map
@@ -42,6 +52,30 @@ pub enum TextEditAction {
     Home,
     /// Move to the visible end of the current visual row.
     End,
+    /// Move to the preceding word boundary.
+    WordLeft,
+    /// Move to the following word boundary.
+    WordRight,
+    /// Move the cursor to `char`, searching forward from the cursor.
+    JumpForward(char),
+    /// Move the cursor to `char`, searching backward from the cursor.
+    JumpBackward(char),
+    /// Kill the preceding word into the kill ring.
+    DeleteWordBackward,
+    /// Kill the following word into the kill ring.
+    DeleteWordForward,
+    /// Kill from the start of the logical line to the cursor.
+    DeleteToLineStart,
+    /// Kill from the cursor to the end of the logical line.
+    DeleteToLineEnd,
+    /// Insert the newest kill-ring entry, recording it for yank-pop.
+    Yank,
+    /// Replace the last yanked text with the previous kill-ring entry.
+    YankPop,
+    /// Restore the previous text/cursor snapshot.
+    Undo,
+    /// Reapply the most recently undone snapshot.
+    Redo,
 }
 
 /// One visual row in a [`TextEditorLayout`].
@@ -261,6 +295,30 @@ impl TextEditorProjection {
     }
 }
 
+// Each direction retains at most 64 snapshots / 4 MiB, bounding the combined
+// undo + redo history to 128 snapshots / 8 MiB of snapshot storage.
+const HISTORY_COUNT: usize = 64;
+const HISTORY_BYTES: usize = 4 * 1024 * 1024;
+
+/// One detached editor state used by the undo/redo history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EditorSnapshot {
+    text: String,
+    cursor: usize,
+}
+
+/// The kind of the most recent action, used for kill accumulation and
+/// fish-style undo coalescing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LastAction {
+    /// The last action killed text, so a following kill accumulates.
+    Kill,
+    /// The last action yanked, so `YankPop` is still allowed.
+    Yank,
+    /// The last action typed a word character, so another one coalesces.
+    TypeWord,
+}
+
 #[derive(Clone, Debug)]
 struct LayoutCache {
     wrap_width: usize,
@@ -299,6 +357,16 @@ pub struct TextEditor {
     /// cursor movement.
     text_revision: u64,
     cached_layout: RefCell<Option<LayoutCache>>,
+    /// Undo history of detached pre-edit snapshots.
+    undo: UndoStack<EditorSnapshot>,
+    /// Redo history, filled by undo and cleared by any new edit.
+    redo: UndoStack<EditorSnapshot>,
+    /// Emacs-style kill ring shared by every kill and yank action.
+    kill_ring: KillRing,
+    /// Kind of the most recent action, for coalescing and accumulation.
+    last_action: Option<LastAction>,
+    /// Byte range replaced by the most recent yank, for yank-pop.
+    last_yank: Option<Range<usize>>,
 }
 
 impl Default for TextEditor {
@@ -310,6 +378,11 @@ impl Default for TextEditor {
             revision: 0,
             text_revision: 0,
             cached_layout: RefCell::new(None),
+            undo: UndoStack::with_limits(HISTORY_COUNT, HISTORY_BYTES),
+            redo: UndoStack::with_limits(HISTORY_COUNT, HISTORY_BYTES),
+            kill_ring: KillRing::new(),
+            last_action: None,
+            last_yank: None,
         }
     }
 }
@@ -333,6 +406,11 @@ impl TextEditor {
             revision: 0,
             text_revision: 0,
             cached_layout: RefCell::new(None),
+            undo: UndoStack::with_limits(HISTORY_COUNT, HISTORY_BYTES),
+            redo: UndoStack::with_limits(HISTORY_COUNT, HISTORY_BYTES),
+            kill_ring: KillRing::new(),
+            last_action: None,
+            last_yank: None,
         }
     }
 
@@ -396,6 +474,7 @@ impl TextEditor {
         } else if cursor_changed {
             self.touch_cursor();
         }
+        self.reset_history();
     }
 
     /// Clamp `cursor` to the preceding grapheme boundary and select it.
@@ -409,6 +488,10 @@ impl TextEditor {
         let changed = self.cursor != cursor;
         self.cursor = cursor;
         self.preferred_column = None;
+        // Embeddings use this setter for mapped visual motion. It must end a
+        // typing/kill/yank run exactly like the model's own movement actions.
+        self.last_action = None;
+        self.last_yank = None;
         if changed {
             self.touch_cursor();
         }
@@ -438,6 +521,7 @@ impl TextEditor {
         } else if cursor_changed {
             self.touch_cursor();
         }
+        self.reset_history();
         text
     }
 
@@ -472,6 +556,7 @@ impl TextEditor {
         };
         self.text.replace_range(range, replacement);
         self.finish_after_edit(next_cursor, text_changed);
+        self.reset_history();
         true
     }
 
@@ -490,17 +575,29 @@ impl TextEditor {
     /// Returns whether the buffer or cursor changed.
     pub fn apply(&mut self, action: TextEditAction, wrap_width: usize) -> bool {
         match action {
-            TextEditAction::Char(character) => self.insert_text(&character.to_string()),
-            TextEditAction::Paste(text) => self.insert_text(&Self::normalize_paste(&text)),
+            TextEditAction::Char(character) => self.insert_character(character),
+            TextEditAction::Paste(text) => self.insert_atomic(&Self::normalize_paste(&text)),
             TextEditAction::Backspace => self.backspace(),
             TextEditAction::Delete => self.delete(),
-            TextEditAction::Newline => self.insert_text("\n"),
+            TextEditAction::Newline => self.insert_atomic("\n"),
             TextEditAction::Left => self.move_left(),
             TextEditAction::Right => self.move_right(),
             TextEditAction::Up => self.move_vertical(VerticalDirection::Up, wrap_width),
             TextEditAction::Down => self.move_vertical(VerticalDirection::Down, wrap_width),
             TextEditAction::Home => self.move_to_visual_edge(false, wrap_width),
             TextEditAction::End => self.move_to_visual_edge(true, wrap_width),
+            TextEditAction::WordLeft => self.move_word(false),
+            TextEditAction::WordRight => self.move_word(true),
+            TextEditAction::JumpForward(character) => self.jump_to_char(character, true),
+            TextEditAction::JumpBackward(character) => self.jump_to_char(character, false),
+            TextEditAction::DeleteWordBackward => self.delete_word(false),
+            TextEditAction::DeleteWordForward => self.delete_word(true),
+            TextEditAction::DeleteToLineStart => self.delete_to_line_edge(false),
+            TextEditAction::DeleteToLineEnd => self.delete_to_line_edge(true),
+            TextEditAction::Yank => self.yank(),
+            TextEditAction::YankPop => self.yank_pop(),
+            TextEditAction::Undo => self.undo(),
+            TextEditAction::Redo => self.redo(),
         }
     }
 
@@ -576,10 +673,35 @@ impl TextEditor {
         project_layout(text, Self::layout_for(text, cursor, wrap_width))
     }
 
-    fn insert_text(&mut self, text: &str) -> bool {
+    /// Insert one typed character with fish-style undo coalescing.
+    ///
+    /// A run of word characters coalesces into a single undo unit; whitespace
+    /// always captures a fresh snapshot first so undo removes the space and the
+    /// following word together. Mirrors upstream `insertCharacter`.
+    fn insert_character(&mut self, character: char) -> bool {
+        let mut buffer = [0u8; 4];
+        let encoded = character.encode_utf8(&mut buffer);
+        if encoded.is_empty() {
+            return false;
+        }
+        if is_whitespace_grapheme(encoded) || self.last_action != Some(LastAction::TypeWord) {
+            self.push_undo();
+        }
+        self.last_action = Some(LastAction::TypeWord);
+        self.insert_raw(encoded)
+    }
+
+    /// Insert text as one atomic, independently undoable edit.
+    fn insert_atomic(&mut self, text: &str) -> bool {
         if text.is_empty() {
             return false;
         }
+        self.push_undo();
+        self.last_action = None;
+        self.insert_raw(text)
+    }
+
+    fn insert_raw(&mut self, text: &str) -> bool {
         self.text.insert_str(self.cursor, text);
         self.finish_after_edit(self.cursor + text.len(), true);
         true
@@ -589,6 +711,8 @@ impl TextEditor {
         if self.cursor == 0 {
             return false;
         }
+        self.push_undo();
+        self.last_action = None;
         let previous = previous_grapheme_boundary(&self.text, self.cursor);
         self.text.replace_range(previous..self.cursor, "");
         self.finish_after_edit(previous, true);
@@ -599,6 +723,8 @@ impl TextEditor {
         if self.cursor == self.text.len() {
             return false;
         }
+        self.push_undo();
+        self.last_action = None;
         let next = next_grapheme_boundary(&self.text, self.cursor);
         self.text.replace_range(self.cursor..next, "");
         self.finish_after_edit(self.cursor, true);
@@ -610,7 +736,7 @@ impl TextEditor {
             return false;
         }
         let cursor = previous_grapheme_boundary(&self.text, self.cursor);
-        self.finish_after_motion(cursor);
+        self.finish_after_boundary_motion(cursor);
         true
     }
 
@@ -619,11 +745,262 @@ impl TextEditor {
             return false;
         }
         let cursor = next_grapheme_boundary(&self.text, self.cursor);
-        self.finish_after_motion(cursor);
+        self.finish_after_boundary_motion(cursor);
         true
     }
 
+    /// Move one word forward or backward within the logical line, spilling to
+    /// the adjacent line boundary at either end.
+    fn move_word(&mut self, forward: bool) -> bool {
+        let (line_start, line_end) = logical_line_bounds(&self.text, self.cursor);
+        let target = if forward {
+            if self.cursor >= line_end {
+                if line_end >= self.text.len() {
+                    return false;
+                }
+                line_end + 1
+            } else {
+                find_word_forward(&self.text[line_start..line_end], self.cursor - line_start)
+                    + line_start
+            }
+        } else if self.cursor == line_start {
+            if line_start == 0 {
+                return false;
+            }
+            line_start - 1
+        } else {
+            find_word_backward(&self.text[line_start..line_end], self.cursor - line_start)
+                + line_start
+        };
+        if target == self.cursor {
+            return false;
+        }
+        self.finish_after_motion(target);
+        true
+    }
+
+    /// Move the cursor to the next match of `character` in the given direction.
+    ///
+    /// The search is case-sensitive, spans the whole buffer, and never lands on
+    /// the character currently under the cursor. A missing match leaves the
+    /// cursor where it is.
+    fn jump_to_char(&mut self, character: char, forward: bool) -> bool {
+        let needle = character.to_string();
+        let target = if forward {
+            let start = next_grapheme_boundary(&self.text, self.cursor);
+            self.text[start..]
+                .find(&needle)
+                .map(|offset| start + offset)
+        } else {
+            self.text[..self.cursor].rfind(&needle)
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        if target == self.cursor {
+            return false;
+        }
+        self.finish_after_motion(target);
+        true
+    }
+
+    /// Kill one word backward or forward, accumulating consecutive kills.
+    fn delete_word(&mut self, forward: bool) -> bool {
+        let (line_start, line_end) = logical_line_bounds(&self.text, self.cursor);
+        let at_edge = if forward {
+            self.cursor >= line_end
+        } else {
+            self.cursor == line_start
+        };
+
+        if at_edge {
+            let newline = if forward {
+                if line_end >= self.text.len() {
+                    return false;
+                }
+                line_end
+            } else {
+                if line_start == 0 {
+                    return false;
+                }
+                line_start - 1
+            };
+            self.push_undo();
+            let was_kill = self.last_action == Some(LastAction::Kill);
+            self.kill_ring.push("\n", !forward, was_kill);
+            self.last_action = Some(LastAction::Kill);
+            self.text.replace_range(newline..newline + 1, "");
+            self.finish_after_edit(newline, true);
+            return true;
+        }
+
+        let was_kill = self.last_action == Some(LastAction::Kill);
+        let line = &self.text[line_start..line_end];
+        let local = self.cursor - line_start;
+        let target = if forward {
+            find_word_forward(line, local) + line_start
+        } else {
+            find_word_backward(line, local) + line_start
+        };
+        if target == self.cursor {
+            return false;
+        }
+        self.push_undo();
+        let range = if forward {
+            self.cursor..target
+        } else {
+            target..self.cursor
+        };
+        let anchor = range.start;
+        let deleted = self.text[range.clone()].to_owned();
+        self.kill_ring.push(&deleted, !forward, was_kill);
+        self.last_action = Some(LastAction::Kill);
+        self.text.replace_range(range, "");
+        self.finish_after_edit(anchor, true);
+        true
+    }
+
+    /// Kill from the line edge to the cursor, merging lines at an edge.
+    fn delete_to_line_edge(&mut self, forward: bool) -> bool {
+        let (line_start, line_end) = logical_line_bounds(&self.text, self.cursor);
+        let at_edge = if forward {
+            self.cursor >= line_end
+        } else {
+            self.cursor == line_start
+        };
+
+        if at_edge {
+            let newline = if forward {
+                if line_end >= self.text.len() {
+                    return false;
+                }
+                line_end
+            } else {
+                if line_start == 0 {
+                    return false;
+                }
+                line_start - 1
+            };
+            self.push_undo();
+            let was_kill = self.last_action == Some(LastAction::Kill);
+            self.kill_ring.push("\n", !forward, was_kill);
+            self.last_action = Some(LastAction::Kill);
+            self.text.replace_range(newline..newline + 1, "");
+            self.finish_after_edit(newline, true);
+            return true;
+        }
+
+        let was_kill = self.last_action == Some(LastAction::Kill);
+        let range = if forward {
+            self.cursor..line_end
+        } else {
+            line_start..self.cursor
+        };
+        let anchor = range.start;
+        let deleted = self.text[range.clone()].to_owned();
+        self.push_undo();
+        self.kill_ring.push(&deleted, !forward, was_kill);
+        self.last_action = Some(LastAction::Kill);
+        self.text.replace_range(range, "");
+        self.finish_after_edit(anchor, true);
+        true
+    }
+
+    /// Insert the newest kill-ring entry and remember it for `YankPop`.
+    fn yank(&mut self) -> bool {
+        let Some(text) = self.kill_ring.peek().map(str::to_owned) else {
+            return false;
+        };
+        self.push_undo();
+        let start = self.cursor;
+        self.text.insert_str(start, &text);
+        self.finish_after_edit(start + text.len(), true);
+        self.last_yank = Some(start..start + text.len());
+        self.last_action = Some(LastAction::Yank);
+        true
+    }
+
+    /// Replace the last yank with the previous kill-ring entry.
+    fn yank_pop(&mut self) -> bool {
+        if self.last_action != Some(LastAction::Yank) || self.kill_ring.len() <= 1 {
+            return false;
+        }
+        let Some(range) = self.last_yank.clone() else {
+            return false;
+        };
+        self.push_undo();
+        self.text.replace_range(range.clone(), "");
+        self.kill_ring.rotate();
+        let text = self.kill_ring.peek().map(str::to_owned).unwrap_or_default();
+        self.text.insert_str(range.start, &text);
+        self.finish_after_edit(range.start + text.len(), true);
+        self.last_yank = Some(range.start..range.start + text.len());
+        self.last_action = Some(LastAction::Yank);
+        true
+    }
+
+    /// Restore the previous snapshot, moving the current state to redo.
+    fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.undo.pop() else {
+            return false;
+        };
+        Self::save_snapshot(&self.text, self.cursor, &mut self.redo);
+        self.restore(snapshot);
+        true
+    }
+
+    /// Reapply the most recently undone snapshot.
+    fn redo(&mut self) -> bool {
+        let Some(snapshot) = self.redo.pop() else {
+            return false;
+        };
+        Self::save_snapshot(&self.text, self.cursor, &mut self.undo);
+        self.restore(snapshot);
+        true
+    }
+
+    fn save_snapshot(text: &str, cursor: usize, history: &mut UndoStack<EditorSnapshot>) {
+        // A fresh String has exactly the copied text's capacity; account for
+        // both its UTF-8 bytes and the fixed snapshot fields. Reject before
+        // cloning a large paste, not after allocating another large buffer.
+        let bytes = text
+            .len()
+            .saturating_add(std::mem::size_of::<EditorSnapshot>());
+        if bytes > HISTORY_BYTES {
+            history.clear();
+            return;
+        }
+        history.push_owned_with_size(
+            EditorSnapshot {
+                text: text.to_owned(),
+                cursor,
+            },
+            bytes,
+        );
+    }
+
+    fn push_undo(&mut self) {
+        Self::save_snapshot(&self.text, self.cursor, &mut self.undo);
+        self.redo.clear();
+    }
+
+    fn restore(&mut self, snapshot: EditorSnapshot) {
+        let text_changed = self.text != snapshot.text;
+        self.text = snapshot.text;
+        self.cursor = snapshot.cursor;
+        self.preferred_column = None;
+        self.last_action = None;
+        self.last_yank = None;
+        if text_changed {
+            self.invalidate_layout();
+            self.touch_text();
+        } else {
+            self.touch_cursor();
+        }
+    }
+
     fn move_vertical(&mut self, direction: VerticalDirection, wrap_width: usize) -> bool {
+        self.last_action = None;
         let layout = self.layout(wrap_width);
         let line = &layout.lines[layout.cursor_row];
         let target_column = self
@@ -659,7 +1036,7 @@ impl TextEditor {
         let line = &layout.lines[layout.cursor_row];
         let cursor = if end { line.visible_end } else { line.start };
         let changed = cursor != self.cursor;
-        self.finish_after_motion(cursor);
+        self.finish_after_boundary_motion(cursor);
         changed
     }
 
@@ -678,12 +1055,27 @@ impl TextEditor {
 
     fn finish_after_motion(&mut self, cursor: usize) {
         let cursor = clamp_to_grapheme_boundary(&self.text, cursor);
+        self.finish_after_boundary_motion(cursor);
+    }
+
+    /// The caller already obtained this offset from grapheme navigation/layout.
+    fn finish_after_boundary_motion(&mut self, cursor: usize) {
         let changed = self.cursor != cursor;
         self.cursor = cursor;
         self.preferred_column = None;
+        self.last_action = None;
         if changed {
             self.touch_cursor();
         }
+    }
+
+    /// Drop all history when the buffer is replaced programmatically rather
+    /// than through an undoable keystroke action.
+    fn reset_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.last_action = None;
+        self.last_yank = None;
     }
 
     fn touch_text(&mut self) {
@@ -714,6 +1106,16 @@ enum VerticalDirection {
 
 fn normalize_wrap_width(wrap_width: usize) -> usize {
     wrap_width.max(1)
+}
+
+/// Byte bounds of the logical line containing `cursor`, exclusive of the
+/// terminating newline. `cursor` must sit on a char boundary.
+fn logical_line_bounds(text: &str, cursor: usize) -> (usize, usize) {
+    let start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
+    let end = text[cursor..]
+        .find('\n')
+        .map_or(text.len(), |index| cursor + index);
+    (start, end)
 }
 
 fn is_whitespace_grapheme(grapheme: &str) -> bool {
@@ -1391,5 +1793,189 @@ mod tests {
             assert!(cursor.row() < projection.lines().len());
             assert!(is_grapheme_boundary(editor.text(), cursor.offset()));
         }
+    }
+
+    #[test]
+    fn large_draft_deletions_keep_undo_and_redo_within_byte_budgets() {
+        let mut editor = TextEditor::with_text("x".repeat(65_536));
+        for _ in 0..2048 {
+            editor.apply(TextEditAction::Backspace, 80);
+        }
+        assert!(
+            editor.undo.len() < 70,
+            "history must be byte-bounded, not one full draft per deletion"
+        );
+        let mut undo_bytes = 0;
+        let mut history = editor.undo.clone();
+        while let Some(snapshot) = history.pop() {
+            undo_bytes += snapshot.text.capacity() + std::mem::size_of::<EditorSnapshot>();
+        }
+        assert!(undo_bytes <= HISTORY_BYTES);
+        while editor.undo() {}
+        let mut redo_bytes = 0;
+        let mut history = editor.redo.clone();
+        while let Some(snapshot) = history.pop() {
+            redo_bytes += snapshot.text.capacity() + std::mem::size_of::<EditorSnapshot>();
+        }
+        assert!(redo_bytes <= HISTORY_BYTES);
+        while editor.redo() {}
+        assert_eq!(editor.text().len(), 65_536 - 2048);
+    }
+
+    #[test]
+    fn fish_style_undo_coalesces_word_runs_and_splits_on_space() {
+        let mut editor = TextEditor::new();
+        for character in "hello world".chars() {
+            assert!(editor.apply(TextEditAction::Char(character), 80));
+        }
+        assert_eq!(editor.text(), "hello world");
+
+        assert!(editor.apply(TextEditAction::Undo, 80));
+        assert_eq!(editor.text(), "hello");
+        assert!(editor.apply(TextEditAction::Undo, 80));
+        assert_eq!(editor.text(), "");
+        assert!(!editor.apply(TextEditAction::Undo, 80));
+        assert_eq!(editor.cursor(), 0);
+    }
+
+    #[test]
+    fn undo_and_redo_round_trip_and_new_edits_clear_redo() {
+        let mut editor = TextEditor::with_text("abc");
+        assert!(editor.apply(TextEditAction::Char('d'), 80));
+        assert_eq!(editor.text(), "abcd");
+
+        assert!(editor.apply(TextEditAction::Undo, 80));
+        assert_eq!(editor.text(), "abc");
+        assert_eq!(editor.cursor(), 3);
+        assert!(editor.apply(TextEditAction::Redo, 80));
+        assert_eq!(editor.text(), "abcd");
+        assert_eq!(editor.cursor(), 4);
+
+        assert!(editor.apply(TextEditAction::Undo, 80));
+        assert!(editor.apply(TextEditAction::Char('z'), 80));
+        assert_eq!(editor.text(), "abcz");
+        assert!(!editor.apply(TextEditAction::Redo, 80));
+    }
+
+    #[test]
+    fn bounded_history_preserves_recent_unicode_pastes_and_cursor() {
+        let mut editor = TextEditor::new();
+        let atom = "👩🏽‍💻e\u{301}界[image:1]";
+        for _ in 0..HISTORY_COUNT + 10 {
+            assert!(editor.apply(TextEditAction::Paste(atom.into()), 80));
+        }
+        assert_eq!(editor.undo.len(), HISTORY_COUNT);
+        assert!(editor.undo.retained_bytes() <= HISTORY_BYTES);
+        for remaining in (10..HISTORY_COUNT + 10).rev() {
+            assert!(editor.apply(TextEditAction::Undo, 80));
+            assert_eq!(editor.text(), atom.repeat(remaining));
+            assert_eq!(editor.cursor(), editor.text().len());
+        }
+        assert!(!editor.apply(TextEditAction::Undo, 80));
+        for _ in 0..HISTORY_COUNT {
+            assert!(editor.apply(TextEditAction::Redo, 80));
+        }
+        assert_eq!(editor.text(), atom.repeat(HISTORY_COUNT + 10));
+        assert!(!editor.apply(TextEditAction::Redo, 80));
+    }
+
+    #[test]
+    fn history_bytes_evict_oldest_and_oversize_is_an_undo_barrier() {
+        let mut editor = TextEditor::with_text("界".repeat(HISTORY_BYTES / 12));
+        for _ in 0..12 {
+            editor.apply(TextEditAction::Paste("界".into()), 80);
+        }
+        assert!(editor.undo.len() < 12);
+        assert!(editor.undo.retained_bytes() <= HISTORY_BYTES);
+        assert!(editor.undo());
+        assert!(editor.redo.retained_bytes() <= HISTORY_BYTES);
+        editor.set_text("x".repeat(HISTORY_BYTES));
+        editor.apply(TextEditAction::Paste("界".into()), 80);
+        assert!(editor.undo.is_empty());
+        assert!(!editor.undo());
+    }
+
+    #[test]
+    fn kill_ring_yank_and_yank_pop_cycle_entries() {
+        let mut editor = TextEditor::with_text("one two");
+        // Kill "two", then break accumulation with a motion, then kill "one".
+        editor.set_cursor("one ".len());
+        assert!(editor.apply(TextEditAction::DeleteToLineEnd, 80));
+        assert_eq!(editor.text(), "one ");
+        assert!(editor.apply(TextEditAction::Left, 80));
+        assert!(editor.apply(TextEditAction::DeleteToLineStart, 80));
+        assert_eq!(editor.text(), " ");
+
+        assert!(editor.apply(TextEditAction::Yank, 80));
+        assert_eq!(editor.text(), "one ");
+        assert!(editor.apply(TextEditAction::YankPop, 80));
+        assert_eq!(editor.text(), "two ");
+        assert!(editor.apply(TextEditAction::YankPop, 80));
+        assert_eq!(editor.text(), "one ");
+    }
+
+    #[test]
+    fn consecutive_word_kills_accumulate_into_one_entry() {
+        let mut editor = TextEditor::with_text("alpha beta gamma");
+        assert!(editor.apply(TextEditAction::DeleteWordBackward, 80));
+        assert_eq!(editor.text(), "alpha beta ");
+        assert!(editor.apply(TextEditAction::DeleteWordBackward, 80));
+        assert_eq!(editor.text(), "alpha ");
+        assert!(editor.apply(TextEditAction::DeleteWordBackward, 80));
+        assert_eq!(editor.text(), "");
+
+        // The accumulated run re-yanks in source order as one entry.
+        assert!(editor.apply(TextEditAction::Yank, 80));
+        assert_eq!(editor.text(), "alpha beta gamma");
+    }
+
+    #[test]
+    fn word_moves_and_jumps_stay_on_grapheme_boundaries() {
+        let mut editor = TextEditor::with_text("alpha beta");
+        editor.set_cursor(0);
+        assert!(editor.apply(TextEditAction::WordRight, 80));
+        assert_eq!(editor.cursor(), "alpha".len());
+        assert!(editor.apply(TextEditAction::WordRight, 80));
+        assert_eq!(editor.cursor(), "alpha beta".len());
+        assert!(editor.apply(TextEditAction::WordLeft, 80));
+        assert_eq!(editor.cursor(), "alpha ".len());
+        assert!(editor.apply(TextEditAction::WordLeft, 80));
+        assert_eq!(editor.cursor(), 0);
+
+        let mut jumps = TextEditor::with_text("a,b,c");
+        jumps.set_cursor(0);
+        assert!(jumps.apply(TextEditAction::JumpForward(','), 80));
+        assert_eq!(jumps.cursor(), 1);
+        assert!(jumps.apply(TextEditAction::JumpForward(','), 80));
+        assert_eq!(jumps.cursor(), 3);
+        assert!(jumps.apply(TextEditAction::JumpBackward(','), 80));
+        assert_eq!(jumps.cursor(), 1);
+        assert!(!jumps.apply(TextEditAction::JumpBackward(','), 80));
+        assert_eq!(jumps.cursor(), 1);
+        assert!(jumps.cursor_is_valid());
+    }
+
+    #[test]
+    fn line_edge_kills_merge_lines_and_are_undoable() {
+        let mut editor = TextEditor::with_text("abc\ndef");
+        editor.set_cursor("abc\nd".len());
+        assert!(editor.apply(TextEditAction::DeleteToLineStart, 80));
+        assert_eq!(editor.text(), "abc\nef");
+        assert!(editor.apply(TextEditAction::DeleteToLineStart, 80));
+        assert_eq!(editor.text(), "abcef");
+        assert_eq!(editor.cursor(), 3);
+        assert!(editor.apply(TextEditAction::Undo, 80));
+        assert_eq!(editor.text(), "abc\nef");
+
+        let mut tail = TextEditor::with_text("one\ntwo");
+        tail.set_cursor(0);
+        assert!(!tail.apply(TextEditAction::DeleteToLineStart, 80));
+        assert_eq!(tail.text(), "one\ntwo");
+        tail.set_cursor("one".len());
+        assert!(tail.apply(TextEditAction::DeleteToLineEnd, 80));
+        assert_eq!(tail.text(), "onetwo");
+        assert_eq!(tail.cursor(), 3);
+        assert!(tail.apply(TextEditAction::Undo, 80));
+        assert_eq!(tail.text(), "one\ntwo");
     }
 }

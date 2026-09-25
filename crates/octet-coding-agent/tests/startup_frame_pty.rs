@@ -193,6 +193,10 @@ impl Pty {
 #[derive(Clone, Copy)]
 enum StartupFixture<'a> {
     Model(&'a str),
+    /// Online catalog discovery against a gated, credential-free loopback API.
+    DiscoveringModel(&'a str, bool),
+    /// Fresh/resumed/forked startup against one synthetic saved conversation.
+    Session(&'a [&'a str]),
     /// A persisted selection, resolved through the real registry with no auth.
     ConfiguredGemma,
     /// Empty inventory and no appearance preference: both onboarding owners run.
@@ -245,18 +249,23 @@ impl PtyOctet {
             .expect("canonical PTY fixture root");
         let home = canonical_root.join("home");
         let workspace = match fixture {
-            StartupFixture::Model(_) => canonical_root.join("workspace"),
+            StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_, _) => {
+                canonical_root.join("workspace")
+            }
             _ => home.join("workspace"),
         };
         let sessions = canonical_root.join("sessions");
         create_inert_environment(&home, &workspace, &sessions);
         let credential = home.join(".octet/credentials/custom.json");
         match fixture {
-            StartupFixture::Model(model) if api.is_some() || model != "probe" => {
+            StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model, _)
+                if api.is_some() || model != "probe" =>
+            {
                 let base_url = api.unwrap_or("http://127.0.0.1:9/v1/");
                 let record = serde_json::json!({
                     "base_url": base_url, "api_key": "", "api_name": model,
-                    "headers": [], "auto_discover": false,
+                    "headers": [],
+                    "auto_discover": matches!(fixture, StartupFixture::DiscoveringModel(_, _)),
                     // The composed-redraw fixture needs genuinely distinct status
                     // values now that successful changes do not append notices.
                     "models": if model == "qwen-3.8-27b" {
@@ -302,7 +311,25 @@ impl PtyOctet {
                 )
                 .unwrap();
             }
-            StartupFixture::Model(_) => {}
+            StartupFixture::Session(_) => {
+                // The on-disk session store uses the workspace's stable FNV-1a key.
+                let mut key = 0xcbf2_9ce4_8422_2325u64;
+                for byte in workspace.to_string_lossy().as_bytes() {
+                    key = (key ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                let directory = sessions.join(format!("{key:012x}"));
+                fs::create_dir_all(&directory).unwrap();
+                let mut session =
+                    octet_agent::Session::create(directory.join("startup-history.jsonl")).unwrap();
+                session
+                    .append(octet_agent::EntryValue::Message(octet_ai::Message::User(
+                        octet_ai::UserMessage {
+                            content: vec![octet_ai::UserPart::Text("OCTET_RESUMED_HISTORY".into())],
+                        },
+                    )))
+                    .unwrap();
+            }
+            StartupFixture::Model(_) | StartupFixture::DiscoveringModel(_, _) => {}
         }
 
         let mut pty = Pty::open(dimensions.0, dimensions.1);
@@ -324,9 +351,11 @@ impl PtyOctet {
         let stderr = duplicate_stdio(pty.slave.as_raw_fd());
         let tty_fd = pty.slave.as_raw_fd();
         let mut command = Command::new(binary);
+        if !matches!(fixture, StartupFixture::DiscoveringModel(_, _)) {
+            command.arg("--offline");
+        }
         command
             .args([
-                "--offline",
                 "--no-context-files",
                 "--no-tools",
                 "--color",
@@ -358,8 +387,16 @@ impl PtyOctet {
             .stderr(stderr);
 
         match fixture {
-            StartupFixture::Model(model) => {
+            StartupFixture::Model(model) | StartupFixture::DiscoveringModel(model, _) => {
                 command.args(["--model", &format!("custom/{model}")]);
+                if matches!(fixture, StartupFixture::DiscoveringModel(_, true)) {
+                    command.args(["--models", &format!("custom/{model}")]);
+                }
+            }
+            StartupFixture::Session(args) => {
+                command
+                    .args(["--model", "custom/probe", "--theme", "dark"])
+                    .args(args);
             }
             StartupFixture::Changelog { model, initial } => {
                 command.args(["--theme", "dark"]);
@@ -422,8 +459,9 @@ impl PtyOctet {
             thread::sleep(Duration::from_millis(5));
         }
         panic!(
-            "PTY condition timed out; transcript: {}",
-            visible_bytes(&self.pty.output)
+            "PTY condition timed out; transcript: {}; tail: {}",
+            visible_bytes(&self.pty.output),
+            visible_bytes(&self.pty.output[self.pty.output.len().saturating_sub(4096)..])
         );
     }
 
@@ -438,22 +476,23 @@ impl PtyOctet {
         );
     }
 
-    fn shutdown(mut self) -> ShutdownCapture {
+    fn shutdown(self) -> ShutdownCapture {
+        self.shutdown_with_input(&[4]) // Ctrl-D
+    }
+
+    fn shutdown_with_input(mut self, input: &[u8]) -> ShutdownCapture {
         let shutdown_start = self.pty.output.len();
-        self.pty.write_input(&[4]); // Ctrl-D
+        self.pty.write_input(input);
         let started = Instant::now();
         let status = loop {
             self.pty.read_available();
-            if let Some(status) = self.child.try_wait().expect("poll Ctrl-D shutdown") {
+            if let Some(status) = self.child.try_wait().expect("poll shutdown") {
                 break status;
             }
             if started.elapsed() >= SHUTDOWN_TIMEOUT {
-                unsafe {
-                    let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-                }
-                let _ = self.child.wait();
+                terminate_child(&mut self.child, &mut self.pty);
                 panic!(
-                    "octet did not stop after Ctrl-D within {SHUTDOWN_TIMEOUT:?}; transcript: {}",
+                    "octet did not stop after input {input:?} within {SHUTDOWN_TIMEOUT:?}; transcript: {}",
                     visible_bytes(&self.pty.output)
                 );
             }
@@ -476,15 +515,70 @@ impl PtyOctet {
     }
 }
 
+fn terminate_child(child: &mut Child, pty: &mut Pty) {
+    let _ = child.kill();
+    // Like setup_tui_acceptance's failure cleanup, keep draining while the
+    // killed controlling-terminal owner exits. On macOS a blocking wait()
+    // with unread PTY output can deadlock even after SIGKILL, hiding the
+    // original assertion failure and holding the suite's shared test lock.
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    let mut buffer = [0u8; 8192];
+    loop {
+        for _ in 0..8 {
+            match pty.master.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "killed startup PTY child did not settle"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 impl Drop for PtyOctet {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            unsafe {
-                let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-            }
-            let _ = self.child.wait();
+            terminate_child(&mut self.child, &mut self.pty);
         }
     }
+}
+
+#[test]
+fn startup_failure_cleanup_drains_a_full_pty_and_reaps_the_child() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let octet = PtyOctet::spawn_at(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        MouseMode::Auto,
+        None,
+        true,
+        (180, 24),
+        (2, false, false),
+        StartupFixture::Setup,
+    );
+    // Leave the wide first frame unread, as it would be during assertion
+    // unwinding. On macOS even a killed controlling-terminal owner needs its
+    // queued output drained before it can exit and be reaped.
+    thread::sleep(Duration::from_millis(200));
+    let pid = octet.child.id() as libc::pid_t;
+    let started = Instant::now();
+    drop(octet);
+    assert!(started.elapsed() < SHUTDOWN_TIMEOUT);
+    assert_eq!(
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
 }
 
 struct ShutdownCapture {
@@ -836,6 +930,148 @@ fn run_inline() -> InlineTrace {
 }
 
 #[test]
+fn real_octet_session_startup_is_silent_and_preserves_history() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        for args in [
+            &[][..],
+            &["--continue"][..],
+            &["--resume", "startup-history"][..],
+            &["--fork", "startup-history"][..],
+            &["--resume"][..],
+            &["--fork"][..],
+        ] {
+            let mut octet = PtyOctet::spawn_at(
+                Path::new(env!("CARGO_BIN_EXE_octet")),
+                mode,
+                None,
+                false,
+                (INITIAL_COLUMNS, INITIAL_ROWS),
+                (2, false, false),
+                StartupFixture::Session(args),
+            );
+            if args == ["--resume"] || args == ["--fork"] {
+                octet.wait_until(STARTUP_TIMEOUT, |output| {
+                    synchronized_frame_end_containing(output, b"Resume Session").is_some()
+                });
+                octet.pty.write_input(b"\r");
+            }
+            octet.wait_until(STARTUP_TIMEOUT, |output| {
+                synchronized_frame_end_containing(output, READY_MARKER).is_some()
+            });
+            octet.pty.drain_for(DRAIN_TIME);
+            // Inspect every emitted byte, not just the final frame: a fleeting
+            // phase label is still chatter even if readiness erases it later.
+            for noise in [
+                "starting session",
+                "restarting session",
+                "replaying session",
+                "opening session",
+                "finding latest session",
+                "discovering sessions",
+                "opening source session",
+                "forking session",
+                "starting extensions",
+                "discovering models",
+                "startup build",
+                "live reload armed",
+            ] {
+                assert!(
+                    !contains_bytes(&octet.pty.output, noise.as_bytes()),
+                    "{noise:?} painted during {mode:?} startup {args:?}"
+                );
+            }
+            let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+            parser.process(&octet.pty.output);
+            assert_eq!(
+                parser.screen().contents().contains("OCTET_RESUMED_HISTORY"),
+                !args.is_empty(),
+                "startup must preserve the selected conversation: {args:?}"
+            );
+            let capture = octet.shutdown();
+            assert!(capture.status.success());
+            assert!(capture.termios_restored);
+        }
+    }
+}
+
+#[test]
+fn real_octet_reload_is_quiet_until_details_are_requested() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut octet = PtyOctet::spawn(Path::new(env!("CARGO_BIN_EXE_octet")), MouseMode::Auto);
+    octet.wait_until(STARTUP_TIMEOUT, |output| {
+        contains_bytes(output, READY_MARKER)
+    });
+    // Wait beyond the default first poll so a silent baseline is established.
+    octet.pty.drain_for(Duration::from_millis(1300));
+    assert!(
+        !contains_bytes(&octet.pty.output, b"live reload armed"),
+        "routine reload startup banner: {}",
+        visible_bytes(&octet.pty.output)
+    );
+
+    let prompts = octet._root.path().join("home/.octet/prompts");
+    fs::create_dir_all(&prompts).unwrap();
+    fs::write(prompts.join("reload-probe.md"), "A local reload fixture.\n").unwrap();
+    // Prove the resource actually became available, not merely that no notice
+    // was printed. /prompt only inspects the loaded catalog; it never reloads
+    // resources or submits a provider request. Close it between observations so
+    // the watcher can apply its pass at the idle prompt.
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        octet.pty.drain_for(Duration::from_millis(350));
+        let before = octet.pty.output.len();
+        octet.pty.write_input(b"/prompt\r");
+        octet.wait_until(STARTUP_TIMEOUT, |output| {
+            contains_bytes(&output[before..], b"Prompt templates:")
+        });
+        octet.pty.drain_for(DRAIN_TIME);
+        let loaded = contains_bytes(&octet.pty.output[before..], b"/reload-probe");
+        octet.pty.write_input(b"\x1b");
+        octet.pty.drain_for(Duration::from_millis(100));
+        if loaded {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "automatic reload did not load the prompt"
+        );
+    }
+    for noise in [
+        "live reload armed",
+        "changed path(s)",
+        "live reload: applied",
+        "resources reloaded",
+        "reload pass #",
+        "instructions, prompts, skills, extensions, and keybindings reloaded",
+    ] {
+        assert!(
+            !contains_bytes(&octet.pty.output, noise.as_bytes()),
+            "unexpected routine notice {noise}: {}",
+            visible_bytes(&octet.pty.output)
+        );
+    }
+
+    // Explicit reload still acknowledges completion; details stay on demand.
+    let before = octet.pty.output.len();
+    octet.pty.write_input(b"/reload\r");
+    octet.wait_until(STARTUP_TIMEOUT, |output| {
+        contains_bytes(&output[before..], b"resources reloaded")
+    });
+    octet.pty.write_input(b"/reload --dry-run\r");
+    octet.wait_until(STARTUP_TIMEOUT, |output| {
+        contains_bytes(output, b"poll 1000 ms") && contains_bytes(output, b"reload preview")
+    });
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+}
+
+#[test]
 fn real_octet_startup_frame_pty_contract() {
     let _guard = pty_test_lock()
         .lock()
@@ -889,15 +1125,16 @@ fn assert_green_gemma_frame(parser: &vt100::Parser) {
     assert_single_welcome(parser, INITIAL_COLUMNS, "first-ready Gemma");
     assert!(text.contains("Gemma 4 31B"), "{text}");
     assert!(text.contains("~/workspace"), "{text}");
-    let wordmark = status_colors(parser, "octet", INITIAL_COLUMNS).unwrap();
-    let vt100::Color::Rgb(red, green, blue) = wordmark[0] else {
-        panic!("SSH/Ghostty fixture lost truecolor: {wordmark:?}");
+    // The default footer and welcome wordmark are neutral; the composer
+    // rules carry the model accent across the full terminal width.
+    let rule_colors = status_colors(parser, "─", INITIAL_COLUMNS).unwrap();
+    let vt100::Color::Rgb(red, green, blue) = rule_colors[0] else {
+        panic!("SSH/Ghostty fixture lost truecolor: {rule_colors:?}");
     };
     assert!(
         green > red && green > blue,
-        "Gemma accent is green: {wordmark:?}"
+        "Gemma accent is green: {rule_colors:?}"
     );
-    assert!(wordmark.iter().all(|color| *color == wordmark[0]));
     let (rows, columns) = parser.screen().size();
     let mut logo_columns = vec![None; usize::from(columns)];
     let mut rules = 0;
@@ -906,7 +1143,11 @@ fn assert_green_gemma_frame(parser: &vt100::Parser) {
             let cell = parser.screen().cell(row, col).unwrap();
             match cell.contents().as_str() {
                 "─" => {
-                    assert_eq!(cell.fgcolor(), wordmark[0], "mixed composer accent\n{text}");
+                    assert_eq!(
+                        cell.fgcolor(),
+                        rule_colors[0],
+                        "mixed composer accent\n{text}"
+                    );
                     rules += 1;
                 }
                 "█" => {
@@ -931,7 +1172,7 @@ fn assert_green_gemma_frame(parser: &vt100::Parser) {
                     let vt100::Color::Rgb(r, g, b) = cell.fgcolor() else {
                         panic!("logo lost truecolor");
                     };
-                    let column = usize::from(col - 2) / 3; // 24-cell mark in a 96-column fixture
+                    let column = usize::from(col - 2) / 2; // Fixed 16-cell mark in the default card
                     for ((base, accent), actual) in gradient[column]
                         .into_iter()
                         .zip([red, green, blue])
@@ -1196,8 +1437,17 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
             assert!(parser.screen().contents().contains("Set up a provider"));
             assert!(!parser.screen().hide_cursor());
         }
-        // Open the existing endpoint-input owner, type without submitting, and
-        // Ctrl-C out. This never probes a service or writes provider state.
+        // Local endpoints are nested under the cloud-first setup menu. Open
+        // the endpoint-input owner, type without submitting, and Ctrl-C out.
+        // This never probes a service or writes provider state.
+        octet.pty.write_input(b"Local\r");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "› LM Studio",
+            STARTUP_TIMEOUT,
+        );
         octet.pty.write_input(b"\x1b[B\r");
         await_screen(
             &mut octet,
@@ -1224,8 +1474,16 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
             STARTUP_TIMEOUT,
         );
         assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        octet.pty.write_input(b"\x1b"); // Leave nested local setup.
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Add an API key",
+            STARTUP_TIMEOUT,
+        );
         let readiness_start = consumed;
-        octet.pty.write_input(b"\x1b[B\x1b[B\r"); // Continue without a provider.
+        octet.pty.write_input(b"Continue without\r");
         octet.wait_until(STARTUP_TIMEOUT, |bytes| {
             synchronized_frame_end_containing(&bytes[readiness_start..], b"setup needed").is_some()
         });
@@ -1322,8 +1580,121 @@ fn legacy_inline_startup_frame_pty_contract() {
     );
 }
 
+/// Catalog discovery must not own the terminal's input or first-frame boundary.
+/// Keep the real response gated until after edits and resize have been painted.
+#[test]
+fn real_octet_model_discovery_keeps_startup_editable() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (mode, scoped) in [
+        (MouseMode::Auto, false),
+        (MouseMode::App, false),
+        (MouseMode::Auto, true),
+        (MouseMode::App, true),
+    ] {
+        let api = HeldChatApi::start_for_models(true);
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            mode,
+            Some(&api.url),
+            false,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (2, false, false),
+            StartupFixture::DiscoveringModel("probe", scoped),
+        );
+        api.wait_for_request(&mut octet, 1);
+        octet.wait_until(STARTUP_TIMEOUT, |bytes| nth_frame_end(bytes, 1).is_some());
+        assert_eq!(
+            terminal_attributes(octet.pty.slave.as_raw_fd()).c_lflag & (libc::ICANON | libc::ECHO),
+            0,
+            "edits must be handled by octet, not echoed by the line discipline"
+        );
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+        let mut consumed = 0;
+        octet
+            .pty
+            .write_input(b"startup draftX\x7f\x1b[200~ pasted\x1b[201~");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "startup draft pasted",
+            Duration::from_millis(500),
+        );
+        assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        assert!(
+            synchronized_frame_end_containing(&octet.pty.output, b"startup draft pasted").is_some()
+        );
+
+        let resized_start = octet.pty.output.len();
+        octet.resize(RESIZED_COLUMNS, RESIZED_ROWS);
+        parser.set_size(RESIZED_ROWS, RESIZED_COLUMNS);
+        octet.wait_until(Duration::from_millis(500), |bytes| {
+            synchronized_frame_end_containing(&bytes[resized_start..], b"startup draft pasted")
+                .is_some()
+        });
+        // Enter during bootstrap must not submit or silently consume the draft.
+        octet.pty.write_input(b"\r");
+        octet.pty.drain_for(DRAIN_TIME);
+        parser.process(&octet.pty.output[consumed..]);
+        consumed = octet.pty.output.len();
+        assert!(parser.screen().contents().contains("startup draft pasted"));
+        assert_unbranded_startup(&parser, RESIZED_COLUMNS);
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(api.requests.lock().unwrap().is_empty());
+
+        api.release.send(()).unwrap();
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "custom/probe",
+            STARTUP_TIMEOUT,
+        );
+        assert!(parser.screen().contents().contains("startup draft pasted"));
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        assert!(!uses_alternate_screen(&capture.output));
+    }
+}
+
+#[test]
+fn real_octet_model_discovery_ctrl_c_restores_terminal_while_response_is_held() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for mode in [MouseMode::Auto, MouseMode::App] {
+        let api = HeldChatApi::start_for_models(true);
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            mode,
+            Some(&api.url),
+            false,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (2, false, false),
+            StartupFixture::DiscoveringModel("probe", false),
+        );
+        api.wait_for_request(&mut octet, 1);
+        octet.wait_until(STARTUP_TIMEOUT, |bytes| nth_frame_end(bytes, 1).is_some());
+        let capture = octet.shutdown_with_input(&[3]); // Ctrl-C; do not release HTTP.
+        assert_eq!(capture.status.code(), Some(128 + libc::SIGINT));
+        assert!(capture.termios_restored);
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+        parser.process(&capture.output);
+        assert_unbranded_startup(&parser, INITIAL_COLUMNS);
+        assert!(!parser.screen().hide_cursor());
+        assert!(!parser.screen().bracketed_paste());
+        assert!(!uses_alternate_screen(&capture.output));
+        assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(api.requests.lock().unwrap().is_empty());
+    }
+}
+
 /// One HTTP owner, one explicit response gate per request. It sends headers
-/// immediately, but no provider events until the test releases the body.
+/// immediately, but no chat events or model inventory until the body is released.
 struct HeldChatApi {
     url: String,
     arrived: std::sync::mpsc::Receiver<usize>,
@@ -1336,6 +1707,10 @@ struct HeldChatApi {
 
 impl HeldChatApi {
     fn start() -> Self {
+        Self::start_for_models(false)
+    }
+
+    fn start_for_models(models: bool) -> Self {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::mpsc;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1380,16 +1755,24 @@ impl HeldChatApi {
                     }
                 };
                 let headers = String::from_utf8_lossy(&request[..header_end]);
-                assert!(headers.starts_with("POST /v1/chat/completions HTTP/1.1"));
+                assert!(headers.starts_with(if models {
+                    "GET /v1/models HTTP/1.1"
+                } else {
+                    "POST /v1/chat/completions HTTP/1.1"
+                }));
                 assert!(!headers.to_ascii_lowercase().contains("authorization:"));
-                let length: usize = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse().unwrap())
-                    })
-                    .unwrap();
+                let length: usize = if models {
+                    0
+                } else {
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap()
+                };
                 assert!(length <= 128 * 1024);
                 while request.len() < header_end + length {
                     let mut bytes = [0; 1024];
@@ -1397,15 +1780,21 @@ impl HeldChatApi {
                     assert!(n > 0);
                     request.extend_from_slice(&bytes[..n]);
                 }
-                recorded.lock().unwrap().push(
-                    serde_json::from_slice(&request[header_end..header_end + length]).unwrap(),
-                );
-                let body = concat!(
-                    "data: {\"id\":\"fixture\",\"model\":\"probe\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"fixture response done\"},\"finish_reason\":null}]}\n\n",
-                    "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
-                    "data: [DONE]\n\n",
-                );
-                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                if !models {
+                    recorded.lock().unwrap().push(
+                        serde_json::from_slice(&request[header_end..header_end + length]).unwrap(),
+                    );
+                }
+                let (content_type, body) = if models {
+                    ("application/json", r#"{"data":[{"id":"probe"}]}"#)
+                } else {
+                    ("text/event-stream", concat!(
+                        "data: {\"id\":\"fixture\",\"model\":\"probe\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"fixture response done\"},\"finish_reason\":null}]}\n\n",
+                        "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
+                        "data: [DONE]\n\n",
+                    ))
+                };
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
                 socket.flush().unwrap();
                 let index = counted.fetch_add(1, Ordering::SeqCst) + 1;
                 if arrived_tx.send(index).is_err() {
@@ -1599,13 +1988,13 @@ fn assert_held_activity_pty(compact: bool, color: bool) {
         "bounded 80 ms animation cadence, not busy redraw: {}",
         frames.len()
     );
-    if color {
+    if color && !compact {
         assert!(palettes.len() >= 3, "held {label} must change ANSI cell styles without provider events: {} palettes / {} frames", palettes.len(), frames.len());
     } else {
         assert_eq!(
             palettes.len(),
             1,
-            "no-color status style intentionally static"
+            "compaction and no-color status styles remain static"
         );
         assert!(
             frames.len() <= 2,
@@ -1985,9 +2374,12 @@ fn assert_single_welcome(parser: &vt100::Parser, columns: u16, label: &str) {
         .lines()
         .position(|line| line.contains(&version))
         .unwrap();
-    let logo_box = (usize::from(columns) / 3).clamp(14, 24);
-    let scale = (logo_box / 8).min(3);
-    let top = version_row + (6 - 2 * scale) / 2;
+    // The compiled welcome card uses a fixed 16-cell, four-row logo; the
+    // footer owns model identity and the card no longer expands with width.
+    let logo_box = 16;
+    let logo_rows = 4;
+    let scale = logo_box / 8;
+    let top = version_row + (logo_rows - 2 * scale) / 2;
     let left = 2 + (logo_box - 8 * scale) / 2;
     let (rows, _) = parser.screen().size();
     for row in 0..usize::from(rows) {
@@ -2115,7 +2507,7 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                             "{label}-setting{step}: redundant thinking notice\n{screen}"
                         );
                         if consumed > redraw_start
-                            && screen.contains(&format!("Qwen 3.8 27B / {level}"))
+                            && screen.contains(&format!("Qwen 3.8 27B · {level}"))
                         {
                             break;
                         }
@@ -2472,6 +2864,18 @@ fn changelog_session_bytes(octet: &PtyOctet) -> Vec<u8> {
     fs::read(&sessions[0]).unwrap()
 }
 
+fn current_changelog_first_section() -> &'static str {
+    // Match the actual release body, not a heading from a previous version.
+    include_str!(concat!(
+        "../src/tui/view/releases/v",
+        env!("CARGO_PKG_VERSION"),
+        ".md"
+    ))
+    .lines()
+    .find_map(|line| line.strip_prefix("## "))
+    .expect("bundled release notes have a section heading")
+}
+
 #[test]
 fn real_octet_changelog_initial_and_idle_never_submit_to_provider() {
     let _guard = pty_test_lock()
@@ -2502,7 +2906,9 @@ fn real_octet_changelog_initial_and_idle_never_submit_to_provider() {
                 STARTUP_TIMEOUT,
             );
             let before = changelog_session_bytes(&octet);
-            octet.pty.write_input(b"/changelog\r\r");
+            // Enter on the visible slash popup invokes `/changelog`; a second
+            // Enter would close the report via its own input owner.
+            octet.pty.write_input(b"/changelog\r");
             Some(before)
         } else {
             None
@@ -2511,7 +2917,7 @@ fn real_octet_changelog_initial_and_idle_never_submit_to_provider() {
             &mut octet,
             &mut parser,
             &mut consumed,
-            "Fixed",
+            current_changelog_first_section(),
             STARTUP_TIMEOUT,
         );
         assert!(parser.screen().contents().contains("Changelog"));
@@ -2562,12 +2968,12 @@ fn real_octet_initial_changelog_without_model_preserves_setup_choice() {
         "Set up a provider",
         STARTUP_TIMEOUT,
     );
-    octet.pty.write_input(b"\x1b[B\x1b[B\r");
+    octet.pty.write_input(b"Continue without\r");
     await_screen(
         &mut octet,
         &mut parser,
         &mut consumed,
-        "Fixed",
+        current_changelog_first_section(),
         STARTUP_TIMEOUT,
     );
     assert!(parser.screen().contents().contains("Changelog"));

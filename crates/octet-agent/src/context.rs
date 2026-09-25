@@ -434,6 +434,7 @@ mod tests {
             delta: "hello".into(),
         });
         tracker.observe_stream(&StreamEvent::ToolCallStart {
+            async_execution: false,
             index: 1,
             id: ToolCallId("c1".into()),
             name: "read".into(),
@@ -480,6 +481,7 @@ mod tests {
             cost: None,
             response_id: Some("r2".into()),
             responses_output: None,
+            deferred: None,
             diagnostics: Vec::new(),
         }));
         tracker.tool_started();

@@ -1,13 +1,14 @@
 # octet Browse reference
 
-**Distribution version: 0.7.6.** Catalog commands below require version-matched
-published assets. Source checkouts and local archives require exactly octet 0.7.6.
-See the [release record](../../docs/releases/v0.7.6.md) for publication and
-installation evidence.
+**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
+public-install evidence. Reviewed source checkouts and local archives remain
+separate installation options.
 
-[Usage guide](README.md). This reference describes the bundled API `0.2`
-implementation, not current extension authoring. Distribution `0.7.6` requires
-exactly octet `0.7.6` and pins `playwright==1.57.0`.
+[Usage guide](README.md). This reference describes the bundled API `0.4`
+implementation, not a general extension-authoring tutorial. Distribution `0.8.0` requires
+exactly octet `0.8.0` and pins `playwright==1.57.0`.
 
 The opt-in executable always launches Playwright's bundled Chromium visibly
 (`headless=False`) with a persistent profile owned only by octet Browse. It never
@@ -17,9 +18,9 @@ pairs with, copies, discovers, or launches a normal Chrome/Chromium profile.
 
 Bundle installation only copies inert files. It does **not** run Python, install Playwright, download a browser, create a profile, or start this extension.
 
-With [octet 0.7.6 installed](../../docs/installation.md), use the matching signed
-public bundle below. A reviewed checkout or locally built archive remains an alternative;
-see the [guide](README.md#install-the-bundle).
+With [octet 0.8.0](../../docs/installation.md) and verified
+matching published assets, use the catalog commands below. For a reviewed
+checkout or local archive instead, see the [guide](README.md#install-the-bundle).
 
 ```console
 octet extension install octet-browse
@@ -61,6 +62,25 @@ After the extension is running:
 | `/browse close` | Close the owning browser context and invalidate tab state |
 | `/browse reset-profile` | Destructive confirmation, close, lock/sentinel verification, then remove only the isolated profile |
 
+Repeated `/browse open` and `browser_launch` requests reuse the currently open
+context and do not create a new browser process. A context close/crash is
+reported as degraded closed state and its Playwright/profile resources are
+released when the owner worker observes it. Only a subsequent explicit open
+request can relaunch the visible browser; ordinary browser operations never
+silently relaunch it or explicitly request foreground activation. A launch
+cancelled before admission closes the newly created context instead of leaving
+a visible helper behind.
+
+Tool-created isolated tabs request Chromium's non-activating target creation;
+matching is by exact returned target ID, not by the first arriving page. This is
+a fixed internal operation, not a raw CDP/tool escape hatch, and it never applies
+to external connectors. Chromium stays visible with its owned persistent profile.
+There is no headless, offscreen, minimize, or focus-restoration workaround.
+Initial explicit launch and page-created popups can still activate a window.
+Physical focus preservation remains unqualified; the [qualification record and
+opt-in terminal-focus test](QUALIFICATION.md) distinguish these remaining gates
+from dependency-free regression coverage.
+
 The setup runtime is built in a private temporary directory and published only after a complete marker is written and validated. A cross-process lock makes setup idempotent. Interrupted/failed setup is never reported ready. Status points to `~/.octet/browse/install.log` but does not return its potentially environment-specific contents.
 
 ## Tool surface
@@ -68,6 +88,10 @@ The setup runtime is built in a private temporary directory and published only a
 There is no general browser escape hatch. The exact tools are:
 
 - `browser_status`
+- `browser_backend_select`
+- `browser_backend_revoke`
+- `browser_backend_stop`
+- `browser_backend_status`
 - `browser_launch`
 - `browser_tabs`
 - `browser_open_url`
@@ -80,6 +104,40 @@ There is no general browser escape hatch. The exact tools are:
 - `browser_screenshot`
 - `browser_tab_close`
 - `browser_close`
+
+## Explicit connectors
+
+The isolated, always-headful Chromium context remains the default. Existing
+browser targets are available only through a connector explicitly registered by
+the host integration; Browse performs no ambient browser discovery, process
+enumeration, normal-profile attachment, or session/window/tab listing.
+Registration and connector callback requirements are documented in
+[CONNECTORS.md](CONNECTORS.md).
+
+Use `browser_backend_select` with all five exact identities:
+`connector_id`, `browser_id`, `session_id`, `window_id`, and `tab_id`. An optional
+connector-issued `target_revision` is a stale-target fence. The selection tool
+cannot discover omitted identities. `browser_backend_status` reports only
+bounded registered descriptors and owner-visible selected state; it does not
+query unrelated external targets. `browser_backend_revoke` releases the exact
+selected target, while `browser_backend_stop` invokes the connector's explicit
+stop callback and then releases it. Releasing or stopping is not inferred from
+process state.
+
+External and isolated browsing are mutually exclusive. Each external operation
+rechecks the host-derived resource owner, target identity/revision, page
+liveness, connector verification, and declared capability before confirmation or
+browser use. Unsupported capabilities fail with `unsupported_capability`.
+Only passive snapshot/screenshot capabilities default on. All external action
+capabilities default off, and an explicitly declared action requires a connector
+that installs/verifies preventive navigation, scripted popup and download
+interception before selection and each action. Post-action URL inspection and a
+page-level download listener cannot substitute for that connector boundary;
+the isolated Chromium interception is not installed in an external context.
+Native Firefox and Safari operations are unsupported; a connector cannot turn a
+literal native-browser selection into an isolated Chromium operation. External
+connectors must preserve the manual-auth boundary and must not provide
+credentials, cookies, storage, profile data, or arbitrary evaluation.
 
 Every tab operation takes an explicit opaque `tab_id`. `browser_open_url` creates a new explicit tab only when `tab_id` is omitted; it never selects an implicit active page. Browser state is fenced by the host-derived `{session_id, extension_instance_id, process_generation}` owner, never a model argument. Handler-time presentation snapshots are parent-correlated, and worker-thread snapshots echo that complete host-issued triple; owner changes clear cached tab/activity/artifact presentation before publication.
 
@@ -101,7 +159,7 @@ Authentication is manual in the visible window. `browser_type` refuses fields th
 
 Clicks and Enter/Space actions that appear to purchase/pay, send/publish, grant consent, submit an external side effect, or delete data synchronously request octet confirmation before acting. Denial, a dropped request, a non-interactive frontend, cancellation, or timeout fails closed. Page content and labels cannot grant confirmation.
 
-Only explicit absolute HTTP(S) navigation is allowed. URLs with userinfo, relative URLs passed to `browser_open_url`, `file:`, `javascript:`, data/blob/custom/browser-internal schemes, and malformed hosts are rejected. The same top-level policy is enforced for links, forms, redirects, and popups. Query strings and fragments are removed from displayed URLs. Downloads are cancelled and never published or retained.
+Only explicit absolute HTTP(S) navigation is allowed. URLs with userinfo, relative URLs passed to `browser_open_url`, `file:`, `javascript:`, data/blob/custom/browser-internal schemes, and malformed hosts are rejected. The same top-level policy is enforced for links, forms, redirects, and popups in the isolated context; action-enabled external connectors must supply their own preventive guard. Query strings and fragments are removed from displayed URLs. Downloads are cancelled and never published or retained.
 
 octet Browse does not expose JavaScript evaluation, raw CDP, coordinates, physical-pointer control, clipboard, upload, download, cookies, storage, cache, history, browser extensions, visibility/headless controls, or profile inspection.
 
@@ -115,9 +173,9 @@ BEGIN UNTRUSTED BROWSER CONTENT
 END UNTRUSTED BROWSER CONTENT
 ```
 
-Everything inside is data, never instructions or authorization. A snapshot is capped at 20,000 characters and 100 interactive elements, with explicit truncation notices. It returns only bounded visible text and accessible role/name/state data. Input/textarea values, hidden content, cookies, storage, headers, and profile data are not queried or returned. Tab lists carrying page titles/URLs use the same markers.
+Everything inside is data, never instructions or authorization. A snapshot is capped at 20,000 characters and 100 interactive elements, with explicit truncation notices. Visible body extraction reads at most 30,000 UTF-16 source units, returns at most 30,000 units, and visits at most 10,000 DOM nodes; source, output, and traversal cuts remain explicit even when whitespace sanitization produces a short result. Remembered tool-typed values (including encoded variants and possible cut-boundary prefixes) are redacted on the host, never sent back into the page. Visible editable content conservatively omits body text. It returns only bounded visible text and accessible role/name/state data. Input/textarea values, hidden content, cookies, storage, headers, and profile data are not queried or returned. Tab lists carrying page titles/URLs use the same markers.
 
-Screenshots are viewport-only PNGs. To prevent form-value leakage, capture is refused after `browser_type` has supplied a value in that tab or while any visible form/editable field could contain manually entered data (with a specific refusal for credential/authentication/payment fields). An image at or above 5 MiB fails clearly instead of returning an unreadable attachment. Successful images are retained under `~/.octet/browse/artifacts/screenshots/`, bounded to 20 files and 80 MiB, copied briefly into the host-owned process scratch area, and published through API `0.2` as owner/generation-scoped artifacts. Results contain both the image part and a textual local reference usable with built-in `read`.
+Screenshots are viewport-only PNGs. To prevent form-value leakage, capture is refused after `browser_type` has supplied a value in that tab or while any visible form/editable field could contain manually entered data (with a specific refusal for credential/authentication/payment fields). An image at or above 5 MiB fails clearly instead of returning an unreadable attachment. Successful images are retained under `~/.octet/browse/artifacts/screenshots/`, bounded to 20 files and 80 MiB, copied briefly into the host-owned process scratch area, and published through API `0.4` as owner/generation-scoped artifacts. Results contain both the image part and a textual local reference usable with built-in `read`.
 
 The conservative visible-form refusal can be relaxed for non-credential fields by setting `OCTET_BROWSE_ALLOW_FORM_SCREENSHOTS` to `1`, `true`, `yes`, or `on` before starting octet, or by creating the regular sentinel file `~/.octet/browse/allow-form-screenshots`. This override never permits capture after `browser_type` has supplied a value and never permits capture while a visible credential, OTP, payment, authentication, or other credential-like field is present.
 

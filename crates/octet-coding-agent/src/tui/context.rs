@@ -67,7 +67,6 @@ struct CellAllocation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ContextReport {
     model_display: String,
-    model: String,
     context_window: u64,
     estimated_input: u64,
     slices: Vec<ContextSlice>,
@@ -151,7 +150,6 @@ impl ContextReport {
         let model_display = ModelDisplayMetadata::resolve(&app.model.spec).name;
         Self {
             model_display,
-            model: app.model.spec.id.0.clone(),
             context_window,
             estimated_input,
             slices,
@@ -220,7 +218,6 @@ impl ContextReport {
                 &theme.bold(&sanitize_for_terminal(&self.model_display)),
                 width,
             ),
-            fit_line(&sanitize_for_terminal(&self.model), width),
             fit_line(
                 &format!(
                     "{}/{} tokens ({percent:.0}%)",
@@ -436,7 +433,6 @@ mod tests {
     fn report(context_window: u64) -> ContextReport {
         ContextReport {
             model_display: "Ornith 35B".into(),
-            model: "custom/ornith-35b".into(),
             context_window,
             estimated_input: 133_000,
             slices: vec![
@@ -515,7 +511,6 @@ mod tests {
         ];
         let mut tiny = ContextReport {
             model_display: "Large".into(),
-            model: "large".into(),
             context_window: 1_000_000,
             estimated_input: kinds.len() as u64,
             slices: kinds

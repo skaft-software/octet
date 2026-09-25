@@ -18,6 +18,8 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -192,20 +194,59 @@ fn candidate_status(text: &str) -> Candidate {
     }
 }
 
+/// Timer-driven foreground polling, with no detached or armed terminal reader.
+///
+/// Crossterm's EventStream keeps a background read armed after next() is
+/// cancelled. A terminal grant cannot quiesce that reader with an atomic flag.
+/// Poll only with a zero timeout on the frontend thread instead: when we yield,
+/// the terminal has no pending host read and may be handed to another owner.
+#[derive(Default)]
+pub struct ForegroundEvents {
+    wake: Option<Pin<Box<Sleep>>>,
+}
+
+impl Stream for ForegroundEvents {
+    type Item = io::Result<Event>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if let Some(wake) = &mut this.wake {
+            if wake.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            this.wake = None;
+        }
+        match crossterm::event::poll(Duration::ZERO) {
+            Ok(true) => Poll::Ready(Some(crossterm::event::read())),
+            Err(error) => Poll::Ready(Some(Err(error))),
+            Ok(false) => {
+                let mut wake = Box::pin(tokio::time::sleep(Duration::from_millis(10)));
+                let _ = wake.as_mut().poll(cx);
+                this.wake = Some(wake);
+                Poll::Pending
+            }
+        }
+    }
+}
+
 /// Filtered, cancellation-safe interactive input. Pass this same owner to every
 /// panel and lifecycle loop; raw crossterm events must never reach extensions.
-pub struct TerminalInput<S = crossterm::event::EventStream> {
+pub struct TerminalInput<S = ForegroundEvents> {
     source: S,
     replies: BackgroundReplies,
     timer: Option<Pin<Box<Sleep>>>,
     timer_deadline: Option<Instant>,
     ended: bool,
     input_error: Option<io::Error>,
+    /// Set by the shell while an extension grant holds the raw terminal. While
+    /// set the stream never polls its source, so a ceded byte stays with the
+    /// child that owns `/dev/tty` instead of being stolen by the host.
+    ceded: Arc<AtomicBool>,
 }
 
 impl TerminalInput {
     pub fn new() -> Self {
-        Self::from_stream(crossterm::event::EventStream::new())
+        Self::from_stream(ForegroundEvents::default())
     }
 }
 
@@ -224,7 +265,18 @@ impl<S> TerminalInput<S> {
             timer_deadline: None,
             ended: false,
             input_error: None,
+            ceded: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Park this stream on a shared cede flag owned by the shell.
+    ///
+    /// The flag is the one piece of terminal authority a granted extension can
+    /// temporarily hold: while it is set, the host reads no raw bytes and the
+    /// ceded child owns them.
+    pub fn with_cede_flag(mut self, ceded: Arc<AtomicBool>) -> Self {
+        self.ceded = ceded;
+        self
     }
 }
 
@@ -286,6 +338,13 @@ impl<S: Stream<Item = io::Result<Event>> + Unpin> Stream for TerminalInput<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        // A ceded foreground grant owns the raw terminal. Returning without
+        // polling the source is the whole parking guarantee: no ceded byte is
+        // read or buffered by the host. The surrounding loop has its own
+        // periodic wakeups, so it still re-polls this stream after release.
+        if this.ceded.load(Ordering::SeqCst) {
+            return Poll::Pending;
+        }
         // The state and timer belong to the stream, not next()'s future. A
         // select! cancellation or an input-owner change cannot lose a prefix.
         for _ in 0..256 {
@@ -650,6 +709,28 @@ mod tests {
             input.next().await.unwrap().unwrap_err().to_string(),
             "input failed"
         );
+    }
+
+    #[tokio::test]
+    async fn ceded_terminal_input_is_parked_until_the_grant_is_released() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let ceded = Arc::new(AtomicBool::new(false));
+        let mut input = TerminalInput::from_stream(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(receiver),
+        )
+        .with_cede_flag(ceded.clone());
+        let typed = key(KeyCode::Char('x'), KeyModifiers::NONE);
+        sender.send(Ok(typed.clone())).unwrap();
+
+        ceded.store(true, Ordering::SeqCst);
+        // The source is never polled while ceded, so the byte the child will
+        // read on /dev/tty is still queued for the host afterwards.
+        for _ in 0..3 {
+            assert!(futures_util::poll!(input.next()).is_pending());
+        }
+
+        ceded.store(false, Ordering::SeqCst);
+        assert_eq!(input.next().await.unwrap().unwrap(), typed);
     }
 
     #[tokio::test]

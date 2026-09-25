@@ -51,34 +51,38 @@ impl BedrockEventStreamDecoder {
         }
         self.buffer.extend_from_slice(chunk);
         let mut messages = Vec::new();
+        let mut consumed = 0;
         loop {
-            if self.buffer.len() < 12 {
+            let remaining = &self.buffer[consumed..];
+            if remaining.len() < 12 {
                 break;
             }
-            let total_length = read_u32(&self.buffer[..4])? as usize;
-            let headers_length = read_u32(&self.buffer[4..8])? as usize;
+            let total_length = read_u32(&remaining[..4])? as usize;
+            let headers_length = read_u32(&remaining[4..8])? as usize;
             if !(16..=MAX_EVENT_STREAM_FRAME_BYTES).contains(&total_length)
                 || headers_length > total_length.saturating_sub(16)
             {
                 return Err(invalid_frame());
             }
-            if crc32(&self.buffer[..8]) != read_u32(&self.buffer[8..12])? {
+            if crc32(&remaining[..8]) != read_u32(&remaining[8..12])? {
                 return Err(invalid_frame());
             }
-            if self.buffer.len() < total_length {
+            if remaining.len() < total_length {
                 break;
             }
-            if crc32(&self.buffer[..total_length - 4])
-                != read_u32(&self.buffer[total_length - 4..total_length])?
+            if crc32(&remaining[..total_length - 4])
+                != read_u32(&remaining[total_length - 4..total_length])?
             {
                 return Err(invalid_frame());
             }
             let header_end = 12 + headers_length;
-            let headers = parse_event_headers(&self.buffer[12..header_end])?;
-            let payload = bytes::Bytes::copy_from_slice(&self.buffer[header_end..total_length - 4]);
-            self.buffer.drain(..total_length);
+            let headers = parse_event_headers(&remaining[12..header_end])?;
+            let payload = bytes::Bytes::copy_from_slice(&remaining[header_end..total_length - 4]);
+            consumed += total_length;
             messages.push(BedrockEventStreamMessage { headers, payload });
         }
+        // Compact the incomplete suffix once, not once per frame in a burst.
+        self.buffer.drain(..consumed);
         Ok(messages)
     }
 
@@ -270,9 +274,10 @@ pub(crate) fn build_request(
     let mut inference = Map::new();
     inference.insert(
         "maxTokens".to_owned(),
-        json!(request
-            .max_output_tokens
-            .unwrap_or(model.spec.limits.max_output_tokens)),
+        json!(
+            crate::effective_output_token_cap(model, request.max_output_tokens)
+                .expect("Bedrock always emits an output cap")
+        ),
     );
     if let Some(temperature) = request.temperature {
         inference.insert("temperature".to_owned(), json!(temperature));
@@ -299,19 +304,30 @@ pub(crate) fn build_request(
     }
 
     if !request.tools.is_empty() && request.tool_choice != ToolChoice::None {
-        let tools = request
-            .tools
-            .iter()
-            .map(|tool| {
-                json!({
-                    "toolSpec": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "inputSchema": {"json": tool.parameters},
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut tools = Vec::with_capacity(request.tools.len());
+        for tool in &request.tools {
+            // Strict JSON-schema constrained sampling rewrites the input schema
+            // and sets Bedrock's per-tool `strict` flag; otherwise the canonical
+            // schema is sent unchanged.
+            let (parameters, strict) = crate::constrained_sampling::function_tool_parameters(
+                tool,
+                super::strict_mode_for(model),
+            )?;
+            let input_schema = if strict {
+                parameters
+            } else {
+                tool.parameters.clone()
+            };
+            let mut tool_spec = json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": {"json": input_schema},
+            });
+            if strict {
+                tool_spec["strict"] = json!(true);
+            }
+            tools.push(json!({ "toolSpec": tool_spec }));
+        }
         let tool_choice = match &request.tool_choice {
             ToolChoice::Auto => json!({"auto": {}}),
             ToolChoice::Required => json!({"any": {}}),
@@ -336,6 +352,12 @@ pub(crate) fn build_request(
         segments.push(&model.spec.api_name);
         segments.push("converse-stream");
     }
+    // The URL path-segment setter leaves `:` as a legal path character. Bedrock
+    // model routes must carry it as `%3A`; `set_path` preserves that existing
+    // escape instead of turning it into `%253A`, keeping the prepared URL equal
+    // to the SigV4 canonical URI.
+    let encoded_path = url.path().replace(':', "%3A");
+    url.set_path(&encoded_path);
     let mut headers = http::HeaderMap::new();
     headers.insert(
         http::header::ACCEPT,
@@ -390,6 +412,7 @@ pub(crate) fn decode_stream_event(
                     &mut events,
                     builder,
                     StreamEvent::ToolCallStart {
+                        async_execution: false,
                         index: canonical,
                         id: ToolCallId(id),
                         name,
@@ -602,7 +625,12 @@ pub(crate) fn finish_stream(
     state: &mut BedrockStreamState,
     events: &mut Vec<StreamEvent>,
 ) -> Result<(), AiError> {
-    if state.message_stopped && !state.finished {
+    if !state.message_stopped {
+        return Err(invalid_provider_field(
+            "Bedrock stream ended without messageStop",
+        ));
+    }
+    if !state.finished {
         let response = builder.finish_mut()?;
         emit_event(events, builder, StreamEvent::Finished(response))?;
         state.finished = true;
@@ -719,6 +747,14 @@ fn map_usage(value: &Value) -> Result<Usage, AiError> {
         .get("inputTokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let cache_read_tokens = value
+        .get("cacheReadInputTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_write_tokens = value
+        .get("cacheWriteInputTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let output_tokens = value
         .get("outputTokens")
         .and_then(Value::as_u64)
@@ -735,8 +771,8 @@ fn map_usage(value: &Value) -> Result<Usage, AiError> {
     }
     Ok(Usage {
         input_tokens,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
+        cache_read_tokens,
+        cache_write_tokens,
         cache_write_1h_tokens: 0,
         output_tokens,
         reasoning_tokens: 0,
@@ -935,6 +971,22 @@ mod tests {
     }
 
     #[test]
+    fn frame_decoder_compacts_a_burst_and_preserves_its_partial_tail() {
+        let frame = frame(&[(":message-type", "event")], &json!({"text": "burst"}));
+        let mut burst = frame.repeat(256);
+        burst.extend_from_slice(&frame[..9]);
+        let mut decoder = BedrockEventStreamDecoder::new();
+        let messages = decoder.push(&burst).unwrap();
+        assert_eq!(messages.len(), 256);
+        assert!(messages
+            .iter()
+            .all(|message| message.payload == messages[0].payload));
+        assert_eq!(decoder.buffer, frame[..9]);
+        assert_eq!(decoder.push(&frame[9..]).unwrap().len(), 1);
+        decoder.finish().unwrap();
+    }
+
+    #[test]
     fn frame_decoder_rejects_bad_crc() {
         let mut bytes = frame(
             &[(":message-type", "event"), (":event-type", "messageStart")],
@@ -945,6 +997,103 @@ mod tests {
         assert!(BedrockEventStreamDecoder::new().push(&bytes).is_err());
     }
 
+    #[test]
+    fn frame_decoder_rejects_bad_prelude_crc_and_partial_eof() {
+        let mut prelude_corrupted = frame(
+            &[(":message-type", "event"), (":event-type", "messageStart")],
+            &json!({"role": "assistant"}),
+        );
+        prelude_corrupted[8] ^= 0xff;
+        assert!(BedrockEventStreamDecoder::new()
+            .push(&prelude_corrupted)
+            .is_err());
+
+        let complete = frame(
+            &[(":message-type", "event"), (":event-type", "messageStart")],
+            &json!({"role": "assistant"}),
+        );
+        let mut decoder = BedrockEventStreamDecoder::new();
+        assert!(decoder
+            .push(&complete[..complete.len() - 1])
+            .unwrap()
+            .is_empty());
+        assert!(decoder.finish().is_err());
+    }
+
+    #[test]
+    fn finish_stream_rejects_complete_body_without_message_stop() {
+        let model = harness::model(Protocol::BedrockConverse, None);
+        let mut builder =
+            ResponseBuilder::new(model.spec.id.clone(), Protocol::BedrockConverse, None);
+        let mut state = BedrockStreamState::default();
+        let mut events = Vec::new();
+        assert!(matches!(
+            finish_stream(&mut builder, &mut state, &mut events),
+            Err(AiError::Decode(DecodeError::InvalidProviderField(field)))
+                if field == "Bedrock stream ended without messageStop"
+        ));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn exception_frames_preserve_type_and_message() {
+        let bytes = frame(
+            &[
+                (":message-type", "exception"),
+                (":exception-type", "ThrottlingException"),
+            ],
+            &json!({"message": "fixture throttled"}),
+        );
+        let message = BedrockEventStreamDecoder::new()
+            .push(&bytes)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let model = harness::model(Protocol::BedrockConverse, None);
+        let mut builder =
+            ResponseBuilder::new(model.spec.id.clone(), Protocol::BedrockConverse, None);
+        let error = decode_stream_event(
+            &model,
+            &message,
+            &mut builder,
+            &mut BedrockStreamState::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AiError::Provider(ProviderError {
+                code: Some(code),
+                kind: Some(kind),
+                message,
+                ..
+            }) if code == "ThrottlingException"
+                && kind == "bedrock_event_stream"
+                && message == "fixture throttled"
+        ));
+    }
+
+    #[test]
+    fn usage_preserves_bedrock_cache_counters_and_rejects_underflow() {
+        let usage = map_usage(&json!({
+            "inputTokens": 10,
+            "cacheReadInputTokens": 4,
+            "cacheWriteInputTokens": 2,
+            "outputTokens": 5,
+            "totalTokens": 17,
+        }))
+        .unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.cache_read_tokens, 4);
+        assert_eq!(usage.cache_write_tokens, 2);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.total_tokens, 17);
+        assert!(map_usage(&json!({
+            "inputTokens": 10,
+            "outputTokens": 5,
+            "totalTokens": 14,
+        }))
+        .is_err());
+    }
     #[test]
     fn request_builder_uses_converse_shape() {
         let model = harness::model(Protocol::BedrockConverse, None);
@@ -1011,6 +1160,8 @@ mod tests {
                 content: vec![UserPart::Text("hello".into())],
             })],
             tools: vec![crate::types::ToolDef {
+                async_execution: false,
+                constrained_sampling: None,
                 name: "echo".into(),
                 description: "fixture".into(),
                 parameters: json!({"type": "object"}),

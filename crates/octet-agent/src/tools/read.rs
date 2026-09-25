@@ -84,6 +84,8 @@ pub struct ReadTool;
 impl Tool for ReadTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "read".to_string(),
             description: "Read text, images, or audio. `path` may be a workspace-relative local path, \
                           an absolute/~/ path when trusted-local access is enabled, a local `file://` \
@@ -117,6 +119,14 @@ impl Tool for ReadTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Read file contents")
+    }
+
+    fn prompt_guidelines(&self) -> &[&str] {
+        &["Use read to examine files instead of cat or sed."]
     }
 
     fn effect(
@@ -231,8 +241,10 @@ impl Tool for ReadTool {
     }
 
     fn concurrency(&self) -> ToolConcurrency {
-        // Likewise, HostRead and Network calls are forced back to sequential
-        // execution after per-call effect classification.
+        // Live read waves admit exact Pure, WorkspaceRead, or HostRead calls only
+        // after effect classification and policy admission. HostRead remains
+        // non-replayable; crash replay still requires exact Pure/WorkspaceRead,
+        // while Network and all other effects remain sequential barriers.
         ToolConcurrency::Parallel
     }
 

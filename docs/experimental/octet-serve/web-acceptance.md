@@ -1,20 +1,18 @@
 # Web acceptance
 
 Maintainer acceptance criteria, **not a current test result**. The web-first gate
-requires observed evidence for every applicable item below. For the octet 0.7.6
-source, see the [release notes](../../releases/v0.7.6.md); publication, signed
-assets, and public-install results belong to the
-[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
-[0.7.4](../../releases/v0.7.4.md) is a published immutable release, not a 0.7.6
-pass. Package smoke and historical fixtures do not establish every manual
+requires observed evidence for every applicable item below. For the octet 0.8.0
+release, see the [release notes](../../releases/v0.8.0.md). Historical [0.7.6](../../releases/v0.7.6.md) and
+[0.7.4](../../releases/v0.7.4.md) release records retain their signed-asset and
+public-install results, not a 0.8.0 pass. Package smoke and historical fixtures do not establish every manual
 journey, actual-terminal/SSH behavior, private-LAN access, or endurance.
 Live-provider/native-host audio checks are optional and **NOT RUN** in this
 source review.
 
 For local usage, see the [Serve guide](README.md). Consult
-[implementation limits](current-state.md#what-remains-fixture-only-specified-or-absent)
+[availability limits](README.md#availability-limits)
 before treating a renderer as an enabled feature: production previews and
-child-agent trees are off; LAN and native clients are unimplemented. Work
+child-agent trees are off; LAN and native clients are not supported connection paths. Work
 tracking is on the [Project](https://github.com/orgs/skaft-software/projects/5).
 
 ## Real execution

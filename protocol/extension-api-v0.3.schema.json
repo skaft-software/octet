@@ -201,6 +201,84 @@
       "value": 256,
       "description": "Maximum UTF-8 bytes in one opaque session-hook binding identifier.",
       "negotiated": false
+    },
+    {
+      "name": "max_theme_id_bytes",
+      "value": 128,
+      "description": "Maximum UTF-8 bytes in one host-advertised theme id.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_topics",
+      "value": 128,
+      "description": "Maximum declared topics per session-isolated host bus.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_peers",
+      "value": 64,
+      "description": "Maximum process generations attached to one session-isolated bus.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_fields",
+      "value": 24,
+      "description": "Maximum scalar fields in one declared bus topic.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_identifier_bytes",
+      "value": 64,
+      "description": "Maximum bytes in a bus publisher, topic segment, or field name.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_topic_bytes",
+      "value": 96,
+      "description": "Maximum bytes in one exact bus topic.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_string_bytes",
+      "value": 1024,
+      "description": "Maximum bytes in a bus string or enumeration value.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_enum_values",
+      "value": 32,
+      "description": "Maximum alternatives in one bus enumeration field.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_message_bytes",
+      "value": 8192,
+      "description": "Maximum encoded bus event bytes excluding LF.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_queue_messages",
+      "value": 64,
+      "description": "Maximum queued bus events per subscriber process.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_queue_bytes",
+      "value": 262144,
+      "description": "Maximum queued bus event bytes per subscriber process.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_subscriptions",
+      "value": 16,
+      "description": "Maximum exact-topic subscriptions per process.",
+      "negotiated": false
+    },
+    {
+      "name": "max_bus_message_age_ms",
+      "value": 30000,
+      "description": "Maximum time a queued bus event may wait before delivery; expired events are discarded.",
+      "negotiated": false
     }
   ],
   "capabilities": [
@@ -268,6 +346,18 @@
       "name": "tool_call",
       "description": "Bounded host-to-extension model tool invocation.",
       "host_offer": "required",
+      "status": "foundation"
+    },
+    {
+      "name": "theme_selection",
+      "description": "Host-mediated, extension-namespaced presentation theme selection over host-resolved non-widening themes.",
+      "host_offer": "optional",
+      "status": "foundation"
+    },
+    {
+      "name": "event_bus",
+      "description": "Optional session-isolated bus. Selection MUST include bus/lifecycle; subscriptions also require bus/event. No compatibility claim for earlier draft bus contracts.",
+      "host_offer": "optional",
       "status": "foundation"
     }
   ],
@@ -524,6 +614,83 @@
       "result": null,
       "terminal": "deferred",
       "notification": false
+    },
+    {
+      "name": "theme/select",
+      "direction": "extension_to_host",
+      "capability": "theme_selection",
+      "host_offer": "optional",
+      "status": "foundation",
+      "params": "ThemeSelectParams",
+      "result": "ThemeSelectResult",
+      "terminal": "result_or_error",
+      "notification": false
+    },
+    {
+      "name": "bus/declare",
+      "direction": "extension_to_host",
+      "capability": "event_bus",
+      "host_offer": "optional",
+      "status": "foundation",
+      "params": "BusDeclareParams",
+      "result": "BusAck",
+      "terminal": "result_or_error",
+      "notification": false
+    },
+    {
+      "name": "bus/subscribe",
+      "direction": "extension_to_host",
+      "capability": "event_bus",
+      "host_offer": "optional",
+      "status": "foundation",
+      "params": "BusTopicParams",
+      "result": "BusSubscribeResult",
+      "terminal": "result_or_error",
+      "notification": false
+    },
+    {
+      "name": "bus/unsubscribe",
+      "direction": "extension_to_host",
+      "capability": "event_bus",
+      "host_offer": "optional",
+      "status": "foundation",
+      "params": "BusTopicParams",
+      "result": "BusAck",
+      "terminal": "result_or_error",
+      "notification": false
+    },
+    {
+      "name": "bus/publish",
+      "direction": "extension_to_host",
+      "capability": "event_bus",
+      "host_offer": "optional",
+      "status": "foundation",
+      "params": "BusPublishParams",
+      "result": "BusPublishResult",
+      "terminal": "result_or_error",
+      "notification": false
+    },
+    {
+      "name": "bus/event",
+      "direction": "host_to_extension",
+      "capability": "event_bus",
+      "host_offer": "optional",
+      "status": "foundation",
+      "params": "BusEventParams",
+      "result": null,
+      "terminal": "stream_event",
+      "notification": true
+    },
+    {
+      "name": "bus/lifecycle",
+      "direction": "host_to_extension",
+      "capability": "event_bus",
+      "host_offer": "optional",
+      "status": "foundation",
+      "params": "BusLifecycleParams",
+      "result": null,
+      "terminal": "stream_event",
+      "notification": true
     }
   ],
   "errors": [
@@ -599,6 +766,58 @@
       "description": "Defer a supported operation until a host-owned boundary resolves."
     }
   ],
+  "theme_selection": {
+    "capability": "theme_selection",
+    "method": "theme/select",
+    "params_model": "ThemeSelectParams",
+    "result_model": "ThemeSelectResult",
+    "namespace": "extension",
+    "scopes": [
+      "extension"
+    ],
+    "roles": [
+      "accent",
+      "border",
+      "diff_added",
+      "diff_context",
+      "diff_header",
+      "diff_hunk",
+      "diff_removed",
+      "dim",
+      "error",
+      "foreground",
+      "md_code",
+      "md_code_block",
+      "md_emphasis",
+      "md_heading",
+      "md_link",
+      "md_list_bullet",
+      "md_quote",
+      "md_strong",
+      "muted",
+      "success",
+      "syntax_comment",
+      "syntax_function",
+      "syntax_keyword",
+      "syntax_number",
+      "syntax_operator",
+      "syntax_punctuation",
+      "syntax_string",
+      "syntax_type",
+      "syntax_variable",
+      "warning"
+    ],
+    "trust_values": [
+      "compiled",
+      "user"
+    ],
+    "rejections": {
+      "namespace_mismatch": "capability_mismatch",
+      "unknown_theme": "invalid_params",
+      "unknown_role": "invalid_params",
+      "trust_widening": "capability_mismatch"
+    }
+  },
   "models": [
     {
       "name": "ProtocolLimits",
@@ -2010,6 +2229,499 @@
           "max_bytes": "max_provider_auth_lease_bytes"
         }
       ]
+    },
+    {
+      "name": "ThemeSelectParams",
+      "description": "Bounded extension-scoped theme selection request. Scope is fixed to the requesting extension so a selection can never widen project trust.",
+      "fields": [
+        {
+          "name": "namespace",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_capability_name_bytes"
+        },
+        {
+          "name": "theme_id",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_theme_id_bytes"
+        },
+        {
+          "name": "role",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "values": [
+            "accent",
+            "border",
+            "diff_added",
+            "diff_context",
+            "diff_header",
+            "diff_hunk",
+            "diff_removed",
+            "dim",
+            "error",
+            "foreground",
+            "md_code",
+            "md_code_block",
+            "md_emphasis",
+            "md_heading",
+            "md_link",
+            "md_list_bullet",
+            "md_quote",
+            "md_strong",
+            "muted",
+            "success",
+            "syntax_comment",
+            "syntax_function",
+            "syntax_keyword",
+            "syntax_number",
+            "syntax_operator",
+            "syntax_punctuation",
+            "syntax_string",
+            "syntax_type",
+            "syntax_variable",
+            "warning"
+          ]
+        },
+        {
+          "name": "scope",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "values": [
+            "extension"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ThemeSelectResult",
+      "description": "Terminal host decision for one theme selection. Only the host names a resolved non-widening theme id.",
+      "fields": [
+        {
+          "name": "status",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "values": [
+            "selected",
+            "denied",
+            "unavailable"
+          ]
+        },
+        {
+          "name": "theme_id",
+          "type": "string",
+          "presence": "optional",
+          "nullable": false,
+          "max_bytes": "max_theme_id_bytes"
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "presence": "optional",
+          "nullable": false,
+          "max_bytes": "max_reason_bytes"
+        }
+      ]
+    },
+    {
+      "name": "BusFieldSpec",
+      "description": "One scalar-only bus field. Host runtime additionally screens names, values and conditional bounds.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_bus_identifier_bytes"
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "values": [
+            "string",
+            "integer",
+            "boolean",
+            "enum"
+          ]
+        },
+        {
+          "name": "required",
+          "type": "boolean",
+          "presence": "required",
+          "nullable": false
+        },
+        {
+          "name": "max_bytes",
+          "type": "integer",
+          "presence": "required",
+          "nullable": false
+        },
+        {
+          "name": "values",
+          "type": "string[]",
+          "presence": "required",
+          "nullable": false,
+          "max_items": "max_bus_enum_values",
+          "max_bytes": "max_bus_string_bytes"
+        },
+        {
+          "name": "minimum",
+          "type": "signed_integer",
+          "presence": "optional",
+          "nullable": false
+        },
+        {
+          "name": "maximum",
+          "type": "signed_integer",
+          "presence": "optional",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "BusDeclareParams",
+      "description": "Declare one immutable typed topic owned by the host-derived requesting process principal.",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_session_hook_id_bytes"
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_bus_topic_bytes"
+        },
+        {
+          "name": "fields",
+          "type": "BusFieldSpec[]",
+          "presence": "required",
+          "nullable": false,
+          "max_items": "max_bus_fields"
+        }
+      ]
+    },
+    {
+      "name": "BusTopicParams",
+      "description": "Exact topic interest. Subscribe explicitly acknowledges pending interest or active subscription; unknown topics are never active.",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_session_hook_id_bytes"
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_bus_topic_bytes"
+        }
+      ]
+    },
+    {
+      "name": "BusAck",
+      "description": "Binding-scoped successful declaration or unsubscribe acknowledgement.",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_session_hook_id_bytes"
+        }
+      ]
+    },
+    {
+      "name": "BusPublishParams",
+      "description": "Typed inert payload; publisher identity, generation, sequence and time are host-owned.",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_session_hook_id_bytes"
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_bus_topic_bytes"
+        },
+        {
+          "name": "payload",
+          "type": "json",
+          "presence": "required",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "BusPublishResult",
+      "description": "Host-owned monotonic sequence of an atomically admitted publication.",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_session_hook_id_bytes"
+        },
+        {
+          "name": "sequence",
+          "type": "integer",
+          "presence": "required",
+          "nullable": false
+        },
+        {
+          "name": "published_at_ms",
+          "type": "integer",
+          "presence": "required",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "BusEventParams",
+      "description": "In-memory event delivered only to a subscribed process of this host session.",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_session_hook_id_bytes"
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_bus_topic_bytes"
+        },
+        {
+          "name": "publisher",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_bus_identifier_bytes"
+        },
+        {
+          "name": "publisher_instance_id",
+          "type": "string",
+          "presence": "required",
+          "nullable": false,
+          "max_bytes": "max_session_hook_id_bytes"
+        },
+        {
+          "name": "process_generation",
+          "type": "integer",
+          "presence": "required",
+          "nullable": false
+        },
+        {
+          "name": "sequence",
+          "type": "integer",
+          "presence": "required",
+          "nullable": false
+        },
+        {
+          "name": "published_at_ms",
+          "type": "integer",
+          "presence": "required",
+          "nullable": false
+        },
+        {
+          "name": "payload",
+          "type": "json",
+          "presence": "required",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "BusSubscribeResult",
+      "description": "Explicit bounded interest admission. Pending is not an active subscription; activation requires a new subscribe ACK with host provenance.",
+      "kind": "tagged_union",
+      "tag": "state",
+      "variants": [
+        {
+          "name": "Pending",
+          "wire": "pending",
+          "status": "foundation",
+          "fields": [
+            {
+              "name": "binding_id",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_session_hook_id_bytes"
+            },
+            {
+              "name": "topic_revision",
+              "type": "integer",
+              "presence": "required",
+              "nullable": false
+            }
+          ]
+        },
+        {
+          "name": "Active",
+          "wire": "active",
+          "status": "foundation",
+          "fields": [
+            {
+              "name": "binding_id",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_session_hook_id_bytes"
+            },
+            {
+              "name": "topic_revision",
+              "type": "integer",
+              "presence": "required",
+              "nullable": false
+            },
+            {
+              "name": "publisher_instance_id",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_session_hook_id_bytes"
+            },
+            {
+              "name": "process_generation",
+              "type": "integer",
+              "presence": "required",
+              "nullable": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "BusLifecycleParams",
+      "description": "Mandatory negotiated bus control notification. Monotonic host revisions order bindings and exact-topic availability; no authority or publication replay.",
+      "kind": "tagged_union",
+      "tag": "kind",
+      "variants": [
+        {
+          "name": "Binding",
+          "wire": "binding",
+          "status": "foundation",
+          "fields": [
+            {
+              "name": "binding_id",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_session_hook_id_bytes"
+            },
+            {
+              "name": "binding_revision",
+              "type": "integer",
+              "presence": "required",
+              "nullable": false
+            }
+          ]
+        },
+        {
+          "name": "TopicAvailable",
+          "wire": "topic_available",
+          "status": "foundation",
+          "fields": [
+            {
+              "name": "binding_id",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_session_hook_id_bytes"
+            },
+            {
+              "name": "topic",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_bus_topic_bytes"
+            },
+            {
+              "name": "topic_revision",
+              "type": "integer",
+              "presence": "required",
+              "nullable": false
+            },
+            {
+              "name": "publisher_instance_id",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_session_hook_id_bytes"
+            },
+            {
+              "name": "process_generation",
+              "type": "integer",
+              "presence": "required",
+              "nullable": false
+            }
+          ]
+        },
+        {
+          "name": "TopicUnavailable",
+          "wire": "topic_unavailable",
+          "status": "foundation",
+          "fields": [
+            {
+              "name": "binding_id",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_session_hook_id_bytes"
+            },
+            {
+              "name": "topic",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_bus_topic_bytes"
+            },
+            {
+              "name": "topic_revision",
+              "type": "integer",
+              "presence": "required",
+              "nullable": false
+            },
+            {
+              "name": "publisher_instance_id",
+              "type": "string",
+              "presence": "required",
+              "nullable": false,
+              "max_bytes": "max_session_hook_id_bytes"
+            },
+            {
+              "name": "process_generation",
+              "type": "integer",
+              "presence": "required",
+              "nullable": false
+            }
+          ]
+        }
+      ]
     }
   ],
   "fixtures": [
@@ -2035,7 +2747,7 @@
           ]
         },
         "host": {
-          "label": "café"
+          "label": "caf\u00e9"
         },
         "contract": {
           "schema": "octet.extension.api/0.3",
@@ -2353,12 +3065,12 @@
           -17,
           9007199254740991
         ],
-        "": "private-use key sorts before emoji",
-        "😀": "emoji key",
-        "é": "café",
+        "\ue000": "private-use key sorts before emoji",
+        "\ud83d\ude00": "emoji key",
+        "\u00e9": "caf\u00e9",
         "control": "line\n\ttab\bbackspace\fpage\rreturn\\slash/quote\"",
         "nested": {
-          "β": "two",
+          "\u03b2": "two",
           "a": "one"
         }
       }
@@ -2495,6 +3207,102 @@
         "status": "ready",
         "lease": "opaque-lease"
       }
+    },
+    {
+      "name": "theme-select-params",
+      "value": {
+        "namespace": "octet.example",
+        "role": "accent",
+        "scope": "extension",
+        "theme_id": "solarized"
+      }
+    },
+    {
+      "name": "theme-select-result",
+      "value": {
+        "status": "selected",
+        "theme_id": "solarized"
+      }
+    },
+    {
+      "name": "bus-declare-params",
+      "value": {
+        "topic": "bus.alpha.status",
+        "fields": [
+          {
+            "name": "summary",
+            "kind": "string",
+            "required": true,
+            "max_bytes": 128,
+            "values": []
+          }
+        ],
+        "binding_id": "binding-example"
+      }
+    },
+    {
+      "name": "bus-topic-params",
+      "value": {
+        "topic": "bus.alpha.status",
+        "binding_id": "binding-example"
+      }
+    },
+    {
+      "name": "bus-publish-params",
+      "value": {
+        "topic": "bus.alpha.status",
+        "payload": {
+          "summary": "ready"
+        },
+        "binding_id": "binding-example"
+      }
+    },
+    {
+      "name": "bus-publish-result",
+      "value": {
+        "sequence": 1,
+        "published_at_ms": 1700000000000,
+        "binding_id": "binding-example"
+      }
+    },
+    {
+      "name": "bus-event-params",
+      "value": {
+        "topic": "bus.alpha.status",
+        "publisher": "alpha",
+        "publisher_instance_id": "instance-alpha",
+        "process_generation": 1,
+        "sequence": 1,
+        "published_at_ms": 1700000000000,
+        "payload": {
+          "summary": "ready"
+        },
+        "binding_id": "binding-example"
+      }
+    },
+    {
+      "name": "bus-ack",
+      "value": {
+        "binding_id": "binding-example"
+      }
+    },
+    {
+      "name": "bus-subscribe-result",
+      "value": {
+        "state": "active",
+        "binding_id": "binding-example",
+        "topic_revision": 1,
+        "publisher_instance_id": "instance-alpha",
+        "process_generation": 1
+      }
+    },
+    {
+      "name": "bus-lifecycle-params",
+      "value": {
+        "kind": "binding",
+        "binding_id": "binding-example",
+        "binding_revision": 1
+      }
     }
   ],
   "canonical_profile": {
@@ -2520,8 +3328,15 @@
     },
     {
       "version": "0.3",
-      "status": "current",
+      "status": "supported",
       "wire": "canonical-json-rpc",
+      "runtime": "supported",
+      "bundles": "supported"
+    },
+    {
+      "version": "0.4",
+      "status": "current",
+      "wire": "legacy-json-rpc",
       "runtime": "supported",
       "bundles": "supported"
     }

@@ -400,7 +400,7 @@ fn printed_resume_command_round_trips_custom_session_scope() {
 
     let mut resumed =
         PtyOctet::spawn_from_resume_command(directory.path(), &notice.command, &invocation_cwd);
-    resumed.submit_command(b"/quit");
+    resumed.submit_command(b"/exit");
     let (status, elapsed, output) = resumed.wait_for_exit(Instant::now());
     assert_eq!(status.code(), Some(0));
     assert!(elapsed < EXIT_DEADLINE, "resumed shutdown took {elapsed:?}");
@@ -451,11 +451,11 @@ fn slash_quit_prints_one_resume_command_after_terminal_restoration() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = tempfile::tempdir().expect("tempdir");
     let mut octet = PtyOctet::spawn(directory.path());
-    octet.submit_command(b"/quit");
+    octet.submit_command(b"/exit");
 
     let (status, elapsed, output) = octet.wait_for_exit(Instant::now());
     assert_eq!(status.code(), Some(0));
-    assert!(elapsed < EXIT_DEADLINE, "/quit shutdown took {elapsed:?}");
+    assert!(elapsed < EXIT_DEADLINE, "/exit shutdown took {elapsed:?}");
     let _ = assert_resume_notice(directory.path(), &output);
 }
 
@@ -475,7 +475,7 @@ fn resume_notice_tracks_the_active_session_after_a_clone_transition() {
     octet.wait_until(READY_DEADLINE, |output| {
         contains_bytes(output, b"Cloned to new session")
     });
-    octet.submit_command(b"/quit");
+    octet.submit_command(b"/exit");
 
     let (status, elapsed, output) = octet.wait_for_exit(Instant::now());
     assert_eq!(status.code(), Some(0));
@@ -504,7 +504,7 @@ fn resume_notice_tracks_the_active_session_after_a_resume_transition() {
     octet.wait_until(READY_DEADLINE, |output| {
         contains_bytes(output, b"resumed session")
     });
-    octet.submit_command(b"/quit");
+    octet.submit_command(b"/exit");
 
     let (status, elapsed, output) = octet.wait_for_exit(Instant::now());
     assert_eq!(status.code(), Some(0));

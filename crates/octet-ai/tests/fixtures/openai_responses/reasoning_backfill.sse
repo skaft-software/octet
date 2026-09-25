@@ -1,0 +1,15 @@
+: cite: pi packages/ai/src/api/openai-responses-shared.ts backfillReasoningSignatures (terminal encrypted_content backfill)
+: cite: Azure OpenAI / xAI send reasoning.encrypted_content only in response.completed.response.output
+data: {"type":"response.created","response":{"id":"resp_backfill"}}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"delta":"Trace it"}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_backfill","type":"reasoning"}}
+
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message"}}
+
+data: {"type":"response.output_text.delta","output_index":1,"delta":"done"}
+
+data: {"type":"response.output_text.done","output_index":1}
+
+data: {"type":"response.completed","response":{"output":[{"id":"rs_backfill","type":"reasoning","encrypted_content":"VEVSTUlOQUxfRU5DUllQVEVE"},{"id":"msg_1","type":"message"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}

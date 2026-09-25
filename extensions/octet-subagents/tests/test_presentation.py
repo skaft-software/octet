@@ -42,6 +42,48 @@ class PresentationTests(unittest.TestCase):
         defaults.update(values)
         return Worker(**defaults)
 
+    def test_explicit_model_labels_do_not_duplicate_canonical_provider(self):
+        from octet_subagents.presentation import detail_body, worker_secondary
+        for model in ("alternate", "custom/fixture/alternate"):
+            with self.subTest(model=model):
+                worker = self.worker(
+                    requested_provider="custom/fixture", requested_model=model,
+                    effective_provider="custom/fixture", effective_model=model,
+                    requested_reasoning="off", effective_reasoning="off",
+                    model_policy_applied=True,
+                )
+                detail = detail_body(worker, worker.created_at_ms)
+                row = worker_secondary(worker, worker.created_at_ms)
+                self.assertIn("Model/profile: custom/fixture/alternate / explore", detail)
+                self.assertIn("provider/model custom/fixture/alternate", detail)
+                self.assertIn("effective custom/fixture/alternate / reasoning off", detail)
+                self.assertIn("model custom/fixture/alternate", row)
+                self.assertNotIn("custom/fixture/custom/fixture", detail + row)
+                self.assertNotIn("(inherited)", detail)
+        inherited = self.worker()
+        self.assertIn("Model/profile: claude-sonnet-test (inherited) / explore",
+                      detail_body(inherited, inherited.created_at_ms))
+
+    def test_mixed_model_fleet_labels_each_worker_not_the_collection(self):
+        inherited = self.worker(agent_id="agent-a", name="audit", effective_model="claude-sonnet-test")
+        explicit = self.worker(
+            agent_id="agent-b", agent_path="/root/search", name="search",
+            requested_provider="openai", requested_model="gpt-test",
+            effective_provider="openai", effective_model="gpt-test",
+            model_policy_applied=True,
+        )
+        snapshot = build_snapshot(
+            [inherited, explicit], selected_agent_id=inherited.agent_id,
+            now_ms=1_700_000_004_000,
+        )
+        collection = snapshot["collection"]
+        self.assertEqual(collection["title"], "Subagents")
+        rows = {node["label"]: node["secondary"] for node in collection["nodes"]}
+        self.assertIn("claude-sonnet-test", rows["audit"])
+        self.assertNotIn("gpt-test", rows["audit"])
+        self.assertIn("gpt-test", rows["search"])
+        self.assertNotIn("claude-sonnet-test", rows["search"])
+
     def test_tree_is_content_free_while_detail_carries_terminal_summary(self):
         worker = self.worker(
             "done",
@@ -101,6 +143,26 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("\\\\u001b[31m", encoded)
         self.assertIn("\\\\u0000", encoded)
 
+    def test_joined_emoji_in_tasks_remains_valid_but_presentation_is_escaped(self):
+        from octet_subagents.model import sanitize_document, validate_plain_text
+        task = "Describe \U0001f469\u200d\U0001f4bb in the screenshot"
+        validate_plain_text(task, "task", allow_newline=True)
+        self.assertIn("\\u200d", sanitize_document(task, 8192))
+
+    def test_summary_invisible_formatting_is_escaped_for_host_validation(self):
+        from octet_subagents.model import sanitize_document
+        unsafe = [0x061C, *range(0x200B, 0x2010), *range(0x202A, 0x202F),
+                  0x2060, *range(0x2066, 0x206A), 0xFEFF]
+        for codepoint in unsafe:
+            with self.subTest(codepoint=codepoint):
+                worker = self.worker("done", summary=sanitize_document(
+                    "review" + chr(codepoint) + "result", 8192))
+                snapshot = build_snapshot([worker], selected_agent_id=worker.agent_id,
+                                          now_ms=1_700_000_001_000)
+                body = snapshot["collection"]["detail"]["body"]
+                self.assertNotIn(chr(codepoint), body)
+                self.assertIn("\\u%04x" % codepoint, body)
+
     def test_every_internal_state_maps_to_a_generic_host_state(self):
         expected = {
             "queued": "pending",
@@ -113,7 +175,7 @@ class PresentationTests(unittest.TestCase):
             "stopped": "stopped",
             "timed_out": "failed",
             "cancelled": "cancelled",
-            "orphaned": "unavailable",
+            "orphaned": "degraded",
             "restarted": "degraded",
         }
         for index, (state, generic) in enumerate(expected.items(), 1):
@@ -236,7 +298,7 @@ class PresentationTests(unittest.TestCase):
                 self.assertNotIn(entry["name"], compact)
                 self.assertNotIn(entry["args"], compact)
         self.assertEqual(activity["summary"], "fixture-worker · running")
-        self.assertIn("2 tool calls", node["secondary"])
+        self.assertIn("2 calls", node["secondary"])
         self.assertIn("1/8 turns", node["secondary"])
         self.assertIn("1000 tok", node["secondary"])
         self.assertIn("$0.0012", node["secondary"])
@@ -275,6 +337,7 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(activity["summary"], "fixture-worker · failed")
         self.assertEqual(snapshot["status"]["state"], "degraded")
         self.assertIn("1 failed", snapshot["status"]["label"])
+        self.assertEqual(snapshot["collection"]["title"], "Subagents")
         for compact in (
             node["secondary"], activity["summary"], narrow_list([worker], 1_700_000_003_000)
         ):
@@ -284,6 +347,153 @@ class PresentationTests(unittest.TestCase):
         detail = snapshot["collection"]["detail"]["body"]
         self.assertIn("[error] bash command=make test", detail)
         self.assertIn(worker.last_error, detail)
+
+    def test_stable_collection_title_is_not_the_live_count_status_label(self):
+        empty = build_snapshot([], selected_agent_id=None, now_ms=1_700_000_001_000)
+        self.assertEqual(empty["collection"]["title"], "Subagents")
+        self.assertEqual(empty["status"]["label"], "Subagents")
+
+        worker = self.worker("limit_reached")
+        snapshot = build_snapshot(
+            [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_002_000
+        )
+        # The header must not change shape as workers come and go; the counts
+        # stay available in the status label the host already reads.
+        self.assertEqual(snapshot["collection"]["title"], "Subagents")
+        self.assertNotIn("limited", snapshot["collection"]["title"])
+        self.assertIn("1 limited", snapshot["status"]["label"])
+
+    def test_detached_and_parked_workers_report_the_host_reason(self):
+        """A refused reattach or an approval park shows the host's own reason."""
+        reason = (
+            "not reattached: another live session owner holds the durable "
+            "fleet lease (instance abc123, generation 7)"
+        )
+        worker = self.worker("orphaned", host_diagnostic=reason)
+        snapshot = build_snapshot(
+            [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_005_000
+        )
+        node = snapshot["collection"]["nodes"][0]
+        self.assertIn("another live session owner", node["secondary"])
+        self.assertIn(
+            "Host reattachment: %s" % reason,
+            snapshot["collection"]["detail"]["body"],
+        )
+
+        parked = self.worker("awaiting_approval", host_diagnostic=reason)
+        snapshot = build_snapshot(
+            [parked], selected_agent_id=parked.agent_id, now_ms=1_700_000_006_000
+        )
+        self.assertIn(
+            "another live session owner", snapshot["collection"]["nodes"][0]["secondary"]
+        )
+        self.assertIn("Host reattachment", snapshot["collection"]["detail"]["body"])
+
+        # An attached worker with no host reason never renders a reattach line.
+        running = self.worker("running")
+        snapshot = build_snapshot(
+            [running], selected_agent_id=running.agent_id, now_ms=1_700_000_007_000
+        )
+        self.assertNotIn("Host reattachment", snapshot["collection"]["detail"]["body"])
+
+    def test_settled_worker_retains_bounded_host_recovery_guidance(self):
+        from octet_subagents.model import MAX_ERROR_BYTES, sanitize_document
+
+        hint = "Interrupted after restart; use subagent_continue to resume explicitly."
+        for state in ("cancelled", "stopped", "failed"):
+            with self.subTest(state=state):
+                worker = self.worker(
+                    state,
+                    host_diagnostic=sanitize_document(
+                        hint + "\x1b[31m\x00\n" + "é" * 5000, MAX_ERROR_BYTES
+                    ),
+                    summary="PRIVATE-CHILD-PROSE",
+                    phase="PRIVATE-RUNNING-PHASE",
+                )
+                snapshot = build_snapshot(
+                    [worker], selected_agent_id=worker.agent_id,
+                    now_ms=1_700_000_007_000,
+                )
+                node = snapshot["collection"]["nodes"][0]
+                detail = snapshot["collection"]["detail"]["body"]
+                self.assertIn(hint, node["secondary"])
+                self.assertIn("Host reattachment: " + hint, detail)
+                self.assertLessEqual(len(node["secondary"].encode("utf-8")), 1024)
+                diagnostic = detail.split("Host reattachment: ", 1)[1].split(
+                    "\n\nHost-observed final summary", 1
+                )[0]
+                self.assertLessEqual(len(diagnostic.encode("utf-8")), MAX_ERROR_BYTES)
+                for text in (node["secondary"], detail):
+                    self.assertNotIn("\x1b", text)
+                    self.assertNotIn("\x00", text)
+                compact = json.dumps(node) + json.dumps(snapshot["activities"])
+                self.assertNotIn(worker.summary, compact)
+                self.assertNotIn(worker.phase, compact)
+
+    def test_worker_rows_omit_absence_and_human_format_bounded_values(self):
+        # Every ceiling is inherited and no counter is exposed: absence must be
+        # omitted, never rendered as `no ceiling` or a `?` placeholder.
+        bare = self.worker(
+            "running",
+            max_turns=None,
+            max_tokens=None,
+            max_cost_microdollars=None,
+            turn_count=None,
+            tokens_used=None,
+            cost_microdollars=None,
+            tool_call_count=0,
+            phase="thinking",
+        )
+        snapshot = build_snapshot(
+            [bare], selected_agent_id=bare.agent_id, now_ms=1_700_000_004_000
+        )
+        secondary = snapshot["collection"]["nodes"][0]["secondary"]
+        self.assertEqual(secondary, "running · 4s · claude-sonnet-test · 0 calls")
+        for absent in ("no ceiling", "?", "inherited", "unlimited", "not exposed"):
+            self.assertNotIn(absent, secondary)
+
+        long_running = self.worker(
+            "running",
+            turn_count=349,
+            max_turns=None,
+            tokens_used=263_229,
+            max_tokens=None,
+            cost_microdollars=7_200,
+            max_cost_microdollars=None,
+            tool_call_count=1,
+        )
+        snapshot = build_snapshot(
+            [long_running],
+            selected_agent_id=long_running.agent_id,
+            now_ms=1_700_000_349_000,
+        )
+        secondary = snapshot["collection"]["nodes"][0]["secondary"]
+        self.assertIn("5m49s", secondary)
+        self.assertIn("349 turns", secondary)
+        self.assertIn("263K tok", secondary)
+        self.assertIn("$0.0072", secondary)
+        self.assertNotIn("no ceiling", secondary)
+        self.assertIn("1 call ·", secondary)
+
+    def test_failed_rows_carry_a_bounded_reason_without_placeholders(self):
+        worker = self.worker(
+            "failed",
+            max_turns=None,
+            max_tokens=None,
+            turn_count=None,
+            tokens_used=None,
+            cost_microdollars=None,
+            last_error="provider boundary rejected the request: " + "x" * 400,
+        )
+        snapshot = build_snapshot(
+            [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_004_000
+        )
+        secondary = snapshot["collection"]["nodes"][0]["secondary"]
+        self.assertIn("failed", secondary)
+        self.assertIn("provider boundary rejected the request", secondary)
+        self.assertNotIn("x" * 200, secondary)
+        self.assertNotIn("?", secondary)
+        self.assertLessEqual(len(secondary.encode("utf-8")), 1024)
 
     def test_checked_in_presentation_fixtures_cover_live_tree_resync_and_inspection(self):
         live = json.loads(

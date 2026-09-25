@@ -41,18 +41,27 @@ MAX_PRESENTATION_ACTIVITIES = 128
 MAX_PRESENTATION_NODES = 256
 MAX_PRESENTATION_ACTIONS = 64
 MAX_PRESENTATION_REVISION = (2**53) - 1
+MAX_PROGRESS_DECORATION_LABEL_BYTES = 256
+MAX_PROGRESS_DECORATION_DETAIL_BYTES = 4 * 1024
+MAX_POST_MUTATION_RESOURCES = 32
+_TYPED_MUTATION_HOOKS = frozenset(
+    {"provider_retry", "before_persistence", "post_mutation"}
+)
 API_V02_FEATURES = (
     "request_cancellation",
     "request_progress",
+    "progress_decoration",
     "content_parts",
     "artifacts",
     "lifecycle_events",
     "policy_intents",
     "dynamic_tools",
     "agent_sessions",
+    "agent_model_selection_v1",
     "delegation_telemetry_v1",
     "approvals",
     "secrets",
+    "compaction_strategy",
 )
 LIFECYCLE_METHODS = (
     "session/started",
@@ -169,6 +178,54 @@ def _valid_extension_identifier(value: Any) -> bool:
         and (character.isalnum() or character in {"_", "-", "."})
         for character in rest
     )
+
+
+def provider_retry_delay(additional_delay_ms: int) -> dict[str, Any]:
+    """Build bounded-delay advice for a ``provider_retry`` hook result.
+
+    The host remains authoritative: it clamps this additive delay and never
+    lets an extension increase the retry budget or shorten host backoff.
+    """
+
+    if (
+        not isinstance(additional_delay_ms, int)
+        or isinstance(additional_delay_ms, bool)
+        or additional_delay_ms < 0
+        or additional_delay_ms > (2**64) - 1
+    ):
+        raise ValueError("additional_delay_ms must be an unsigned 64-bit integer")
+    return {"delay": {"additional_delay_ms": additional_delay_ms}}
+
+
+def persistence_metadata(value: Any, *, public: bool = False) -> dict[str, Any]:
+    """Build one ``before_persistence`` metadata proposal.
+
+    The host attaches namespace/provenance and applies its JSON shape and size
+    limits at the durable assistant-turn boundary.
+    """
+
+    if not isinstance(public, bool):
+        raise TypeError("public must be a boolean")
+    try:
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError) as error:
+        raise ValueError("metadata value must be JSON-serializable") from error
+    return {"public": public, "value": value}
+
+
+def post_mutation_rescan(resource_ids: Sequence[str]) -> dict[str, Any]:
+    """Build a selected-resource ``post_mutation`` rescan disposition.
+
+    The host accepts only a bounded subset of opaque resource IDs it disclosed
+    in the settled mutation notification.
+    """
+
+    values = list(resource_ids)
+    if not values or len(values) > MAX_POST_MUTATION_RESOURCES:
+        raise ValueError("resource_ids must contain 1 through 32 values")
+    if not all(isinstance(value, str) and value for value in values):
+        raise ValueError("resource_ids must contain non-empty strings")
+    return {"action": "request_rescan", "resource_ids": values}
 
 
 def text_content(text: Any) -> dict[str, Any]:
@@ -524,7 +581,7 @@ class Extension:
             raise ValueError("tool description must be non-empty")
         schema = dict(parameters) if parameters is not None else {"type": "object"}
         result_schema = dict(output_schema) if output_schema is not None else None
-        if result_schema is not None and self.api_version != "0.2":
+        if result_schema is not None and self.api_version not in ("0.2", "0.4"):
             raise ValueError("output_schema requires extension API 0.2")
 
         def decorate(handler: Handler) -> Handler:
@@ -558,6 +615,10 @@ class Extension:
 
     def hook(self, name: str) -> Callable[[Handler], Handler]:
         self._validate_name("hook", name)
+        if name == "compaction_strategy" and self.api_version != "0.4":
+            raise ValueError("compaction_strategy requires API 0.4")
+        if name in _TYPED_MUTATION_HOOKS and self.api_version not in ("0.2", "0.4"):
+            raise ValueError(f"{name} requires extension API 0.2")
 
         def decorate(handler: Handler) -> Handler:
             if name in self._hooks:
@@ -651,7 +712,7 @@ class Extension:
         process-scoped state.
         """
 
-        if self.api_version != "0.2":
+        if self.api_version not in ("0.2", "0.4"):
             raise RpcError(-32601, "semantic presentation requires extension API 0.2")
         self._require_capability("presentation")
         if not isinstance(snapshot, Mapping):
@@ -772,7 +833,7 @@ class Extension:
             raise ValueError("request method must be non-empty")
         self._require_initialized()
         payload = dict(params) if params is not None else {}
-        if self.api_version == "0.2" and correlate_parent:
+        if self.api_version in ("0.2", "0.4") and correlate_parent:
             parent = self._resolve_parent(parent_request_id, required=operation_scoped)
             if parent is not _MISSING:
                 payload["parent_request_id"] = parent
@@ -995,7 +1056,7 @@ class Extension:
             "confirmation/request",
             params,
             parent_request_id=parent_request_id,
-            operation_scoped=self.api_version == "0.2",
+            operation_scoped=self.api_version in ("0.2", "0.4"),
         )
         if not isinstance(result, Mapping) or not isinstance(result.get("confirmed"), bool):
             raise RpcError(-32603, "invalid confirmation response")
@@ -1026,7 +1087,7 @@ class Extension:
         if not isinstance(secret, bool):
             raise TypeError("input secret must be a boolean")
         self._require_initialized()
-        if self.api_version != "0.2":
+        if self.api_version not in ("0.2", "0.4"):
             raise RpcError(-32601, "input/request requires extension API 0.2")
         result = self.request(
             "input/request",
@@ -1082,6 +1143,8 @@ class Extension:
             event = value
         if not isinstance(event, Mapping):
             raise TypeError("progress event must be an object")
+        if event.get("type") == "decoration":
+            self._require_feature("progress_decoration")
         normalized = self._validate_progress_event(dict(event))
         sequence = token._next_sequence()
         self._send(
@@ -1098,6 +1161,20 @@ class Extension:
         return sequence
 
     report_progress = progress
+
+    def progress_decoration(
+        self,
+        label: str,
+        detail: Optional[str] = None,
+        *,
+        request_id: Any = _MISSING,
+    ) -> int:
+        """Replace the active request's bounded semantic progress decoration."""
+
+        event: dict[str, Any] = {"type": "decoration", "label": label}
+        if detail is not None:
+            event["detail"] = detail
+        return self.progress(event, request_id=request_id)
 
     def publish_artifact(
         self,
@@ -1288,6 +1365,7 @@ class Extension:
         timeout_ms: Optional[int] = None,
         profile: Optional[str] = None,
         fingerprint: Optional[str] = None,
+        model_selection: Optional[Mapping[str, str]] = None,
         parent_request_id: Any = _MISSING,
     ) -> dict[str, Any]:
         """Create a host-bounded child owned by the active request; omitted ceilings inherit the parent session's limits."""
@@ -1383,6 +1461,21 @@ class Extension:
                 "timeout_ms": timeout_ms,
             },
         }
+        if model_selection is not None:
+            self._require_feature("agent_model_selection_v1")
+            if not isinstance(model_selection, Mapping) or set(model_selection) - {"provider", "model", "reasoning"}:
+                raise ValueError("agent model_selection must contain only provider, model, reasoning")
+            for key, value in model_selection.items():
+                if key == "reasoning":
+                    if not isinstance(value, str) or value not in {
+                        "inherit", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+                    }:
+                        raise ValueError("agent reasoning must be inherit or a supported effort identifier")
+                elif (not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256
+                      or not (value[0].isascii() and (value[0].isalnum() or value[0] == "@"))
+                      or any(not (c.isascii() and (c.isalnum() or c in "._+:/@-")) for c in value)):
+                    raise ValueError("agent model_selection identifiers must be bounded plain identifiers")
+            params["policy"]["model_selection"] = dict(model_selection)
         if profile is not None:
             params["profile"] = profile
         if fingerprint is not None:
@@ -1450,6 +1543,28 @@ class Extension:
         )
         if not isinstance(result, Mapping):
             raise RpcError(-32603, f"invalid {method} response")
+        return dict(result)
+
+    def list_agent_models(
+        self, *, query: Optional[str] = None, limit: int = 50,
+        parent_request_id: Any = _MISSING,
+    ) -> dict[str, Any]:
+        """Discover bounded configured routes available to the current owner, without credentials."""
+        self._require_feature("agent_sessions")
+        self._require_feature("agent_model_selection_v1")
+        if query is not None and (not isinstance(query, str) or len(query.encode("utf-8")) > 128
+                                  or any(ord(c) < 32 or ord(c) == 127 for c in query)):
+            raise ValueError("agent model query must be plain text of at most 128 bytes")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("agent model limit must be an integer between 1 and 100")
+        params: dict[str, Any] = {"limit": limit}
+        if query is not None:
+            params["query"] = query
+        result = self.request("agent/models", params, parent_request_id=parent_request_id,
+                              operation_scoped=True)
+        if (not isinstance(result, Mapping) or not isinstance(result.get("models"), list)
+            or len(result["models"]) > limit or type(result.get("truncated")) is not bool):
+            raise RpcError(-32603, "invalid agent models response")
         return dict(result)
 
     def list_agents(
@@ -1803,11 +1918,11 @@ class Extension:
         self._validate_declarations()
 
         protocol_response: Optional[dict[str, Any]] = None
-        if self.api_version == "0.2":
+        if self.api_version in ("0.2", "0.4"):
             protocol = params.get("protocol")
             if not isinstance(protocol, Mapping):
                 raise RpcError(-32602, "API 0.2 initialize requires a protocol object")
-            if protocol.get("version") != "0.2":
+            if protocol.get("version") not in ("0.2", "0.4"):
                 raise RpcError(-32000, "unsupported executable-extension protocol version")
             required = self._feature_list(protocol.get("required_features", []), "required_features")
             optional = self._feature_list(protocol.get("optional_features", []), "optional_features")
@@ -1837,7 +1952,7 @@ class Extension:
                 with self._tool_catalog_lock:
                     self._tool_catalogs[0] = dict(self._tools)
             protocol_response = {
-                "version": "0.2",
+                "version": self.api_version,
                 "features": features,
                 "limits": {"max_concurrent_requests": self._negotiated_concurrency},
             }
@@ -1900,7 +2015,7 @@ class Extension:
             if catalog_revision is _MISSING:
                 catalog = self._tools
             else:
-                if self.api_version != "0.2" or "dynamic_tools" not in self._features:
+                if self.api_version not in ("0.2", "0.4") or "dynamic_tools" not in self._features:
                     raise RpcError(
                         -32602,
                         "tool/call catalog_revision requires negotiated dynamic_tools",
@@ -1939,7 +2054,7 @@ class Extension:
             raise
         except Exception as error:
             self.logger.error("tool handler failed", tool=name, error=str(error))
-            if self.api_version == "0.2":
+            if self.api_version in ("0.2", "0.4"):
                 return self._tool_result(
                     tool_result(text_content(str(error)), is_error=True),
                     tool,
@@ -1981,7 +2096,7 @@ class Extension:
         except Exception as error:
             self.logger.error("hook handler failed", hook=name, error=str(error))
             raise RpcError(-32603, "internal error") from error
-        return self._hook_result(value)
+        return self._hook_result(name, value)
 
     def _collect_context(self, params: Any) -> list[Any]:
         request = self._object_params(params, "context/collect")
@@ -2182,17 +2297,88 @@ class Extension:
             }
         return {"text": str(value), "notifications": [], "context": []}
 
-    @staticmethod
-    def _hook_result(value: Any) -> dict[str, Any]:
+    def _hook_result(self, hook: str, value: Any) -> dict[str, Any]:
         if value is None:
             return {"disposition": {"action": "continue"}, "context": [], "notifications": []}
-        if isinstance(value, Mapping):
-            return {
-                "disposition": value.get("disposition", {"action": "continue"}),
-                "context": value.get("context", []),
-                "notifications": value.get("notifications", []),
-            }
-        raise RpcError(-32603, "hook handler must return an object")
+        if not isinstance(value, Mapping):
+            raise RpcError(-32603, "hook handler must return an object")
+        result: dict[str, Any] = {
+            "disposition": value.get("disposition", {"action": "continue"}),
+            "context": value.get("context", []),
+            "notifications": value.get("notifications", []),
+        }
+        if hook == "provider_retry" and "provider_retry" in value:
+            result["provider_retry"] = self._validate_provider_retry_advice(
+                value["provider_retry"]
+            )
+        elif hook == "before_persistence" and "persistence_metadata" in value:
+            result["persistence_metadata"] = self._validate_persistence_metadata(
+                value["persistence_metadata"]
+            )
+        elif hook == "post_mutation" and "post_mutation" in value:
+            result["post_mutation"] = self._validate_post_mutation_disposition(
+                value["post_mutation"]
+            )
+        elif hook == "compaction_strategy":
+            if "compaction_strategy" not in self._features:
+                raise RpcError(-32603, "compaction_strategy was not negotiated")
+            frames = value.get("compaction_frames")
+            if (not isinstance(frames, list) or not 1 <= len(frames) <= 32
+                    or any(not isinstance(frame, str) or len(frame) > 512 * 1024
+                           for frame in frames)):
+                raise RpcError(-32603, "invalid compaction frames")
+            result["compaction_frames"] = frames
+        return result
+
+    @staticmethod
+    def _validate_provider_retry_advice(value: Any) -> Any:
+        if isinstance(value, str) and value in {"retry", "stop"}:
+            return value
+        if not isinstance(value, Mapping) or set(value) != {"delay"}:
+            raise RpcError(-32603, "invalid provider_retry advice")
+        delay = value["delay"]
+        if (
+            not isinstance(delay, Mapping)
+            or set(delay) != {"additional_delay_ms"}
+            or not isinstance(delay["additional_delay_ms"], int)
+            or isinstance(delay["additional_delay_ms"], bool)
+            or delay["additional_delay_ms"] < 0
+            or delay["additional_delay_ms"] > (2**64) - 1
+        ):
+            raise RpcError(-32603, "invalid provider_retry delay")
+        return {"delay": {"additional_delay_ms": delay["additional_delay_ms"]}}
+
+    @staticmethod
+    def _validate_persistence_metadata(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or set(value) - {"public", "value"} or "value" not in value:
+            raise RpcError(-32603, "invalid persistence_metadata proposal")
+        public = value.get("public", False)
+        if not isinstance(public, bool):
+            raise RpcError(-32603, "persistence_metadata public must be a boolean")
+        try:
+            json.dumps(value["value"], ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError) as error:
+            raise RpcError(-32603, "persistence_metadata value must be JSON") from error
+        return {"public": public, "value": value["value"]}
+
+    @staticmethod
+    def _validate_post_mutation_disposition(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise RpcError(-32603, "invalid post_mutation disposition")
+        action = value.get("action")
+        if action == "no_rescan" and set(value) == {"action"}:
+            return {"action": "no_rescan"}
+        resource_ids = value.get("resource_ids")
+        if (
+            action != "request_rescan"
+            or set(value) != {"action", "resource_ids"}
+            or not isinstance(resource_ids, list)
+            or not resource_ids
+            or len(resource_ids) > MAX_POST_MUTATION_RESOURCES
+            or not all(isinstance(resource, str) and resource for resource in resource_ids)
+        ):
+            raise RpcError(-32603, "invalid post_mutation rescan request")
+        return {"action": "request_rescan", "resource_ids": list(resource_ids)}
 
     @staticmethod
     def _status_result(value: Any) -> Optional[dict[str, Any]]:
@@ -2279,10 +2465,15 @@ class Extension:
         ).start()
 
     def _start_eof_drain(self) -> None:
+        shutdown_requested = self._draining
         self._draining = True
 
         def eof_flow() -> None:
-            if not self._wait_for_futures(self.shutdown_timeout):
+            if shutdown_requested:
+                # EOF must not overtake an admitted shutdown hook and its ACK.
+                # A non-cooperative hook still cannot extend the EOF drain forever.
+                self._shutdown_done.wait(self.shutdown_timeout + self.cancellation_grace)
+            elif not self._wait_for_futures(self.shutdown_timeout):
                 self._cancel_all("transport_lost")
                 self._wait_for_futures(self.cancellation_grace)
             self._fail_pending(RpcError(-32000, "stdin closed while waiting for host response"))
@@ -2356,7 +2547,7 @@ class Extension:
 
     def _require_feature(self, feature: str) -> None:
         self._require_initialized()
-        if self.api_version != "0.2" or feature not in self._features:
+        if self.api_version not in ("0.2", "0.4") or feature not in self._features:
             raise RpcError(-32601, f"API 0.2 feature is not negotiated: {feature}")
 
     def _require_declared_name(self, key: str, name: str) -> None:
@@ -2426,8 +2617,26 @@ class Extension:
                 except ValueError as error:
                     raise ValueError("output progress data is not valid base64") from error
             allowed = {"type", "stream", "encoding", "data"}
+        elif kind == "decoration":
+            label = event.get("label")
+            detail = event.get("detail")
+            if (
+                not isinstance(label, str)
+                or not label
+                or len(label.encode("utf-8")) > MAX_PROGRESS_DECORATION_LABEL_BYTES
+                or any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in label)
+            ):
+                raise ValueError("decoration progress label is invalid")
+            if detail is not None and (
+                not isinstance(detail, str)
+                or not detail
+                or len(detail.encode("utf-8")) > MAX_PROGRESS_DECORATION_DETAIL_BYTES
+                or any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in detail)
+            ):
+                raise ValueError("decoration progress detail is invalid")
+            allowed = {"type", "label", "detail"}
         else:
-            raise ValueError("progress event type must be status or output")
+            raise ValueError("progress event type must be status, output, or decoration")
         unknown = set(event) - allowed
         if unknown:
             raise ValueError(f"unknown progress event fields: {sorted(unknown)}")

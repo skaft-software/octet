@@ -100,7 +100,10 @@
           "format": "uri",
           "description": "Absolute HTTP(S) URL; cleartext HTTP is accepted only for numeric loopback addresses. Queries, fragments, and userinfo are rejected by the strict loader."
         },
-        "auth": {"$ref": "#/$defs/bearerAuth"},
+        "auth": {
+          "description": "Explicit remote credential source. 'bearer' names a logical reference resolved only by an explicitly composed host credential adapter; 'static-bearer' names exactly one extension-scoped OCTET_MCP_* environment variable that the bridge reads per request and never stores, logs, or reports. Neither form accepts or echoes a token value.",
+          "oneOf": [{"$ref": "#/$defs/bearerAuth"}, {"$ref": "#/$defs/staticBearerAuth"}]
+        },
         "enabled": {"type": "boolean"},
         "required": {"type": "boolean"},
         "startupTimeoutMs": {"type": "integer", "minimum": 10, "maximum": 30000},
@@ -109,6 +112,7 @@
       }
     },
     "bearerAuth": {
+      "description": "Host-adapter credential reference. The process owner must explicitly compose a credential adapter; the stock runtime resolves nothing and the request fails closed. OAuth/browser authorization stays policy-gated and unimplemented.",
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "credential"],
@@ -119,6 +123,21 @@
           "minLength": 1,
           "maxLength": 64,
           "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$"
+        }
+      }
+    },
+    "staticBearerAuth": {
+      "description": "Static extension-scoped credential. The bridge reads the named OCTET_MCP_* environment variable at request time; no other variable, dotenv file, keychain, or OAuth flow is consulted, and an unset or unnamespaced name fails closed without echoing the name or value.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "environment"],
+      "properties": {
+        "type": {"const": "static-bearer"},
+        "environment": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^OCTET_MCP_[A-Z0-9_]{1,48}$"
         }
       }
     }

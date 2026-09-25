@@ -96,6 +96,12 @@ pub(crate) fn validate_request(
 ) -> Result<Vec<Diagnostic>, AiError> {
     let mut diagnostics = Vec::new();
 
+    // No codec emits the native load-point schemas/references yet. Accepting
+    // this flag previously hid announced Chat tools without loading them.
+    if caps.deferred_tool_loading {
+        return Err(crate::error::ConfigError::InvalidModel(target_model.clone()).into());
+    }
+
     if req.responses.is_some() && protocol != Protocol::OpenAiResponses {
         return Err(AiError::Unsupported(UnsupportedError::ResponsesOptions));
     }
@@ -120,6 +126,14 @@ pub(crate) fn validate_request(
     }
 
     for tool in &req.tools {
+        if tool.async_execution
+            && (protocol != Protocol::OpenAiResponses || !caps.responses_features.async_tools)
+        {
+            return Err(crate::error::ConfigError::Parse(
+                "async tools are not qualified for this route".into(),
+            )
+            .into());
+        }
         if tool.name.is_empty() || !tool.parameters.is_object() {
             return Err(AiError::Validation(ValidationError::InvalidToolSchema(
                 tool.name.clone(),
@@ -144,8 +158,31 @@ pub(crate) fn validate_request(
     }
 
     // 3. Tool results and calls pairing
+    // Async-qualified Responses histories need globally unique call identities:
+    // their results may arrive across turns. Other codecs may generate fallback
+    // IDs per response, so a completed synchronous identity can be reused.
+    let global_call_ids =
+        protocol == Protocol::OpenAiResponses && caps.responses_features.async_tools;
+    // A completed historical call is replay, not a request to execute its old
+    // tool again. Index potential results here; the ordered walk below still
+    // rejects orphans, duplicates and reused identities before accepting them.
+    let historical_results: HashSet<&ToolCallId> = req
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(&user.content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            UserPart::ToolResult(result) => Some(&result.tool_call_id),
+            _ => None,
+        })
+        .collect();
     let mut all_tool_calls: HashSet<ToolCallId> = HashSet::new();
     let mut pending_calls: HashSet<ToolCallId> = HashSet::new();
+    let mut pending_async: HashSet<ToolCallId> = HashSet::new();
+    let mut completed_calls: HashSet<ToolCallId> = HashSet::new();
 
     for msg in &req.messages {
         match msg {
@@ -160,7 +197,7 @@ pub(crate) fn validate_request(
                 {
                     // In Strict mode, this is a ValidationError.
                     // In Lossy mode, we emit a diagnostic and expect the codec to insert a synthetic error.
-                    for call_id in &pending_calls {
+                    for call_id in pending_calls.difference(&pending_async) {
                         if mode == CompatibilityMode::Strict {
                             return Err(AiError::Validation(ValidationError::MissingToolResult(
                                 call_id.clone(),
@@ -172,7 +209,7 @@ pub(crate) fn validate_request(
                             });
                         }
                     }
-                    pending_calls.clear();
+                    pending_calls.retain(|id| pending_async.contains(id));
                 }
 
                 // Collect tool calls from this assistant message
@@ -184,7 +221,59 @@ pub(crate) fn validate_request(
                                 tc.id.clone(),
                             ))
                         })?;
-                        all_tool_calls.insert(tc.id.clone());
+                        if !all_tool_calls.insert(tc.id.clone())
+                            && (global_call_ids || pending_calls.contains(&tc.id))
+                        {
+                            return Err(crate::error::ConfigError::Parse(
+                                "duplicate tool call ID".into(),
+                            )
+                            .into());
+                        }
+                        if !global_call_ids {
+                            completed_calls.remove(&tc.id);
+                        }
+                        if tc.async_execution {
+                            if protocol != Protocol::OpenAiResponses
+                                || !caps.responses_features.async_tools
+                                || assistant.protocol != protocol
+                                || &assistant.model != target_model
+                            {
+                                return Err(crate::error::ConfigError::Parse(
+                                    "async call history is not qualified for this model route"
+                                        .into(),
+                                )
+                                .into());
+                            }
+                            if historical_results.contains(&tc.id) {
+                                // Its paired result makes this historical data. A
+                                // current definition may be removed or changed;
+                                // it is not the past call's execution authority.
+                                pending_async.insert(tc.id.clone());
+                            } else {
+                                if !req
+                                    .tools
+                                    .iter()
+                                    .any(|tool| tool.name == tc.name && tool.async_execution)
+                                {
+                                    return Err(crate::error::ConfigError::Parse(
+                                        "pending async call was not advertised for this tool"
+                                            .into(),
+                                    )
+                                    .into());
+                                }
+                                let arguments = tc.arguments_value()?;
+                                if tc.argument_error.is_none()
+                                    && matches!(
+                                        crate::json_repair::validate_tool_arguments(
+                                            &tc.name, &arguments, &req.tools
+                                        )?,
+                                        crate::types::ToolArgumentValidation::Valid
+                                    )
+                                {
+                                    pending_async.insert(tc.id.clone());
+                                }
+                            }
+                        }
                         pending_calls.insert(tc.id.clone());
                     }
                 }
@@ -197,7 +286,14 @@ pub(crate) fn validate_request(
                                 tr.tool_call_id.clone(),
                             )));
                         }
+                        if !completed_calls.insert(tr.tool_call_id.clone()) {
+                            return Err(crate::error::ConfigError::Parse(
+                                "duplicate tool result".into(),
+                            )
+                            .into());
+                        }
                         pending_calls.remove(&tr.tool_call_id);
+                        pending_async.remove(&tr.tool_call_id);
                     }
                 }
             }
@@ -210,7 +306,7 @@ pub(crate) fn validate_request(
         || protocol == Protocol::GoogleGenerativeAi)
         && !pending_calls.is_empty()
     {
-        for call_id in &pending_calls {
+        for call_id in pending_calls.difference(&pending_async) {
             if mode == CompatibilityMode::Strict {
                 return Err(AiError::Validation(ValidationError::MissingToolResult(
                     call_id.clone(),
@@ -474,6 +570,13 @@ pub(crate) fn validate_request(
                                         // documented tool-result media mapping.
                                         Protocol::BedrockConverse
                                         | Protocol::GoogleGenerativeAi => false,
+                                        // No evidenced native Conversations tool-result media schema.
+                                        Protocol::MistralConversations => false,
+                                        // Pi's `ImageContent` block carries inline bytes only;
+                                        // a URL or provider reference has no mapping.
+                                        Protocol::PiMessages => {
+                                            matches!(&image.source, ImageSource::Inline(_))
+                                        }
                                     },
                                     ToolResultPart::Media(Media::Audio(_)) => false,
                                 };
@@ -532,6 +635,13 @@ pub(crate) fn validate_request(
                                 });
                             }
                             if let Some(state) = &rp.state {
+                                // The pi-messages codec retains the provider's
+                                // opaque continuation payload as the canonical
+                                // signature carriers and stamps the state with
+                                // its own protocol/model, so this route must be
+                                // able to replay those kinds (see
+                                // `protocol::pi_messages::decode_stream_event`
+                                // and `assistant_part_value`).
                                 let kind_matches = matches!(
                                     (protocol, &state.kind),
                                     (
@@ -546,6 +656,10 @@ pub(crate) fn validate_request(
                                     ) | (
                                         Protocol::BedrockConverse,
                                         crate::types::ReasoningStateKind::AnthropicSignature { .. }
+                                    ) | (
+                                        Protocol::PiMessages,
+                                        crate::types::ReasoningStateKind::AnthropicSignature { .. }
+                                            | crate::types::ReasoningStateKind::AnthropicRedacted { .. }
                                     )
                                 );
                                 let empty_bedrock_signature = protocol == Protocol::BedrockConverse
@@ -786,6 +900,7 @@ mod tests {
         }
 
         Capabilities {
+            responses_features: Default::default(),
             input_modalities: input,
             output_modalities: output,
             tools,
@@ -868,6 +983,7 @@ mod tests {
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
                         id: ToolCallId("call_1".to_string()),
                         name: "tool".to_string(),
                         arguments_json: r#"{}"#.to_string(),
@@ -1069,6 +1185,7 @@ mod matrix_tests {
             output = output.with(Modality::Audio);
         }
         Capabilities {
+            responses_features: Default::default(),
             input_modalities: input,
             output_modalities: output,
             tools,
@@ -1320,11 +1437,25 @@ mod matrix_tests {
         }
     }
 
+    // --- deferred tool loading is not implemented: reject, never hide schemas ---
+    #[test]
+    fn deferred_tool_loading_is_rejected_instead_of_hiding_schemas() {
+        let req = base();
+        let mut c = caps(false, false, false, true, false, false);
+        c.deferred_tool_loading = true;
+        assert!(matches!(
+            run(&req, &c, Protocol::OpenAiChat),
+            Err(AiError::Config(crate::error::ConfigError::InvalidModel(_)))
+        ));
+    }
+
     // --- tools without capability ---
     #[test]
     fn tools_without_capability() {
         let mut req = base();
         req.tools = vec![ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "grep".into(),
             description: "search".into(),
             parameters: serde_json::json!({"type":"object"}),
@@ -1655,6 +1786,7 @@ mod matrix_tests {
             0,
             Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call_1".into()),
                     name: "t".into(),
                     arguments_json: "{}".into(),
@@ -1746,6 +1878,7 @@ mod matrix_tests {
         req.messages = vec![
             Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("call_1".into()),
                     name: "t".into(),
                     arguments_json: "{}".into(),

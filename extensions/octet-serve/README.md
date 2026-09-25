@@ -2,11 +2,10 @@
 
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
-Serve remains experimental. This checkout's source distribution is 0.7.6;
-public packages must match exactly. The [source notes](../../docs/releases/v0.7.6.md)
-describe changes; the [exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
-records publication and installation evidence. These implementation contracts do not
-imply complete feature or live-provider acceptance.
+Serve remains experimental. Its distribution is **0.8.0**; packages must match
+the host exactly. The [release notes](../../docs/releases/v0.8.0.md) link signed
+assets and public-install evidence. These implementation contracts do not imply
+complete feature or live-provider acceptance.
 
 ## Focused checks
 
@@ -86,11 +85,10 @@ The feature-gated octet adapter must:
 
 The ordinary octet binary owns package management and a small external
 `octet serve` dispatcher. The separately packaged feature-enabled runtime
-contains the adapter into private `App`. Source-level extraction behind a stable
-Runtime API is deferred; the default TUI, agent, AI, and `sexy-tui-rs` must not
+contains the adapter into private `App`. The default TUI, agent, AI, and `sexy-tui-rs` must not
 depend on the web surface. See [architecture](../../docs/experimental/octet-serve/architecture.md).
 
-The source package requires exactly octet `=0.7.6`. Use version-matched published
+The source package requires exactly octet `=0.8.0`. Use version-matched published
 assets or a matching local build and reviewed local archive. See
 [distribution channels](../../docs/distribution.md). It declares three targets:
 
@@ -118,6 +116,5 @@ package-layout gate before separately authorized publication.
 The earlier [octet 0.7.0](../../docs/releases/v0.7.0.md#release-verification) includes signed
 Serve artifacts and verified public installation. Live-provider/native-audio checks
 are optional and **NOT RUN**; package smoke does not establish full live-feature
-acceptance. Earlier passes belong to the
-[historical validation record](../../docs/experimental/octet-serve/current-state.md#validation-evidence).
+acceptance.
 Work tracking is on the [Project](https://github.com/orgs/skaft-software/projects/5).

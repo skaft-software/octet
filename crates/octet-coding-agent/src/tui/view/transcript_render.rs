@@ -19,23 +19,36 @@ use super::tool_render::{
 use super::transcript_cache::{RenderedTranscriptBlock, SurfaceGeometry};
 use super::{
     activity_elbow, finish_transcript_block, fit_line, render_shell_output, render_user_prompt,
-    subdued_text, wrap_hanging, ToolPanel, TranscriptBlock, ACTIVITY_DETAIL_INDENT,
+    subdued_text, wrap_hanging, TranscriptBlock, ACTIVITY_DETAIL_INDENT,
 };
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
 
-fn extension_activity_state_label(state: octet_agent::ExtensionPresentationState) -> &'static str {
-    match state {
-        octet_agent::ExtensionPresentationState::Loading => "loading",
-        octet_agent::ExtensionPresentationState::Pending => "pending",
-        octet_agent::ExtensionPresentationState::Active => "active",
-        octet_agent::ExtensionPresentationState::Running => "running",
-        octet_agent::ExtensionPresentationState::Succeeded => "completed",
-        octet_agent::ExtensionPresentationState::Failed => "failed",
-        octet_agent::ExtensionPresentationState::Cancelled => "cancelled",
-        octet_agent::ExtensionPresentationState::Degraded => "degraded",
-        octet_agent::ExtensionPresentationState::Stopped => "stopped",
-        octet_agent::ExtensionPresentationState::Unavailable => "unavailable",
-        octet_agent::ExtensionPresentationState::Empty => "empty",
+/// Round display-only token counts; the telemetry and accounting remain exact.
+fn compact_subagent_tokens(tokens: u64) -> String {
+    let tokens = u128::from(tokens);
+    let units = [
+        (1_000, "K"),
+        (1_000_000, "M"),
+        (1_000_000_000, "B"),
+        (1_000_000_000_000, "T"),
+    ];
+    let Some(mut index) = units.iter().rposition(|(scale, _)| tokens >= *scale) else {
+        return tokens.to_string();
+    };
+    loop {
+        let (scale, suffix) = units[index];
+        // Keep one decimal below 100 units and whole units above it.
+        let precision = if tokens < 100 * scale { 10 } else { 1 };
+        let rounded = (tokens * precision + scale / 2) / scale;
+        if rounded >= 1_000 * precision && index + 1 < units.len() {
+            index += 1;
+            continue;
+        }
+        return if precision == 10 && rounded % 10 != 0 {
+            format!("{}.{}{suffix}", rounded / 10, rounded % 10)
+        } else {
+            format!("{}{suffix}", rounded / precision)
+        };
     }
 }
 
@@ -93,160 +106,36 @@ fn append_nested_tool_output(
     header.extend(nest_tool_output(rows, theme, width));
 }
 
-fn render_subagent_activity_panel(
-    panel: &ToolPanel,
-    theme: &OctetTheme,
-    width: u16,
-) -> Vec<String> {
-    let Some(view) = panel.subagent_activity.as_ref() else {
-        return Vec::new();
-    };
-    let label = theme.bold(&theme.fg("foreground", "Subagents"));
-    let mut lines = vec![label];
-    // A subagents event is already an owner-bounded roster, so keep every
-    // retained child visible even when ordinary tool output is collapsed.
-    let unicode = theme.unicode();
-    let separator = if unicode { " · " } else { " - " };
-    let render_row = |text: &str, last: bool| {
-        let elbow = match (unicode, last) {
-            (true, true) => "└",
-            (true, false) => "├",
-            (false, true) => "`-",
-            (false, false) => "+-",
-        };
-        // Nest connectors beneath the heading and align wrapped content with
-        // the worker name, including the wider ASCII connector.
-        let prefix = format!("{ACTIVITY_DETAIL_INDENT}{} ", theme.fg("muted", elbow));
-        let continuation = " ".repeat(visible_width(&prefix));
-        wrap_hanging(text, &prefix, &continuation, width)
-    };
-    let usage_detail = |input: u64, output: u64, cost: Option<u64>| {
-        let input = crate::tui::composer_surface::compact_token_count(input);
-        let output = crate::tui::composer_surface::compact_token_count(output);
-        let mut detail = if unicode {
-            format!("{separator}↑{input} ↓{output}")
-        } else {
-            format!("{separator}in {input} out {output}")
-        };
-        if let Some(cost) = cost {
-            detail.push_str(if unicode { " • " } else { " - " });
-            detail.push_str(&crate::tui::composer_surface::format_microdollars(cost));
-        }
-        detail
-    };
-
-    if !view.telemetry.is_empty() {
-        let children = &view.telemetry;
-        let task_width = children
-            .iter()
-            .map(|child| visible_width(&sanitize_for_terminal(&child.task_name)))
-            .max()
-            .unwrap_or_default();
-        for (index, child) in children.iter().rev().enumerate() {
-            let last = index + 1 == children.len();
-            let task = sanitize_for_terminal(&child.task_name);
-            let padding = " ".repeat(task_width - visible_width(&task));
-            let status = if child.state.is_empty() {
-                "running"
-            } else {
-                child.state.as_str()
-            };
-            let mut detail = status.to_owned();
-            // Short child tools belong in the inspector, not between the
-            // compact state and usage columns where they flash in and out.
-            // Input buckets are disjoint; reasoning is already in output.
-            // Tool-call counts remain in telemetry, not the transcript row.
-            let input = child
-                .input_tokens
-                .saturating_add(child.cache_read_tokens)
-                .saturating_add(child.cache_write_tokens);
-            detail.push_str(&usage_detail(
-                input,
-                child.output_tokens,
-                child.cost_microdollars,
-            ));
-            if let Some(reason) = child.failure_reason.as_deref() {
-                detail.push_str(separator);
-                detail.push_str(&sanitize_for_terminal(reason));
-            }
-            lines.extend(render_row(
-                &format!(
-                    "{}{padding} {}",
-                    theme.fg("foreground", &task),
-                    theme.fg("muted", &detail),
-                ),
-                last,
-            ));
-        }
-    } else {
-        let activities = &view.activities;
-        let summary_width = activities
-            .iter()
-            .map(|activity| visible_width(&sanitize_for_terminal(&activity.summary)))
-            .max()
-            .unwrap_or_default();
-        for (index, activity) in activities.iter().rev().enumerate() {
-            let last = index + 1 == activities.len();
-            let summary = sanitize_for_terminal(&activity.summary);
-            let padding = " ".repeat(summary_width - visible_width(&summary));
-            let mut detail = extension_activity_state_label(activity.state).to_owned();
-            if let Some(metrics) = activity.metrics {
-                let input = metrics
-                    .input_tokens
-                    .saturating_add(metrics.cache_read_tokens)
-                    .saturating_add(metrics.cache_write_tokens);
-                detail.push_str(&usage_detail(
-                    input,
-                    metrics.output_tokens,
-                    metrics.cost_microdollars,
-                ));
-            }
-            lines.extend(render_row(
-                &format!(
-                    "{}{padding} {}",
-                    theme.fg("foreground", &summary),
-                    theme.fg("muted", &detail),
-                ),
-                last,
-            ));
-        }
-    }
-
-    if lines.len() == 1 {
-        if let Some(reason) = view.failure_reason.as_deref() {
-            lines.extend(render_row(
-                &theme.fg(
-                    "muted",
-                    &format!("failed{separator}{}", sanitize_for_terminal(reason)),
-                ),
-                true,
-            ));
-        }
-    }
-    finish_transcript_block(lines)
-}
-
 pub(super) struct RenderedTranscriptBlockUpdate {
     pub(super) stable_rows: usize,
     pub(super) replacement: Vec<String>,
     pub(super) geometry: SurfaceGeometry,
 }
 
-/// Incrementally decorate a streaming assistant tail. Stable Markdown rows and
-/// their outer surface frame remain in `TranscriptCache`; only the mutable
-/// content suffix plus trailing frame rows are rebuilt.
+/// Incrementally decorate a streaming assistant or expanded reasoning tail.
+/// Stable Markdown rows and their outer surface frame remain in
+/// `TranscriptCache`; only the mutable suffix plus trailing frame rows are rebuilt.
 pub(super) fn render_assistant_update_planned(
     previous: Option<&TranscriptBlock>,
     block: &TranscriptBlock,
     theme: &OctetTheme,
     rich_renderer: &RichRenderer,
+    reasoning_renderer: &RichRenderer,
     outer_width: u16,
+    show_reasoning: bool,
 ) -> Option<RenderedTranscriptBlockUpdate> {
-    let TranscriptBlock::Assistant(assistant) = block else {
-        return None;
+    let (assistant, renderer) = match block {
+        TranscriptBlock::Assistant(assistant) => (assistant, rich_renderer),
+        TranscriptBlock::Reasoning(reasoning)
+            if (reasoning.reasoning_expanded || show_reasoning)
+                && (!reasoning.text.is_empty() || reasoning.show_reasoning_hint) =>
+        {
+            (reasoning, reasoning_renderer)
+        }
+        _ => return None,
     };
     let plan = compile_surface_plan(previous, block, theme, outer_width);
-    let update = assistant.render_update(rich_renderer, theme, plan.geometry.content_width)?;
+    let update = assistant.render_update(renderer, theme, plan.geometry.content_width)?;
     if update.stable_prefix == 0 {
         return None;
     }
@@ -288,6 +177,9 @@ pub(super) fn render_block_planned(
         spinner_frame,
         status_shimmer_frame,
         0,
+        // Document/measurement projections have no live roster; only the
+        // retained transcript cache passes the render-time liveness flag.
+        false,
     )
 }
 
@@ -303,6 +195,7 @@ pub(super) fn render_block_planned_with_rainbow(
     spinner_frame: usize,
     status_shimmer_frame: usize,
     rainbow_strength: u16,
+    subagents_running: bool,
 ) -> RenderedTranscriptBlock {
     let plan = compile_surface_plan(previous, block, theme, outer_width);
     let width = plan.geometry.content_width;
@@ -333,6 +226,74 @@ pub(super) fn render_block_planned_with_rainbow(
             theme,
             width,
         ),
+        TranscriptBlock::Subagents(summary) => {
+            let full = summary.label();
+            let fits = |label: &str| visible_width(label) <= usize::from(width);
+            // Keep the hint in the existing heading row: adding a row pushes
+            // the mutable roster above the native viewport in short terminals.
+            let stop_label = (!summary.hydrated && summary.active_count() > 0)
+                .then(|| {
+                    [
+                        format!("{full} · stop: /subagents stop all"),
+                        format!("{full} stop all"),
+                        "Subagents /subagents stop all".to_owned(),
+                        "/subagents stop all".to_owned(),
+                    ]
+                    .into_iter()
+                    .find(|label| fits(label))
+                })
+                .flatten();
+            let label = if let Some(label) = stop_label {
+                label
+            } else if fits(&full) {
+                full
+            } else if fits("Subagents · /subagents") {
+                "Subagents · /subagents".to_owned()
+            } else {
+                "/subagents".to_owned()
+            };
+            let label = sanitize_for_terminal(&label);
+            let role = if summary.active_count() > 0 {
+                "foreground"
+            } else {
+                summary.settled_role()
+            };
+            let label = if let Some(rest) = label.strip_prefix("Subagents") {
+                format!(
+                    "{}{}",
+                    theme.bold(&theme.fg(role, "Subagents")),
+                    theme.fg(role, rest)
+                )
+            } else {
+                theme.fg(role, &label)
+            };
+            let mut lines = vec![fit_line(&label, width)];
+            let hidden = summary
+                .active_count()
+                .saturating_sub(summary.live_workers.len());
+            for worker in &summary.live_workers {
+                let elbow = activity_elbow(theme);
+                let name = sanitize_for_terminal(&worker.name);
+                let estimate = if worker.output_estimated { "~" } else { "" };
+                let text = format!(
+                    "{name} · ↑{} ↓{estimate}{}",
+                    compact_subagent_tokens(worker.input_tokens),
+                    compact_subagent_tokens(worker.output_tokens)
+                );
+                lines.push(fit_line(
+                    &theme.fg("muted", &format!("{elbow} {text}")),
+                    width,
+                ));
+            }
+            if hidden > 0 && !summary.live_workers.is_empty() {
+                let elbow = activity_elbow(theme);
+                lines.push(fit_line(
+                    &theme.fg("muted", &format!("{elbow} +{hidden} more")),
+                    width,
+                ));
+            }
+            finish_transcript_block(lines)
+        }
         TranscriptBlock::Assistant(assistant) => finish_transcript_block(
             assistant.render_on_surface(rich_renderer, theme, width, content_background),
         ),
@@ -346,9 +307,6 @@ pub(super) fn render_block_planned_with_rainbow(
             status_shimmer_frame,
             rainbow_strength,
         ),
-        TranscriptBlock::Tool(panel) if panel.subagent_activity.is_some() => {
-            finish_transcript_block(render_subagent_activity_panel(panel, theme, width))
-        }
         TranscriptBlock::Tool(panel) => {
             let compact_bash = matches!(panel.name.as_str(), "bash" | "exec")
                 && panel.display.shell_command.is_some();
@@ -436,7 +394,9 @@ pub(super) fn render_block_planned_with_rainbow(
             append_nested_tool_output(&mut lines, output_lines, theme, width);
             finish_transcript_block(lines)
         }
-        TranscriptBlock::Outcome(outcome) => render_outcome(outcome, theme, width),
+        TranscriptBlock::Outcome(outcome) => {
+            render_outcome(outcome, theme, width, subagents_running)
+        }
         TranscriptBlock::UpdateAvailable(version) => finish_transcript_block(
             super::startup_update::render_update_notice(version, rich_renderer, theme, width),
         ),

@@ -18,10 +18,11 @@ use octet_agent::extension_process::{
     ExtensionSessionLifecycleRequest, MAX_EXTENSION_TERMINAL_INPUT_BYTES,
 };
 use octet_agent::{
-    analyze_session_cache_stats, AgentCompactionMode, AgentError, AgentEvent, EntryId,
-    GoalDecision, GoalStatus, GoalTurnSource, Run, RunControl, Session, ToolProgress,
+    analyze_session_cache_stats, AgentCompactionMode, AgentError, AgentEvent, EffectBroker,
+    EffectIntent, EntryId, GoalDecision, GoalStatus, GoalTurnSource, OutputChannel, Run,
+    RunControl, Session, ToolEffect, ToolProgress, ToolProgressSink,
 };
-use octet_ai::{ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
+use octet_ai::{Model, ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use crate::app::bootstrap::{
@@ -29,14 +30,14 @@ use crate::app::bootstrap::{
     rebuild_app, resolve_launch_interactive, terminal_goal_session_id, Bootstrap, SessionSelection,
 };
 use crate::app::{
-    apply_reconfig, level_from_reasoning, reasoning_label, supported_levels_with_subagents,
-    thinking_to_reasoning_with_subagents, App, Reconfig,
+    apply_reconfig, level_from_reasoning, reasoning_label, requested_thinking_to_reasoning,
+    supported_levels_with_subagents, App, Reconfig,
 };
 use crate::commands::{self, Command};
-use crate::compaction::{
-    attempt_compaction, context_window, estimate_next_request_tokens, CompactionOutcome,
-};
-use crate::config::{CompactionMode, Config, ThinkingLevel};
+#[cfg(test)]
+use crate::compaction::attempt_compaction;
+use crate::compaction::{context_window, estimate_next_request_tokens, CompactionOutcome};
+use crate::config::{CompactionMode, Config, ResumeSelector, SandboxPolicy, ThinkingLevel};
 use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
 use crate::prompts::{render_and_record, RenderedPrompt};
@@ -45,14 +46,13 @@ use crate::provider_setup::{
     SetupAuthentication, SetupAuthority, SetupDraft,
 };
 use crate::resources::{compose_instructions, expand_skill_command};
-use crate::session_tree::render_session_tree;
 use crate::tui::composer::ComposedInput;
 use crate::tui::keymap::{self, InputAction};
 use crate::tui::pickers::{
-    confirmation_picker, extension_confirmation_picker, extension_input_picker, extension_picker,
-    message_picker, optional_model_picker, pick_list_with_preview, provider_setup_picker,
-    read_only_document, read_only_document_live_styled, session_picker, subagent_picker,
-    thinking_picker, tool_input_picker, SubagentPickerSnapshot,
+    self, confirmation_picker, extension_confirmation_picker, extension_input_picker,
+    extension_picker, message_picker, optional_model_picker, pick_list_with_preview,
+    provider_setup_picker, read_only_document, read_only_document_live_styled, session_picker,
+    subagent_picker, thinking_picker, SubagentPickerSnapshot,
 };
 use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
@@ -61,21 +61,65 @@ use crate::tui::theme::{
     TerminalThemeChoice,
 };
 use crate::tui::view::{
-    InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult, PanelAction,
+    InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult, Panel, PanelAction, PanelResult,
+    SubagentPanel,
 };
 
+mod onboarding;
+
 /// Ordered controls sent to the frozen Agent during an active run.
-#[derive(Debug)]
 enum ControlIntent {
-    Steer(octet_agent::UserInput),
+    /// Retractable live steering whose payload and recall receipt already live
+    /// in the shell queue. Sending through `steer_retractable` keeps the
+    /// receipt authoritative, so an Option/Alt+Up recall before delivery is a
+    /// successful no-op instead of a duplicate append. Nonretractable `/answer`
+    /// steering keeps using [`ControlIntent::FinishNow`].
+    SteerPrepared(octet_agent::PreparedSteering),
     FinishNow(octet_agent::UserInput),
 }
 
 type ControlFuture = Pin<Box<dyn Future<Output = Result<(), AgentError>>>>;
+type SubagentStop = Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>;
+
+/// The narrow broadcast seam that brackets one frontend-owned host dialog with
+/// exactly one `dialog/started`/`dialog/settled` pair, whatever its outcome.
+trait DialogLifecycleSink {
+    fn open_dialog(&self, dialog: &str);
+    fn close_dialog(&self, dialog: &str);
+}
+
+impl DialogLifecycleSink for crate::extensions::ExtensionLifecycleSnapshot {
+    fn open_dialog(&self, dialog: &str) {
+        crate::extensions::ExtensionLifecycleSnapshot::dialog_started(self, dialog);
+    }
+
+    fn close_dialog(&self, dialog: &str) {
+        crate::extensions::ExtensionLifecycleSnapshot::dialog_settled(self, dialog);
+    }
+}
+
+/// Present one host-owned dialog under a single dialog boundary.
+///
+/// The settled boundary is published on every outcome, including refusal,
+/// cancellation, picker errors, and shutdown, and it is published exactly once
+/// because the boundary is not part of the picker's own control flow.
+async fn present_host_dialog<S, F, T>(dialogs: &S, dialog: &'static str, present: F) -> T
+where
+    S: DialogLifecycleSink + ?Sized,
+    F: Future<Output = T>,
+{
+    dialogs.open_dialog(dialog);
+    let outcome = present.await;
+    dialogs.close_dialog(dialog);
+    outcome
+}
 
 struct InteractiveExtensionConfirmations<'a> {
     shell: &'a mut InteractiveShell,
     input: &'a mut EventStream,
+    /// Process handles captured before the extension runtime took its mutable
+    /// borrow, so a presented dialog can still announce its boundary.
+    dialogs: &'a crate::extensions::ExtensionLifecycleSnapshot,
 }
 
 impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionConfirmations<'_> {
@@ -138,7 +182,8 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
         extension: &'a str,
         request: &'a octet_agent::extension_process::ConfirmationRequest,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
-        Box::pin(async move {
+        let dialogs = self.dialogs;
+        Box::pin(present_host_dialog(dialogs, "confirm", async move {
             tokio::select! {
                 biased;
                 _ = crate::tui::terminal::wait_for_shutdown_signal() => {
@@ -151,7 +196,7 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
                     request,
                 ) => result,
             }
-        })
+        }))
     }
 
     fn input<'a>(
@@ -159,7 +204,8 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
         _extension: &'a str,
         request: &'a octet_agent::extension_process::ExtensionInputRequest,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + 'a>> {
-        Box::pin(async move {
+        let dialogs = self.dialogs;
+        Box::pin(present_host_dialog(dialogs, "input", async move {
             tokio::select! {
                 biased;
                 _ = crate::tui::terminal::wait_for_shutdown_signal() => {
@@ -167,7 +213,7 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
                 }
                 result = extension_input_picker(self.shell, self.input, request) => result,
             }
-        })
+        }))
     }
 }
 
@@ -178,6 +224,7 @@ pub enum PendingIdleAction {
     Login(Option<String>),
     Logout(Option<String>),
     ChangeModel(ModelId),
+    Fast(bool),
     ChangeThinking(ReasoningConfig),
     ChangeThinkingLevel(ThinkingLevel),
     CycleThinking,
@@ -188,13 +235,24 @@ pub enum PendingIdleAction {
     Fork,
     Clone,
     Compact,
+    CompactWithInstructions(String),
     AutoCompact(Option<commands::AutoCompactSetting>),
     ShowContext,
     ReloadResources,
-    ShowTree,
-    CheckoutEntry(String),
     Skills(commands::SkillsSubcommand),
-    Goal(commands::GoalCommand),
+    // `/goal` deliberately has no queued form: it is applied the instant it is
+    // submitted, mid-run or idle. Deferring it to the next idle boundary was
+    // the reported defect, so the queue cannot even represent it.
+    /// Extension management that owns the application (menu, reload, actions).
+    Extensions(commands::ExtensionsSubcommand),
+    /// `/settings` mutations that must own the application (theme, images,
+    /// default model/reasoning). Reports are rendered immediately instead.
+    Settings(commands::SettingsCommand),
+    /// `/scoped-models` mutations that must own the application catalog and the
+    /// shell's cycling list. Reports are rendered immediately instead.
+    ScopedModels(commands::ScopedModelsCommand),
+    /// Durable record of a shell escape that ran during an active run.
+    RecordShellEscape(commands::ShellEscapeRecord),
 }
 
 /// Push an idle action while preserving ordering barriers. Adjacent model or
@@ -206,26 +264,31 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
         (
             Some(PendingIdleAction::ChangeModel(_)),
             PendingIdleAction::ChangeModel(_)
-        ) | (
-            Some(PendingIdleAction::ChangeThinking(_)),
-            PendingIdleAction::ChangeThinking(_)
-        ) | (
-            Some(PendingIdleAction::ChangeThinking(_)),
-            PendingIdleAction::ChangeThinkingLevel(_)
-        ) | (
-            Some(PendingIdleAction::ChangeThinkingLevel(_)),
-            PendingIdleAction::ChangeThinking(_)
-        ) | (
-            Some(PendingIdleAction::ChangeThinkingLevel(_)),
-            PendingIdleAction::ChangeThinkingLevel(_)
-        ) | (
-            Some(
+        ) | (Some(PendingIdleAction::Fast(_)), PendingIdleAction::Fast(_))
+            | (
+                Some(PendingIdleAction::ChangeThinking(_)),
                 PendingIdleAction::ChangeThinking(_)
-                    | PendingIdleAction::ChangeThinkingLevel(_)
-                    | PendingIdleAction::CycleThinking
-            ),
-            PendingIdleAction::CycleThinking
-        )
+            )
+            | (
+                Some(PendingIdleAction::ChangeThinking(_)),
+                PendingIdleAction::ChangeThinkingLevel(_)
+            )
+            | (
+                Some(PendingIdleAction::ChangeThinkingLevel(_)),
+                PendingIdleAction::ChangeThinking(_)
+            )
+            | (
+                Some(PendingIdleAction::ChangeThinkingLevel(_)),
+                PendingIdleAction::ChangeThinkingLevel(_)
+            )
+            | (
+                Some(
+                    PendingIdleAction::ChangeThinking(_)
+                        | PendingIdleAction::ChangeThinkingLevel(_)
+                        | PendingIdleAction::CycleThinking
+                ),
+                PendingIdleAction::CycleThinking
+            )
     );
     if same_kind {
         let _ = queue.pop_back();
@@ -237,11 +300,16 @@ enum Idle {
     Submit(ComposedInput),
     Command(String),
     SessionLifecycle(ExtensionSessionLifecycleRequest),
+    /// The live-reload supervisor has stale layers past their debounce deadline.
+    /// `run_interactive_once` applies them in the fixed order resources →
+    /// extensions → host before the next prompt is drawn.
+    ReloadDue,
     GoalContinuation,
     CycleThinking,
     Quit,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_prompt<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -249,6 +317,9 @@ async fn wait_for_prompt<S>(
     extension_tick: &mut Interval,
     executable_extensions: &mut crate::extensions::ExecutableExtensions,
     goal_deadline: Option<Instant>,
+    reload_tick: &mut Interval,
+    reload_watcher: &crate::reload::ReloadWatcher,
+    reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<Idle>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -269,6 +340,11 @@ where
                     Some(Err(error)) => return Err(error.into()),
                     None => return Ok(Idle::Quit),
                 };
+                // Search owns its query before any extension or clipboard
+                // admission; pasted paths/text must not become composer input.
+                if shell.intercept_transcript_input(&event) {
+                    continue;
+                }
                 observe_extension_terminal_event(executable_extensions, &event);
                 if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
                     shell.request_close();
@@ -329,19 +405,17 @@ where
                     shell.render();
                     continue;
                 }
-                let pending = if shell.pending_is_empty() {
-                    String::new()
-                } else {
-                    shell.pending()
-                };
-                match keymap::translate_with_popup(
-                    Some(event),
-                    false,
-                    &pending,
-                    shell.slash_popup_open(),
-                ) {
+                // The clipboard gesture is resolved before translation: the
+                // native read is asynchronous and the translator has no action
+                // that can await it. A failed read falls through untouched.
+                if paste_clipboard_text(shell, &event).await {
+                    continue;
+                }
+                match shell.translate_input(Some(event), false) {
                     InputAction::SlashMenu(action) => {
-                        shell.slash_menu(action);
+                        if shell.slash_menu(action) {
+                            return Ok(Idle::Command(shell.drain_editor()));
+                        }
                         shell.render();
                     }
                     InputAction::CompleteSlashCommand => {
@@ -411,6 +485,10 @@ where
                         shell.render();
                     }
                     InputAction::CycleThinking => return Ok(Idle::CycleThinking),
+                    InputAction::EditQueued => {
+                        shell.edit_queued_message();
+                        shell.render();
+                    }
                     InputAction::ClearEditor => {
                         shell.clear_editor();
                         shell.render();
@@ -420,9 +498,12 @@ where
                         shell.render();
                     }
                     InputAction::Submit(_) => return Ok(Idle::Submit(shell.drain_composed())),
-                    InputAction::Command(_) => return Ok(Idle::Command(shell.drain_editor())),
+                    InputAction::Command(text) => return Ok(Idle::Command(shell.consume_command_text(text))),
                     InputAction::Closed => return Ok(Idle::Quit),
-                    InputAction::Ignore | InputAction::Abort | InputAction::Steer(_) => {}
+                    InputAction::FocusGained => apply_focus_transition(shell, true),
+                    InputAction::FocusLost => apply_focus_transition(shell, false),
+                    InputAction::Ignore | InputAction::Abort | InputAction::DispatchQueued
+                    | InputAction::Queue(_) | InputAction::Steer(_) => {}
                 }
             }
             // Mouse/trackpad events arrive in bursts. Apply every delta to
@@ -444,6 +525,19 @@ where
                 // request queued until the frontend returns to its prompt.
                 if !shell.has_panel() && !shell.has_overlay() {
                     if let Some(request) = executable_extensions.next_session_lifecycle_request() {
+                        if matches!(
+                            request.operation(),
+                            ExtensionSessionLifecycleOperation::Reload
+                        ) {
+                            // API 0.3 `session/reload` is a first-class reload
+                            // trigger (Pi's `ctx.reload()`), not only a file
+                            // change: mark resources and extensions stale and
+                            // let the idle boundary apply them in order.
+                            reload.request(
+                                std::time::Instant::now(),
+                                crate::reload::ReloadRequester::ExtensionSessionReload,
+                            );
+                        }
                         return Ok(Idle::SessionLifecycle(request));
                     }
                 }
@@ -451,6 +545,142 @@ where
                     shell.render();
                 }
             }
+            // Live reload: sample on the poll interval, then hand a due pass
+            // back to the caller. `begin` and the reloads themselves stay in
+            // the outer loop, which owns `&mut App`.
+            _ = reload_tick.tick() => {
+                let now = std::time::Instant::now();
+                if let Some(observed) =
+                    reload_watcher.poll(reload, &crate::reload::SystemMetadata, now)
+                {
+                    if observed.first_observation {
+                        if let Some(notice) = reload_watcher.watches().limit_notice() {
+                            shell.notice(notice);
+                            shell.render();
+                        }
+                    }
+                    for notice in reload.checked_problems(
+                        crate::reload::ReloadComponent::WatchCoverage,
+                        observed.cap_notice().into_iter().collect(),
+                        false,
+                    ) {
+                        shell.notice(notice);
+                        shell.render();
+                    }
+                    if observed.anything_changed() && !observed.due {
+                        // Queued evidence always carries a debounce deadline;
+                        // without one it would wait forever, so say so loudly
+                        // rather than silently never applying it.
+                        debug_assert!(
+                            reload.deadline().is_some(),
+                            "queued live-reload evidence must carry a debounce deadline"
+                        );
+                    }
+                }
+                if reload.is_due(now) {
+                    return Ok(Idle::ReloadDue);
+                }
+            }
+        }
+    }
+}
+
+/// Durable goal state a live run can still reach.
+///
+/// `Run` owns `&mut Agent` for the whole turn, so the frontend cannot lend it
+/// `&App` and cannot call the idle goal dispatcher. These are exactly the
+/// application fields the goal command touches: the shared durable store, the
+/// session key that store is addressed by, and the driver, whose state is
+/// already `Arc`-shared with `app.goal_driver`, so a command applied mid-run is
+/// the same command the idle boundary would have applied.
+#[derive(Clone)]
+pub(crate) struct GoalAccess {
+    store: Arc<octet_agent::DurableGoalStore>,
+    driver: octet_agent::GoalDriver,
+    session_id: String,
+}
+
+/// A live run that cannot address the durable goal at all.
+///
+/// `/goal` under an active run fails closed with this reason: it is rendered to
+/// the user, never queued to the next idle boundary, and never a silent no-op.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ActiveGoalError {
+    /// The session carries no durable goal identity, so neither a read nor a
+    /// mutation can be addressed. Bootstrap requires one, so this means the run
+    /// cannot reconstruct the key it would have to mutate.
+    #[error("the session has no durable goal identity, so the goal store cannot be addressed")]
+    UnaddressableSession,
+}
+
+impl GoalAccess {
+    /// Address the durable goal of an application whose `Agent` is not borrowed.
+    fn from_app(app: &App) -> Result<Self, ActiveGoalError> {
+        Self::from_parts(
+            app.goal_store.clone(),
+            app.goal_driver.clone(),
+            app.goal_session_id.clone(),
+        )
+    }
+
+    fn from_parts(
+        store: Arc<octet_agent::DurableGoalStore>,
+        driver: octet_agent::GoalDriver,
+        session_id: String,
+    ) -> Result<Self, ActiveGoalError> {
+        if session_id.is_empty() {
+            return Err(ActiveGoalError::UnaddressableSession);
+        }
+        Ok(Self {
+            store,
+            driver,
+            session_id,
+        })
+    }
+
+    fn status_text(&self) -> anyhow::Result<String> {
+        let goal = self.store.get(&self.session_id)?;
+        let Some(goal) = goal else {
+            return Ok("No goal is configured for this session.".to_owned());
+        };
+        let remaining = goal
+            .turn_budget
+            .map(|budget| {
+                format!(
+                    " · {} turn{} remaining",
+                    budget.saturating_sub(goal.turns_used),
+                    if budget.saturating_sub(goal.turns_used) == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                )
+            })
+            .unwrap_or_default();
+        Ok(format!(
+            "{} goal: {}{}",
+            goal_status_label(goal.status),
+            goal.objective,
+            remaining
+        ))
+    }
+
+    fn arm_deadline(&self) -> anyhow::Result<Option<Instant>> {
+        match self.driver.turn_settled(GoalTurnSource::User, "", false)? {
+            GoalDecision::Wait { delay, .. } => Ok(Some(Instant::now() + delay)),
+            _ => Ok(None),
+        }
+    }
+
+    fn recovered_deadline(&self) -> anyhow::Result<Option<Instant>> {
+        if self
+            .store
+            .get(&self.session_id)?
+            .is_some_and(|goal| goal.status == GoalStatus::Active)
+        {
+            self.arm_deadline()
+        } else {
+            Ok(None)
         }
     }
 }
@@ -466,57 +696,31 @@ fn goal_status_label(status: GoalStatus) -> &'static str {
     }
 }
 
-fn goal_status_text(app: &App) -> anyhow::Result<String> {
-    let goal = app.goal_store.get(&app.goal_session_id)?;
-    let Some(goal) = goal else {
-        return Ok("No goal is configured for this session.".to_owned());
-    };
-    let remaining = goal
-        .turn_budget
-        .map(|budget| {
-            format!(
-                " · {} turn{} remaining",
-                budget.saturating_sub(goal.turns_used),
-                if budget.saturating_sub(goal.turns_used) == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            )
-        })
-        .unwrap_or_default();
-    Ok(format!(
-        "{} goal: {}{}",
-        goal_status_label(goal.status),
-        goal.objective,
-        remaining
-    ))
-}
-
-fn arm_goal_deadline(app: &App) -> anyhow::Result<Option<Instant>> {
-    match app
-        .goal_driver
-        .turn_settled(GoalTurnSource::User, "", false)?
-    {
-        GoalDecision::Wait { delay, .. } => Ok(Some(Instant::now() + delay)),
-        _ => Ok(None),
-    }
-}
-
 fn recovered_goal_deadline(app: &App) -> anyhow::Result<Option<Instant>> {
-    if app
-        .goal_store
-        .get(&app.goal_session_id)?
-        .is_some_and(|goal| goal.status == GoalStatus::Active)
-    {
-        arm_goal_deadline(app)
-    } else {
-        Ok(None)
-    }
+    GoalAccess::from_app(app)?.recovered_deadline()
 }
 
-fn apply_goal_command(
+/// The idle dispatcher's `/goal` arm: address the durable goal of the current
+/// application and apply the command now. Idle and mid-run `/goal` both call
+/// [`apply_goal_command`], so their durable effect and driver state cannot
+/// diverge.
+fn apply_idle_goal_command(
     app: &App,
+    shell: &mut InteractiveShell,
+    command: commands::GoalCommand,
+    goal_deadline: &mut Option<Instant>,
+) -> anyhow::Result<()> {
+    apply_goal_command(&GoalAccess::from_app(app)?, shell, command, goal_deadline)
+}
+
+/// Apply `/goal` now, against durable state, wherever the command was typed.
+///
+/// The same producer serves the idle dispatcher and a live run: `/goal` is
+/// never queued to the next idle boundary, so a mid-run objective, pause,
+/// resume, or clear mutates the store at that instant and leaves the driver
+/// armed exactly as an idle command would.
+fn apply_goal_command(
+    access: &GoalAccess,
     shell: &mut InteractiveShell,
     command: commands::GoalCommand,
     goal_deadline: &mut Option<Instant>,
@@ -530,7 +734,7 @@ fn apply_goal_command(
             "Goal commands\n\n/goal <objective>\n/goal status\n/goal pause\n/goal resume\n/goal clear"
                 .to_owned(),
         ),
-        commands::GoalCommand::Status => match goal_status_text(app) {
+        commands::GoalCommand::Status => match access.status_text() {
             Ok(status) => shell.show_report_text(
                 "Goal status",
                 "Review the current session goal",
@@ -538,28 +742,27 @@ fn apply_goal_command(
             ),
             Err(error) => shell.error(format!("unable to read goal: {error}")),
         },
-        commands::GoalCommand::Set(objective) => match app
-            .goal_store
-            .set(&app.goal_session_id, &objective, None)
-        {
-            Ok(goal) => {
-                app.goal_driver.user_spoke();
-                *goal_deadline = arm_goal_deadline(app)?;
-                shell.notice(format!(
-                    "goal set · {} goal: {}",
-                    goal_status_label(goal.status), goal.objective
-                ));
+        commands::GoalCommand::Set(objective) => {
+            match access.store.set(&access.session_id, &objective, None) {
+                Ok(goal) => {
+                    access.driver.user_spoke();
+                    *goal_deadline = access.arm_deadline()?;
+                    shell.notice(format!(
+                        "goal set · {} goal: {}",
+                        goal_status_label(goal.status), goal.objective
+                    ));
+                }
+                Err(error) => shell.error(format!("unable to set goal: {error}")),
             }
-            Err(error) => shell.error(format!("unable to set goal: {error}")),
-        },
+        }
         commands::GoalCommand::Pause => {
-            match app
-                .goal_store
-                .apply(&app.goal_session_id, DurableGoalAction::Pause)
+            match access
+                .store
+                .apply(&access.session_id, DurableGoalAction::Pause)
             {
                 Ok(Some(goal)) => {
                     *goal_deadline = None;
-                    app.goal_driver.user_spoke();
+                    access.driver.user_spoke();
                     shell.notice(format!("goal paused · {}", goal.objective));
                 }
                 Ok(None) => shell.error("no goal is configured for this session".to_owned()),
@@ -567,13 +770,13 @@ fn apply_goal_command(
             }
         }
         commands::GoalCommand::Resume => {
-            match app
-                .goal_store
-                .apply(&app.goal_session_id, DurableGoalAction::Resume)
+            match access
+                .store
+                .apply(&access.session_id, DurableGoalAction::Resume)
             {
                 Ok(Some(goal)) => {
-                    app.goal_driver.user_spoke();
-                    *goal_deadline = arm_goal_deadline(app)?;
+                    access.driver.user_spoke();
+                    *goal_deadline = access.arm_deadline()?;
                     shell.notice(format!("goal resumed · {}", goal.objective));
                 }
                 Ok(None) => shell.error("no goal is configured for this session".to_owned()),
@@ -581,13 +784,13 @@ fn apply_goal_command(
             }
         }
         commands::GoalCommand::Clear => {
-            match app
-                .goal_store
-                .apply(&app.goal_session_id, DurableGoalAction::Clear)
+            match access
+                .store
+                .apply(&access.session_id, DurableGoalAction::Clear)
             {
                 Ok(None) => {
                     *goal_deadline = None;
-                    app.goal_driver.user_spoke();
+                    access.driver.user_spoke();
                     shell.notice("goal cleared");
                 }
                 Ok(Some(_)) => unreachable!("clearing a goal returns no state"),
@@ -656,13 +859,19 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
         Command::Fork => PendingIdleAction::Fork,
         Command::Clone => PendingIdleAction::Clone,
         Command::Compact => PendingIdleAction::Compact,
+        Command::CompactWithInstructions(instructions) => {
+            PendingIdleAction::CompactWithInstructions(instructions)
+        }
         Command::AutoCompact(setting) => PendingIdleAction::AutoCompact(setting),
         Command::Context => PendingIdleAction::ShowContext,
         Command::Reload => PendingIdleAction::ReloadResources,
-        Command::Tree => PendingIdleAction::ShowTree,
-        Command::Checkout(id) => PendingIdleAction::CheckoutEntry(id),
         Command::Skills(sub) => PendingIdleAction::Skills(sub),
-        Command::Goal(goal) => PendingIdleAction::Goal(goal),
+        // `/goal` is applied the instant it is submitted, mid-run or idle. It
+        // has no queued form: queueing it is exactly the reported defect, so an
+        // attempt to queue one fails closed instead of deferring the command.
+        Command::Goal(_) => {
+            anyhow::bail!("`/goal` is applied immediately and is never queued as an idle action")
+        }
         other => anyhow::bail!("{other:?} cannot be queued as an idle action"),
     };
     push_pending_action(queue, action);
@@ -693,6 +902,14 @@ where
             }
             event = input.next(), if input_open => match event {
                 Some(Ok(event)) => {
+                    if shell.intercept_transcript_input(&event) {
+                        continue;
+                    }
+                    // A clipboard paste is still admitted while a cancellable
+                    // operation runs; a failed read keeps the event unchanged.
+                    if paste_clipboard_text(shell, &event).await {
+                        continue;
+                    }
                     if handle_cancellable_wait_input(shell, event) {
                         return None;
                     }
@@ -728,9 +945,8 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         shell.render();
         return false;
     }
-    let pending = shell.pending();
-    match keymap::translate_with_popup(Some(event), true, &pending, shell.slash_popup_open()) {
-        InputAction::Abort => return true,
+    match shell.translate_input(Some(event), true) {
+        InputAction::Abort | InputAction::DispatchQueued => return true,
         InputAction::Closed => {
             shell.request_close();
             return true;
@@ -742,10 +958,15 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         InputAction::Scroll(direction) => shell.scroll(direction),
         InputAction::ScrollLines(direction) => shell.scroll_lines(direction),
         InputAction::JumpToTail => shell.jump_to_tail(),
-        InputAction::SlashMenu(action) => shell.slash_menu(action),
+        InputAction::SlashMenu(action) => {
+            shell.slash_menu(action);
+        }
         InputAction::CompleteSlashCommand => shell.complete_slash_command(),
         InputAction::CompletePath => shell.complete_path(),
-        InputAction::Steer(_) | InputAction::Submit(_) | InputAction::Command(_) => {
+        InputAction::Queue(_)
+        | InputAction::Steer(_)
+        | InputAction::Submit(_)
+        | InputAction::Command(_) => {
             // This operation has no RunControl owner. Keep the complete draft
             // rather than pretending Enter delivered it or discarding it.
             shell.notice("operation in progress · draft kept for the next prompt");
@@ -763,6 +984,7 @@ async fn compact_interactively<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
     force: bool,
+    instructions: Option<&str>,
 ) where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
@@ -772,19 +994,36 @@ async fn compact_interactively<S>(
     }
     shell.set_run_label("compacting…");
     shell.render();
+    app.executable_extensions.notify_compaction_started_all();
     let original_keep = app.config.compaction.keep_recent_tokens;
     if force {
         app.config.compaction.keep_recent_tokens = 1;
     }
-    let result = await_with_ctrl_c(attempt_compaction(app), shell, input).await;
+    let result = await_with_ctrl_c(
+        crate::compaction::attempt_compaction_with_instructions(app, instructions),
+        shell,
+        input,
+    )
+    .await;
     app.config.compaction.keep_recent_tokens = original_keep;
     // Clear the transient activity on every result before publishing the one
     // settled frame, including errors and cancellation of a held-open response.
     shell.set_run_label("idle");
     match result {
-        Some(Ok(outcome)) => report_compaction(shell, &outcome, app.agent.session()),
-        Some(Err(error)) => shell.error(format!("compaction failed: {error}")),
-        None => shell.notice("compaction cancelled · completed work is retained"),
+        Some(Ok(outcome)) => {
+            app.executable_extensions.notify_compaction_settled_all();
+            report_compaction(shell, &outcome, app.agent.session());
+        }
+        Some(Err(error)) => {
+            app.executable_extensions
+                .notify_compaction_failed_all(&error.to_string());
+            shell.error(format!("compaction failed: {error}"));
+        }
+        None => {
+            // A cancelled boundary still settles; nothing failed.
+            app.executable_extensions.notify_compaction_settled_all();
+            shell.notice("compaction cancelled · completed work is retained");
+        }
     }
     if let Some(message) = cost_limit_message(app) {
         shell.error(message);
@@ -802,12 +1041,434 @@ fn is_ctrl_c(key: &crossterm::event::KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
+/// Declared clipboard paste gesture. `app.clipboard.pasteImage` defaults to
+/// ctrl+v, or alt+v on Windows (`tui/keymap/keybindings.rs`). The gesture is
+/// resolved here rather than in the keymap because the native read is
+/// asynchronous: the translator has no action that can await it. The event is
+/// otherwise unbound, so this consumes nothing the translator would deliver.
+///
+/// Required keymap change (recorded, not made — another worker owns
+/// `keymap.rs`): add `InputAction::PasteImage`, return it from
+/// `translate_input` for this same key, and reserve the key in
+/// `is_reserved_extension_shortcut`; then this predicate can be deleted.
+fn is_clipboard_paste_key(key: &crossterm::event::KeyEvent) -> bool {
+    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return false;
+    }
+    let expected = if cfg!(target_os = "windows") {
+        KeyModifiers::ALT
+    } else {
+        KeyModifiers::CONTROL
+    };
+    key.code == KeyCode::Char('v') && key.modifiers == expected
+}
+
+/// Insert native clipboard text into the composer through the bracketed-paste
+/// path, so consent, path attachment, and large-paste classification stay
+/// identical to a terminal-originated paste. Returns `true` only when the
+/// gesture was consumed: an unavailable, empty, or oversized clipboard falls
+/// through to the existing behaviour (terminal bracketed paste plus the
+/// retained copy buffer) instead of reporting a paste that did not happen.
+async fn paste_clipboard_text(shell: &mut InteractiveShell, event: &Event) -> bool {
+    if !matches!(event, Event::Key(key) if is_clipboard_paste_key(key)) {
+        return false;
+    }
+    let Some(text) = clipboard_read::read_text().await else {
+        return false;
+    };
+    shell.apply_edit(crate::tui::keymap::EditAction::Paste(text));
+    shell.render();
+    true
+}
+
+/// Settle only into the exact editor revision that admitted the native read.
+/// Any intervening text/cursor edit (including extension replacement) invalidates
+/// both its text and fallback gesture. The normal composer must still own focus;
+/// search/panels/tool input must never receive its result. Snapshot text is cloned
+/// only at admission, completion, and fallback replay—not on each loop poll.
+fn settle_active_clipboard_read(
+    shell: &mut InteractiveShell,
+    revision: u64,
+    text: Option<String>,
+    gesture: Option<Event>,
+) -> Option<Event> {
+    let editor = shell.extension_editor_snapshot();
+    if !editor.focused || editor.revision != revision {
+        return None;
+    }
+    if let Some(text) = text {
+        shell.apply_edit(crate::tui::keymap::EditAction::Paste(text));
+        shell.render();
+        None
+    } else {
+        gesture
+    }
+}
+
+/// Native **text** clipboard read (parity row 2c.6). Clipboard image capture is
+/// an explicit exclusion, so only text ever leaves the clipboard and nothing in
+/// this module writes to it. The existing write transport (pbcopy plus OSC 52 in
+/// `tui/view.rs`) is untouched and remains the fallback.
+///
+/// Every helper is bounded by a deadline and a byte cap, and every failure fails
+/// closed. A helper that blocks — a disconnected display, a wedged Wayland
+/// compositor, no `pbpaste` on PATH — must never hold the interactive loop.
+mod clipboard_read {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    /// Deadline for one helper process.
+    const READ_TIMEOUT: Duration = Duration::from_millis(600);
+    /// Accepted clipboard text. A larger payload fails closed rather than
+    /// pasting a silently truncated document.
+    const MAX_TEXT_BYTES: usize = 1024 * 1024;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Platform {
+        MacOs,
+        Linux,
+        Windows,
+    }
+
+    fn host_platform() -> Platform {
+        if cfg!(target_os = "macos") {
+            Platform::MacOs
+        } else if cfg!(target_os = "windows") {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Helper {
+        program: String,
+        args: Vec<String>,
+    }
+
+    fn helper(program: &str, args: &[&str]) -> Helper {
+        Helper {
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        }
+    }
+
+    /// Declared helper order. A platform helper is used when it exists, so an
+    /// environment that declares no display yields no helper at all and the read
+    /// fails closed instead of scraping an unrelated transport.
+    fn helpers(platform: Platform, env: impl Fn(&str) -> Option<String>) -> Vec<Helper> {
+        match platform {
+            Platform::MacOs => vec![helper("pbpaste", &[])],
+            // `clip` writes only; PowerShell is the declared text reader.
+            Platform::Windows => vec![helper(
+                "powershell",
+                &["-NoProfile", "-Command", "Get-Clipboard -Raw"],
+            )],
+            Platform::Linux => {
+                let mut helpers = Vec::new();
+                if env("TERMUX_VERSION").is_some() {
+                    helpers.push(helper("termux-clipboard-get", &[]));
+                }
+                if env("WAYLAND_DISPLAY").is_some() {
+                    helpers.push(helper("wl-paste", &["--no-newline", "--type", "text"]));
+                }
+                if env("DISPLAY").is_some() {
+                    helpers.push(helper("xclip", &["-selection", "clipboard", "-out"]));
+                    helpers.push(helper("xsel", &["--clipboard", "--output"]));
+                }
+                helpers
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        /// The helper exited successfully and produced bytes.
+        Text(Vec<u8>),
+        /// The helper exited successfully and produced nothing.
+        Empty,
+        /// The helper is missing, failed, timed out, or exceeded the byte cap.
+        Failed,
+    }
+
+    /// Decide one helper's contribution. `Err(())` means "try the next helper";
+    /// every other outcome settles the read, matching the reference loop, where
+    /// a successful helper that printed nothing reports an empty clipboard
+    /// rather than leaking into the next transport.
+    fn settle(outcome: Outcome) -> Result<Option<String>, ()> {
+        match outcome {
+            Outcome::Failed => Err(()),
+            Outcome::Empty => Ok(None),
+            Outcome::Text(bytes) => Ok(decode(&bytes)),
+        }
+    }
+
+    /// Invalid UTF-8 is replaced rather than dropped, matching the reference
+    /// reader's `toString("utf8")`. At this point the payload is already
+    /// bounded, so only a genuinely empty clipboard yields `None`.
+    fn decode(bytes: &[u8]) -> Option<String> {
+        if bytes.is_empty() || bytes.len() > MAX_TEXT_BYTES {
+            return None;
+        }
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    }
+
+    fn classify(bytes: Vec<u8>) -> Outcome {
+        if bytes.len() > MAX_TEXT_BYTES {
+            Outcome::Failed
+        } else if bytes.is_empty() {
+            Outcome::Empty
+        } else {
+            Outcome::Text(bytes)
+        }
+    }
+
+    async fn run(helper: &Helper) -> Outcome {
+        let command = tokio::process::Command::new(&helper.program)
+            .args(&helper.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            // A helper that ignores the deadline is killed when its future is
+            // dropped, so cancellation cannot leak a blocked child.
+            .kill_on_drop(true)
+            .spawn();
+        let Ok(mut child) = command else {
+            return Outcome::Failed;
+        };
+        let Some(mut stdout) = child.stdout.take() else {
+            return Outcome::Failed;
+        };
+        let operation = async move {
+            use tokio::io::AsyncReadExt;
+            let mut bytes = Vec::new();
+            let mut bounded = (&mut stdout).take(MAX_TEXT_BYTES as u64 + 1);
+            bounded.read_to_end(&mut bytes).await?;
+            let status = child.wait().await?;
+            Ok::<_, std::io::Error>((bytes, status))
+        };
+        match tokio::time::timeout(READ_TIMEOUT, operation).await {
+            // A helper that reports failure is transport failure, not an empty
+            // clipboard: `settle` then tries the next declared helper.
+            Ok(Ok((bytes, status))) if status.success() => classify(bytes),
+            _ => Outcome::Failed,
+        }
+    }
+
+    pub(super) async fn read_text() -> Option<String> {
+        #[cfg(test)]
+        if let Some(helper) = TEST_HELPER.with(|slot| slot.borrow_mut().take()) {
+            return helper.await;
+        }
+        #[cfg(test)]
+        if let Some(overridden) = test_override() {
+            return overridden;
+        }
+        for helper in helpers(host_platform(), |name| std::env::var(name).ok()) {
+            if let Ok(text) = settle(run(&helper).await) {
+                return text;
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
+    type TestHelper = std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>;
+
+    #[cfg(test)]
+    thread_local! {
+        /// One-shot controllable helper; no developer clipboard is accessed.
+        static TEST_HELPER: std::cell::RefCell<Option<TestHelper>> =
+            const { std::cell::RefCell::new(None) };
+        /// The outer `None` means no override; per-thread state isolates tests.
+        static OVERRIDE: std::cell::RefCell<Option<Option<String>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_helper(
+        helper: impl std::future::Future<Output = Option<String>> + Send + 'static,
+    ) {
+        TEST_HELPER.with(|slot| *slot.borrow_mut() = Some(Box::pin(helper)));
+    }
+
+    #[cfg(test)]
+    fn test_override() -> Option<Option<String>> {
+        OVERRIDE.with(|slot| slot.borrow().clone())
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_text(text: Option<String>) {
+        OVERRIDE.with(|slot| *slot.borrow_mut() = Some(text));
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_test_text() {
+        OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+            move |name| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        }
+
+        #[test]
+        fn linux_helper_order_follows_the_declared_environment_gates() {
+            let all = helpers(
+                Platform::Linux,
+                env(&[
+                    ("TERMUX_VERSION", "1"),
+                    ("WAYLAND_DISPLAY", "wayland-0"),
+                    ("DISPLAY", ":0"),
+                ]),
+            );
+            let programs: Vec<&str> = all.iter().map(|helper| helper.program.as_str()).collect();
+            assert_eq!(
+                programs,
+                ["termux-clipboard-get", "wl-paste", "xclip", "xsel"]
+            );
+            assert_eq!(
+                all[1].args,
+                [
+                    "--no-newline".to_owned(),
+                    "--type".to_owned(),
+                    "text".to_owned()
+                ]
+            );
+            assert_eq!(
+                all[2].args,
+                ["-selection", "clipboard", "-out"].map(str::to_owned)
+            );
+        }
+
+        #[test]
+        fn a_session_with_no_declared_display_yields_no_helper() {
+            assert!(helpers(Platform::Linux, env(&[])).is_empty());
+            assert_eq!(helpers(Platform::Linux, env(&[("DISPLAY", ":0")])).len(), 2);
+            assert_eq!(
+                helpers(Platform::Linux, env(&[("WAYLAND_DISPLAY", "wayland-1")])).len(),
+                1
+            );
+        }
+
+        #[test]
+        fn macos_and_windows_read_through_one_declared_helper() {
+            assert_eq!(helpers(Platform::MacOs, env(&[]))[0].program, "pbpaste");
+            let windows = helpers(Platform::Windows, env(&[]));
+            assert_eq!(windows[0].program, "powershell");
+            assert!(windows[0]
+                .args
+                .iter()
+                .any(|arg| arg.contains("Get-Clipboard")));
+            assert!(!windows[0].args.iter().any(|arg| arg.contains("clip\"")));
+        }
+
+        #[test]
+        fn helper_failure_tries_the_next_transport_and_empty_success_settles() {
+            assert_eq!(settle(Outcome::Failed), Err(()));
+            assert_eq!(settle(Outcome::Empty), Ok(None));
+            assert_eq!(
+                settle(Outcome::Text(b"from clipboard".to_vec())),
+                Ok(Some("from clipboard".to_owned()))
+            );
+        }
+
+        #[test]
+        fn oversized_payloads_fail_closed_instead_of_pasting_a_prefix() {
+            assert_eq!(classify(vec![b'x'; MAX_TEXT_BYTES + 1]), Outcome::Failed);
+            assert_eq!(classify(Vec::new()), Outcome::Empty);
+            assert_eq!(decode(&[]), None);
+            assert_eq!(decode(&vec![b'x'; MAX_TEXT_BYTES + 1]), None);
+            // The reference reader replaces invalid UTF-8 instead of dropping
+            // the whole clipboard.
+            assert_eq!(decode(&[0xff, 0xfe]), Some("\u{fffd}\u{fffd}".to_owned()));
+        }
+
+        #[tokio::test]
+        async fn a_missing_helper_fails_closed_without_panicking() {
+            let missing = Helper {
+                program: "octet-no-such-clipboard-helper".to_owned(),
+                args: Vec::new(),
+            };
+            assert_eq!(run(&missing).await, Outcome::Failed);
+        }
+
+        /// Exercise the real spawn/decode/reap path against throwaway helper
+        /// programs. The developer's own clipboard is never read or written.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_real_helper_is_read_bounded_and_its_exit_status_is_honoured() {
+            let text = Helper {
+                program: "/bin/echo".to_owned(),
+                args: vec!["clipboard text".to_owned()],
+            };
+            assert_eq!(
+                run(&text).await,
+                Outcome::Text(b"clipboard text\n".to_vec())
+            );
+            assert_eq!(
+                settle(Outcome::Text(b"clipboard text\n".to_vec())),
+                Ok(Some("clipboard text\n".to_owned()))
+            );
+
+            let empty = Helper {
+                // /bin/true is absent on macOS; use the portable shell builtin.
+                program: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), "exit 0".to_owned()],
+            };
+            assert_eq!(run(&empty).await, Outcome::Empty);
+
+            let failing = Helper {
+                program: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), "exit 3".to_owned()],
+            };
+            assert_eq!(run(&failing).await, Outcome::Failed);
+
+            // A helper that never returns is killed at the deadline instead of
+            // holding the interactive loop.
+            let wedged = Helper {
+                program: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
+            };
+            let started = std::time::Instant::now();
+            assert_eq!(run(&wedged).await, Outcome::Failed);
+            assert!(
+                started.elapsed() < READ_TIMEOUT * 6,
+                "bounded helper read took {:?}",
+                started.elapsed()
+            );
+        }
+
+        #[tokio::test]
+        async fn the_test_override_replaces_the_platform_read() {
+            set_test_text(Some("overridden".to_owned()));
+            assert_eq!(read_text().await, Some("overridden".to_owned()));
+            set_test_text(None);
+            assert_eq!(read_text().await, None);
+            clear_test_text();
+        }
+    }
+}
+
 /// Forward only normalized, bounded observations. Extensions never receive the
 /// terminal event itself and cannot influence the host keymap or resize path.
 fn observe_extension_terminal_event(
     executable_extensions: &mut crate::extensions::ExecutableExtensions,
     event: &Event,
 ) {
+    if executable_extensions.terminal_grant_is_active() {
+        // A ceded holder owns raw input. A second observer must never see the
+        // same keystroke, and the host must not answer a resize the child owns.
+        return;
+    }
     match event {
         Event::Resize(columns, rows) => {
             executable_extensions.observe_terminal_resize(*columns, *rows);
@@ -847,6 +1508,10 @@ fn observe_extension_terminal_event(
 /// appearance probe. Ctrl-C becomes the same coordinated SIGINT shutdown used
 /// by the signal thread; Ctrl-D records a close request and lets the owned
 /// operation settle before its caller exits.
+///
+/// An empty `label` is the silent startup form: nothing is rendered for the
+/// phase, while cancellation and shutdown diagnostics still name the operation
+/// as `startup` (see [`run_blocking_startup_lifecycle`]).
 async fn await_lifecycle<F, T, S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -859,6 +1524,9 @@ where
 {
     let mut operation = Box::pin(operation);
     let mut input_open = true;
+    // Display text is empty for silent startup phases; diagnostics still need a
+    // name so a cancelled or signalled wait remains attributable.
+    let operation_name = if label.is_empty() { "startup" } else { label };
     shell.set_run_label(label);
     shell.render();
 
@@ -869,7 +1537,7 @@ where
                 shell.set_run_label("shutting down…");
                 shell.render();
                 let _ = tokio::time::timeout(LIFECYCLE_SHUTDOWN_GRACE, &mut operation).await;
-                anyhow::bail!("shutdown signal {signal} received during {label}");
+                anyhow::bail!("shutdown signal {signal} received during {operation_name}");
             }
             result = &mut operation => {
                 shell.set_run_label("idle");
@@ -881,7 +1549,7 @@ where
                     shell.set_run_label("shutting down…");
                     shell.render();
                     let _ = tokio::time::timeout(LIFECYCLE_SHUTDOWN_GRACE, &mut operation).await;
-                    anyhow::bail!("Ctrl-C cancelled {label}");
+                    anyhow::bail!("Ctrl-C cancelled {operation_name}");
                 }
                 Some(Ok(Event::Key(key))) if keymap::is_close_key(&key) => {
                     shell.request_close();
@@ -893,8 +1561,15 @@ where
                     shell.render();
                 }
                 Some(Ok(event)) => {
+                    if shell.intercept_transcript_input(&event) {
+                        continue;
+                    }
                     // Submission is not admitted during lifecycle work, but
                     // ordinary editing must not lose the probe's saved input.
+                    // The same holds for a native clipboard paste.
+                    if paste_clipboard_text(shell, &event).await {
+                        continue;
+                    }
                     let _ = handle_cancellable_wait_input(shell, event);
                 }
                 Some(Err(error)) => {
@@ -937,6 +1612,41 @@ where
     await_lifecycle(shell, input, label, async move {
         task.await
             .map_err(|error| anyhow::anyhow!("{label} worker failed: {error}"))?
+    })
+    .await
+}
+
+/// Diagnostic names for silent startup work. They never render: the startup
+/// composer stays typeable without branding until readiness; a name appears
+/// only in a worker-failure, cancellation, or shutdown diagnostic.
+const STARTUP_MODELS_OPERATION: &str = "model discovery";
+const STARTUP_APP_OPERATION: &str = "startup build";
+const STARTUP_SESSION_OPERATION: &str = "session open";
+
+/// Run one bounded startup phase with no status text and a typeable composer.
+///
+/// Startup shows nothing: no phase label, no progress notice. Keystrokes are
+/// still accepted and buffered into the draft from the first frame, and the
+/// phase durations stay attributable off-screen through
+/// `OCTET_STARTUP_TRACE=1` (`crate::app::bootstrap::startup_phase`).
+pub(crate) async fn run_blocking_startup_lifecycle<T, W, S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    operation: &'static str,
+    work: W,
+) -> anyhow::Result<T>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    T: Send + 'static,
+    W: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let task = tokio::task::spawn_blocking(work);
+    await_lifecycle(shell, input, "", async move {
+        task.await
+            .map_err(|error| anyhow::anyhow!("{operation} worker failed: {error}"))?
+            // Nothing rendered, so the operation name is the only attribution a
+            // failed startup phase carries.
+            .map_err(|error| anyhow::anyhow!("{operation} failed: {error}"))
     })
     .await
 }
@@ -1125,25 +1835,379 @@ async fn logout_custom(
     Ok(app)
 }
 
-fn handle_active_command(
+fn show_hotkeys(shell: &mut InteractiveShell) {
+    let text = shell.hotkeys_text();
+    shell.show_report_text("Hotkeys", "Resolved user keybindings", text);
+}
+
+fn copy_last_assistant(shell: &mut InteractiveShell) {
+    if shell.copy_last_assistant().is_some() {
+        shell.notice("Copied the last assistant message");
+    } else {
+        shell.error("There is no assistant message to copy yet".into());
+    }
+}
+
+/// Refuse unsupported routes before either applying or queueing a tier change.
+fn fast_route_available(shell: &mut InteractiveShell, model: &Model) -> bool {
+    if commands::codex_fast_tier_endpoint(model) {
+        true
+    } else {
+        shell.error(format!(
+            "`/fast` is only available on Codex Responses routes; {} is not one, so nothing changed",
+            commands::model_route_label(model),
+        ));
+        false
+    }
+}
+
+/// Apply only while the App owns the idle Agent; never mutate an active Run.
+fn apply_fast_command(app: &mut App, shell: &mut InteractiveShell, requested: Option<bool>) {
+    if !fast_route_available(shell, &app.model) {
+        return;
+    }
+    if let Some(enabled) = requested {
+        if let Err(error) = app.set_fast_mode(enabled) {
+            shell.error(format!("`/fast` not applied: {error}"));
+            return;
+        }
+        update_status(shell, app);
+    }
+    shell.notice(format!(
+        "{}; current live session only (restart or a different session resets it). Priority billing is not fully qualified across requests and reservations; enabling it marks session cost uncertain.",
+        commands::fast_status_text(&app.model, app.agent.service_tier()),
+    ));
+}
+
+fn active_fast_status(
+    inspection: &ActiveRunInspection,
+    queue: &VecDeque<PendingIdleAction>,
+) -> String {
+    let mut status =
+        commands::fast_status_text(&inspection.model, inspection.service_tier).to_owned();
+    // Queue order matters: a model/session change between toggles is a barrier,
+    // so report all queued switches without pretending any has been applied.
+    for action in queue {
+        if let PendingIdleAction::Fast(enabled) = action {
+            status.push_str(if *enabled {
+                "\nFast mode on queued for the next idle boundary (route rechecked then)"
+            } else {
+                "\nFast mode off queued for the next idle boundary (route rechecked then)"
+            });
+        }
+    }
+    status
+}
+
+/// Apply a terminal keyboard-focus transition (`?1004` reporting).
+///
+/// A stale press, drag, or hover must not resume when focus returns, and a
+/// returning window must repaint immediately. The shell owns pointer state;
+/// settling a gesture whose pointer is outside the transcript clears the
+/// pending press anchor and the drag flag and creates no selection. An
+/// already-copied selection is a copy buffer, not transient interaction state,
+/// so it survives.
+fn apply_focus_transition(shell: &mut InteractiveShell, gained: bool) {
+    if !gained {
+        shell.begin_transcript_selection(u16::MAX, u16::MAX, false);
+    }
+    shell.render();
+}
+
+/// Read-only application facts a live run may inspect while its own
+/// agent/session borrow is held by `Run`.
+///
+/// An active run owns `&mut Agent`, so the frontend cannot reach
+/// `app.agent.session()`. Session-scoped reports therefore re-open the same
+/// session file read-only by path — the same handle the live `/subagents`
+/// drill-in already uses through the run's delegation binding. Nothing here
+/// mutates the running session or the frozen agent.
+#[derive(Clone)]
+pub struct ActiveRunInspection {
+    workspace: PathBuf,
+    invocation_cwd: PathBuf,
+    session_path: PathBuf,
+    /// Captured host authorization namespace; stop admission must not re-read a
+    /// potentially large live transcript on the input thread.
+    resource_owner: String,
+    model: Model,
+    catalog: octet_ai::ModelCatalog,
+    sessions: crate::session_store::SessionStore,
+    /// The launch sandbox policy, so a local shell escape applies the same
+    /// process/shell gates and limits as the model `bash` tool.
+    sandbox: SandboxPolicy,
+    /// The launch effect policy, so a local shell escape takes the ordinary
+    /// process approval decision instead of inventing a second one.
+    effect_policy: octet_agent::EffectPolicy,
+    subagents_available: bool,
+    service_tier: Option<octet_ai::ServiceTier>,
+    /// Durable goal state, or the typed reason the run cannot address it.
+    ///
+    /// Captured like every other fact here; the goal store and the driver hold
+    /// no borrow of the application, so `/goal` mutates durable state mid-run
+    /// instead of being deferred to the next idle boundary.
+    goal: Result<GoalAccess, ActiveGoalError>,
+    /// Effective `/settings` facts (defaults, theme, transport, images).
+    settings: commands::SettingsSurface,
+    /// The launch ordered cycling scope, rendered by `/scoped-models` mid-run.
+    model_scope: Option<Vec<crate::cli::parity::ScopedModel>>,
+    /// Whether the catalog holds only the routes this launch proved it needs.
+    ///
+    /// A narrowed picker waits for idle ownership of the app, then opens from
+    /// the current catalog while deferred fleet discovery runs independently.
+    catalog_is_narrowed: bool,
+}
+
+impl ActiveRunInspection {
+    /// Whether this run's catalog is missing providers the launch deferred.
+    fn is_narrowed(&self) -> bool {
+        self.catalog_is_narrowed
+    }
+
+    /// Snapshot the application facts a run cannot borrow without cancelling it.
+    pub fn capture(app: &App) -> Self {
+        Self {
+            workspace: app.config.workspace.clone(),
+            invocation_cwd: app.config.invocation_cwd.clone(),
+            session_path: app.agent.session().path().to_path_buf(),
+            resource_owner: app.agent.session().resource_owner_key(),
+            model: app.model.clone(),
+            catalog: app.catalog.clone(),
+            sandbox: app.config.sandbox.clone(),
+            effect_policy: app.config.effect_policy,
+            catalog_is_narrowed: !app.readiness.is_fleet(),
+            sessions: app.sessions.clone(),
+            subagents_available: app.subagents_available(),
+            service_tier: app.agent.service_tier(),
+            goal: GoalAccess::from_app(app),
+            settings: commands::SettingsSurface::capture(app),
+            model_scope: app.model_scope.clone(),
+        }
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        self.session_path.file_stem().and_then(|stem| stem.to_str())
+    }
+
+    /// Re-read the live session without repairing, truncating, or appending.
+    fn read_only_session(&self) -> anyhow::Result<Session> {
+        Ok(Session::open_read_only(&self.session_path)?)
+    }
+
+    /// The durable goal of this run, or the typed reason it is unaddressable.
+    fn goal_access(&self) -> Result<&GoalAccess, &ActiveGoalError> {
+        self.goal.as_ref()
+    }
+}
+
+/// Immediate `/context` body for an active run.
+///
+/// The styled idle report (`tui::context::ContextReport`) can only be built
+/// from `&App`, which the run holds. The run's own live context snapshot is the
+/// authoritative alternative for the same quantities.
+fn active_context_text(snapshot: &octet_agent::ContextSnapshot, model: &Model) -> String {
+    let breakdown = &snapshot.context;
+    let mut text = format!(
+        "Model: {}\nContext window: {} tokens\nEstimated next request: {} tokens\n\n",
+        model
+            .spec
+            .display_name
+            .as_deref()
+            .unwrap_or(&model.spec.api_name),
+        breakdown.context_limit,
+        breakdown.total_tokens,
+    );
+    for (label, tokens) in [
+        ("Runtime framing and tools", breakdown.system_tokens),
+        ("System instructions", breakdown.instruction_tokens),
+        ("Conversation", breakdown.conversation_tokens),
+        ("Tool results", breakdown.tool_result_tokens),
+        ("Attachments", breakdown.attachment_tokens),
+        ("Compaction summaries", breakdown.compaction_summary_tokens),
+        ("Other", breakdown.other_tokens),
+    ] {
+        text.push_str(&format!("{label}: {tokens} tokens\n"));
+    }
+    if let Some(measured) = breakdown.provider_tokens {
+        text.push_str(&format!("Provider measurement: {measured} tokens\n"));
+    }
+    text
+}
+
+/// Install a panel, but leave input and the caller-driven Run with the main loop.
+fn open_active_thinking(shell: &mut InteractiveShell, inspection: &ActiveRunInspection) {
+    let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
+    let mut items: Vec<String> = levels.iter().map(|level| level.label().into()).collect();
+    if let Some(surface) = codex_context_surface(&inspection.model) {
+        items.push(pickers::codex_context_menu_row(&surface));
+    }
+    let (_, current) = shell.selected_identity();
+    let selected = levels
+        .iter()
+        .position(|level| level.label() == current.trim_end_matches(" (queued)"))
+        .unwrap_or(0);
+    if let Some(item) = items.get_mut(selected) {
+        item.push_str(" (current)");
+    }
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::with_purpose(
+            "Select thinking level",
+            "Choose effort for the next supported response boundary and startup default",
+        ),
+        descriptions: vec![None; items.len()],
+        items,
+        selected,
+        filter: String::new(),
+        action: PanelAction::SelectThinking(levels),
+    });
+}
+
+fn open_active_codex_context(
+    shell: &mut InteractiveShell,
+    surface: &commands::CodexContextSurface,
+) {
+    let mut items = vec![format!(
+        "Keep the deliberate {} window",
+        surface.effective_window()
+    )];
+    let mut descriptions = vec![Some("no change".into())];
+    if let Some(target) = surface.raise_target() {
+        items.push(format!(
+            "Acknowledge and raise to {target} tokens (double-priced; websocket risk)"
+        ));
+        descriptions.push(Some(
+            crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING.into(),
+        ));
+    }
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::with_purpose(
+            "Codex context window",
+            surface.summary_lines().join(" · "),
+        ),
+        items,
+        descriptions,
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::ProviderSetup(vec!["codex-context".into()]),
+    });
+}
+
+/// Handle a slash command while the model is running.
+///
+/// Anything observable through [`ActiveRunInspection`] or the run's own context
+/// snapshot renders immediately through the same producers the idle dispatcher
+/// uses. Commands that must *transition* the application (session changes,
+/// model selection, extension reload) still queue a [`PendingIdleAction`], but
+/// they never leave the user with only a "next idle boundary" notice.
+#[allow(clippy::too_many_arguments)]
+async fn handle_active_command<S, F>(
     shell: &mut InteractiveShell,
     command: Command,
+    inspection: &ActiveRunInspection,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    context: &octet_agent::ContextSnapshot,
+    goal_deadline: &mut Option<Instant>,
+    open_delegated: F,
+    input: &mut S,
     queue: &mut VecDeque<PendingIdleAction>,
     quit_requested: &mut bool,
-) {
+) -> anyhow::Result<()>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    F: Fn(&str, &str) -> Result<Option<Session>, Box<AgentError>>,
+{
     match command {
         Command::Status => {
             let mut status = shell.status_detail();
+            if inspection
+                .model
+                .responses_features()
+                .reasoning_effort_updates
+            {
+                let selected = shell.selected_identity().1;
+                status = status
+                    .lines()
+                    .map(|line| {
+                        if line.starts_with("Reasoning      ") {
+                            format!("Reasoning      {selected}")
+                        } else {
+                            line.to_owned()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                status.push_str("\nThinking is host-selected, not provider acknowledgement.");
+            }
             if !queue.is_empty() {
                 status.push_str(&format!("\nQueued idle actions: {}", queue.len()));
+                if queue
+                    .iter()
+                    .any(|action| matches!(action, PendingIdleAction::Fast(_)))
+                {
+                    status.push_str(&format!("\n{}", active_fast_status(inspection, queue)));
+                }
             }
             shell.show_status_text_with_telemetry(status);
         }
-        Command::Cost | Command::Cache => {
-            shell.notice("cost and cache reports are available at the next idle boundary")
-        }
         Command::Changelog => shell.show_changelog(),
-        Command::Update => shell.notice("update checks are available at the next idle boundary"),
+        Command::Hotkeys => show_hotkeys(shell),
+        Command::Copy => copy_last_assistant(shell),
+        Command::Session => match inspection.read_only_session() {
+            Ok(session) => shell.show_report_text(
+                "Session",
+                "Durable session facts",
+                commands::session_text(&session),
+            ),
+            Err(error) => shell.error(format!("session report unavailable: {error}")),
+        },
+        Command::Help(topic) => shell.show_report_text(
+            "Help",
+            "Browse commands and keyboard shortcuts",
+            commands::help_text(&inspection.workspace, topic.as_deref()),
+        ),
+        Command::Cost => match inspection.read_only_session() {
+            Ok(session) => shell.show_report_text(
+                "Cost",
+                "Review session token usage and estimated cost",
+                commands::cost_text(&session, &inspection.model),
+            ),
+            Err(error) => shell.error(format!("cost report unavailable: {error}")),
+        },
+        Command::Cache => match inspection.read_only_session() {
+            Ok(session) => shell.show_report_text(
+                "Cache",
+                "Review session cache accounting",
+                commands::cache_text(&session),
+            ),
+            Err(error) => shell.error(format!("cache report unavailable: {error}")),
+        },
+        Command::Context => shell.show_report_text(
+            "Context",
+            "Review the estimated request context before the next turn",
+            active_context_text(context, &inspection.model),
+        ),
+        Command::Update => {
+            // The check is a bounded local request. Run events buffer until it
+            // settles, exactly like the live `/subagents` panel, and the next
+            // select iteration owns any shutdown the signal arm requests.
+            shell.show_overlay_text("Checking for updates…".into());
+            shell.render();
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                    shell.request_close();
+                }
+                result = crate::update::check() => match result {
+                    Ok(status) => shell.show_overlay_text(match status {
+                        crate::update::UpdateStatus::Available { .. } => {
+                            format!("{status}\n\nRun `octet update` to install.")
+                        }
+                        status => status.to_string(),
+                    }),
+                    Err(error) => shell.error(format!("update check failed: {error}")),
+                },
+            }
+        }
         Command::Verbose(value) => {
             let enabled = value.unwrap_or(!shell.verbose_tools());
             shell.set_verbose_tools(enabled);
@@ -1152,14 +2216,250 @@ fn handle_active_command(
                 if enabled { "enabled" } else { "disabled" }
             ));
         }
-        Command::Extensions(_) => {
-            shell.notice("extension inspection and reload are available at the next idle boundary")
+        Command::Name(name) => match inspection.session_id() {
+            Some(id) => match name {
+                Some(name) => match inspection.sessions.rename(id, &name) {
+                    Ok(metadata) => shell.notice(format!(
+                        "session named {}",
+                        metadata.name.as_deref().unwrap_or("(unnamed)")
+                    )),
+                    Err(error) => shell.error(error.to_string()),
+                },
+                None => match inspection.sessions.load_metadata(id) {
+                    Ok(metadata) => shell.notice(format!(
+                        "session name: {}",
+                        metadata
+                            .name
+                            .as_deref()
+                            .unwrap_or("(derived from first prompt)")
+                    )),
+                    Err(error) => shell.error(error.to_string()),
+                },
+            },
+            None => shell.error("current session has no valid id".into()),
+        },
+        Command::Export(output) => match inspection.session_id() {
+            Some(id) => match crate::session_commands::export_portable(
+                &inspection.sessions,
+                id,
+                output.map(PathBuf::from),
+                &inspection.invocation_cwd,
+                false,
+                false,
+            ) {
+                Ok(report) => shell.show_overlay_text(format!(
+                    "Exported {}\nRedacted {} potentially sensitive values{}",
+                    report.destination.display(),
+                    report.redaction_count,
+                    if report.ignored_torn_tail {
+                        "\nIgnored an interrupted final append; use `octet sessions repair`."
+                    } else {
+                        ""
+                    }
+                )),
+                Err(error) => shell.error(error.to_string()),
+            },
+            None => shell.error("current session has no valid id".into()),
+        },
+        Command::Extensions(commands::ExtensionsSubcommand::Status) => {
+            shell.show_overlay_text(extensions.inspect_text());
         }
-        Command::Help(_) => shell.notice("help is available at the next idle boundary"),
-        Command::Name(_) | Command::Export(_) => {
-            shell.notice("session management commands are available at the next idle boundary")
+        Command::Extensions(commands::ExtensionsSubcommand::Inspect { reference }) => {
+            let principal = extensions.presentation_session_reference_principal(&reference);
+            match principal {
+                Some(principal) => {
+                    match open_delegated(&principal, &reference) {
+                        Ok(Some(session)) => {
+                            let theme = shell.theme();
+                            let width = shell.read_only_document_width();
+                            let verbose_tools = shell.verbose_tools();
+                            match delegated_session_text(&session, &theme, width, verbose_tools) {
+                                Ok(text) => shell.show_styled_overlay_text(
+                                    delegated_session_overlay_text(&text, &theme),
+                                ),
+                                Err(error) => shell
+                                    .error(format!("failed to inspect delegated session: {error}")),
+                            }
+                        }
+                        Ok(None) => shell.error(
+                            "delegated session reference is unavailable for this parent".into(),
+                        ),
+                        Err(error) => {
+                            shell.error(format!("failed to inspect delegated session: {error}"))
+                        }
+                    }
+                }
+                None => shell.error(
+                    "delegated session reference is unavailable, stale, or owned by another extension"
+                        .into(),
+                ),
+            }
         }
-        Command::Quit => *quit_requested = true,
+        Command::Extensions(sub) => {
+            // The management menu, reload, and actions own the application and
+            // its executable extensions, so they still run through the idle
+            // dispatcher — but their current state renders now.
+            shell.show_overlay_text(extensions.inspect_text());
+            push_pending_action(queue, PendingIdleAction::Extensions(sub));
+        }
+        Command::Fast(requested) => {
+            if fast_route_available(shell, &inspection.model) {
+                if let Some(enabled) = requested {
+                    push_pending_action(queue, PendingIdleAction::Fast(enabled));
+                }
+                shell.notice(active_fast_status(inspection, queue));
+            }
+        }
+        Command::Goal(goal) => match inspection.goal_access() {
+            // Applied now, against the same durable store and driver the idle
+            // dispatcher uses. The run in progress is untouched: it is not
+            // restarted, and the armed deadline is recomputed from the settled
+            // turn exactly as it is for an idle `/goal`.
+            Ok(access) => {
+                if let Err(error) = apply_goal_command(access, shell, goal, goal_deadline) {
+                    shell.error(format!("/goal failed: {error:#}"));
+                }
+            }
+            // Fail closed. The typed reason is rendered; the command is never
+            // queued and never a silent no-op.
+            Err(error) => shell.error(format!("/goal failed: {error}")),
+        },
+        Command::Debug => {
+            let rendered = shell.dump_rendered_frame().await;
+            match inspection.read_only_session() {
+                Ok(session) => {
+                    write_debug_report(shell, &session, None, rendered).await;
+                }
+                Err(error) => shell.error(format!("/debug unavailable: {error}")),
+            }
+        }
+        Command::Model(None) => {
+            if inspection.is_narrowed() {
+                push_pending_action(queue, PendingIdleAction::PickModel);
+                shell.notice("model picker opens at the next idle boundary");
+                return Ok(());
+            }
+            let mut presentation = pickers::model_picker_presentation(&inspection.catalog);
+            let (current, _) = shell.selected_identity();
+            if let Some(index) = presentation.ids.iter().position(|id| id.0 == current) {
+                presentation.labels[index].push_str(" (current)");
+            }
+            shell.open_panel(Panel::SelectList {
+                surface: OrdinarySurfaceMetadata::with_purpose(
+                    "Select model",
+                    "Choose the model for subsequent prompts and the startup default",
+                ),
+                items: presentation.labels,
+                descriptions: presentation.descriptions,
+                selected: 0,
+                filter: String::new(),
+                action: PanelAction::SelectGroupedModel {
+                    models: presentation.ids,
+                    providers: presentation.providers,
+                },
+            });
+        }
+        Command::Thinking(None) => open_active_thinking(shell, inspection),
+        Command::Settings(sub) => {
+            match sub {
+                commands::SettingsCommand::Show => shell.show_report_text(
+                    "Settings",
+                    "Effective display and default preferences",
+                    commands::settings_text(&inspection.settings),
+                ),
+                commands::SettingsCommand::Transport => shell.notice(format!(
+                    "transport {} (declared by the {} route; not a user preference)",
+                    inspection.settings.transport, inspection.settings.endpoint,
+                )),
+                commands::SettingsCommand::Padding => shell.notice(
+                    "editor padding is compiled into the active theme layout; octet persists no padding override"
+                        .to_owned(),
+                ),
+                mutation => {
+                    // Theme install, config writes and image rendering own the
+                    // application, so the mutation runs through the idle
+                    // dispatcher verbatim at the next boundary; the report
+                    // above never leaves the user with only a promise.
+                    push_pending_action(queue, PendingIdleAction::Settings(mutation));
+                    shell.notice("settings change queued for the next idle boundary");
+                }
+            }
+        }
+        Command::ScopedModels(sub) => {
+            let mut available = inspection
+                .catalog
+                .models()
+                .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
+                .collect::<Vec<_>>();
+            available.sort();
+            match sub {
+                commands::ScopedModelsCommand::Show => shell.show_report_text(
+                    "Scoped models",
+                    "Ordered model cycling scope",
+                    commands::scoped_models_text(inspection.model_scope.as_deref(), &available),
+                ),
+                // Scope mutation owns the App's catalog-backed scope and the
+                // shell's cycling list, so it queues for the idle boundary but
+                // reports the decision immediately.
+                mutation => {
+                    push_pending_action(queue, PendingIdleAction::ScopedModels(mutation));
+                    shell.notice("model scope change queued for the next idle boundary");
+                }
+            }
+        }
+        Command::Bash(escape) => {
+            let prefix = if escape.excluded { "!!" } else { "!" };
+            if !inspection.sandbox.process_execution_allowed() {
+                shell.error("shell commands are disabled by --no-process/--no-shell".to_owned());
+            } else if escape.command.trim().is_empty() {
+                shell.notice(format!("usage: {prefix}<shell command>"));
+            } else if !matches!(
+                approve_shell_escape(shell, input, inspection.effect_policy, &escape.command)
+                    .await?,
+                ShellEscapeApproval::Approved
+            ) {
+                shell.error(format!("{prefix} command was not approved"));
+            } else {
+                extensions.notify_user_bash_all(&escape.command);
+                shell.on_local_command_submitted(&format!("{prefix}{}", escape.command));
+                let outcome = run_local_shell(
+                    shell,
+                    input,
+                    &inspection.workspace,
+                    &inspection.sandbox,
+                    &escape.command,
+                )
+                .await?;
+                if outcome.shutting_down {
+                    // The drive loop owns the ordered shutdown (abort, drain,
+                    // process-group cleanup); the escape only requests it.
+                    shell.request_close();
+                } else if let Some(refusal) = outcome.refusal {
+                    shell.error(refusal);
+                } else {
+                    // The run owns the session writer, so the durable record is
+                    // appended by the idle owner without breaking tool-result
+                    // ordering; the context decision is fixed now.
+                    push_pending_action(
+                        queue,
+                        PendingIdleAction::RecordShellEscape(commands::ShellEscapeRecord::new(
+                            escape.command,
+                            outcome.output,
+                            outcome.exit_code,
+                            escape.excluded,
+                        )),
+                    );
+                    shell.notice(if escape.excluded {
+                        "shell result recorded at the next idle boundary; excluded from model context"
+                            .to_owned()
+                    } else {
+                        "shell result recorded at the next idle boundary; added to model context"
+                            .to_owned()
+                    });
+                }
+            }
+        }
+        Command::Exit => *quit_requested = true,
         Command::Unknown(text) => shell.error(format!("unknown command: {text}")),
         command => match queue_command(command, queue) {
             Ok(()) => shell.notice("command queued for the next idle boundary"),
@@ -1167,6 +2467,52 @@ fn handle_active_command(
         },
     }
     shell.render();
+    Ok(())
+}
+
+/// Route one active-run submission through the shell-escape dispatcher when it
+/// is a `!`/`!!` command.
+///
+/// Returns `false` for an ordinary prompt, which then takes the existing queue
+/// or steer path unchanged. An escape is consumed here: it keeps the ordinary
+/// process gate, approval, bounded capture, and context decision instead of
+/// silently becoming model input.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_active_shell_escape<S>(
+    composed: &ComposedInput,
+    run: &mut Run<'_>,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    executable_extensions: &mut crate::extensions::ExecutableExtensions,
+    inspection: &ActiveRunInspection,
+    goal_deadline: &mut Option<Instant>,
+    queue: &mut VecDeque<PendingIdleAction>,
+    quit_requested: &mut bool,
+) -> anyhow::Result<bool>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let Some(escape) = commands::BashEscape::parse(&composed.display_text) else {
+        return Ok(false);
+    };
+    let context = run.context_snapshot();
+    handle_active_command(
+        shell,
+        Command::Bash(escape),
+        inspection,
+        executable_extensions,
+        &context,
+        goal_deadline,
+        |principal: &str, reference: &str| {
+            run.open_delegated_session_reference(principal, reference)
+                .map_err(Box::new)
+        },
+        input,
+        queue,
+        quit_requested,
+    )
+    .await?;
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1207,6 +2553,357 @@ fn confirmation_notice(tool_name: Option<&str>, confirmed: bool) -> String {
     )
 }
 
+/// The fan-out seam the run driver uses to publish assistant message
+/// boundaries without owning any batching decision.
+trait MessageLifecycleSink {
+    fn message_started(&mut self, message_id: &str);
+    fn message_delta(&mut self, delta: &str);
+    fn message_settled(&mut self, message_id: &str);
+}
+
+impl MessageLifecycleSink for crate::extensions::ExecutableExtensions {
+    fn message_started(&mut self, message_id: &str) {
+        self.notify_message_started_all(message_id);
+    }
+
+    fn message_delta(&mut self, delta: &str) {
+        self.push_message_delta_all(delta);
+    }
+
+    fn message_settled(&mut self, message_id: &str) {
+        self.notify_message_settled_all(message_id);
+    }
+}
+
+/// Producer-side state for one assistant message boundary.
+///
+/// One boundary covers one logical model turn: the first streamed text
+/// increment opens it, a provider retry keeps it open (the retry is the same
+/// logical turn), and the turn's terminal event settles it. Deltas are handed
+/// to the host verbatim; the host coalescer owns every batching and flush
+/// decision, so this producer never opens a second batching layer and never
+/// causes one host notification per streamed increment.
+#[derive(Default)]
+struct AssistantMessageLifecycle {
+    sequence: u64,
+    message_id: Option<String>,
+}
+
+impl AssistantMessageLifecycle {
+    /// Fold one run event into the assistant message boundary.
+    fn observe(&mut self, sink: &mut impl MessageLifecycleSink, event: &AgentEvent) {
+        match event {
+            AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text,
+            } => self.delta(sink, text),
+            // The turn commit and any terminal run outcome close an open
+            // boundary exactly once; settling an already-settled boundary is a
+            // no-op, and a turn that never streamed text never opens one.
+            AgentEvent::TurnFinished { .. } | AgentEvent::RunFinished { .. } => {
+                self.settle(sink);
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the boundary on the first non-empty text increment, then forward
+    /// the increment unchanged.
+    fn delta(&mut self, sink: &mut impl MessageLifecycleSink, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.message_id.is_none() {
+            self.sequence += 1;
+            let message_id = format!("assistant-{}", self.sequence);
+            sink.message_started(&message_id);
+            self.message_id = Some(message_id);
+        }
+        sink.message_delta(text);
+    }
+
+    /// Close the open boundary, if any.
+    fn settle(&mut self, sink: &mut impl MessageLifecycleSink) {
+        if let Some(message_id) = self.message_id.take() {
+            sink.message_settled(&message_id);
+        }
+    }
+}
+
+/// Pending consent contains only bounded requests, never buffered Run events.
+/// Dropping an unanswered interaction is fail-closed, including error paths.
+struct ActiveToolInteraction {
+    id: ToolCallId,
+    tool: Option<String>,
+    request: ActiveToolRequest,
+}
+
+enum ActiveToolRequest {
+    Confirmation(octet_agent::tool::ToolConfirmation),
+    Input(
+        octet_agent::tool::ToolInputRequest,
+        pickers::SecretInputBuffer,
+    ),
+}
+
+impl Drop for ActiveToolInteraction {
+    fn drop(&mut self) {
+        match &self.request {
+            ActiveToolRequest::Confirmation(request) => request.respond(false),
+            ActiveToolRequest::Input(request, _) => request.cancel(),
+        }
+    }
+}
+
+impl ActiveToolInteraction {
+    fn request_bytes(&self) -> usize {
+        match &self.request {
+            ActiveToolRequest::Confirmation(request) => request
+                .prompt
+                .len()
+                .saturating_add(request.detail.as_ref().map_or(0, String::len)),
+            ActiveToolRequest::Input(request, _) => request.prompt.len(),
+        }
+    }
+
+    fn from_event(
+        event: &AgentEvent,
+        tools: &std::collections::HashMap<ToolCallId, (String, serde_json::Value)>,
+    ) -> Option<Self> {
+        let AgentEvent::ToolProgress { id, progress, .. } = event else {
+            return None;
+        };
+        let request = match progress {
+            ToolProgress::Confirmation(request) => ActiveToolRequest::Confirmation(request.clone()),
+            ToolProgress::Input(request) => {
+                ActiveToolRequest::Input(request.clone(), Default::default())
+            }
+            _ => return None,
+        };
+        Some(Self {
+            id: id.clone(),
+            tool: tools.get(id).map(|(name, _)| name.clone()),
+            request,
+        })
+    }
+
+    fn open(&self, shell: &mut InteractiveShell) {
+        match &self.request {
+            ActiveToolRequest::Confirmation(request) => {
+                let items = if request.default {
+                    vec!["Approve".into(), "Deny".into()]
+                } else {
+                    vec!["Deny".into(), "Approve".into()]
+                };
+                let title = if request.destructive {
+                    format!("Action requires approval · {}", request.prompt)
+                } else {
+                    request.prompt.clone()
+                };
+                shell.open_panel(Panel::SelectList {
+                    surface: OrdinarySurfaceMetadata::new(title),
+                    items,
+                    descriptions: vec![request.detail.clone(), request.detail.clone()],
+                    selected: 0,
+                    filter: String::new(),
+                    action: PanelAction::Confirmation,
+                });
+            }
+            ActiveToolRequest::Input(request, _) => {
+                shell.set_tool_input_prompt(Some(request.prompt.clone()))
+            }
+        }
+    }
+
+    fn input(&mut self, shell: &mut InteractiveShell, event: &Event) -> bool {
+        match &mut self.request {
+            ActiveToolRequest::Confirmation(request) => {
+                let cancelled = matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL));
+                let result = if cancelled {
+                    shell.close_panel();
+                    Some(PanelResult::Cancel)
+                } else {
+                    shell.panel_input(event).map(|(result, _)| result)
+                };
+                let Some(result) = result else {
+                    return false;
+                };
+                let confirmed = matches!(result, PanelResult::Confirm(index) if (index == 0) == request.default);
+                request.respond(confirmed);
+                let notice = confirmation_notice(self.tool.as_deref(), confirmed);
+                if confirmed {
+                    shell.notice_success(notice);
+                } else {
+                    shell.notice_error(notice);
+                }
+                true
+            }
+            ActiveToolRequest::Input(request, secret) => {
+                match event {
+                    Event::Key(key)
+                        if key.kind == KeyEventKind::Press && key.code == KeyCode::Enter =>
+                    {
+                        request.respond(secret.take());
+                        shell.set_tool_input_prompt(None);
+                        return true;
+                    }
+                    Event::Key(key)
+                        if key.kind == KeyEventKind::Press
+                            && (key.code == KeyCode::Esc
+                                || (key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL))) =>
+                    {
+                        request.cancel();
+                        shell.set_tool_input_prompt(None);
+                        shell.notice("interactive command input cancelled");
+                        return true;
+                    }
+                    Event::Key(key)
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                    {
+                        match key.code {
+                            KeyCode::Backspace => secret.backspace(),
+                            KeyCode::Char(character)
+                                if !key.modifiers.intersects(
+                                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                                ) =>
+                            {
+                                secret.push(character)
+                            }
+                            _ => {}
+                        }
+                    }
+                    Event::Paste(paste) => secret.extend_paste(paste),
+                    Event::Resize(columns, rows) => shell.set_size(*columns, *rows),
+                    _ => {}
+                }
+                false
+            }
+        }
+    }
+}
+
+fn active_subagent_snapshot(
+    extensions: &crate::extensions::ExecutableExtensions,
+) -> Option<SubagentPickerSnapshot> {
+    subagent_view_entries(extensions)
+        .map(|(title, entries)| subagent_picker_snapshot(&title, &entries, Vec::new()))
+}
+
+fn active_subagent_panel(snapshot: &SubagentPickerSnapshot) -> SubagentPanel {
+    SubagentPanel {
+        node_ids: snapshot.node_ids.clone(),
+        groups: snapshot.groups.clone(),
+        collapsed: true,
+        revealed_node: None,
+        state_filter: None,
+    }
+}
+
+fn open_active_subagent_list(
+    shell: &mut InteractiveShell,
+    extensions: &crate::extensions::ExecutableExtensions,
+) -> bool {
+    let Some(snapshot) =
+        active_subagent_snapshot(extensions).filter(|snapshot| !snapshot.items.is_empty())
+    else {
+        shell.notice("No subagents for this session.");
+        return false;
+    };
+    let action = PanelAction::SelectSubagent(active_subagent_panel(&snapshot));
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new(snapshot.title),
+        items: snapshot.items,
+        descriptions: snapshot.descriptions,
+        selected: 0,
+        filter: String::new(),
+        action,
+    });
+    true
+}
+
+fn refresh_active_subagent_list(
+    shell: &mut InteractiveShell,
+    extensions: &crate::extensions::ExecutableExtensions,
+) {
+    if let Some(snapshot) = active_subagent_snapshot(extensions) {
+        let panel = active_subagent_panel(&snapshot);
+        shell.refresh_subagent_panel(snapshot.title, snapshot.items, snapshot.descriptions, panel);
+    }
+}
+
+fn open_active_subagent_document(
+    shell: &mut InteractiveShell,
+    extensions: &crate::extensions::ExecutableExtensions,
+    run: &Run<'_>,
+    id: &str,
+    opening: bool,
+) {
+    // Re-resolve both the node and opaque principal/reference for every read;
+    // a stale panel must never confer another generation's session authority.
+    let entry = subagent_view_entries(extensions)
+        .and_then(|(_, entries)| entries.into_iter().find(|entry| entry.node_id == id));
+    let Some(entry) = entry else {
+        if opening {
+            shell.notice("subagent state changed; select it again to view");
+            open_active_subagent_list(shell, extensions);
+        } else {
+            shell.update_read_only_document(
+                "Subagent is no longer available to this owner; return to the list.".into(),
+            );
+        }
+        return;
+    };
+    let text = match entry.session_reference.as_deref().and_then(|reference| {
+        extensions
+            .presentation_session_reference_principal(reference)
+            .map(|principal| (principal, reference))
+    }) {
+        Some((principal, reference)) => {
+            match run.open_delegated_session_reference(&principal, reference) {
+                Ok(Some(session)) => delegated_session_text(
+                    &session,
+                    &shell.theme(),
+                    shell.read_only_document_width(),
+                    shell.verbose_tools(),
+                )
+                .unwrap_or_else(|error| {
+                    crate::tui::view::sanitize_for_terminal(&format!(
+                        "Failed to render delegated transcript: {error}"
+                    ))
+                }),
+                Ok(None) => crate::tui::view::sanitize_for_terminal(&entry.fallback_detail),
+                Err(error) => crate::tui::view::sanitize_for_terminal(&format!(
+                    "Failed to open delegated transcript: {error}"
+                )),
+            }
+        }
+        None => crate::tui::view::sanitize_for_terminal(&entry.fallback_detail),
+    };
+    if opening {
+        shell.open_panel(Panel::ReadOnlyDocument {
+            title: format!("{} · read-only transcript", entry.label),
+            text: text.into(),
+            styled: true,
+            scroll_from_bottom: 0,
+        });
+    } else {
+        shell.update_read_only_document_styled(text);
+    }
+}
+
+fn show_active_subagent_stop_result(shell: &mut InteractiveShell, result: anyhow::Result<String>) {
+    match result {
+        Ok(output) => shell.show_extension_output(
+            "subagents",
+            format!("Stop request responded; terminal settlement is not confirmed. Check /subagents.\n\n{output}"),
+        ),
+        Err(error) => shell.error(format!("subagent stop not confirmed: {error}; check /subagents")),
+    }
+    shell.render();
+}
+
 /// Drive one active frozen-Agent run. Control sends are queued locally, and
 /// their bounded sends are polled alongside input and the run stream. Channel
 /// admission is not a delivery acknowledgement; only SteeringDelivered is.
@@ -1223,6 +2920,8 @@ pub async fn drive_active_run<S>(
     cost_warning_microdollars: Option<u64>,
     executable_extensions: &mut crate::extensions::ExecutableExtensions,
     made_tool_call: &mut bool,
+    inspection: &ActiveRunInspection,
+    goal_deadline: &mut Option<Instant>,
 ) -> anyhow::Result<HostRunOutcome>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -1232,7 +2931,20 @@ where
         .ok_or_else(|| anyhow::anyhow!("cannot drive a run without presentation state"))?;
     let mut intents = VecDeque::<ControlIntent>::new();
     let mut in_flight: Option<ControlFuture> = None;
+    // Loop-owned, not spawned: dropping this future also drops the helper's
+    // kill-on-drop child. No clipboard task can outlive the run.
+    let mut clipboard: Option<Pin<Box<dyn Future<Output = Option<String>>>>> = None;
+    let mut clipboard_gesture = None;
+    let mut clipboard_revision = 0;
+    let mut clipboard_fallback = None;
+    let mut pending_reasoning: Option<ReasoningConfig> = None;
+    // One pending latest choice and one bounded channel admission; never spawn
+    // a control sender that could outlive the caller-driven run.
+    type ReasoningSend = Pin<Box<dyn Future<Output = (ReasoningConfig, Result<(), AgentError>)>>>;
+    let mut reasoning_send: Option<ReasoningSend> = None;
     let mut aborting = false;
+    let mut dispatch_queued = false;
+    shell.settle_queued_follow_ups(false);
     let mut input_open = true;
     let mut scroll_dirty = false;
     let mut last_run_cost = 0u64;
@@ -1240,8 +2952,53 @@ where
     extension_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut tool_calls =
         std::collections::HashMap::<ToolCallId, (String, serde_json::Value)>::new();
+    let mut assistant_message = AssistantMessageLifecycle::default();
+    let mut interactions = VecDeque::<ActiveToolInteraction>::new();
+    let mut subagents_open = false;
+    let mut subagent_document = None::<String>;
+    let mut subagent_refresh: Option<Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>> =
+        None;
+    let mut subagent_refresh_error = None::<String>;
+    // Each accepted control keeps its owned extension request until its response
+    // arrives, even if the root finishes first. Never spawn a detached mutation.
+    let mut subagent_stops = VecDeque::<SubagentStop>::new();
+    let mut subagent_stop: Option<SubagentStop> = None;
+    // Retain the root outcome while owned stop requests finish, using this same
+    // input/event loop rather than a blocking drain or a detached mutation task.
+    let mut settled_outcome = None;
+    let mut update_check: Option<
+        Pin<Box<dyn Future<Output = anyhow::Result<crate::update::UpdateStatus>>>>,
+    > = None;
+    let mut update_report_open = false;
+    let mut modal_refresh = tokio::time::interval(Duration::from_secs(1));
+    modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        if settled_outcome.is_some() {
+            // Ctrl+C can arrive after root settlement while a stop response is
+            // pending. It must still revoke previously armed follow-up dispatch.
+            if aborting && !dispatch_queued {
+                shell.settle_queued_follow_ups(false);
+            }
+            if subagent_stop.is_none() && subagent_stops.is_empty() {
+                return Ok(settled_outcome.take().expect("settled root outcome"));
+            }
+            if *quit_requested || shell.close_requested() {
+                shell.error("subagent stop response interrupted by shutdown; check /subagents after restart".into());
+                shell.render();
+                return Ok(HostRunOutcome::shutdown());
+            }
+        }
+        if aborting || shell.close_requested() {
+            clipboard = None;
+            clipboard_gesture = None;
+            clipboard_fallback = None;
+            if !interactions.is_empty() {
+                interactions.clear();
+                shell.close_panel();
+                shell.set_tool_input_prompt(None);
+            }
+        }
         if shell.close_requested() && !*quit_requested {
             request_active_close(
                 control,
@@ -1259,16 +3016,36 @@ where
                 let control = control.clone();
                 in_flight = Some(Box::pin(async move {
                     match intent {
-                        ControlIntent::Steer(text) => control.steer(text).await,
+                        ControlIntent::SteerPrepared(prepared) => {
+                            control.steer_retractable(prepared).await
+                        }
                         ControlIntent::FinishNow(text) => control.finish_now(text).await,
                     }
                 }));
             }
         }
 
+        if !aborting && reasoning_send.is_none() {
+            if let Some(reasoning) = pending_reasoning.take() {
+                let control = control.clone();
+                reasoning_send = Some(Box::pin(async move {
+                    let result = control.set_reasoning(reasoning.clone()).await;
+                    (reasoning, result)
+                }));
+            }
+        }
+        if aborting {
+            pending_reasoning = None;
+            reasoning_send = None;
+        }
+        if subagent_stop.is_none() {
+            subagent_stop = subagent_stops.pop_front();
+        }
+
         tokio::select! {
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                drop(clipboard.take());
                 control.abort();
                 *quit_requested = true;
                 shell.restore_queued_steering();
@@ -1280,6 +3057,31 @@ where
                 .await;
                 return Ok(HostRunOutcome::shutdown());
             }
+            result = futures_util::future::OptionFuture::from(reasoning_send.as_mut().map(|f| f.as_mut())), if reasoning_send.is_some() => {
+                reasoning_send = None;
+                if let Some((reasoning, result)) = result {
+                    match result {
+                        Ok(()) => {
+                            let label = reasoning_label(&reasoning);
+                            shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &format!("{label} (queued)"));
+                            shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
+                            if let Err(error) = persist_configuration(Some(executable_extensions), || crate::cli::persist_reasoning(&label)).await {
+                                shell.error(format!("failed to save thinking preference: {error}"));
+                            }
+                        }
+                        Err(error) => shell.error(format!("thinking unchanged: {error}")),
+                    }
+                }
+                shell.render();
+            }
+            result = futures_util::future::OptionFuture::from(clipboard.as_mut().map(|f| f.as_mut())), if clipboard.is_some() => {
+                clipboard = None;
+                // A background extension can replace the composer without an
+                // InputAction. Fence completion as well as explicit handoffs.
+                clipboard_fallback = settle_active_clipboard_read(
+                    shell, clipboard_revision, result.flatten(), clipboard_gesture.take(),
+                );
+            }
             result = futures_util::future::OptionFuture::from(in_flight.as_mut().map(|f| f.as_mut())), if in_flight.is_some() => {
                 // A run may have ended before a pending control was delivered.
                 // That error is harmless; no detached send survives this loop.
@@ -1290,12 +3092,63 @@ where
                 shell.render();
                 scroll_dirty = false;
             }
+            result = futures_util::future::OptionFuture::from(update_check.as_mut().map(|future| future.as_mut())), if update_check.is_some() => {
+                update_check = None;
+                if let Some(result) = result {
+                    match result {
+                        Ok(status) => {
+                            let text = match status {
+                                crate::update::UpdateStatus::Available { .. } => format!("{status}\n\nRun `octet update` to install."),
+                                status => status.to_string(),
+                            };
+                            if update_report_open && interactions.is_empty() && !shell.has_panel() {
+                                shell.show_overlay_text(text);
+                            } else { shell.notice(text); }
+                        }
+                        Err(error) => shell.error(format!("update check failed: {error}")),
+                    }
+                }
+                shell.render();
+            }
+            result = futures_util::future::OptionFuture::from(subagent_stop.as_mut().map(|future| future.as_mut())), if subagent_stop.is_some() => {
+                subagent_stop = None;
+                if let Some(result) = result {
+                    show_active_subagent_stop_result(shell, result);
+                }
+            }
+            result = futures_util::future::OptionFuture::from(subagent_refresh.as_mut().map(|future| future.as_mut())), if subagent_refresh.is_some() => {
+                subagent_refresh = None;
+                let error = result.and_then(Result::err).map(|error| format!("subagent view live refresh failed; showing the last accepted state: {error}"));
+                if error != subagent_refresh_error {
+                    if let Some(error) = error.as_ref() { shell.notice(error.clone()); }
+                    subagent_refresh_error = error;
+                }
+                apply_extension_background(shell, executable_extensions);
+                if subagents_open && subagent_document.is_none() && interactions.is_empty() {
+                    refresh_active_subagent_list(shell, executable_extensions);
+                }
+                shell.render();
+            }
+            _ = modal_refresh.tick(), if subagents_open && interactions.is_empty() => {
+                if subagent_refresh.is_none() { subagent_refresh = executable_extensions.subagent_status_check(); }
+                if let Some(id) = subagent_document.as_deref() {
+                    open_active_subagent_document(shell, executable_extensions, run, id, false);
+                } else { refresh_active_subagent_list(shell, executable_extensions); }
+                shell.render();
+            }
             _ = extension_tick.tick() => {
                 if apply_extension_background(shell, executable_extensions) {
                     shell.render();
                 }
             }
-            maybe = input.next(), if input_open => {
+            incoming = async {
+                if let Some(event) = clipboard_fallback.take() {
+                    (Some(Ok(event)), true)
+                } else {
+                    (input.next().await, false)
+                }
+            }, if input_open => {
+                let (maybe, clipboard_replay) = incoming;
                 let event = match maybe {
                     Some(Ok(event)) => event,
                     Some(Err(error)) => {
@@ -1318,8 +3171,23 @@ where
                         continue;
                     }
                 };
-                observe_extension_terminal_event(executable_extensions, &event);
-                if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
+                if clipboard_replay {
+                    // A higher-priority branch may have changed ownership since
+                    // the failed read settled on the preceding select iteration.
+                    let editor = shell.extension_editor_snapshot();
+                    if !editor.focused || editor.revision != clipboard_revision {
+                        continue;
+                    }
+                }
+                // Search owns its query before any extension or clipboard
+                // admission; pasted paths/text must not become composer input.
+                if !clipboard_replay && interactions.is_empty() && !shell.has_panel() && shell.intercept_transcript_input(&event) {
+                    continue;
+                }
+                if !clipboard_replay {
+                    observe_extension_terminal_event(executable_extensions, &event);
+                }
+                if !clipboard_replay && matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
                     request_active_close(
                         control,
                         shell,
@@ -1332,25 +3200,95 @@ where
                     );
                     continue;
                 }
-                // Panels are driven by picker functions that own the event
-                // stream. If a panel leaks here (shouldn't happen), Esc closes it.
-                if shell.has_panel() {
-                    match &event {
-                        Event::Mouse(_) => continue,
-                        Event::Resize(columns, rows) => {
-                            shell.set_size(*columns, *rows);
-                            shell.render();
-                            continue;
-                        }
-                        Event::Key(key)
-                            if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc =>
-                        {
-                            shell.close_panel();
-                            shell.render();
-                            continue;
-                        }
-                        _ => continue,
+                // Tool consent preempts ordinary inspection. No provider events are
+                // buffered by a modal and no request can hide behind a report.
+                if let Some(interaction) = interactions.front_mut().filter(|_| !clipboard_replay) {
+                    if interaction.input(shell, &event) {
+                        interactions.pop_front();
+                        if let Some(next) = interactions.front() { next.open(shell); }
                     }
+                    shell.render();
+                    continue;
+                }
+                if !clipboard_replay && shell.has_panel() {
+                    // Ctrl+C remains draft-sensitive even while an ordinary picker
+                    // owns navigation. Escape only dismisses that picker.
+                    if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press
+                        && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
+                        if !shell.pending().is_empty() {
+                            clipboard = None;
+                            clipboard_gesture = None;
+                            shell.clear_editor();
+                        } else {
+                            control.abort(); aborting = true;
+                            intents.clear(); in_flight = None;
+                            shell.close_panel(); subagents_open = false; subagent_document = None;
+                            shell.set_run_preparing(run_id, "cancelling");
+                        }
+                        shell.render(); continue;
+                    }
+                    if let Some((result, action)) = shell.panel_input(&event) {
+                        match (result, action) {
+                            (PanelResult::Confirm(index), PanelAction::SelectGroupedModel { models, .. }) => {
+                                if let Some(id) = models.get(index) {
+                                    if let Err(error) = crate::cli::persist_model(&id.0) {
+                                        shell.error(format!("failed to save model preference: {error}"));
+                                    }
+                                    push_pending_action(pending_actions, PendingIdleAction::ChangeModel(id.clone()));
+                                    shell.notice("model change queued for the next idle boundary");
+                                }
+                            }
+                            (PanelResult::Confirm(index), PanelAction::SelectThinking(levels)) => {
+                                if let Some(level) = levels.get(index) {
+                                    let reasoning = match requested_thinking_to_reasoning(*level,
+                                        &inspection.model, inspection.subagents_available) {
+                                        Ok(reasoning) => reasoning,
+                                        Err(error) => {
+                                            shell.error(format!("thinking unchanged: {error}"));
+                                            shell.render();
+                                            continue;
+                                        }
+                                    };
+                                    if inspection.model.responses_features().reasoning_effort_updates {
+                                        pending_reasoning = Some(reasoning);
+                                    } else {
+                                        push_pending_action(pending_actions, PendingIdleAction::ChangeThinking(reasoning));
+                                        shell.notice("thinking change queued for the next idle boundary");
+                                    }
+                                } else if let Some(surface) = codex_context_surface(&inspection.model) {
+                                    open_active_codex_context(shell, &surface);
+                                }
+                            }
+                            (result, PanelAction::ProviderSetup(kind)) if kind.first().is_some_and(|kind| kind == "codex-context") => {
+                                if matches!(result, PanelResult::Confirm(1)) {
+                                    if let Some(surface) = codex_context_surface(&inspection.model) {
+                                        if let Some(target) = surface.raise_target() {
+                                            shell.notice(format!("{} Set acknowledged for the launch boundary.",
+                                                crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING));
+                                            match surface.raise(target, true) {
+                                                Ok(window) => shell.notice(format!("Codex context window raise to {window} tokens accepted: {}", surface.raise_instruction(target))),
+                                                Err(reason) => shell.error(format!("Codex context window unchanged at {} tokens: {reason}", surface.effective_window())),
+                                            }
+                                        }
+                                    }
+                                }
+                                open_active_thinking(shell, inspection);
+                            }
+                            (PanelResult::Confirm(index), PanelAction::SelectSubagent(panel)) => {
+                                subagent_document = panel.node_ids.get(index).cloned();
+                                if let Some(id) = subagent_document.as_deref() {
+                                    open_active_subagent_document(shell, executable_extensions, run, id, true);
+                                }
+                            }
+                            (_, PanelAction::ReadOnlyDocument) if subagents_open => {
+                                subagent_document = None;
+                                open_active_subagent_list(shell, executable_extensions);
+                            }
+                            _ => { subagents_open = false; subagent_document = None; }
+                        }
+                    }
+                    shell.render();
+                    continue;
                 }
                 if shell.has_overlay() {
                     match event {
@@ -1366,11 +3304,13 @@ where
                                 continue;
                             }
                             OverlayInputResult::Closed => {
+                                update_report_open = false;
                                 shell.clear_error();
                                 shell.render();
                                 continue;
                             }
                             OverlayInputResult::Legacy => {
+                                update_report_open = false;
                                 shell.close_overlay();
                                 shell.clear_error();
                                 shell.render();
@@ -1379,7 +3319,7 @@ where
                         },
                     }
                 }
-                if let Some(shortcut) = executable_extensions.dispatch_shortcut_for_event(&event) {
+                if let Some(shortcut) = (!clipboard_replay).then(|| executable_extensions.dispatch_shortcut_for_event(&event)).flatten() {
                     shell.notice(format!(
                         "running extension shortcut {}: {}",
                         shortcut.extension, shortcut.description
@@ -1387,21 +3327,36 @@ where
                     shell.render();
                     continue;
                 }
-                let pending = if shell.pending_is_empty() {
-                    String::new()
-                } else {
-                    shell.pending()
-                };
-                match keymap::translate_with_popup(
-                    Some(event),
-                    true,
-                    &pending,
-                    shell.slash_popup_open(),
-                ) {
-                    InputAction::SlashMenu(action) => {
-                        shell.slash_menu(action);
-                        shell.render();
+                // Keep polling input and the run while a native helper waits.
+                // Coalesce held/repeated gestures to one bounded read.
+                if !clipboard_replay && matches!(&event, Event::Key(key) if is_clipboard_paste_key(key)) {
+                    if !aborting && clipboard.is_none() {
+                        clipboard_revision = shell.extension_editor_snapshot().revision;
+                        clipboard = Some(Box::pin(clipboard_read::read_text()));
+                        clipboard_gesture = Some(event);
                     }
+                    continue;
+                }
+                let action = match shell.translate_input(Some(event), true) {
+                    InputAction::SlashMenu(action) => {
+                        if shell.slash_menu(action) {
+                            InputAction::Command(shell.pending())
+                        } else {
+                            shell.render();
+                            continue;
+                        }
+                    }
+                    action => action,
+                };
+                // These actions consume or replace the draft that admitted the
+                // read. Its eventual text must not enter the next composer.
+                if matches!(&action, InputAction::Queue(_) | InputAction::Steer(_)
+                    | InputAction::Command(_) | InputAction::EditQueued | InputAction::ClearEditor)
+                {
+                    clipboard = None;
+                    clipboard_gesture = None;
+                }
+                match action {
                     InputAction::CompletePath => {
                         if shell.accept_extension_autocomplete() {
                             shell.render();
@@ -1412,7 +3367,12 @@ where
                             shell.render();
                         }
                     }
-                    InputAction::Abort => {
+                    InputAction::Abort | InputAction::DispatchQueued => {
+                        // Ctrl+C always revokes an earlier Escape dispatch;
+                        // Escape cannot arm a cancellation already requested by Ctrl+C.
+                        if matches!(action, InputAction::Abort) || !aborting {
+                            dispatch_queued = matches!(action, InputAction::DispatchQueued);
+                        }
                         control.abort();
                         // A steer send can be waiting for acknowledgement or
                         // still be only a local intent. Stop dispatching both,
@@ -1424,29 +3384,127 @@ where
                         shell.set_run_preparing(run_id, "cancelling");
                         shell.render();
                     }
+                    InputAction::EditQueued => {
+                        shell.edit_queued_message();
+                        shell.render();
+                    }
                     InputAction::ClearEditor => {
                         shell.clear_editor();
+                        shell.render();
+                    }
+                    InputAction::Queue(_) => {
+                        if !aborting {
+                            let composed = shell.drain_composed();
+                            if !dispatch_active_shell_escape(
+                                &composed,
+                                run,
+                                shell,
+                                input,
+                                executable_extensions,
+                                inspection,
+                                goal_deadline,
+                                pending_actions,
+                                quit_requested,
+                            )
+                            .await?
+                            {
+                                shell.queue_follow_up(composed);
+                            }
+                        }
                         shell.render();
                     }
                     InputAction::Steer(_) => {
                         if !aborting {
                             let composed = shell.drain_composed();
-                            if !composed.is_empty() {
-                                shell.queue_steering(&composed);
-                                intents.push_back(ControlIntent::Steer(composed.into_user_input()));
+                            if !composed.is_empty()
+                                && !dispatch_active_shell_escape(
+                                    &composed,
+                                    run,
+                                    shell,
+                                    input,
+                                    executable_extensions,
+                                    inspection,
+                                    goal_deadline,
+                                    pending_actions,
+                                    quit_requested,
+                                )
+                                .await?
+                            {
+                                // Reserve synchronously before publishing a shell receipt.
+                                // A full/ended control queue has accepted no payload, so its
+                                // editable projection returns directly to the composer instead
+                                // of becoming a stale FIFO entry ahead of later steering.
+                                let ComposedInput {
+                                    display_text,
+                                    transcript_text,
+                                    parts,
+                                    attachments,
+                                    ..
+                                } = composed;
+                                match control.prepare_steer(parts) {
+                                    Ok((prepared, receipt)) => {
+                                        shell.queue_retractable_steering(
+                                            receipt,
+                                            transcript_text,
+                                            display_text,
+                                            attachments,
+                                        );
+                                        intents.push_back(ControlIntent::SteerPrepared(prepared));
+                                    }
+                                    Err(error) => {
+                                        shell.restore_unqueued_steering(display_text, attachments);
+                                        shell.error(format!("could not queue steering: {error}"));
+                                    }
+                                }
                             }
                         }
                         shell.render();
                     }
 
+                    InputAction::Command(text) if text.starts_with("/skill:") => {
+                        // Selecting a skill from the slash popup emits Command
+                        // even though its invocation is an ordinary prompt.
+                        // Keep the same follow-up path as typed Enter while a
+                        // run owns the agent; expansion happens at admission.
+                        if !aborting {
+                            let composed = shell.drain_composed();
+                            shell.queue_follow_up(composed);
+                        }
+                        shell.render();
+                    }
                     InputAction::Command(text) => {
                         if aborting && matches!(commands::parse(&text), Command::Answer(_)) {
                             shell.notice("run is settling · answer request kept in the draft");
                             shell.render();
                             continue;
                         }
-                        let command = commands::parse(&shell.drain_editor());
-                        let was_quit = matches!(command, Command::Quit);
+                        let command = commands::parse(&shell.consume_command_text(text));
+                        if let Command::Thinking(Some(level)) = &command {
+                            let requested = ThinkingLevel::parse(level).and_then(|level| requested_thinking_to_reasoning(
+                                level, &inspection.model, inspection.subagents_available,
+                            ));
+                            match requested {
+                                Err(error) => { shell.error(error.to_string()); shell.render(); continue; }
+                                Ok(reasoning) if inspection.model.responses_features().reasoning_effort_updates => {
+                                    if aborting {
+                                        shell.error("thinking unchanged: run is settling".into());
+                                    } else {
+                                        pending_reasoning = Some(reasoning);
+                                    }
+                                    shell.render();
+                                    continue;
+                                }
+                                Ok(_) => {}
+                            }
+                        }
+                        let was_quit = matches!(command, Command::Exit);
+                        if matches!(command, Command::Update) {
+                            if update_check.is_none() { update_check = Some(Box::pin(crate::update::check())); }
+                            update_report_open = true;
+                            shell.show_overlay_text("Checking for updates…".into());
+                            shell.render();
+                            continue;
+                        }
                         if let Command::Answer(instruction) = &command {
                             if !aborting {
                                 let composed = answer_now_input(instruction.clone());
@@ -1461,40 +3519,55 @@ where
                             shell.render();
                             continue;
                         }
-                        // The live subagents view only reads extension
-                        // presentation state, so it is safe to open while the
-                        // run keeps going. Run events buffer until the panel
-                        // closes and are applied immediately afterwards.
                         if matches!(&command, Command::Unknown(text)
                             if is_live_subagents_command(text, executable_extensions))
                         {
-                            match active_subagents_view(
-                                shell,
-                                input,
-                                executable_extensions,
-                                |principal: &str, reference: &str| {
-                                    run.open_delegated_session_reference(principal, reference)
-                                },
-                            )
-                            .await
-                            {
-                                Ok(()) => {
-                                    shell.render();
-                                    continue;
+                            subagents_open = open_active_subagent_list(shell, executable_extensions);
+                            subagent_document = None;
+                            shell.render();
+                            continue;
+                        }
+                        if let Command::Unknown(text) = &command {
+                            if let Some(target) = live_subagents_stop_target(text) {
+                                if subagent_stops.len() + usize::from(subagent_stop.is_some()) >= 8 {
+                                    shell.error("subagent stop queue is full; retry after a response".into());
+                                } else if aborting || *quit_requested || shell.close_requested() {
+                                    shell.error("subagent stop not admitted while closing".into());
+                                } else {
+                                    let result = executable_extensions.subagent_stop_control(
+                                        target.to_owned(), &inspection.resource_owner,
+                                    );
+                                    match result {
+                                        Ok(stop) => {
+                                            subagent_stops.push_back(stop);
+                                            shell.notice("subagent stop queued; waiting for the owner-bound response (not terminal settlement)");
+                                        }
+                                        Err(error) => shell.error(format!("subagent stop not admitted: {error}")),
+                                    }
                                 }
-                                Err(error) => {
-                                    shell.error(format!("extension command failed: {error}"));
-                                    shell.render();
-                                    continue;
-                                }
+                                shell.render();
+                                continue;
                             }
                         }
-                        handle_active_command(
+                        let context = run.context_snapshot();
+                        if let Err(error) = handle_active_command(
                             shell,
                             command,
+                            inspection,
+                            executable_extensions,
+                            &context,
+                            goal_deadline,
+                            |principal: &str, reference: &str| {
+                                run.open_delegated_session_reference(principal, reference).map_err(Box::new)
+                            },
+                            input,
                             pending_actions,
                             quit_requested,
-                        );
+                        )
+                        .await
+                        {
+                            shell.error(format!("command failed: {error}"));
+                        }
                         if was_quit {
                             control.abort();
                             aborting = true;
@@ -1561,14 +3634,30 @@ where
                         shell.render();
                     }
                     InputAction::CycleThinking => {
-                        push_pending_action(pending_actions, PendingIdleAction::CycleThinking);
-                        shell.notice("thinking change queued for the next idle boundary");
+                        if inspection.model.responses_features().reasoning_effort_updates {
+                            let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
+                            let current = pending_reasoning.as_ref().map(reasoning_label)
+                                .unwrap_or_else(|| shell.selected_identity().1.trim_end_matches(" (queued)").to_owned());
+                            if let Some(index) = levels.iter().position(|level| level.label() == current) {
+                                match requested_thinking_to_reasoning(
+                                    levels[(index + 1) % levels.len()], &inspection.model, inspection.subagents_available,
+                                ) {
+                                    Ok(reasoning) => pending_reasoning = Some(reasoning),
+                                    Err(error) => shell.error(format!("thinking unchanged: {error}")),
+                                }
+                            }
+                        } else {
+                            push_pending_action(pending_actions, PendingIdleAction::CycleThinking);
+                            shell.notice("thinking change queued for the next idle boundary");
+                        }
                         shell.render();
                     }
                     InputAction::Close => {
                         shell.clear_error();
                         shell.render();
                     }
+                    InputAction::FocusGained => apply_focus_transition(shell, true),
+                    InputAction::FocusLost => apply_focus_transition(shell, false),
                     InputAction::Closed => {
                         request_active_close(
                             control,
@@ -1582,88 +3671,53 @@ where
                         );
                     }
                     InputAction::Ignore | InputAction::Submit(_) => {}
+                    InputAction::SlashMenu(_) => unreachable!(
+                        "slash-menu actions are handled before active command dispatch"
+                    ),
                 }
             }
-            event = run.next() => match event {
+            event = run.next(), if settled_outcome.is_none() => match event {
                 Some(event) => {
+                    if matches!(&event, AgentEvent::TurnStarted) && inspection.model.responses_features().reasoning_effort_updates {
+                        if let Ok(session) = inspection.read_only_session() {
+                            if let Ok(Some((_, reasoning))) = session.responses_reasoning(&inspection.model.endpoint.id, &inspection.model.spec.id) {
+                                shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &reasoning_label(&reasoning));
+                            }
+                        }
+                    }
                     if let AgentEvent::ToolStarted { id, name, args } = &event {
                         *made_tool_call = true;
                         tool_calls.insert(id.clone(), (name.clone(), args.clone()));
                     }
-                    if let AgentEvent::ToolProgress {
-                        id,
-                        progress: octet_agent::ToolProgress::Confirmation(request),
-                        ..
-                    } = &event
-                    {
-                        let confirmation = tokio::select! {
-                            biased;
-                            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
-                                request.respond(false);
-                                control.abort();
-                                *quit_requested = true;
-                                shell.restore_queued_steering();
-                                shell.set_run_preparing(run_id, "shutting down");
-                                shell.render();
-                                octet_agent::extension_process::terminate_bash_process_groups(
-                                    Duration::from_millis(400),
-                                )
-                                .await;
-                                return Ok(HostRunOutcome::shutdown());
-                            }
-                            result = confirmation_picker(shell, input, request) => result,
-                        };
-                        let confirmed = match confirmation {
-                            Ok(confirmed) => confirmed,
-                            Err(error) => {
-                                request.respond(false);
-                                return Err(error);
-                            }
-                        };
-                        request.respond(confirmed);
-                        if shell.close_requested() {
-                            request_active_close(
-                                control,
-                                shell,
-                                run_id,
-                                &mut input_open,
-                                &mut aborting,
-                                &mut intents,
-                                &mut in_flight,
-                                quit_requested,
-                            );
-                        }
-                        let tool_name = tool_calls.get(id).map(|(name, _)| name.as_str());
-                        let notice = confirmation_notice(tool_name, confirmed);
-                        if confirmed {
-                            shell.notice_success(notice);
+                    if let Some(interaction) = ActiveToolInteraction::from_event(&event, &tool_calls) {
+                        if aborting || *quit_requested || interactions.len() >= 32
+                            || interactions.iter().map(ActiveToolInteraction::request_bytes).sum::<usize>()
+                                .saturating_add(interaction.request_bytes()) > 256 * 1024
+                        {
+                            // Bound both request count and bytes; private input buffers
+                            // additionally retain at most 4 KiB per request.
+                            // Saturation is an explicit denial, never implicit consent.
+                            shell.notice_error("interactive tool request denied while cancelling or at the pending-request limit");
                         } else {
-                            shell.notice_error(notice);
+                            if interactions.is_empty() {
+                                shell.close_panel(); shell.close_overlay();
+                                update_report_open = false;
+                                subagents_open = false; subagent_document = None;
+                                interaction.open(shell);
+                            }
+                            interactions.push_back(interaction);
                         }
                     }
-                    if let AgentEvent::ToolProgress {
-                        progress: octet_agent::ToolProgress::Input(request),
-                        ..
-                    } = &event
-                    {
-                        let answered = tool_input_picker(shell, input, request).await?;
-                        if shell.close_requested() {
-                            request_active_close(
-                                control,
-                                shell,
-                                run_id,
-                                &mut input_open,
-                                &mut aborting,
-                                &mut intents,
-                                &mut in_flight,
-                                quit_requested,
-                            );
-                        }
-                        if !answered {
-                            shell.notice("interactive command input cancelled");
+                    if let AgentEvent::ToolFinished { id, .. } = &event {
+                        let was_front = interactions.front().is_some_and(|request| &request.id == id);
+                        interactions.retain(|request| &request.id != id);
+                        if was_front {
+                            shell.close_panel(); shell.set_tool_input_prompt(None);
+                            if let Some(next) = interactions.front() { next.open(shell); }
                         }
                     }
                     shell.on_run_event(run_id, &event);
+                    assistant_message.observe(executable_extensions, &event);
                     if let AgentEvent::ToolFinished { id, result, .. } = &event {
                         if let Some((name, arguments)) = tool_calls.remove(id) {
                             let (output, is_error) = match result {
@@ -1717,19 +3771,27 @@ where
                     }
                     let run_finished = matches!(&event, AgentEvent::RunFinished { .. });
                     if run_finished {
+                        interactions.clear();
+                        shell.close_panel();
+                        shell.set_tool_input_prompt(None);
                         // The renderer is asynchronous and coalesces requests.
                         // Restore any steer that lost the final delivery race
                         // before requesting the terminal frame, so idle chrome,
                         // the terminal outcome, and the editor are one atomic
                         // presentation state.
                         shell.restore_queued_steering();
+                        let dispatch = !*quit_requested && !shell.close_requested()
+                            && matches!(&event, AgentEvent::RunFinished { reason, .. }
+                                if matches!(reason, octet_agent::FinishReason::Completed)
+                                    || (dispatch_queued && matches!(reason, octet_agent::FinishReason::Aborted)));
+                        shell.settle_queued_follow_ups(dispatch);
                     }
                     shell.render();
                     if let AgentEvent::RunFinished { reason, .. } = event {
                         let (endpoint, model) = shell
                             .current_run_route()
                             .unwrap_or_else(|| ("unknown".to_owned(), "unknown".to_owned()));
-                        return Ok(HostRunOutcome::from_finish_reason(
+                        settled_outcome = Some(HostRunOutcome::from_finish_reason(
                             &reason,
                             &endpoint,
                             &model,
@@ -1737,10 +3799,14 @@ where
                     }
                 }
                 None => {
+                    interactions.clear();
+                    shell.close_panel();
+                    shell.set_tool_input_prompt(None);
+                    assistant_message.settle(executable_extensions);
                     shell.restore_queued_steering();
                     shell.fail_run(run_id, RUN_STREAM_LOST_MESSAGE);
                     shell.render();
-                    return Ok(HostRunOutcome::stream_lost());
+                    settled_outcome = Some(HostRunOutcome::stream_lost());
                 }
             },
         }
@@ -1785,6 +3851,7 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
     // Registry/configured metadata overrides the conservative canonical-ID
     // fallback installed by `set_identity` and is cached until model switch.
     shell.set_model_theme(&app.model);
+    shell.set_model_cycle(app.model_cycle());
     shell.set_status_detail(commands::status_text_with_metrics(
         app,
         None,
@@ -1819,6 +3886,12 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
     for message in app.executable_extensions.drain_events_for_shell(shell) {
         shell.notice(message);
     }
+    if app
+        .executable_extensions
+        .apply_session_host_requests(&mut app.agent, &app.sessions)
+    {
+        shell.notice("extension updated the session metadata");
+    }
     let _ = app.executable_extensions.sync_semantic_ui(shell);
     app.executable_extensions
         .sync_editor_state(shell.extension_editor_snapshot());
@@ -1830,6 +3903,10 @@ fn apply_extension_background(
 ) -> bool {
     let updates = executable_extensions.drain_background_updates();
     let mut changed = false;
+    for message in executable_extensions.drain_post_mutation_rescans() {
+        shell.notice(message);
+        changed = true;
+    }
     for update in updates.rendered_tools {
         shell.apply_extension_tool_renderer(&update.id, &update.segments);
         changed = true;
@@ -1878,7 +3955,14 @@ fn report_compaction(shell: &mut InteractiveShell, outcome: &CompactionOutcome, 
                         .input_tokens
                         .saturating_add(record.usage.cache_read_tokens)
                         .saturating_add(record.usage.cache_write_tokens);
-                    format!("{prompt_tokens} input tokens summarized · {cost} compaction cost")
+                    format!(
+                        "{prompt_tokens} input tokens summarized · {cost} compaction cost{}",
+                        if session.has_uncertain_usage() || session.has_unpriced_usage() {
+                            " (session usage or pricing uncertain)"
+                        } else {
+                            ""
+                        }
+                    )
                 },
             );
             let summary = session
@@ -1912,7 +3996,14 @@ fn report_compaction(shell: &mut InteractiveShell, outcome: &CompactionOutcome, 
                         .input_tokens
                         .saturating_add(record.usage.cache_read_tokens)
                         .saturating_add(record.usage.cache_write_tokens);
-                    format!("{prompt_tokens} input tokens compacted · {cost} compaction cost")
+                    format!(
+                        "{prompt_tokens} input tokens compacted · {cost} compaction cost{}",
+                        if session.has_uncertain_usage() || session.has_unpriced_usage() {
+                            " (session usage or pricing uncertain)"
+                        } else {
+                            ""
+                        }
+                    )
                 },
             );
             shell.native_compaction_marker(format!("Context compacted natively · {detail}"));
@@ -2002,11 +4093,78 @@ fn configure_auto_compaction(
     Ok(())
 }
 
-async fn reload_resources(
-    app: App,
+/// Bounded, descriptor-bound observation; unknown files never produce a claim
+/// that a config mutation committed. Raw bytes remain inside the host.
+fn configuration_snapshot(path: &Path) -> Option<Option<Vec<u8>>> {
+    match octet_agent::secure_fs::read_regular_file_bounded(path, 1024 * 1024) {
+        Ok(bytes) => Some(Some(bytes)),
+        Err(octet_agent::secure_fs::SecureFileError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Some(None)
+        }
+        Err(_) => None,
+    }
+}
+
+async fn observe_configuration_commit(
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    before: Option<Option<Vec<u8>>>,
+    path: Option<&Path>,
+) -> bool {
+    let (Some(before), Some(path)) = (before, path) else {
+        return false;
+    };
+    let Some(after) = configuration_snapshot(path) else {
+        return false;
+    };
+    if before == after {
+        return false;
+    }
+    // An observation owner lives inside this process. No contents, paths,
+    // credentials, or user identities appear in its stable notification ID.
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    extensions
+        .notify_configuration_changed(
+            format!("configuration:{generation}"),
+            generation,
+            octet_agent::PostMutationState::Committed,
+        )
+        .await;
+    true
+}
+
+async fn persist_configuration<T>(
+    extensions: Option<&mut crate::extensions::ExecutableExtensions>,
+    persist: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let path = extensions
+        .as_ref()
+        .and_then(|_| crate::cli::global_config_path());
+    let before = path.as_deref().and_then(configuration_snapshot);
+    let result = persist()?;
+    if let Some(extensions) = extensions {
+        observe_configuration_commit(extensions, before, path.as_deref()).await;
+    }
+    Ok(result)
+}
+
+async fn reload_resources<S>(
+    mut app: App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
-) -> anyhow::Result<App> {
+    input: &mut S,
+) -> anyhow::Result<(App, bool)>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    // Rebuilding drops the Agent and shuts down its delegated tasks. Check the
+    // original owner before recomposing resources or releasing any binding.
+    if refuse_resource_reload(&app, shell) {
+        return Ok((app, false));
+    }
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(shell, "the application resources are being reloaded");
     let _diagnostics = crate::output::defer_tui_diagnostics();
     let background = shell.theme().background();
     let (app, theme) = run_blocking_lifecycle(shell, input, "reloading resources…", move || {
@@ -2020,11 +4178,621 @@ async fn reload_resources(
     .await?;
     shell.set_theme(theme);
     shell.set_runtime_config(app.config.clone());
+    shell.reload_keybindings();
     shell.hydrate(app.agent.session())?;
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(shell, &app);
+    Ok((app, true))
+}
+
+fn refuse_resource_reload(app: &App, shell: &mut InteractiveShell) -> bool {
+    let count = active_subagent_workers(app);
+    if count == 0 {
+        return false;
+    }
+    shell.notice(format!(
+        "reload refused: {count} host worker tasks remain attached; reload is unavailable while they are attached. Finish or stop the work, then exit and resume the session to replace the owning host. The current application and workers are unchanged"
+    ));
+    true
+}
+
+/// How one `/reload`-family caller wants the host layer handled.
+///
+/// The host layer is the only layer that executes a replacement image, so which
+/// caller selected it decides what consent exists: plain `/reload` and the
+/// queued/extension request path are resources-only, a typed `/reload --force`
+/// is its own explicit confirmation, and the automatic `reload_host = true`
+/// watcher must defer to an explicit command before any consent is needed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostPass {
+    /// Resources only: never probe, never re-exec.
+    ResourcesOnly,
+    /// The host layer was selected. `redirect_confirmed` is true when the
+    /// caller's own explicit user action already confirmed a retargeted image.
+    Allowed { redirect_confirmed: bool },
+}
+
+impl HostPass {
+    fn may_prompt(self) -> bool {
+        matches!(
+            self,
+            Self::Allowed {
+                redirect_confirmed: true
+            }
+        )
+    }
+}
+
+#[derive(Debug)]
+enum HostReloadResult {
+    Unchanged,
+    Problem(String),
+    Ready(crate::reexec::ReexecPlan),
+}
+
+/// `/reload` keeps its existing transactional resource reload, then re-execs
+/// only when the on-disk executable changed *and* the caller selected the host
+/// layer.
+///
+/// Returns `Some(plan)` when the caller must leave the TUI and call
+/// `plan.exec()` after the loop settles. `None` covers a resources-only reload
+/// and every refusal or validation failure, all of which leave this process
+/// fully live. The final boolean reports whether the resource rebuild applied;
+/// a worker refusal returns the original App and must not be acknowledged as success.
+async fn reload_resources_with_reexec<S>(
+    app: App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    reexec: Option<&mut crate::reexec::ReexecController>,
+    host: HostPass,
+    reload: &mut crate::reload::ReloadSupervisor,
+) -> anyhow::Result<(App, Option<crate::reexec::ReexecPlan>, bool)>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let before = app.executable_extensions.running_generations();
+    let (mut app, applied) = reload_resources(app, shell, input).await?;
+    if !applied {
+        return Ok((app, None, false));
+    }
+    remember_rebuilt_extensions(
+        reload,
+        &before,
+        &app.executable_extensions.running_generations(),
+    );
+    request_extension_ui(shell, &mut app);
+    if host == HostPass::ResourcesOnly {
+        return Ok((app, None, true));
+    }
+    let (next, result) = reload_host_with_reexec(app, shell, input, reexec, host).await?;
+    app = next;
+    let plan = match result {
+        HostReloadResult::Unchanged => {
+            shell.notice(crate::reexec::notice::RESOURCES_ONLY);
+            None
+        }
+        HostReloadResult::Problem(notice) => {
+            shell.notice(notice);
+            None
+        }
+        HostReloadResult::Ready(plan) => Some(plan),
+    };
+    Ok((app, plan, true))
+}
+
+fn remember_rebuilt_extensions(
+    reload: &mut crate::reload::ReloadSupervisor,
+    before: &std::collections::BTreeMap<String, (String, u64)>,
+    after: &std::collections::BTreeMap<String, (String, u64)>,
+) {
+    for (name, generation) in after {
+        if before.get(name) != Some(generation) {
+            // A new live instance/generation completed initialization. Retained,
+            // stopped, and absent bindings were not successful replacement checks.
+            reload.checked_problems(
+                crate::reload::ReloadComponent::Extension(name.clone()),
+                Vec::new(),
+                true,
+            );
+        }
+    }
+}
+
+async fn reload_host_with_reexec<S>(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    reexec: Option<&mut crate::reexec::ReexecController>,
+    host: HostPass,
+) -> anyhow::Result<(App, HostReloadResult)>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let Some(reexec) = reexec else {
+        return Ok((app, HostReloadResult::Problem(
+            "reload: the current executable could not be captured; host replacement is unavailable".into(),
+        )));
+    };
+    let session_id = match crate::app::bootstrap::terminal_goal_session_id(app.agent.session()) {
+        Ok(id) => id,
+        Err(error) => {
+            return Ok((
+                app,
+                HostReloadResult::Problem(format!(
+                    "reload: the active session cannot be resumed: {error}"
+                )),
+            ));
+        }
+    };
+    reexec.set_session_id(session_id);
+    // Resolve the executable *now*. An update commonly retargets a symlink or
+    // swaps a version-pinned directory (Homebrew, npm, a pinned installer), so
+    // the path this process started from is not necessarily the path `/reload`
+    // must enter. The observation carries the resolved path into the probe, the
+    // exec, and the notice, and reports an update that is still in flight as its
+    // own blocked notice instead of an opaque error.
+    let observed = reexec.observe_generation();
+    let safety = live_reexec_inputs(active_subagent_workers(&app));
+    // A typed `/reload --force` already carries the retarget consent;
+    // every other host pass must ask before a
+    // retargeted image is probed.
+    let mut options = crate::reexec::ReexecOptions::refusing_workers();
+    if matches!(
+        host,
+        HostPass::Allowed {
+            redirect_confirmed: true
+        }
+    ) {
+        options = options.confirming_redirect();
+    }
+    // Rebuilds cannot hand live tasks to a replacement owner. There is no
+    // detach opt-in: durable transcripts do not preserve running execution.
+    let decision = loop {
+        let (decision, events) =
+            reexec_decision(&mut app, reexec, &observed, &safety, options).await;
+        for event in events {
+            shell.notice(event);
+        }
+        match decision {
+            crate::reexec::ReexecDecision::ConfirmationRequired { redirect, .. }
+                if !options.redirect_confirmed =>
+            {
+                if !host.may_prompt() {
+                    return Ok((
+                        app,
+                        HostReloadResult::Problem(
+                            "reload: binary replacement needs consent; run /reload --force".into(),
+                        ),
+                    ));
+                }
+                if confirm_binary_retarget(shell, input, &redirect).await? {
+                    options = options.confirming_redirect();
+                    continue;
+                }
+                return Ok((app, HostReloadResult::Problem(
+                    "reload cancelled · the replaced binary was not probed or entered; this process is unchanged".into(),
+                )));
+            }
+            other => break other,
+        }
+    };
+    match decision {
+        crate::reexec::ReexecDecision::ResourcesOnly => Ok((app, HostReloadResult::Unchanged)),
+        crate::reexec::ReexecDecision::Refused { notice, .. }
+        | crate::reexec::ReexecDecision::Blocked { notice, .. }
+        | crate::reexec::ReexecDecision::ExecFailed { notice, .. }
+        | crate::reexec::ReexecDecision::ConfirmationRequired { notice, .. } => {
+            Ok((app, HostReloadResult::Problem(notice)))
+        }
+        crate::reexec::ReexecDecision::Ready(plan) => {
+            // Imminent replacement is an occurrence, never deduplicated.
+            // Attached worker ownership is refused before this point.
+            shell.notice(plan.notice());
+            shell.render();
+            Ok((app, HostReloadResult::Ready(*plan)))
+        }
+    }
+}
+
+/// One `/reload` decision taken against the live session and extension manager.
+///
+/// The hooks borrow the session and extension manager for the duration of
+/// the decision only; nothing below the validated
+/// `Ready` moves the application.
+async fn reexec_decision(
+    app: &mut App,
+    reexec: &crate::reexec::ReexecController,
+    observed: &crate::reexec::ExecutableObservation,
+    safety: &crate::reexec::LiveSafetyInputs,
+    options: crate::reexec::ReexecOptions,
+) -> (crate::reexec::ReexecDecision, Vec<String>) {
+    let mut hooks = InteractiveReexecHooks {
+        session: app.agent.session(),
+        extensions: &mut app.executable_extensions,
+        discarded_requests: Vec::new(),
+    };
+    let decision = reexec
+        .reexec_if_changed(observed, safety, options, &mut hooks)
+        .await;
+    (decision, hooks.discarded_requests)
+}
+
+/// Ask the user to confirm entering a replaced or moved binary.
+///
+/// The probe executes the candidate image, so a retargeted image is never
+/// probed before this answer. The suggested choice is to keep the current
+/// process, and a denied confirmation leaves the binary unexecuted.
+async fn confirm_binary_retarget<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    redirect: &crate::reexec::ExecutableRedirect,
+) -> anyhow::Result<bool>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let detail = "The new image has not been probed or executed yet. Approving runs it once as a \
+                  probe and then replaces this process image.";
+    let prompt = match redirect {
+        crate::reexec::ExecutableRedirect::Moved { from, to } => format!(
+            "The octet binary moved from {} to {}. Reload into it?",
+            from.display(),
+            to.display()
+        ),
+        crate::reexec::ExecutableRedirect::Replaced { path } => format!(
+            "The octet binary at {} was replaced (new file identity). Reload into it?",
+            path.display()
+        ),
+    };
+    let request = octet_agent::extension_process::ConfirmationRequest {
+        parent_request_id: None,
+        prompt,
+        detail: Some(detail.to_owned()),
+        destructive: false,
+        default: false,
+    };
+    extension_confirmation_picker(shell, input, "octet", &request).await
+}
+
+/// Apply one admitted live-reload pass at the interactive idle boundary.
+///
+/// This is the only place a pass is applied, and it is reachable only from the
+/// idle prompt: `Idle::ReloadDue` is produced by `wait_for_prompt`, which runs
+/// before any `Run` exists, and the explicit `/reload --dry-run` /
+/// `/reload --force` text is handled in the same idle match arm. A run owns the
+/// session inside the `Idle::Submit` arm, which never reaches this function, so
+/// "never reload while a run owns the session" is enforced by where this is
+/// called from — and `ReloadBoundary::Idle`, which `ReloadSupervisor::begin`
+/// refuses to bend, is the checked half of the same rule.
+///
+/// Host consent is checked before any resource rebuild can tear down worker
+/// bindings. An admitted host re-exec supersedes in-process rebuilds; otherwise
+/// resources precede extension restarts.
+async fn apply_live_reload_plan(
+    app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    reload: &mut crate::reload::ReloadSupervisor,
+    mut plan: crate::reload::ReloadPlan,
+    reexec: Option<&mut crate::reexec::ReexecController>,
+    pending_reexec: &mut Option<crate::reexec::ReexecPlan>,
+) -> anyhow::Result<App> {
+    use crate::reload::{LayerOutcome, ReloadLayer, SkipReason};
+
+    let mut app = app;
+    let wants_resources = plan.contains(ReloadLayer::Resources);
+    let wants_extensions = plan.contains(ReloadLayer::Extensions);
+    let wants_host = plan.contains(ReloadLayer::Host);
+    let workers = active_subagent_workers(&app);
+    if workers > 0 {
+        for notice in reload.checked_problems(
+            crate::reload::ReloadComponent::Workers,
+            vec![format!("reload refused: {} host worker task(s) remain attached; finish or stop the work, then exit and resume to replace the owning host", workers)],
+            false,
+        ) {
+            shell.notice(notice);
+        }
+        for layer in plan.layers() {
+            plan.record(layer, LayerOutcome::Skipped(SkipReason::NotSelected));
+        }
+        reload.finish(plan);
+        shell.render();
+        return Ok(app);
+    }
+    if workers == 0 {
+        reload.checked_problems(
+            crate::reload::ReloadComponent::Workers,
+            Vec::new(),
+            plan.is_forced(),
+        );
+    }
+    // A forced pass is the user's explicit confirmation of whatever the
+    // executable now is; an automatic host pass defers rather than asking for
+    // consent to enter a retargeted image.
+    let host_pass = if wants_host {
+        HostPass::Allowed {
+            redirect_confirmed: plan.is_forced(),
+        }
+    } else {
+        HostPass::ResourcesOnly
+    };
+
+    if wants_host {
+        let (next, result) = reload_host_with_reexec(app, shell, input, reexec, host_pass).await?;
+        app = next;
+        match result {
+            HostReloadResult::Ready(host_plan) => {
+                reload.checked_problems(
+                    crate::reload::ReloadComponent::Host,
+                    Vec::new(),
+                    plan.is_forced(),
+                );
+                plan.record_reload(ReloadLayer::Host);
+                plan.record(
+                    ReloadLayer::Extensions,
+                    LayerOutcome::Skipped(SkipReason::NotSelected),
+                );
+                *pending_reexec = Some(host_plan);
+            }
+            HostReloadResult::Unchanged => {
+                reload.checked_problems(
+                    crate::reload::ReloadComponent::Host,
+                    Vec::new(),
+                    plan.is_forced(),
+                );
+                plan.record(
+                    ReloadLayer::Host,
+                    LayerOutcome::Skipped(SkipReason::NoChange),
+                );
+                if workers > 0 {
+                    shell.notice("reload deferred: active background workers remain; no host replacement was selected and no worker teardown was authorized");
+                    for layer in [ReloadLayer::Resources, ReloadLayer::Extensions] {
+                        plan.record(layer, LayerOutcome::Skipped(SkipReason::NotSelected));
+                    }
+                    reload.finish(plan);
+                    shell.render();
+                    return Ok(app);
+                }
+            }
+            HostReloadResult::Problem(problem) => {
+                for notice in reload.checked_problems(
+                    crate::reload::ReloadComponent::Host,
+                    vec![problem],
+                    plan.is_forced(),
+                ) {
+                    shell.notice(notice);
+                }
+                plan.record(ReloadLayer::Host, LayerOutcome::Failed);
+                if workers > 0 {
+                    for layer in [ReloadLayer::Resources, ReloadLayer::Extensions] {
+                        plan.record(layer, LayerOutcome::Skipped(SkipReason::NotSelected));
+                    }
+                    if let Some(report) = reload.finish(plan) {
+                        if report.forced {
+                            shell.notice(report.summary());
+                        }
+                    }
+                    shell.render();
+                    return Ok(app);
+                }
+            }
+        }
+    }
+
+    if wants_resources && pending_reexec.is_none() {
+        let _automatic = (!plan.is_forced()).then(crate::output::automatic_diagnostics);
+        let (next, applied) = reload_resources(app, shell, input).await?;
+        app = next;
+        if !applied {
+            plan.record(ReloadLayer::Resources, LayerOutcome::Failed);
+            reload.finish(plan);
+            return Ok(app);
+        }
+        request_extension_ui(shell, &mut app);
+        plan.record_reload(ReloadLayer::Resources);
+    }
+
+    if wants_extensions && pending_reexec.is_none() {
+        app.executable_extensions
+            .revoke_terminal_grant_for_shell(shell, "the extensions are being reloaded");
+        let result = await_lifecycle(shell, input, "reloading extensions…", async {
+            Ok(app.executable_extensions.reload_report().await)
+        })
+        .await?;
+        let failed = result.processes.iter().any(|(_, result)| result.is_err());
+        for notice in extension_reload_notices(reload, result, plan.is_forced()) {
+            shell.notice(notice);
+        }
+        // reload_report already drained typed rescans. Do not merge their
+        // discard events or successful generation details into catalog problems.
+        let catalog = app
+            .executable_extensions
+            .synchronize_provider_catalog_report(&mut app.catalog, &app.client);
+        for notice in provider_reload_notices(reload, catalog, plan.is_forced()) {
+            shell.notice(notice);
+        }
+        plan.record(
+            ReloadLayer::Extensions,
+            if failed {
+                LayerOutcome::Failed
+            } else {
+                LayerOutcome::Reloaded
+            },
+        );
+        request_extension_ui(shell, &mut app);
+    }
+
+    if let Some(report) = reload.finish(plan) {
+        debug_assert!(
+            report.boundary_idle || report.forced,
+            "a live-reload pass is applied at the idle boundary"
+        );
+        debug_assert!(
+            !reload.is_in_flight(),
+            "finishing a pass always clears the in-flight plan"
+        );
+        // Typed component feedback above owns automatic diagnostics. Rendering
+        // the aggregate here would repeat failures and inspection warnings.
+        if report.forced {
+            for notice in report.notices() {
+                shell.notice(notice);
+            }
+        }
+        // Background maintenance should not add success chatter to the chat.
+        // Explicit /reload --force still gets a completion report; plain
+        // /reload and --dry-run own their feedback at their command sites.
+        if report.forced {
+            shell.notice(report.summary());
+        }
+        update_status(shell, &app);
+        shell.render();
+    }
     Ok(app)
+}
+
+fn extension_reload_notices(
+    reload: &mut crate::reload::ReloadSupervisor,
+    result: crate::extensions::ExtensionReloadReport,
+    explicit: bool,
+) -> Vec<String> {
+    use crate::reload::ReloadComponent;
+    let mut notices = Vec::new();
+    for (name, outcome) in result.processes {
+        let problems = match outcome {
+            Ok(detail) => {
+                if explicit {
+                    notices.push(detail);
+                }
+                Vec::new()
+            }
+            Err(problem) => vec![problem],
+        };
+        notices.extend(reload.checked_problems(
+            ReloadComponent::Extension(name),
+            problems,
+            explicit,
+        ));
+    }
+    notices.extend(reload.checked_problems(
+        ReloadComponent::ExtensionShortcuts,
+        result.shortcuts,
+        explicit,
+    ));
+    for (component, problems) in result.rescans.checked {
+        notices.extend(reload.checked_problems(
+            ReloadComponent::ExtensionRescan(component),
+            problems,
+            explicit,
+        ));
+    }
+    if explicit {
+        notices.extend(result.details);
+        notices.extend(result.rescans.details);
+    }
+    notices.extend(result.rescans.events);
+    // Every event occurrence survives, including identical request-loss notices.
+    notices.extend(result.events);
+    notices
+}
+
+fn provider_reload_notices(
+    reload: &mut crate::reload::ReloadSupervisor,
+    catalog: crate::extensions::ProviderCatalogReport,
+    explicit: bool,
+) -> Vec<String> {
+    let mut notices = if catalog.checked {
+        reload.checked_problems(
+            crate::reload::ReloadComponent::ProviderCatalog,
+            catalog.problems,
+            explicit,
+        )
+    } else if explicit {
+        catalog.problems
+    } else {
+        Vec::new()
+    };
+    if explicit {
+        notices.extend(catalog.details);
+    }
+    notices
+}
+
+fn reload_interruption_preview(app: &App) -> Vec<String> {
+    let mut notices = Vec::new();
+    let requests = app.executable_extensions.pending_host_request_count();
+    if requests > 0 {
+        notices.push(format!("reload: possible interruption of {requests} pending extension host request(s) if their process is replaced"));
+    }
+    let workers = active_subagent_workers(app);
+    if workers > 0 {
+        notices.push(format!("reload refused: {workers} host worker task(s) remain attached; finish or stop the work, then exit and resume to replace the owning host"));
+    }
+    notices
+}
+
+/// The two caller-owned operations `crate::reexec` must not implement itself.
+struct InteractiveReexecHooks<'a> {
+    session: &'a Session,
+    extensions: &'a mut crate::extensions::ExecutableExtensions,
+    discarded_requests: Vec<String>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl crate::reexec::ReexecHooks for InteractiveReexecHooks<'_> {
+    async fn make_session_durable(&mut self) -> anyhow::Result<()> {
+        // Reuse the existing session store: every semantic record is
+        // `sync_data`d before its append reports success
+        // (`octet-agent/src/session_writer.rs`), so the durable head is made
+        // recoverable by observing it rather than by writing a second store.
+        // Re-opening replays the file with the same parser `--resume` will.
+        let head = self.session.head_ref().cloned();
+        let reopened = Session::open(self.session.path())?;
+        anyhow::ensure!(
+            reopened.head_ref() == head.as_ref(),
+            "the durable session head does not match the live head"
+        );
+        Ok(())
+    }
+
+    async fn shutdown_extensions(&mut self) -> anyhow::Result<()> {
+        // `ExecutableExtensions::shutdown` releases the current session
+        // binding and bounds each protocol plus the whole manager with its own
+        // hard deadline; no extension child is inherited by the replacement
+        // image. The caller can rebuild children after a failed exec.
+        self.extensions.shutdown().await;
+        self.discarded_requests
+            .extend(self.extensions.discard_stale_host_requests());
+        Ok(())
+    }
+}
+
+/// Live-state inputs for a re-exec decision taken by `/reload`.
+///
+/// `/reload` is dispatched only at the interactive idle boundary: the main
+/// loop drops the active `Run` before queued actions or idle commands run,
+/// idle shell escapes are awaited to completion before their outcome returns,
+/// every session append is synchronous, and effect approvals are admitted only
+/// inside the run pipeline. The five run-owned fields are therefore
+/// observations of this boundary rather than guesses. Delegated workers
+/// outlive the root run, so their count is read from live state.
+fn live_reexec_inputs(background_workers: usize) -> crate::reexec::LiveSafetyInputs {
+    crate::reexec::LiveSafetyInputs {
+        model_turn_active: false,
+        tool_call_active: false,
+        shell_child_active: false,
+        pending_effect: false,
+        session_persistence_in_flight: false,
+        background_workers,
+    }
+}
+
+/// Observe host-owned tasks before replacing any App or extension owner.
+/// Presentation may be missing or stale, and idle workers retain live control
+/// receivers. Keep its count only as an additional conservative refusal signal.
+fn active_subagent_workers(app: &App) -> usize {
+    app.agent
+        .active_delegated_worker_count()
+        .max(app.executable_extensions.active_subagent_worker_count())
 }
 
 #[derive(Clone, Debug)]
@@ -2235,7 +5003,12 @@ async fn web_search_management_menu(
     }
     let provider = if index == 0 { "brave" } else { "searxng" };
     let output = {
-        let mut interaction = InteractiveExtensionConfirmations { shell, input };
+        let dialogs = app.executable_extensions.lifecycle_snapshot();
+        let mut interaction = InteractiveExtensionConfirmations {
+            shell,
+            input,
+            dialogs: &dialogs,
+        };
         app.executable_extensions
             .execute_command_with_confirmation(
                 WEB_SEARCH_COMMAND_NAME,
@@ -2348,7 +5121,12 @@ async fn extension_management_menu(
             continue;
         }
 
+        if refuse_resource_reload(&app, shell) {
+            continue;
+        }
         let enabled = !choice.enabled;
+        let config_path = crate::cli::global_config_path();
+        let before_config = config_path.as_deref().and_then(configuration_snapshot);
         let persisted = match crate::cli::persist_extension_enabled(&choice.name, enabled) {
             Ok(persisted) => persisted,
             Err(error) => {
@@ -2361,7 +5139,7 @@ async fn extension_management_menu(
         };
         app.config.enabled_extensions = persisted;
         app = match reload_resources(app, shell, input).await {
-            Ok(app) => app,
+            Ok((app, _)) => app,
             Err(error) => {
                 let rollback = crate::cli::persist_extension_enabled(&choice.name, choice.enabled);
                 return match rollback {
@@ -2376,6 +5154,12 @@ async fn extension_management_menu(
                 };
             }
         };
+        observe_configuration_commit(
+            &mut app.executable_extensions,
+            before_config,
+            config_path.as_deref(),
+        )
+        .await;
         request_extension_ui(shell, &mut app);
         let summary = app
             .executable_extensions
@@ -2428,10 +5212,30 @@ async fn thinking_configuration_picker(
     input: &mut EventStream,
 ) -> anyhow::Result<Option<(ReasoningMode, ThinkingLevel)>> {
     let levels = supported_levels_with_subagents(&app.model, app.subagents_available());
-    let Some(level) = thinking_picker(shell, input, &levels).await? else {
+    let codex_context = codex_context_surface(&app.model);
+    let Some(level) = thinking_picker(shell, input, &levels, codex_context.as_ref()).await? else {
         return Ok(None);
     };
     Ok(Some((ReasoningMode::Standard, level)))
+}
+
+/// Codex context-window facts for the effort menu, or `None` on every other
+/// route.
+///
+/// Entitlement is read from the same subscription credential the launch used,
+/// and an unreadable or unparsable credential reports `false` so an unknown plan
+/// never grants a raise above the deliberate cap.
+fn codex_context_surface(model: &octet_ai::Model) -> Option<commands::CodexContextSurface> {
+    if !commands::codex_responses_endpoint(model) {
+        return None;
+    }
+    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
+    let entitled = crate::auth::codex::usable_subscription_claims(&store)
+        .ok()
+        .flatten()
+        .and_then(|claims| claims.plan)
+        .is_some_and(|plan| plan.uses_max_context_window());
+    commands::CodexContextSurface::capture(model, entitled)
 }
 
 fn delegated_session_text(
@@ -2458,20 +5262,81 @@ struct SubagentViewEntry {
     node_id: String,
     label: String,
     description: String,
+    /// Declared generic presentation state, lowercased. The panel derives its
+    /// group headings from this and never from the row text.
+    state: String,
     session_reference: Option<String>,
     fallback_detail: String,
+}
+
+/// Display group for one declared generic presentation state.
+///
+/// Live work is expanded by default; terminal states collapse behind their
+/// heading so a long-lived parent session cannot bury its running workers under
+/// finished ones. `openall` is adding per-worker model/reasoning to the typed
+/// presentation, so the group table stays separate from the row text.
+fn subagent_group_for(state: &str) -> (&'static str, u8, bool) {
+    match state {
+        "running" => ("Running", 0, false),
+        "pending" => ("Queued", 1, false),
+        "degraded" => ("Blocked", 2, false),
+        "active" => ("Active", 3, false),
+        "succeeded" => ("Done", 4, true),
+        "failed" => ("Failed", 5, true),
+        "stopped" | "cancelled" => ("Stopped", 6, true),
+        "unavailable" => ("Unavailable", 7, true),
+        "empty" | "loading" => ("Pending state", 8, false),
+        _ => ("Other", 9, true),
+    }
+}
+
+/// Order entries into their display groups and derive the group index ranges.
+///
+/// Only ordering changes here: every worker keeps its stable node id and its
+/// opaque session reference, and no session identifier enters the display text.
+fn order_subagent_entries(
+    entries: Vec<SubagentViewEntry>,
+) -> (Vec<SubagentViewEntry>, Vec<crate::tui::view::SubagentGroup>) {
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|index| {
+        let (_, priority, _) = subagent_group_for(&entries[*index].state);
+        (priority, *index)
+    });
+    let mut groups: Vec<crate::tui::view::SubagentGroup> = Vec::new();
+    let mut ordered: Vec<SubagentViewEntry> = Vec::with_capacity(entries.len());
+    for (position, source) in order.into_iter().enumerate() {
+        let entry = &entries[source];
+        let (label, _, collapsible) = subagent_group_for(&entry.state);
+        match groups.last_mut() {
+            Some(group) if group.label == label => group.indices.push(position),
+            _ => groups.push(crate::tui::view::SubagentGroup {
+                label: label.to_owned(),
+                indices: vec![position],
+                collapsible,
+            }),
+        }
+        ordered.push(entry.clone());
+    }
+    (ordered, groups)
 }
 
 fn subagent_view_entries_from_presentation(
     view: crate::extensions::ExtensionPresentationView,
 ) -> Option<(String, Vec<SubagentViewEntry>)> {
-    let title = view
-        .snapshot
-        .status
-        .as_ref()
-        .map(|status| status.label.clone())
-        .unwrap_or_else(|| "Subagents".into());
+    // Panel titles are surface names only. Per-worker states live on the group
+    // rows and key affordances live in the picker's action footer, so the
+    // status label's counts stay in status/telemetry/notices instead of the
+    // header. A blank collection title falls back to the surface name rather
+    // than inventing chrome.
     let collection = view.snapshot.collection?;
+    let title = {
+        let declared = collection.title.trim();
+        if declared.is_empty() {
+            "Subagents".to_owned()
+        } else {
+            declared.to_owned()
+        }
+    };
     let detail = collection.detail;
     let entries = collection
         .nodes
@@ -2500,6 +5365,7 @@ fn subagent_view_entries_from_presentation(
                 node_id: node.id,
                 label: node.label,
                 description,
+                state,
                 session_reference,
                 fallback_detail,
             }
@@ -2523,14 +5389,19 @@ fn subagent_picker_snapshot(
     entries: &[SubagentViewEntry],
     notices: Vec<String>,
 ) -> SubagentPickerSnapshot {
+    let (ordered, groups) = order_subagent_entries(entries.to_vec());
     SubagentPickerSnapshot {
-        title: format!("{title} · Enter views transcript · Esc closes"),
-        items: entries.iter().map(|entry| entry.label.clone()).collect(),
-        descriptions: entries
+        // Surface name only: the rows carry the per-worker states and the
+        // picker chrome renders `picker_hints`/`panel_action_footer` for key
+        // affordances. Nothing may silently re-add hints or counts here.
+        title: title.to_owned(),
+        items: ordered.iter().map(|entry| entry.label.clone()).collect(),
+        descriptions: ordered
             .iter()
             .map(|entry| Some(entry.description.clone()))
             .collect(),
-        node_ids: entries.iter().map(|entry| entry.node_id.clone()).collect(),
+        node_ids: ordered.iter().map(|entry| entry.node_id.clone()).collect(),
+        groups,
         notices,
     }
 }
@@ -2578,14 +5449,25 @@ fn refresh_subagent_snapshot<'a, 'extensions>(
         match subagent_view_entries(context.extensions) {
             Some((title, entries)) => subagent_picker_snapshot(&title, &entries, notices),
             None => SubagentPickerSnapshot {
-                title: "Subagents · waiting for current state · Esc closes".into(),
+                title: "Subagents".into(),
                 items: Vec::new(),
                 descriptions: Vec::new(),
                 node_ids: Vec::new(),
+                groups: Vec::new(),
                 notices,
             },
         }
     })
+}
+
+/// Admit only the exact stop verb and one target. Other extension commands
+/// retain the active dispatcher's ordinary unknown-command behavior.
+fn live_subagents_stop_target(text: &str) -> Option<&str> {
+    let mut parts = text.split_whitespace();
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("/subagents"), Some("stop"), Some(target), None) => Some(target),
+        _ => None,
+    }
 }
 
 /// Whether an unknown-command text is the bare `/subagents` live view owned
@@ -2601,122 +5483,6 @@ fn is_live_subagents_command(
     };
     name.trim() == "subagents"
         && extensions.command_owner("subagents").as_deref() == Some("octet-subagents")
-}
-
-/// Live `/subagents` view while a run is active. Mirrors the idle
-/// `subagents_view` picker: selection opens the same theme-styled read-only
-/// worker transcript through the active run's delegation binding, so every
-/// subagent with a durable child session is viewable mid-run too.
-async fn active_subagents_view<S, F>(
-    shell: &mut InteractiveShell,
-    input: &mut S,
-    extensions: &mut crate::extensions::ExecutableExtensions,
-    open_delegated: F,
-) -> anyhow::Result<()>
-where
-    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
-    F: Fn(&str, &str) -> Result<Option<Session>, octet_agent::AgentError>,
-{
-    loop {
-        if subagent_view_entries(extensions).is_none_or(|(_, entries)| entries.is_empty()) {
-            for notice in extensions.drain_events() {
-                shell.notice(notice);
-            }
-            shell.notice("No subagents for this session.");
-            return Ok(());
-        }
-        let notices = extensions.drain_events();
-        let (title, entries) =
-            subagent_view_entries(extensions).expect("entries checked non-empty above");
-        let initial = subagent_picker_snapshot(&title, &entries, notices);
-        let selected_id = {
-            let mut refresh = SubagentRefreshContext {
-                extensions,
-                last_error: None,
-            };
-            subagent_picker(
-                shell,
-                input,
-                initial,
-                0,
-                &mut refresh,
-                refresh_subagent_snapshot,
-            )
-            .await?
-        };
-        let Some(selected_id) = selected_id else {
-            return Ok(());
-        };
-        for notice in extensions.drain_events() {
-            shell.notice(notice);
-        }
-        // Open the same theme-styled transcript as the idle view, resolved
-        // through the active run's delegation binding. The read-only session
-        // file never touches the running agent state.
-        if let Some((_, entries)) = subagent_view_entries(extensions) {
-            if let Some(entry) = entries.iter().find(|entry| entry.node_id == selected_id) {
-                let reference = entry.session_reference.clone();
-                let principal = reference.as_deref().and_then(|reference| {
-                    extensions.presentation_session_reference_principal(reference)
-                });
-                let node_id = entry.node_id.clone();
-                let fallback_detail = entry.fallback_detail.clone();
-                let label = entry.label.clone();
-                let theme = shell.theme();
-                let verbose_tools = shell.verbose_tools();
-                let open_text = |fallback: &str, width: u16| -> String {
-                    match (principal.as_deref(), reference.as_deref()) {
-                        (Some(principal), Some(reference)) => {
-                            match open_delegated(principal, reference) {
-                                Ok(Some(session)) => delegated_session_text(
-                                    &session,
-                                    &theme,
-                                    width,
-                                    verbose_tools,
-                                )
-                                .unwrap_or_else(|error| {
-                                    format!(
-                                        "{fallback}\n\nFailed to render the delegated transcript: {error}"
-                                    )
-                                }),
-                                Ok(None) => format!(
-                                    "{fallback}\n\nThe delegated transcript is not available yet."
-                                ),
-                                Err(error) => format!(
-                                    "{fallback}\n\nFailed to open the delegated transcript: {error}"
-                                ),
-                            }
-                        }
-                        _ => fallback.to_owned(),
-                    }
-                };
-                let initial_text = open_text(&fallback_detail, shell.read_only_document_width());
-                let refresh = |width| {
-                    let current_fallback = subagent_view_entries(extensions)
-                        .and_then(|(_, entries)| {
-                            entries
-                                .into_iter()
-                                .find(|candidate| candidate.node_id == node_id)
-                        })
-                        .map(|candidate| candidate.fallback_detail)
-                        .unwrap_or_else(|| fallback_detail.clone());
-                    let result: anyhow::Result<Option<String>> =
-                        Ok(Some(open_text(&current_fallback, width)));
-                    std::future::ready(result)
-                };
-                read_only_document_live_styled(
-                    shell,
-                    input,
-                    format!("{label} · read-only transcript"),
-                    initial_text,
-                    refresh,
-                )
-                .await?;
-            } else {
-                shell.notice("subagent state changed; select it again to view");
-            }
-        }
-    }
 }
 
 async fn subagents_view(
@@ -2906,73 +5672,102 @@ async fn subagents_view(
     }
 }
 
-fn session_tree_text(session: &Session) -> String {
-    render_session_tree(session)
-}
-
+#[cfg(test)]
 fn restore_session_head(path: &std::path::Path, head: EntryId) -> anyhow::Result<()> {
     let mut session = Session::open(path)?;
     session.checkout(head)?;
     Ok(())
 }
 
-async fn checkout_entry(
+/// Which additive lifecycle notification one reconfiguration owes extensions.
+#[derive(Clone, Copy)]
+enum HostNotification {
+    ModelSelected,
+    ReasoningSelected,
+    SessionInfoChanged,
+}
+
+impl HostNotification {
+    /// Classify one reconfiguration before it consumes its payload.
+    fn of(reconfig: &Reconfig) -> Self {
+        match reconfig {
+            Reconfig::Model(_) => Self::ModelSelected,
+            Reconfig::Thinking(_) | Reconfig::ThinkingMode { .. } => Self::ReasoningSelected,
+            Reconfig::NewSession | Reconfig::Resume(_) => Self::SessionInfoChanged,
+        }
+    }
+
+    /// Publish the notification to the negotiated v2 subscribers.
+    fn publish(self, extensions: &mut crate::extensions::ExecutableExtensions) {
+        match self {
+            Self::ModelSelected => {
+                extensions.notify_model_selected_all();
+                extensions.notify_session_info_changed_all();
+            }
+            Self::ReasoningSelected => extensions.notify_reasoning_selected_all(),
+            Self::SessionInfoChanged => extensions.notify_session_info_changed_all(),
+        }
+    }
+}
+
+/// Apply a user thinking selection before saving its startup preference. Qualified
+/// Responses controls validate both the advertised choice and the host's
+/// observation runtime before committing a durable selection.
+async fn select_thinking<S>(
     mut app: App,
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
-    id: String,
-) -> anyhow::Result<App> {
-    let _diagnostics = crate::output::defer_tui_diagnostics();
-    let display_id = id.clone();
-    let (app, path, previous_head) =
-        run_blocking_lifecycle(shell, input, "checking out session…", move || {
-        let path = app.agent.session().path().to_owned();
-        let previous_head = app
-            .agent
-            .session()
-            .head()
-            .ok_or_else(|| anyhow::anyhow!("cannot checkout from an empty session"))?;
-        app.agent.session_mut().checkout(EntryId(id.clone()))?;
-        match rebuild_app(
-            app,
-            None,
-            None,
-            None,
-            Some(crate::app::bootstrap::SessionSelection::OpenExisting(
-                path.clone(),
-            )),
-        ) {
-            Ok(app) => Ok((app, path, previous_head)),
-            Err(error) => {
-                if let Err(rollback) = restore_session_head(&path, previous_head) {
-                    anyhow::bail!(
-                        "checkout failed: {error}; restoring the previous head also failed: {rollback}"
-                    );
-                }
-                Err(error)
-            }
+    input: &mut S,
+    reasoning: ReasoningConfig,
+    picker: Option<(ReasoningMode, ThinkingLevel)>,
+) -> anyhow::Result<App>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let mode = picker.map(|(mode, _)| mode);
+    // Preserve the portable picker default (e.g. high, not a model-specific
+    // token budget); slash commands retain their effective reasoning label.
+    let preference = picker.map_or_else(
+        || reasoning_label(&reasoning),
+        |(_, level)| level.label().to_owned(),
+    );
+    let qualified = app.model.responses_features().reasoning_effort_updates;
+    if qualified {
+        if let Err(error) = app.agent.set_reasoning(reasoning.clone()) {
+            shell.error(format!("thinking unchanged: {error}"));
+            return Ok(app);
         }
-        })
-        .await?;
-    if let Err(error) = shell.hydrate(app.agent.session()) {
-        if let Err(rollback) = restore_session_head(&path, previous_head) {
-            anyhow::bail!(
-                "checkout hydration failed: {error}; restoring the previous head also failed: {rollback}"
-            );
-        }
-        return Err(error);
+        app.reasoning = app.agent.reasoning().clone();
     }
-    update_status(shell, &app);
-    app.executable_extensions
-        .activate_session_lifecycle_driver();
-    shell.notice(format!(
-        "checked out entry {display_id}; future messages will create a branch"
-    ));
-    Ok(app)
+    if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+        crate::cli::persist_reasoning(&preference)
+    })
+    .await
+    {
+        shell.error(format!("failed to save thinking preference: {error}"));
+    }
+    if let Some(mode) = mode {
+        if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+            crate::cli::persist_reasoning_mode(mode)
+        })
+        .await
+        {
+            shell.error(format!("failed to save reasoning mode preference: {error}"));
+        }
+    }
+    if qualified && mode.is_none_or(|mode| mode == app.reasoning_mode) {
+        update_status(shell, &app);
+        app.executable_extensions.notify_reasoning_selected_all();
+        return Ok(app);
+    }
+    let reconfig = match mode {
+        Some(mode) => Reconfig::ThinkingMode { mode, reasoning },
+        None => Reconfig::Thinking(reasoning),
+    };
+    transition(app, shell, input, reconfig).await
 }
 
 async fn transition<S>(
-    app: App,
+    mut app: App,
     shell: &mut InteractiveShell,
     input: &mut S,
     reconfig: Reconfig,
@@ -2980,18 +5775,113 @@ async fn transition<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let direct_reasoning = match &reconfig {
+        Reconfig::Thinking(reasoning) => Some(reasoning),
+        Reconfig::ThinkingMode { mode, reasoning } if *mode == app.reasoning_mode => {
+            Some(reasoning)
+        }
+        _ => None,
+    };
+    if let Some(reasoning) = direct_reasoning {
+        if app.model.responses_features().reasoning_effort_updates {
+            match app.agent.set_reasoning(reasoning.clone()) {
+                Ok(()) => {
+                    app.reasoning = app.agent.reasoning().clone();
+                    update_status(shell, &app);
+                    app.executable_extensions.notify_reasoning_selected_all();
+                }
+                Err(error) => shell.error(format!("thinking unchanged: {error}")),
+            }
+            return Ok(app);
+        }
+    }
     let _diagnostics = crate::output::defer_tui_diagnostics();
-    let app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
+    if let Reconfig::Model(id) = &reconfig {
+        if app.catalog.resolve(id).is_err() {
+            app = run_blocking_lifecycle(shell, input, "loading models…", move || {
+                let notice = app.enrich_catalog_for_surface();
+                Ok((app, notice))
+            })
+            .await
+            .map(|(app, notice)| {
+                if let Some(notice) = notice {
+                    shell.notice(notice);
+                }
+                app
+            })?;
+            shell.set_model_cycle(app.model_cycle());
+        }
+        if let Err(error) = app.catalog.resolve(id) {
+            shell.error(error.to_string());
+            return Ok(app);
+        }
+    }
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(shell, "the model or foreground session is changing");
+    let had_fast = app.agent.service_tier().is_some();
+    let host_notification = HostNotification::of(&reconfig);
+    // A transition may replace the active durable session (`/resume`, `/new`,
+    // `/fork`, `/clone`). Herdr's pane reference must follow it, exactly as the
+    // Pi integration refreshes its session reference on every `agent_start`.
+    let previous_session_id = herdr_session_id(&app);
+    let start_source = herdr_reconfig_source(&reconfig);
+    let mut app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
         apply_reconfig(app, reconfig)
     })
     .await?;
     shell.hydrate(app.agent.session())?;
+    let session_id = herdr_session_id(&app);
+    if session_id != previous_session_id {
+        shell.herdr_session_changed(session_id, start_source, herdr_launch_scope(&app));
+    }
     // Model and thinking changes are acknowledged by stable chrome, not a
     // duplicate transcript notice. Session-operation notices remain caller-owned.
     update_status(shell, &app);
+    if had_fast && app.agent.service_tier().is_none() {
+        shell.notice("Fast mode: off after the model/session change; use /fast on on a supported route to enable it again");
+    }
     app.executable_extensions
         .activate_session_lifecycle_driver();
+    host_notification.publish(&mut app.executable_extensions);
     Ok(app)
+}
+
+/// The opaque, path-free session id `octet --resume <id>` accepts, when the
+/// active session has a usable durable identity.
+///
+/// Only the id is ever reported: Herdr's Pi integration also sends an
+/// `agent_session_path`, and octet deliberately does not — its transcript path
+/// never leaves the process.
+fn herdr_session_id(app: &App) -> Option<String> {
+    terminal_goal_session_id(app.agent.session()).ok()
+}
+
+/// A restored lookup needs the same store root and workspace as the live App;
+/// a session id alone is only unique within that pair.
+fn herdr_launch_scope(app: &App) -> crate::herdr::restore::LaunchScope {
+    crate::herdr::restore::LaunchScope::new(
+        &app.config.session_dir,
+        &app.config.workspace,
+        &app.config.invocation_cwd,
+    )
+}
+
+/// The Pi-style `session_start` reason for a launch selection.
+fn herdr_startup_source(selector: &ResumeSelector) -> Option<&'static str> {
+    match selector {
+        ResumeSelector::New => Some("startup"),
+        ResumeSelector::Continue | ResumeSelector::Resume(_) => Some("resume"),
+        ResumeSelector::Fork(_) => Some("fork"),
+    }
+}
+
+/// The Pi-style `session_start` reason for an in-process session transition.
+fn herdr_reconfig_source(reconfig: &Reconfig) -> Option<&'static str> {
+    match reconfig {
+        Reconfig::NewSession => Some("startup"),
+        Reconfig::Resume(_) => Some("resume"),
+        Reconfig::Model(_) | Reconfig::Thinking(_) | Reconfig::ThinkingMode { .. } => None,
+    }
 }
 
 fn bounded_extension_session_id(session_id: String) -> anyhow::Result<String> {
@@ -3081,6 +5971,8 @@ async fn switch_extension_session(
     if request.is_cancelled() {
         return Ok(None);
     }
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(shell, "the foreground session is being replaced");
     replace_extension_active_session(app, session).map(Some)
 }
 
@@ -3095,6 +5987,8 @@ async fn reload_extension_session(
     if request.is_cancelled() {
         return Ok(None);
     }
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(shell, "the foreground session is being replaced");
     replace_extension_active_session(app, session).map(Some)
 }
 
@@ -3312,12 +6206,18 @@ async fn clone_session(
     Ok(app)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_pending_actions(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     pending_actions: &mut VecDeque<PendingIdleAction>,
     goal_deadline: &mut Option<Instant>,
+    // Reborrowed once per idle pass: the request must survive the loop without
+    // handing the controller away.
+    mut reexec: Option<&mut crate::reexec::ReexecController>,
+    pending_reexec: &mut Option<crate::reexec::ReexecPlan>,
+    reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<App> {
     while !shell.close_requested() {
         let Some(action) = pending_actions.pop_front() else {
@@ -3340,37 +6240,25 @@ async fn apply_pending_actions(
                 Ok(_) => unreachable!(),
                 Err(e) => shell.error(e.to_string()),
             },
+            PendingIdleAction::Fast(enabled) => {
+                apply_fast_command(&mut app, shell, Some(enabled));
+            }
             PendingIdleAction::ChangeModel(id) => {
                 app = transition(app, shell, input, Reconfig::Model(id)).await?;
             }
             PendingIdleAction::ChangeThinking(reasoning) => {
-                if let Err(e) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
-                    shell.error(format!("failed to save thinking preference: {e}"));
-                }
-                app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
+                app = select_thinking(app, shell, input, reasoning, None).await?;
             }
             PendingIdleAction::ChangeThinkingLevel(level) => {
-                let reasoning = thinking_to_reasoning_with_subagents(
-                    level,
-                    &app.model,
-                    app.subagents_available(),
-                )?;
-                if let Err(e) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
-                    shell.error(format!("failed to save thinking preference: {e}"));
-                }
-                app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
+                let reasoning =
+                    requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
+                app = select_thinking(app, shell, input, reasoning, None).await?;
             }
             PendingIdleAction::CycleThinking => {
                 let level = next_thinking_level(&app)?;
-                let reasoning = thinking_to_reasoning_with_subagents(
-                    level,
-                    &app.model,
-                    app.subagents_available(),
-                )?;
-                if let Err(e) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
-                    shell.error(format!("failed to save thinking preference: {e}"));
-                }
-                app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
+                let reasoning =
+                    requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
+                app = select_thinking(app, shell, input, reasoning, None).await?;
             }
             PendingIdleAction::NewSession => {
                 app = transition(app, shell, input, Reconfig::NewSession).await?;
@@ -3401,7 +6289,10 @@ async fn apply_pending_actions(
                 app = clone_session(app, shell, input).await?;
             }
             PendingIdleAction::Compact => {
-                compact_interactively(&mut app, shell, input, false).await;
+                compact_interactively(&mut app, shell, input, false, None).await;
+            }
+            PendingIdleAction::CompactWithInstructions(instructions) => {
+                compact_interactively(&mut app, shell, input, false, Some(&instructions)).await;
             }
             PendingIdleAction::AutoCompact(setting) => {
                 configure_auto_compaction(&mut app, shell, setting)?;
@@ -3411,17 +6302,26 @@ async fn apply_pending_actions(
                 shell.show_context_report(crate::tui::context::ContextReport::capture(&app, &[]));
             }
             PendingIdleAction::ReloadResources => {
-                app = reload_resources(app, shell, input).await?;
-                shell.notice("instructions, prompts, skills, and extensions reloaded");
-            }
-            PendingIdleAction::ShowTree => {
-                shell.show_overlay_text(session_tree_text(app.agent.session()));
-            }
-            PendingIdleAction::CheckoutEntry(id) => {
-                app = checkout_entry(app, shell, input, id).await?;
+                let (next, plan, applied) = reload_resources_with_reexec(
+                    app,
+                    shell,
+                    input,
+                    reexec.as_deref_mut(),
+                    HostPass::ResourcesOnly,
+                    reload,
+                )
+                .await?;
+                if applied {
+                    shell.notice("resources reloaded");
+                }
+                app = next;
+                if let Some(plan) = plan {
+                    *pending_reexec = Some(plan);
+                    break;
+                }
             }
             PendingIdleAction::PickModel => {
-                if let Some(model) = optional_model_picker(shell, input, &app.catalog).await? {
+                if let Some(model) = open_model_picker(&mut app, shell, input).await? {
                     app = transition(app, shell, input, Reconfig::Model(model)).await?;
                 }
             }
@@ -3429,33 +6329,84 @@ async fn apply_pending_actions(
                 if let Some((mode, level)) =
                     thinking_configuration_picker(&app, shell, input).await?
                 {
-                    if let Err(error) = crate::cli::persist_reasoning_mode(mode) {
-                        shell.error(format!("failed to save reasoning mode preference: {error}"));
-                    }
-                    let reasoning = thinking_to_reasoning_with_subagents(
+                    let reasoning = requested_thinking_to_reasoning(
                         level,
                         &app.model,
                         app.subagents_available(),
                     )?;
-                    app = transition(
-                        app,
-                        shell,
-                        input,
-                        Reconfig::ThinkingMode { mode, reasoning },
-                    )
-                    .await?;
+                    app =
+                        select_thinking(app, shell, input, reasoning, Some((mode, level))).await?;
                 }
             }
             PendingIdleAction::Skills(sub) => {
                 if sub == commands::SkillsSubcommand::Reload {
-                    app = reload_resources(app, shell, input).await?;
-                    shell.notice("queued skills and prompt templates reload applied");
+                    let (next, applied) = reload_resources(app, shell, input).await?;
+                    app = next;
+                    if applied {
+                        shell.notice("queued skills and prompt templates reload applied");
+                    }
                 } else {
                     execute_skills_command(&mut app, shell, sub).await?;
                 }
             }
-            PendingIdleAction::Goal(command) => {
-                apply_goal_command(&app, shell, command, goal_deadline)?;
+            PendingIdleAction::Extensions(sub) => {
+                // Reuse the idle dispatcher verbatim so the menu, reload, and
+                // action semantics never diverge from `/extensions` at idle.
+                match run_idle_command(
+                    app,
+                    shell,
+                    input,
+                    Command::Extensions(sub),
+                    goal_deadline,
+                    None,
+                    reload,
+                )
+                .await?
+                {
+                    IdleCommandOutcome::Continue(next)
+                    | IdleCommandOutcome::Quit(next)
+                    | IdleCommandOutcome::Submit { app: next, .. }
+                    // `/extensions` dispatch never plans a re-exec; the arm
+                    // only keeps the match exhaustive.
+                    | IdleCommandOutcome::Reexec { app: next, .. } => app = *next,
+                }
+            }
+            PendingIdleAction::Settings(sub) => {
+                // Reuse the idle dispatcher verbatim so a queued mutation takes
+                // exactly the path an immediate `/settings` would.
+                match run_idle_command(
+                    app,
+                    shell,
+                    input,
+                    Command::Settings(sub),
+                    goal_deadline,
+                    None,
+                    reload,
+                )
+                .await?
+                {
+                    IdleCommandOutcome::Continue(next)
+                    | IdleCommandOutcome::Quit(next)
+                    | IdleCommandOutcome::Submit { app: next, .. }
+                    // `/settings` dispatch never plans a re-exec; the arm only
+                    // keeps the match exhaustive.
+                    | IdleCommandOutcome::Reexec { app: next, .. } => app = *next,
+                }
+            }
+            PendingIdleAction::ScopedModels(sub) => {
+                apply_scoped_models_command(&mut app, shell, sub).await;
+                shell.notice("model scope change applied at the idle boundary");
+            }
+            PendingIdleAction::RecordShellEscape(record) => {
+                if let Err(error) = record_shell_escape(&mut app, &record) {
+                    shell.error(format!("shell result could not be recorded: {error}"));
+                } else {
+                    shell.notice(if record.excluded() {
+                        "shell result recorded; excluded from model context".to_owned()
+                    } else {
+                        "shell result recorded; added to model context".to_owned()
+                    });
+                }
             }
         }
         request_extension_ui(shell, &mut app);
@@ -3615,8 +6566,24 @@ async fn execute_skills_command(
 
 enum IdleCommandOutcome {
     Continue(Box<App>),
-    Submit { app: Box<App>, input: ComposedInput },
+    Submit {
+        app: Box<App>,
+        input: ComposedInput,
+    },
     Quit(Box<App>),
+    /// A validated re-exec: the caller leaves the TUI, then `plan.exec()`.
+    Reexec {
+        app: Box<App>,
+        plan: crate::reexec::ReexecPlan,
+    },
+}
+
+/// How one interactive process lifetime ended.
+enum InteractiveExit {
+    /// No process replacement was requested.
+    Finished,
+    /// The terminal was left and the wrapper above must `exec` the plan.
+    Reexec(Box<crate::reexec::ReexecPlan>),
 }
 
 fn prompt_templates_text(app: &App) -> String {
@@ -3686,15 +6653,828 @@ fn expand_prompt_invocation(
     .map_err(Into::into)
 }
 
+/// Prepare the model-picker surface for a launch whose readiness plan was
+/// narrowed to the selected route.
+///
+/// Startup latency defers the other configured providers, so a surface that
+/// enumerates every route must complete the catalog first: the `/model` picker
+/// would otherwise list only the launch's own provider even though other
+/// credentials are present. Completion is idempotent, and a failure keeps the
+/// narrowed catalog and reports it instead of hiding the missing providers.
+/// Write the hidden `/debug` report and report the owner-private destination.
+///
+/// The frame is asked of the renderer; the messages come from the active branch
+/// so the log matches exactly what the provider receives. A failure is surfaced,
+/// never swallowed: a diagnostics surface that silently does nothing is useless.
+async fn write_debug_report(
+    shell: &mut InteractiveShell,
+    session: &Session,
+    terminal: Option<(u16, u16)>,
+    rendered: Option<Vec<String>>,
+) {
+    let Some(path) = crate::cli::debug_log_path() else {
+        shell.error("/debug unavailable: user home directory is unavailable".to_owned());
+        return;
+    };
+    write_debug_report_at(shell, &path, session, terminal, rendered).await;
+}
+
+/// The same report against an explicit destination, so the writer is testable
+/// without touching the operator's real `~/.octet` directory.
+async fn write_debug_report_at(
+    shell: &mut InteractiveShell,
+    path: &std::path::Path,
+    session: &Session,
+    terminal: Option<(u16, u16)>,
+    rendered: Option<Vec<String>>,
+) {
+    let messages = session.context().unwrap_or_default();
+    let report = commands::debug_report_text(terminal, rendered.as_deref(), &messages);
+    if let Err(error) = crate::auth::write_private_atomic(path, report.as_bytes(), ".octet-debug-")
+    {
+        shell.error(format!(
+            "/debug could not write {}: {error}",
+            path.display()
+        ));
+        return;
+    }
+    shell.notice(format!("debug log written: {}", path.display()));
+}
+
+async fn open_model_picker<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+) -> anyhow::Result<Option<ModelId>>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    // The launch catalog is already usable. Only the deferred fleet inventory
+    // belongs on a worker; App, its extension projection, and the terminal
+    // remain owned by this idle event loop.
+    let pending = (!app.readiness.is_fleet()).then(|| {
+        let offline = app.config.offline;
+        tokio::task::spawn_blocking(move || {
+            crate::app::bootstrap::model_catalog_for_readiness(
+                offline,
+                &crate::app::bootstrap::CatalogReadiness::Fleet,
+            )
+        })
+    });
+    pickers::optional_model_picker_live(shell, input, app, pending).await
+}
+
+/// Whether the active branch ends in an assistant tool call that has no
+/// durable result yet. Appending a user message in that state would place text
+/// between a tool call and its required result, so the shell record stays
+/// non-model-visible until the call is settled at the next run boundary.
+fn session_has_unresolved_tool_calls(session: &Session) -> bool {
+    let mut settled = std::collections::HashSet::new();
+    let mut cursor = session.head();
+    while let Some(id) = cursor {
+        let Some(entry) = session.entry(&id) else {
+            break;
+        };
+        match &entry.value {
+            octet_agent::EntryValue::Message(octet_ai::Message::Assistant(assistant)) => {
+                if assistant.content.iter().any(|part| {
+                    matches!(part, octet_ai::AssistantPart::ToolCall(call) if !settled.contains(&call.id))
+                }) {
+                    return true;
+                }
+            }
+            octet_agent::EntryValue::Message(octet_ai::Message::User(user)) => {
+                for part in &user.content {
+                    if let octet_ai::UserPart::ToolResult(result) = part {
+                        settled.insert(result.tool_call_id.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+        cursor = entry.parent.clone();
+    }
+    false
+}
+
+/// Append one finished shell escape to the durable session.
+///
+/// `!command` results become ordinary user messages (model-visible).
+/// `!!command` results use a non-model-visible config envelope whose
+/// presentation metadata still retains the exact command, exit status, and
+/// output, so the execution is accounted for without entering model context.
+/// An unresolved tool call forces the excluded form even for `!command`, so a
+/// pending call can never be split from its result.
+fn record_shell_escape(app: &mut App, record: &commands::ShellEscapeRecord) -> anyhow::Result<()> {
+    let session = app.agent.session_mut();
+    if record.excluded() || session_has_unresolved_tool_calls(session) {
+        session.append_with_metadata(
+            octet_agent::EntryValue::Config {
+                model: None,
+                reasoning: None,
+                reasoning_mode: None,
+            },
+            Some(octet_agent::EntryMetadata {
+                display_text: Some(record.transcript_text()),
+                ..octet_agent::EntryMetadata::default()
+            }),
+        )?;
+    } else {
+        session.append(octet_agent::EntryValue::Message(octet_ai::Message::User(
+            octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text(record.context_text())],
+            },
+        )))?;
+    }
+    Ok(())
+}
+
+/// Ordinary process admission for one local shell escape.
+///
+/// This builds the same canonical `bash` intent the model tool would produce
+/// and lets the shared [`EffectBroker`] decide: `unsafe_host` admits it,
+/// `controlled` asks only for commands its shell-safety analysis flags, and
+/// `controlled_bash_approval` asks for every command. The confirmation is the
+/// same picker the model run uses; a denial is reported, never swallowed.
+enum ShellEscapeApproval {
+    Approved,
+    Denied,
+}
+
+async fn approve_shell_escape<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    policy: octet_agent::EffectPolicy,
+    command: &str,
+) -> anyhow::Result<ShellEscapeApproval>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let arguments = serde_json::json!({ "command": command });
+    let intent = match EffectIntent::new(
+        "local-shell",
+        "local-shell-escape",
+        0,
+        "local-shell-escape",
+        "bash",
+        ToolEffect::HostProcess,
+        &arguments,
+    ) {
+        Ok(intent) => intent,
+        Err(_) => return Ok(ShellEscapeApproval::Denied),
+    };
+    let broker = EffectBroker::new(policy);
+    let (sink, mut progress) = ToolProgressSink::bounded_channel();
+    let mut authorization = Box::pin(broker.authorize(&intent, Some(&sink)));
+    let result = loop {
+        tokio::select! {
+            biased;
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                shell.request_close();
+                return Ok(ShellEscapeApproval::Denied);
+            }
+            result = &mut authorization => break result,
+            update = progress.recv() => match update {
+                Some(ToolProgress::Confirmation(request)) => {
+                    let confirmed = confirmation_picker(shell, input, &request).await?;
+                    request.respond(confirmed);
+                }
+                Some(_) => {}
+                None => {}
+            },
+        }
+    };
+    match result {
+        Ok(_receipt) => Ok(ShellEscapeApproval::Approved),
+        Err(_) => Ok(ShellEscapeApproval::Denied),
+    }
+}
+
+/// One finished local shell invocation.
+struct ShellEscapeOutcome {
+    /// Combined bounded stdout/stderr as rendered in the live transcript.
+    output: String,
+    exit_code: i32,
+    /// Set when the command never executed (spawn/prepare failure).
+    refusal: Option<String>,
+    /// The user interrupted it or it exceeded the product deadline.
+    stopped: bool,
+    /// The product is shutting down; the caller owns the exit.
+    shutting_down: bool,
+}
+
+/// Run one local shell escape with the product's bounded capture, deadline,
+/// interrupt handling, and process-group cleanup.
+///
+/// The approval decision is the caller's (it owns the picker); this function
+/// only executes an approved command under the launch sandbox limits.
+async fn run_local_shell<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    workspace: &Path,
+    sandbox: &SandboxPolicy,
+    command: &str,
+) -> anyhow::Result<ShellEscapeOutcome>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let shell_id = shell.append_shell_in_progress(command.to_owned());
+    shell.render();
+
+    // Spawn the child process with piped output.
+    let mut process = tokio::process::Command::new("sh");
+    process
+        .current_dir(workspace)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    process.process_group(0);
+    #[cfg(unix)]
+    let launch = match BashProcessLaunch::prepare(&mut process, command) {
+        Ok(launch) => launch,
+        Err(error) => {
+            let message = format!("failed to prepare lifecycle supervision: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+    #[cfg(unix)]
+    process.arg("-c").arg(launch.source());
+    #[cfg(not(unix))]
+    process.arg("-c").arg(command);
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let message = format!("failed to spawn: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+    #[cfg(unix)]
+    let (group_guard, handoff) = match launch.register(child.id()).await {
+        Ok(registered) => registered,
+        Err(error) => {
+            let _ = child.wait().await;
+            let message = format!("failed to register lifecycle supervision: {error}");
+            shell.finalize_shell(&shell_id, message.clone(), -1);
+            return Ok(ShellEscapeOutcome {
+                output: message.clone(),
+                exit_code: -1,
+                refusal: Some(message),
+                stopped: false,
+                shutting_down: false,
+            });
+        }
+    };
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let output_budget = sandbox.max_output_bytes;
+    let stdout_budget = output_budget / 2;
+    let stderr_budget = output_budget.saturating_sub(stdout_budget);
+    let stdout = Arc::new(Mutex::new(BoundedShellOutput::new(stdout_budget)));
+    let stderr = Arc::new(Mutex::new(BoundedShellOutput::new(stderr_budget)));
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel();
+    let command_timeout = Duration::from_secs(sandbox.bash_timeout_secs);
+    #[cfg(unix)]
+    let command_started = tokio::time::Instant::now();
+    let stdout_capture = stdout.clone();
+    let stderr_capture = stderr.clone();
+    let stdout_updates = output_tx.clone();
+    let stderr_updates = output_tx;
+    let work = async {
+        #[cfg(unix)]
+        let (_, _, status) = tokio::join!(
+            drain_shell_pipe(&mut stdout_pipe, &stdout_capture, &stdout_updates,),
+            drain_shell_pipe(&mut stderr_pipe, &stderr_capture, &stderr_updates,),
+            wait_for_bash_process(&mut child, handoff),
+        );
+        #[cfg(not(unix))]
+        let (_, _, status) = tokio::join!(
+            drain_shell_pipe(&mut stdout_pipe, &stdout_capture, &stdout_updates,),
+            drain_shell_pipe(&mut stderr_pipe, &stderr_capture, &stderr_updates,),
+            child.wait(),
+        );
+        status
+    };
+    let mut work = Box::pin(work);
+    let deadline = tokio::time::sleep(command_timeout);
+    tokio::pin!(deadline);
+    let mut input_open = true;
+    let mut interrupted = false;
+    let mut timed_out = false;
+    let mut shutting_down = false;
+
+    let exit = loop {
+        tokio::select! {
+            biased;
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                interrupted = true;
+                shutting_down = true;
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "command stopped during shutdown",
+                ));
+            }
+            status = &mut work => {
+                break status;
+            }
+            event = input.next(), if input_open => match event {
+                Some(Ok(Event::Key(key))) if keymap::is_close_key(&key) => {
+                    shell.request_close();
+                    interrupted = true;
+                    shutting_down = true;
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "command stopped during close",
+                    ));
+                }
+                Some(Ok(Event::Key(key)))
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                        && key.code == KeyCode::Char('c')
+                        && key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    interrupted = true;
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "command cancelled",
+                    ));
+                }
+                Some(Ok(Event::Key(key)))
+                    if key.kind == KeyEventKind::Press
+                        && key.code == KeyCode::Char('o')
+                        && key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    shell.toggle_disclosure();
+                    shell.render();
+                }
+                Some(Ok(Event::Resize(columns, rows))) => {
+                    shell.set_size(columns, rows);
+                    shell.render();
+                }
+                Some(Ok(_)) => {}
+                Some(Err(_)) | None => input_open = false,
+            },
+            _ = &mut deadline => {
+                timed_out = true;
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "command timed out",
+                ));
+            }
+            update = output_rx.recv() => {
+                if update.is_some() {
+                    // Collapse a burst into one bounded tail update. This keeps
+                    // the latest process lines visible without repainting once
+                    // per read syscall.
+                    while output_rx.try_recv().is_ok() {}
+                    shell.update_shell_output(
+                        &shell_id,
+                        rendered_shell_captures(&stdout, &stderr),
+                    );
+                    shell.render();
+                }
+            }
+        }
+    };
+
+    if shutting_down {
+        #[cfg(unix)]
+        {
+            let process_cleanup = octet_agent::extension_process::terminate_bash_process_groups(
+                Duration::from_millis(400),
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                tokio::join!(&mut work, process_cleanup)
+            })
+            .await;
+            group_guard.terminate_now();
+        }
+        drop(work);
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        let mut combined = rendered_shell_captures(&stdout, &stderr);
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str("command stopped during shutdown");
+        shell.finalize_shell(&shell_id, combined.clone(), -1);
+        shell.render();
+        return Ok(ShellEscapeOutcome {
+            output: combined,
+            exit_code: -1,
+            refusal: None,
+            stopped: true,
+            shutting_down: true,
+        });
+    }
+
+    if interrupted || timed_out {
+        #[cfg(unix)]
+        {
+            group_guard.terminate_now();
+            // Retain output already in the pipes when ordinary descendants
+            // close promptly, but an escaped child must not defeat the
+            // execution deadline forever.
+            let _ = tokio::time::timeout(Duration::from_millis(500), &mut work).await;
+        }
+    } else {
+        #[cfg(unix)]
+        group_guard.supervise_bash_descendants(
+            command_timeout.saturating_sub(command_started.elapsed()),
+            Default::default(),
+        );
+    }
+    // Releasing the concurrent wait/drain future closes any descriptors
+    // retained by an escaped descendant.
+    drop(work);
+    #[cfg(not(unix))]
+    if interrupted || timed_out {
+        let _ = child.kill().await;
+    }
+
+    let exit_code = match exit {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(error) => {
+            let mut combined = rendered_shell_captures(&stdout, &stderr);
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            if interrupted {
+                combined.push_str("command cancelled");
+            } else if timed_out {
+                combined.push_str(&format!(
+                    "command exceeded the {}s execution limit",
+                    sandbox.bash_timeout_secs
+                ));
+            } else {
+                combined.push_str(&format!("process error: {error}"));
+            }
+            shell.finalize_shell(&shell_id, combined.clone(), -1);
+            shell.render();
+            return Ok(ShellEscapeOutcome {
+                output: combined,
+                exit_code: -1,
+                refusal: None,
+                stopped: interrupted || timed_out,
+                shutting_down: false,
+            });
+        }
+    };
+
+    let combined = rendered_shell_captures(&stdout, &stderr);
+    shell.finalize_shell(&shell_id, combined.clone(), exit_code);
+    shell.render();
+    Ok(ShellEscapeOutcome {
+        output: combined,
+        exit_code,
+        refusal: None,
+        stopped: false,
+        shutting_down: false,
+    })
+}
+
+/// `/settings` at the idle boundary. Reports render immediately; mutations
+/// persist through the shared configuration writer and apply in-session.
+async fn apply_settings_command(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    sub: commands::SettingsCommand,
+) -> anyhow::Result<()> {
+    use commands::SettingsCommand as Sub;
+    match sub {
+        Sub::Show => shell.show_report_text(
+            "Settings",
+            "Effective display and default preferences",
+            commands::settings_text(&commands::SettingsSurface::capture(app)),
+        ),
+        Sub::Transport => shell.notice(format!(
+            "transport {} (declared by the {} route; not a user preference)",
+            commands::transport_label(&app.model),
+            app.model.endpoint.id.0,
+        )),
+        Sub::Padding => shell.notice(
+            "editor padding is compiled into the active theme layout; octet persists no padding override"
+                .to_owned(),
+        ),
+        Sub::Theme(requested) => {
+            configure_terminal_theme(
+                shell,
+                input,
+                &mut app.config,
+                requested,
+                false,
+                Some(&mut app.executable_extensions),
+            )
+            .await?;
+        }
+        Sub::Images(requested) => {
+            let enabled = requested.unwrap_or(!app.config.show_images);
+            if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+                crate::cli::persist_show_images(enabled)
+            })
+            .await
+            {
+                shell.error(format!("failed to save the image display preference: {error}"));
+                return Ok(());
+            }
+            app.config.show_images = enabled;
+            shell.set_runtime_config(app.config.clone());
+            shell.notice(format!(
+                "inline tool-result images {}",
+                if enabled { "enabled" } else { "disabled" }
+            ));
+        }
+        Sub::DefaultModel(id) => match id {
+            None => shell.notice(format!(
+                "default model for new sessions: {}",
+                app.config
+                    .model
+                    .as_ref()
+                    .map(|model| model.0.as_str())
+                    .unwrap_or("(chosen at startup or by the session)")
+            )),
+            Some(id) => {
+                let model = ModelId(id);
+                if app.catalog.resolve(&model).is_err() {
+                    shell.error(format!(
+                        "unknown or unavailable model {:?}; /model lists the credential-scoped catalog",
+                        model.0
+                    ));
+                    return Ok(());
+                }
+                if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+                    crate::cli::persist_model(&model.0)
+                })
+                .await
+                {
+                    shell.error(format!("failed to save the default model: {error}"));
+                    return Ok(());
+                }
+                shell.notice(format!(
+                    "default model for new sessions: {} (use /model to switch this session now)",
+                    model.0
+                ));
+            }
+        },
+        Sub::DefaultReasoning(level) => match level {
+            None => shell.notice(format!(
+                "default reasoning: {}",
+                reasoning_label(&app.reasoning)
+            )),
+            Some(level) => match crate::config::parse_reasoning(&level) {
+                Ok(reasoning) => {
+                    let label = reasoning_label(&reasoning);
+                    if let Err(error) =
+                        persist_configuration(Some(&mut app.executable_extensions), || {
+                            crate::cli::persist_reasoning(&label)
+                        })
+                        .await
+                    {
+                        shell.error(format!("failed to save the default reasoning: {error}"));
+                        return Ok(());
+                    }
+                    shell.notice(format!(
+                        "default reasoning for new sessions: {label} (use /thinking to change this session now)"
+                    ));
+                }
+                Err(error) => shell
+                    .error(format!("invalid reasoning level {level:?}: {error}")),
+            },
+        },
+    }
+    Ok(())
+}
+
+/// One `/scoped-models` mutation against the App's ordered scope.
+///
+/// Returns the persistence decision (`None` = remove the key, `Some(patterns)`
+/// = write them) or a reportable error. Deliberately free of the shell and the
+/// config writer so the ordering rules are unit-testable without touching the
+/// user's real configuration.
+fn apply_scope_mutation(
+    app: &mut App,
+    sub: &commands::ScopedModelsCommand,
+) -> Result<Option<Option<String>>, String> {
+    use crate::cli::parity::ScopedModel;
+    use commands::ScopedModelsCommand as Sub;
+    let mut available = app
+        .catalog
+        .models()
+        .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
+        .collect::<Vec<_>>();
+    // The catalog is a map, so sort before turning it into an order the user
+    // sees, cycles through, or persists; the result is stable across runs.
+    available.sort();
+    let materialized = || {
+        available
+            .iter()
+            .map(|(id, _)| ScopedModel {
+                id: ModelId(id.clone()),
+                pattern: id.clone(),
+                reasoning: None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // Every mutation operates on an explicit ordered scope. An unrestricted
+    // scope is materialized from the current catalog first, so toggling one
+    // provider never silently changes every other model's membership.
+    if app.model_scope.is_none() && !matches!(sub, Sub::All | Sub::Clear) {
+        app.model_scope = Some(materialized());
+    }
+    match sub {
+        Sub::Show => Ok(None),
+        Sub::All => {
+            app.model_scope = Some(materialized());
+            // `*` re-selects every currently available model on the next
+            // interactive launch without pinning today's catalog contents.
+            Ok(Some(Some("*".to_owned())))
+        }
+        Sub::Clear => {
+            app.model_scope = None;
+            Ok(Some(None))
+        }
+        Sub::Enable(target) | Sub::Disable(target) => {
+            let enable = matches!(sub, Sub::Enable(_));
+            let scope = app
+                .model_scope
+                .as_mut()
+                .expect("a mutation scope is always materialized above");
+            commands::set_scope_target(scope, &available, target, enable)?;
+            Ok(Some(commands::scope_patterns_string(scope)))
+        }
+        Sub::Toggle(target) => {
+            let scope = app
+                .model_scope
+                .as_mut()
+                .expect("a mutation scope is always materialized above");
+            commands::toggle_scope_target(scope, &available, target)?;
+            Ok(Some(commands::scope_patterns_string(scope)))
+        }
+        Sub::Move { model, direction } => {
+            let scope = app
+                .model_scope
+                .as_mut()
+                .expect("a mutation scope is always materialized above");
+            commands::move_scope_model(scope, model, *direction)?;
+            Ok(Some(commands::scope_patterns_string(scope)))
+        }
+    }
+}
+
+/// `/scoped-models` at the idle boundary. The ordered scope applies to the
+/// live shell's cycling bindings immediately and persists as the exact ordered
+/// pattern list the next interactive launch reads back.
+async fn apply_scoped_models_command(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    sub: commands::ScopedModelsCommand,
+) {
+    if matches!(sub, commands::ScopedModelsCommand::Show) {
+        let mut available = app
+            .catalog
+            .models()
+            .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
+            .collect::<Vec<_>>();
+        available.sort();
+        shell.show_report_text(
+            "Scoped models",
+            "Ordered model cycling scope",
+            commands::scoped_models_text(app.model_scope.as_deref(), &available),
+        );
+        return;
+    }
+    let persistence = match apply_scope_mutation(app, &sub) {
+        Ok(persistence) => persistence,
+        Err(error) => {
+            shell.error(error);
+            return;
+        }
+    };
+    // Report the decision from the resulting scope, so the notice can never
+    // disagree with what cycling actually follows. An unrestricted scope
+    // covers the whole catalog.
+    let count = app
+        .model_scope
+        .as_ref()
+        .map_or_else(|| app.catalog.models().count(), Vec::len);
+    shell.notice(format!(
+        "model scope now covers {count} model(s); /scoped-models lists the order"
+    ));
+    if let Some(patterns) = persistence {
+        if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+            crate::cli::persist_scoped_models(patterns.as_deref())
+        })
+        .await
+        {
+            shell.error(format!("failed to save the model scope: {error}"));
+        }
+    }
+    update_status(shell, app);
+}
+
+/// Idle dispatch for one local shell escape. The command keeps the ordinary
+/// process gates, the ordinary approval decision, the ordinary bounded
+/// capture/cleanup, and an explicit context decision.
+async fn run_idle_shell_escape(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    escape: commands::BashEscape,
+) -> anyhow::Result<IdleCommandOutcome> {
+    if !app.config.sandbox.process_execution_allowed() {
+        shell.error("shell commands are disabled by --no-process/--no-shell".to_owned());
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    let prefix = if escape.excluded { "!!" } else { "!" };
+    if escape.command.trim().is_empty() {
+        shell.notice(format!("usage: {prefix}<shell command>"));
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    if !matches!(
+        approve_shell_escape(shell, input, app.config.effect_policy, &escape.command).await?,
+        ShellEscapeApproval::Approved
+    ) {
+        shell.error(format!("{prefix} command was not approved"));
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    app.executable_extensions
+        .notify_user_bash_all(&escape.command);
+    shell.on_local_command_submitted(&format!("{prefix}{}", escape.command));
+    let outcome = run_local_shell(
+        shell,
+        input,
+        &app.config.workspace,
+        &app.config.sandbox,
+        &escape.command,
+    )
+    .await?;
+    if outcome.shutting_down {
+        return Ok(IdleCommandOutcome::Quit(Box::new(app)));
+    }
+    if let Some(refusal) = outcome.refusal {
+        shell.error(refusal);
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    let record = commands::ShellEscapeRecord::new(
+        escape.command.clone(),
+        outcome.output,
+        outcome.exit_code,
+        escape.excluded,
+    );
+    if let Err(error) = record_shell_escape(&mut app, &record) {
+        shell.error(format!("shell result could not be recorded: {error}"));
+        return Ok(IdleCommandOutcome::Continue(Box::new(app)));
+    }
+    let context_note = if escape.excluded {
+        "excluded from model context"
+    } else {
+        "added to model context"
+    };
+    shell.notice(if outcome.stopped {
+        format!("shell result recorded ({context_note}); the command was stopped")
+    } else {
+        format!("shell result {context_note}")
+    });
+    Ok(IdleCommandOutcome::Continue(Box::new(app)))
+}
+
 async fn run_idle_command(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     command: Command,
     goal_deadline: &mut Option<Instant>,
+    reexec: Option<&mut crate::reexec::ReexecController>,
+    reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<IdleCommandOutcome> {
     match command {
         Command::Changelog => shell.show_changelog(),
+        Command::Hotkeys => show_hotkeys(shell),
+        Command::Copy => copy_last_assistant(shell),
+        Command::Session => shell.show_report_text(
+            "Session",
+            "Durable session facts",
+            commands::session_text(app.agent.session()),
+        ),
         Command::Help(topic) => {
             shell.show_report_text(
                 "Help",
@@ -3821,11 +7601,17 @@ async fn run_idle_command(
             shell.show_overlay_text(app.executable_extensions.inspect_text());
         }
         Command::Extensions(commands::ExtensionsSubcommand::Reload) => {
-            let mut messages = await_lifecycle(shell, input, "reloading extensions…", async {
-                Ok(app.executable_extensions.reload().await)
+            app.executable_extensions
+                .revoke_terminal_grant_for_shell(shell, "the extensions are being reloaded");
+            let report = await_lifecycle(shell, input, "reloading extensions…", async {
+                Ok(app.executable_extensions.reload_report().await)
             })
             .await?;
-            messages.extend(app.synchronize_extension_provider_catalog());
+            let mut messages = extension_reload_notices(reload, report, true);
+            let catalog = app
+                .executable_extensions
+                .synchronize_provider_catalog_report(&mut app.catalog, &app.client);
+            messages.extend(provider_reload_notices(reload, catalog, true));
             if messages.is_empty() {
                 shell.notice("no running executable extensions to reload");
             } else {
@@ -3872,7 +7658,12 @@ async fn run_idle_command(
         }
         Command::Extensions(commands::ExtensionsSubcommand::Action { extension, action }) => {
             let result = {
-                let mut confirmations = InteractiveExtensionConfirmations { shell, input };
+                let dialogs = app.executable_extensions.lifecycle_snapshot();
+                let mut confirmations = InteractiveExtensionConfirmations {
+                    shell,
+                    input,
+                    dialogs: &dialogs,
+                };
                 app.executable_extensions
                     .execute_presentation_action_with_confirmation(
                         &extension,
@@ -3890,7 +7681,7 @@ async fn run_idle_command(
             }
             request_extension_ui(shell, &mut app);
         }
-        Command::Quit => return Ok(IdleCommandOutcome::Quit(Box::new(app))),
+        Command::Exit => return Ok(IdleCommandOutcome::Quit(Box::new(app))),
         Command::Login(provider) => match validate_provider(provider.as_deref()) {
             Ok("codex") => login_codex(&mut app, shell).await?,
             Ok("custom") => login_custom(shell)?,
@@ -3935,43 +7726,41 @@ async fn run_idle_command(
         Command::Clone => {
             app = clone_session(app, shell, input).await?;
         }
+        Command::Fast(requested) => apply_fast_command(&mut app, shell, requested),
         Command::Model(Some(id)) => {
             app = transition(app, shell, input, Reconfig::Model(ModelId(id))).await?;
         }
         Command::Theme(requested) => {
-            configure_terminal_theme(shell, input, &mut app.config, requested, false).await?;
+            configure_terminal_theme(
+                shell,
+                input,
+                &mut app.config,
+                requested,
+                false,
+                Some(&mut app.executable_extensions),
+            )
+            .await?;
         }
         Command::Thinking(Some(level)) => {
             let level = ThinkingLevel::parse(&level)?;
             let reasoning =
-                thinking_to_reasoning_with_subagents(level, &app.model, app.subagents_available())?;
-            if let Err(e) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
-                shell.error(format!("failed to save thinking preference: {e}"));
-            }
-            app = transition(app, shell, input, Reconfig::Thinking(reasoning)).await?;
+                requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
+            app = select_thinking(app, shell, input, reasoning, None).await?;
+        }
+        Command::Debug => {
+            let rendered = shell.dump_rendered_frame().await;
+            write_debug_report(shell, app.agent.session(), None, rendered).await;
         }
         Command::Model(None) => {
-            if let Some(model) = optional_model_picker(shell, input, &app.catalog).await? {
+            if let Some(model) = open_model_picker(&mut app, shell, input).await? {
                 app = transition(app, shell, input, Reconfig::Model(model)).await?;
             }
         }
         Command::Thinking(None) => {
             if let Some((mode, level)) = thinking_configuration_picker(&app, shell, input).await? {
-                if let Err(error) = crate::cli::persist_reasoning_mode(mode) {
-                    shell.error(format!("failed to save reasoning mode preference: {error}"));
-                }
-                let reasoning = thinking_to_reasoning_with_subagents(
-                    level,
-                    &app.model,
-                    app.subagents_available(),
-                )?;
-                app = transition(
-                    app,
-                    shell,
-                    input,
-                    Reconfig::ThinkingMode { mode, reasoning },
-                )
-                .await?;
+                let reasoning =
+                    requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
+                app = select_thinking(app, shell, input, reasoning, Some((mode, level))).await?;
             }
         }
         Command::Verbose(value) => {
@@ -3983,20 +7772,38 @@ async fn run_idle_command(
             ));
         }
         Command::Compact => {
-            compact_interactively(&mut app, shell, input, true).await;
+            compact_interactively(&mut app, shell, input, true, None).await;
+        }
+        Command::CompactWithInstructions(instructions) => {
+            compact_interactively(&mut app, shell, input, true, Some(&instructions)).await;
         }
         Command::AutoCompact(setting) => {
             configure_auto_compaction(&mut app, shell, setting)?;
             update_status(shell, &app);
         }
         Command::Reload => {
-            app = reload_resources(app, shell, input).await?;
-            request_extension_ui(shell, &mut app);
-            shell.notice("instructions, prompts, skills, and extensions reloaded");
-        }
-        Command::Tree => shell.show_overlay_text(session_tree_text(app.agent.session())),
-        Command::Checkout(id) => {
-            app = checkout_entry(app, shell, input, id).await?;
+            // Plain `/reload` is resources-only: it never probes or replaces
+            // the process image. `/reload --force` is handled before
+            // `commands::parse` and is the explicit host path.
+            let (next, plan, applied) = reload_resources_with_reexec(
+                app,
+                shell,
+                input,
+                reexec,
+                HostPass::ResourcesOnly,
+                reload,
+            )
+            .await?;
+            if applied {
+                shell.notice("resources reloaded");
+            }
+            app = next;
+            if let Some(plan) = plan {
+                return Ok(IdleCommandOutcome::Reexec {
+                    app: Box::new(app),
+                    plan,
+                });
+            }
         }
         Command::Skills(commands::SkillsSubcommand::Load(id)) => {
             if let Err(error) = app.skills.load(&id) {
@@ -4009,15 +7816,27 @@ async fn run_idle_command(
             }
         }
         Command::Skills(commands::SkillsSubcommand::Reload) => {
-            app = reload_resources(app, shell, input).await?;
-            request_extension_ui(shell, &mut app);
-            shell.notice("skills and prompt templates reloaded");
+            let (next, applied) = reload_resources(app, shell, input).await?;
+            app = next;
+            if applied {
+                request_extension_ui(shell, &mut app);
+                shell.notice("skills and prompt templates reloaded");
+            }
         }
         Command::Skills(sub) => {
             execute_skills_command(&mut app, shell, sub).await?;
         }
         Command::Goal(goal) => {
-            apply_goal_command(&app, shell, goal, goal_deadline)?;
+            apply_idle_goal_command(&app, shell, goal, goal_deadline)?;
+        }
+        Command::Settings(sub) => {
+            apply_settings_command(&mut app, shell, input, sub).await?;
+        }
+        Command::ScopedModels(sub) => {
+            apply_scoped_models_command(&mut app, shell, sub).await;
+        }
+        Command::Bash(escape) => {
+            return run_idle_shell_escape(app, shell, input, escape).await;
         }
         Command::Unknown(text) => {
             let (extension_name, extension_arguments) = split_prompt_invocation(&text)
@@ -4036,7 +7855,12 @@ async fn run_idle_command(
                 && extension_arguments.is_empty()
                 && presentation_owner.as_deref() == Some("octet-subagents");
             let result = {
-                let mut confirmations = InteractiveExtensionConfirmations { shell, input };
+                let dialogs = app.executable_extensions.lifecycle_snapshot();
+                let mut confirmations = InteractiveExtensionConfirmations {
+                    shell,
+                    input,
+                    dialogs: &dialogs,
+                };
                 app.executable_extensions
                     .execute_command_with_confirmation(
                         &extension_name,
@@ -4463,10 +8287,9 @@ where
     // Preserve Auto's already-resolved background, including an earlier OSC
     // response. Otherwise use environment detection/fallback once; never query
     // the terminal while the picker owns its input stream.
-    let auto = if current == TerminalThemeChoice::Auto {
-        original.clone()
-    } else {
-        load_theme(&preview_config)
+    let auto = match current {
+        TerminalThemeChoice::Auto => original.clone(),
+        _ => load_theme(&preview_config),
     };
     let previews = TerminalThemeChoice::all().map(|choice| {
         if choice == TerminalThemeChoice::Auto {
@@ -4511,6 +8334,7 @@ async fn configure_terminal_theme<S>(
     config: &mut Config,
     requested: Option<String>,
     onboarding: bool,
+    extensions: Option<&mut crate::extensions::ExecutableExtensions>,
 ) -> anyhow::Result<Option<TerminalThemeChoice>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -4543,10 +8367,14 @@ where
     if !used_picker || selected.is_none() {
         shell.set_theme(load_theme(config));
     }
-    if matches!(choice, TerminalThemeChoice::Auto) {
+    if choice == TerminalThemeChoice::Auto {
         apply_detected_terminal_background(shell, input, config).await;
     }
-    if let Err(error) = crate::cli::persist_theme_choice(choice.key()) {
+    if let Err(error) = persist_configuration(extensions, || {
+        crate::cli::persist_theme_choice(choice.key())
+    })
+    .await
+    {
         shell.error(format!("failed to save terminal appearance: {error}"));
     } else if !onboarding {
         shell.notice(format!("terminal appearance: {}", choice.label()));
@@ -4576,10 +8404,11 @@ async fn run_interactive_without_model(
     let workspace = boot.config.workspace.clone();
     let mut prepared = boot.take_prepared_session();
     let selection = launch.session;
-    let session = run_blocking_lifecycle(shell, input, "opening session…", move || {
-        crate::app::bootstrap::open_launch_session(&mut prepared, selection)
-    })
-    .await?;
+    let session =
+        run_blocking_startup_lifecycle(shell, input, STARTUP_SESSION_OPERATION, move || {
+            crate::app::bootstrap::open_launch_session(&mut prepared, selection)
+        })
+        .await?;
 
     let resume_command = resume_command_for_session(&session, &boot.config);
     shell.set_identity("", "", "");
@@ -4588,7 +8417,6 @@ async fn run_interactive_without_model(
     shell.set_input_modalities(octet_ai::ModalitySet::none());
     shell.set_session_telemetry(&session, None);
     shell.hydrate(&session)?;
-    shell.finish_startup();
     shell.notice(
         "No configured model. Use /login, /model, or /reload to configure one; prompts are disabled until then.",
     );
@@ -4603,6 +8431,11 @@ async fn run_interactive_without_model(
     {
         shell.show_changelog();
     }
+    // The same single ready frame as the model path: onboarding text and the
+    // optional changelog surface arrive with readiness, never as a partial
+    // paint before it.
+    crate::app::bootstrap::startup_phase("frame.ready");
+    shell.finish_startup();
     shell.render();
 
     let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
@@ -4610,6 +8443,15 @@ async fn run_interactive_without_model(
     let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
     extension_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut extensions = crate::extensions::ExecutableExtensions::default();
+    // Model-less mode has no `App`, no agent, and no session, so there is
+    // nothing a pass could re-read. The supervisor stays disabled and can never
+    // report a due pass; keeping the same call shape means the idle loop has
+    // exactly one arm set.
+    let mut reload =
+        crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
+    let reload_watcher = crate::reload::ReloadWatcher::new(crate::reload::ReloadWatchSet::new());
+    let mut reload_tick = tokio::time::interval(reload.settings().tick_interval());
+    reload_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         match wait_for_prompt(
@@ -4619,10 +8461,16 @@ async fn run_interactive_without_model(
             &mut extension_tick,
             &mut extensions,
             None,
+            &mut reload_tick,
+            &reload_watcher,
+            &mut reload,
         )
         .await?
         {
             Idle::Quit => return Ok(resume_command),
+            // Unreachable while the supervisor is disabled; kept explicit so the
+            // variant stays honest instead of silently ignored.
+            Idle::ReloadDue => {}
             Idle::CycleThinking => {
                 shell.notice("thinking is unavailable until a model is configured");
                 shell.render();
@@ -4639,7 +8487,23 @@ async fn run_interactive_without_model(
                 shell.render();
             }
             Idle::Command(raw) => match commands::parse(&raw) {
-                Command::Quit => return Ok(resume_command),
+                Command::Exit => return Ok(resume_command),
+                Command::Hotkeys => {
+                    show_hotkeys(shell);
+                    shell.render();
+                }
+                Command::Copy => {
+                    copy_last_assistant(shell);
+                    shell.render();
+                }
+                Command::Session => {
+                    shell.show_report_text(
+                        "Session",
+                        "Durable session facts",
+                        commands::session_text(&session),
+                    );
+                    shell.render();
+                }
                 Command::Changelog => {
                     shell.show_changelog();
                     shell.render();
@@ -4662,8 +8526,15 @@ async fn run_interactive_without_model(
                     shell.render();
                 }
                 Command::Theme(requested) => {
-                    configure_terminal_theme(shell, input, &mut boot.config, requested, false)
-                        .await?;
+                    configure_terminal_theme(
+                        shell,
+                        input,
+                        &mut boot.config,
+                        requested,
+                        false,
+                        None,
+                    )
+                    .await?;
                 }
                 Command::Login(provider) => match validate_provider(provider.as_deref()) {
                     Ok("codex") => {
@@ -4767,7 +8638,19 @@ fn prepare_startup_input(
 }
 
 fn schedule_idle_responses_prewarm(app: &App, command: &Command) {
-    if !matches!(command, Command::Changelog) {
+    // Local controls/status must not submit provider requests. The next
+    // normal request (including any later prewarm) reads the selected tier.
+    if !matches!(
+        command,
+        Command::Changelog
+            | Command::Fast(_)
+            | Command::Hotkeys
+            | Command::Copy
+            | Command::Session
+            | Command::Settings(_)
+            | Command::ScopedModels(_)
+            | Command::Bash(_)
+    ) {
         schedule_responses_prewarm(app);
     }
 }
@@ -4787,12 +8670,15 @@ enum GuidedSetupPreset {
     OpenAiCompatible,
 }
 
-async fn guided_setup_input(
+async fn guided_setup_input<S>(
     shell: &mut InteractiveShell,
-    input: &mut EventStream,
+    input: &mut S,
     prompt: &str,
     secret: bool,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<String>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     // This is the existing bounded temporary-input surface. Secret values are
     // never copied into the ordinary composer or rendered frame.
     extension_input_picker(
@@ -4828,12 +8714,12 @@ async fn guided_provider_setup(
             vec![
                 "LM Studio".to_owned(),
                 "OpenAI-compatible endpoint".to_owned(),
-                "Continue without a provider".to_owned(),
+                "Cancel setup".to_owned(),
             ],
             vec![
                 Some("Use an explicitly selected local OpenAI-compatible endpoint".to_owned()),
                 Some("Use one endpoint you enter; octet will not scan for services".to_owned()),
-                Some("Open the session read-only; no provider data is written".to_owned()),
+                Some("Cancel local endpoint setup without writing provider data".to_owned()),
             ],
             0,
         )
@@ -5243,46 +9129,111 @@ fn startup_update_task(
     tasks
 }
 
-/// Run the interactive frontend with explicit idle and active borrow phases.
-pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
-    let initial_prompt = boot.config.initial_prompt.clone();
-    let theme = load_theme(&boot.config);
+/// Interactive launch retaining the ordered `--models` patterns, including
+/// reasoning suffixes that cannot be recovered from a list of bare ModelIds.
+///
+/// A `/reload` that finds a changed on-disk executable unwinds the TUI and
+/// re-execs into it. `exec` returns only on failure, so this wrapper rebuilds
+/// the TUI and extension children from the durable session head and keeps the
+/// current process usable.
+pub(crate) async fn run_interactive_with_options(
+    config: Config,
+    mut options: crate::cli::parity::ParityOptions,
+) -> anyhow::Result<()> {
+    let mut config = config;
+    loop {
+        match run_interactive_once(config.clone(), options.clone()).await? {
+            InteractiveExit::Finished => return Ok(()),
+            InteractiveExit::Reexec(plan) => {
+                let session_id = plan.session_id().to_owned();
+                // `exec` returns only when the image was not replaced: either
+                // the platform call failed or the final probe→exec re-check
+                // found the binary changed again. Both recover the same way.
+                let notice = match plan.exec() {
+                    crate::reexec::ReexecDecision::ExecFailed { notice, .. } => notice,
+                    decision => match decision.notice() {
+                        Some(notice) => notice.to_owned(),
+                        None => continue,
+                    },
+                };
+                // The terminal was left before `exec`. Re-entering the loop
+                // rebuilds the TUI and extension children from the durable
+                // session head and resumes the exact session, so the process
+                // stays usable.
+                crate::output::stderr_line(notice);
+                config.initial_prompt = None;
+                config.resume = crate::config::ResumeSelector::Resume(Some(session_id));
+                options.session_id = None;
+                options.name = None;
+            }
+        }
+    }
+}
+
+/// One interactive process lifetime. Returns after the terminal was left.
+async fn run_interactive_once(
+    config: Config,
+    options: crate::cli::parity::ParityOptions,
+) -> anyhow::Result<InteractiveExit> {
+    let model_scope_patterns = options.models.clone();
+    let mut config = config;
+    let initial_prompt = config.initial_prompt.clone();
+    let theme = load_theme(&config);
     let size = Arc::new(Mutex::new(crossterm::terminal::size().unwrap_or((80, 24))));
     let mut shell =
-        InteractiveShell::enter_with_mouse(theme, size, boot.config.mouse.application_owned())?;
-    shell.set_runtime_config(boot.config.clone());
+        InteractiveShell::enter_with_mouse(theme, size, config.mouse.application_owned())?;
+    // Best-effort re-exec support: a host that cannot report its own executable
+    // keeps the resources-only `/reload`.
+    let mut reexec = crate::reexec::ReexecController::capture().ok();
+    shell.set_runtime_config(config.clone());
     let _update_task = startup_update_task(
-        boot.config.offline,
+        config.offline,
         crate::update::startup_available_update(),
         shell.startup_update_notifier(),
     );
-    let mut input = EventStream::new();
-    apply_detected_terminal_background(&mut shell, &mut input, &boot.config).await;
-    if crate::cli::should_offer_theme_onboarding(&boot.config)
+    let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
+    apply_detected_terminal_background(&mut shell, &mut input, &config).await;
+    if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
-        && !boot.config.plain
+        && !config.plain
     {
-        configure_terminal_theme(&mut shell, &mut input, &mut boot.config, None, true).await?;
+        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true, None).await?;
         if shell.close_requested() {
             shell.leave();
-            return Ok(());
+            return Ok(InteractiveExit::Finished);
         }
     }
-    // Offer setup only when bootstrap has no runnable provider inventory. An
-    // explicit --model remains authoritative, and resumed provenance is still
-    // resolved after this optional first-run transaction.
-    if !boot.config.model_explicit && boot.catalog.models().next().is_none() {
-        let config = boot.config.clone();
-        if let Some(completed) = guided_provider_setup(&mut shell, &mut input, &config).await? {
-            boot.catalog = completed.catalog;
-            boot.config.model = Some(completed.model.clone());
-            // Keep this as a persisted default rather than an invocation
-            // override, so an existing session's provenance remains eligible.
-            boot.config.model_explicit = false;
-            shell.set_runtime_config(boot.config.clone());
-            shell.notice(format!("provider setup saved · {}", completed.model.0));
-            shell.render();
-        }
+    // Cold/expired model inventories can require network discovery. Give the
+    // terminal an input owner before that work, just as for session/extension
+    // startup below. Editing is live; submission still waits for full startup.
+    // Startup renders nothing: the phase is named only in diagnostics, and its
+    // duration stays attributable through `OCTET_STARTUP_TRACE=1`.
+    let mut boot = run_blocking_startup_lifecycle(
+        &mut shell,
+        &mut input,
+        STARTUP_MODELS_OPERATION,
+        move || {
+            let mut boot = crate::app::bootstrap::bootstrap(config)?;
+            if options.models.is_some() {
+                boot.enrich_catalog()?;
+                options.resolve_models_in_catalog(&mut boot.config, &boot.catalog)?;
+            }
+            options.select_session(&mut boot.config)?;
+            Ok(boot)
+        },
+    )
+    .await?;
+    if shell.close_requested() {
+        shell.leave();
+        return Ok(InteractiveExit::Finished);
+    }
+    // Onboarding keeps explicit selection and resumed provenance authoritative.
+    // Cloud authentication refreshes this bootstrap before the ordinary model
+    // picker runs; local setup retains its reviewed default model.
+    onboarding::run(&mut shell, &mut input, &mut boot).await?;
+    if shell.close_requested() {
+        shell.leave();
+        return Ok(InteractiveExit::Finished);
     }
     // The shell owns a dedicated renderer thread, but sexy-tui still renders
     // synchronously when that thread receives a request. This clock only
@@ -5295,7 +9246,7 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
     let launch_result = resolve_launch_interactive(&boot, &mut shell, &mut input).await;
     let Some(launch) = startup_launch_outcome(&shell, launch_result)? else {
         shell.leave();
-        return Ok(());
+        return Ok(InteractiveExit::Finished);
     };
     if boot.is_modeless() {
         let result = run_interactive_without_model(boot, launch, &mut shell, &mut input).await;
@@ -5303,21 +9254,31 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
         return match result {
             Ok(resume_command) => {
                 print_resume_command(resume_command.as_deref());
-                Ok(())
+                Ok(InteractiveExit::Finished)
             }
             Err(error) => Err(error),
         };
     }
-    let mut app = run_blocking_lifecycle(
-        &mut shell,
-        &mut input,
-        "starting extensions…",
-        move || {
+    let mut app =
+        run_blocking_startup_lifecycle(&mut shell, &mut input, STARTUP_APP_OPERATION, move || {
             let system = compose_instructions(&boot.config)?;
             build_app(boot, launch, system)
-        },
-    )
-    .await?;
+        })
+        .await?;
+    // `--models` always wins. Without it, the interactive launch reads the
+    // user-level ordered scope persisted by `/scoped-models`; headless modes
+    // never consult it. A hand-edited invalid value warns instead of breaking
+    // startup, and the command line still fails closed on the same input.
+    match model_scope_patterns.clone() {
+        Some(patterns) => app.set_model_scope_patterns(Some(&patterns))?,
+        None => {
+            if let Some(persisted) = crate::cli::persisted_scoped_models() {
+                if let Err(error) = app.set_model_scope_patterns(Some(&persisted)) {
+                    shell.notice(format!("ignored the persisted model scope: {error}"));
+                }
+            }
+        }
+    }
     let mut startup_prompt = initial_prompt;
     if let Some(name) = app.config.prompt_template.clone() {
         let arguments = startup_prompt.take().unwrap_or_default();
@@ -5329,24 +9290,63 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
         }
         startup_prompt = Some(rendered.text);
     }
+    // One atomic ready frame. History, identity, status, extension UI and the
+    // startup prompt are all installed before `finish_startup` opens the
+    // branded surface, so the terminal never sees an incremental
+    // partial-then-corrected paint. Hydration cost stays attributable
+    // off-screen through `OCTET_STARTUP_TRACE=1`.
+    crate::app::bootstrap::startup_phase("history.hydrate");
     shell.hydrate(app.agent.session())?;
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(&mut shell, &app);
     request_extension_ui(&mut shell, &mut app);
-    shell.finish_startup();
+    // The pane is ready for input. Reporting here (not earlier) means the
+    // session identity is already resolved, and a headless/plain run never
+    // reaches this point at all — the equivalent of Pi's TUI-only gate.
+    shell.herdr_attach(
+        herdr_session_id(&app),
+        herdr_startup_source(&app.config.resume),
+        herdr_launch_scope(&app),
+    );
     let mut startup_input = prepare_startup_input(&app, &mut shell, startup_prompt);
+    crate::app::bootstrap::startup_phase("frame.ready");
+    shell.finish_startup();
     shell.render();
 
     let mut pending_actions = VecDeque::new();
     let mut goal_deadline = recovered_goal_deadline(&app)?;
     let mut next_prompt_source = GoalTurnSource::User;
+    // A validated re-exec: the loop breaks, the TUI is left, and the wrapper
+    // above replaces the process image (or recovers from a failed exec).
+    let mut pending_reexec: Option<crate::reexec::ReexecPlan> = None;
+    // Live-reload supervisor (`crates/octet-coding-agent/src/reload.rs`).
+    //
+    // Sampling is metadata-only, gated by the poll interval, and every pass is
+    // applied only at this idle boundary: a run owns the session inside the
+    // `Idle::Submit` arm below, which never reaches the supervisor. The
+    // `reload`, `reload_poll_ms`, `reload_debounce_ms`, and `reload_max_files`
+    // keys come from the user-level config layer, and `ReloadWatcher::poll`
+    // reads both the interval and the inspection budget from the supervisor, so
+    // exactly one `ReloadSettings` value is in play. The supervisor announces
+    // itself once, on its first observation.
+    let mut reload = crate::reload::ReloadSupervisor::new(crate::cli::live_reload_settings());
+    let reload_watcher =
+        crate::reload::ReloadWatcher::new(crate::reload::ReloadWatchSet::from_config(&app.config));
+    let mut reload_tick = tokio::time::interval(reload.settings().tick_interval());
+    reload_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     'interactive: loop {
         if shell.close_requested() {
             shutdown_for_exit(&mut app).await;
             break;
         }
-        let idle = match startup_input.take() {
+        let queued_input = if startup_input.is_none() {
+            shell.take_ready_follow_up()
+        } else {
+            None
+        };
+        let queued_submission = queued_input.is_some();
+        let idle = match startup_input.take().or(queued_input) {
             Some(input) if !input.is_empty() => Idle::Submit(input),
             _ => {
                 wait_for_prompt(
@@ -5356,6 +9356,9 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                     &mut extension_tick,
                     &mut app.executable_extensions,
                     goal_deadline,
+                    &mut reload_tick,
+                    &reload_watcher,
+                    &mut reload,
                 )
                 .await?
             }
@@ -5375,6 +9378,37 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                     // deadline target the discarded driver.
                     goal_deadline = recovered_goal_deadline(&app)?;
                     next_prompt_source = GoalTurnSource::User;
+                    // `session/switch` and `session/reload` are the only
+                    // lifecycle operations that replace the active durable
+                    // session; `create`/`fork` return dormant ids without
+                    // switching. Herdr's stored reference follows the active
+                    // session, exactly as the Pi integration refreshes it.
+                    shell.herdr_session_changed(
+                        herdr_session_id(&app),
+                        Some("resume"),
+                        herdr_launch_scope(&app),
+                    );
+                }
+            }
+            // The one place a live-reload pass is applied. Only idle-boundary
+            // code reaches this arm, and `begin` refuses anything but `Idle`.
+            Idle::ReloadDue => {
+                let now = std::time::Instant::now();
+                let Some(plan) = reload.begin(now, crate::reload::ReloadBoundary::Idle) else {
+                    continue;
+                };
+                app = apply_live_reload_plan(
+                    app,
+                    &mut shell,
+                    &mut input,
+                    &mut reload,
+                    plan,
+                    reexec.as_mut(),
+                    &mut pending_reexec,
+                )
+                .await?;
+                if pending_reexec.is_some() {
+                    break 'interactive;
                 }
             }
             Idle::GoalContinuation => {
@@ -5394,22 +9428,58 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
             }
             Idle::CycleThinking => {
                 let level = next_thinking_level(&app)?;
-                let reasoning = thinking_to_reasoning_with_subagents(
-                    level,
-                    &app.model,
-                    app.subagents_available(),
-                )?;
-                if let Err(error) = crate::cli::persist_reasoning(&reasoning_label(&reasoning)) {
-                    shell.error(format!("failed to save thinking preference: {error}"));
-                }
-                app =
-                    transition(app, &mut shell, &mut input, Reconfig::Thinking(reasoning)).await?;
+                let reasoning =
+                    requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
+                app = select_thinking(app, &mut shell, &mut input, reasoning, None).await?;
                 schedule_responses_prewarm(&app);
                 shell.render();
             }
             Idle::Command(command_input) => {
                 if command_input.trim_start().starts_with("/skill:") {
                     startup_input = Some(ComposedInput::from_text(command_input));
+                    continue;
+                }
+                // The supervisor's explicit user actions. Plain `/reload` keeps
+                // its existing transactional path (`run_idle_command` below);
+                // only these two documented flags hand control to the
+                // live-reload supervisor, so a forced pass can never be
+                // triggered by the watcher noticing a file change.
+                if let Some(action) = crate::reload::ReloadUserAction::parse(&command_input) {
+                    let now = std::time::Instant::now();
+                    match action {
+                        crate::reload::ReloadUserAction::DryRun => {
+                            shell.notice(reload_watcher.watches().arming_notice(reload.settings()));
+                            let report = reload.dry_run(now, crate::reload::ReloadBoundary::Idle);
+                            for notice in reload_interruption_preview(&app) {
+                                shell.notice(notice);
+                            }
+                            for notice in report.notices() {
+                                shell.notice(notice);
+                            }
+                            shell.notice(report.summary());
+                            shell.render();
+                        }
+                        crate::reload::ReloadUserAction::Force => {
+                            // Current queued work is a risk, not an actual loss.
+                            for notice in reload_interruption_preview(&app) {
+                                shell.notice(notice);
+                            }
+                            let plan = reload.force();
+                            app = apply_live_reload_plan(
+                                app,
+                                &mut shell,
+                                &mut input,
+                                &mut reload,
+                                plan,
+                                reexec.as_mut(),
+                                &mut pending_reexec,
+                            )
+                            .await?;
+                            if pending_reexec.is_some() {
+                                break 'interactive;
+                            }
+                        }
+                    }
                     continue;
                 }
                 let command = commands::parse(&command_input);
@@ -5419,6 +9489,8 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                     &mut input,
                     command.clone(),
                     &mut goal_deadline,
+                    reexec.as_mut(),
+                    &mut reload,
                 )
                 .await?
                 {
@@ -5430,6 +9502,11 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                         app = *next;
                         schedule_responses_prewarm(&app);
                         startup_input = Some(input);
+                    }
+                    IdleCommandOutcome::Reexec { app: next, plan } => {
+                        app = *next;
+                        pending_reexec = Some(plan);
+                        break 'interactive;
                     }
                     IdleCommandOutcome::Quit(next) => {
                         app = *next;
@@ -5446,287 +9523,49 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                     app.goal_driver.user_spoke();
                 }
                 // Shell escapes have the same authority as the model `bash`
-                // tool and executable extensions. Never let this local UX
-                // bypass the product-wide process gate.
-                if let Some(command) = composed
-                    .display_text
-                    .trim()
-                    .strip_prefix('!')
-                    .map(|s| s.trim().to_owned())
-                {
-                    if !app.config.sandbox.process_execution_allowed() {
-                        shell.error(
-                            "shell commands are disabled by --no-process/--no-shell".to_owned(),
-                        );
-                        shell.render();
-                        continue;
-                    }
-                    if command.is_empty() {
-                        shell.notice("usage: !<shell command>");
-                        shell.render();
-                        continue;
-                    }
-                    shell.on_local_command_submitted(&format!("!{command}"));
-                    let shell_id = shell.append_shell_in_progress(command.clone());
-                    shell.render();
-
-                    let workspace = app.config.workspace.clone();
-                    let cmd = command.clone();
-
-                    // Spawn the child process with piped output.
-                    let mut process = tokio::process::Command::new("sh");
-                    process
-                        .current_dir(&workspace)
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .stdin(std::process::Stdio::null())
-                        .kill_on_drop(true);
-                    #[cfg(unix)]
-                    process.process_group(0);
-                    #[cfg(unix)]
-                    let launch = match BashProcessLaunch::prepare(&mut process, &cmd) {
-                        Ok(launch) => launch,
-                        Err(error) => {
-                            shell.finalize_shell(
-                                &shell_id,
-                                format!("failed to prepare lifecycle supervision: {error}"),
-                                -1,
-                            );
-                            shell.render();
-                            continue;
-                        }
-                    };
-                    #[cfg(unix)]
-                    process.arg("-c").arg(launch.source());
-                    #[cfg(not(unix))]
-                    process.arg("-c").arg(&cmd);
-                    let mut child = match process.spawn() {
-                        Ok(child) => child,
-                        Err(error) => {
-                            shell.finalize_shell(
-                                &shell_id,
-                                format!("failed to spawn: {error}"),
-                                -1,
-                            );
-                            shell.render();
-                            continue;
-                        }
-                    };
-                    #[cfg(unix)]
-                    let (group_guard, handoff) = match launch.register(child.id()).await {
-                        Ok(registered) => registered,
-                        Err(error) => {
-                            let _ = child.wait().await;
-                            shell.finalize_shell(
-                                &shell_id,
-                                format!("failed to register lifecycle supervision: {error}"),
-                                -1,
-                            );
-                            shell.render();
-                            continue;
-                        }
-                    };
-
-                    let mut stdout_pipe = child.stdout.take();
-                    let mut stderr_pipe = child.stderr.take();
-                    let output_budget = app.config.sandbox.max_output_bytes;
-                    let stdout_budget = output_budget / 2;
-                    let stderr_budget = output_budget.saturating_sub(stdout_budget);
-                    let stdout = std::sync::Arc::new(std::sync::Mutex::new(
-                        BoundedShellOutput::new(stdout_budget),
-                    ));
-                    let stderr = std::sync::Arc::new(std::sync::Mutex::new(
-                        BoundedShellOutput::new(stderr_budget),
-                    ));
-                    let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel();
-                    let command_timeout = Duration::from_secs(app.config.sandbox.bash_timeout_secs);
-                    #[cfg(unix)]
-                    let command_started = tokio::time::Instant::now();
-                    let stdout_capture = stdout.clone();
-                    let stderr_capture = stderr.clone();
-                    let stdout_updates = output_tx.clone();
-                    let stderr_updates = output_tx;
-                    let work = async {
-                        #[cfg(unix)]
-                        let (_, _, status) = tokio::join!(
-                            drain_shell_pipe(&mut stdout_pipe, &stdout_capture, &stdout_updates,),
-                            drain_shell_pipe(&mut stderr_pipe, &stderr_capture, &stderr_updates,),
-                            wait_for_bash_process(&mut child, handoff),
-                        );
-                        #[cfg(not(unix))]
-                        let (_, _, status) = tokio::join!(
-                            drain_shell_pipe(&mut stdout_pipe, &stdout_capture, &stdout_updates,),
-                            drain_shell_pipe(&mut stderr_pipe, &stderr_capture, &stderr_updates,),
-                            child.wait(),
-                        );
-                        status
-                    };
-                    let mut work = Box::pin(work);
-                    let deadline = tokio::time::sleep(command_timeout);
-                    tokio::pin!(deadline);
-                    let mut input_open = true;
-                    let mut interrupted = false;
-                    let mut timed_out = false;
-                    let mut shutting_down = false;
-
-                    let exit = loop {
-                        tokio::select! {
-                            biased;
-                            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
-                                interrupted = true;
-                                shutting_down = true;
-                                break Err(std::io::Error::new(
-                                    std::io::ErrorKind::Interrupted,
-                                    "command stopped during shutdown",
-                                ));
-                            }
-                            status = &mut work => {
-                                break status;
-                            }
-                            event = input.next(), if input_open => match event {
-                                Some(Ok(Event::Key(key))) if keymap::is_close_key(&key) => {
-                                    shell.request_close();
-                                    interrupted = true;
-                                    shutting_down = true;
-                                    break Err(std::io::Error::new(
-                                        std::io::ErrorKind::Interrupted,
-                                        "command stopped during close",
-                                    ));
-                                }
-                                Some(Ok(Event::Key(key)))
-                                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                                        && key.code == KeyCode::Char('c')
-                                        && key.modifiers == KeyModifiers::CONTROL =>
-                                {
-                                    interrupted = true;
-                                    break Err(std::io::Error::new(
-                                        std::io::ErrorKind::Interrupted,
-                                        "command cancelled",
-                                    ));
-                                }
-                                Some(Ok(Event::Key(key)))
-                                    if key.kind == KeyEventKind::Press
-                                        && key.code == KeyCode::Char('o')
-                                        && key.modifiers == KeyModifiers::CONTROL =>
-                                {
-                                    shell.toggle_disclosure();
-                                    shell.render();
-                                }
-                                Some(Ok(Event::Resize(columns, rows))) => {
-                                    shell.set_size(columns, rows);
-                                    shell.render();
-                                }
-                                Some(Ok(_)) => {}
-                                Some(Err(_)) | None => input_open = false,
-                            },
-                            _ = &mut deadline => {
-                                timed_out = true;
-                                break Err(std::io::Error::new(
-                                    std::io::ErrorKind::TimedOut,
-                                    "command timed out",
-                                ));
-                            }
-                            update = output_rx.recv() => {
-                                if update.is_some() {
-                                    // Collapse a burst into one bounded tail update. This keeps
-                                    // the latest process lines visible without repainting once
-                                    // per read syscall.
-                                    while output_rx.try_recv().is_ok() {}
-                                    shell.update_shell_output(
-                                        &shell_id,
-                                        rendered_shell_captures(&stdout, &stderr),
-                                    );
-                                    shell.render();
-                                }
-                            }
-                        }
-                    };
-
-                    if shutting_down {
-                        #[cfg(unix)]
+                // tool and executable extensions. Never let this local UX bypass
+                // the product-wide process gate, the ordinary process approval,
+                // or bounded process cleanup. Active-run follow-ups are model
+                // input, never delayed local shell escapes that gain process
+                // authority on dispatch.
+                if !queued_submission {
+                    if let Some(escape) = commands::BashEscape::parse(&composed.display_text) {
+                        match run_idle_command(
+                            app,
+                            &mut shell,
+                            &mut input,
+                            Command::Bash(escape),
+                            &mut goal_deadline,
+                            None,
+                            &mut reload,
+                        )
+                        .await?
                         {
-                            let process_cleanup =
-                                octet_agent::extension_process::terminate_bash_process_groups(
-                                    Duration::from_millis(400),
-                                );
-                            let _ = tokio::time::timeout(Duration::from_millis(500), async {
-                                tokio::join!(&mut work, process_cleanup)
-                            })
-                            .await;
-                            group_guard.terminate_now();
-                        }
-                        drop(work);
-                        #[cfg(not(unix))]
-                        {
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
-                        }
-                        let mut combined = rendered_shell_captures(&stdout, &stderr);
-                        if !combined.is_empty() {
-                            combined.push('\n');
-                        }
-                        combined.push_str("command stopped during shutdown");
-                        shell.finalize_shell(&shell_id, combined, -1);
-                        shell.render();
-                        shutdown_for_exit(&mut app).await;
-                        break 'interactive;
-                    }
-
-                    if interrupted || timed_out {
-                        #[cfg(unix)]
-                        {
-                            group_guard.terminate_now();
-                            // Retain output already in the pipes when ordinary
-                            // descendants close promptly, but an escaped child
-                            // must not defeat the execution deadline forever.
-                            let _ =
-                                tokio::time::timeout(Duration::from_millis(500), &mut work).await;
-                        }
-                    } else {
-                        #[cfg(unix)]
-                        group_guard.supervise_bash_descendants(
-                            command_timeout.saturating_sub(command_started.elapsed()),
-                            Default::default(),
-                        );
-                    }
-                    // Releasing the concurrent wait/drain future closes any
-                    // descriptors retained by an escaped descendant.
-                    drop(work);
-                    #[cfg(not(unix))]
-                    if interrupted || timed_out {
-                        let _ = child.kill().await;
-                    }
-
-                    let exit_code = match exit {
-                        Ok(status) => status.code().unwrap_or(-1),
-                        Err(error) => {
-                            let mut combined = rendered_shell_captures(&stdout, &stderr);
-                            if !combined.is_empty() {
-                                combined.push('\n');
+                            IdleCommandOutcome::Continue(next) => {
+                                app = *next;
+                                continue;
                             }
-                            if interrupted {
-                                combined.push_str("command cancelled");
-                            } else if timed_out {
-                                combined.push_str(&format!(
-                                    "command exceeded the {}s execution limit",
-                                    app.config.sandbox.bash_timeout_secs
-                                ));
-                            } else {
-                                combined.push_str(&format!("process error: {error}"));
+                            IdleCommandOutcome::Quit(next) => {
+                                app = *next;
+                                shutdown_for_exit(&mut app).await;
+                                break 'interactive;
                             }
-                            shell.finalize_shell(&shell_id, combined, -1);
-                            shell.render();
-                            continue;
+                            IdleCommandOutcome::Submit { app: next, input } => {
+                                app = *next;
+                                startup_input = Some(input);
+                                continue;
+                            }
+                            IdleCommandOutcome::Reexec { app: next, .. } => {
+                                // A bash escape cannot plan a re-exec; keep the
+                                // application and continue instead of dropping it.
+                                app = *next;
+                                continue;
+                            }
                         }
-                    };
-
-                    let combined = rendered_shell_captures(&stdout, &stderr);
-                    shell.finalize_shell(&shell_id, combined, exit_code);
-                    shell.render();
-                    continue;
+                    }
                 }
-
                 if let Some(message) = cost_limit_message(&app) {
+                    shell.restore_composed(composed);
                     shell.error(message);
                     shell.render();
                     continue;
@@ -5821,6 +9660,13 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                     shell.notice(diagnostic);
                 }
 
+                // Capture the pane's session identity before the run borrows
+                // the agent mutably: Herdr must learn the session reference at
+                // the same moment the prompt is accepted.
+                let pane_session_id = herdr_session_id(&app);
+                // Snapshot the read-only application facts the run cannot lend
+                // out (it owns `&mut Agent`), so inspection commands still work.
+                let inspection = ActiveRunInspection::capture(&app);
                 let mut run = {
                     let user_input = composed.into_user_input();
                     let run_result = if answer_only {
@@ -5850,9 +9696,11 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                 app.executable_extensions
                     .commit_prompt_context(pending_context_count);
                 prepare_prompt(&mut shell);
-                let display = retry_composed.transcript_text;
-                shell.on_prompt_submitted(&display);
+                shell.on_composed_prompt_submitted(&retry_composed);
                 let run_id = shell.begin_run(&app.model.endpoint.id.0);
+                // Working from the moment the prompt is accepted, before any
+                // provider event: Pi reports `working` on `agent_start`.
+                shell.herdr_run_started(pane_session_id);
                 shell.mark_prompt_persisted();
                 shell.set_awaiting_provider(run_id);
                 shell.render();
@@ -5871,9 +9719,16 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                     app.config.cost_warning_microdollars,
                     &mut app.executable_extensions,
                     &mut made_tool_call,
+                    &inspection,
+                    &mut goal_deadline,
                 )
                 .await?;
                 drop(run);
+                if app.model.responses_features().reasoning_effort_updates {
+                    app.reasoning = app.agent.reasoning().clone();
+                    update_status(&mut shell, &app);
+                    app.executable_extensions.notify_reasoning_selected_all();
+                }
                 app.executable_extensions
                     .settle_turn(extension_turn, &ended)
                     .await;
@@ -5955,27 +9810,493 @@ pub async fn run_interactive(mut boot: Bootstrap) -> anyhow::Result<()> {
                     &mut input,
                     &mut pending_actions,
                     &mut goal_deadline,
+                    reexec.as_mut(),
+                    &mut pending_reexec,
+                    &mut reload,
                 )
                 .await?;
+                if pending_reexec.is_some() {
+                    break 'interactive;
+                }
             }
         }
     }
     let resume_command = resume_command_for_session(app.agent.session(), &app.config);
     shell.leave();
     print_resume_command(resume_command.as_deref());
-    Ok(())
+    match pending_reexec {
+        Some(plan) => Ok(InteractiveExit::Reexec(Box::new(plan))),
+        None => Ok(InteractiveExit::Finished),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_resource_reload_clears_only_reinitialized_extension_problems() {
+        use crate::reload::{ReloadComponent, ReloadSettings, ReloadSupervisor};
+        let mut reload = ReloadSupervisor::new(ReloadSettings::default());
+        let before: std::collections::BTreeMap<String, (String, u64)> =
+            std::collections::BTreeMap::from([
+                ("replaced".into(), ("old".into(), 1)),
+                ("retained".into(), ("shared".into(), 1)),
+                ("stopped".into(), ("old-stopped".into(), 1)),
+            ]);
+        let after = std::collections::BTreeMap::from([
+            ("replaced".into(), ("new".into(), 1)),
+            ("retained".into(), ("shared".into(), 1)),
+        ]);
+        let problem = || vec!["fixture failure".to_owned()];
+        for name in before.keys() {
+            reload.checked_problems(ReloadComponent::Extension(name.clone()), problem(), false);
+        }
+        reload.checked_problems(ReloadComponent::Host, problem(), false);
+        remember_rebuilt_extensions(&mut reload, &before, &after);
+        assert!(!reload
+            .checked_problems(
+                ReloadComponent::Extension("replaced".into()),
+                problem(),
+                false
+            )
+            .is_empty());
+        for name in ["retained", "stopped"] {
+            assert!(reload
+                .checked_problems(ReloadComponent::Extension(name.into()), problem(), false)
+                .is_empty());
+        }
+        assert!(reload
+            .checked_problems(ReloadComponent::Host, problem(), false)
+            .is_empty());
+    }
+
+    #[test]
+    fn automatic_reload_cannot_prompt_for_binary_or_worker_consent() {
+        assert!(!HostPass::ResourcesOnly.may_prompt());
+        assert!(!HostPass::Allowed {
+            redirect_confirmed: false
+        }
+        .may_prompt());
+        assert!(HostPass::Allowed {
+            redirect_confirmed: true
+        }
+        .may_prompt());
+    }
+
+    #[test]
+    fn automatic_extension_reload_silences_success_but_preserves_each_event() {
+        use crate::extensions::{ExtensionReloadReport, ExtensionRescanReport};
+        use crate::reload::{ReloadSettings, ReloadSupervisor};
+        let mut reload = ReloadSupervisor::new(ReloadSettings::default());
+        let success = |generation| ExtensionReloadReport {
+            processes: vec![(
+                "fixture".into(),
+                Ok(format!("reloaded fixture generation {generation}")),
+            )],
+            rescans: ExtensionRescanReport {
+                checked: vec![("resource:fixture".into(), Vec::new())],
+                details: vec![format!("rescanned fixture generation {generation}")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(extension_reload_notices(&mut reload, success(1), false).is_empty());
+        assert!(extension_reload_notices(&mut reload, success(2), false).is_empty());
+        assert_eq!(
+            extension_reload_notices(&mut reload, success(3), true).len(),
+            2
+        );
+        let failure = || ExtensionReloadReport {
+            processes: vec![("fixture".into(), Err("fixture unavailable".into()))],
+            events: vec![
+                "discarded host request".into(),
+                "discarded host request".into(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            extension_reload_notices(&mut reload, failure(), false).len(),
+            3
+        );
+        assert_eq!(
+            extension_reload_notices(&mut reload, failure(), false).len(),
+            2
+        );
+        // No process check in this pass: the previous failure remains remembered.
+        extension_reload_notices(&mut reload, ExtensionReloadReport::default(), false);
+        assert_eq!(
+            extension_reload_notices(&mut reload, failure(), false).len(),
+            2
+        );
+        assert_eq!(
+            extension_reload_notices(&mut reload, success(4), true).len(),
+            2
+        );
+        assert_eq!(
+            extension_reload_notices(&mut reload, failure(), false).len(),
+            3
+        );
+        assert_eq!(
+            extension_reload_notices(&mut reload, failure(), true).len(),
+            3
+        );
+    }
+
     use super::*;
     use octet_agent::EntryValue;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resource_reload_refusal_preserves_worker_owner_and_control() {
+        use crate::extensions::reload_lifecycle_test_support::fixture;
+        use octet_agent::ExtensionPresentationState as State;
+
+        for state in [
+            State::Pending,
+            State::Active,
+            State::Running,
+            State::Degraded,
+        ] {
+            for host in [
+                HostPass::ResourcesOnly,
+                HostPass::Allowed {
+                    redirect_confirmed: true,
+                },
+            ] {
+                let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+                let (extensions, process, wire) = fixture(directory.path(), Some(state)).await;
+                app.executable_extensions = extensions;
+                let before = app.executable_extensions.presentation_views();
+                let path = app.agent.session().path().to_owned();
+                let session = std::fs::read(&path).unwrap();
+                let system = app.system.clone();
+                let skills = app.skills.clone();
+                let generation = process.health_snapshot().generation;
+                let mut shell = InteractiveShell::test_shell();
+                let mut input = EventStream::from_stream(futures_util::stream::pending());
+                let mut reexec = crate::reexec::ReexecController::capture().ok();
+                let (mut app, plan, applied) = reload_resources_with_reexec(
+                    app,
+                    &mut shell,
+                    &mut input,
+                    reexec.as_mut(),
+                    host,
+                    &mut crate::reload::ReloadSupervisor::new(Default::default()),
+                )
+                .await
+                .unwrap();
+
+                assert!(!applied);
+                assert!(plan.is_none());
+                assert_eq!(app.system, system);
+                assert!(Arc::ptr_eq(&skills, &app.skills), "the App was rebuilt");
+                assert_eq!(std::fs::read(&path).unwrap(), session);
+                assert_eq!(app.executable_extensions.presentation_views(), before);
+                assert_eq!(active_subagent_workers(&app), 1);
+                assert!(process.is_running());
+                assert_eq!(process.health_snapshot().generation, generation);
+                assert!(!std::fs::read_to_string(&wire)
+                    .unwrap_or_default()
+                    .contains("shutdown"));
+                assert_eq!(
+                    app.executable_extensions
+                        .execute_command_without_confirmation("worker-control", Vec::new(),)
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some("control retained"),
+                );
+                app.executable_extensions.shutdown().await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resource_reload_refuses_host_worker_without_presentation_and_retains_control() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn tool_turn(name: &str, arguments: serde_json::Value) -> String {
+            [
+                serde_json::json!({"type":"message_start", "message":{
+                    "id":"reload-worker", "usage":{"input_tokens":1,"output_tokens":0}}}),
+                serde_json::json!({"type":"content_block_start", "index":0,
+                    "content_block":{"type":"tool_use", "id":name, "name":name}}),
+                serde_json::json!({"type":"content_block_delta", "index":0,
+                    "delta":{"type":"input_json_delta", "partial_json":arguments.to_string()}}),
+                serde_json::json!({"type":"content_block_stop", "index":0}),
+                serde_json::json!({"type":"message_delta", "delta":{"stop_reason":"tool_use"},
+                    "usage":{"output_tokens":1}}),
+                serde_json::json!({"type":"message_stop"}),
+            ]
+            .into_iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect()
+        }
+
+        // Exercise a real host-owned worker, with all inference restricted to
+        // deterministic loopback responses and no subagents extension at all.
+        let server = MockServer::start().await;
+        let root_turns = Arc::new(AtomicUsize::new(0));
+        let child_turns = Arc::new(AtomicUsize::new(0));
+        let roots = root_turns.clone();
+        let children = child_turns.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let response = if body["system"]
+                    .to_string()
+                    .contains("You are /root/survivor")
+                {
+                    let turn = children.fetch_add(1, Ordering::SeqCst) + 1;
+                    text_turn().replace("done", &format!("worker task {turn} complete"))
+                } else {
+                    match roots.fetch_add(1, Ordering::SeqCst) {
+                        0 => tool_turn(
+                            "spawn_agent",
+                            serde_json::json!({
+                            "task_name":"survivor", "message":"complete the first task"}),
+                        ),
+                        1 | 4 => tool_turn("wait_agent", serde_json::json!({"timeout_ms":3000})),
+                        2 | 5 => text_turn(),
+                        3 => tool_turn(
+                            "followup_task",
+                            serde_json::json!({
+                            "target":"/root/survivor", "message":"continue after refused reload"}),
+                        ),
+                        unexpected => panic!("unexpected root turn {unexpected}"),
+                    }
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(response)
+            })
+            .mount(&server)
+            .await;
+        let (directory, mut app) = fast_test_app(scripted_model(&server.uri()));
+        // Native delegation tools require explicit host authority; only the
+        // fixed local script above can request tools in this fixture.
+        app.config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        app = rebuild_app(app, None, None, None, None).unwrap();
+        app.agent
+            .enable_v2_delegation(octet_agent::DelegationConfig::new(
+                directory.path().join("delegation"),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.agent.complete("start survivor").await.unwrap().text,
+            "done"
+        );
+        for entry in app.agent.session().entries() {
+            if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
+                for part in &message.content {
+                    if let octet_ai::UserPart::ToolResult(result) = part {
+                        assert!(!result.is_error, "{result:?}");
+                    }
+                }
+            }
+        }
+        assert_eq!(child_turns.load(Ordering::SeqCst), 1);
+        // The first task has settled, but its live receiver must still block
+        // destructive reloads, even though no presentation roster exists.
+        assert_eq!(app.agent.active_delegated_worker_count(), 1);
+        assert!(app.executable_extensions.presentation_views().is_empty());
+        assert_eq!(app.executable_extensions.active_subagent_worker_count(), 0);
+        let team = app.agent.delegation_team_directory().unwrap().to_path_buf();
+        let child_path = team.join("0001-survivor.jsonl");
+        let child_before = std::fs::read(&child_path).unwrap();
+        let root_path = app.agent.session().path().to_owned();
+        let root_before = std::fs::read(&root_path).unwrap();
+        let owner = app.agent.session().resource_owner_key();
+        let skills = app.skills.clone();
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = EventStream::from_stream(futures_util::stream::pending());
+        let mut reexec = crate::reexec::ReexecController::capture().ok();
+        for host in [
+            HostPass::ResourcesOnly,
+            HostPass::Allowed {
+                redirect_confirmed: true,
+            },
+        ] {
+            let (next, plan, applied) = reload_resources_with_reexec(
+                app,
+                &mut shell,
+                &mut input,
+                reexec.as_mut(),
+                host,
+                &mut crate::reload::ReloadSupervisor::new(Default::default()),
+            )
+            .await
+            .unwrap();
+            app = next;
+            assert!(!applied);
+            assert!(plan.is_none());
+            assert!(Arc::ptr_eq(&skills, &app.skills));
+            assert_eq!(app.agent.session().resource_owner_key(), owner);
+            assert_eq!(app.agent.active_delegated_worker_count(), 1);
+            assert_eq!(std::fs::read(&root_path).unwrap(), root_before);
+            assert_eq!(std::fs::read(&child_path).unwrap(), child_before);
+        }
+        let notice = shell.debug_snapshot();
+        assert!(notice.contains("host worker tasks remain attached"));
+        assert!(notice.contains("then exit and resume the session to replace the owning host"));
+        assert!(notice.contains("The current application and workers are unchanged"));
+        // Control still targets the original child task/session, not a worker
+        // reconstructed from durable records after destroying the old owner.
+        assert_eq!(
+            app.agent.complete("continue survivor").await.unwrap().text,
+            "done"
+        );
+        assert_eq!(child_turns.load(Ordering::SeqCst), 2);
+        assert_eq!(root_turns.load(Ordering::SeqCst), 6);
+        assert_eq!(app.agent.active_delegated_worker_count(), 1);
+        assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
+        assert!(std::fs::read_to_string(child_path)
+            .unwrap()
+            .contains("worker task 2 complete"));
+        for entry in app.agent.session().entries() {
+            if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
+                for part in &message.content {
+                    if let octet_ai::UserPart::ToolResult(result) = part {
+                        assert!(!result.is_error, "{result:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn forced_watch_reload_refusal_does_not_restart_extensions_or_claim_success() {
+        use crate::extensions::reload_lifecycle_test_support::fixture;
+        use octet_agent::ExtensionPresentationState as State;
+        let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let (extensions, process, wire) = fixture(directory.path(), Some(State::Running)).await;
+        app.executable_extensions = extensions;
+        let skills = app.skills.clone();
+        let mut shell = InteractiveShell::test_shell();
+        // A refusal must not poll raw input or enter any lifecycle worker.
+        shell.cede_terminal_input();
+        let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
+        let mut pending_reexec = None;
+        let mut supervisor = crate::reload::ReloadSupervisor::new(Default::default());
+        let plan = supervisor.force();
+        let mut app = tokio::time::timeout(
+            Duration::from_secs(2),
+            apply_live_reload_plan(
+                app,
+                &mut shell,
+                &mut input,
+                &mut supervisor,
+                plan,
+                None,
+                &mut pending_reexec,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!supervisor.is_in_flight());
+        assert!(pending_reexec.is_none());
+        assert!(Arc::ptr_eq(&skills, &app.skills));
+        assert!(process.is_running());
+        assert!(!std::fs::read_to_string(wire)
+            .unwrap_or_default()
+            .contains("shutdown"));
+        let visible = shell.debug_snapshot();
+        assert!(visible.contains("reload refused"), "{visible}");
+        assert!(
+            !visible.contains("reloaded") && !visible.contains("reload applied"),
+            "{visible}"
+        );
+        app.executable_extensions.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
+        use crate::extensions::reload_lifecycle_test_support::{
+            acquire_terminal, assert_revoked_before_shutdown, fixture,
+        };
+
+        for operation in [
+            "resources",
+            "model",
+            "reasoning",
+            "new",
+            "resume",
+            "extensions",
+        ] {
+            let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+            let (extensions, process, wire) = fixture(directory.path(), None).await;
+            app.executable_extensions = extensions;
+            let mut shell = InteractiveShell::test_shell();
+            acquire_terminal(&mut app.executable_extensions, &mut shell, &process);
+            let parking = shell.terminal_input_parking();
+            let mut input = EventStream::from_stream(futures_util::stream::pending())
+                .with_cede_flag(parking.clone());
+            let mut app = match operation {
+                "resources" => {
+                    let (next, applied) =
+                        reload_resources(app, &mut shell, &mut input).await.unwrap();
+                    assert!(applied);
+                    next
+                }
+                "extensions" => {
+                    app.executable_extensions.revoke_terminal_grant_for_shell(
+                        &mut shell,
+                        "the extensions are being reloaded",
+                    );
+                    app.executable_extensions.reload().await;
+                    app
+                }
+                _ => {
+                    let reconfig = match operation {
+                        "model" => Reconfig::Model(app.model.spec.id.clone()),
+                        "reasoning" => Reconfig::Thinking(ReasoningConfig::Off),
+                        "new" => Reconfig::NewSession,
+                        "resume" => Reconfig::Resume(app.agent.session().path().to_owned()),
+                        _ => unreachable!(),
+                    };
+                    transition(app, &mut shell, &mut input, reconfig)
+                        .await
+                        .unwrap()
+                }
+            };
+            assert!(
+                !parking.load(std::sync::atomic::Ordering::SeqCst),
+                "{operation}"
+            );
+            assert!(
+                !app.executable_extensions.terminal_grant_is_active(),
+                "{operation}"
+            );
+            assert_revoked_before_shutdown(&wire);
+            // Test input uses the same restored ownership flag as the live stream.
+            let key = theme_picker_key(KeyCode::Char('x'));
+            let mut restored =
+                EventStream::from_stream(tokio_stream::iter([key])).with_cede_flag(parking);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), restored.next())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            app.executable_extensions.shutdown().await;
+        }
+    }
 
     fn test_theme() -> crate::tui::theme::OctetTheme {
         crate::tui::theme::test_theme()
     }
 
-    fn terminal_theme_test_config(workspace: PathBuf) -> Config {
+    pub(super) fn terminal_theme_test_config(workspace: PathBuf) -> Config {
         use crate::config::{CompactionPolicy, Mode, ResumeSelector, SandboxPolicy};
 
         Config {
@@ -5983,7 +10304,7 @@ mod tests {
             invocation_cwd: workspace,
             model: None,
             model_explicit: false,
-            reasoning: octet_ai::ReasoningConfig::Off,
+            reasoning: None,
             reasoning_explicit: false,
             reasoning_mode: octet_ai::ReasoningMode::Standard,
             reasoning_mode_explicit: false,
@@ -6114,7 +10435,8 @@ mod tests {
             // Exercise the configuration boundary too: none of these /theme
             // outcomes may reach its persistence branch or mutate the config.
             let result =
-                configure_terminal_theme(&mut shell, &mut input, &mut config, None, false).await;
+                configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None)
+                    .await;
             if exit == "error" {
                 assert_eq!(result.unwrap_err().to_string(), "preview input failed");
             } else {
@@ -6420,6 +10742,7 @@ mod tests {
             .append(EntryValue::Message(octet_ai::Message::Assistant(
                 octet_ai::AssistantMessage {
                     content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        async_execution: false,
                         id: call_id.clone(),
                         name: "write".into(),
                         arguments_json: serde_json::json!({
@@ -6473,7 +10796,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(title, "1 worker");
+        // The picker header is the collection's stable surface name only: the
+        // per-worker states are on the rows and the key affordances are in the
+        // panel action footer, so no counts or hints may be composed into it.
+        assert_eq!(title, "Subagents");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].label, "test-review");
         assert!(entries[0].description.contains("running"));
@@ -6570,6 +10896,61 @@ mod tests {
         assert_eq!(shell.pending(), "draft during wait");
         assert_ne!(shell.verbose_tools(), was_verbose);
         assert!(!shell.close_requested());
+    }
+
+    #[tokio::test]
+    async fn silent_startup_lifecycle_keeps_typed_input_and_names_the_phase_off_screen() {
+        use crossterm::event::KeyEvent;
+
+        // Typing before readiness is buffered into the draft, exactly as the
+        // labeled wait does; nothing renders a phase label.
+        let events = [
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Paste(" draft during startup".into())),
+        ];
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let mut done_tx = Some(done_tx);
+        let source = tokio_stream::iter(events).chain(futures_util::stream::poll_fn(move |_| {
+            if let Some(done_tx) = done_tx.take() {
+                let _ = done_tx.send(());
+            }
+            std::task::Poll::Ready(None)
+        }));
+        let mut input = EventStream::from_stream(source);
+        let mut shell = InteractiveShell::test_shell();
+        let result = run_blocking_startup_lifecycle(
+            &mut shell,
+            &mut input,
+            STARTUP_APP_OPERATION,
+            move || {
+                done_rx.recv()?;
+                Ok(7)
+            },
+        )
+        .await
+        .expect("the silent startup phase completes");
+        assert_eq!(result, 7);
+        assert_eq!(shell.pending(), "x draft during startup");
+
+        // A failed silent phase stays attributable without rendering: the
+        // operation name is carried by the diagnostic alone.
+        let mut input =
+            EventStream::from_stream(tokio_stream::iter(Vec::<std::io::Result<Event>>::new()));
+        let error = run_blocking_startup_lifecycle(
+            &mut shell,
+            &mut input,
+            STARTUP_MODELS_OPERATION,
+            || -> anyhow::Result<()> { anyhow::bail!("catalog unavailable") },
+        )
+        .await
+        .expect_err("the failed startup phase surfaces");
+        assert_eq!(
+            error.to_string(),
+            "model discovery failed: catalog unavailable"
+        );
     }
 
     #[tokio::test]
@@ -6698,32 +11079,7 @@ mod tests {
     }
 
     #[test]
-    fn session_tree_marks_the_durable_head_and_parent_links() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut session = Session::create(directory.path().join("tree.jsonl")).unwrap();
-        let root = session
-            .append(EntryValue::Config {
-                model: Some("model".to_string()),
-                reasoning: Some("off".to_string()),
-                reasoning_mode: None,
-            })
-            .unwrap();
-        let child = session
-            .append(EntryValue::Config {
-                model: None,
-                reasoning: Some("high".to_string()),
-                reasoning_mode: None,
-            })
-            .unwrap();
-        session.checkout(root.clone()).unwrap();
-
-        let tree = session_tree_text(&session);
-        assert!(tree.contains(&format!("└─* {}  config", root.0)), "{tree}");
-        assert!(tree.contains(&format!("└─  {}  config", child.0)), "{tree}");
-    }
-
-    #[test]
-    fn failed_checkout_can_restore_the_previous_durable_head() {
+    fn a_failed_checkout_can_restore_the_previous_durable_head() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rollback.jsonl");
         let mut session = Session::create(&path).unwrap();
@@ -6836,19 +11192,1763 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn idle_slash_enter_returns_the_highlighted_command_to_dispatch() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let mut shell = InteractiveShell::test_shell();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        for event in [
+            Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ] {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+        let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let (reload_watcher, mut reload, mut reload_tick) = test_reload();
+
+        let idle = wait_for_prompt(
+            &mut shell,
+            &mut input,
+            &mut scroll_tick,
+            &mut extension_tick,
+            &mut extensions,
+            None,
+            &mut reload_tick,
+            &reload_watcher,
+            &mut reload,
+        )
+        .await
+        .unwrap();
+        let Idle::Command(command) = idle else {
+            panic!("highlighted slash command was not handed to the idle dispatcher");
+        };
+        assert_eq!(command.trim(), "/resume");
+        assert!(shell.pending_is_empty());
+        assert!(!shell.slash_popup_open());
+    }
+
+    /// Drive the idle input owner with a fixed event list and return the shell.
+    async fn idle_shell_after(events: Vec<Event>) -> (InteractiveShell, Idle) {
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let mut shell = InteractiveShell::test_shell();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        for event in events {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+        let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let (reload_watcher, mut reload, mut reload_tick) = test_reload();
+        let idle = wait_for_prompt(
+            &mut shell,
+            &mut input,
+            &mut scroll_tick,
+            &mut extension_tick,
+            &mut extensions,
+            None,
+            &mut reload_tick,
+            &reload_watcher,
+            &mut reload,
+        )
+        .await
+        .unwrap();
+        (shell, idle)
+    }
+
+    /// A disabled live-reload supervisor for idle-loop tests: it samples
+    /// nothing and can never report a due pass, so the existing idle-loop
+    /// assertions keep their meaning unchanged.
+    fn test_reload() -> (
+        crate::reload::ReloadWatcher,
+        crate::reload::ReloadSupervisor,
+        tokio::time::Interval,
+    ) {
+        let reload =
+            crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
+        let watcher = crate::reload::ReloadWatcher::new(crate::reload::ReloadWatchSet::new());
+        let mut tick = tokio::time::interval(reload.settings().tick_interval());
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        (watcher, reload, tick)
+    }
+
+    fn ctrl_key(character: char) -> Event {
+        Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::CONTROL,
+        ))
+    }
+
+    #[tokio::test]
+    async fn idle_clipboard_gesture_inserts_native_text_without_submitting() {
+        clipboard_read::set_test_text(Some("pasted from the clipboard".to_owned()));
+        // Ctrl-D settles the idle wait without submitting or discarding the
+        // draft the paste created.
+        let (shell, idle) = idle_shell_after(vec![ctrl_key('v'), ctrl_key('d')]).await;
+        clipboard_read::clear_test_text();
+
+        assert!(matches!(idle, Idle::Quit));
+        assert_eq!(shell.pending(), "pasted from the clipboard");
+    }
+
+    #[tokio::test]
+    async fn idle_clipboard_gesture_without_text_keeps_the_existing_fallback() {
+        clipboard_read::set_test_text(None);
+        let (shell, idle) = idle_shell_after(vec![
+            ctrl_key('v'),
+            // The terminal-originated bracketed paste remains the fallback when
+            // no native transport produced text.
+            Event::Paste("terminal bracketed paste".to_owned()),
+            ctrl_key('d'),
+        ])
+        .await;
+        clipboard_read::clear_test_text();
+
+        assert!(matches!(idle, Idle::Quit));
+        assert_eq!(shell.pending(), "terminal bracketed paste");
+    }
+
+    #[tokio::test]
+    async fn active_clipboard_completion_preserves_native_and_terminal_paste() {
+        for native in [Some("native draft".to_owned()), None] {
+            let (_server, _workspace, mut agent) =
+                scripted_agent_with_delay(Duration::from_secs(2)).await;
+            let mut shell = InteractiveShell::test_shell();
+            clipboard_read::set_test_text(native.clone());
+            let gesture = Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            ));
+            let mut events = vec![Ok(gesture)];
+            if native.is_none() {
+                events.push(Ok(Event::Paste("terminal draft".into())));
+            }
+            events.push(Ok(ctrl_key('d')));
+            let mut input = tokio_stream::iter(events).chain(futures_util::stream::pending());
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let mut deadline = None;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(1),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut pending,
+                    &mut quit,
+                    None,
+                    None,
+                    &mut extensions,
+                    &mut false,
+                    test_run_inspection(),
+                    &mut deadline,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            clipboard_read::clear_test_text();
+            assert_eq!(ended, HostRunOutcome::Aborted);
+            assert!(quit);
+            assert_eq!(
+                shell.pending(),
+                native.as_deref().unwrap_or("terminal draft")
+            );
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn active_clipboard_slow_helper_cancels_on_ctrl_c_and_settlement() {
+        for cancel in [true, false] {
+            let (_server, _workspace, mut agent) = scripted_agent_with_delay(if cancel {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(10)
+            })
+            .await;
+            let mut shell = InteractiveShell::test_shell();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            // A deterministic wedged helper: input cannot send Ctrl-C until the
+            // read is actually polled, and the helper cannot finish on its own.
+            clipboard_read::set_test_helper(async move {
+                let _guard = dropped_tx;
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Some("must never reach the draft".into())
+            });
+            let gesture = Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            ));
+            let mut input = tokio_stream::iter([Ok(gesture)])
+                .chain(
+                    futures_util::stream::once(async move {
+                        started_rx.await.unwrap();
+                        if cancel {
+                            Ok(ctrl_key('c'))
+                        } else {
+                            futures_util::future::pending().await
+                        }
+                    })
+                    .boxed(),
+                )
+                .chain(futures_util::stream::pending());
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let mut deadline = None;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(1),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut pending,
+                    &mut quit,
+                    None,
+                    None,
+                    &mut extensions,
+                    &mut false,
+                    test_run_inspection(),
+                    &mut deadline,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                ended,
+                if cancel {
+                    HostRunOutcome::Aborted
+                } else {
+                    HostRunOutcome::Completed
+                }
+            );
+            assert!(shell.pending().is_empty());
+            assert!(!quit);
+            assert!(matches!(
+                dropped_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ));
+            shell.extension_set_editor("replacement composer".into());
+            assert!(
+                release_tx.send(()).is_err(),
+                "settled helper must be dropped"
+            );
+            tokio::task::yield_now().await;
+            assert_eq!(shell.pending(), "replacement composer");
+        }
+    }
+
+    #[tokio::test]
+    async fn active_clipboard_editor_ownership_fences_text_and_fallback() {
+        for text in [Some("stale native text".to_owned()), None] {
+            for owner in ["extension", "search", "panel"] {
+                let text = text.clone();
+                let mut shell = InteractiveShell::test_shell();
+                shell.begin_run("test");
+                shell.extension_set_editor("original draft".into());
+                let revision = shell.extension_editor_snapshot().revision;
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+                let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
+                clipboard_read::set_test_helper(async move {
+                    let _guard = dropped_tx;
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    text
+                });
+                let mut read = Box::pin(clipboard_read::read_text());
+                assert!(futures_util::poll!(&mut read).is_pending());
+                started_rx.await.unwrap();
+                // These changes bypass InputAction ownership-transfer checks.
+                // Search and panels leave the normal editor revision unchanged.
+                match owner {
+                    "extension" => {
+                        shell.extension_set_editor("replacement composer".into());
+                        assert_ne!(shell.extension_editor_snapshot().revision, revision);
+                    }
+                    "search" => {
+                        assert!(shell.intercept_transcript_input(&transcript_search_open_key()));
+                        assert!(shell.transcript_search_active());
+                    }
+                    "panel" => shell.open_panel(Panel::ReadOnlyDocument {
+                        title: "Inspection".into(),
+                        text: "Read-only document".into(),
+                        styled: false,
+                        scroll_from_bottom: 0,
+                    }),
+                    _ => unreachable!(),
+                }
+                if owner != "extension" {
+                    let editor = shell.extension_editor_snapshot();
+                    assert_eq!(editor.revision, revision);
+                    assert!(!editor.focused);
+                }
+                let before = shell.debug_snapshot();
+                release_tx.send(()).unwrap();
+                let gesture = Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Char('v'),
+                    if cfg!(windows) {
+                        KeyModifiers::ALT
+                    } else {
+                        KeyModifiers::CONTROL
+                    },
+                ));
+                let fallback =
+                    settle_active_clipboard_read(&mut shell, revision, read.await, Some(gesture));
+                assert!(
+                    fallback.is_none(),
+                    "stale gestures must not be replayed either"
+                );
+                assert_eq!(
+                    shell.pending(),
+                    if owner == "extension" {
+                        "replacement composer"
+                    } else {
+                        "original draft"
+                    }
+                );
+                assert_eq!(
+                    shell.debug_snapshot(),
+                    before,
+                    "{owner} must not receive stale paste"
+                );
+                assert!(matches!(
+                    dropped_rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn active_clipboard_draft_handoff_drops_pending_read_before_replacement() {
+        for boundary in ["queue", "steer", "recall", "command"] {
+            let (_server, _workspace, mut agent) =
+                scripted_agent_with_delay(Duration::from_secs(2)).await;
+            let mut shell = InteractiveShell::test_shell();
+            shell.extension_set_editor(if boundary == "command" {
+                "/answer answer now".into()
+            } else {
+                "original draft".into()
+            });
+            let boundary_key = match boundary {
+                "steer" => ctrl_key('s'),
+                "recall" => {
+                    let queued = shell.drain_composed();
+                    shell.queue_follow_up(queued);
+                    Event::Key(crossterm::event::KeyEvent::new(
+                        KeyCode::Up,
+                        KeyModifiers::ALT,
+                    ))
+                }
+                _ => Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                )),
+            };
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            clipboard_read::set_test_helper(async move {
+                let _guard = dropped_tx;
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Some("late clipboard payload".into())
+            });
+            let gesture = Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            ));
+            let mut input = tokio_stream::iter([Ok(gesture)])
+                .chain(
+                    futures_util::stream::once(async move {
+                        started_rx.await.unwrap();
+                        Ok(boundary_key)
+                    })
+                    .boxed(),
+                )
+                .chain(
+                    futures_util::stream::once(async move {
+                        // Checked before close or run settlement can clean up the
+                        // helper: ownership transfer itself must cancel the read.
+                        assert!(
+                            matches!(
+                                dropped_rx.try_recv(),
+                                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                            ),
+                            "{boundary}"
+                        );
+                        assert!(release_tx.send(()).is_err(), "{boundary}");
+                        Ok(Event::Paste(" replacement composer".into()))
+                    })
+                    .boxed(),
+                )
+                .chain(tokio_stream::iter([Ok(ctrl_key('d'))]))
+                .chain(futures_util::stream::pending());
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let mut deadline = None;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(1),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut pending,
+                    &mut quit,
+                    None,
+                    None,
+                    &mut extensions,
+                    &mut false,
+                    test_run_inspection(),
+                    &mut deadline,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(ended, HostRunOutcome::Aborted, "{boundary}");
+            assert!(quit);
+            assert!(
+                shell.pending().contains("replacement composer"),
+                "{boundary}"
+            );
+            assert!(
+                !shell.pending().contains("late clipboard payload"),
+                "{boundary}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn clipboard_gesture_is_consumed_on_the_active_run_path_too() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        let gesture = ctrl_key('v');
+
+        clipboard_read::set_test_text(Some("steer text".to_owned()));
+        assert!(paste_clipboard_text(&mut shell, &gesture).await);
+        assert_eq!(shell.pending(), "steer text");
+
+        // Only the declared gesture is consumed.
+        let typed = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ));
+        assert!(!paste_clipboard_text(&mut shell, &typed).await);
+
+        // A failed read reports that nothing was pasted and leaves the draft.
+        clipboard_read::set_test_text(None);
+        assert!(!paste_clipboard_text(&mut shell, &gesture).await);
+        assert_eq!(shell.pending(), "steer text");
+        clipboard_read::clear_test_text();
+    }
+
+    fn transcript_search_open_key() -> Event {
+        let bindings = keymap::keybindings::KeybindingsManager::current_platform();
+        let mut key = crossterm::event::KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        // Windows/WSL use Ctrl-F; other platforms use Ctrl-Shift-F.
+        if !bindings.matches(&key, "tui.altScreen.search") {
+            key.modifiers |= KeyModifiers::SHIFT;
+        }
+        assert!(bindings.matches(&key, "tui.altScreen.search"));
+        Event::Key(key)
+    }
+
+    #[tokio::test]
+    async fn transcript_search_idle_owner_intercepts_paste_before_composer_admission() {
+        clipboard_read::set_test_text(Some("native clipboard must stay out of the draft".into()));
+        let (mut shell, idle) = idle_shell_after(vec![
+            Event::Paste("preserved draft".into()),
+            transcript_search_open_key(),
+            Event::Paste("search query /tmp/image.png".into()),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            )),
+            ctrl_key('d'),
+        ])
+        .await;
+        clipboard_read::clear_test_text();
+        assert!(matches!(idle, Idle::Quit));
+        assert!(shell.transcript_search_active());
+        assert_eq!(shell.pending(), "preserved draft");
+        assert!(shell.drain_composed().attachments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transcript_search_active_owner_consumes_query_and_escape_without_interrupting_run() {
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_millis(100)).await;
+        let mut shell = InteractiveShell::test_shell();
+        shell.extension_set_editor("preserved active draft".into());
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        for event in [
+            transcript_search_open_key(),
+            Event::Paste("search query /tmp/image.png".into()),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                if cfg!(windows) {
+                    KeyModifiers::ALT
+                } else {
+                    KeyModifiers::CONTROL
+                },
+            )),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )),
+        ] {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        let _sender = sender;
+        let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let mut deadline = None;
+        clipboard_read::set_test_text(Some("native clipboard must stay out of the draft".into()));
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut false,
+                test_run_inspection(),
+                &mut deadline,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        clipboard_read::clear_test_text();
+        drop(run);
+        assert_eq!(ended, HostRunOutcome::Completed);
+        assert!(!quit);
+        assert!(pending.is_empty());
+        assert!(!shell.transcript_search_active());
+        assert_eq!(shell.pending(), "preserved active draft");
+        assert!(shell.drain_composed().attachments.is_empty());
+        assert!(!format!("{:?}", agent.session().context().unwrap()).contains("search query"));
+    }
+
+    #[tokio::test]
+    async fn configuration_commit_observer_skips_noops_and_unknown_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().canonicalize().unwrap().join("config.toml");
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let missing = configuration_snapshot(&path);
+        assert_eq!(missing, Some(None));
+        assert!(!observe_configuration_commit(&mut extensions, missing.clone(), Some(&path)).await);
+        std::fs::write(&path, b"theme = \"dark\"\n").unwrap();
+        assert!(observe_configuration_commit(&mut extensions, missing, Some(&path)).await);
+        let unchanged = configuration_snapshot(&path);
+        assert!(!observe_configuration_commit(&mut extensions, unchanged, Some(&path)).await);
+        assert!(!observe_configuration_commit(&mut extensions, None, Some(&path)).await);
+        assert!(!observe_configuration_commit(&mut extensions, Some(None), None).await);
+        std::fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        assert!(configuration_snapshot(&path).is_none());
+        #[cfg(unix)]
+        {
+            let link = path.with_file_name("link.toml");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(configuration_snapshot(&link).is_none());
+        }
+        let failed: anyhow::Result<()> = persist_configuration(Some(&mut extensions), || {
+            anyhow::bail!("failed before commit")
+        })
+        .await;
+        assert!(failed.is_err());
+    }
+
+    #[tokio::test]
+    async fn scoped_model_cycle_reaches_idle_owner_without_draining_draft() {
+        for draft in ["unfinished prompt", "/model second"] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_identity("test", "first", "off");
+            shell.set_model_cycle(vec!["first".into(), "second".into()]);
+            shell.extension_set_editor(draft.into());
+            let mut input = tokio_stream::iter([Ok(ctrl_key('p'))]);
+            let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+            let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let (reload_watcher, mut reload, mut reload_tick) = test_reload();
+            let idle = wait_for_prompt(
+                &mut shell,
+                &mut input,
+                &mut scroll_tick,
+                &mut extension_tick,
+                &mut extensions,
+                None,
+                &mut reload_tick,
+                &reload_watcher,
+                &mut reload,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(idle, Idle::Command(text) if text == "/model second"));
+            assert_eq!(shell.pending(), draft);
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_model_cycle_queues_on_active_owner_without_draining_draft() {
+        for draft in ["unfinished active prompt", "/model second"] {
+            let (_server, _workspace, mut agent) =
+                scripted_agent_with_delay(Duration::from_millis(100)).await;
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_identity("test", "scripted", "off");
+            shell.set_model_cycle(vec!["scripted".into(), "second".into(), "third".into()]);
+            shell.extension_set_editor(draft.into());
+            let (sender, receiver) = tokio::sync::mpsc::channel(4);
+            sender.send(Ok(ctrl_key('p'))).await.unwrap();
+            sender.send(Ok(ctrl_key('p'))).await.unwrap();
+            let _sender = sender;
+            let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+            let mut ticker = tokio::time::interval(Duration::from_millis(1));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut deadline = None;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(5),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut pending,
+                    &mut quit,
+                    None,
+                    None,
+                    &mut extensions,
+                    &mut false,
+                    test_run_inspection(),
+                    &mut deadline,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            drop(run);
+            assert_eq!(ended, HostRunOutcome::Completed);
+            assert!(!quit);
+            assert_eq!(shell.pending(), draft);
+            assert_eq!(
+                pending,
+                VecDeque::from([PendingIdleAction::ChangeModel(ModelId("third".into()))])
+            );
+            assert!(!format!("{:?}", agent.session().context().unwrap()).contains("/model"));
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_custom_instructions_queue_and_reach_only_the_summary_wire() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for queued in [false, true] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(text_turn()),
+                )
+                .mount(&server)
+                .await;
+            let (_directory, mut app) = fast_test_app(scripted_model(&server.uri()));
+            seed_compaction_session(&mut app.agent);
+            app.config.compaction.keep_recent_tokens = 1;
+            let mut shell = InteractiveShell::test_shell();
+            let requested = commands::parse("/compact preserve the API contract");
+            let instructions = if queued {
+                let (mut queue, quit) =
+                    run_active_command(&mut shell, requested, test_run_inspection()).await;
+                assert!(!quit);
+                assert!(server.received_requests().await.unwrap().is_empty());
+                let Some(PendingIdleAction::CompactWithInstructions(value)) = queue.pop_front()
+                else {
+                    panic!("missing queued instructions")
+                };
+                assert!(queue.is_empty());
+                value
+            } else {
+                let Command::CompactWithInstructions(value) = requested else {
+                    panic!("missing instructions")
+                };
+                value
+            };
+            let mut input = futures_util::stream::pending();
+            compact_interactively(
+                &mut app,
+                &mut shell,
+                &mut input,
+                !queued,
+                Some(&instructions),
+            )
+            .await;
+            assert_eq!(shell.debug_error(), None);
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert!(body["system"].to_string().contains(&instructions));
+            assert!(!body["messages"].to_string().contains(&instructions));
+            assert_eq!(
+                app.agent.session().usage_records().len(),
+                1,
+                "summary accounted exactly once"
+            );
+            assert!(
+                !format!("{:?}", app.agent.session().context().unwrap()).contains(&instructions)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_custom_instructions_fail_closed_for_native_and_oversize() {
+        let server = wiremock::MockServer::start().await;
+        let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri()));
+        app.config.compaction.mode = CompactionMode::NativeResponses;
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending();
+        compact_interactively(
+            &mut app,
+            &mut shell,
+            &mut input,
+            true,
+            Some("preserve evidence"),
+        )
+        .await;
+        assert!(shell
+            .debug_snapshot()
+            .contains("custom instructions require local compaction mode"));
+        let oversized = "x".repeat(16 * 1024 + 1);
+        compact_interactively(&mut app, &mut shell, &mut input, true, Some(&oversized)).await;
+        assert!(shell.debug_error().unwrap().contains("at most 16 KiB"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
     #[test]
-    fn active_changelog_is_read_only_and_does_not_queue_or_interrupt() {
+    fn app_shell_policy_is_explicit_and_checkpoints_survive_rebuilds() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        #[cfg(any(unix, windows))]
+        assert!(app.agent.partial_output_checkpoint_stats().is_some());
+        assert!(!app.config.tool_available("powershell"));
+        app.config.tools = crate::config::ToolPolicy::only(["powershell".into()]).unwrap();
+        assert_eq!(app.config.tool_available("powershell"), cfg!(windows));
+        app.config.sandbox.allow_process = false;
+        assert!(!app.config.tool_available("powershell"));
+        app.config.sandbox.allow_process = true;
+        app.config.sandbox.allow_shell = false;
+        assert!(!app.config.tool_available("powershell"));
+        // Restore fixture policy before checking the rebuild, not an unavailable
+        // Windows-only explicit request on this platform.
+        app.config.tools = Default::default();
+        app.config.sandbox.allow_shell = true;
+        app = rebuild_app(app, None, None, None, None).unwrap();
+        #[cfg(any(unix, windows))]
+        assert!(app.agent.partial_output_checkpoint_stats().is_some());
+    }
+
+    /// 2d.11 — `!command` results enter model context; `!!command` results are
+    /// durably recorded but explicitly excluded from it.
+    #[test]
+    fn shell_escape_records_are_explicitly_included_or_excluded_from_context() {
+        let (_directory, mut app) = fast_test_app(scripted_codex_model("http://127.0.0.1:1"));
+        let included = commands::ShellEscapeRecord::new("printf hi", "hi", 0, false);
+        record_shell_escape(&mut app, &included).unwrap();
+        let context = serde_json::to_string(&app.agent.session().context().unwrap()).unwrap();
+        assert!(context.contains("printf hi"), "{context}");
+        assert!(context.contains("exit 0"), "{context}");
+
+        let excluded = commands::ShellEscapeRecord::new("printf secret", "secret-value", 1, true);
+        record_shell_escape(&mut app, &excluded).unwrap();
+        let context = serde_json::to_string(&app.agent.session().context().unwrap()).unwrap();
+        assert!(!context.contains("secret-value"), "{context}");
+        assert!(!context.contains("printf secret"), "{context}");
+        // The excluded execution is still durably accounted for, with an
+        // explicit exclusion marker and its exact command and output.
+        let head = app.agent.session().head().unwrap();
+        let entry = app.agent.session().entry(&head).unwrap();
+        let display = entry
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.display_text.as_deref())
+            .expect("the excluded record retains its presentation text");
+        assert!(
+            display.contains("[excluded from model context]"),
+            "{display}"
+        );
+        assert!(display.contains("printf secret"), "{display}");
+        assert!(display.contains("secret-value"), "{display}");
+    }
+
+    /// A pending tool call must never be split from its result by a shell
+    /// record, even for the context-including `!` form.
+    #[test]
+    fn an_unresolved_tool_call_keeps_an_included_record_out_of_context() {
+        let (_directory, mut app) = fast_test_app(scripted_codex_model("http://127.0.0.1:1"));
+        let model = app.model.spec.id.clone();
+        app.agent
+            .session_mut()
+            .append(octet_agent::EntryValue::Message(
+                octet_ai::Message::Assistant(octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        async_execution: false,
+                        id: ToolCallId("call-1".into()),
+                        name: "bash".into(),
+                        arguments_json: "{\"command\":\"ls\"}".into(),
+                        argument_error: None,
+                    })],
+                    model,
+                    protocol: octet_ai::Protocol::AnthropicMessages,
+                }),
+            ))
+            .unwrap();
+        assert!(session_has_unresolved_tool_calls(app.agent.session()));
+        record_shell_escape(
+            &mut app,
+            &commands::ShellEscapeRecord::new("printf hi", "hi", 0, false),
+        )
+        .unwrap();
+        let context = serde_json::to_string(&app.agent.session().context().unwrap()).unwrap();
+        assert!(!context.contains("printf hi"), "{context}");
+    }
+
+    /// 2d.2 — the scope mutations materialize deterministically, toggle the
+    /// requested provider, reorder by request, and hand back the exact ordered
+    /// pattern list (with reasoning suffixes) the writer persists.
+    #[test]
+    fn scoped_models_mutations_materialize_toggle_reorder_and_persist() {
+        let mut model = scripted_codex_model("http://127.0.0.1:1");
+        std::sync::Arc::make_mut(&mut model.spec).id = ModelId("first".into());
+        std::sync::Arc::make_mut(&mut model.spec).api_name = "first".into();
+        let (_directory, mut app) = fast_test_app(model);
+        let mut second = (*app.model.spec).clone();
+        second.id = ModelId("second".into());
+        second.api_name = "second".into();
+        app.catalog.register_model(second).unwrap();
+
+        // `all` builds the explicit ordered scope from the complete catalog in
+        // a stable order and persists a re-selectable glob.
+        let persistence =
+            apply_scope_mutation(&mut app, &commands::ScopedModelsCommand::All).unwrap();
+        assert_eq!(persistence, Some(Some("*".to_owned())));
+        let all = app.model_cycle();
+        assert!(all.contains(&"first".to_owned()), "{all:?}");
+        assert!(all.contains(&"second".to_owned()), "{all:?}");
+        assert!(
+            all.windows(2).all(|pair| pair[0] < pair[1]),
+            "`all` must materialize a stable order: {all:?}"
+        );
+        // `clear` removes the restriction and the persisted key; unrestricted
+        // cycling follows the same stable catalog order.
+        assert_eq!(
+            apply_scope_mutation(&mut app, &commands::ScopedModelsCommand::Clear).unwrap(),
+            Some(None)
+        );
+        assert_eq!(app.model_cycle(), all);
+
+        // A narrow ordered scope exercises provider toggle and reorder exactly.
+        app.set_model_scope_patterns(Some("first:low,second"))
+            .unwrap();
+        assert_eq!(app.model_cycle(), vec!["first", "second"]);
+        // A provider toggle disables every model of that provider, then
+        // restores them in stable order.
+        assert_eq!(
+            apply_scope_mutation(
+                &mut app,
+                &commands::ScopedModelsCommand::Toggle("test/*".into())
+            )
+            .unwrap(),
+            Some(None)
+        );
+        assert!(app.model_cycle().is_empty());
+        assert_eq!(
+            apply_scope_mutation(
+                &mut app,
+                &commands::ScopedModelsCommand::Toggle("test/*".into())
+            )
+            .unwrap(),
+            Some(Some("first,second".to_owned()))
+        );
+        // Reorder follows the requested move; the untouched entry keeps the
+        // launch suffix in the persisted list.
+        app.set_model_scope_patterns(Some("first:low,second"))
+            .unwrap();
+        assert_eq!(
+            apply_scope_mutation(
+                &mut app,
+                &commands::ScopedModelsCommand::Move {
+                    model: "second".into(),
+                    direction: commands::ScopeMove::Top,
+                }
+            )
+            .unwrap(),
+            Some(Some("second,first:low".to_owned()))
+        );
+        assert_eq!(app.model_cycle(), vec!["second", "first"]);
+        // Unmatched targets and boundary moves are explicit errors.
+        assert!(apply_scope_mutation(
+            &mut app,
+            &commands::ScopedModelsCommand::Enable("nope/*".into())
+        )
+        .is_err());
+        assert!(apply_scope_mutation(
+            &mut app,
+            &commands::ScopedModelsCommand::Move {
+                model: "second".into(),
+                direction: commands::ScopeMove::Up,
+            }
+        )
+        .is_err());
+    }
+
+    /// 2d.1 / 2d.2 — the active-run path renders both reports immediately and
+    /// queues the mutations it cannot own mid-run.
+    #[tokio::test]
+    async fn settings_and_scoped_models_render_mid_run_and_queue_mutations() {
+        let directory = tempfile::tempdir().unwrap();
+        let inspection = test_run_inspection_with_session(directory.path());
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::Settings(commands::SettingsCommand::Show),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty());
+        assert!(!quit);
+        assert!(shell.has_overlay());
+        shell.close_overlay();
+
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::Settings(commands::SettingsCommand::Images(Some(true))),
+            &inspection,
+        )
+        .await;
+        assert!(!quit);
+        assert!(matches!(
+            queue.back(),
+            Some(PendingIdleAction::Settings(
+                commands::SettingsCommand::Images(Some(true))
+            ))
+        ));
+
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::ScopedModels(commands::ScopedModelsCommand::Show),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty());
+        assert!(!quit);
+        assert!(shell.has_overlay());
+        shell.close_overlay();
+
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::ScopedModels(commands::ScopedModelsCommand::All),
+            &inspection,
+        )
+        .await;
+        assert!(!quit);
+        assert!(matches!(
+            queue.back(),
+            Some(PendingIdleAction::ScopedModels(
+                commands::ScopedModelsCommand::All
+            ))
+        ));
+    }
+
+    /// 2d.11 active path: an approved escape runs immediately under the captured
+    /// sandbox, and its explicit context decision is queued for the idle owner
+    /// that owns the session writer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn active_shell_escape_runs_and_queues_its_context_decision() {
+        let directory = tempfile::tempdir().unwrap();
+        let inspection = test_run_inspection_with_session(directory.path());
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::Bash(commands::BashEscape {
+                command: "printf octet-active-shell".into(),
+                excluded: false,
+            }),
+            &inspection,
+        )
+        .await;
+        assert!(!quit);
+        let Some(PendingIdleAction::RecordShellEscape(record)) = queue.back() else {
+            panic!("the active escape must queue its durable record: {queue:?}");
+        };
+        assert!(!record.excluded());
+        assert_eq!(record.exit_code(), 0);
+        assert!(record.output().contains("octet-active-shell"), "{record:?}");
+
+        // `!!` fixes the opposite decision without touching execution.
+        let (queue, quit) = run_active_command(
+            &mut shell,
+            Command::Bash(commands::BashEscape {
+                command: "printf octet-excluded".into(),
+                excluded: true,
+            }),
+            &inspection,
+        )
+        .await;
+        assert!(!quit);
+        let Some(PendingIdleAction::RecordShellEscape(record)) = queue.back() else {
+            panic!("the excluded escape must still be accounted for: {queue:?}");
+        };
+        assert!(record.excluded());
+    }
+
+    /// The shared local-shell execution path keeps bounded capture, an exit
+    /// status, and no refusal for an ordinary command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_shell_escape_runs_through_the_bounded_capture_path() {
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let outcome = run_local_shell(
+            &mut shell,
+            &mut input,
+            Path::new("/"),
+            &SandboxPolicy::default(),
+            "printf octet-shell-test",
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        assert!(
+            outcome.output.contains("octet-shell-test"),
+            "{}",
+            outcome.output
+        );
+        assert!(outcome.refusal.is_none());
+        assert!(!outcome.stopped);
+        assert!(!outcome.shutting_down);
+    }
+
+    #[test]
+    fn scoped_model_order_suffixes_and_rebuilds_preserve_launch_defaults() {
+        let mut model = scripted_codex_model("http://127.0.0.1:1");
+        Arc::make_mut(&mut model.spec).capabilities.reasoning =
+            Some(octet_ai::ReasoningCapability {
+                options: None,
+                control: octet_ai::ReasoningControl::Effort,
+                exposes_text: true,
+                preserves_state: false,
+                effort_budgets: None,
+                openai_chat_mode: Default::default(),
+                min_effort: octet_ai::ReasoningEffort::Minimal,
+                max_effort: octet_ai::ReasoningEffort::High,
+            });
+        let (_directory, mut app) = fast_test_app(model);
+        let mut second = (*app.model.spec).clone();
+        second.id = ModelId("second".into());
+        app.catalog.register_model(second).unwrap();
+        app.set_model_scope_patterns(Some("second:low,scripted:high"))
+            .unwrap();
+        assert_eq!(app.model_cycle(), vec!["second", "scripted"]);
+        assert_eq!(app.model.spec.id.0, "scripted");
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Off,
+            "scope handoff must not override launch defaults"
+        );
+        app = crate::app::apply_reconfig(app, Reconfig::Model(ModelId("second".into()))).unwrap();
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low)
+        );
+        app = crate::app::apply_reconfig(app, Reconfig::Model(ModelId("scripted".into()))).unwrap();
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+        );
+        app = rebuild_app(app, None, None, None, None).unwrap();
+        assert_eq!(app.model_cycle(), vec!["second", "scripted"]);
+        // Removing an available route narrows, rather than widens, the scope.
+        app.catalog
+            .remove_model_if_endpoint(&ModelId("second".into()), &app.model.endpoint.id);
+        assert_eq!(app.model_cycle(), vec!["scripted"]);
+        app.set_model_scope_patterns(None).unwrap();
+        let cycle = app.model_cycle();
+        assert!(cycle.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test]
+    async fn session_and_hotkeys_reports_remain_read_only_during_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let inspection = test_run_inspection_with_session(directory.path());
+        let before = std::fs::read(&inspection.session_path).unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        for (command, expected) in [
+            ("/session info", "Active-branch messages: 1"),
+            ("/hotkeys", "app.model.cycleForward"),
+        ] {
+            let (queue, quit) =
+                run_active_command(&mut shell, commands::parse(command), &inspection).await;
+            assert!(queue.is_empty());
+            assert!(!quit);
+            assert!(shell.has_overlay());
+            let text = if command == "/hotkeys" {
+                shell.hotkeys_text()
+            } else {
+                commands::session_text(&inspection.read_only_session().unwrap())
+            };
+            assert!(text.contains(expected), "{text}");
+            shell.close_overlay();
+        }
+        let (queue, quit) = run_active_command(&mut shell, Command::Copy, &inspection).await;
+        assert!(queue.is_empty());
+        assert!(!quit);
+        assert!(shell
+            .debug_error()
+            .unwrap()
+            .contains("no assistant message"));
+        assert_eq!(std::fs::read(&inspection.session_path).unwrap(), before);
+    }
+
+    /// A narrowed launch opens `/model` without waiting for fleet discovery.
+    /// Cancelling before completion cannot apply a late catalog to the app.
+    #[tokio::test]
+    async fn model_picker_cancel_keeps_the_narrowed_launch_catalog() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let active = app.model.spec.id.clone();
+        let narrowed = app.catalog.models().count();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        assert!(ActiveRunInspection::capture(&app).is_narrowed());
+        let mut shell = InteractiveShell::test_shell();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+        let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+        assert!(open_model_picker(&mut app, &mut shell, &mut input)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!shell.has_panel());
+        assert!(!app.readiness.is_fleet());
+        assert_eq!(app.catalog.models().count(), narrowed);
+        assert_eq!(app.model.spec.id, active);
+    }
+
+    #[test]
+    fn picker_catalog_completion_keeps_the_active_route() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let active = app.model.spec.id.clone();
+        let narrowed = app.catalog.models().count();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let (catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
+            app.config.offline,
+            &crate::app::bootstrap::CatalogReadiness::Fleet,
+        )
+        .unwrap();
+        assert!(app.apply_picker_catalog(&active, catalog, notes).unwrap());
+        assert!(app.readiness.is_fleet());
+        assert!(app.catalog.models().count() >= narrowed);
+        assert!(app.catalog.resolve(&active).is_ok());
+        assert!(!ActiveRunInspection::capture(&app).is_narrowed());
+    }
+
+    #[test]
+    fn picker_catalog_rejects_an_obsolete_selection() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let before = app.catalog.models().count();
+        let (catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
+            app.config.offline,
+            &crate::app::bootstrap::CatalogReadiness::Fleet,
+        )
+        .unwrap();
+        assert!(!app
+            .apply_picker_catalog(&ModelId("obsolete".into()), catalog, notes)
+            .unwrap());
+        assert!(!app.readiness.is_fleet());
+        assert_eq!(app.catalog.models().count(), before);
+    }
+
+    #[test]
+    fn picker_catalog_rejects_a_withdrawn_active_route() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let active = app.model.spec.id.clone();
+        let endpoint = app.model.endpoint.id.clone();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let (mut catalog, notes) = crate::app::bootstrap::model_catalog_for_readiness(
+            app.config.offline,
+            &crate::app::bootstrap::CatalogReadiness::Fleet,
+        )
+        .unwrap();
+        assert!(catalog.remove_model_if_endpoint(&active, &endpoint));
+        assert!(app.apply_picker_catalog(&active, catalog, notes).is_err());
+        assert!(!app.readiness.is_fleet());
+        assert!(app.catalog.resolve(&active).is_ok());
+    }
+
+    #[test]
+    fn model_scope_does_not_override_an_existing_explicit_session() {
+        for existing in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut config = terminal_theme_test_config(directory.path().to_owned());
+            config.session_dir = directory.path().join("sessions");
+            let store =
+                crate::session_store::SessionStore::new(&config.session_dir, &config.workspace);
+            store.write_workspace_marker().unwrap();
+            if existing {
+                let mut session = Session::create(store.dir().join("chosen.jsonl")).unwrap();
+                session
+                    .append(EntryValue::Config {
+                        model: Some("saved-model".into()),
+                        reasoning: None,
+                        reasoning_mode: None,
+                    })
+                    .unwrap();
+            }
+            let options = crate::cli::parity::ParityOptions {
+                session_id: Some("chosen".into()),
+                models: Some("gpt-5.4-mini-responses:high".into()),
+                ..Default::default()
+            };
+            options
+                .resolve_models_in_catalog(&mut config, &octet_ai::ModelCatalog::builtin().unwrap())
+                .unwrap();
+            assert_eq!(config.model.is_none(), existing);
+            assert_eq!(config.model_explicit, !existing);
+            options.select_session(&mut config).unwrap();
+            assert!(
+                matches!(config.resume, crate::config::ResumeSelector::Resume(Some(ref id)) if id == "chosen")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_model_selection_enriches_and_unknown_models_preserve_the_app() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["codex"]);
+        let target = ModelId("gpt-5.4-mini-responses".into());
+        let target_model = app.catalog.resolve(&target).unwrap();
+        app.catalog
+            .remove_model_if_endpoint(&target, &target_model.endpoint.id);
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending();
+        let mut app = transition(app, &mut shell, &mut input, Reconfig::Model(target.clone()))
+            .await
+            .unwrap();
+        assert!(app.readiness.is_fleet());
+        assert_eq!(app.model.spec.id, target);
+        let path = app.agent.session().path().to_owned();
+        app = transition(
+            app,
+            &mut shell,
+            &mut input,
+            Reconfig::Model(ModelId("nonexistent/route".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.model.spec.id, target);
+        assert_eq!(app.agent.session().path(), path);
+        assert!(shell.debug_error().unwrap().contains("Unknown model"));
+    }
+
+    fn fast_test_app(model: Model) -> (tempfile::TempDir, App) {
+        let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+        app.catalog
+            .register_endpoint((*model.endpoint).clone())
+            .unwrap();
+        app.catalog.register_model((*model.spec).clone()).unwrap();
+        let app = rebuild_app(app, Some(model), None, None, None).unwrap();
+        (directory, app)
+    }
+
+    fn fast_response() -> String {
+        let output = serde_json::json!([{
+            "id": "fast-message", "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "done", "annotations": []}]
+        }]);
+        [
+            serde_json::json!({"type":"response.created", "response":{"id":"fast-response"}}),
+            serde_json::json!({"type":"response.output_item.added", "output_index":0,
+                "item":{"id":"fast-message", "type":"message"}}),
+            serde_json::json!({"type":"response.output_text.delta", "output_index":0, "delta":"done"}),
+            serde_json::json!({"type":"response.output_text.done", "output_index":0}),
+            serde_json::json!({"type":"response.completed", "response":{"output":output,
+                "usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}),
+        ].into_iter().map(|event| format!("data: {event}\n\n")).collect()
+    }
+
+    async fn fast_idle(mut app: App, shell: &mut InteractiveShell, command: &str) -> App {
+        let command = commands::parse(command);
+        let Command::Fast(requested) = command else {
+            panic!("expected fast control")
+        };
+        apply_fast_command(&mut app, shell, requested);
+        schedule_idle_responses_prewarm(&app, &command);
+        app
+    }
+
+    /// Exercise the slash handler, actual HTTP/SSE requests, status, route
+    /// transitions, and rebuilds together; a setter-only assertion is not enough.
+    #[tokio::test]
+    async fn fast_commands_reach_live_requests_and_fail_closed_on_other_routes() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(fast_response()),
+            )
+            .mount(&server)
+            .await;
+        let mut model = scripted_codex_model(&server.uri());
+        Arc::make_mut(&mut model.spec).limits.context_window = 272_000;
+        let (_directory, mut app) = fast_test_app(model.clone());
+        let mut shell = InteractiveShell::test_shell();
+        let before = std::fs::read(app.agent.session().path()).unwrap();
+        app = fast_idle(app, &mut shell, "/fast").await;
+        assert!(shell.debug_snapshot().contains("Fast mode: off"));
+        assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
+        assert!(!app.agent.session().has_uncertain_usage());
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        app = fast_idle(app, &mut shell, "/fast on").await;
+        assert!(shell.debug_snapshot().contains("Fast mode: on"));
+        assert!(commands::status_text(&app, None).contains("Fast mode: on"));
+        assert!(commands::status_text(&app, None).contains("known subtotal"));
+        assert!(app.agent.session().has_uncertain_usage());
+        assert_eq!(app.model.spec.limits.context_window, 272_000);
+        app.agent.complete("priority turn").await.unwrap();
+        // Rebuilds for reasoning/reload must retain the real request control.
+        app = rebuild_app(app, None, Some(ReasoningConfig::Off), None, None).unwrap();
+        app.agent.complete("priority after rebuild").await.unwrap();
+        let before = std::fs::read(app.agent.session().path()).unwrap();
+        app = fast_idle(app, &mut shell, "/fast status").await;
+        assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
+        app = fast_idle(app, &mut shell, "/fast off").await;
+        app.agent.complete("ordinary turn").await.unwrap();
+        assert!(commands::status_text(&app, None).contains("Fast mode: off"));
+        assert!(
+            commands::cost_text(app.agent.session(), &app.model).contains("Known subtotal only")
+        );
+        // Clearing a request control does not erase uncertain spend.
+        assert!(app.agent.session().has_uncertain_usage());
+        assert_eq!(
+            app.agent
+                .session()
+                .usage_uncertainty_records()
+                .iter()
+                .filter(|record| record.operation == "responses-priority-tier")
+                .count(),
+            1
+        );
+
+        app = fast_idle(app, &mut shell, "/fast on").await;
+        let mut ordinary = model.clone();
+        Arc::make_mut(&mut ordinary.endpoint)
+            .runtime
+            .responses_profile = octet_ai::ResponsesRuntimeProfile::Default;
+        Arc::make_mut(&mut ordinary.endpoint).id = octet_ai::EndpointId("ordinary".into());
+        Arc::make_mut(&mut ordinary.spec).endpoint = ordinary.endpoint.id.clone();
+        Arc::make_mut(&mut ordinary.spec).id = ModelId("ordinary".into());
+        app.catalog
+            .register_endpoint((*ordinary.endpoint).clone())
+            .unwrap();
+        app.catalog
+            .register_model((*ordinary.spec).clone())
+            .unwrap();
+        app = rebuild_app(app, Some(ordinary), None, None, None).unwrap();
+        assert_eq!(
+            app.agent.service_tier(),
+            None,
+            "unsupported model switches clear the tier"
+        );
+        let before = std::fs::read(app.agent.session().path()).unwrap();
+        for command in ["/fast on", "/fast off", "/fast", "/fast status"] {
+            app = fast_idle(app, &mut shell, command).await;
+            assert!(shell
+                .debug_error()
+                .unwrap()
+                .contains("only available on Codex Responses routes"));
+        }
+        assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
+        app.agent
+            .complete("unsupported route stays ordinary")
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            4,
+            "status and rejected controls never invoke inference"
+        );
+        let bodies: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect();
+        assert_eq!(bodies[0]["service_tier"], "priority");
+        assert_eq!(bodies[1]["service_tier"], "priority");
+        assert!(bodies[2].get("service_tier").is_none());
+        assert!(bodies[3].get("service_tier").is_none());
+        for body in bodies {
+            let body = body.to_string();
+            assert!(
+                !body.contains("/fast"),
+                "local controls must not enter model context"
+            );
+        }
+        app.agent.set_max_session_cost_microdollars(Some(u64::MAX));
+        assert!(app
+            .agent
+            .complete("hard ceilings must fail closed")
+            .await
+            .is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn fast_compaction_preserves_selection_and_restart_keeps_uncertainty_fenced() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(fast_response()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/v1/responses/compact"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "output":[{"type":"compaction", "id":"compact-fast", "encrypted_content":"checkpoint"}],
+                "usage":{"input_tokens":5,"output_tokens":2}
+            }))).mount(&server).await;
+        let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri()));
+        let mut shell = InteractiveShell::test_shell();
+        app = fast_idle(app, &mut shell, "/fast on").await;
+        app.agent.complete("before compaction").await.unwrap();
+        app.config.compaction.mode = CompactionMode::NativeResponses;
+        assert_eq!(
+            attempt_compaction(&mut app).await.unwrap(),
+            CompactionOutcome::NativeCompacted
+        );
+        assert_eq!(
+            app.agent.service_tier(),
+            Some(octet_ai::ServiceTier::Priority)
+        );
+        assert!(app.agent.session().has_uncertain_usage());
+        app.agent.complete("after compaction").await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            if request.url.path().ends_with("/compact") {
+                // Compact has no declared tier field: never invent one or
+                // promise that this auxiliary operation used priority.
+                assert!(body.get("service_tier").is_none());
+            } else {
+                assert_eq!(body["service_tier"], "priority");
+            }
+        }
+
+        // Reconstruct through startup, not a compatible idle rebuild: fast is
+        // process-scoped, whereas past uncertain spend is durable and sticky.
+        let session_path = app.agent.session().path().to_owned();
+        let model = app.model.spec.id.clone();
+        let catalog = app.catalog.clone();
+        let mut config = app.config.clone();
+        config.max_cost_microdollars = Some(u64::MAX);
+        drop(app);
+        let mut boot = crate::app::bootstrap::bootstrap(config).unwrap();
+        boot.catalog = catalog;
+        let mut app = build_app(
+            boot,
+            crate::app::bootstrap::LaunchSelection {
+                model,
+                session: SessionSelection::OpenExisting(session_path),
+                reasoning: ReasoningConfig::Off,
+                reasoning_mode: ReasoningMode::Standard,
+            },
+            "system".into(),
+        )
+        .unwrap();
+        assert_eq!(app.agent.service_tier(), None);
+        assert!(app.agent.session().has_uncertain_usage());
+        // Match the budget error itself, not a guessed word in its display:
+        // UsageUncertain reports "unsettled provider usage".
+        assert_eq!(
+            attempt_compaction(&mut app).await.unwrap(),
+            CompactionOutcome::Skipped {
+                reason: octet_agent::AgentError::UsageUncertain.to_string(),
+            },
+            "compaction must refuse the unsettled ledger before network I/O",
+        );
+        assert!(app.agent.complete("ceiling after restart").await.is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn unpriced_usage_marks_local_and_native_compaction_reports_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("compaction-report.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let first_kept = session
+            .append(EntryValue::Message(octet_ai::Message::User(
+                octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text("retained turn".into())],
+                },
+            )))
+            .unwrap();
+        session
+            .record_compaction_usage(
+                octet_ai::EndpointId("fixture".into()),
+                ModelId("fixture".into()),
+                octet_ai::Usage::default(),
+                None,
+            )
+            .unwrap();
+        // A later fully priced compaction does not repair the old missing cost.
+        session
+            .record_compaction_usage(
+                octet_ai::EndpointId("fixture".into()),
+                ModelId("fixture".into()),
+                octet_ai::Usage::default(),
+                Some(octet_ai::Cost::default()),
+            )
+            .unwrap();
+        session.compact("summary", first_kept).unwrap();
+        drop(session);
+        let session = Session::open_read_only(path).unwrap();
+        assert!(session.has_unpriced_usage());
+        assert!(!session.has_uncertain_usage());
+        for outcome in [
+            CompactionOutcome::Compacted { elided: 1 },
+            CompactionOutcome::NativeCompacted,
+        ] {
+            let mut shell = InteractiveShell::test_shell();
+            report_compaction(&mut shell, &outcome, &session);
+            assert!(shell
+                .debug_snapshot()
+                .contains("session usage or pricing uncertain"));
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_local_summary_cost_ceiling_fails_closed_before_network_io() {
+        let server = wiremock::MockServer::start().await;
+        let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri()));
+        seed_compaction_session(&mut app.agent);
+        app.config.compaction.keep_recent_tokens = 1;
+        app.set_fast_mode(true).unwrap();
+        app.agent.set_max_session_cost_microdollars(Some(u64::MAX));
+        // Match the budget error itself, not a guessed word in its display:
+        // UsageUncertain reports "unsettled provider usage".
+        assert_eq!(
+            attempt_compaction(&mut app).await.unwrap(),
+            CompactionOutcome::Skipped {
+                reason: octet_agent::AgentError::UsageUncertain.to_string(),
+            },
+            "compaction must refuse the unsettled ledger before network I/O",
+        );
+        assert_eq!(
+            app.agent.service_tier(),
+            Some(octet_ai::ServiceTier::Priority)
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fast_unsupported_active_controls_are_not_queued() {
+        let mut inspection = test_run_inspection().clone();
+        // A profile alone must not lend a Chat route Responses capabilities.
+        Arc::make_mut(&mut inspection.model.spec).protocol = octet_ai::Protocol::OpenAiChat;
+        Arc::make_mut(&mut inspection.model.endpoint)
+            .runtime
+            .responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        for command in ["/fast", "/fast status", "/fast on", "/fast off"] {
+            let (queue, quit) =
+                run_active_command(&mut shell, commands::parse(command), &inspection).await;
+            assert!(queue.is_empty());
+            assert!(!quit);
+            assert!(shell
+                .debug_error()
+                .unwrap()
+                .contains("only available on Codex Responses routes"));
+        }
+    }
+
+    #[test]
+    fn fast_rebuild_scope_and_queue_barriers_are_explicit() {
+        let model = scripted_codex_model("http://127.0.0.1:1");
+        let (directory, mut app) = fast_test_app(model);
+        app.set_fast_mode(true).unwrap();
+        let path = app.agent.session().path().to_path_buf();
+        app = rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(SessionSelection::OpenExisting(path.clone())),
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent.service_tier(),
+            Some(octet_ai::ServiceTier::Priority)
+        );
+        let mut next = app.model.clone();
+        Arc::make_mut(&mut next.spec).id = ModelId("another-scripted".into());
+        app.catalog.register_model((*next.spec).clone()).unwrap();
+        app = rebuild_app(app, Some(next), None, None, None).unwrap();
+        assert_eq!(
+            app.agent.service_tier(),
+            Some(octet_ai::ServiceTier::Priority)
+        );
+        app = rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(SessionSelection::CreateNew(
+                directory.path().join("new-fast.jsonl"),
+            )),
+        )
+        .unwrap();
+        assert_eq!(app.agent.service_tier(), None);
+        assert!(!app.agent.session().has_uncertain_usage());
+        app = rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(SessionSelection::OpenExisting(path)),
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent.service_tier(),
+            None,
+            "resuming a different session does not silently opt into billing"
+        );
+        assert!(
+            app.agent.session().has_uncertain_usage(),
+            "old accounting remains sticky"
+        );
+
+        let mut queue = VecDeque::new();
+        for action in [
+            PendingIdleAction::Fast(true),
+            PendingIdleAction::Fast(false),
+            PendingIdleAction::NewSession,
+            PendingIdleAction::Fast(true),
+        ] {
+            push_pending_action(&mut queue, action);
+        }
+        assert_eq!(
+            queue.into_iter().collect::<Vec<_>>(),
+            vec![
+                PendingIdleAction::Fast(false),
+                PendingIdleAction::NewSession,
+                PendingIdleAction::Fast(true)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn active_changelog_is_read_only_and_does_not_queue_or_interrupt() {
         let mut shell = InteractiveShell::test_shell();
         shell.begin_run("test");
         let before = shell.debug_snapshot();
-        let mut queue = VecDeque::new();
-        let mut quit_requested = false;
-        handle_active_command(
-            &mut shell,
-            Command::Changelog,
-            &mut queue,
-            &mut quit_requested,
-        );
+        let (queue, quit_requested) =
+            run_active_command(&mut shell, Command::Changelog, test_run_inspection()).await;
         assert!(shell.has_overlay());
         assert!(queue.is_empty());
         assert!(!quit_requested);
@@ -6871,20 +12971,59 @@ mod tests {
         );
     }
 
-    #[test]
-    fn active_cost_and_cache_reports_wait_for_the_idle_boundary() {
-        for command in [Command::Cost, Command::Cache] {
+    #[tokio::test]
+    async fn active_inspection_reports_render_without_waiting_for_the_idle_boundary() {
+        let session_dir = tempfile::tempdir().expect("inspection fixture");
+        let inspection = test_run_inspection_with_session(session_dir.path());
+        for command in [
+            Command::Help(None),
+            Command::Context,
+            Command::Cost,
+            Command::Cache,
+        ] {
             let mut shell = InteractiveShell::test_shell();
-            let mut queue = VecDeque::new();
-            let mut quit_requested = false;
-            handle_active_command(&mut shell, command, &mut queue, &mut quit_requested);
+            shell.begin_run("test");
+            let (queue, quit_requested) =
+                run_active_command(&mut shell, command.clone(), &inspection).await;
 
-            assert!(shell
-                .debug_snapshot()
-                .contains("cost and cache reports are available at the next idle boundary"));
-            assert!(queue.is_empty());
+            assert!(shell.has_overlay(), "{command:?} did not render a report");
+            assert!(queue.is_empty(), "{command:?} must not wait for idle");
             assert!(!quit_requested);
+            assert_eq!(shell.debug_error(), None, "{command:?} reported an error");
         }
+    }
+
+    #[tokio::test]
+    async fn active_session_commands_report_through_the_read_only_session() {
+        let session_dir = tempfile::tempdir().expect("inspection fixture");
+        let inspection = test_run_inspection_with_session(session_dir.path());
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+
+        // `/name` without an argument reports the name stored beside the live
+        // session file; `/export` writes a portable copy of the same records.
+        let (queue, quit_requested) =
+            run_active_command(&mut shell, Command::Name(None), &inspection).await;
+        assert!(queue.is_empty());
+        assert!(!quit_requested);
+        assert!(
+            shell.debug_snapshot().contains("session name:"),
+            "transcript: {}",
+            shell.debug_snapshot()
+        );
+
+        let output = session_dir.path().join("exported.json");
+        let (queue, quit_requested) = run_active_command(
+            &mut shell,
+            Command::Export(Some(output.display().to_string())),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty());
+        assert!(!quit_requested);
+        assert!(shell.has_overlay(), "export did not render a report");
+        assert!(output.exists(), "export did not write {}", output.display());
+        assert_eq!(shell.debug_error(), None);
     }
 
     #[tokio::test]
@@ -6904,7 +13043,7 @@ mod tests {
 
         for level in [ThinkingLevel::High, ThinkingLevel::Low, ThinkingLevel::High] {
             let reasoning =
-                thinking_to_reasoning_with_subagents(level, &app.model, app.subagents_available())
+                requested_thinking_to_reasoning(level, &app.model, app.subagents_available())
                     .unwrap();
             let label = reasoning_label(&reasoning);
             let previous = shell.selected_identity();
@@ -6936,32 +13075,37 @@ mod tests {
         update_status(&mut shell, &app);
         let identity = shell.selected_identity();
         let mut input = futures_util::stream::pending();
-        let error = transition(
+        let app = transition(
             app,
             &mut shell,
             &mut input,
             Reconfig::Model(ModelId("missing-release-test-model".into())),
         )
         .await
-        .err()
-        .expect("an unresolved model must remain an error");
+        .expect("an unresolved model must preserve the usable app");
+        let error = shell
+            .debug_error()
+            .expect("a diagnostic must remain visible");
         assert!(
             error.to_string().contains("missing-release-test-model"),
             "{error}"
         );
         assert_eq!(shell.selected_identity(), identity);
+        assert_eq!(
+            app.config.model.as_ref().map(|id| id.0.as_str()),
+            Some(identity.0.as_str())
+        );
         assert!(shell.debug_snapshot().is_empty());
     }
 
-    #[test]
-    fn queued_setting_changes_retain_acknowledgements_and_invalid_values_retain_errors() {
+    #[tokio::test]
+    async fn queued_setting_changes_retain_acknowledgements_and_invalid_values_retain_errors() {
         for command in [
             Command::Model(Some("gpt-4o-mini".into())),
             Command::Thinking(Some("high".into())),
         ] {
             let mut shell = InteractiveShell::test_shell();
-            let mut queue = VecDeque::new();
-            handle_active_command(&mut shell, command, &mut queue, &mut false);
+            let (queue, _) = run_active_command(&mut shell, command, test_run_inspection()).await;
             assert_eq!(queue.len(), 1);
             assert!(shell
                 .debug_snapshot()
@@ -6969,13 +13113,12 @@ mod tests {
             assert_eq!(shell.debug_error(), None);
         }
         let mut shell = InteractiveShell::test_shell();
-        let mut queue = VecDeque::new();
-        handle_active_command(
+        let (queue, _) = run_active_command(
             &mut shell,
             Command::Thinking(Some("invalid-effort".into())),
-            &mut queue,
-            &mut false,
-        );
+            test_run_inspection(),
+        )
+        .await;
         assert!(queue.is_empty());
         assert!(shell.debug_error().is_some());
         assert!(shell.debug_snapshot().is_empty());
@@ -7020,12 +13163,14 @@ mod tests {
 
         octet_ai::Model {
             spec: Arc::new(ModelSpec {
+                preset: Default::default(),
                 id: ModelId("scripted".into()),
                 endpoint: EndpointId("test".into()),
                 api_name: "scripted".into(),
                 display_name: None,
                 protocol: Protocol::AnthropicMessages,
                 capabilities: Capabilities {
+                    responses_features: Default::default(),
                     input_modalities: ModalitySet::none().with(Modality::Image),
                     output_modalities: ModalitySet::none(),
                     tools: true,
@@ -7053,6 +13198,207 @@ mod tests {
                 timeout: Duration::from_secs(5),
             }),
         }
+    }
+
+    /// The same scripted fixture on the Codex Responses route, the only profile
+    /// that declares the `service_tier` capability.
+    fn scripted_codex_model(uri: &str) -> octet_ai::Model {
+        let mut model = scripted_model(uri);
+        std::sync::Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
+        std::sync::Arc::make_mut(&mut model.endpoint)
+            .runtime
+            .responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
+        model
+    }
+
+    /// The effort menu must offer the Codex context-window surface on a Codex
+    /// route and nowhere else, and it must report the live effective window.
+    #[test]
+    fn codex_context_surface_follows_the_declared_route_and_the_effective_window() {
+        let plain = scripted_model("http://127.0.0.1:1");
+        assert!(
+            codex_context_surface(&plain).is_none(),
+            "a non-Codex route must not offer a Codex context-window surface"
+        );
+
+        let mut codex = scripted_codex_model("http://127.0.0.1:1");
+        std::sync::Arc::make_mut(&mut codex.spec).id = octet_ai::ModelId("gpt-6-astra".into());
+        std::sync::Arc::make_mut(&mut codex.spec)
+            .limits
+            .context_window = 272_000;
+        let surface = codex_context_surface(&codex).expect("Codex route");
+        assert_eq!(surface.effective_window(), 272_000);
+        assert!(!surface.has_uncertain_usage());
+        let row = pickers::codex_context_menu_row(&surface);
+        assert!(row.contains("272000"), "{row}");
+        let lines = surface.summary_lines().join("\n");
+        assert!(lines.contains("272K"), "{lines}");
+        assert!(
+            lines.contains("effective 272K"),
+            "the surface must label the effective window it reports: {lines}"
+        );
+
+        // An above-standard-tier route renders its accounting as uncertain and
+        // never as an exact figure.
+        std::sync::Arc::make_mut(&mut codex.spec).id = octet_ai::ModelId("gpt-5.6-luna".into());
+        std::sync::Arc::make_mut(&mut codex.spec)
+            .limits
+            .context_window = 372_000;
+        let uncertain = codex_context_surface(&codex).expect("Codex route");
+        assert!(uncertain.has_uncertain_usage());
+        assert!(pickers::codex_context_menu_row(&uncertain).contains("UNCERTAIN"));
+        let lines = uncertain.summary_lines().join("\n");
+        assert!(lines.contains("UNCERTAIN"), "{lines}");
+        assert!(lines.contains("double-priced"), "{lines}");
+        assert!(
+            !lines.contains(octet_ai_operation_name()),
+            "the internal operation id must never be rendered: {lines}"
+        );
+        assert!(!lines.contains("::"), "{lines}");
+        assert!(
+            !lines.contains('$'),
+            "no exact-looking figure may be rendered above the standard tier: {lines}"
+        );
+    }
+
+    fn octet_ai_operation_name() -> &'static str {
+        crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
+    }
+
+    /// Inspection facts for tests that drive `drive_active_run` directly. The
+    /// paths do not exist: only the mechanics tests use this, and none of them
+    /// issue an inspection command.
+    ///
+    /// The durable goal is deliberately unaddressable here, so this fixture is
+    /// also the fail-closed case: a mechanics test that issued `/goal` would
+    /// have to observe the typed error rather than a silent no-op.
+    fn test_run_inspection() -> &'static ActiveRunInspection {
+        static INSPECTION: std::sync::OnceLock<ActiveRunInspection> = std::sync::OnceLock::new();
+        INSPECTION.get_or_init(|| {
+            let missing = PathBuf::from("/nonexistent/octet-run-inspection");
+            ActiveRunInspection {
+                workspace: missing.clone(),
+                invocation_cwd: missing.clone(),
+                session_path: missing.join("session.jsonl"),
+                resource_owner: "fixture-owner".into(),
+                model: scripted_model("http://127.0.0.1:1"),
+                catalog: octet_ai::ModelCatalog::default(),
+                sessions: crate::session_store::SessionStore::new(&missing, &missing),
+                sandbox: SandboxPolicy::default(),
+                effect_policy: octet_agent::EffectPolicy::UnsafeHost,
+                subagents_available: false,
+                service_tier: None,
+                goal: Err(ActiveGoalError::UnaddressableSession),
+                settings: commands::SettingsSurface {
+                    default_model: None,
+                    reasoning: "off".into(),
+                    theme: None,
+                    transport: "http",
+                    endpoint: "test-endpoint".into(),
+                    show_images: false,
+                },
+                model_scope: None,
+                catalog_is_narrowed: false,
+            }
+        })
+    }
+
+    /// Inspection whose session path is a real, empty session file, so
+    /// session-scoped reports render instead of failing to open.
+    fn test_run_inspection_with_session(dir: &Path) -> ActiveRunInspection {
+        let session_path = dir.join("session.jsonl");
+        let mut created = octet_agent::Session::create(&session_path).expect("inspection session");
+        // `/export` refuses a session with no resumable conversation, so the
+        // fixture carries the smallest resumable turn.
+        created
+            .append(EntryValue::Message(octet_ai::Message::User(
+                octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text("inspection fixture".into())],
+                },
+            )))
+            .expect("inspection fixture prompt");
+        let resource_owner = created.resource_owner_key();
+        drop(created);
+        ActiveRunInspection {
+            workspace: dir.to_path_buf(),
+            invocation_cwd: dir.to_path_buf(),
+            session_path,
+            resource_owner,
+            model: scripted_model("http://127.0.0.1:1"),
+            catalog: octet_ai::ModelCatalog::default(),
+            sessions: crate::session_store::SessionStore::for_directory(dir, dir),
+            sandbox: SandboxPolicy::default(),
+            effect_policy: octet_agent::EffectPolicy::UnsafeHost,
+            subagents_available: false,
+            service_tier: None,
+            goal: Err(ActiveGoalError::UnaddressableSession),
+            settings: commands::SettingsSurface {
+                default_model: None,
+                reasoning: "off".into(),
+                theme: None,
+                transport: "http",
+                endpoint: "test-endpoint".into(),
+                show_images: false,
+            },
+            model_scope: None,
+            catalog_is_narrowed: false,
+        }
+    }
+
+    /// A run inspection whose durable goal is addressable, exactly as `App`
+    /// addresses it: the same store, the same driver state, the same session
+    /// key. The caller keeps its own store handle to read the mutation back.
+    fn test_run_inspection_with_goal(
+        dir: &Path,
+        store: Arc<octet_agent::DurableGoalStore>,
+        driver: octet_agent::GoalDriver,
+        session_id: &str,
+    ) -> ActiveRunInspection {
+        let mut inspection = test_run_inspection_with_session(dir);
+        inspection.goal = GoalAccess::from_parts(store, driver, session_id.to_owned());
+        inspection
+    }
+
+    /// Drive one active-run slash command with the minimum test scaffolding.
+    async fn run_active_command(
+        shell: &mut InteractiveShell,
+        command: Command,
+        inspection: &ActiveRunInspection,
+    ) -> (VecDeque<PendingIdleAction>, bool) {
+        let (queue, quit_requested, _) =
+            run_active_command_observing_deadline(shell, command, inspection).await;
+        (queue, quit_requested)
+    }
+
+    /// [`run_active_command`] plus the goal deadline the command armed or
+    /// cleared, so a mid-run `/goal` is provably applied to the same driver
+    /// state an idle `/goal` reaches.
+    async fn run_active_command_observing_deadline(
+        shell: &mut InteractiveShell,
+        command: Command,
+        inspection: &ActiveRunInspection,
+    ) -> (VecDeque<PendingIdleAction>, bool, Option<Instant>) {
+        let mut queue = VecDeque::new();
+        let mut quit_requested = false;
+        let mut goal_deadline = None;
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let context = octet_agent::ContextSnapshot::default();
+        handle_active_command(
+            shell,
+            command,
+            inspection,
+            &mut extensions,
+            &context,
+            &mut goal_deadline,
+            |_, _| Ok(None),
+            &mut input,
+            &mut queue,
+            &mut quit_requested,
+        )
+        .await
+        .expect("active command");
+        (queue, quit_requested, goal_deadline)
     }
 
     async fn scripted_agent_with_delay(
@@ -7119,6 +13465,7 @@ mod tests {
     struct HeldApi {
         uri: String,
         requests: Arc<std::sync::atomic::AtomicUsize>,
+        bodies: Arc<Mutex<Vec<serde_json::Value>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -7136,6 +13483,17 @@ mod tests {
             tokio::sync::oneshot::Receiver<()>,
             tokio::sync::oneshot::Sender<bool>,
         ) {
+            Self::start_with_repeat(body, false).await
+        }
+
+        async fn start_with_repeat(
+            body: String,
+            repeat: bool,
+        ) -> (
+            Self,
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<bool>,
+        ) {
             use std::sync::atomic::Ordering;
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -7143,11 +13501,17 @@ mod tests {
             let uri = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let counted = requests.clone();
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            let captured = bodies.clone();
             let (started_tx, started_rx) = tokio::sync::oneshot::channel();
             let (release_tx, release_rx) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(async move {
                 let mut started_tx = Some(started_tx);
                 let mut release_rx = Some(release_rx);
+                // The held first body must not block admission of a replacement
+                // request after its client times out. This set owns that one
+                // body task, so aborting the fixture also retires the socket.
+                let mut held_responses = tokio::task::JoinSet::new();
                 loop {
                     let (mut socket, _) = listener.accept().await.unwrap();
                     let mut request = Vec::new();
@@ -7177,8 +13541,14 @@ mod tests {
                         assert!(n > 0);
                         request.extend_from_slice(&bytes[..n]);
                     }
+                    if repeat {
+                        captured.lock().unwrap().push(
+                            serde_json::from_slice(&request[header_end..header_end + length])
+                                .unwrap(),
+                        );
+                    }
                     let attempt = counted.fetch_add(1, Ordering::SeqCst);
-                    if attempt != 0 {
+                    if attempt != 0 && !repeat {
                         // Bound an existing recovery policy without ever replaying
                         // the fixture's successful result on an unexpected POST.
                         socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
@@ -7186,21 +13556,30 @@ mod tests {
                     }
                     let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                     socket.write_all(headers.as_bytes()).await.unwrap();
-                    let _ = started_tx.take().unwrap().send(());
-                    if let Ok(complete) = release_rx.take().unwrap().await {
-                        let response = if complete {
-                            body.as_bytes()
-                        } else {
-                            &body.as_bytes()[..1]
-                        };
-                        let _ = socket.write_all(response).await;
+                    if attempt != 0 {
+                        socket.write_all(body.as_bytes()).await.unwrap();
+                        continue;
                     }
+                    let _ = started_tx.take().unwrap().send(());
+                    let release = release_rx.take().unwrap();
+                    let body = body.clone();
+                    held_responses.spawn(async move {
+                        if let Ok(complete) = release.await {
+                            let response = if complete {
+                                body.as_bytes()
+                            } else {
+                                &body.as_bytes()[..1]
+                            };
+                            let _ = socket.write_all(response).await;
+                        }
+                    });
                 }
             });
             (
                 Self {
                     uri,
                     requests,
+                    bodies,
                     task,
                 },
                 started_rx,
@@ -7234,6 +13613,348 @@ mod tests {
                 self.remaining = self.remaining.saturating_sub(1);
             }
             event
+        }
+    }
+
+    /// A real registered first-party command goes through the active dispatcher,
+    /// not the idle extension dispatcher, while the root provider is held.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn active_subagent_stops_are_owned_and_survive_root_completion() {
+        for (target, owner_mode) in [
+            ("all", "owned"),
+            ("worker-one", "owned"),
+            ("all", "slow"),
+            ("all", "cancel"),
+            ("all", "after-completion-abort"),
+            ("all", "missing"),
+            ("all", "wrong"),
+            ("all", "impostor"),
+            ("all extra", "owned"),
+            ("inspect worker-one", "owned"),
+        ] {
+            let (server, started, release) = HeldApi::start(text_turn()).await;
+            let (_agent_dir, mut agent) =
+                scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
+            let mut inspection = test_run_inspection().clone();
+            inspection.session_path = agent.session().path().to_path_buf();
+            let owner = agent.session().resource_owner_key();
+            inspection.resource_owner = owner.clone();
+            let fixture_dir = tempfile::tempdir().unwrap();
+            let (mut extensions, process, log) =
+                crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
+                    fixture_dir.path(),
+                    match owner_mode {
+                        "missing" => None,
+                        "wrong" => Some("another-session"),
+                        _ => Some(&owner),
+                    },
+                    if owner_mode == "impostor" {
+                        "other-extension"
+                    } else {
+                        "octet-subagents"
+                    },
+                    match owner_mode {
+                        "slow" => 6,
+                        "after-completion-abort" => 2,
+                        _ => 1,
+                    },
+                )
+                .await;
+            let command = if target.starts_with("inspect ") {
+                format!("/subagents {target}")
+            } else {
+                format!("/subagents stop {target}")
+            };
+            let events = vec![
+                Event::Paste(command),
+                Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                )),
+            ];
+            let after_completion_abort = owner_mode == "after-completion-abort";
+            let owned = matches!(target, "all" | "worker-one")
+                && matches!(
+                    owner_mode,
+                    "owned" | "slow" | "cancel" | "after-completion-abort"
+                );
+            let (sender, receiver) = tokio::sync::mpsc::channel(128);
+            let (handled_tx, handled) = tokio::sync::oneshot::channel();
+            let mut input = ProbedInput {
+                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+                remaining: events.len()
+                    + 1
+                    + usize::from(owner_mode == "cancel")
+                    + 2 * usize::from(after_completion_abort),
+                handled: Some(handled_tx),
+            };
+            let mut shell = InteractiveShell::test_shell();
+            let run_id = shell.begin_run("test");
+            let run_active = shell.test_run_active_probe();
+            let mut run = agent.prompt("held turn").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut made_tool_call = false;
+            let mut deadline = None;
+            let driver = drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut deadline,
+            );
+            let producer = async {
+                let mut release = Some(release);
+                started.await.unwrap();
+                for event in events {
+                    sender.send(Ok(event)).await.unwrap();
+                }
+                if owned {
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        while !log.exists() {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("stop request reached the registered extension");
+                }
+                sender
+                    .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                        KeyCode::Char('x'),
+                        KeyModifiers::NONE,
+                    ))))
+                    .await
+                    .unwrap();
+                if owner_mode == "cancel" {
+                    sender
+                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                            KeyCode::Esc,
+                            KeyModifiers::NONE,
+                        ))))
+                        .await
+                        .unwrap();
+                }
+                if after_completion_abort {
+                    sender
+                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                            KeyCode::Enter,
+                            KeyModifiers::NONE,
+                        ))))
+                        .await
+                        .unwrap();
+                    release.take().unwrap().send(true).unwrap();
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        while run_active() {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("root settled before stop response and Ctrl+C");
+                    sender
+                        .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                            KeyCode::Char('c'),
+                            KeyModifiers::CONTROL,
+                        ))))
+                        .await
+                        .unwrap();
+                }
+                tokio::time::timeout(Duration::from_millis(500), handled)
+                    .await
+                    .expect("input/cancel stays responsive while stop response is pending")
+                    .expect("input handler completed while waiting for the stop response");
+                if let Some(release) = release {
+                    let _ = release.send(true);
+                }
+            };
+            let (ended, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+                tokio::join!(driver, producer)
+            })
+            .await
+            .expect("active run and stop should settle");
+            drop(run);
+            assert_eq!(
+                ended.unwrap(),
+                if owner_mode == "cancel" {
+                    HostRunOutcome::Aborted
+                } else {
+                    HostRunOutcome::Completed
+                }
+            );
+            if after_completion_abort {
+                assert!(shell.pending().is_empty());
+                assert_eq!(shell.queued_follow_up_len(), 1);
+                assert!(
+                    shell.take_ready_follow_up().is_none(),
+                    "Ctrl+C must revoke dispatch after root settlement"
+                );
+            } else {
+                assert_eq!(shell.pending(), "x");
+            }
+            assert!(!quit);
+            assert!(pending.is_empty());
+            let wire = std::fs::read_to_string(&log).unwrap_or_default();
+            if owned {
+                let commands: Vec<serde_json::Value> = wire
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(
+                    commands.len(),
+                    1,
+                    "{owner_mode} {target}: {wire}; error={:?}; frame={:?}; transcript={}",
+                    shell.debug_error(),
+                    shell.dump_rendered_frame().await,
+                    shell.debug_snapshot()
+                );
+                assert_eq!(
+                    commands[0]["params"]["arguments"],
+                    serde_json::json!(["stop", target])
+                );
+                assert_eq!(
+                    commands[0]["params"]["context"]["resource_owner"]["session_id"],
+                    owner
+                );
+                let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+                assert!(frame.contains("not settled"), "{target}: {frame}");
+                assert!(!shell.debug_snapshot().contains("unknown command"));
+            } else {
+                assert!(
+                    wire.is_empty(),
+                    "unexpected command for {owner_mode} {target}: {wire}"
+                );
+            }
+            assert!(process.shutdown().await);
+        }
+    }
+
+    /// Input is acknowledged while the first response is held by a gate. The
+    /// running request keeps its tier; only a subsequent run sees the change.
+    #[tokio::test]
+    async fn fast_active_commands_wait_for_ownership_before_changing_wire_requests() {
+        use crossterm::event::KeyEvent;
+        for initially_on in [false, true] {
+            let (server, started, release) =
+                HeldApi::start_with_repeat(fast_response(), true).await;
+            let (_directory, mut app) = fast_test_app(scripted_codex_model(&server.uri));
+            let mut shell = InteractiveShell::test_shell();
+            if initially_on {
+                app = fast_idle(app, &mut shell, "/fast on").await;
+            }
+            update_status(&mut shell, &app);
+            let inspection = ActiveRunInspection::capture(&app);
+            let command = if initially_on {
+                "/fast off"
+            } else {
+                "/fast on"
+            };
+            let events: Vec<_> = [command, "/fast"]
+                .into_iter()
+                .flat_map(|text| {
+                    text.chars()
+                        .map(|character| {
+                            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
+                        })
+                        .chain(std::iter::once(KeyEvent::new(
+                            KeyCode::Enter,
+                            KeyModifiers::NONE,
+                        )))
+                })
+                .collect();
+            let (sender, receiver) = tokio::sync::mpsc::channel(32);
+            let (handled_tx, handled) = tokio::sync::oneshot::channel();
+            let mut input = ProbedInput {
+                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+                remaining: events.len(),
+                handled: Some(handled_tx),
+            };
+            let mut pending = VecDeque::new();
+            let mut ticker = tokio::time::interval(Duration::from_millis(1));
+            let mut quit = false;
+            let mut made_tool_call = false;
+            let mut deadline = None;
+            let run_id = shell.begin_run("test");
+            let mut run = app.agent.prompt("held first turn").await.unwrap();
+            let control = run.control();
+            shell.set_awaiting_provider(run_id);
+            let driver = drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut app.executable_extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut deadline,
+            );
+            let producer = async {
+                started.await.unwrap();
+                for event in events {
+                    sender.send(Ok(Event::Key(event))).await.unwrap();
+                }
+                handled
+                    .await
+                    .expect("slash commands handled before releasing response");
+                assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+                release.send(true).unwrap();
+            };
+            let (ended, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(driver, producer)
+            })
+            .await
+            .unwrap();
+            drop(run);
+            assert_eq!(ended.unwrap(), HostRunOutcome::Completed);
+            assert!(!quit);
+            assert_eq!(
+                app.agent.service_tier(),
+                initially_on.then_some(octet_ai::ServiceTier::Priority)
+            );
+            assert_eq!(
+                pending.len(),
+                1,
+                "read-only status must not enqueue another toggle"
+            );
+            assert!(shell
+                .debug_snapshot()
+                .contains("queued for the next idle boundary"));
+            let PendingIdleAction::Fast(enabled) = pending.pop_front().unwrap() else {
+                panic!("wrong action")
+            };
+            assert_eq!(enabled, !initially_on);
+            // The production idle queue uses this same handler after Run drops.
+            apply_fast_command(&mut app, &mut shell, Some(enabled));
+            assert!(pending.is_empty());
+            app.agent
+                .complete("second turn after idle change")
+                .await
+                .unwrap();
+            let bodies = server.bodies.lock().unwrap();
+            assert_eq!(bodies.len(), 2);
+            for (body, priority) in bodies.iter().zip([initially_on, !initially_on]) {
+                if priority {
+                    assert_eq!(body["service_tier"], "priority");
+                } else {
+                    assert!(body.get("service_tier").is_none());
+                }
+                assert!(!body.to_string().contains("/fast"));
+            }
         }
     }
 
@@ -7348,6 +14069,9 @@ mod tests {
                 // compaction summary. Only this fixture changes stream limits.
                 app.client = octet_ai::AiClient::new()
                     .with_stream_timeouts(Duration::from_millis(750), Duration::from_secs(2));
+                // Summaries now use Agent's retry/accounting client. Rebuild it
+                // with the fixture's bounded stream timeouts before starting.
+                app = rebuild_app(app, None, None, None, None).unwrap();
                 app.agent
                     .set_compaction_model(Some(scripted_model(&server.uri)));
                 seed_compaction_session(&mut app.agent);
@@ -7367,12 +14091,19 @@ mod tests {
                 let stimulus =
                     held_api_input(started, sender, handled_rx, release, outcome, columns);
                 tokio::pin!(stimulus);
+                // 750ms initial body timeout + the shared summary policy's
+                // 500ms first backoff + an immediate terminal HTTP 400 on the
+                // replacement fits the original bound. Do not hide a blocked
+                // fixture accept loop by extending this deadline.
                 tokio::time::timeout(Duration::from_secs(3), async {
                     tokio::select! {
-                        result = compact_interactively(&mut app, &mut shell, &mut input, force) => result,
+                        result = compact_interactively(&mut app, &mut shell, &mut input, force, None) => result,
                         _ = &mut stimulus => unreachable!(),
                     }
-                }).await.expect("held compaction must settle");
+                }).await.unwrap_or_else(|error| panic!(
+                    "held compaction must settle: outcome={outcome:?}, columns={columns}, requests={}, error={error}",
+                    server.requests.load(std::sync::atomic::Ordering::SeqCst),
+                ));
                 let snapshot = shell.debug_snapshot();
                 match outcome {
                     HeldOutcome::Success => {
@@ -7388,8 +14119,19 @@ mod tests {
                 assert_eq!(app.config.compaction.keep_recent_tokens, original_keep);
                 assert_eq!(shell.pending(), "draft while API waits");
                 assert_ne!(shell.verbose_tools(), was_verbose);
-                assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+                let expected_requests = match outcome {
+                    HeldOutcome::Timeout | HeldOutcome::TransportFailure => 2,
+                    HeldOutcome::Success | HeldOutcome::Cancel => 1,
+                };
+                assert_eq!(
+                    server.requests.load(std::sync::atomic::Ordering::SeqCst),
+                    expected_requests,
+                    "the first summary replacement must hit the fixture's terminal rejection: {outcome:?}",
+                );
                 if !matches!(outcome, HeldOutcome::Success) {
+                    assert!(app.agent.session().has_uncertain_usage(), "{outcome:?}");
+                    assert!(app.agent.session().usage_records().is_empty(),
+                        "failed/abandoned summaries have unknown usage, not invented successful receipts");
                     assert_eq!(
                         app.agent.session().entries().len(),
                         before,
@@ -7434,9 +14176,11 @@ mod tests {
             let stimulus = held_api_input(started, sender, handled_rx, release, outcome, 80);
             tokio::pin!(stimulus);
             let ended = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut goal_deadline = None;
                 tokio::select! {
                     result = drive_active_run(&mut run, &control, &mut shell, &mut input,
-                        &mut ticker, &mut pending, &mut quit, None, None, &mut extensions, &mut made_tool_call) => result.unwrap(),
+                        &mut ticker, &mut pending, &mut quit, None, None, &mut extensions, &mut made_tool_call,
+                        test_run_inspection(), &mut goal_deadline) => result.unwrap(),
                     _ = &mut stimulus => unreachable!(),
                 }
             }).await.expect("held model request must settle");
@@ -7460,6 +14204,654 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn caller_driven_run_settles_and_cancels_while_real_renderer_is_gated() {
+        // The independent watchdog releases a stalled renderer even when an
+        // inline render/held mutex prevents this Tokio thread polling a timeout.
+        struct ReleaseGate(Box<dyn Fn()>);
+        impl Drop for ReleaseGate {
+            fn drop(&mut self) {
+                (self.0)();
+            }
+        }
+        for cancel in [false, true] {
+            let (server, started, release_response) = HeldApi::start(text_turn()).await;
+            let (_workspace, mut agent) =
+                scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
+            let (mut shell, gate) = InteractiveShell::test_blocked_renderer();
+            // Declared after shell: always releases before shell's join on unwind.
+            let release_gate = gate.clone();
+            let _release = ReleaseGate(Box::new(move || release_gate.release()));
+            let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+            let watchdog_gate = gate.clone();
+            let watchdog = std::thread::spawn(move || {
+                let settled_while_blocked = settled_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+                watchdog_gate.release();
+                settled_while_blocked
+            });
+            assert!(gate.wait_until_entered(Duration::from_secs(3)));
+            let (sender, receiver) = tokio::sync::mpsc::channel(8);
+            let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+            let mut ticker = tokio::time::interval(Duration::from_millis(1));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("settle independently of paint").await.unwrap();
+            let control = run.control();
+            shell.set_awaiting_provider(run_id);
+            let stimulus = async move {
+                started.await.unwrap();
+                if cancel {
+                    // Empty-draft Ctrl+C must reach the real Agent control and
+                    // the caller must continue polling through RunFinished.
+                    sender.send(Ok(ctrl_key('c'))).await.unwrap();
+                    let _keep_response_held = release_response;
+                    std::future::pending::<()>().await;
+                } else {
+                    release_response.send(true).unwrap();
+                    let _keep_input_open = sender;
+                    std::future::pending::<()>().await;
+                }
+            };
+            tokio::pin!(stimulus);
+            let mut made_tool_call = false;
+            let mut deadline = None;
+            let result = tokio::select! {
+                result = drive_active_run(
+                    &mut run, &control, &mut shell, &mut input, &mut ticker,
+                    &mut pending, &mut quit, None, None, &mut extensions,
+                    &mut made_tool_call, test_run_inspection(), &mut deadline,
+                ) => result.unwrap(),
+                _ = &mut stimulus => unreachable!(),
+            };
+            assert_eq!(
+                result,
+                if cancel {
+                    HostRunOutcome::Aborted
+                } else {
+                    HostRunOutcome::Completed
+                }
+            );
+            assert!(
+                run.next().await.is_none(),
+                "driver must consume the terminal outcome"
+            );
+            drop(run);
+            assert_eq!(agent.session().checkpoints().len(), 1);
+            assert!(pending.is_empty());
+            assert!(!quit);
+            settled_tx.send(()).ok();
+            assert!(
+                watchdog.join().unwrap(),
+                "Run only settled after the renderer watchdog released layout: cancel={cancel}"
+            );
+        }
+    }
+
+    fn reasoning_control_model(uri: &str) -> Model {
+        let mut model = scripted_model(uri);
+        let spec = Arc::make_mut(&mut model.spec);
+        spec.protocol = octet_ai::Protocol::OpenAiResponses;
+        spec.capabilities
+            .responses_features
+            .reasoning_effort_updates = true;
+        spec.capabilities.reasoning = Some(octet_ai::ReasoningCapability {
+            options: Some(octet_ai::types::ReasoningOptions {
+                values: vec!["none".into(), "low".into(), "high".into()],
+                default: Some("low".into()),
+            }),
+            control: octet_ai::ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: true,
+            effort_budgets: None,
+            openai_chat_mode: octet_ai::OpenAiChatReasoningMode::Standard,
+            min_effort: octet_ai::ReasoningEffort::Low,
+            max_effort: octet_ai::ReasoningEffort::High,
+        });
+        Arc::make_mut(&mut model.endpoint)
+            .runtime
+            .responses_features
+            .reasoning_effort_updates = true;
+        model
+    }
+
+    #[tokio::test]
+    async fn thinking_control_preserves_active_run_and_hands_off_wire_update() {
+        // Exercise real preference persistence without modifying the developer HOME.
+        const CHILD: &str = "OCTET_TEST_REASONING_CONTROL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "modes::interactive::tests::thinking_control_preserves_active_run_and_hands_off_wire_update", "--nocapture"])
+                .env(CHILD, "1").env("HOME", home.path()).output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
+        use crossterm::event::KeyEvent;
+        for (requested, qualified) in [
+            ("high", true),
+            ("medium", true),
+            ("ultra", true),
+            ("high", false),
+        ] {
+            let accepted = requested == "high" && qualified;
+            let (server, started, release) =
+                HeldApi::start_with_repeat(fast_response(), true).await;
+            let mut model = reasoning_control_model(&server.uri);
+            Arc::make_mut(&mut model.endpoint)
+                .runtime
+                .responses_features
+                .reasoning_effort_updates = qualified;
+            let (_workspace, mut agent) =
+                scripted_agent_for_route(model.clone(), octet_ai::AiClient::new());
+            let mut inspection = test_run_inspection().clone();
+            inspection.model = model;
+            inspection.session_path = agent.session().path().to_path_buf();
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_identity("test", "scripted", "off");
+            let events: Vec<_> = format!("/thinking {requested}")
+                .chars()
+                .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+                .chain(std::iter::once(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))))
+                .collect();
+            let (sender, receiver) = tokio::sync::mpsc::channel(32);
+            let (handled_tx, handled) = tokio::sync::oneshot::channel();
+            let mut input = ProbedInput {
+                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+                remaining: events.len(),
+                handled: Some(handled_tx),
+            };
+            let mut pending = VecDeque::new();
+            let mut ticker = tokio::time::interval(Duration::from_millis(1));
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let id = shell.begin_run("test");
+            let mut run = agent.prompt("keep the root alive").await.unwrap();
+            let control = run.control();
+            shell.set_awaiting_provider(id);
+            let mut deadline = None;
+            let mut made_tool_call = false;
+            let driver = drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut deadline,
+            );
+            let stimulus = async move {
+                started.await.unwrap();
+                for event in events {
+                    sender.send(Ok(event)).await.unwrap();
+                }
+                handled.await.unwrap();
+                release.send(true).unwrap();
+                std::future::pending::<()>().await;
+            };
+            tokio::pin!(stimulus);
+            let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! { result = driver => result.unwrap(), _ = &mut stimulus => unreachable!() }
+        }).await.unwrap();
+            assert_eq!(outcome, HostRunOutcome::Completed);
+            drop(run);
+            assert!(!quit);
+            if qualified {
+                assert!(
+                    pending.is_empty(),
+                    "qualified control never rebuilds at idle"
+                );
+            } else {
+                assert_eq!(
+                    pending.front(),
+                    Some(&PendingIdleAction::ChangeThinkingLevel(ThinkingLevel::High))
+                );
+            }
+            assert_eq!(agent.session().checkpoints().len(), 1);
+            assert_eq!(
+                agent.reasoning(),
+                &if accepted {
+                    ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+                } else {
+                    ReasoningConfig::Off
+                }
+            );
+            assert_eq!(
+                shell.selected_identity().1,
+                if accepted { "high" } else { "off" }
+            );
+            let bodies = server.bodies.lock().unwrap();
+            if !accepted {
+                assert_eq!(
+                    bodies.len(),
+                    1,
+                    "rejected effort must not create a model response"
+                );
+                assert!(!agent.session().entries().iter().any(|entry| matches!(
+                    &entry.value,
+                    EntryValue::ResponsesReasoning {
+                        update: Some(_),
+                        ..
+                    }
+                )));
+                if qualified {
+                    assert!(shell.debug_error().unwrap().contains("not supported"));
+                } else {
+                    assert!(shell.debug_error().is_none());
+                    assert!(shell.debug_snapshot().contains("next idle boundary"));
+                }
+                continue;
+            }
+            assert!(shell
+                .debug_snapshot()
+                .contains("not provider acknowledgement"));
+            assert_eq!(bodies.len(), 2);
+            assert_eq!(bodies[0]["reasoning"]["effort"], "none");
+            assert_eq!(
+                bodies[1]["reasoning"]["effort"], "none",
+                "wire baseline stays pinned"
+            );
+            assert!(bodies[1]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == "configuration_update"
+                    && item["reasoning"]["effort"] == "high"));
+            assert!(
+                std::fs::read_to_string(crate::cli::global_config_path().unwrap())
+                    .unwrap()
+                    .contains("high")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_thinking_rejection_preserves_session_and_startup_preference() {
+        const CHILD: &str = "OCTET_TEST_IDLE_THINKING_PREFERENCE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "modes::interactive::tests::idle_thinking_rejection_preserves_session_and_startup_preference", "--nocapture"])
+                .env(CHILD, "1").env("HOME", home.path()).output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
+        let mut model = reasoning_control_model("http://127.0.0.1:1");
+        let capabilities = &mut Arc::make_mut(&mut model.spec).capabilities;
+        capabilities.agent_delegation = Some(octet_ai::AgentDelegation::V2);
+        let capability = capabilities.reasoning.as_mut().unwrap();
+        capability.max_effort = octet_ai::ReasoningEffort::Ultra;
+        capability
+            .options
+            .as_mut()
+            .unwrap()
+            .values
+            .extend(["max".into(), "ultra".into()]);
+        // Metadata alone cannot authorize Ultra: the observation runtime must
+        // be installed before a selection is committed.
+        let ultra = requested_thinking_to_reasoning(ThinkingLevel::Ultra, &model, true).unwrap();
+        let (_workspace, mut app) = fast_test_app(model);
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending();
+        app = select_thinking(
+            app,
+            &mut shell,
+            &mut input,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+            None,
+        )
+        .await
+        .unwrap();
+        let preference = crate::cli::global_config_path().unwrap();
+        let config_before = std::fs::read(&preference).unwrap();
+        assert!(String::from_utf8_lossy(&config_before).contains("high"));
+        let session = app.agent.session().path().to_path_buf();
+        let session_before = std::fs::read(&session).unwrap();
+        let identity = shell.selected_identity();
+        // None is the slash/shortcut path; Some(Standard) is picker selection.
+        for mode in [None, Some((ReasoningMode::Standard, ThinkingLevel::Ultra))] {
+            shell.clear_error();
+            app = select_thinking(app, &mut shell, &mut input, ultra.clone(), mode)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&preference).unwrap(), config_before);
+            assert_eq!(std::fs::read(&session).unwrap(), session_before);
+            assert_eq!(shell.selected_identity(), identity);
+            assert_eq!(
+                app.reasoning,
+                ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+            );
+            assert_eq!(app.agent.reasoning(), &app.reasoning);
+            let error = shell.debug_error().unwrap();
+            assert!(
+                error.contains("thinking unchanged") && error.contains("observation runtime"),
+                "{error}"
+            );
+        }
+        app.agent
+            .enable_v2_delegation_extension_only(octet_agent::DelegationConfig::new(
+                _workspace.path().join("delegation"),
+            ))
+            .unwrap();
+        let team = app.agent.delegation_team_directory().unwrap().to_path_buf();
+        for level in [
+            ThinkingLevel::Max,
+            ThinkingLevel::Ultra,
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Max,
+            ThinkingLevel::Ultra,
+            ThinkingLevel::Low,
+        ] {
+            let reasoning = requested_thinking_to_reasoning(level, &app.model, true).unwrap();
+            shell.clear_error();
+            app = select_thinking(app, &mut shell, &mut input, reasoning.clone(), None)
+                .await
+                .unwrap();
+            assert!(shell.debug_error().is_none(), "{:?}", shell.debug_error());
+            assert_eq!(app.reasoning, reasoning);
+            assert_eq!(app.agent.reasoning(), &reasoning);
+            assert_eq!(app.agent.session().path(), session);
+            assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
+            assert!(std::fs::read_to_string(&preference)
+                .unwrap()
+                .contains(level.label()));
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_control_idle_is_durable_and_rejected_effort_leaves_session_unchanged() {
+        let model = reasoning_control_model("http://127.0.0.1:1");
+        let (_workspace, mut app) = fast_test_app(model.clone());
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending();
+        let session = app.agent.session().path().to_path_buf();
+        app = transition(
+            app,
+            &mut shell,
+            &mut input,
+            Reconfig::Thinking(ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.agent.session().path(), session);
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+        );
+        assert_eq!(shell.selected_identity().1, "high");
+        let before = std::fs::read(&session).unwrap();
+        for level in [ThinkingLevel::Medium, ThinkingLevel::Ultra] {
+            assert!(requested_thinking_to_reasoning(level, &app.model, false).is_err());
+        }
+        app = transition(
+            app,
+            &mut shell,
+            &mut input,
+            Reconfig::Thinking(ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.model.spec.id, model.spec.id);
+        assert_eq!(
+            app.reasoning,
+            ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+        );
+        assert_eq!(std::fs::read(&session).unwrap(), before);
+        assert!(shell.debug_error().unwrap().contains("thinking unchanged"));
+        let resumed = Session::open_read_only(&session).unwrap();
+        assert_eq!(
+            resumed
+                .responses_reasoning(&model.endpoint.id, &model.spec.id)
+                .unwrap()
+                .unwrap()
+                .1,
+            app.reasoning
+        );
+        let mut codex = model;
+        Arc::make_mut(&mut codex.spec)
+            .capabilities
+            .reasoning
+            .as_mut()
+            .unwrap()
+            .options
+            .as_mut()
+            .unwrap()
+            .values
+            .remove(0);
+        assert!(requested_thinking_to_reasoning(ThinkingLevel::Off, &codex, false).is_err());
+        Arc::make_mut(&mut codex.endpoint)
+            .runtime
+            .responses_features = Default::default();
+        assert!(
+            !codex.responses_features().reasoning_effort_updates,
+            "unknown routes keep selector fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_model_and_thinking_panels_do_not_suspend_run() {
+        use crossterm::event::KeyEvent;
+        for command in ["/model", "/thinking"] {
+            let (server, started, release) = HeldApi::start(text_turn()).await;
+            let (_workspace, mut agent) =
+                scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
+            let mut inspection = test_run_inspection().clone();
+            inspection
+                .catalog
+                .register_endpoint((*inspection.model.endpoint).clone())
+                .unwrap();
+            inspection
+                .catalog
+                .register_model((*inspection.model.spec).clone())
+                .unwrap();
+            let mut shell = InteractiveShell::test_shell();
+            let events: Vec<_> = command
+                .chars()
+                .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+                .chain(std::iter::once(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))))
+                .collect();
+            let (sender, receiver) = tokio::sync::mpsc::channel(32);
+            let (handled_tx, handled) = tokio::sync::oneshot::channel();
+            let mut input = ProbedInput {
+                input: tokio_stream::wrappers::ReceiverStream::new(receiver),
+                remaining: events.len(),
+                handled: Some(handled_tx),
+            };
+            let mut pending = VecDeque::new();
+            let mut ticker = tokio::time::interval(Duration::from_millis(1));
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let run_id = shell.begin_run("test");
+            let mut run = agent
+                .prompt("complete while the picker remains open")
+                .await
+                .unwrap();
+            let control = run.control();
+            shell.set_awaiting_provider(run_id);
+            let mut deadline = None;
+            let mut made_tool_call = false;
+            let driver = drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut deadline,
+            );
+            let stimulus = async move {
+                started.await.unwrap();
+                for event in events {
+                    sender.send(Ok(event)).await.unwrap();
+                }
+                handled.await.unwrap();
+                // No Escape, Enter, or EOF follows opening the panel. This
+                // failed previously because the modal stopped polling Run.
+                release.send(true).unwrap();
+                std::future::pending::<()>().await;
+            };
+            tokio::pin!(stimulus);
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! { result = driver => result.unwrap(), _ = &mut stimulus => unreachable!() }
+            }).await.expect("an open picker must not stall settlement");
+            assert_eq!(result, HostRunOutcome::Completed, "{command}");
+            assert!(run.next().await.is_none());
+            drop(run);
+            assert_eq!(agent.session().checkpoints().len(), 1);
+            assert!(
+                pending.is_empty(),
+                "opening or settlement must not imply selection"
+            );
+            assert!(!quit);
+            assert!(
+                !shell.has_panel(),
+                "settlement cannot leave a driverless modal"
+            );
+            assert!(shell.debug_snapshot().contains("done"));
+        }
+    }
+
+    #[tokio::test]
+    async fn active_modal_escape_ctrl_c_and_close_keep_their_owners() {
+        use crossterm::event::KeyEvent;
+        for (draft, keys, expected, closing) in [
+            (
+                "draft",
+                vec![
+                    ctrl_key('c'),
+                    Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                ],
+                HostRunOutcome::Completed,
+                false,
+            ),
+            ("", vec![ctrl_key('c')], HostRunOutcome::Aborted, false),
+            ("draft", vec![ctrl_key('d')], HostRunOutcome::Aborted, true),
+        ] {
+            let (_server, _workspace, mut agent) =
+                scripted_agent_with_delay(Duration::from_millis(100)).await;
+            let mut shell = InteractiveShell::test_shell();
+            shell.extension_set_editor(draft.into());
+            let (sender, receiver) = tokio::sync::mpsc::channel(8);
+            sender.send(Ok(ctrl_key('l'))).await.unwrap();
+            for key in keys {
+                sender.send(Ok(key)).await.unwrap();
+            }
+            let _sender = sender;
+            let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+            let mut ticker = tokio::time::interval(Duration::from_millis(1));
+            let mut pending = VecDeque::new();
+            let mut quit = false;
+            let mut extensions = crate::extensions::ExecutableExtensions::default();
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            let control = run.control();
+            shell.set_awaiting_provider(run_id);
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut pending,
+                    &mut quit,
+                    None,
+                    None,
+                    &mut extensions,
+                    &mut false,
+                    test_run_inspection(),
+                    &mut None,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(result, expected);
+            assert_eq!(quit, closing);
+            assert_eq!(shell.pending(), if closing { draft } else { "" });
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn active_tool_consent_requires_a_visible_fresh_confirmation_and_drop_denies() {
+        use crossterm::event::{KeyEvent, KeyEventKind};
+        let (sink, mut progress) = ToolProgressSink::bounded_channel();
+        let answer = tokio::spawn(async move {
+            sink.confirmation(
+                "Approve fixture effect?".into(),
+                Some("Consequence retained".into()),
+                true,
+                true,
+            )
+            .await
+        });
+        let ToolProgress::Confirmation(request) = progress.recv().await.unwrap() else {
+            panic!("confirmation")
+        };
+        let mut interaction = ActiveToolInteraction {
+            id: ToolCallId("fixture".into()),
+            tool: Some("write".into()),
+            request: ActiveToolRequest::Confirmation(request),
+        };
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        interaction.open(&mut shell);
+        assert!(!interaction.input(
+            &mut shell,
+            &Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            ))
+        ));
+        assert!(!answer.is_finished(), "repeat must not approve");
+        shell.set_size(1, 1);
+        assert!(!interaction.input(
+            &mut shell,
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        ));
+        assert!(!answer.is_finished(), "invisible action must not approve");
+        drop(interaction);
+        assert!(
+            !answer.await.unwrap(),
+            "cancel/settlement/error must deny unanswered requests"
+        );
+    }
+
+    #[tokio::test]
     async fn cancellation_retains_answer_draft_and_ordered_undelivered_steering() {
         use crossterm::event::KeyEvent;
         let (_server, _workspace, mut agent) =
@@ -7467,9 +14859,9 @@ mod tests {
         let mut shell = InteractiveShell::test_shell();
         let events = [
             Event::Paste("first queued".into()),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             Event::Paste("second queued".into()),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Event::Paste("/answer preserve this instruction".into()),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -7490,6 +14882,7 @@ mod tests {
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let mut goal_deadline = None;
         let ended = tokio::time::timeout(
             Duration::from_secs(1),
             drive_active_run(
@@ -7504,6 +14897,8 @@ mod tests {
                 None,
                 &mut extensions,
                 &mut false,
+                test_run_inspection(),
+                &mut goal_deadline,
             ),
         )
         .await
@@ -7522,6 +14917,116 @@ mod tests {
             1,
             "undelivered input is not durable or replayed"
         );
+    }
+
+    #[tokio::test]
+    async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement() {
+        use crossterm::event::KeyEvent;
+        for (cancel, dispatch, quit_expected, escape_first) in [
+            (
+                Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                true,
+                false,
+                false,
+            ),
+            (
+                Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                false,
+                false,
+                false,
+            ),
+            (
+                Some(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+                false,
+                true,
+                false,
+            ),
+            (
+                Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                false,
+                false,
+                true,
+            ),
+            (None, true, false, false),
+        ] {
+            let (_server, _workspace, mut agent) =
+                scripted_agent_with_delay(Duration::from_millis(10)).await;
+            let mut shell = InteractiveShell::test_shell();
+            let mut events = vec![
+                Event::Paste("queued first".into()),
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Paste("queued second".into()),
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                Event::Paste(" edited".into()),
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ];
+            if escape_first {
+                events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            }
+            if let Some(cancel) = cancel {
+                events.push(Event::Key(cancel));
+                // Neither repeated Escape nor a second fresh Escape can arm a
+                // Ctrl+C cancellation after settlement has already started.
+                events.push(Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                    KeyEventKind::Repeat,
+                )));
+                events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            }
+            let mut input = tokio_stream::iter(events.into_iter().map(Ok))
+                .chain(futures_util::stream::pending());
+            let run_id = shell.begin_run("test");
+            let mut run = agent.prompt("initial").await.unwrap();
+            shell.set_awaiting_provider(run_id);
+            let control = run.control();
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            let mut quit = false;
+            let mut goal_deadline = None;
+            let ended = tokio::time::timeout(
+                Duration::from_secs(2),
+                drive_active_run(
+                    &mut run,
+                    &control,
+                    &mut shell,
+                    &mut input,
+                    &mut ticker,
+                    &mut VecDeque::new(),
+                    &mut quit,
+                    None,
+                    None,
+                    &mut crate::extensions::ExecutableExtensions::default(),
+                    &mut false,
+                    test_run_inspection(),
+                    &mut goal_deadline,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(run.next().await.is_none(), "one terminal event");
+            drop(run);
+            assert_eq!(quit, quit_expected);
+            assert_eq!(
+                ended,
+                if cancel.is_some() {
+                    HostRunOutcome::Aborted
+                } else {
+                    HostRunOutcome::Completed
+                }
+            );
+            assert_eq!(agent.session().checkpoints().len(), 1);
+            assert_eq!(
+                shell
+                    .take_ready_follow_up()
+                    .map(|input| input.transcript_text),
+                dispatch.then(|| "queued first".to_owned())
+            );
+            assert!(shell.take_ready_follow_up().is_none());
+            shell.edit_queued_message();
+            assert_eq!(shell.pending(), "queued second edited");
+        }
     }
 
     struct EndsThenPanics(bool);
@@ -7553,6 +15058,7 @@ mod tests {
         let mut quit = false;
         let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
 
+        let mut goal_deadline = None;
         let ended = drive_active_run(
             &mut run,
             &control,
@@ -7565,6 +15071,8 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
+            test_run_inspection(),
+            &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -7714,15 +15222,6 @@ mod tests {
             ))))
             .await
             .unwrap();
-        // The first Enter selects the inline completion; the second executes
-        // the selected no-argument command, like the ordinary composer path.
-        sender
-            .send(Ok(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))))
-            .await
-            .unwrap();
         let _sender = sender;
         let mut input = ReceiverStream::new(receiver);
         let mut ticker = tokio::time::interval(Duration::from_millis(1));
@@ -7733,6 +15232,7 @@ mod tests {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
+        let mut goal_deadline = None;
         let ended = tokio::time::timeout(
             Duration::from_secs(5),
             drive_active_run(
@@ -7747,6 +15247,8 @@ mod tests {
                 None,
                 &mut extensions,
                 &mut false,
+                test_run_inspection(),
+                &mut goal_deadline,
             ),
         )
         .await
@@ -7764,13 +15266,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_skill_invocations_queue_as_prompts_instead_of_unknown_commands() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let (_server, _workspace, mut agent) = scripted_agent().await;
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_skill_commands(Arc::from([("skill:review".into(), "Review".into())]));
+        let (sender, receiver) = tokio::sync::mpsc::channel(64);
+        for invocation in ["/skill:review inspect", "/skill:rev"] {
+            for character in invocation.chars() {
+                sender
+                    .send(Ok(Event::Key(KeyEvent::new(
+                        KeyCode::Char(character),
+                        KeyModifiers::NONE,
+                    ))))
+                    .await
+                    .unwrap();
+            }
+            sender
+                .send(Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))))
+                .await
+                .unwrap();
+        }
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let mut goal_deadline = None;
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut false,
+                test_run_inspection(),
+                &mut goal_deadline,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(run);
+        assert_eq!(ended, HostRunOutcome::Completed);
+        assert!(!quit);
+        assert!(pending.is_empty());
+        assert_eq!(shell.queued_follow_up_len(), 2);
+        assert_eq!(
+            shell.take_ready_follow_up().unwrap().transcript_text,
+            "/skill:review inspect"
+        );
+        shell.settle_queued_follow_ups(true);
+        assert_eq!(
+            shell.take_ready_follow_up().unwrap().transcript_text,
+            "/skill:review "
+        );
+        assert!(!format!("{:?}", agent.session().context().unwrap()).contains("/skill:"));
+    }
+
+    #[tokio::test]
     async fn scripted_active_loop_queues_controls_and_never_forwards_active_model_command() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use tokio_stream::wrappers::ReceiverStream;
 
         let (_server, workspace, mut agent) = scripted_agent().await;
         let image = workspace.path().join("shot.png");
-        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(
+            &image,
+            include_bytes!("../../tests/fixtures/export_html/one-pixel.png"),
+        )
+        .unwrap();
 
         let mut shell = InteractiveShell::test_shell();
         shell.set_input_modalities(octet_ai::ModalitySet::none().with(octet_ai::Modality::Image));
@@ -7816,6 +15398,7 @@ mod tests {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
+        let mut goal_deadline = None;
         let ended = drive_active_run(
             &mut run,
             &control,
@@ -7828,6 +15411,8 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
+            test_run_inspection(),
+            &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -7917,6 +15502,7 @@ mod tests {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
+        let mut goal_deadline = None;
         let ended = drive_active_run(
             &mut run,
             &control,
@@ -7929,6 +15515,8 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
+            test_run_inspection(),
+            &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -7946,6 +15534,270 @@ mod tests {
                     octet_ai::UserPart::Text(text) if text.starts_with("steer ")
                 ))
         )));
+    }
+
+    /// Drive one scripted run with a fixed event script and return its settled
+    /// outcome. The sender stays alive so the input stream remains pending
+    /// rather than signalling a close that would abort the run.
+    async fn drive_scripted_events(
+        agent: &mut octet_agent::Agent,
+        shell: &mut InteractiveShell,
+        events: Vec<Event>,
+    ) -> (HostRunOutcome, bool) {
+        use tokio_stream::wrappers::ReceiverStream;
+        let (sender, receiver) = tokio::sync::mpsc::channel(64);
+        for event in events {
+            sender.send(Ok(event)).await.unwrap();
+        }
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let mut goal_deadline = None;
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_active_run(
+                &mut run,
+                &control,
+                shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut executable_extensions,
+                &mut false,
+                test_run_inspection(),
+                &mut goal_deadline,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(run);
+        (ended, quit)
+    }
+
+    /// Every durable user-message text in the session, in order.
+    fn delivered_user_text(agent: &octet_agent::Agent) -> Vec<String> {
+        agent
+            .session()
+            .context()
+            .unwrap()
+            .iter()
+            .filter_map(|message| match message {
+                octet_ai::Message::User(user) => Some(
+                    user.content
+                        .iter()
+                        .filter_map(|part| match part {
+                            octet_ai::UserPart::Text(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn full_steering_admission_restores_the_draft_without_a_shell_entry() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_secs(2)).await;
+        let mut shell = InteractiveShell::test_shell();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let reservations = (0..64)
+            .map(|_| control.prepare_steer("occupied").unwrap().0)
+            .collect::<Vec<_>>();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        sender
+            .send(Ok(Event::Paste("refused steering".into())))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+            ))))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ))))
+            .await
+            .unwrap();
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let mut goal_deadline = None;
+
+        let ended = drive_active_run(
+            &mut run,
+            &control,
+            &mut shell,
+            &mut input,
+            &mut ticker,
+            &mut pending,
+            &mut quit,
+            None,
+            None,
+            &mut extensions,
+            &mut false,
+            test_run_inspection(),
+            &mut goal_deadline,
+        )
+        .await
+        .unwrap();
+        drop(reservations);
+        drop(run);
+
+        assert_eq!(ended, HostRunOutcome::Aborted);
+        assert_eq!(shell.pending(), "refused steering");
+        assert!(!shell.debug_snapshot().contains("Steering:"));
+        assert!(!delivered_user_text(&agent)
+            .iter()
+            .any(|text| text.contains("refused steering")),);
+    }
+
+    #[tokio::test]
+    async fn recalled_live_steering_returns_to_the_editor_without_delivery() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_secs(2)).await;
+        let mut shell = InteractiveShell::test_shell();
+        let (ended, quit) = drive_scripted_events(
+            &mut agent,
+            &mut shell,
+            vec![
+                Event::Paste("steer recalled".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                // Option/Alt+Up recalls the newest retractable live steering
+                // before the provider boundary can claim it.
+                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ],
+        )
+        .await;
+        assert_eq!(ended, HostRunOutcome::Aborted);
+        assert!(!quit);
+        assert_eq!(shell.pending(), "steer recalled");
+        assert!(!shell.debug_snapshot().contains("Steering:"));
+        assert!(
+            !delivered_user_text(&agent)
+                .iter()
+                .any(|text| text.contains("steer recalled")),
+            "a recalled submission must not also be delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn requeued_edited_live_steering_is_what_the_next_provider_request_carries() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_millis(200)).await;
+        let mut shell = InteractiveShell::test_shell();
+        let (ended, quit) = drive_scripted_events(
+            &mut agent,
+            &mut shell,
+            vec![
+                Event::Paste("original".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                Event::Paste(" edited".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            ],
+        )
+        .await;
+        assert_eq!(ended, HostRunOutcome::Completed);
+        assert!(!quit);
+        let delivered = delivered_user_text(&agent);
+        assert!(
+            delivered.iter().any(|text| text == "original edited"),
+            "requeued edited steering is delivered: {delivered:?}"
+        );
+        assert!(
+            !delivered.iter().any(|text| text == "original"),
+            "the recalled draft is not delivered twice: {delivered:?}"
+        );
+        assert!(shell.pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recalled_live_steering_is_not_double_counted_in_the_editor() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (_server, _workspace, mut agent) =
+            scripted_agent_with_delay(Duration::from_secs(2)).await;
+        let mut shell = InteractiveShell::test_shell();
+        let (ended, _quit) = drive_scripted_events(
+            &mut agent,
+            &mut shell,
+            vec![
+                Event::Paste("alpha".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                Event::Paste("beta".into()),
+                Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ],
+        )
+        .await;
+        assert_eq!(ended, HostRunOutcome::Aborted);
+        let pending = shell.pending();
+        // The recalled entry is restored once and the still-queued entry is
+        // restored once, with no duplicate append from either owner.
+        assert_eq!(pending, "alpha\n\nbeta");
+        assert_eq!(pending.matches("alpha").count(), 1);
+        assert_eq!(pending.matches("beta").count(), 1);
+        assert!(
+            !delivered_user_text(&agent)
+                .iter()
+                .any(|text| text.contains("alpha") || text.contains("beta")),
+            "recalled and aborted steering must not be delivered"
+        );
+    }
+
+    #[test]
+    fn sticky_answer_steering_is_not_retractable_while_live_steering_is() {
+        let mut shell = InteractiveShell::test_shell();
+        let answer = answer_now_input(Some("keep tools off".into()));
+        shell.queue_steering(&answer);
+        let (live, receipt) = octet_agent::PreparedSteering::new("live steer");
+        shell.queue_retractable_steering(
+            receipt,
+            "live steer".into(),
+            "live steer".into(),
+            Vec::new(),
+        );
+        shell.edit_queued_message();
+        // Joint recall takes the newest retractable steering entry only.
+        assert_eq!(shell.pending(), "live steer");
+        assert!(
+            shell
+                .debug_snapshot()
+                .contains("Steering: /answer keep tools off"),
+            "sticky /answer stays queued: {}",
+            shell.debug_snapshot()
+        );
+        // The recalled live submission is a no-op rather than a second append.
+        drop(live);
     }
 
     #[tokio::test]
@@ -7984,6 +15836,7 @@ mod tests {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
+        let mut goal_deadline = None;
         let ended = drive_active_run(
             &mut run,
             &control,
@@ -7996,6 +15849,8 @@ mod tests {
             None,
             &mut executable_extensions,
             &mut false,
+            test_run_inspection(),
+            &mut goal_deadline,
         )
         .await
         .unwrap();
@@ -8006,6 +15861,626 @@ mod tests {
             shell.debug_error().as_deref(),
             Some("unknown command: /subagents"),
             "without a octet-subagents owner the command must not open the live view"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `/goal` applies immediately, mid-run or idle; it is never queued.
+    // -----------------------------------------------------------------------
+
+    use crate::commands::GoalCommand;
+
+    /// A real durable goal store, its driver, and an inspection that addresses
+    /// it exactly as `App` does: same store, same shared driver state, same
+    /// session key. The caller keeps the store and driver to read back the
+    /// mutation and to prove driver coherence.
+    fn goal_fixture(
+        dir: &Path,
+        session_id: &str,
+    ) -> (
+        Arc<octet_agent::DurableGoalStore>,
+        octet_agent::GoalDriver,
+        ActiveRunInspection,
+    ) {
+        let store =
+            Arc::new(octet_agent::DurableGoalStore::open(dir).expect("durable goal store fixture"));
+        let driver = octet_agent::GoalDriver::new(store.clone(), session_id);
+        let inspection =
+            test_run_inspection_with_goal(dir, store.clone(), driver.clone(), session_id);
+        (store, driver, inspection)
+    }
+
+    #[test]
+    fn goal_commands_have_no_queued_form() {
+        let mut queue = VecDeque::new();
+        for command in [
+            GoalCommand::Help,
+            GoalCommand::Status,
+            GoalCommand::Set("an objective".into()),
+            GoalCommand::Pause,
+            GoalCommand::Resume,
+            GoalCommand::Clear,
+        ] {
+            let error = queue_command(Command::Goal(command), &mut queue)
+                .expect_err("goal commands are never queued");
+            assert!(
+                error.to_string().contains("never queued"),
+                "the refusal names the defect: {error}"
+            );
+        }
+        assert!(queue.is_empty(), "no goal action was deferred: {queue:?}");
+        assert!(matches!(
+            commands::parse("/goal close the parity row"),
+            Command::Goal(GoalCommand::Set(objective)) if objective == "close the parity row"
+        ));
+    }
+
+    #[tokio::test]
+    async fn active_goal_objective_mutates_the_durable_store_without_queueing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, driver, inspection) = goal_fixture(dir.path(), "goal-session");
+        let mut shell = InteractiveShell::test_shell();
+        let (queue, quit, deadline) = run_active_command_observing_deadline(
+            &mut shell,
+            Command::Goal(GoalCommand::Set("close the goal-parity row".into())),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty(), "mid-run /goal must not queue: {queue:?}");
+        assert!(!quit);
+        let goal = store
+            .get("goal-session")
+            .expect("the fixture store stays readable")
+            .expect("the durable goal exists immediately");
+        assert_eq!(goal.objective, "close the goal-parity row");
+        assert_eq!(goal.status, octet_agent::GoalStatus::Active);
+        assert_eq!(goal.turns_used, 0, "setting an objective reserves no turn");
+        assert!(
+            deadline.is_some(),
+            "an active objective arms the same deadline an idle /goal arms"
+        );
+        let painted = shell.debug_snapshot();
+        assert!(painted.contains("goal set"), "{painted}");
+        // Driver coherence: the shared driver waits on the new objective exactly
+        // as it would after an idle `/goal`, and nothing has been reserved.
+        assert!(matches!(
+            driver.turn_settled(octet_agent::GoalTurnSource::User, "", false),
+            Ok(octet_agent::GoalDecision::Wait { .. })
+        ));
+        assert!(goal.turns_used == 0);
+    }
+
+    #[tokio::test]
+    async fn active_goal_commands_apply_while_the_run_is_still_streaming() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let (server, mut started, release) = HeldApi::start(text_turn()).await;
+        let (_workspace, mut agent) =
+            scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _driver, inspection) = goal_fixture(dir.path(), "goal-session");
+        store
+            .set("goal-session", "keep the stream honest", None)
+            .expect("durable goal fixture");
+
+        let mut shell = InteractiveShell::test_shell();
+        let run_id = shell.begin_run("test");
+        let mut run = agent.prompt("initial").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let (sender, receiver) = tokio::sync::mpsc::channel(64);
+        // The objective change is typed first: it mutates no overlay, so the
+        // status report typed second still receives its Enter.
+        for command in ["/goal set streamed objective", "/goal status"] {
+            for character in command.chars() {
+                sender
+                    .send(Ok(Event::Key(KeyEvent::new(
+                        KeyCode::Char(character),
+                        KeyModifiers::NONE,
+                    ))))
+                    .await
+                    .unwrap();
+            }
+            sender
+                .send(Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))))
+                .await
+                .unwrap();
+        }
+        // Keep the sender alive so EOF cannot abort the held run.
+        let _sender = sender;
+        let mut input = ReceiverStream::new(receiver);
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut made_tool_call = false;
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let mut goal_deadline = None;
+        // The run borrows the shell, its queue, and the deadline for the whole
+        // held turn, so the mid-run observations happen inside this block and
+        // every post-settlement assertion happens after its borrows end.
+        let ended = {
+            let drive = drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut ticker,
+                &mut pending,
+                &mut quit,
+                None,
+                None,
+                &mut extensions,
+                &mut made_tool_call,
+                &inspection,
+                &mut goal_deadline,
+            );
+            tokio::pin!(drive);
+            tokio::select! {
+                result = &mut drive => {
+                    panic!("the held run settled before the provider request started: {result:?}")
+                }
+                result = &mut started => result.expect("the held provider request starts"),
+            }
+
+            // The provider response is still withheld, so a store mutation
+            // observed here was applied to the durable goal mid-run, while the
+            // stream was live.
+            let budget = Instant::now() + Duration::from_secs(2);
+            while store.get("goal-session").unwrap().unwrap().objective != "streamed objective" {
+                assert!(
+                    Instant::now() < budget,
+                    "the mid-run objective was never applied while kept alive"
+                );
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(10), &mut drive)
+                        .await
+                        .is_err(),
+                    "the run settled before the mid-run /goal was applied"
+                );
+            }
+            let streamed = store.get("goal-session").unwrap().unwrap();
+            assert_eq!(streamed.objective, "streamed objective");
+            assert_eq!(streamed.status, octet_agent::GoalStatus::Active);
+            assert_eq!(
+                streamed.turns_used, 0,
+                "the mid-run objective reserved no continuation turn"
+            );
+
+            release.send(true).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), &mut drive)
+                .await
+                .expect("the released run settles")
+                .unwrap()
+        };
+        assert_eq!(ended, HostRunOutcome::Completed);
+        drop(run);
+        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            goal_deadline.is_some(),
+            "the mid-run objective armed the continuation deadline"
+        );
+        assert!(
+            pending.is_empty(),
+            "neither goal command was queued to the idle boundary: {pending:?}"
+        );
+        assert!(!quit);
+        assert!(
+            shell.has_overlay(),
+            "the /goal status report opened mid-run and stayed open"
+        );
+        let painted = shell.debug_snapshot();
+        assert!(painted.contains("goal set"), "{painted}");
+        assert!(
+            painted.contains("streamed objective"),
+            "the notice names the objective applied mid-run: {painted}"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_goal_status_reports_immediately_without_queueing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _driver, inspection) = goal_fixture(dir.path(), "goal-session");
+        store
+            .set("goal-session", "keep the stream honest", None)
+            .expect("durable goal fixture");
+        let mut shell = InteractiveShell::test_shell();
+        let (queue, quit, deadline) = run_active_command_observing_deadline(
+            &mut shell,
+            Command::Goal(GoalCommand::Status),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty(), "status is never queued: {queue:?}");
+        assert!(!quit);
+        assert!(deadline.is_none(), "status arms no deadline");
+        assert!(
+            shell.has_overlay(),
+            "the active-run status reports in the frame immediately"
+        );
+        let status = inspection
+            .goal_access()
+            .expect("addressable fixture")
+            .status_text()
+            .expect("the report reads the durable store");
+        assert!(
+            status.contains("Active goal: keep the stream honest"),
+            "the open report carries the durable goal: {status}"
+        );
+        assert_eq!(
+            store.get("goal-session").unwrap().unwrap().objective,
+            "keep the stream honest",
+            "status does not mutate the goal"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_goal_pause_resume_and_clear_are_coherent_mid_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, driver, inspection) = goal_fixture(dir.path(), "goal-session");
+        store
+            .set("goal-session", "stay coherent", None)
+            .expect("durable goal fixture");
+        let mut shell = InteractiveShell::test_shell();
+
+        let (queue, _, paused_deadline) = run_active_command_observing_deadline(
+            &mut shell,
+            Command::Goal(GoalCommand::Pause),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty(), "pause is never queued: {queue:?}");
+        assert_eq!(
+            store.get("goal-session").unwrap().unwrap().status,
+            octet_agent::GoalStatus::Paused
+        );
+        assert!(
+            paused_deadline.is_none(),
+            "a paused goal disarms the continuation deadline"
+        );
+        assert_eq!(
+            driver.turn_settled(octet_agent::GoalTurnSource::User, "", false),
+            Ok(octet_agent::GoalDecision::Paused),
+            "a paused goal cannot continue the run that paused it"
+        );
+        assert!(
+            driver.fire_continuation().unwrap().is_none(),
+            "a paused goal reserves no continuation turn"
+        );
+
+        let (queue, _, resumed_deadline) = run_active_command_observing_deadline(
+            &mut shell,
+            Command::Goal(GoalCommand::Resume),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty(), "resume is never queued: {queue:?}");
+        let resumed = store.get("goal-session").unwrap().unwrap();
+        assert_eq!(resumed.status, octet_agent::GoalStatus::Active);
+        assert_eq!(
+            resumed.objective, "stay coherent",
+            "resume keeps the objective"
+        );
+        assert!(resumed_deadline.is_some(), "resume re-arms the deadline");
+        assert!(matches!(
+            driver.turn_settled(octet_agent::GoalTurnSource::User, "", false),
+            Ok(octet_agent::GoalDecision::Wait { .. })
+        ));
+
+        let (queue, _, cleared_deadline) = run_active_command_observing_deadline(
+            &mut shell,
+            Command::Goal(GoalCommand::Clear),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty(), "clear is never queued: {queue:?}");
+        assert!(store.get("goal-session").unwrap().is_none());
+        assert!(
+            cleared_deadline.is_none(),
+            "a cleared goal disarms the continuation deadline"
+        );
+        assert_eq!(
+            driver.turn_settled(octet_agent::GoalTurnSource::User, "", false),
+            Ok(octet_agent::GoalDecision::Inactive)
+        );
+        assert!(
+            driver.fire_continuation().unwrap().is_none(),
+            "a cleared goal reserves no continuation turn"
+        );
+        let painted = shell.debug_snapshot();
+        for expected in ["goal paused", "goal resumed", "goal cleared"] {
+            assert!(
+                painted.contains(expected),
+                "{expected:?} missing: {painted}"
+            );
+        }
+        assert!(paused_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn unaddressable_active_goal_fails_closed_and_is_never_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(octet_agent::DurableGoalStore::open(dir.path()).expect("store fixture"));
+        let driver = octet_agent::GoalDriver::new(store.clone(), "goal-session");
+        assert!(matches!(
+            GoalAccess::from_parts(store, driver, String::new()),
+            Err(ActiveGoalError::UnaddressableSession)
+        ));
+        let mut shell = InteractiveShell::test_shell();
+        for command in [
+            GoalCommand::Status,
+            GoalCommand::Set("never queued".into()),
+            GoalCommand::Pause,
+            GoalCommand::Resume,
+            GoalCommand::Clear,
+        ] {
+            let (queue, quit, deadline) = run_active_command_observing_deadline(
+                &mut shell,
+                Command::Goal(command),
+                test_run_inspection(),
+            )
+            .await;
+            assert!(queue.is_empty(), "the refusal is never queued: {queue:?}");
+            assert!(!quit);
+            assert!(deadline.is_none(), "no deadline can be armed");
+            let error = shell
+                .debug_error()
+                .expect("the typed reason is rendered, not a silent no-op");
+            assert!(error.starts_with("/goal failed:"), "{error}");
+            assert!(error.contains("no durable goal identity"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reachable_goal_store_that_rejects_still_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _driver, inspection) = goal_fixture(dir.path(), "goal-session");
+        let mut shell = InteractiveShell::test_shell();
+        let oversized = "x".repeat(octet_agent::MAX_GOAL_OBJECTIVE_BYTES + 1);
+        let (queue, _, deadline) = run_active_command_observing_deadline(
+            &mut shell,
+            Command::Goal(GoalCommand::Set(oversized)),
+            &inspection,
+        )
+        .await;
+        assert!(
+            queue.is_empty(),
+            "a rejected goal is never queued: {queue:?}"
+        );
+        assert!(deadline.is_none(), "a rejected goal arms no deadline");
+        assert!(
+            store.get("goal-session").unwrap().is_none(),
+            "the store rejected the objective and stayed empty"
+        );
+        let error = shell.debug_error().expect("the store error is rendered");
+        assert!(error.starts_with("unable to set goal:"), "{error}");
+        assert!(error.contains("invalid goal objective"), "{error}");
+    }
+
+    /// `/goal` at idle applies the same durable mutations through the same
+    /// producer the idle dispatcher's arm calls, on a real bootstrap-built App
+    /// with a real durable store and session key.
+    #[tokio::test]
+    async fn idle_goal_commands_still_apply_the_same_durable_mutations() {
+        let (_workspace, app) = crate::compaction::tests::app_for_estimate();
+        let store = app.goal_store.clone();
+        let session_id = app.goal_session_id.clone();
+        assert!(
+            !session_id.is_empty(),
+            "the idle fixture carries a durable goal identity"
+        );
+        let mut shell = InteractiveShell::test_shell();
+        let mut goal_deadline = None;
+
+        apply_idle_goal_command(
+            &app,
+            &mut shell,
+            GoalCommand::Set("idle objective".into()),
+            &mut goal_deadline,
+        )
+        .expect("idle /goal set");
+        let goal = store
+            .get(&session_id)
+            .unwrap()
+            .expect("idle /goal writes the durable store");
+        assert_eq!(goal.objective, "idle objective");
+        assert_eq!(goal.status, octet_agent::GoalStatus::Active);
+        assert!(goal_deadline.is_some(), "idle /goal arms the deadline");
+        assert!(shell.debug_snapshot().contains("goal set"));
+
+        apply_idle_goal_command(&app, &mut shell, GoalCommand::Status, &mut goal_deadline)
+            .expect("idle /goal status");
+        assert!(
+            shell.has_overlay(),
+            "idle /goal status opens the same report"
+        );
+        assert!(store.get(&session_id).unwrap().is_some());
+
+        apply_idle_goal_command(&app, &mut shell, GoalCommand::Pause, &mut goal_deadline)
+            .expect("idle /goal pause");
+        assert_eq!(
+            store.get(&session_id).unwrap().unwrap().status,
+            octet_agent::GoalStatus::Paused
+        );
+        assert!(goal_deadline.is_none());
+
+        apply_idle_goal_command(&app, &mut shell, GoalCommand::Resume, &mut goal_deadline)
+            .expect("idle /goal resume");
+        assert_eq!(
+            store.get(&session_id).unwrap().unwrap().status,
+            octet_agent::GoalStatus::Active
+        );
+        assert!(goal_deadline.is_some());
+
+        apply_idle_goal_command(&app, &mut shell, GoalCommand::Clear, &mut goal_deadline)
+            .expect("idle /goal clear");
+        assert!(store.get(&session_id).unwrap().is_none());
+        assert!(goal_deadline.is_none());
+    }
+
+    #[derive(Default)]
+    struct RecordingLifecycle {
+        events: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl RecordingLifecycle {
+        fn events(&self) -> Vec<String> {
+            self.events.borrow().clone()
+        }
+    }
+
+    impl MessageLifecycleSink for RecordingLifecycle {
+        fn message_started(&mut self, message_id: &str) {
+            self.events
+                .borrow_mut()
+                .push(format!("started:{message_id}"));
+        }
+
+        fn message_delta(&mut self, delta: &str) {
+            self.events.borrow_mut().push(format!("delta:{delta}"));
+        }
+
+        fn message_settled(&mut self, message_id: &str) {
+            self.events
+                .borrow_mut()
+                .push(format!("settled:{message_id}"));
+        }
+    }
+
+    impl DialogLifecycleSink for RecordingLifecycle {
+        fn open_dialog(&self, dialog: &str) {
+            self.events.borrow_mut().push(format!("started:{dialog}"));
+        }
+
+        fn close_dialog(&self, dialog: &str) {
+            self.events.borrow_mut().push(format!("settled:{dialog}"));
+        }
+    }
+
+    fn text_delta(text: &str) -> AgentEvent {
+        AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: text.to_owned(),
+        }
+    }
+
+    fn completed_run() -> AgentEvent {
+        AgentEvent::RunFinished {
+            head: EntryId("entry-1".to_owned()),
+            reason: octet_agent::FinishReason::Completed,
+        }
+    }
+
+    #[test]
+    fn assistant_message_lifecycle_brackets_one_message_per_text_turn() {
+        let mut lifecycle = AssistantMessageLifecycle::default();
+        let mut sink = RecordingLifecycle::default();
+        lifecycle.observe(&mut sink, &text_delta(""));
+        assert!(sink.events().is_empty(), "an empty delta opens nothing");
+        lifecycle.observe(&mut sink, &text_delta("Hel"));
+        lifecycle.observe(
+            &mut sink,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Reasoning,
+                text: "hidden reasoning".to_owned(),
+            },
+        );
+        lifecycle.observe(&mut sink, &text_delta("lo"));
+        assert_eq!(
+            sink.events(),
+            ["started:assistant-1", "delta:Hel", "delta:lo"]
+        );
+        // Every terminal run outcome settles the open boundary exactly once.
+        lifecycle.observe(&mut sink, &completed_run());
+        lifecycle.observe(&mut sink, &completed_run());
+        assert_eq!(sink.events().len(), 4);
+        assert_eq!(
+            sink.events().last().map(String::as_str),
+            Some("settled:assistant-1")
+        );
+        // A later turn opens a fresh, still bounded identifier.
+        lifecycle.observe(&mut sink, &text_delta("again"));
+        assert_eq!(
+            sink.events().last().map(String::as_str),
+            Some("delta:again")
+        );
+        assert!(sink.events().contains(&"started:assistant-2".to_owned()));
+    }
+
+    #[test]
+    fn assistant_message_lifecycle_keeps_one_boundary_across_provider_retry() {
+        let mut lifecycle = AssistantMessageLifecycle::default();
+        let mut sink = RecordingLifecycle::default();
+        lifecycle.observe(&mut sink, &text_delta("partial"));
+        lifecycle.observe(
+            &mut sink,
+            &AgentEvent::ProviderRetry {
+                attempt: 1,
+                max_attempts: 3,
+                delay: Duration::from_millis(1),
+                error: "stream reset".to_owned(),
+            },
+        );
+        lifecycle.observe(&mut sink, &text_delta("final"));
+        assert_eq!(
+            sink.events(),
+            ["started:assistant-1", "delta:partial", "delta:final"]
+        );
+        lifecycle.settle(&mut sink);
+        assert_eq!(
+            sink.events().last().map(String::as_str),
+            Some("settled:assistant-1")
+        );
+    }
+
+    #[test]
+    fn assistant_message_lifecycle_forwards_each_delta_verbatim() {
+        let mut lifecycle = AssistantMessageLifecycle::default();
+        let mut sink = RecordingLifecycle::default();
+        for index in 0..64 {
+            lifecycle.observe(&mut sink, &text_delta(&format!("t{index}")));
+        }
+        let events = sink.events();
+        assert_eq!(events[0], "started:assistant-1");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("delta:"))
+                .count(),
+            64,
+            "the producer forwards every increment; the host owns coalescing"
+        );
+        assert!(
+            !events.iter().any(|event| event.starts_with("settled:")),
+            "no notification per delta is issued before the terminal boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn present_host_dialog_settles_once_on_every_outcome() {
+        let sink = RecordingLifecycle::default();
+        let value = present_host_dialog(&sink, "confirm", async { Ok::<_, anyhow::Error>(true) })
+            .await
+            .expect("approved dialog");
+        assert!(value);
+        assert_eq!(sink.events(), ["started:confirm", "settled:confirm"]);
+        let refused = present_host_dialog(&sink, "input", async {
+            Err::<Option<String>, _>(anyhow::anyhow!("dismissed"))
+        })
+        .await;
+        assert!(refused.is_err());
+        assert_eq!(
+            sink.events(),
+            [
+                "started:confirm",
+                "settled:confirm",
+                "started:input",
+                "settled:input",
+            ]
         );
     }
 }

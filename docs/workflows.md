@@ -70,12 +70,12 @@ child spend is persisted once in the root ledger before settlement.
 
 Executable extensions require full-access mode and use your OS authority.
 Install/enable/trust are separate; [publication-gated package setup](installation.md#optional-packages).
-The bundled implementation is API 0.2, not a current-API authoring example.
+The working-tree bundle declares API 0.4; exact host-version pins still apply.
 
 ## Extend or embed
 
 - Add repository instructions, prompts, and skills through [instructions](instructions.md) and [resource discovery](resources.md).
-- Add tools in any language through [extensions](extensions.md) and [Extension API 0.3](extensions/API-0.3-REFERENCE.md). A qualified end-to-end 0.3 example remains missing; do not relabel bundled 0.2 implementations.
+- Add tools in any language through [extensions](extensions.md) and the [API 0.4 reference](extensions/API-0.4-REFERENCE.md). Use the current Python process recipe; retain exact-version examples and conformance tests rather than relabeling them.
 - Use [browser](../extensions/octet-browse/README.md), [web search](../extensions/octet-web-search/README.md), or [MCP](../extensions/octet-mcp/README.md) through their package guides.
 - Inventory/import/restore Pi setup with [Pi migration](pi-migration.md).
 - Embed through the independent [native host protocol 1](sdk.md), or use the optional [graphical Serve interface](experimental/octet-serve/README.md).

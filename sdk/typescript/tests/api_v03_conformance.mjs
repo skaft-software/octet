@@ -36,6 +36,36 @@ const toolResult = api.parseToolCallResult(readFixture("tool-call-result"));
 api.validateToolCallResult(toolResult);
 assert.equal(toolResult.structured_content.kind, "value");
 assert.deepEqual(toolResult.structured_content.value, { value: "hello" });
+
+const sessionStartHook = api.parseSessionHookParams(readFixture("session-hook-start-params"));
+assert.deepEqual(sessionStartHook, {
+  hook: "session_start",
+  payload: {
+    binding: {
+      session_id: "session-0123456789abcdef",
+      extension_instance_id: "0123456789abcdef0123456789abcdef",
+      process_generation: 1,
+    },
+  },
+});
+const sessionEndHook = api.parseSessionHookParams(readFixture("session-hook-end-params"));
+assert.deepEqual(sessionEndHook, {
+  hook: "session_end",
+  payload: {
+    binding: {
+      session_id: "session-0123456789abcdef",
+      extension_instance_id: "0123456789abcdef0123456789abcdef",
+      process_generation: 1,
+    },
+    outcome: "shutdown",
+    reason: "shutdown",
+    duration_ms: 17,
+  },
+});
+const sessionHookResult = api.parseSessionHookResult(readFixture("session-hook-result"));
+api.validateDisposition(sessionHookResult.disposition);
+assert.deepEqual(sessionHookResult, { disposition: { kind: "continue" } });
+
 api.validateCancelRequestParams(api.parseCancelRequestParams(readFixture("cancel-request-params")));
 api.parseSessionCreateParams(readFixture("session-create-params"));
 api.parseSessionForkParams(readFixture("session-fork-params"));
@@ -72,6 +102,16 @@ const offer = api.hostOffer(api.MAX_FRAME_BYTES * 2, api.MAX_CONCURRENT_REQUESTS
 assert.equal(offer.limits.max_frame_bytes, api.MAX_FRAME_BYTES);
 assert.equal(offer.limits.max_concurrent_requests, api.MAX_CONCURRENT_REQUESTS);
 const negotiated = api.negotiate(offer, api.selectRequired(offer));
+assert.equal(api.methodIsAvailable(negotiated, "hook/run", "host_to_extension"), false);
+const lifecycleContract = api.negotiate(offer, {
+  schema: offer.schema,
+  encoding: offer.encoding,
+  capabilities: [...offer.required_capabilities, "lifecycle_events"],
+  methods: [...offer.required_methods, "hook/run"],
+  limits: offer.limits,
+});
+assert.equal(api.methodIsAvailable(lifecycleContract, "hook/run", "host_to_extension"), true);
+api.requireMethod(lifecycleContract, "hook/run", "host_to_extension");
 const unboundLifecycleOffer = {
   ...offer,
   optional_capabilities: [],
@@ -100,6 +140,51 @@ assert.equal(errorCode(() => api.canonicalFrame({ x: "y" }, 1)), -32012);
 assert.equal(errorCode(() => api.parseJsonRpcEnvelope({ jsonrpc: "2.0", id: null, result: {} })), -32600);
 assert.equal(errorCode(() => api.parseJsonRpcEnvelope({ jsonrpc: "2.0", id: 1, result: {}, error: { code: -32600, message: "invalid request" } })), -32600);
 assert.equal(errorCode(() => api.canonicalJson({ "\ud800": "bad" })), -32602);
+
+assert.equal(
+  errorCode(() => api.parseSessionHookParams({ hook: "unsupported", payload: {} })),
+  -32602,
+);
+assert.equal(
+  errorCode(() => api.parseSessionHookParams({ hook: "session_start" })),
+  -32602,
+);
+assert.equal(
+  errorCode(() => api.parseSessionHookParams({
+    ...sessionStartHook,
+    payload: { ...sessionStartHook.payload, unexpected: true },
+  })),
+  -32602,
+);
+assert.equal(
+  errorCode(() => api.parseSessionHookParams({
+    ...sessionEndHook,
+    payload: { ...sessionEndHook.payload, outcome: "unsupported" },
+  })),
+  -32602,
+);
+assert.equal(
+  errorCode(() => api.parseSessionHookParams({
+    ...sessionEndHook,
+    payload: { ...sessionEndHook.payload, duration_ms: -1 },
+  })),
+  -32602,
+);
+assert.equal(
+  errorCode(() => api.parseSessionHookParams({
+    ...sessionStartHook,
+    payload: {
+      ...sessionStartHook.payload,
+      binding: {
+        ...sessionStartHook.payload.binding,
+        session_id: "x".repeat(api.MAX_SESSION_HOOK_ID_BYTES + 1),
+      },
+    },
+  })),
+  -32012,
+);
+assert.equal(errorCode(() => api.parseSessionHookResult({})), -32602);
+assert.equal(errorCode(() => api.validateDisposition({ kind: "deny" })), -32602);
 
 for (const entry of JSON.parse(readFileSync(resolve(negativeFixtures, "manifest.json"), "utf8")).fixtures) {
   const raw = readFileSync(resolve(negativeFixtures, `${entry.name}.json`), "utf8");
@@ -133,3 +218,14 @@ assert.deepEqual(api.LEGACY_ADAPTERS[0], { version: "0.1", status: "frozen", wir
 assert.deepEqual(api.LEGACY_ADAPTERS[1], { version: "0.2", status: "supported", wire: "legacy-json-rpc" });
 
 console.log(`TypeScript API 0.3 conformance: ${manifest.fixtures.length} fixtures`);
+
+// The real host assigns publisher identity and time; these are never publish arguments.
+api.parseBusDeclareParams(readFixture("bus-declare-params"));
+api.parseBusTopicParams(readFixture("bus-topic-params"));
+api.parseBusPublishParams(readFixture("bus-publish-params"));
+api.parseBusPublishResult(readFixture("bus-publish-result"));
+api.parseBusEventParams(readFixture("bus-event-params"));
+api.parseBusAck(readFixture("bus-ack"));
+for (const foreign of [{publisher: "beta"}, {published_at_ms: 1}, {process_generation: 1}]) {
+  assert.equal(errorCode(() => api.parseBusPublishParams({...readFixture("bus-publish-params"), ...foreign})), -32602);
+}

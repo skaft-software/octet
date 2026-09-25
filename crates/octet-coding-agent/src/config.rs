@@ -116,12 +116,13 @@ impl Default for SandboxPolicy {
 }
 
 /// Tool names understood by the v0.1 coding product.
-pub const SUPPORTED_TOOL_NAMES: [&str; 8] = [
+pub const SUPPORTED_TOOL_NAMES: [&str; 9] = [
     "read",
     "search",
     "edit",
     "write",
     "bash",
+    "powershell",
     "search_skills",
     "load_skill",
     "read_skill_resource",
@@ -148,7 +149,8 @@ impl Default for ToolPolicy {
                 // `bash` already provides faster, composable discovery through
                 // rg/find/ls. Keep the narrower search schema available for
                 // explicit allowlists without charging every default request.
-                .filter(|name| *name != "search")
+                // PowerShell is likewise explicit-only and Windows-gated.
+                .filter(|name| !matches!(*name, "search" | "powershell"))
                 .map(str::to_owned)
                 .collect(),
             excluded: BTreeSet::new(),
@@ -191,6 +193,25 @@ impl ToolPolicy {
         }
         self.enabled.remove(&name);
         self.excluded.insert(name);
+        Ok(())
+    }
+
+    /// Add one validated tool name to the allowlist.
+    ///
+    /// This is the additive opt-in path (`--powershell`): unlike
+    /// [`Self::only`] it preserves every default entry, and it deliberately
+    /// leaves `requested` untouched so an additive grant is never reported as
+    /// an `--tools` allowlist request.
+    pub fn include(&mut self, name: &str) -> anyhow::Result<()> {
+        let name = name.trim().to_ascii_lowercase();
+        if !valid_tool_name(&name) {
+            anyhow::bail!(
+                "invalid tool name {name:?}; built-ins: {}",
+                SUPPORTED_TOOL_NAMES.join(", ")
+            );
+        }
+        self.excluded.remove(&name);
+        self.enabled.insert(name);
         Ok(())
     }
 
@@ -403,7 +424,9 @@ pub struct Config {
     /// True when `model` came from an explicit command-line override rather
     /// than defaults that a resumed session may supersede.
     pub model_explicit: bool,
-    pub reasoning: ReasoningConfig,
+    /// Unset until a user preference or the selected model supplies a value.
+    /// `Some(Off)` is a deliberate preference, not the absence of one.
+    pub reasoning: Option<ReasoningConfig>,
     /// True when `reasoning` came from an explicit command-line override.
     pub reasoning_explicit: bool,
     /// Standard or Pro execution, selected independently from reasoning effort.
@@ -491,6 +514,7 @@ impl Config {
                 "write" => self.sandbox.allow_write,
                 // Process mode deliberately has shell-equivalent authority.
                 "bash" => self.sandbox.process_execution_allowed(),
+                "powershell" => cfg!(windows) && self.sandbox.process_execution_allowed(),
                 _ => true,
             }
     }
@@ -649,12 +673,32 @@ mod tests {
     }
 
     #[test]
+    fn powershell_opt_in_is_additive_and_removable_again() {
+        let mut policy = ToolPolicy::default();
+        assert!(!policy.enabled("powershell"));
+        policy.include("powershell").unwrap();
+        // The opt-in never replaces the default allowlist and is not an
+        // `--tools` request, so startup diagnostics do not claim one.
+        for name in ["read", "edit", "write", "bash", "powershell"] {
+            assert!(policy.enabled(name), "{name}");
+        }
+        assert!(policy.explicit_names().is_none());
+        assert!(policy.include("not a tool").is_err());
+        policy.exclude("powershell").unwrap();
+        assert!(!policy.enabled("powershell"));
+    }
+
+    #[test]
     fn default_tool_policy_uses_bash_instead_of_a_redundant_search_schema() {
         let policy = ToolPolicy::default();
         for name in ["read", "edit", "write", "bash"] {
             assert!(policy.enabled(name), "{name}");
         }
         assert!(!policy.enabled("search"));
+        assert!(!policy.enabled("powershell"));
+        assert!(ToolPolicy::only(["powershell".to_owned()])
+            .unwrap()
+            .enabled("powershell"));
         assert!(ToolPolicy::only(["search".to_owned()])
             .unwrap()
             .enabled("search"));

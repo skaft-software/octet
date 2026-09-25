@@ -463,7 +463,7 @@ fn compose_instructions_at(config: &Config, global: &Path) -> anyhow::Result<Str
                     MAX_CONTEXT_TOTAL_BYTES
                 );
             }
-            crate::output::stderr_line(format!("context: loaded {}", path.display()));
+            crate::output::routine_diagnostic(format!("context: loaded {}", path.display()));
             context.push(format!(
                 "<project_instructions path=\"{}\">\n{}\n</project_instructions>",
                 xml_attribute(&prompt_path(path)),
@@ -509,12 +509,19 @@ const MAX_SKILL_FILE_BYTES: usize = 256 * 1024;
 const MAX_SKILL_FRONTMATTER_BYTES: usize = 32 * 1024;
 const MAX_SKILL_ENTRIES_PER_ROOT: usize = 4096;
 const MAX_SKILL_NAME_LENGTH: usize = 64;
-const MAX_SKILL_DESCRIPTION_LENGTH: usize = 1024;
+const MAX_SKILL_DESCRIPTION_BYTES: usize = 1024;
+const MAX_SKILL_DESCRIPTORS: usize = 256;
+// Logical descriptor payload bytes, not a process RSS limit.
+const MAX_SKILL_DESCRIPTOR_BYTES: usize = 256 * 1024;
+const MAX_SKILL_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_SKILL_COMPATIBILITY_LENGTH: usize = 500;
 
 /// Immutable catalog built from one best-effort filesystem discovery pass.
 pub struct FileSystemSkillRegistry {
     descriptors: Arc<[SkillDescriptor]>,
+    // Keep winning locations, not unbounded descriptions, for explicit loads
+    // of skills omitted from the bounded discovery catalog.
+    sources: BTreeMap<SkillId, SkillCandidate>,
     diagnostics: Arc<[SkillDiagnostic]>,
     workspace_trusted: bool,
 }
@@ -619,7 +626,8 @@ fn check_allowed_subdirs(root: &Path, target: &Path) -> Result<(), SkillLoadErro
 }
 
 fn read_manifest_header(skill_md: &Path) -> Result<ManifestHeader, SkillLoadError> {
-    let file = fs::File::open(skill_md).map_err(|error| SkillLoadError::Io(error.to_string()))?;
+    let file = octet_agent::secure_fs::open_regular_file_for_read(skill_md)
+        .map_err(|error| SkillLoadError::Io(error.to_string()))?;
     // Cap the reader itself: `read_line` must never allocate an unbounded
     // newline-free manifest during startup discovery.
     let mut reader = BufReader::new(file.take((MAX_SKILL_FRONTMATTER_BYTES + 1) as u64));
@@ -714,7 +722,7 @@ fn parse_manifest_header_with_diagnostics(
         });
     }
 
-    let description = header.description.unwrap_or_default();
+    let mut description = header.description.unwrap_or_default();
     if description.trim().is_empty() {
         diagnostics.push(SkillDiagnostic {
             path: skill_md.to_path_buf(),
@@ -724,14 +732,17 @@ fn parse_manifest_header_with_diagnostics(
             "description is required".into(),
         ));
     }
-    if description.len() > MAX_SKILL_DESCRIPTION_LENGTH {
+    if description.len() > MAX_SKILL_DESCRIPTION_BYTES {
         diagnostics.push(SkillDiagnostic {
             path: skill_md.to_path_buf(),
             message: format!(
-                "description exceeds {MAX_SKILL_DESCRIPTION_LENGTH} characters ({})",
+                "description exceeds {MAX_SKILL_DESCRIPTION_BYTES} bytes ({}); catalog excerpt capped, skill instructions unchanged",
                 description.len()
             ),
         });
+        // Allocate only the excerpt, rather than retaining the full string's
+        // capacity after truncation. The authoritative file is never rewritten.
+        description = skill_description_excerpt(&description);
     }
     if header
         .compatibility
@@ -781,7 +792,14 @@ fn parse_manifest_header(
     trust: SkillTrust,
     skill_root: &Path,
 ) -> Result<SkillDescriptor, SkillLoadError> {
-    parse_manifest_header_with_diagnostics(skill_md, trust, skill_root, false, &mut Vec::new())
+    // Production discovery supplies canonical locations to the no-follow open.
+    parse_manifest_header_with_diagnostics(
+        &skill_md.canonicalize().unwrap(),
+        trust,
+        &skill_root.canonicalize().unwrap(),
+        false,
+        &mut Vec::new(),
+    )
 }
 
 /// Return SKILL.md's markdown body, excluding its required YAML frontmatter.
@@ -821,6 +839,58 @@ struct SkillCandidate {
     entrypoint: PathBuf,
     root: PathBuf,
     policy: SkillRootPolicy,
+}
+
+fn skill_description_excerpt(description: &str) -> String {
+    if description.len() <= MAX_SKILL_DESCRIPTION_BYTES {
+        return description.to_owned();
+    }
+    let mut end = MAX_SKILL_DESCRIPTION_BYTES - '…'.len_utf8();
+    while !description.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &description[..end])
+}
+
+fn skill_descriptor_bytes(descriptor: &SkillDescriptor) -> usize {
+    // Count retained text/path bytes plus serialized arbitrary metadata on
+    // admission and removal, without cloning descriptions or allocating JSON.
+    // Paths use their encoded bytes: serializing an entire descriptor would
+    // fail for otherwise valid filesystem paths containing non-UTF-8 bytes.
+    struct ByteCount(usize);
+    impl std::io::Write for ByteCount {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = ByteCount(0);
+    serde_json::to_writer(&mut count, &descriptor.metadata).expect("JSON metadata serializes");
+    for value in [
+        descriptor.id.as_str(),
+        descriptor.name.as_str(),
+        descriptor.description.as_str(),
+        descriptor.license.as_deref().unwrap_or_default(),
+        descriptor.compatibility.as_deref().unwrap_or_default(),
+        descriptor.version.as_deref().unwrap_or_default(),
+    ] {
+        count.0 += value.len();
+    }
+    for value in descriptor
+        .allowed_tools
+        .iter()
+        .chain(&descriptor.required_tools)
+        .chain(&descriptor.tags)
+    {
+        count.0 += value.len();
+    }
+    if let SkillSource::FileSystem { root, entrypoint } = &descriptor.source {
+        count.0 += root.as_os_str().len() + entrypoint.as_os_str().len();
+    }
+    count.0
 }
 
 fn skill_diagnostic(path: impl Into<PathBuf>, message: impl Into<String>) -> SkillDiagnostic {
@@ -1177,6 +1247,8 @@ impl FileSystemSkillRegistry {
         workspace_trusted: bool,
     ) -> Result<Self, SkillLoadError> {
         let mut selected = BTreeMap::<SkillId, SkillDescriptor>::new();
+        let mut sources = BTreeMap::<SkillId, SkillCandidate>::new();
+        let mut descriptor_bytes = 0;
         let mut real_paths = HashSet::<PathBuf>::new();
         for candidate in candidates {
             let real_path = match candidate.entrypoint.canonicalize() {
@@ -1206,13 +1278,16 @@ impl FileSystemSkillRegistry {
             ) {
                 Ok(descriptor) => {
                     diagnostics.extend(parsed_diagnostics);
-                    if let Some(shadowed) =
-                        selected.insert(descriptor.id.clone(), descriptor.clone())
-                    {
-                        let loser = match shadowed.source {
-                            SkillSource::FileSystem { entrypoint, .. } => entrypoint,
-                            SkillSource::BuiltIn => PathBuf::from("<built-in>"),
-                        };
+                    let id = descriptor.id.clone();
+                    if let Some(shadowed) = sources.insert(
+                        id.clone(),
+                        SkillCandidate {
+                            entrypoint: real_path.clone(),
+                            root,
+                            policy: candidate.policy,
+                        },
+                    ) {
+                        let loser = shadowed.entrypoint;
                         diagnostics.push(skill_diagnostic(
                             &real_path,
                             format!(
@@ -1222,6 +1297,19 @@ impl FileSystemSkillRegistry {
                             ),
                         ));
                     }
+                    // Admit in deterministic discovery order. A later winner
+                    // always replaces its predecessor, even if it no longer
+                    // fits: never advertise a shadowed lower-precedence skill.
+                    if let Some(previous) = selected.remove(&id) {
+                        descriptor_bytes -= skill_descriptor_bytes(&previous);
+                    }
+                    let bytes = skill_descriptor_bytes(&descriptor);
+                    if selected.len() < MAX_SKILL_DESCRIPTORS
+                        && bytes <= MAX_SKILL_DESCRIPTOR_BYTES - descriptor_bytes
+                    {
+                        descriptor_bytes += bytes;
+                        selected.insert(id, descriptor);
+                    }
                 }
                 Err(error) => {
                     diagnostics.extend(parsed_diagnostics);
@@ -1229,16 +1317,38 @@ impl FileSystemSkillRegistry {
                 }
             }
         }
-        let descriptors = selected.into_values().collect::<Vec<_>>();
-        for diagnostic in &diagnostics {
-            crate::output::stderr_line(format!(
-                "resource: skill {}: {}",
-                diagnostic.path.display(),
-                diagnostic.message
+        let omitted = sources.len() - selected.len();
+        if omitted > 0 {
+            diagnostics.push(skill_diagnostic(
+                "<skill catalog>",
+                format!("{omitted} skills omitted from discovery metadata (global limits: {MAX_SKILL_DESCRIPTORS} descriptors / {MAX_SKILL_DESCRIPTOR_BYTES} payload bytes); explicit /skill:NAME loads remain available"),
             ));
         }
+        let descriptors = selected.into_values().collect::<Vec<_>>();
+        let (_, prompt_omitted) = render_skills_for_prompt(&descriptors);
+        if prompt_omitted > 0 {
+            diagnostics.push(skill_diagnostic(
+                "<skill catalog>",
+                format!("{prompt_omitted} skills omitted from the model catalog (global {MAX_SKILL_PROMPT_BYTES}-byte rendered XML limit); explicit /skill:NAME loads remain available"),
+            ));
+        }
+        crate::output::checked_diagnostics(
+            crate::output::DiagnosticComponent::Resource("skills"),
+            diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    format!(
+                        "resource: skill {}: {}",
+                        diagnostic.path.display(),
+                        diagnostic.message
+                    )
+                })
+                .collect(),
+            true,
+        );
         Ok(Self {
             descriptors: Arc::from(descriptors),
+            sources,
             diagnostics: Arc::from(diagnostics),
             workspace_trusted,
         })
@@ -1317,14 +1427,39 @@ impl SkillRegistry for FileSystemSkillRegistry {
     }
 
     fn load(&self, id: &SkillId) -> Result<LoadedSkill, SkillLoadError> {
-        let descriptor = self
+        let source = self
+            .sources
+            .get(id)
+            .ok_or_else(|| SkillLoadError::NotFound(id.clone()))?;
+        if source.policy.trust == SkillTrust::Workspace && !self.workspace_trusted {
+            return Err(SkillLoadError::UntrustedWorkspace);
+        }
+        let descriptor = match self
             .descriptors
             .iter()
             .find(|descriptor| &descriptor.id == id)
-            .ok_or_else(|| SkillLoadError::NotFound(id.clone()))?;
-        if descriptor.trust == SkillTrust::Workspace && !self.workspace_trusted {
-            return Err(SkillLoadError::UntrustedWorkspace);
-        }
+        {
+            Some(descriptor) => descriptor.clone(),
+            None => {
+                // Omission is a catalog budget decision, not deactivation.
+                // Parse the winning bounded header on demand under the same
+                // trust/link boundary as an ordinary explicit load.
+                check_symlinks(&source.root, &source.entrypoint)?;
+                let descriptor = parse_manifest_header_with_diagnostics(
+                    &source.entrypoint,
+                    source.policy.trust,
+                    &source.root,
+                    source.policy.legacy_octet,
+                    &mut Vec::new(),
+                )?;
+                if &descriptor.id != id {
+                    return Err(SkillLoadError::InvalidManifest(
+                        "skill name changed since discovery; reload skills first".into(),
+                    ));
+                }
+                descriptor
+            }
+        };
         let (root, entrypoint) = match &descriptor.source {
             SkillSource::BuiltIn => {
                 return Err(SkillLoadError::UnsupportedSource("built-in".into()))
@@ -1343,7 +1478,7 @@ impl SkillRegistry for FileSystemSkillRegistry {
         let content = String::from_utf8(bytes).map_err(|_| SkillLoadError::InvalidUtf8)?;
         let content_hash = octet_agent::content_hash(content.as_bytes());
         Ok(LoadedSkill {
-            descriptor: descriptor.clone(),
+            descriptor,
             instructions: strip_frontmatter(&content)?,
             content_hash,
         })
@@ -1398,46 +1533,96 @@ fn skill_xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Format the immutable model-visible Agent Skills catalog in Pi's XML form.
-pub fn format_skills_for_prompt(descriptors: &[SkillDescriptor]) -> String {
-    let mut visible = descriptors
-        .iter()
-        .filter(|descriptor| !descriptor.disable_model_invocation)
-        .filter_map(|descriptor| skill_location(descriptor).map(|path| (descriptor, path)))
-        .collect::<Vec<_>>();
-    visible.sort_by(|(left, left_path), (right, right_path)| {
-        left.id
-            .cmp(&right.id)
-            .then_with(|| left_path.cmp(right_path))
-    });
-    if visible.is_empty() {
-        return String::new();
+fn skill_xml_bytes(value: &str) -> usize {
+    let mut chars = value.chars().peekable();
+    let mut bytes = 0;
+    while let Some(character) = chars.next() {
+        bytes += match character {
+            '&' => 5,
+            '<' | '>' => 4,
+            '"' | '\'' => 6,
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                1
+            }
+            other => other.len_utf8(),
+        };
     }
+    bytes
+}
 
-    let mut lines = vec![
-        "".to_owned(),
-        "".to_owned(),
-        "The following skills provide specialized instructions for specific tasks.".to_owned(),
-        "Use the read tool to load a skill's file when the task matches its description.".to_owned(),
-        "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.".to_owned(),
-        "".to_owned(),
-        "<available_skills>".to_owned(),
-    ];
-    for (descriptor, path) in visible {
-        lines.push("  <skill>".into());
-        lines.push(format!("    <name>{}</name>", skill_xml(&descriptor.id)));
-        lines.push(format!(
-            "    <description>{}</description>",
-            skill_xml(&descriptor.description)
-        ));
-        lines.push(format!(
-            "    <location>{}</location>",
-            skill_xml(&prompt_path(path))
-        ));
-        lines.push("  </skill>".into());
+const SKILL_PROMPT_HEADER: &str = "\n\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>";
+const SKILL_PROMPT_FOOTER: &str = "\n</available_skills>";
+const SKILL_PROMPT_CAP_NOTE: &str = "\nSkill catalog capped; omitted skills remain available through explicit /skill:NAME invocation.";
+const SKILL_ENTRY_PARTS: [&str; 4] = [
+    "\n  <skill>\n    <name>",
+    "</name>\n    <description>",
+    "</description>\n    <location>",
+    "</location>\n  </skill>",
+];
+
+/// Return complete XML plus the number of visible descriptors omitted by caps.
+fn render_skills_for_prompt(descriptors: &[SkillDescriptor]) -> (String, usize) {
+    // Retain only a bounded sorted prefix, even for non-filesystem callers.
+    // ID/path ordering matches the uncapped catalog; the index preserves ties.
+    let mut visible = BTreeMap::new();
+    let mut eligible = 0;
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        if descriptor.disable_model_invocation {
+            continue;
+        }
+        let Some(path) = skill_location(descriptor) else {
+            continue;
+        };
+        eligible += 1;
+        visible.insert((descriptor.id.as_str(), path, index), descriptor);
+        if visible.len() > MAX_SKILL_DESCRIPTORS {
+            visible.pop_last();
+        }
     }
-    lines.push("</available_skills>".into());
-    lines.join("\n")
+    if eligible == 0 {
+        return (String::new(), 0);
+    }
+    let mut text = SKILL_PROMPT_HEADER.to_owned();
+    let mut rendered = 0;
+    let limit = MAX_SKILL_PROMPT_BYTES - SKILL_PROMPT_FOOTER.len() - SKILL_PROMPT_CAP_NOTE.len();
+    for ((_, path, _), descriptor) in visible {
+        let description = skill_description_excerpt(&descriptor.description);
+        let location = prompt_path(path);
+        // Account for XML expansion and framing before allocating escaped
+        // copies. Never cut a name, path, entity, code point, or closing tag.
+        let bytes = SKILL_ENTRY_PARTS
+            .iter()
+            .map(|part| part.len())
+            .sum::<usize>()
+            + skill_xml_bytes(&descriptor.id)
+            + skill_xml_bytes(&description)
+            + skill_xml_bytes(&location);
+        if bytes > limit - text.len() {
+            break;
+        }
+        text.push_str(SKILL_ENTRY_PARTS[0]);
+        text.push_str(&skill_xml(&descriptor.id));
+        text.push_str(SKILL_ENTRY_PARTS[1]);
+        text.push_str(&skill_xml(&description));
+        text.push_str(SKILL_ENTRY_PARTS[2]);
+        text.push_str(&skill_xml(&location));
+        text.push_str(SKILL_ENTRY_PARTS[3]);
+        rendered += 1;
+    }
+    text.push_str(SKILL_PROMPT_FOOTER);
+    let omitted = eligible - rendered;
+    if omitted > 0 {
+        text.push_str(SKILL_PROMPT_CAP_NOTE);
+    }
+    (text, omitted)
+}
+
+/// Format a bounded model-visible catalog; explicit loads do not use this XML.
+pub fn format_skills_for_prompt(descriptors: &[SkillDescriptor]) -> String {
+    render_skills_for_prompt(descriptors).0
 }
 
 /// Expand an explicit `/skill:name arguments` invocation into an ordinary user message.
@@ -1488,7 +1673,7 @@ mod tests {
             invocation_cwd: cwd,
             model: None,
             model_explicit: false,
-            reasoning: octet_ai::ReasoningConfig::Off,
+            reasoning: None,
             reasoning_explicit: false,
             reasoning_mode: octet_ai::ReasoningMode::Standard,
             reasoning_mode_explicit: false,
@@ -1676,7 +1861,6 @@ Environment:
             "LICENSE",
             "extensions/octet-browse/REFERENCE.md",
             "extensions/octet-subagents/REFERENCE.md",
-            "extensions/octet-pi-compat/profiles/0.84.4.json",
             "crates/octet-ai/src/responses_ws.rs",
             "sdk/typescript/src/api_v03.ts",
             "sdk/typescript/src/api_v03.mjs",
@@ -1689,6 +1873,8 @@ Environment:
             "extensions/octet-browse/extension.toml",
             "extensions/octet-browse/extension.py",
             "crates/octet-coding-agent/src/main.rs",
+            // The retired parity inventory is not part of the public package.
+            "docs/reference/pi-compat/profiles/0.84.4.json",
             "docs/private.md",
             "sdk/private.so",
         ] {
@@ -1938,6 +2124,311 @@ Environment:
         let error =
             parse_manifest_header(&skill_md, SkillTrust::Workspace, &skill_dir).unwrap_err();
         assert!(error.to_string().contains("32 KiB"), "{error}");
+    }
+
+    fn write_catalog_skill(path: &Path, id: &str, description: &str, extra: &str, body: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            format!(
+                "---\nname: {id}\ndescription: {}\n{extra}---\n{body}",
+                serde_json::to_string(description).unwrap(),
+            ),
+        )
+        .unwrap();
+    }
+
+    fn discover_catalog(workspace: &Path, roots: Vec<PathBuf>) -> FileSystemSkillRegistry {
+        FileSystemSkillRegistry::discover(
+            workspace.to_path_buf(),
+            workspace.to_path_buf(),
+            roots,
+            false,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn retained_skill_descriptions_are_utf8_excerpts_not_truncated_instructions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("long.md");
+        let description = format!("{}{}", "a".repeat(1020), "🦀".repeat(4000));
+        let body = "\nAuthoritative instructions.\r\n<&> Keep every byte.\n";
+        write_catalog_skill(&path, "long", &description, "", body);
+        let registry = discover_catalog(temp.path(), vec![path.clone()]);
+        let descriptors = registry.descriptors();
+        assert_eq!(descriptors.len(), 1);
+        let retained = &descriptors[0].description;
+        assert_eq!(retained, &format!("{}…", "a".repeat(1020)));
+        assert!(retained.len() <= MAX_SKILL_DESCRIPTION_BYTES);
+        assert!(
+            retained.capacity() < description.len(),
+            "do not retain the large allocation"
+        );
+        assert!(registry
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("catalog excerpt capped")));
+        let loaded = registry.load(&"long".to_owned()).unwrap();
+        assert_eq!(loaded.instructions, body);
+        assert_eq!(
+            loaded.content_hash,
+            octet_agent::content_hash(&fs::read(path).unwrap())
+        );
+    }
+
+    #[test]
+    fn many_skill_roots_share_descriptor_limits_and_preserve_explicit_winners() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut roots = Vec::new();
+        for index in 0..MAX_SKILL_DESCRIPTORS + 8 {
+            let root = temp.path().join(format!("root-{}", index / 8));
+            if index % 8 == 0 {
+                roots.push(root.clone());
+            }
+            let id = format!("skill-{index:03}");
+            write_catalog_skill(
+                &root.join(&id).join("SKILL.md"),
+                &id,
+                "Small skill.",
+                "",
+                "Original instructions.",
+            );
+        }
+        // One retained and one omitted ID both get higher-precedence winners.
+        for index in [0, MAX_SKILL_DESCRIPTORS + 7] {
+            let path = temp.path().join(format!("override-{index}.md"));
+            write_catalog_skill(
+                &path,
+                &format!("skill-{index:03}"),
+                "Explicit-only winner.",
+                "disable-model-invocation: true\nrequired-tools: [read]\n",
+                "Winning instructions.",
+            );
+            roots.push(path);
+        }
+        let registry = discover_catalog(temp.path(), roots.clone());
+        let descriptors = registry.descriptors();
+        assert_eq!(descriptors.len(), MAX_SKILL_DESCRIPTORS);
+        assert_eq!(registry.sources.len(), MAX_SKILL_DESCRIPTORS + 8);
+        assert!(
+            descriptors
+                .iter()
+                .map(skill_descriptor_bytes)
+                .sum::<usize>()
+                <= MAX_SKILL_DESCRIPTOR_BYTES
+        );
+        assert!(registry.diagnostics().iter().any(|d| d
+            .message
+            .starts_with("8 skills omitted from discovery metadata")));
+        let prompt = format_skills_for_prompt(&descriptors);
+        assert!(!prompt.contains("<name>skill-000</name>"));
+        let omitted_id = format!("skill-{:03}", MAX_SKILL_DESCRIPTORS + 7);
+        assert!(!descriptors.iter().any(|d| d.id == omitted_id));
+        for id in ["skill-000".to_owned(), omitted_id] {
+            let loaded = registry.load(&id).unwrap();
+            assert!(loaded.descriptor.disable_model_invocation);
+            assert_eq!(loaded.instructions, "Winning instructions.");
+            assert!(matches!(
+                expand_skill_command(&registry, &format!("/skill:{id}"), &[]),
+                Err(SkillLoadError::MissingRequiredTools(_))
+            ));
+            assert!(
+                expand_skill_command(&registry, &format!("/skill:{id}"), &["read".into()])
+                    .unwrap()
+                    .unwrap()
+                    .contains("Winning instructions.")
+            );
+        }
+        // Rescanning the same ordered roots selects the same bounded catalog.
+        let again = discover_catalog(temp.path(), roots);
+        assert_eq!(prompt, format_skills_for_prompt(&again.descriptors()));
+
+        let omitted_id = format!("skill-{:03}", MAX_SKILL_DESCRIPTORS + 7);
+        let omitted_path = &registry.sources[&omitted_id].entrypoint;
+        write_catalog_skill(
+            omitted_path,
+            "renamed",
+            "Changed identity.",
+            "",
+            "New instructions.",
+        );
+        assert!(matches!(
+            registry.load(&omitted_id),
+            Err(SkillLoadError::InvalidManifest(_))
+        ));
+        #[cfg(unix)]
+        {
+            fs::remove_file(omitted_path).unwrap();
+            std::os::unix::fs::symlink(&registry.sources["skill-000"].entrypoint, omitted_path)
+                .unwrap();
+            assert!(matches!(
+                registry.load(&omitted_id),
+                Err(SkillLoadError::SymlinkRejected)
+            ));
+        }
+    }
+
+    #[test]
+    fn descriptor_byte_limit_does_not_advertise_a_shadowed_smaller_definition() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut roots = Vec::new();
+        for index in 0..24 {
+            let path = temp.path().join(format!("large-{index:02}.md"));
+            write_catalog_skill(
+                &path,
+                &format!("large-{index:02}"),
+                "Large metadata.",
+                &format!("metadata:\n  blob: {}\n", "x".repeat(16 * 1024)),
+                "Earlier instructions.",
+            );
+            roots.push(path);
+        }
+        let before = discover_catalog(temp.path(), roots.clone());
+        assert!(before.descriptors().len() < 24);
+        assert!(
+            before
+                .descriptors()
+                .iter()
+                .map(skill_descriptor_bytes)
+                .sum::<usize>()
+                <= MAX_SKILL_DESCRIPTOR_BYTES
+        );
+        let path = temp.path().join("winner.md");
+        write_catalog_skill(
+            &path,
+            "large-00",
+            "Larger winner.",
+            &format!("metadata:\n  blob: {}\n", "y".repeat(31 * 1024)),
+            "Winning instructions.",
+        );
+        roots.push(path);
+        let registry = discover_catalog(temp.path(), roots);
+        let descriptors = registry.descriptors();
+        assert!(!descriptors.iter().any(|d| d.id == "large-00"));
+        assert!(
+            descriptors
+                .iter()
+                .map(skill_descriptor_bytes)
+                .sum::<usize>()
+                <= MAX_SKILL_DESCRIPTOR_BYTES
+        );
+        assert!(registry
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("payload bytes")));
+        let loaded = registry.load(&"large-00".to_owned()).unwrap();
+        assert_eq!(loaded.instructions, "Winning instructions.");
+        assert_eq!(loaded.descriptor.metadata["blob"], "y".repeat(31 * 1024));
+    }
+
+    #[test]
+    fn skill_xml_expansion_has_a_global_budget_and_complete_paths_and_tags() {
+        let temp = tempfile::tempdir().unwrap();
+        let description = "\"".repeat(MAX_SKILL_DESCRIPTION_BYTES);
+        let mut roots = Vec::new();
+        for index in 0..32 {
+            let path = temp.path().join(format!("xml-{index:02}.md"));
+            write_catalog_skill(
+                &path,
+                &format!("xml-{index:02}"),
+                &description,
+                "",
+                "Full instructions.",
+            );
+            roots.push(path);
+        }
+        let registry = discover_catalog(temp.path(), roots);
+        let descriptors = registry.descriptors();
+        assert_eq!(
+            descriptors.len(),
+            32,
+            "this fixture hits XML bytes, not descriptor limits"
+        );
+        let (text, omitted) = render_skills_for_prompt(&descriptors);
+        assert!(text.len() <= MAX_SKILL_PROMPT_BYTES);
+        let rendered = text.matches("  <skill>\n").count();
+        assert!(rendered > 0 && omitted > 0);
+        assert_eq!(rendered + omitted, descriptors.len());
+        assert_eq!(text.matches("  </skill>").count(), rendered);
+        assert!(text.ends_with(&format!("{SKILL_PROMPT_FOOTER}{SKILL_PROMPT_CAP_NOTE}")));
+        for descriptor in &descriptors[..rendered] {
+            assert!(text.contains(&format!(
+                "<description>{}</description>",
+                "&quot;".repeat(MAX_SKILL_DESCRIPTION_BYTES)
+            )));
+            assert!(text.contains(&format!(
+                "<location>{}</location>",
+                skill_xml(&prompt_path(skill_location(descriptor).unwrap()))
+            )));
+        }
+        assert!(registry
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("rendered XML limit")));
+        assert_eq!(
+            registry.load(&"xml-31".to_owned()).unwrap().instructions,
+            "Full instructions."
+        );
+
+        // The formatter independently bounds count and description retention
+        // even if handed non-registry descriptors in an arbitrary order.
+        let mut many = (0..MAX_SKILL_DESCRIPTORS + 20)
+            .map(|index| {
+                let mut descriptor = descriptors[0].clone();
+                descriptor.id = format!("skill-{index:04}");
+                descriptor.description = "Small.".into();
+                descriptor
+            })
+            .collect::<Vec<_>>();
+        let ordered = format_skills_for_prompt(&many);
+        many.reverse();
+        assert_eq!(ordered, format_skills_for_prompt(&many));
+        assert!(ordered.matches("  <skill>\n").count() <= MAX_SKILL_DESCRIPTORS);
+        assert!(ordered.len() <= MAX_SKILL_PROMPT_BYTES);
+    }
+
+    #[test]
+    fn skill_xml_accounting_preserves_unicode_escaping_and_never_clips_locations() {
+        for value in ["", "é🦀<&>\"'\r\nend\r", "\r\r\n", "<&"] {
+            assert_eq!(skill_xml_bytes(value), skill_xml(value).len());
+        }
+        assert_eq!(skill_xml("é<&>\"'\r\n"), "é&lt;&amp;&gt;&quot;&apos;\n");
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("unicode.md");
+        write_catalog_skill(&path, "unicode", "é<&>\"'", "", "Instructions.");
+        let registry = discover_catalog(temp.path(), vec![path]);
+        let mut descriptor = registry.descriptors()[0].clone();
+        descriptor.source = SkillSource::FileSystem {
+            root: PathBuf::from("/é&"),
+            entrypoint: PathBuf::from("/é&/a<\"'/SKILL.md"),
+        };
+        let text = format_skills_for_prompt(&[descriptor.clone()]);
+        assert!(text.contains("<location>/é&amp;/a&lt;&quot;&apos;/SKILL.md</location>"));
+        assert!(text.contains("<description>é&lt;&amp;&gt;&quot;&apos;</description>"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            descriptor.source = SkillSource::FileSystem {
+                root: PathBuf::from("/"),
+                entrypoint: PathBuf::from(std::ffi::OsString::from_vec(
+                    b"/non-utf8-\xff/SKILL.md".to_vec(),
+                )),
+            };
+            assert!(skill_descriptor_bytes(&descriptor) > 0);
+            assert!(format_skills_for_prompt(&[descriptor.clone()])
+                .contains("/non-utf8-�/SKILL.md</location>"));
+        }
+        descriptor.source = SkillSource::FileSystem {
+            root: PathBuf::from("/"),
+            entrypoint: PathBuf::from(format!("/{}SKILL.md", "&".repeat(MAX_SKILL_PROMPT_BYTES))),
+        };
+        let (text, omitted) = render_skills_for_prompt(&[descriptor]);
+        assert_eq!(omitted, 1);
+        assert!(!text.contains("  <skill>"));
+        assert!(text.len() <= MAX_SKILL_PROMPT_BYTES);
+        assert!(text.contains(SKILL_PROMPT_FOOTER));
     }
 
     #[test]

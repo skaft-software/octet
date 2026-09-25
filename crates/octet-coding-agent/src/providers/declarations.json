@@ -30,10 +30,15 @@
         {
           "endpoint_id": "openai",
           "protocol": "openai_responses",
-          "transport": "http",
+          "transport": "websocket_preferred",
           "body_encoding": "identity",
           "auth_presentation": "bearer",
-          "responses_profile": "default"
+          "responses_profile": "default",
+          "responses_features": {
+            "async_tools": true,
+            "steering": true,
+            "reasoning_effort_updates": true
+          }
         }
       ],
       "route_rules": [
@@ -59,6 +64,8 @@
       "authentication": {
         "kind": "environment",
         "variables": [
+          "ANTHROPIC_AUTH_TOKEN",
+          "ANTHROPIC_OAUTH_TOKEN",
           "ANTHROPIC_API_KEY"
         ]
       },
@@ -270,7 +277,7 @@
       "routes": [
         {
           "endpoint_id": "xai",
-          "protocol": "openai_chat",
+          "protocol": "openai_responses",
           "transport": "http",
           "body_encoding": "identity",
           "auth_presentation": "bearer",
@@ -770,7 +777,10 @@
           "transport": "websocket_preferred",
           "body_encoding": "zstd",
           "auth_presentation": "dynamic",
-          "responses_profile": "codex"
+          "responses_profile": "codex",
+          "responses_features": {
+            "reasoning_effort_updates": true
+          }
         }
       ],
       "route_rules": [
@@ -1017,7 +1027,7 @@
           "body_encoding": "identity",
           "auth_presentation": "header",
           "auth_header": "api-key",
-          "responses_profile": "default"
+          "responses_profile": "azure"
         }
       ],
       "route_rules": [
@@ -1334,6 +1344,249 @@
       "compatibility": "default",
       "pricing": "reference",
       "discovery_capabilities": "assume_image_input"
+    },
+    {
+      "const_name": "BASETEN",
+      "id": "baseten",
+      "name": "Baseten",
+      "base_url": "https://inference.baseten.co/v1/",
+      "authentication": {
+        "kind": "environment",
+        "variables": [
+          "BASETEN_API_KEY"
+        ]
+      },
+      "model_discovery": {
+        "kind": "openai_models",
+        "filter": {
+          "kind": "all"
+        }
+      },
+      "static_models": "none",
+      "inventory_cache": "required",
+      "routes": [
+        {
+          "endpoint_id": "baseten",
+          "protocol": "openai_chat",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "bearer",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "openai",
+      "pricing": "reference",
+      "discovery_capabilities": "default"
+    },
+    {
+      "const_name": "QWEN_TOKEN_PLAN",
+      "id": "qwen-token-plan",
+      "name": "Qwen Token Plan",
+      "base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+      "authentication": {
+        "kind": "environment",
+        "variables": [
+          "QWEN_TOKEN_PLAN_API_KEY"
+        ]
+      },
+      "model_discovery": {
+        "kind": "openai_models",
+        "filter": {
+          "kind": "all"
+        }
+      },
+      "static_models": "none",
+      "inventory_cache": "required",
+      "routes": [
+        {
+          "endpoint_id": "qwen-token-plan",
+          "protocol": "openai_chat",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "bearer",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "default",
+      "pricing": "reference",
+      "discovery_capabilities": "default"
+    },
+    {
+      "const_name": "QWEN_TOKEN_PLAN_CN",
+      "id": "qwen-token-plan-cn",
+      "name": "Qwen Token Plan CN",
+      "base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/",
+      "authentication": {
+        "kind": "environment",
+        "variables": [
+          "QWEN_TOKEN_PLAN_CN_API_KEY"
+        ]
+      },
+      "model_discovery": {
+        "kind": "openai_models",
+        "filter": {
+          "kind": "all"
+        }
+      },
+      "static_models": "none",
+      "inventory_cache": "required",
+      "routes": [
+        {
+          "endpoint_id": "qwen-token-plan-cn",
+          "protocol": "openai_chat",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "bearer",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "default",
+      "pricing": "reference",
+      "discovery_capabilities": "default"
+    },
+    {
+      "const_name": "QWEN_TOKEN_PLAN_INDIVIDUAL",
+      "id": "qwen-token-plan-individual",
+      "name": "Qwen Token Plan Individual",
+      "base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+      "authentication": {
+        "kind": "environment",
+        "variables": [
+          "QWEN_TOKEN_PLAN_API_KEY"
+        ]
+      },
+      "model_discovery": {
+        "kind": "openai_models",
+        "filter": {
+          "kind": "all"
+        }
+      },
+      "static_models": "none",
+      "inventory_cache": "required",
+      "routes": [
+        {
+          "endpoint_id": "qwen-token-plan-individual",
+          "protocol": "openai_chat",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "bearer",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "default",
+      "pricing": "reference",
+      "discovery_capabilities": "default"
+    },
+    {
+      "const_name": "META",
+      "id": "meta",
+      "name": "Meta",
+      "base_url": "https://api.meta.ai/v1/",
+      "authentication": {
+        "kind": "environment",
+        "variables": [
+          "META_API_KEY"
+        ]
+      },
+      "model_discovery": {
+        "kind": "openai_models",
+        "filter": {
+          "kind": "prefix",
+          "values": [
+            "muse-spark-"
+          ]
+        }
+      },
+      "static_models": "none",
+      "inventory_cache": "required",
+      "routes": [
+        {
+          "endpoint_id": "meta",
+          "protocol": "openai_responses",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "bearer",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "default",
+      "pricing": "reference",
+      "discovery_capabilities": "default"
+    },
+    {
+      "const_name": "ZAI_CODING_CN",
+      "id": "zai-coding-cn",
+      "name": "Z.AI Coding CN",
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4/",
+      "authentication": {
+        "kind": "environment",
+        "variables": [
+          "ZAI_CODING_CN_API_KEY"
+        ]
+      },
+      "model_discovery": {
+        "kind": "openai_models",
+        "filter": {
+          "kind": "all"
+        }
+      },
+      "static_models": "none",
+      "inventory_cache": "required",
+      "routes": [
+        {
+          "endpoint_id": "zai-coding-cn",
+          "protocol": "openai_chat",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "bearer",
+          "responses_profile": "default"
+        }
+      ],
+      "route_rules": [
+        {
+          "kind": "default",
+          "route": 0
+        }
+      ],
+      "extra_headers": [],
+      "compatibility": "default",
+      "pricing": "reference",
+      "discovery_capabilities": "default"
     }
   ]
 }

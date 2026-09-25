@@ -56,6 +56,25 @@ pub trait EventObserver: Send + Sync {
     fn on_event_for_owner(&self, event: &AgentEvent, _resource_owner: &str) {
         self.on_event(event);
     }
+
+    /// Called once when a provider response durably parks a deferred run
+    /// (`run_suspend`).
+    ///
+    /// Like [`Self::on_run_started_for_owner`], this hook is intentionally
+    /// separate from [`Self::on_event`]: it gives a host a typed, durable
+    /// suspension identity (operation, handle, poll, generation) without adding
+    /// a frontend stream variant. No provider work is in flight for the parked
+    /// operation until a later permitted pass polls it.
+    fn on_run_suspend(&self, _suspension: &crate::events::DeferredRunSuspended) {}
+
+    /// Called once after an admitted deferred poll durably resumes a parked run
+    /// (`run_resume`).
+    ///
+    /// The poll's `deferred.effect_pending` intent is durable before this
+    /// callback, and exactly one permit was consumed for the driving pass; a
+    /// stale, duplicate, foreign, or expired poll never reaches this hook
+    /// because it is refused before any provider work.
+    fn on_run_resume(&self, _resume: &crate::events::DeferredRunResumed) {}
 }
 
 /// Typed interception point around every broker-admitted, successfully resolved
@@ -162,6 +181,17 @@ pub trait ProviderRetryHook: Send + Sync {
     async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice;
 }
 
+/// Optional API 0.4 replacement for local parent-model summarization.
+/// The host selects this only for a vision-capable active model and owns the
+/// history boundary, validation, checkpoint and subsequent replay.
+#[async_trait::async_trait]
+pub trait CompactionStrategy: Send + Sync {
+    /// Render the complete supplied transcript slice as PNG frames. A failed
+    /// slice aborts compaction; partial frames must never become a checkpoint.
+    async fn render(&self, model_id: &str, text: &str, owner: &str)
+        -> Result<Vec<Vec<u8>>, String>;
+}
+
 /// Stable semantic summary of a completed assistant turn before it becomes a
 /// durable session entry.
 ///
@@ -244,6 +274,8 @@ pub const MAX_POST_MUTATION_AFFECTED_RESOURCES: usize = 32;
 pub const MAX_POST_MUTATION_ID_BYTES: usize = 128;
 /// Maximum opaque resource identity bytes in a post-mutation notification.
 pub const MAX_POST_MUTATION_RESOURCE_ID_BYTES: usize = 128;
+/// Maximum refused tool names echoed back by one active-tool narrowing error.
+pub(crate) const MAX_REFUSED_ACTIVE_TOOL_NAMES: usize = 8;
 
 /// Host-owned category of a completed mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -402,6 +434,10 @@ pub struct PostMutationRescan {
     pub extension: String,
     /// Stable mutation identity that caused the request.
     pub mutation_id: String,
+    /// Host-owned resource family that settled.
+    pub kind: PostMutationKind,
+    /// Process generation that requested the rescan, independent of the resource revision.
+    pub process_generation: u64,
     /// Generation fence inherited from the settled host mutation.
     pub generation: u64,
     /// Selected opaque resource identities, already subset-validated by host.
@@ -424,6 +460,9 @@ struct DynamicToolRegistry {
     ready_changed: Arc<Notify>,
     policy: Option<ToolPolicy>,
     revision: u64,
+    /// `None` publishes the full host-policed surface; `Some` publishes only
+    /// the intersection of these names with that surface.
+    active_names: Option<BTreeSet<String>>,
 }
 
 struct DynamicToolGroup {
@@ -660,6 +699,21 @@ fn validate_dynamic_catalog(
     owner: &str,
     tools: &[Arc<dyn Tool>],
 ) -> Result<(), String> {
+    // Tool::definition returns an owned schema. Extract existing names once,
+    // not once per candidate (which repeatedly cloned every nested schema).
+    let registered_names = registry
+        .groups
+        .iter()
+        .filter(|group| group.owner != owner)
+        .flat_map(|group| &group.tools)
+        .map(|tool| tool.definition().name)
+        .collect::<BTreeSet<_>>();
+    let reserved_names = registry
+        .reservations
+        .iter()
+        .filter(|reservation| reservation.owner != owner)
+        .flat_map(|reservation| reservation.names.iter())
+        .collect::<BTreeSet<_>>();
     let mut names = BTreeSet::new();
     for tool in tools {
         let name = tool.definition().name;
@@ -669,23 +723,12 @@ fn validate_dynamic_catalog(
         if registry.static_names.contains(&name) {
             return Err(format!("dynamic tool `{name}` conflicts with a host tool"));
         }
-        if registry
-            .groups
-            .iter()
-            .filter(|group| group.owner != owner)
-            .flat_map(|group| &group.tools)
-            .any(|registered| registered.definition().name == name)
-        {
+        if registered_names.contains(&name) {
             return Err(format!(
                 "dynamic tool `{name}` conflicts with another extension"
             ));
         }
-        if registry
-            .reservations
-            .iter()
-            .filter(|reservation| reservation.owner != owner)
-            .any(|reservation| reservation.names.contains(&name))
-        {
+        if reserved_names.contains(&name) {
             return Err(format!(
                 "dynamic tool `{name}` is reserved by another extension update"
             ));
@@ -702,6 +745,8 @@ pub struct ExtensionHost {
     pub(crate) observers: Vec<Arc<dyn EventObserver>>,
     pub(crate) tool_call_hooks: Vec<Arc<dyn ToolCallHook>>,
     pub(crate) provider_retry_hooks: Vec<Arc<dyn ProviderRetryHook>>,
+    pub(crate) compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
+    pub(crate) duplicate_compaction_strategy: bool,
     pub(crate) persistence_metadata_hooks: Vec<RegisteredPersistenceMetadataHook>,
     pub(crate) duplicate_tools: Vec<String>,
     pub(crate) invalid_metadata_namespaces: Vec<String>,
@@ -715,6 +760,8 @@ impl Default for ExtensionHost {
             observers: Vec::new(),
             tool_call_hooks: Vec::new(),
             provider_retry_hooks: Vec::new(),
+            compaction_strategy: None,
+            duplicate_compaction_strategy: false,
             persistence_metadata_hooks: Vec::new(),
             duplicate_tools: Vec::new(),
             invalid_metadata_namespaces: Vec::new(),
@@ -827,6 +874,16 @@ impl ExtensionHost {
         self.provider_retry_hooks.push(Arc::new(hook));
     }
 
+    /// Register the one active local-compaction strategy. Competing providers
+    /// are rejected when the Agent is constructed instead of depending on load order.
+    pub fn compaction_strategy(&mut self, strategy: impl CompactionStrategy + 'static) {
+        if self.compaction_strategy.is_some() {
+            self.duplicate_compaction_strategy = true;
+        } else {
+            self.compaction_strategy = Some(Arc::new(strategy));
+        }
+    }
+
     /// Register a typed pre-persistence metadata hook under one extension-owned
     /// namespace.
     ///
@@ -919,6 +976,8 @@ impl ExtensionHost {
         scoped.observers = self.observers.clone();
         scoped.tool_call_hooks = self.tool_call_hooks.clone();
         scoped.provider_retry_hooks = self.provider_retry_hooks.clone();
+        scoped.compaction_strategy = self.compaction_strategy.clone();
+        scoped.duplicate_compaction_strategy = self.duplicate_compaction_strategy;
         scoped.persistence_metadata_hooks = self.persistence_metadata_hooks.clone();
         scoped.invalid_metadata_namespaces = self.invalid_metadata_namespaces.clone();
         let mut effective = Vec::new();
@@ -940,20 +999,92 @@ impl ExtensionHost {
         Ok((scoped, effective))
     }
 
+    /// Narrows the published provider and execution surface to `names`.
+    ///
+    /// This is strictly a narrowing operation. Requested names are
+    /// intersected with the tools this host already publishes after every
+    /// product policy filter, so a call can never add a tool, re-admit a name
+    /// the sandbox, effect broker, or product policy excluded, or widen what
+    /// an admitted tool may do. A name outside that surface refuses the whole
+    /// request (at most `MAX_REFUSED_ACTIVE_TOOL_NAMES` names are echoed in
+    /// the error) and leaves host state untouched.
+    ///
+    /// `None` restores the full host-policed surface. `Some(empty)` is valid
+    /// and publishes no tools. Every accepted call bumps the tool-snapshot
+    /// revision, so a run holding a clone of this host observes the new
+    /// surface at its next turn boundary.
+    pub fn set_active_tools(&self, names: Option<&BTreeSet<String>>) -> Result<(), String> {
+        let mut dynamic = self
+            .dynamic_tools
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(names) = names {
+            let policed = self.policed_tool_names_locked(&dynamic);
+            let refused = names.difference(&policed).cloned().collect::<Vec<_>>();
+            if !refused.is_empty() {
+                let total = refused.len();
+                let listed = refused
+                    .iter()
+                    .take(MAX_REFUSED_ACTIVE_TOOL_NAMES)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return Err(format!(
+                    "active tool set names {total} tool(s) that are not registered after host policy: {}{}",
+                    listed.join(", "),
+                    if total > listed.len() { ", …" } else { "" },
+                ));
+            }
+        }
+        dynamic.active_names = names.cloned();
+        dynamic.revision = dynamic.revision.saturating_add(1);
+        Ok(())
+    }
+
+    /// Every published tool in wire order, ignoring any active-set narrowing.
+    fn policed_tools<'a>(
+        &'a self,
+        dynamic: &'a DynamicToolRegistry,
+    ) -> impl Iterator<Item = &'a Arc<dyn Tool>> {
+        self.tools
+            .iter()
+            .chain(dynamic.groups.iter().flat_map(|group| group.tools.iter()))
+    }
+
+    /// Every published tool name after product policy, ignoring any active-set
+    /// narrowing. Sorted and deduplicated.
+    fn policed_tool_names_locked(&self, dynamic: &DynamicToolRegistry) -> BTreeSet<String> {
+        self.policed_tools(dynamic)
+            .map(|tool| tool.definition().name)
+            .collect()
+    }
+
+    /// Every host-policed registered tool name, sorted, including names that
+    /// are currently deactivated by [`Self::set_active_tools`].
+    ///
+    /// This is the validation surface for active-tool requests: a name absent
+    /// here was removed by product policy or never registered, and no
+    /// activation request can reintroduce it.
+    pub(crate) fn policed_tool_names(&self) -> Vec<String> {
+        let dynamic = self
+            .dynamic_tools
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.policed_tool_names_locked(&dynamic)
+            .into_iter()
+            .collect()
+    }
+
     pub(crate) fn tool_snapshot(&self) -> (u64, Vec<Arc<dyn Tool>>) {
         let dynamic = self
             .dynamic_tools
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dynamic_len: usize = dynamic.groups.iter().map(|group| group.tools.len()).sum();
-        let mut tools = Vec::with_capacity(self.tools.len() + dynamic_len);
-        tools.extend(self.tools.iter().cloned());
-        tools.extend(
-            dynamic
-                .groups
-                .iter()
-                .flat_map(|group| group.tools.iter().cloned()),
-        );
+        let active = dynamic.active_names.as_ref();
+        let tools = self
+            .policed_tools(&dynamic)
+            .filter(|tool| active.is_none_or(|active| active.contains(&tool.definition().name)))
+            .cloned()
+            .collect::<Vec<_>>();
         (dynamic.revision, tools)
     }
 
@@ -991,12 +1122,40 @@ mod tests {
     use crate::tool::{ToolContext, ToolError, ToolOutput};
     use octet_ai::ToolDef;
 
+    struct NoMetadata;
+
+    #[async_trait::async_trait]
+    impl PersistenceMetadataHook for NoMetadata {
+        async fn before_assistant_persist(
+            &self,
+            _context: &AssistantPersistenceContext,
+        ) -> Option<PersistenceMetadataProposal> {
+            None
+        }
+    }
+
+    #[test]
+    fn persistence_metadata_registration_rejects_duplicate_and_invalid_namespaces() {
+        let mut host = ExtensionHost::new();
+        host.persistence_metadata_hook("owner.notes", NoMetadata);
+        host.persistence_metadata_hook("owner.notes", NoMetadata);
+        host.persistence_metadata_hook("owner..invalid", NoMetadata);
+        assert_eq!(host.persistence_metadata_hooks.len(), 1);
+        assert_eq!(host.persistence_metadata_hooks[0].namespace, "owner.notes");
+        assert_eq!(
+            host.invalid_metadata_namespaces,
+            ["owner.notes", "owner..invalid"]
+        );
+    }
+
     struct NamedTool(&'static str);
 
     #[async_trait::async_trait]
     impl Tool for NamedTool {
         fn definition(&self) -> ToolDef {
             ToolDef {
+                async_execution: false,
+                constrained_sampling: None,
                 name: self.0.to_string(),
                 description: String::new(),
                 parameters: serde_json::json!({"type": "object"}),
@@ -1072,6 +1231,60 @@ mod tests {
 
     fn named_tool(name: &'static str) -> Arc<dyn Tool> {
         Arc::new(NamedTool(name))
+    }
+
+    #[test]
+    fn dynamic_catalog_clones_each_definition_once_per_validation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountedTool {
+            name: String,
+            definitions: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl Tool for CountedTool {
+            fn definition(&self) -> ToolDef {
+                self.definitions.fetch_add(1, Ordering::Relaxed);
+                ToolDef {
+                    async_execution: false,
+                    name: self.name.clone(),
+                    description: String::new(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    constrained_sampling: None,
+                }
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &ToolContext<'_>,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!("validation never executes tools")
+            }
+        }
+        for count in [8, 32, 128] {
+            let definitions = Arc::new(AtomicUsize::new(0));
+            let tools = |prefix: &str| {
+                (0..count)
+                    .map(|index| {
+                        Arc::new(CountedTool {
+                            name: format!("{prefix}_{index}"),
+                            definitions: Arc::clone(&definitions),
+                        }) as Arc<dyn Tool>
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let registry = DynamicToolRegistry {
+                groups: vec![DynamicToolGroup {
+                    owner: "other".into(),
+                    tools: tools("old"),
+                }],
+                ..DynamicToolRegistry::default()
+            };
+            validate_dynamic_catalog(&registry, "new", &tools("new")).unwrap();
+            assert_eq!(definitions.load(Ordering::Relaxed), 2 * count);
+            assert!(validate_dynamic_catalog(&registry, "new", &tools("old")).is_err());
+            // Replacing one's own group never conflicts with its previous names.
+            validate_dynamic_catalog(&registry, "other", &tools("old")).unwrap();
+        }
     }
 
     #[test]
@@ -1157,6 +1370,102 @@ mod tests {
         assert_eq!(
             alpha.published_names(),
             BTreeSet::from(["alpha_new".to_owned()])
+        );
+    }
+
+    fn host_tool_names(host: &ExtensionHost) -> Vec<String> {
+        host.tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect()
+    }
+
+    #[test]
+    fn active_tool_narrowing_filters_the_snapshot_and_restores() {
+        let mut host = ExtensionHost::new();
+        host.tool(NamedTool("read"));
+        host.tool(NamedTool("write"));
+        let initial_revision = host.tool_snapshot().0;
+
+        host.set_active_tools(Some(&BTreeSet::from(["read".to_owned()])))
+            .unwrap();
+        assert_eq!(host_tool_names(&host), ["read"]);
+        // Deactivation is not deregistration.
+        assert_eq!(host.policed_tool_names(), ["read", "write"]);
+        let narrowed_revision = host.tool_snapshot().0;
+        assert!(narrowed_revision > initial_revision);
+
+        // An empty set is valid and publishes no tools.
+        host.set_active_tools(Some(&BTreeSet::new())).unwrap();
+        assert!(host.tool_definitions().is_empty());
+
+        host.set_active_tools(None).unwrap();
+        assert_eq!(host_tool_names(&host), ["read", "write"]);
+        assert!(host.tool_snapshot().0 > narrowed_revision);
+    }
+
+    #[test]
+    fn active_tool_narrowing_refuses_unknown_names_without_state_change() {
+        let mut host = ExtensionHost::new();
+        host.tool(NamedTool("read"));
+        let revision = host.tool_snapshot().0;
+
+        let error = host
+            .set_active_tools(Some(&BTreeSet::from([
+                "read".to_owned(),
+                "ghost".to_owned(),
+            ])))
+            .unwrap_err();
+        assert!(
+            error.contains("ghost") && !error.contains("read"),
+            "the refused name is reported: {error}"
+        );
+        assert_eq!(host_tool_names(&host), ["read"]);
+        assert_eq!(host.tool_snapshot().0, revision);
+    }
+
+    #[test]
+    fn active_tool_narrowing_cannot_readmit_policy_denied_names() {
+        let mut host = ExtensionHost::new();
+        host.set_tool_policy(|name| name != "denied");
+        host.dynamic_tools("owner", vec![named_tool("allowed"), named_tool("denied")])
+            .unwrap();
+        assert_eq!(host.policed_tool_names(), ["allowed"]);
+        let revision = host.tool_snapshot().0;
+
+        let error = host
+            .set_active_tools(Some(&BTreeSet::from(["denied".to_owned()])))
+            .unwrap_err();
+        assert!(error.contains("denied"), "{error}");
+        // A refused request changes nothing: the policed surface stays active.
+        assert_eq!(host_tool_names(&host), ["allowed"]);
+        assert_eq!(host.tool_snapshot().0, revision);
+
+        host.set_active_tools(Some(&BTreeSet::from(["allowed".to_owned()])))
+            .unwrap();
+        assert_eq!(host_tool_names(&host), ["allowed"]);
+    }
+
+    #[test]
+    fn active_tool_narrowing_bumps_the_revision_a_cloned_run_host_observes() {
+        let mut host = ExtensionHost::new();
+        host.tool(NamedTool("read"));
+        host.tool(NamedTool("write"));
+        // `Agent::prompt` hands a clone of the host to the streaming loop.
+        let run_host = host.clone();
+        let before = run_host.tool_snapshot().0;
+
+        host.set_active_tools(Some(&BTreeSet::from(["write".to_owned()])))
+            .unwrap();
+
+        let (revision, tools) = run_host.tool_snapshot();
+        assert!(revision > before);
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.definition().name.clone())
+                .collect::<Vec<_>>(),
+            ["write"]
         );
     }
 }

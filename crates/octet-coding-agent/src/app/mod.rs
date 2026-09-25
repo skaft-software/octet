@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 pub mod bootstrap;
+mod delegation_models;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use octet_ai::{
     ReasoningEffort, ReasoningMode,
 };
 
+use crate::app::bootstrap::CodexContextNotes;
 use crate::config::Config;
 use crate::config::ThinkingLevel;
 use crate::extensions::SUBAGENTS_EXTENSION_NAME;
@@ -157,6 +159,20 @@ fn effort_level(effort: ReasoningEffort) -> ThinkingLevel {
         ReasoningEffort::Max => ThinkingLevel::Max,
         ReasoningEffort::Ultra => ThinkingLevel::Ultra,
     }
+}
+
+/// Use the selected endpoint's default only when no user/session preference exists.
+/// Without an advertised default, use the capability's first enabled choice;
+/// absent reasoning metadata stays Off. Callers still normalize the
+/// selection and enforce runtime gates (including Ultra's subagents requirement).
+pub fn default_reasoning_for_model(model: &Model) -> ReasoningConfig {
+    model
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .and_then(|capability| capability.default_selection())
+        .unwrap_or(ReasoningConfig::Off)
 }
 
 /// Normalize a CLI/config reasoning selection against the resolved model.
@@ -362,6 +378,38 @@ pub fn supported_levels_with_subagents(
         .collect()
 }
 
+/// Explicit interactive choices must not silently normalize an unsupported effort.
+/// Startup/configuration normalization intentionally retains its separate policy.
+pub fn requested_thinking_to_reasoning(
+    level: ThinkingLevel,
+    model: &Model,
+    subagents_available: bool,
+) -> anyhow::Result<ReasoningConfig> {
+    anyhow::ensure!(
+        supported_levels_with_subagents(model, subagents_available).contains(&level),
+        "thinking {} is not supported by {} with the current subagent capabilities",
+        level.label(),
+        model.spec.id.0,
+    );
+    let reasoning = thinking_to_reasoning_with_subagents(level, model, subagents_available)?;
+    // Ultra is a host delegation tier, not a wire update effort. Agent/RunControl
+    // check the observation runtime and rebase reasoning at a safe boundary.
+    if model.responses_features().reasoning_effort_updates
+        && reasoning != ReasoningConfig::Effort(ReasoningEffort::Ultra)
+    {
+        let update = octet_ai::ResponsesConfigurationUpdate {
+            reasoning: reasoning.clone(),
+        };
+        octet_ai::responses::validate_responses_input(
+            model,
+            &octet_ai::ResponsesInput::new(vec![update.to_item()]),
+            &reasoning,
+            false,
+        )?;
+    }
+    Ok(reasoning)
+}
+
 /// An Agent-owning runtime transition. These are valid only while idle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reconfig {
@@ -380,7 +428,14 @@ pub fn apply_reconfig(app: App, reconfig: Reconfig) -> anyhow::Result<App> {
     match reconfig {
         Reconfig::Model(id) => {
             let model = app.catalog.resolve(&id)?;
-            bootstrap::rebuild_app(app, Some(model), None, None, None)
+            let reasoning = app
+                .model_scope
+                .as_ref()
+                .and_then(|scope| scope.iter().find(|entry| entry.id == id))
+                .and_then(|entry| entry.reasoning.as_deref())
+                .map(crate::config::parse_reasoning)
+                .transpose()?;
+            bootstrap::rebuild_app(app, Some(model), reasoning, None, None)
         }
         Reconfig::Thinking(reasoning) => {
             bootstrap::rebuild_app(app, None, Some(reasoning), None, None)
@@ -415,6 +470,9 @@ pub struct App {
     pub client: AiClient,
     pub config: Config,
     pub catalog: ModelCatalog,
+    /// Ordered invocation scope; None means the whole available catalog.
+    /// Retained through rebuilds, never written as a project trust/default.
+    pub model_scope: Option<Vec<crate::cli::parity::ScopedModel>>,
     pub sessions: SessionStore,
     pub reasoning: ReasoningConfig,
     pub reasoning_mode: ReasoningMode,
@@ -426,6 +484,21 @@ pub struct App {
     pub goal_store: Arc<DurableGoalStore>,
     pub goal_driver: GoalDriver,
     pub goal_session_id: String,
+    /// The one Codex context note this session may still deliver.
+    ///
+    /// It is never rendered at startup: a frontend pulls it through
+    /// [`App::take_codex_context_note`] on the first assistant turn after
+    /// readiness, or reads it (without consuming) from an on-demand surface such
+    /// as `/context` or `/status` via [`App::codex_context_report`]. The set is
+    /// effective-model-only and once-per-session, and it survives
+    /// `rebuild_app`.
+    pub codex_context_notes: CodexContextNotes,
+    /// Which provider inventories readiness initialized for this launch.
+    ///
+    /// `Fleet` means the catalog is already complete; a narrowed plan means some
+    /// configured providers were deferred and [`App::enrich_catalog`] must run
+    /// before a surface enumerates every route.
+    pub(crate) readiness: crate::app::bootstrap::CatalogReadiness,
 }
 
 fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) -> bool {
@@ -445,6 +518,72 @@ fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) ->
 }
 
 impl App {
+    /// Resolve an invocation's ordered patterns against this effective catalog.
+    /// This only controls cycling; explicit model selection remains available.
+    pub fn set_model_scope_patterns(&mut self, patterns: Option<&str>) -> anyhow::Result<()> {
+        self.model_scope = patterns
+            .map(|patterns| {
+                let patterns = crate::cli::parity::model_patterns(patterns)?;
+                let available = self
+                    .catalog
+                    .models()
+                    .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
+                    .collect::<Vec<_>>();
+                crate::cli::parity::select_scoped_models(&patterns, &available)
+            })
+            .transpose()?;
+        Ok(())
+    }
+
+    /// Available cycling targets in scope order, or stable catalog order.
+    pub fn model_cycle(&self) -> Vec<String> {
+        match &self.model_scope {
+            Some(scope) => scope
+                .iter()
+                .filter(|entry| self.catalog.resolve(&entry.id).is_ok())
+                .map(|entry| entry.id.0.clone())
+                .collect(),
+            None => {
+                let mut models = self
+                    .catalog
+                    .models()
+                    .map(|spec| spec.id.0.clone())
+                    .collect::<Vec<_>>();
+                models.sort();
+                models
+            }
+        }
+    }
+
+    /// Select priority service for this live session. This is an idle-boundary
+    /// control: the running Agent cannot be mutably borrowed at the same time.
+    /// It survives compatible rebuilds, not a restart or a different session.
+    pub fn set_fast_mode(&mut self, enabled: bool) -> anyhow::Result<()> {
+        if !crate::commands::codex_fast_tier_endpoint(&self.model) {
+            anyhow::bail!("fast mode is unavailable on this model route");
+        }
+        // Priority billing is not fully qualified across requests and hard
+        // reservations. Persist uncertainty before selecting a billing-changing
+        // tier; disabling it must not erase that sticky exposure.
+        if enabled
+            && !self
+                .agent
+                .session()
+                .usage_uncertainty_records()
+                .iter()
+                .any(|record| record.operation == "responses-priority-tier")
+        {
+            self.agent.session_mut().record_usage_uncertainty(
+                self.model.endpoint.id.clone(),
+                self.model.spec.id.clone(),
+                "responses-priority-tier",
+            )?;
+        }
+        self.agent
+            .set_service_tier(enabled.then_some(octet_ai::ServiceTier::Priority))?;
+        Ok(())
+    }
+
     /// Whether this application has the owner-bound subagent observer needed
     /// before Ultra may be selected or submitted.
     pub fn subagents_available(&self) -> bool {
@@ -457,6 +596,97 @@ impl App {
             && self.executable_extensions.has_agent_session_service()
     }
 
+    /// The one Codex context note this session's effective model still owes, if
+    /// any. Read-only: this is the on-demand surface (`/context`, `/status`,
+    /// `/telemetry`) and never delivers or latches.
+    ///
+    /// Returns nothing for a model that needs no note (any non-Codex route, or
+    /// a Codex route whose effective window is the deliberate 272K policy).
+    #[cfg(test)]
+    pub fn codex_context_report(&self) -> Option<&str> {
+        self.codex_context_notes.note_for(&self.model.spec.id)
+    }
+
+    /// Deliver the one Codex context note for the effective model, at most once
+    /// per session.
+    ///
+    /// Startup renders nothing; the frontend calls this when the user can act on
+    /// it (the first assistant turn after readiness) and every later call
+    /// returns `None`, so the note can never repeat or leak into a second model.
+    #[cfg(test)]
+    pub fn take_codex_context_note(&self) -> Option<String> {
+        self.codex_context_notes.take_for(&self.model.spec.id)
+    }
+
+    /// Complete the catalog with the provider inventories a narrowed readiness
+    /// plan deferred at startup.
+    ///
+    /// Enrichment is never readiness: readiness already initialized the active
+    /// model's own route. Fleet surfaces may call this synchronously; the idle
+    /// `/model` picker instead builds the fleet on a worker and applies its
+    /// result through `apply_picker_catalog` while the panel remains interactive.
+    /// Both paths keep the agent, session, and active model untouched.
+    /// Complete the catalog for one surface that is about to enumerate routes,
+    /// reporting a failure instead of hiding a partial provider list.
+    ///
+    /// Surfaces call this immediately before they build their list, so the
+    /// deferred discovery happens only when someone asks to see every provider.
+    pub fn enrich_catalog_for_surface(&mut self) -> Option<String> {
+        match self.enrich_catalog() {
+            Ok(()) => None,
+            Err(error) => Some(format!(
+                "could not load every provider: {error}; showing the current launch's routes"
+            )),
+        }
+    }
+
+    pub fn enrich_catalog(&mut self) -> anyhow::Result<()> {
+        use crate::app::bootstrap::{model_catalog_for_readiness, CatalogReadiness};
+        if self.readiness.is_fleet() {
+            return Ok(());
+        }
+        let (catalog, notes) =
+            model_catalog_for_readiness(self.config.offline, &CatalogReadiness::Fleet)?;
+        self.catalog = catalog;
+        self.codex_context_notes.merge(notes);
+        self.readiness = CatalogReadiness::Fleet;
+        self.synchronize_extension_provider_catalog();
+        Ok(())
+    }
+
+    /// Admit one deferred picker inventory only for the model that launched it.
+    /// A failed or obsolete build leaves the current catalog and selection in
+    /// place; extension declarations are reprojected at the idle owner boundary.
+    pub(crate) fn apply_picker_catalog(
+        &mut self,
+        expected_model: &ModelId,
+        mut catalog: ModelCatalog,
+        notes: crate::app::bootstrap::CodexContextNotes,
+    ) -> anyhow::Result<bool> {
+        if self.readiness.is_fleet() || self.model.spec.id != *expected_model {
+            return Ok(false);
+        }
+        self.executable_extensions
+            .rescan_post_mutation_resources(&self.config);
+        self.executable_extensions
+            .synchronize_provider_catalog(&mut catalog, &self.client);
+        if !catalog_route_matches_active_model(&catalog, &self.model) {
+            anyhow::bail!(
+                "the active model {} route changed during catalog discovery; keeping the current routes",
+                self.model.spec.id.0
+            );
+        }
+        self.catalog = catalog;
+        self.codex_context_notes.merge(notes);
+        self.readiness = crate::app::bootstrap::CatalogReadiness::Fleet;
+        if self.executable_extensions.has_agent_session_service() {
+            self.agent.set_delegation_model_resolver(Arc::new(
+                delegation_models::CodingAgentModelResolver::new(self.catalog.clone()),
+            ));
+        }
+        Ok(true)
+    }
+
     /// Current provider-visible tool schema reserve, including live extension
     /// catalog changes published after application bootstrap.
     pub fn current_tool_schema_tokens(&self) -> u64 {
@@ -464,10 +694,22 @@ impl App {
     }
 
     /// Synchronizes secret-free API 0.3 provider declarations at a product
-    /// catalog boundary after extension activity has been observed.
+    /// catalog boundary after extension activity has been observed. Also consumes
+    /// queued, generation-fenced PostMutation resource rescans at that boundary.
     pub fn synchronize_extension_provider_catalog(&mut self) -> Vec<String> {
-        self.executable_extensions
-            .synchronize_provider_catalog(&mut self.catalog, &self.client)
+        let mut diagnostics = self
+            .executable_extensions
+            .rescan_post_mutation_resources(&self.config);
+        diagnostics.extend(
+            self.executable_extensions
+                .synchronize_provider_catalog(&mut self.catalog, &self.client),
+        );
+        if self.executable_extensions.has_agent_session_service() {
+            self.agent.set_delegation_model_resolver(Arc::new(
+                delegation_models::CodingAgentModelResolver::new(self.catalog.clone()),
+            ));
+        }
+        diagnostics
     }
 
     /// Reconciles provider declarations at the request boundary and rejects a
@@ -630,6 +872,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reasoning, ReasoningConfig::Effort(ReasoningEffort::Ultra));
+
+        let mut qualified = model;
+        Arc::make_mut(&mut qualified.spec).protocol = octet_ai::Protocol::OpenAiResponses;
+        Arc::make_mut(&mut qualified.spec)
+            .capabilities
+            .responses_features
+            .reasoning_effort_updates = true;
+        Arc::make_mut(&mut qualified.endpoint)
+            .runtime
+            .responses_features
+            .reasoning_effort_updates = true;
+        assert!(qualified.responses_features().reasoning_effort_updates);
+        assert_eq!(
+            requested_thinking_to_reasoning(ThinkingLevel::Ultra, &qualified, true).unwrap(),
+            ReasoningConfig::Effort(ReasoningEffort::Ultra)
+        );
+        assert!(requested_thinking_to_reasoning(ThinkingLevel::Ultra, &qualified, false).is_err());
     }
     #[test]
     fn ultra_floor_cannot_override_the_effective_runtime_ceiling() {
@@ -723,6 +982,76 @@ mod tests {
             min_effort: ReasoningEffort::Minimal,
             max_effort,
         }))
+    }
+
+    #[test]
+    fn model_defaults_preserve_exact_choices_and_runtime_gates() {
+        for (default, expected) in [
+            (Some("high"), ReasoningConfig::Effort(ReasoningEffort::High)),
+            (Some("none"), ReasoningConfig::Off),
+            (None, ReasoningConfig::Effort(ReasoningEffort::Low)),
+            (Some("ultra"), ReasoningConfig::Effort(ReasoningEffort::Max)),
+        ] {
+            let mut model = effort_model(ReasoningEffort::Ultra);
+            let spec = Arc::make_mut(&mut model.spec);
+            spec.capabilities.agent_delegation = Some(AgentDelegation::V2);
+            spec.capabilities.reasoning.as_mut().unwrap().options =
+                Some(octet_ai::types::ReasoningOptions {
+                    values: ["none", "low", "high", "max", "ultra"]
+                        .map(str::to_owned)
+                        .to_vec(),
+                    default: default.map(str::to_owned),
+                });
+            let requested = default_reasoning_for_model(&model);
+            let (effective, mode, _) = normalize_reasoning_selection_for_model_with_subagents(
+                &requested,
+                ReasoningMode::Standard,
+                &model,
+                false,
+            )
+            .unwrap();
+            assert_eq!(effective, expected, "default={default:?}");
+            assert_eq!(mode, ReasoningMode::Standard);
+            assert!(model
+                .spec
+                .capabilities
+                .reasoning
+                .as_ref()
+                .unwrap()
+                .supports(&effective));
+        }
+        assert_eq!(
+            default_reasoning_for_model(&model_with(None)),
+            ReasoningConfig::Off
+        );
+    }
+
+    #[test]
+    fn model_default_effort_maps_to_the_advertised_token_budget() {
+        let model = model_with(Some(ReasoningCapability {
+            options: Some(octet_ai::types::ReasoningOptions {
+                values: vec!["none".into(), "low".into(), "high".into()],
+                default: Some("high".into()),
+            }),
+            control: ReasoningControl::TokenBudget,
+            exposes_text: true,
+            preserves_state: false,
+            effort_budgets: Some(ReasoningEffortBudgets {
+                minimal: 1024,
+                low: 2048,
+                medium: 4096,
+                high: 8192,
+                xhigh: 16384,
+                max: 32768,
+            }),
+            openai_chat_mode: OpenAiChatReasoningMode::Standard,
+            min_effort: ReasoningEffort::Low,
+            max_effort: ReasoningEffort::High,
+        }));
+        assert_eq!(
+            normalize_reasoning_for_model(&default_reasoning_for_model(&model), &model).unwrap(),
+            ReasoningConfig::Budget(8192),
+        );
     }
 
     #[test]

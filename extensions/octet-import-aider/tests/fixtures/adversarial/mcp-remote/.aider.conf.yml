@@ -1,0 +1,4 @@
+mcp-servers:
+  - name: remote
+    transport: sse
+    url: https://example.invalid/sse

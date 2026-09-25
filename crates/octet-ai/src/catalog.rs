@@ -104,6 +104,9 @@ pub struct ModelConfig {
     /// Prompt-cache compatibility settings for this model/endpoint.
     #[serde(default)]
     pub cache: crate::types::CacheCompatibility,
+    /// Model defaults consumed by request encoding and HTTP header composition.
+    #[serde(default)]
+    pub preset: crate::declarations::ModelPreset,
 }
 
 /// Resolved binding of a model specification and its destination endpoint.
@@ -121,6 +124,37 @@ impl std::fmt::Debug for Model {
             .field("spec", &self.spec.id)
             .field("endpoint", &self.endpoint.id)
             .finish()
+    }
+}
+
+/// The output-token bound actually emitted by an inference codec.
+///
+/// `None` means no enforceable wire bound, not zero or a trusted model maximum.
+/// Hosts must refuse such requests under hard token/cost ceilings. This covers
+/// both Codex's mandatory omission and an explicitly unsupported Responses cap.
+/// Anthropic/Bedrock return their model default only because they emit it.
+///
+/// This is a pure cap-selection function, not full request validation. Call it
+/// with the final model/profile and canonical cap used for dispatch; request
+/// overrides cannot change cap/profile after host reservation. Native Responses
+/// compact is a separate operation with no output-cap field and must not borrow
+/// a fictional inference bound from this function.
+pub fn effective_output_token_cap(model: &Model, requested: Option<u64>) -> Option<u64> {
+    match model.spec.protocol {
+        crate::Protocol::OpenAiResponses
+            if model
+                .endpoint
+                .runtime
+                .responses_profile
+                .omits_max_output_tokens()
+                || model.spec.preset.supports_max_output_tokens == Some(false) =>
+        {
+            None
+        }
+        crate::Protocol::AnthropicMessages | crate::Protocol::BedrockConverse => {
+            Some(requested.unwrap_or(model.spec.limits.max_output_tokens))
+        }
+        _ => requested,
     }
 }
 
@@ -171,6 +205,7 @@ impl ModelCatalog {
                 limits: m_cfg.limits,
                 pricing: m_cfg.pricing,
                 cache: m_cfg.cache,
+                preset: m_cfg.preset,
             };
             catalog.register_model(spec)?;
         }
@@ -315,7 +350,21 @@ fn google_api_name_is_safe(name: &str) -> bool {
 }
 
 pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
-    if spec.api_name.is_empty()
+    spec.preset
+        .validate()
+        .map_err(|_| ConfigError::InvalidModel(spec.id.clone()))?;
+    spec.preset
+        .validate_protocol(spec.protocol)
+        .map_err(|_| ConfigError::InvalidModel(spec.id.clone()))?;
+    if ((spec.preset.thinking_format.is_some()
+        || spec.preset.thinking_token_budget_field.is_some()
+        || spec.preset.chat_template_args.is_some()
+        || spec.preset.chat_template_kwargs.is_some()
+        || spec.preset.mistral_reasoning.is_some()
+        || !spec.preset.thinking_level_map.is_empty())
+        && spec.capabilities.reasoning.is_none())
+        || spec.api_name.is_empty()
+        || spec.capabilities.deferred_tool_loading
         || !spec.capabilities.input_modalities.is_valid()
         || !spec.capabilities.output_modalities.is_valid()
         || spec.limits.context_window == 0
@@ -354,16 +403,29 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
             // Anthropic supports both explicit token budgets (extended thinking)
             // and effort control (adaptive thinking + `output_config.effort`).
             Protocol::AnthropicMessages => true,
-            Protocol::OpenAiChat => matches!(
-                reasoning.control,
-                ReasoningControl::Effort | ReasoningControl::AlwaysOn | ReasoningControl::Toggle
-            ),
+            Protocol::OpenAiChat => {
+                matches!(
+                    reasoning.control,
+                    ReasoningControl::Effort
+                        | ReasoningControl::AlwaysOn
+                        | ReasoningControl::Toggle
+                ) || (reasoning.control == ReasoningControl::TokenBudget
+                    && spec.preset.thinking_token_budget_field.is_some())
+            }
             Protocol::OpenAiResponses => reasoning.control == ReasoningControl::Effort,
             Protocol::GoogleGenerativeAi => matches!(
                 reasoning.control,
                 ReasoningControl::Effort | ReasoningControl::TokenBudget
             ),
             Protocol::BedrockConverse => reasoning.control == ReasoningControl::TokenBudget,
+            // This codec does not yet map native reasoning controls or content.
+            Protocol::MistralConversations => false,
+            // Pi's `thinkingLevel` is an effort control; a token budget has no
+            // native field and fails closed in the codec.
+            Protocol::PiMessages => matches!(
+                reasoning.control,
+                ReasoningControl::Effort | ReasoningControl::AlwaysOn | ReasoningControl::Toggle
+            ),
         };
         let chat_mode_matches = reasoning.openai_chat_mode == OpenAiChatReasoningMode::Standard
             || (spec.protocol == Protocol::OpenAiChat
@@ -647,6 +709,64 @@ mod tests {
             Some(crate::pricing::TokenRate(25_000_000))
         );
         assert_eq!(tier.output, Some(crate::pricing::TokenRate(75_000_000)));
+    }
+
+    #[test]
+    fn builtin_gpt6_controls_and_sol_luna_prices_are_route_qualified() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        for (id, input) in [
+            ("gpt-6-astra", 10_000_000),
+            ("gpt-6-sol", 2_000_000),
+            ("gpt-6-luna", 100_000),
+        ] {
+            let model = catalog.resolve(&ModelId(id.into())).unwrap();
+            assert_eq!(model.spec.api_name, id);
+            assert_eq!(model.spec.limits.context_window, 1_050_000);
+            assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+            assert_eq!(
+                model.endpoint.transport,
+                crate::EndpointTransport::WebSocketPreferred
+            );
+            let features = model.responses_features();
+            assert!(features.async_tools && features.steering && features.reasoning_effort_updates);
+            assert!(!features.compact_reasoning_effort_updates);
+            let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+            assert_eq!(
+                reasoning.supports(&crate::ReasoningConfig::Off),
+                id != "gpt-6-astra"
+            );
+            assert!(!reasoning.supports(&crate::ReasoningConfig::Effort(
+                crate::ReasoningEffort::Ultra
+            )));
+            let pricing = model.spec.pricing.as_ref().unwrap();
+            assert_eq!(pricing.input.0, input);
+            assert_eq!(pricing.output.0, input * 5);
+            assert_eq!(pricing.cache_read.0, input / 10);
+            assert_eq!(pricing.cache_write_5m.0, input * 5 / 4);
+            assert_eq!(pricing.tiers[0].min_input_tokens, 272_001);
+            assert_eq!(pricing.tiers[0].input.unwrap().0, input * 2);
+            assert_eq!(pricing.tiers[0].output.unwrap().0, input * 15 / 2);
+            let mut endpoint = (*model.endpoint).clone();
+            endpoint.runtime.responses_features = Default::default();
+            assert_eq!(
+                crate::Model {
+                    spec: model.spec,
+                    endpoint: Arc::new(endpoint)
+                }
+                .responses_features(),
+                crate::ResponsesFeatures::default()
+            );
+        }
+        assert_eq!(
+            catalog
+                .resolve(&ModelId("gpt-4o-mini".into()))
+                .unwrap()
+                .responses_features(),
+            crate::ResponsesFeatures::default()
+        );
+        assert!(catalog
+            .resolve(&ModelId("gpt-6-unverified".into()))
+            .is_err());
     }
 
     #[test]

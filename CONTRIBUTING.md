@@ -144,6 +144,7 @@ By contributing, you agree that your contribution is distributed under the
 project's [MIT License](LICENSE). Preserve upstream notices when changing
 vendored or derived code; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## Roadmap
+## Project tracking
 
-[Public roadmap](https://github.com/skaft-software/octet/blob/main/ROADMAP.md) · [Engineering backlog](https://github.com/orgs/skaft-software/projects/5) · [Maintainability plan](docs/design/maintainability.md)
+[Issues](https://github.com/skaft-software/octet/issues) and the
+[engineering project](https://github.com/orgs/skaft-software/projects/5) track proposed work.

@@ -47,11 +47,26 @@ pub(super) fn max_scroll_from_bottom(state: &ShellState, width: u16) -> usize {
     if state.overlay.is_some() {
         return 0;
     }
+    if state.render_threaded {
+        // A draft edit or prior scroll invalidates painted pointer positions,
+        // but not the transcript's row count. Keep rapid navigation bounded
+        // while the renderer catches up; changed layout still waits for paint.
+        return state
+            .retained_navigation_geometry()
+            .map_or(usize::MAX, |geometry| {
+                max_scroll_for_available(geometry.total_rows, geometry.viewport_available)
+            });
+    }
     let chrome = shell_chrome(state, width, Instant::now());
     max_scroll_for_available(transcript_lines(state, width).len(), chrome.transcript_rows)
 }
 
 pub(super) fn transcript_viewport_capacity_for_state(state: &ShellState, width: u16) -> usize {
+    if state.render_threaded {
+        return state
+            .retained_render_geometry()
+            .map_or(0, |geometry| geometry.viewport_rows);
+    }
     if state.overlay.is_some() {
         return 0;
     }
@@ -342,7 +357,12 @@ fn viewport_anchor_for_visual_row(
 }
 
 fn capture_viewport_anchor(state: &ShellState, start: usize, end: usize) {
-    if state.viewport_anchor.get().is_some() || start >= end {
+    if state
+        .viewport_anchor
+        .get()
+        .is_some_and(|anchor| anchor.block_hint != usize::MAX)
+        || start >= end
+    {
         return;
     }
     let mut fallback = None;
@@ -368,6 +388,56 @@ pub(super) fn retain_viewport_anchor(state: &ShellState) {
     if state.follow_tail || state.overlay.is_some() {
         return;
     }
+    if state.render_threaded {
+        if state.viewport_anchor.get().is_some() {
+            return;
+        }
+        let Some(geometry) = state.retained_navigation_geometry() else {
+            return;
+        };
+        let row = geometry
+            .total_rows
+            .saturating_sub(state.scroll_from_bottom.get())
+            .saturating_sub(transcript_viewport_capacity(
+                geometry.viewport_available,
+                true,
+            ));
+        if let Some(block) = geometry
+            .blocks
+            .iter()
+            .find(|block| row >= block.start && row < block.start + block.rows)
+        {
+            state.viewport_anchor.set(Some(ViewportAnchor {
+                commit_id: block.id,
+                block_hint: block.index,
+                text_offset: 0,
+                trailing_affinity: false,
+                visual_width: state.size.0,
+                semantic_row_correction: 0,
+                fallback_block_row: row - block.start,
+                fallback_visual_row: row,
+                desired_screen_row: 0,
+                semantic: false,
+            }));
+        } else {
+            // The receipt only keeps visible block identities. A fast PageUp
+            // may leave that window before the next paint; pin its absolute
+            // visual row until the renderer can resolve a semantic identity.
+            state.viewport_anchor.set(Some(ViewportAnchor {
+                commit_id: 0,
+                block_hint: usize::MAX,
+                text_offset: 0,
+                trailing_affinity: false,
+                visual_width: state.size.0,
+                semantic_row_correction: 0,
+                fallback_block_row: 0,
+                fallback_visual_row: row,
+                desired_screen_row: 0,
+                semantic: false,
+            }));
+        }
+        return;
+    }
     let chrome = shell_chrome(state, state.size.0, Instant::now());
     let transcript = transcript_lines(state, state.size.0);
     let scroll = resolved_scroll_from_bottom(state, transcript.len(), chrome.transcript_rows);
@@ -379,6 +449,9 @@ pub(super) fn retain_viewport_anchor(state: &ShellState) {
 }
 
 fn resolve_viewport_anchor(state: &ShellState, mut anchor: ViewportAnchor) -> usize {
+    if anchor.block_hint == usize::MAX {
+        return anchor.fallback_visual_row;
+    }
     let block = if state.transcript_commit_ids.get(anchor.block_hint) == Some(&anchor.commit_id) {
         Some(anchor.block_hint)
     } else {
@@ -456,14 +529,17 @@ pub(super) fn resolved_scroll_from_bottom(
 }
 
 fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -> Vec<String> {
+    state.refresh_transcript_search(width);
     let transcript = transcript_lines(state, width);
+    state.reveal_transcript_search(transcript.len(), available);
     let scroll = resolved_scroll_from_bottom(state, transcript.len(), available);
     let scrolled = scroll > 0;
     let capacity = transcript_viewport_capacity(available, scrolled);
     let end = transcript.len().saturating_sub(scroll);
     let start = end.saturating_sub(capacity);
     let mut lines = transcript[start..end].to_vec();
-    if scrolled {
+    state.decorate_transcript_search(&mut lines, start);
+    if scrolled || !state.follow_tail {
         capture_viewport_anchor(state, start, end);
     } else if state.follow_tail {
         state.viewport_anchor.set(None);
@@ -483,7 +559,9 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
         lines.push(fit_line(
             &state.theme.fg(
                 "muted",
-                &format!("↑ {scroll} rows back{new_output} · PageDown returns to live"),
+                &format!(
+                    "↑ {scroll} rows back{new_output} · Jump to latest · PageDown returns to live"
+                ),
             ),
             width,
         ));
@@ -504,6 +582,7 @@ pub(super) fn render_shell_viewport_at(
     } else {
         transcript_viewport_lines(state, width, chrome.transcript_rows)
     };
+    state.decorate_transcript_navigation(&mut lines, width, &chrome, now);
     append_viewport_chrome(&mut lines, chrome);
     lines
 }

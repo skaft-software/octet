@@ -1,4 +1,4 @@
-# octet agent design
+# octet agent architecture
 
 ## Responsibilities
 
@@ -34,6 +34,63 @@ batches retain emitted execution order; eligible independent observations may
 still overlap through the effect-checked **post-persistence** parallel path.
 This deliberately gives up unsafe overlap rather than promising equivalent
 latency. See the [performance contract](performance.md).
+
+## Qualified Responses controls
+
+Model and endpoint `ResponsesFeatures` must both authorize each feature; names,
+Lite, and WebSocket availability alone grant nothing. Ordinary routes retain
+synchronous tools and queued steering.
+
+- **Async tools:** only complete, durably committed calls from a wholly eligible
+  batch enter the run-owned registry (at most four). Advertised parallel tools
+  are still checked against exact arguments, the effect broker, and hooks.
+  Independent observations may overlap the next response; their results become
+  durable in original call order **after** that response, which did not consume
+  them. Sync, effectful, mixed, and nonparallel batches remain barriers. Hard
+  cumulative ceilings serialize tool accounting; pending jobs disable compaction.
+  Driven terminals cancel and settle jobs; dropping a run aborts task handles.
+  Unresolved async calls after a crash receive indeterminate paired errors,
+  never automatic redispatch, even for replay-safe observations.
+- **Reasoning:** host controls coalesce at response boundaries. Typed
+  `ResponsesReasoning` records pin the request baseline and retain chronological
+  updates separately from effective host selection. Provider-authored opaque
+  configuration updates are rejected. Resume restores effective selection;
+  explicit idle overrides use `Agent::set_reasoning`. Prewarming uses the same
+  replay-dependent reasoning and advertised async tool schemas. Successful local
+  compaction rebases the retained prefix; failed compaction leaves the pin
+  unchanged. Without complete same-route output sidecars, normal Responses
+  requests replay canonical conversation with effective reasoning as their
+  request baseline instead of emitting incomplete chronological updates; native
+  mode still requires complete opaque replay. Unsupported native compaction
+  never strips updates (autonomous qualified runs use local compaction).
+  Qualified Ultra/V2 transitions use a host baseline reset, not an ordinary
+  configuration update: prior effort updates are superseded in replay while
+  canonical messages and opaque outputs remain intact. This may invalidate the
+  reasoning cache prefix, but does not require a new session. Entering Ultra
+  requires an installed child-session observation runtime. Idle setters apply
+  immediately; active controls apply at the next safe response boundary (after
+  any owned native successor). The existing delegation manager stays installed
+  at lower efforts, new workers inherit the effective selection, and existing
+  workers retain their pinned model and reasoning.
+- **Native steering:** qualified WebSocket runs without hard ceilings prepare a
+  local receipt, persist intent, then dispatch. Each completed response retains
+  independent usage. Applied input follows the completed prefix, atomically
+  linked by `EntryMetadata.native_steering` to its operation/local ID, before the
+  successor. Required tool results return on the same socket without repeating
+  steering input. The host update bridge holds at most 128 events and fails
+  closed on overflow. Controls queued between native segments wait until the
+  owned successor settles; FinishNow's tool prohibition remains sticky.
+
+A native intent remains usage-uncertain until its accounted successor has a
+`ResponsesSteering.completed` settlement marker. Thus abrupt drop, disconnect,
+or a crash between intent/application/user materialization/settlement cannot
+silently lose submission identity or imply zero billing. Resume refuses a new
+prompt on any unresolved operation rather than guessing from text or replaying
+input. A crash after accounting but before settlement is conservatively uncertain;
+start a new session instead of automatic reconciliation. Explicit failure usage
+uncertainty remains sticky. `misalignment_policy_violation` is permanent: no
+inference/workflow retry, with pending jobs cancelled/settled and completed
+accounting/effects retained.
 
 ## In-process provider recovery
 
@@ -180,7 +237,16 @@ headers, and healthy response bodies. HTTP 520 sequences/exhaustion and unknown
 failed/incomplete terminal partial generations retain the same finite envelopes.
 Four terminal EOFs followed by success also retain durable unknown usage. This is not a live-provider
 interruption, real-terminal qualification, weeks-long wall-clock soak, or a claim
-of complete unattended-runtime parity.
+of complete unattended-runtime qualification.
+
+## Interrupted-attempt progress
+
+`AgentEvent::RecoveredOutput { channel, text }` carries a durable partial text
+or reasoning prefix from a previous interrupted attempt. It is historical
+progress, not a current `OutputDelta`, completed assistant response, provider
+replay input, or usage/accounting contribution. Consumers may display it in a
+separate recovery view; they must not append it to the current answer. Partial
+tool calls, media, and provider metadata are not recovered as output events.
 
 ## Effect admission boundary
 
@@ -194,7 +260,13 @@ already-running executable.
 
 Workspace-mutation approval creates a random, short-lived capability bound to the canonical intent digest. Tokens are atomically single-use, stored by one-way verifier, redacted in debug output, and never supplied to tools. Dispatch reserves admission before `before_tool_call`, then commits and consumes the exact grant only after all hooks pass and immediately before calling `Tool::execute`. Hook denial or cancellation drops and revokes an uncommitted reservation; cancellation after commit cannot restore it. `after_tool_call` runs only for a committed effect.
 
-Sequential, parallel, and crash-recovery dispatch all use this boundary. Static `ToolConcurrency::Parallel` and `ReplaySafety::Safe` declarations are intersected with the exact host classification: only `Pure` and `WorkspaceRead` calls may run in a parallel batch or be replayed after a crash. A broker or argument denial is returned to the provider as a paired tool error before hooks or executable code; a trusted hook may veto an otherwise admitted call before dispatch.
+Sequential, parallel, and crash-recovery dispatch all use this boundary. The
+ordered live read path intersects static `ToolConcurrency::Parallel` with exact
+host classification and explicit policy admission, admitting contiguous,
+model-ordered waves of at most four exact `Pure`, `WorkspaceRead`, or `HostRead`
+calls. `HostRead` is eligible for these live waves but remains non-replayable.
+Crash replay separately intersects `ReplaySafety::Safe` with exact host
+classification and permits only exact `Pure` and `WorkspaceRead` calls. A broker or argument denial is returned to the provider as a paired tool error before hooks or executable code; a trusted hook may veto an otherwise admitted call before dispatch.
 
 The broker is a deterministic admission reference monitor, not an OS sandbox. Controlled intentionally denies effect classes that still lack isolation or dedicated brokers, while allowing safe read-only `bash` commands through the `Controlled` process channel; `ControlledBashApproval` (selected by `--safe-mode`) confirms every `bash` call. The default `UnsafeHost` policy lets classified command and process effects use ambient host authority.
 
@@ -216,7 +288,7 @@ neither a path nor a digest.
 
 ## Sessions
 
-Sessions are append-only JSONL records containing entries, head updates, provider usage, and checkpoints. Entries form a parent-linked tree and the latest durable head selects the active branch. Compaction adds a Pi-structured summary, `first_kept` boundary, active-skill snapshot, and cumulative `readFiles`/`modifiedFiles` details without deleting ancestry. Both product-triggered and autonomous compaction use the same serialized handoff contract.
+Sessions are append-only JSONL records containing entries, head updates, provider usage, and checkpoints. Entries form a parent-linked tree and the latest durable head selects the active branch. Compaction adds a structured summary, `first_kept` boundary, active-skill snapshot, and cumulative `readFiles`/`modifiedFiles` details without deleting ancestry. Both product-triggered and autonomous compaction use the same serialized handoff contract.
 
 Before every provider turn, the agent estimates the complete request and retains a fixed 16K output reserve (or a larger explicit reasoning floor). The provider-advertised maximum completion size remains the model ceiling; the individual request is clamped only to the context space remaining after input. The default compaction threshold is the full context window, so the fixed reserve is not combined with an additional percentage buffer. If a provider nevertheless ends at the output limit while emitting tools, the assistant envelope is persisted, every call is paired with a synthetic error without execution, and a corrective continuation asks the model to reissue complete arguments.
 

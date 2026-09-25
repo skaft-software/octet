@@ -1729,8 +1729,6 @@ mod tests {
     #[cfg(unix)]
     use super::{run_git_executable, GitRunResult};
     #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt as _;
-    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     fn status_output(records: &[&[u8]], truncated: bool) -> (Vec<super::GitFileStatusEntry>, bool) {
@@ -2026,28 +2024,34 @@ mod tests {
     #[test]
     fn git_timeout_kills_descendant_that_keeps_output_pipes_open() {
         let directory = tempfile::tempdir().unwrap();
-        let wrapper = directory.path().join("fake-git");
         let descendant_pid = directory.path().join("descendant.pid");
-        std::fs::write(
-            &wrapper,
-            format!(
-                "#!/bin/sh\n/bin/sh -c 'trap \"\" TERM; echo $$ > \"{}\"; while :; do /bin/sleep 1; done' &\nwhile [ ! -s \"{}\" ]; do /bin/sleep 0.01; done\nexit 0\n",
-                descendant_pid.display(),
-                descendant_pid.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Invoke the installed shell rather than a freshly written executable:
+        // parallel forks can inherit its writable fd and make Linux exec fail
+        // with ETXTBSY before the timeout/process-tree path is exercised.
+        let script = format!(
+            "/bin/sh -c 'trap \"\" TERM; echo $$ > \"{}\"; while :; do /bin/sleep 1; done' &\nwhile [ ! -s \"{}\" ]; do /bin/sleep 0.01; done\nexit 0\n",
+            descendant_pid.display(),
+            descendant_pid.display()
+        );
 
         let started = Instant::now();
         let result = run_git_executable(
-            &wrapper,
+            std::path::Path::new("/bin/sh"),
             directory.path(),
-            &["status"],
+            &["-c", &script],
             Duration::from_millis(500),
             1024,
         );
-        assert!(matches!(result, GitRunResult::TimedOut));
+        match result {
+            GitRunResult::TimedOut => {}
+            GitRunResult::Finished(output) => {
+                panic!(
+                    "expected Git timeout; fixture settled with {}",
+                    output.status
+                );
+            }
+            GitRunResult::Unavailable => panic!("expected Git timeout; fixture was unavailable"),
+        }
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "timeout cleanup exceeded its bound: {:?}",

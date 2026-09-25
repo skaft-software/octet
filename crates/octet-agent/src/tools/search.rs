@@ -15,7 +15,8 @@ use crate::tools::{clip_line, parse_args, validate_effect_path};
 const MAX_LINE_CHARS: usize = 300;
 /// Default result cap when `max_results` is omitted.
 const DEFAULT_MAX_RESULTS: usize = 50;
-/// Hard cap for one structured `rg --json` record before parsing.
+/// Hard cap for retained fields of one structured `rg --json` record.
+/// Unused per-occurrence submatch arrays are discarded while framing.
 const MAX_RG_EVENT_BYTES: usize = 256 * 1024;
 const RG_MAX_COLUMNS: &str = "1024";
 const RG_MAX_FILESIZE: &str = "32M";
@@ -29,7 +30,18 @@ struct SearchArgs {
     glob: Option<String>,
     #[serde(default)]
     mode: SearchMode,
+    #[serde(alias = "limit")]
     max_results: Option<usize>,
+    #[serde(default, rename = "ignoreCase")]
+    ignore_case: bool,
+    #[serde(default)]
+    context: usize,
+    #[serde(default = "default_hidden")]
+    hidden: bool,
+}
+
+fn default_hidden() -> bool {
+    true
 }
 
 #[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
@@ -57,8 +69,14 @@ pub struct SearchTool;
 
 #[async_trait::async_trait]
 impl Tool for SearchTool {
+    fn prompt_snippet(&self) -> Option<&str> {
+        Some("Search file contents with ripgrep (rg)")
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
             name: "search".to_string(),
             description: "Search local file contents. Prefer paths relative to the workspace; \
                           trusted-local hosts also accept absolute and `~/` paths for intentional \
@@ -86,6 +104,10 @@ impl Tool for SearchTool {
                         "enum": ["literal", "regex"],
                         "description": "Matching mode (default literal)."
                     },
+                    "ignoreCase": {"type":"boolean", "description":"Case-insensitive matching (default false)."},
+                    "context": {"type":"integer", "minimum":0, "maximum":1000, "description":"Surrounding lines per match; not counted against limit."},
+                    "hidden": {"type":"boolean", "description":"Include hidden files (default true); ignore rules still apply."},
+                    "limit": {"type":"integer", "minimum":1, "description":"Alias for max_results; do not combine."},
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,
@@ -120,11 +142,19 @@ impl Tool for SearchTool {
         let arguments = arguments
             .as_object()
             .ok_or_else(|| ToolError::new("invalid arguments: expected an object"))?;
-        if arguments.len() > 5
+        if arguments.len() > 9
             || arguments.keys().any(|key| {
                 !matches!(
                     key.as_str(),
-                    "query" | "path" | "glob" | "mode" | "max_results"
+                    "query"
+                        | "path"
+                        | "glob"
+                        | "mode"
+                        | "max_results"
+                        | "limit"
+                        | "ignoreCase"
+                        | "context"
+                        | "hidden"
                 )
             })
         {
@@ -178,6 +208,35 @@ impl Tool for SearchTool {
         }) {
             return Err(ToolError::new(
                 "invalid arguments: `max_results` must be a positive integer",
+            ));
+        }
+        for name in ["ignoreCase", "hidden"] {
+            if arguments.get(name).is_some_and(|v| !v.is_boolean()) {
+                return Err(ToolError::new(format!(
+                    "invalid arguments: {name} must be boolean"
+                )));
+            }
+        }
+        if arguments
+            .get("context")
+            .is_some_and(|v| v.as_u64().is_none_or(|n| n > 1000))
+        {
+            return Err(ToolError::new(
+                "invalid arguments: context must be an integer from 0 to 1000",
+            ));
+        }
+        if arguments.contains_key("limit") && arguments.contains_key("max_results") {
+            return Err(ToolError::new(
+                "invalid arguments: use limit or max_results, not both",
+            ));
+        }
+        if arguments.get("limit").is_some_and(|v| {
+            v.as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .is_none_or(|n| n == 0)
+        }) {
+            return Err(ToolError::new(
+                "invalid arguments: limit must be a positive integer",
             ));
         }
         // Search currently executes `rg` from PATH as a native child. Treat it
@@ -251,6 +310,15 @@ async fn execute_search(
     if args.mode == SearchMode::Literal {
         command.arg("--fixed-strings");
     }
+    if args.ignore_case {
+        command.arg("--ignore-case");
+    }
+    if args.hidden {
+        command.arg("--hidden");
+    }
+    if args.context > 0 {
+        command.arg("--context").arg(args.context.to_string());
+    }
     if let Some(glob) = &args.glob {
         command.args(["--glob", glob]);
     }
@@ -299,7 +367,8 @@ async fn execute_search(
     let byte_budget = ctx.sandbox.max_output_bytes.saturating_sub(128).max(1024);
     let deadline = tokio::time::Instant::now() + ctx.sandbox.bash_timeout;
     let collect = async {
-        let (results, truncated) = collect_rg_stdout(stdout, max_results, byte_budget).await?;
+        let (results, truncated, match_count) =
+            collect_rg_stdout(stdout, max_results, byte_budget).await?;
 
         let status =
             if truncated {
@@ -315,9 +384,14 @@ async fn execute_search(
                     ToolError::new(format!("failed to wait for ripgrep: {error}"))
                 })?)
             };
-        Ok::<_, ToolError>((results, truncated, status))
+        Ok::<_, ToolError>((results, truncated, match_count, status))
     };
-    let (results, truncated, status) = match tokio::time::timeout_at(deadline, collect).await {
+    let collected = tokio::select! {
+        biased;
+        _ = ctx.cancellation.cancelled() => Ok(Err(ToolError::new("search cancelled"))),
+        result = tokio::time::timeout_at(deadline, collect) => result,
+    };
+    let (results, truncated, match_count, status) = match collected {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
             let _ = child.start_kill();
@@ -347,11 +421,11 @@ async fn execute_search(
         return Ok(ToolOutput::new("no matches"));
     }
     let count_line = if truncated {
-        format!("{}+ matches", results.len())
-    } else if results.len() == 1 {
+        format!("{match_count}+ matches")
+    } else if match_count == 1 {
         "1 match".to_string()
     } else {
-        format!("{} matches", results.len())
+        format!("{match_count} matches")
     };
     Ok(ToolOutput::new(format!(
         "{count_line}\n{}\ntruncated={truncated}",
@@ -363,10 +437,11 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
     mut stdout: R,
     max_results: usize,
     byte_budget: usize,
-) -> Result<(Vec<String>, bool), ToolError> {
+) -> Result<(Vec<String>, bool, usize), ToolError> {
     let mut results = Vec::new();
+    let mut match_count = 0usize;
     let mut body_bytes = 0usize;
-    let mut event = Vec::with_capacity(8 * 1024);
+    let mut event = RgEventBuffer::default();
     let mut chunk = [0u8; 8 * 1024];
 
     loop {
@@ -375,18 +450,19 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
             .await
             .map_err(|error| ToolError::new(format!("failed to read ripgrep output: {error}")))?;
         if read == 0 {
-            if !event.is_empty()
+            if !event.bytes.is_empty()
                 && record_rg_event(
-                    &event,
+                    &event.bytes,
                     &mut results,
                     &mut body_bytes,
+                    &mut match_count,
                     max_results,
                     byte_budget,
                 )
             {
-                return Ok((results, true));
+                return Ok((results, true, match_count));
             }
-            return Ok((results, false));
+            return Ok((results, false, match_count));
         }
 
         let mut cursor = 0;
@@ -395,27 +471,81 @@ async fn collect_rg_stdout<R: tokio::io::AsyncRead + Unpin>(
             let newline = remainder.iter().position(|byte| *byte == b'\n');
             let end = newline.map_or(read, |offset| cursor + offset);
             let segment = &chunk[cursor..end];
-            if event.len().saturating_add(segment.len()) > MAX_RG_EVENT_BYTES {
-                return Err(ToolError::new(format!(
-                    "search output record exceeded the {MAX_RG_EVENT_BYTES}-byte limit"
-                )));
+            for &byte in segment {
+                event.push(byte)?;
             }
-            event.extend_from_slice(segment);
             let Some(_) = newline else {
                 break;
             };
             if record_rg_event(
-                &event,
+                &event.bytes,
                 &mut results,
                 &mut body_bytes,
+                &mut match_count,
                 max_results,
                 byte_budget,
             ) {
-                return Ok((results, true));
+                return Ok((results, true, match_count));
             }
-            event.clear();
+            event = RgEventBuffer::default();
             cursor = end + 1;
         }
+    }
+}
+
+/// Ripgrep emits compact JSON, with an array of offsets and matched text
+/// for *every occurrence*, even with --max-columns-preview. Our result is
+/// line-oriented and never consumes that array. Replace it with [] while
+/// draining the record, keeping memory bounded independently of match density.
+/// String/escape/depth tracking prevents file contents from impersonating keys.
+#[derive(Default)]
+struct RgEventBuffer {
+    bytes: Vec<u8>,
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+    skip_depth: Option<usize>,
+}
+
+impl RgEventBuffer {
+    fn push(&mut self, byte: u8) -> Result<(), ToolError> {
+        let starts_submatches = !self.in_string
+            && self.depth == 2
+            && byte == b'['
+            && self.bytes.ends_with(b"\"submatches\":");
+        if starts_submatches {
+            self.bytes.extend_from_slice(b"[]");
+            self.skip_depth = Some(self.depth);
+        } else if self.skip_depth.is_none() {
+            self.bytes.push(byte);
+        }
+        if self.bytes.len() > MAX_RG_EVENT_BYTES {
+            return Err(ToolError::new(format!(
+                "search output record exceeded the {MAX_RG_EVENT_BYTES}-byte limit"
+            )));
+        }
+        if self.in_string {
+            if self.escaped {
+                self.escaped = false;
+            } else if byte == b'\\' {
+                self.escaped = true;
+            } else if byte == b'"' {
+                self.in_string = false;
+            }
+        } else {
+            match byte {
+                b'"' => self.in_string = true,
+                b'{' | b'[' => self.depth = self.depth.saturating_add(1),
+                b'}' | b']' => {
+                    self.depth = self.depth.saturating_sub(1);
+                    if self.skip_depth == Some(self.depth) {
+                        self.skip_depth = None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -423,28 +553,36 @@ fn record_rg_event(
     event: &[u8],
     results: &mut Vec<String>,
     body_bytes: &mut usize,
+    match_count: &mut usize,
     max_results: usize,
     byte_budget: usize,
 ) -> bool {
     let Ok(event) = std::str::from_utf8(event) else {
         return false;
     };
-    let Some(rendered) = render_match(event) else {
+    let Some((rendered, is_match)) = render_match(event) else {
         return false;
     };
-    if results.len() == max_results || body_bytes.saturating_add(rendered.len()) > byte_budget {
+    if (is_match && *match_count == max_results)
+        || body_bytes.saturating_add(rendered.len() + usize::from(!results.is_empty()))
+            > byte_budget
+    {
         return true;
     }
-    *body_bytes += rendered.len();
+    *body_bytes += rendered.len() + usize::from(!results.is_empty());
+    if is_match {
+        *match_count += 1;
+    }
     results.push(rendered);
     false
 }
 
 /// Converts one `rg --json` event line into a `path:line  text` result, or
 /// `None` for non-match events (begin/end/summary).
-fn render_match(json_line: &str) -> Option<String> {
+fn render_match(json_line: &str) -> Option<(String, bool)> {
     let event: serde_json::Value = serde_json::from_str(json_line).ok()?;
-    if event.get("type")?.as_str()? != "match" {
+    let kind = event.get("type")?.as_str()?;
+    if kind != "match" && kind != "context" {
         return None;
     }
     let data = event.get("data")?;
@@ -456,9 +594,13 @@ fn render_match(json_line: &str) -> Option<String> {
         .and_then(|t| t.as_str())
         .unwrap_or("")
         .trim_end();
-    Some(format!(
-        "{path}:{line_number}  {}",
-        clip_line(text, MAX_LINE_CHARS)
+    let separator = if kind == "match" { ":" } else { "-" };
+    Some((
+        format!(
+            "{path}{separator}{line_number}  {}",
+            clip_line(text, MAX_LINE_CHARS)
+        ),
+        kind == "match",
     ))
 }
 
@@ -554,8 +696,29 @@ mod tests {
         !process_is_alive(pid)
     }
 
+    // These tests exercise process I/O and deadlines, not executable startup
+    // latency. Fresh temporary scripts can take over a second to enter /bin/sh
+    // on macOS. Keep paused Tokio time from auto-advancing while real I/O runs,
+    // but bound every wait in wall time without a detached keepalive task.
     #[cfg(unix)]
-    #[tokio::test]
+    async fn drive_without_advancing_time<F: std::future::Future>(future: F) -> F::Output {
+        tokio::pin!(future);
+        let started = Instant::now();
+        loop {
+            if let std::task::Poll::Ready(result) = futures_util::poll!(&mut future) {
+                return result;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "search fixture made no progress within the wall-clock watchdog"
+            );
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
     async fn stderr_saturation_does_not_block_search() {
         let f = fixture();
         let program = executable_script(
@@ -569,12 +732,15 @@ mod tests {
         let mut sandbox = f.sandbox.clone();
         sandbox.bash_timeout = Duration::from_secs(2);
         let ctx = f.ctx_with(&sandbox);
-        let started = Instant::now();
+        let started = tokio::time::Instant::now();
 
-        let error = SearchTool
-            .execute_with_program(json!({"query": "needle"}), &ctx, &program)
-            .await
-            .unwrap_err();
+        let error = drive_without_advancing_time(SearchTool.execute_with_program(
+            json!({"query": "needle"}),
+            &ctx,
+            &program,
+        ))
+        .await
+        .unwrap_err();
 
         assert!(started.elapsed() < sandbox.bash_timeout);
         assert!(
@@ -584,37 +750,52 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stdout_eof_does_not_bypass_search_timeout_or_cleanup() {
         let f = fixture();
         let program = executable_script(
             &f.workspace,
             "rg-closes-stdout",
             r#"
-            printf '%s' "$$" > child.pid
             exec 1>&-
-            exec /bin/sleep 5
+            printf '%s\n' "$$" > child.pid
+            kill -STOP "$$"
+            exit 2
             "#,
         );
         let mut sandbox = f.sandbox.clone();
         sandbox.bash_timeout = Duration::from_millis(150);
         let ctx = f.ctx_with(&sandbox);
-        let started = Instant::now();
+        let started = tokio::time::Instant::now();
+        let search = SearchTool.execute_with_program(json!({"query": "needle"}), &ctx, &program);
+        tokio::pin!(search);
 
-        let error = SearchTool
-            .execute_with_program(json!({"query": "needle"}), &ctx, &program)
-            .await
-            .unwrap_err();
+        // The PID is published only after stdout is closed. Do not expire the
+        // search before the shell has entered the EOF-with-live-child state.
+        let pid = drive_without_advancing_time(std::future::poll_fn(|cx| {
+            assert!(
+                std::future::Future::poll(search.as_mut(), cx).is_pending(),
+                "search completed before its deadline with a live child"
+            );
+            let pid = std::fs::read_to_string(f.workspace.join("child.pid"))
+                .ok()
+                .filter(|text| text.ends_with('\n'))
+                .and_then(|text| text.trim().parse::<i32>().ok());
+            match pid {
+                Some(pid) => std::task::Poll::Ready(pid),
+                None => std::task::Poll::Pending,
+            }
+        }))
+        .await;
+        assert!(process_is_alive(pid), "EOF fixture child exited early");
+        assert_eq!(started.elapsed(), Duration::ZERO);
 
+        tokio::time::advance(sandbox.bash_timeout).await;
+        let error = drive_without_advancing_time(&mut search).await.unwrap_err();
         assert!(error.message.contains("execution limit"), "{error}");
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "search waited for a child that had already closed stdout"
-        );
-        let pid: i32 = std::fs::read_to_string(f.workspace.join("child.pid"))
-            .unwrap()
-            .parse()
-            .unwrap();
+        assert_eq!(started.elapsed(), sandbox.bash_timeout);
+        // Reaping is an OS observation, so retain a real-time cleanup bound.
+        tokio::time::resume();
         assert!(
             wait_for_process_exit(pid, Duration::from_secs(1)).await,
             "timed-out search child was not reaped"
@@ -697,12 +878,12 @@ mod tests {
         let input = format!("{first}\n{{not json}}\n{second}");
         let reader =
             tokio::io::BufReader::with_capacity(3, std::io::Cursor::new(input.into_bytes()));
-        let (results, truncated) = collect_rg_stdout(reader, 10, 4 * 1024).await.unwrap();
+        let (results, truncated, _) = collect_rg_stdout(reader, 10, 4 * 1024).await.unwrap();
         assert_eq!(results, vec!["a.rs:1  first", "b.rs:2  second"]);
         assert!(!truncated);
 
         let input = format!("{first}\n{second}\n");
-        let (results, truncated) =
+        let (results, truncated, _) =
             collect_rg_stdout(std::io::Cursor::new(input.into_bytes()), 1, 4 * 1024)
                 .await
                 .unwrap();
@@ -710,7 +891,7 @@ mod tests {
         assert!(truncated);
 
         let input = format!("{first}\n{second}\n");
-        let (results, truncated) = collect_rg_stdout(
+        let (results, truncated, _) = collect_rg_stdout(
             std::io::Cursor::new(input.into_bytes()),
             10,
             "a.rs:1  first".len(),
@@ -725,6 +906,41 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.message.contains("record exceeded"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn dense_submatches_do_not_consume_the_line_record_budget() {
+        if !rg_available() {
+            eprintln!("skipping: rg not on PATH");
+            return;
+        }
+        let f = fixture();
+        // Before framing elision, this small line expands into several MiB of
+        // unused JSON offsets/matched-text objects and fails the event cap.
+        let dense = "a".repeat(64 * 1024);
+        std::fs::write(f.workspace.join("dense.txt"), format!("{dense}\ncontext\n")).unwrap();
+        for (query, mode) in [("a", "literal"), ("a|$", "regex")] {
+            let out = SearchTool
+                .execute(
+                    json!({
+                        "query": query, "mode": mode, "path": "dense.txt", "context": 1
+                    }),
+                    &f.ctx(),
+                )
+                .await
+                .unwrap();
+            assert!(out.text.contains("dense.txt:1  aaa"), "{}", out.text);
+            assert!(out.text.ends_with("truncated=false"), "{}", out.text);
+            assert!(out.text.len() < 1024);
+        }
+        // File text may contain JSON-looking keys and escaped delimiters.
+        let text = r#"\"submatches\":[{\"match\":\"]\"}]"#;
+        let raw = match_event("quoted\npath", 1, text);
+        let mut event = RgEventBuffer::default();
+        for byte in raw.bytes() {
+            event.push(byte).unwrap();
+        }
+        assert_eq!(event.bytes, raw.as_bytes());
     }
 
     #[tokio::test]

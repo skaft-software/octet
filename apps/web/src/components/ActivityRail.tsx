@@ -19,6 +19,7 @@ import type {
   SessionSnapshot,
   SourceRef,
 } from "../protocol";
+import type { DockSlot } from "../workspace-layout";
 
 interface ActivityRailProps {
   session: SessionSnapshot;
@@ -43,6 +44,8 @@ interface ActivityRailProps {
   modal: boolean;
   onRestoreFocus: () => void;
   resourcesAvailable: boolean;
+  /** Grid column of the user-created dock split; absent in the default layout. */
+  dockSlot?: DockSlot;
 }
 
 const outputIcon = (output: OutputRef) => {
@@ -259,6 +262,7 @@ function ActivityRailView({
   modal,
   onRestoreFocus,
   resourcesAvailable,
+  dockSlot,
 }: ActivityRailProps) {
   const railRef = useRef<HTMLElement>(null);
   const [openSections, setOpenSections] = useState({
@@ -349,6 +353,7 @@ function ActivityRailView({
   return (
     <aside
       ref={railRef}
+      data-dock-slot={dockSlot}
       className={`activity-rail ${open ? "is-open" : ""}`}
       aria-label="Task activity"
       aria-hidden={!open}

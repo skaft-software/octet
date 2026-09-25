@@ -105,6 +105,8 @@ class ServiceResponder:
         if method == "agent/spawn":
             policy = params.pop("policy")
             result = self.client.spawn_agent(**params, **policy)
+        elif method == "agent/models":
+            result = {"models": [{"provider": "anthropic", "model": "haiku", "display_name": "Haiku", "reasoning": ["off", "low"], "context_window": 100000, "max_output_tokens": 8192}], "truncated": False}
         elif method == "agent/list":
             result = self.client.list_agents()
         elif method == "agent/wait":
@@ -135,10 +137,11 @@ class RuntimeProtocolTests(unittest.TestCase):
     def test_negotiates_only_bounded_features_and_exact_manifest_surface(self):
         initialized = self.running.start()
         result = initialized["result"]
-        self.assertEqual(result["api_version"], "0.2")
+        self.assertEqual(result["api_version"], "0.4")
         self.assertEqual(
             [tool["name"] for tool in result["tools"]],
             [
+                "subagent_models",
                 "subagent_spawn",
                 "subagent_status",
                 "subagent_wait",
@@ -155,12 +158,51 @@ class RuntimeProtocolTests(unittest.TestCase):
                 "delegation_telemetry_v1",
                 "lifecycle_events",
                 "agent_sessions",
+                "agent_model_selection_v1",
             ],
         )
         self.assertEqual(result["protocol"]["lifecycle_events"], ["session/settled"])
         self.assertEqual(result["protocol"]["limits"]["max_concurrent_requests"], 4)
         spawn = next(tool for tool in result["tools"] if tool["name"] == "subagent_spawn")
         self.assertNotIn("max_tokens", spawn["parameters"]["properties"])
+
+    def test_models_discovery_is_bounded_and_owner_correlated(self):
+        self.running.start()
+        for call_id, arguments, error in ((70, {"query": "haiku", "limit": 1}, False),
+                                          (71, {"limit": 101}, True),
+                                          (72, {"owner": "forged"}, True)):
+            self.running.reader.feed(rpc_request(call_id, "tool/call", {
+                "name": "subagent_models", "arguments": arguments, "context": tool_context()}))
+            response = self.running.writer.wait_for(lambda m: m.get("id") == call_id)
+            self.assertEqual(response["result"]["is_error"], error)
+        calls = [m for m in self.responder.reverse if m["method"] == "agent/models"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["params"], {"parent_request_id": 70, "query": "haiku", "limit": 1})
+
+    def test_explicit_route_forwarded_without_caller_clamping(self):
+        self.running.start()
+        self.running.reader.feed(rpc_request(74, "tool/call", {
+            "name": "subagent_spawn", "arguments": {"name": "reader", "task": "x",
+                "provider": "anthropic", "model": "haiku", "reasoning": "max",
+                "reasoning_capability": {"ceiling": "medium"}}, "context": tool_context()}))
+        response = self.running.writer.wait_for(lambda m: m.get("id") == 74)
+        self.assertFalse(response["result"]["is_error"])
+        calls = [m for m in self.responder.reverse if m["method"] == "agent/spawn"]
+        self.assertEqual(calls[0]["params"]["policy"]["model_selection"],
+                         {"provider": "anthropic", "model": "haiku", "reasoning": "max"})
+        self.assertNotIn("reasoning_capability", calls[0]["params"]["policy"])
+
+    def test_explicit_selection_requires_feature_without_spawning(self):
+        init = initialize_request()
+        init["params"]["protocol"]["optional_features"].remove("agent_model_selection_v1")
+        self.running.start(init)
+        self.running.reader.feed(rpc_request(73, "tool/call", {
+            "name": "subagent_spawn", "arguments": {"name": "reader", "task": "x", "model": "haiku"},
+            "context": tool_context()}))
+        response = self.running.writer.wait_for(lambda m: m.get("id") == 73)
+        self.assertTrue(response["result"]["is_error"])
+        self.assertIn("agent_model_selection_v1", response["result"]["content"][0]["text"])
+        self.assertFalse(any(m["method"] == "agent/spawn" for m in self.responder.reverse))
 
     def test_spawn_is_owner_correlated_idempotent_and_publishes_tree(self):
         self.running.start()
@@ -396,7 +438,8 @@ class RuntimeProtocolTests(unittest.TestCase):
         )
         response = self.running.writer.wait_for(lambda message: message.get("id") == 41)
         self.assertTrue(response["result"]["is_error"])
-        self.assertEqual(response["result"]["metadata"]["code"], "orphaned")
+        # Detached, not dead: the stable error code names the recoverable state.
+        self.assertEqual(response["result"]["metadata"]["code"], "detached")
         self.assertEqual(self.responder.steers, [])
         self.assertEqual(self.responder.follow_ups, [])
 
@@ -655,7 +698,8 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.running.writer.wait_for(
             lambda message: message.get("method") == "presentation/update"
             and any(
-                node.get("state") == "unavailable"
+                node.get("state") == "degraded"
+                and str(node.get("secondary", "")).startswith("detached")
                 for node in message.get("params", {})
                 .get("snapshot", {})
                 .get("collection", {})

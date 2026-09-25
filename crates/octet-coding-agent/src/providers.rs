@@ -34,9 +34,11 @@ pub fn builtin_provider_definitions() -> Vec<ProviderDefinition> {
         .collect()
 }
 
+#[cfg(test)]
+pub(crate) use auth::resolve_environment_with;
 pub(crate) use auth::{
-    aws_bedrock_auth, aws_bedrock_base_url, aws_bedrock_region, environment_discovery_headers,
-    resolve_environment, EnvironmentCredential,
+    aws_bedrock_auth, aws_bedrock_base_url, aws_bedrock_region, environment_auth,
+    environment_discovery_headers, resolve_environment, EnvironmentCredential,
 };
 pub(crate) use catalog::{
     public_headers, register_discovered_model, register_discovered_model_at_route,
@@ -47,9 +49,10 @@ pub(crate) use catalog::{
 pub(crate) use compatibility::cache_compatibility;
 pub(crate) use contract::{
     InventoryCacheMode, ModelDiscovery, ModelFilter, ProviderAuthentication, ProviderDeclaration,
-    ProviderRoute, ProviderRuntimeConfiguration, BUILTIN_PROVIDER_DECLARATIONS, CODEX, DEEPSEEK,
+    ProviderRoute, ProviderRuntimeConfiguration, ALL_PROVIDER_DECLARATIONS,
+    BUILTIN_PROVIDER_DECLARATIONS, CODEX, DEEPSEEK,
 };
 #[cfg(test)]
 pub(crate) use contract::{OPENAI, OPENCODE, OPENROUTER};
 pub(crate) use pricing::pricing_for;
-pub(crate) use vertex::resolve_application_default_credentials;
+pub(crate) use vertex::resolve_vertex_configuration;

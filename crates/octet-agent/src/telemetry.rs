@@ -5,15 +5,24 @@
 //! operational facts, not prompts, tool arguments, or tool output.  Hashes are
 //! included where correlation is useful without making a debug run a secret
 //! exfiltration channel.
+//!
+//! The vendor-neutral callback substrate lives in [`spans`] and [`schema`].
+//! These spans and this JSONL observer are best-effort observations. Only
+//! durable [`crate::session`] records are authoritative accounting.
+
+pub mod schema;
+pub mod spans;
+pub mod testing;
+mod writer;
+pub use writer::TelemetryStatus;
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::fs::OpenOptions;
+use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use fs2::FileExt;
 use octet_ai::{Model, Protocol, Usage};
 use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
@@ -32,19 +41,22 @@ const MAX_RECENT_CALLS: usize = 16;
 ///
 /// The observer writes one bounded JSON object per line.  It never writes raw
 /// user input, tool arguments, tool results, credentials, or provider payloads.
-/// File I/O is synchronous by design but happens only for coarse lifecycle
-/// boundaries; streaming deltas are aggregated in memory and are not written.
+/// A dedicated thread writes ordered records. Admission never waits for disk:
+/// the queue is capped at 256 records and 1 MiB including the in-flight record.
+/// Saturation rejects new telemetry (never session records); `status` and
+/// `flush` expose incompleteness. Flush waits at most two seconds; explicit
+/// `shutdown` accepts a caller-owned deadline. Last-owner drop waits at most
+/// 100 ms, then detaches a still-blocked writer. No path promises fsync.
 #[derive(Clone)]
 pub struct TelemetryObserver {
     inner: Arc<Mutex<Inner>>,
 }
 
 struct Inner {
-    file: File,
+    writer: Arc<writer::Writer>,
     path: PathBuf,
     sequence: u64,
     owners: HashMap<String, RunState>,
-    write_failed: bool,
 }
 
 struct RunState {
@@ -178,17 +190,17 @@ impl TelemetryObserver {
         }
         let observer = Self {
             inner: Arc::new(Mutex::new(Inner {
-                file,
+                writer: Arc::new(writer::Writer::new(file)?),
                 path,
                 sequence: 0,
                 owners: HashMap::new(),
-                write_failed: false,
             })),
         };
         let mut fields = Map::new();
         fields.insert("version".into(), Value::String(version.into()));
         fields.insert("pid".into(), Value::Number(std::process::id().into()));
         observer.emit(None, None, "header", fields);
+        observer.flush()?;
         Ok(observer)
     }
 
@@ -199,6 +211,41 @@ impl TelemetryObserver {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .path
             .clone()
+    }
+
+    /// Delivery status for this optional, non-authoritative log.
+    pub fn status(&self) -> TelemetryStatus {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writer
+            .status()
+    }
+
+    /// Drain all previously accepted records. Reports write failure or any
+    /// saturation loss; does not call fsync. Do not call on the event hot path.
+    pub fn flush(&self) -> io::Result<()> {
+        let writer = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writer
+            .clone();
+        writer.flush(writer::DEFAULT_DRAIN_TIMEOUT)
+    }
+
+    /// Close admission and wait up to `timeout` for accepted records. Call at a
+    /// host-owned lifecycle boundary and surface any error via host diagnostics.
+    /// A timeout does not cancel an OS write; pending records remain unconfirmed.
+    pub fn shutdown(&self, timeout: Duration) -> io::Result<()> {
+        let writer = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writer
+            .clone();
+        writer.close();
+        writer.flush(timeout)
     }
 
     fn emit(
@@ -885,7 +932,8 @@ impl EventObserver for TelemetryObserver {
                     fields,
                 );
             }
-            AgentEvent::ToolProgress { .. }
+            AgentEvent::RecoveredOutput { .. }
+            | AgentEvent::ToolProgress { .. }
             | AgentEvent::OutputMedia { .. }
             | AgentEvent::ProviderLifecycle { .. } => {}
         }
@@ -900,9 +948,6 @@ impl Inner {
         record: &str,
         mut fields: Map<String, Value>,
     ) {
-        if self.write_failed {
-            return;
-        }
         self.sequence = self.sequence.saturating_add(1);
         let mut object = Map::new();
         object.insert("schema".into(), Value::String(TELEMETRY_SCHEMA.into()));
@@ -916,18 +961,15 @@ impl Inner {
             object.insert("run_id".into(), Value::String(run_id.into()));
         }
         object.append(&mut fields);
-        let result = (|| -> io::Result<()> {
-            let mut bytes = Vec::new();
-            serde_json::to_writer(&mut bytes, &Value::Object(object))?;
-            bytes.push(b'\n');
-            self.file.lock_exclusive()?;
-            let write_result = self.file.write_all(&bytes).and_then(|_| self.file.flush());
-            let unlock_result = fs2::FileExt::unlock(&self.file);
-            write_result.and(unlock_result)
-        })();
-        if result.is_err() {
-            self.write_failed = true;
+        let rejected = self.writer.status().rejected_records;
+        if rejected != 0 {
+            object.insert("telemetry_rejected_records".into(), rejected.into());
         }
+        // JSON Values serialize infallibly to a Vec; no filesystem work here.
+        let mut bytes =
+            serde_json::to_vec(&Value::Object(object)).expect("JSON value serialization");
+        bytes.push(b'\n');
+        self.writer.enqueue(bytes);
     }
 }
 
@@ -938,6 +980,8 @@ fn protocol_label(protocol: Protocol) -> &'static str {
         Protocol::AnthropicMessages => "anthropic_messages",
         Protocol::BedrockConverse => "bedrock_converse",
         Protocol::GoogleGenerativeAi => "google_generative_ai",
+        Protocol::MistralConversations => "mistral_conversations",
+        Protocol::PiMessages => "pi_messages",
     }
 }
 
@@ -1001,6 +1045,7 @@ fn event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::RunFinished { .. } => "run_finished",
         AgentEvent::DelegationUpdated { .. } => "delegation_updated",
         AgentEvent::OutputDelta { .. }
+        | AgentEvent::RecoveredOutput { .. }
         | AgentEvent::OutputMedia { .. }
         | AgentEvent::ProviderRetry { .. }
         | AgentEvent::ToolProgress { .. } => "event",
@@ -1017,6 +1062,7 @@ fn compaction_reason_label(reason: CompactionReason) -> &'static str {
 fn compaction_kind_label(kind: &CompactionKind) -> &'static str {
     match kind {
         CompactionKind::Local => "local",
+        CompactionKind::Snapcompact => "snapcompact",
         CompactionKind::NativeResponses { .. } => "native_responses",
     }
 }
@@ -1146,6 +1192,7 @@ mod tests {
                 display_name: None,
                 protocol: Protocol::OpenAiChat,
                 capabilities: Capabilities {
+                    responses_features: Default::default(),
                     input_modalities: ModalitySet::none(),
                     output_modalities: ModalitySet::none(),
                     tools: true,
@@ -1162,6 +1209,7 @@ mod tests {
                 },
                 pricing: None,
                 cache: Default::default(),
+                preset: Default::default(),
             }),
             endpoint: Arc::new(Endpoint {
                 id: EndpointId("local".into()),
@@ -1255,6 +1303,7 @@ mod tests {
                 "owner",
             );
         }
+        observer.flush().unwrap();
         let records = std::fs::read_to_string(path)
             .unwrap()
             .lines()
@@ -1318,6 +1367,7 @@ mod tests {
                     total_tokens: 9,
                     ..Usage::default()
                 },
+                turn_cost: None,
                 usage: Usage {
                     input_tokens: 3,
                     cache_read_tokens: 4,
@@ -1513,6 +1563,7 @@ mod tests {
         std::fs::write(&path, "not-json\n").unwrap();
         let observer = TelemetryObserver::new(&path, "test").unwrap();
         observer.on_run_started_for_owner("entry-1", &UserInput::from("task"), &model(), "owner");
+        observer.flush().unwrap();
         let lines = std::fs::read_to_string(path).unwrap();
         assert!(lines.starts_with("not-json\n"));
         assert!(lines
@@ -1546,6 +1597,7 @@ mod tests {
                 "owner",
             );
         }
+        observer.flush().unwrap();
         let lines = std::fs::read_to_string(path).unwrap();
         let repeated = lines
             .lines()

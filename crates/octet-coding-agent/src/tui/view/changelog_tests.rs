@@ -26,6 +26,10 @@ fn key(shell: &mut InteractiveShell, code: KeyCode) -> OverlayInputResult {
 
 #[test]
 fn changelog_renders_current_bundled_markdown_not_source_or_transcript() {
+    let first_section = crate::commands::CURRENT_CHANGELOG
+        .lines()
+        .find_map(|line| line.strip_prefix("## "))
+        .expect("bundled release notes have a section heading");
     for color in [
         ColorDepth::TrueColor,
         ColorDepth::Ansi256,
@@ -43,9 +47,9 @@ fn changelog_renders_current_bundled_markdown_not_source_or_transcript() {
             plain.contains(&format!("octet {}", env!("CARGO_PKG_VERSION"))),
             "{plain}"
         );
-        assert!(plain.contains("Fixed"), "{plain}");
+        assert!(plain.contains(first_section), "{plain}");
         assert!(
-            !plain.contains("# octet") && !plain.contains("## Fixed"),
+            !plain.contains("# octet") && !plain.contains(&format!("## {first_section}")),
             "raw Markdown: {plain}"
         );
         if color == ColorDepth::None {
@@ -65,7 +69,7 @@ fn changelog_rich_report_uses_existing_renderer_for_headings_lists_and_code() {
     let document = parse_markdown(source);
     shell.show_report(
         OrdinarySurfaceMetadata::with_purpose("Changelog", "Bundled release notes"),
-        ReportBody::Markdown(document.clone()),
+        ReportBody::Markdown(Arc::new(document.clone())),
     );
     let state = shell.state.borrow();
     let layout = crate::tui::layout::PresentationLayout::new(&state.theme, 80);
@@ -122,9 +126,34 @@ fn changelog_scrolls_reflows_and_closes_without_editing_the_composer() {
     }
     let tail = plain_rows(&shell);
     assert_ne!(first, tail);
+    // Compare the complete visible tail with the current bundled Markdown,
+    // not release-specific prose or the overlay's own retained body.
+    let expected_tail = {
+        let state = shell.state.borrow();
+        let layout = crate::tui::layout::PresentationLayout::new(&state.theme, state.size.0);
+        state
+            .theme
+            .rich_renderer()
+            .render(
+                &parse_markdown(crate::commands::CURRENT_CHANGELOG),
+                layout.content_width,
+            )
+            .lines
+            .into_iter()
+            .skip(maximum)
+            .map(|line| line.plain.trim().to_owned())
+            .collect::<Vec<_>>()
+    };
     assert!(
-        tail.contains("publication."),
-        "End should reach the last release-note paragraph: {tail}"
+        !expected_tail.is_empty(),
+        "bundled release-note tail is empty"
+    );
+    let actual_tail = tail.lines().map(str::trim).collect::<Vec<_>>();
+    assert!(
+        actual_tail
+            .windows(expected_tail.len())
+            .any(|window| window == expected_tail),
+        "End should show the final rendered release-note rows: {expected_tail:?}\nActual: {tail}"
     );
     let Some(ShellOverlay::Report(report)) = shell.state.borrow().overlay.clone() else {
         panic!("report closed")

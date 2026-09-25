@@ -73,7 +73,15 @@ async function sendPrompt(page: Page, prompt: string): Promise<void> {
   const send = page.getByRole("button", { name: "Send message" });
   await expect(send).toBeEnabled();
   await send.click();
-  await expect(composer).toHaveValue("");
+  try {
+    await expect(composer).toHaveValue("");
+  } catch (error) {
+    const rejection = await page
+      .locator("#composer-send-error")
+      .textContent({ timeout: 1_000 })
+      .catch(() => "No submission error was shown.");
+    throw new Error(`Prompt submission failed: ${rejection}`, { cause: error });
+  }
 }
 
 async function expectDone(page: Page, reply: string): Promise<void> {
@@ -115,6 +123,34 @@ async function sessionSnapshot(
 }
 
 test.describe.configure({ mode: "serial" });
+
+test("accepts and completes the first prompt on a production Tokio worker", async ({
+  context,
+  page,
+}) => {
+  const host = await LiveHostHarness.create();
+  try {
+    const { origin, launchUrl } = await host.start();
+    const exchanged = await context.request.get(launchUrl, { maxRedirects: 0 });
+    expect(exchanged.status()).toBe(303);
+    await page.goto(origin);
+
+    const request = await completePrompt(
+      page,
+      host,
+      "E2E_FIRST_PROMPT_STACK",
+      "E2E_ASSISTANT_E2E_FIRST_PROMPT_STACK",
+    );
+    expectDeterministicRequest(request);
+    host.provider.assertHealthy();
+  } catch (error) {
+    throw new Error(`Production host diagnostics:\n${host.diagnostics()}`, {
+      cause: error,
+    });
+  } finally {
+    await host.close();
+  }
+});
 
 test("runs the authenticated production host lifecycle end to end", async ({
   context,
@@ -591,6 +627,10 @@ test("runs the authenticated production host lifecycle end to end", async ({
 
     host.provider.assertHealthy();
     expect(pageErrors).toEqual([]);
+  } catch (error) {
+    throw new Error(`Production host diagnostics:\n${host.diagnostics()}`, {
+      cause: error,
+    });
   } finally {
     await host.close();
   }

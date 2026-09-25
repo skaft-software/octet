@@ -8,16 +8,17 @@ Other languages launch `octet-host` and exchange UTF-8 JSON objects over
 stdin/stdout, keeping provider and agent behavior in Rust without an unstable
 Rust FFI ABI. Stdout is protocol-only; logs and diagnostics go to stderr.
 
-**Native-host protocol `1` is not extension API `0.3`.** It is a separate
+**Native-host protocol `1` is not an extension API version.** It is a separate
 application embedding interface. It reports extension discovery diagnostics but
 never starts executable extensions. For extension authoring, see
-[the API `0.3` guide](extensions.md).
+the [extension guide](extensions.md).
 
 ## Handshake
 
-The example reports this checkout's **0.7.6 source version**. For version-matched
-published native assets, see [installation](installation.md) and the
-[release record](releases/v0.7.6.md).
+The example uses the **0.8.0** SDK version. Validate the version reported by
+the actual host. See [installation](installation.md) and the
+[release notes](releases/v0.8.0.md) for version-matched native assets; SDK
+registries remain unpublished.
 
 Send `hello` and validate the response before accepting work, including when the
 application uses a configured host path:
@@ -27,7 +28,7 @@ application uses a configured host path:
 ```
 
 ```json
-{"protocol_version":1,"request_id":"probe-1","seq":1,"type":"hello","data":{"sdk_version":"0.7.6","protocol_version":1,"max_frame_bytes":1048576,"max_concurrent_runs":1,"commands":["hello","models","run","shutdown"],"features":{"streaming":true,"persistent_sessions":true,"seed_history":true,"typed_media_input":true,"typed_image_input":true,"typed_audio_input":true,"prompt_display_text":true,"inline_models":true,"tools":true,"skills":true,"extensions":true,"process_group_abort":true,"in_band_abort":false}}}
+{"protocol_version":1,"request_id":"probe-1","seq":1,"type":"hello","data":{"sdk_version":"0.8.0","protocol_version":1,"max_frame_bytes":1048576,"max_concurrent_runs":1,"commands":["hello","models","run","shutdown"],"features":{"streaming":true,"persistent_sessions":true,"seed_history":true,"typed_media_input":true,"typed_image_input":true,"typed_audio_input":true,"prompt_display_text":true,"inline_models":true,"tools":true,"skills":true,"extensions":true,"process_group_abort":true,"in_band_abort":false}}}
 ```
 
 Reject a protocol mismatch, unknown request ID, run/session ID mismatch, or
@@ -89,10 +90,13 @@ run calling its provider.
 
 ### Host-owned GitHub Copilot
 
-GitHub Copilot is embedding-only Rust integration, absent from `octet --login`,
-environment/configuration setup, and NDJSON `octet-host`: those surfaces cannot
-safely own the host's GitHub OAuth state. Standalone catalogs never advertise
-Copilot models.
+The coding-host adapter accepts `octet --login copilot [--headless]`
+and `--logout copilot` (`github-copilot` is an alias). Its private OAuth store can
+supply eligible Copilot models to the shared online catalog, including NDJSON
+`models` and catalog-backed `run`. Offline catalog construction adds none. NDJSON
+protocol 1 has **no** new login/logout command or OAuth payload field, and this
+does not grant extension API 0.3 native-provider authority. See the
+[provider guide](providers.md#github-copilot-unreleased-candidate).
 
 An embedding app implements `octet_sdk::provider::CopilotHost`, owns device-flow/
 OAuth state and durable credential storage, and constructs `CopilotProvider`
@@ -114,9 +118,16 @@ sensitive on requests and redacted from diagnostics, never in provider definitio
 catalog metadata, or persistence. Hosts must also exclude credentials from model
 IDs and display labels.
 
-The seam does not implement GitHub's live OAuth endpoints, Enterprise endpoint
-policy, or an interactive CLI flow. These are host-owned; use Rust embedding
-only when the host can implement and test that policy.
+The generic seam does not implement GitHub's wire endpoints. The separate coding
+adapter implements GitHub.com's bounded device/exchange/discovery path and a
+fixed inference-origin allowlist; it imports no third-party credentials and
+supports no custom Enterprise authority or environment endpoint override.
+`availability` is checked even before reusing a fresh credential: embedding hosts
+must reject a deleted/replaced login. Explicit exchange/refresh share the
+resolver's invalidation lock and discard the old credential on failure or
+cancellation. Hosts still own active-run/device cancellation and catalog
+replacement; local logout is not remote revocation. TUI slash auth is not
+available; this source contract does not establish native/live acceptance.
 
 ## Rust-owned recovery limits
 
@@ -128,11 +139,60 @@ in a logical turn, including subsequent request opening. `None` is the default
 delay beyond the remaining allowance stops recovery rather than retrying early.
 This is not a whole-job timeout and does not extend caller/child limits or
 provider body deadlines. The same setting is passed to auxiliary compaction
-and terminal-gate recovery and inherited by child agents. Historical integration
-checks and remaining limits are recorded in [v0.7.4 recovery qualification](qualification/v0.7.4-recovery.md).
+and terminal-gate recovery and inherited by child agents. See the
+[agent recovery contract](design/octet-agent.md#in-process-provider-recovery).
 
 This is a Rust host setter, not a new NDJSON run field, CLI flag, or persisted
 configuration setting. NDJSON applications retain process-group cancellation.
+
+Rust consumers may also receive `AgentEvent::RecoveredOutput { channel, text }`
+for a previous interrupted attempt's partial text or reasoning prefix. Keep
+this historical progress separate from current `OutputDelta`, the assembled
+answer, provider replay, and usage accounting. It does not establish a new
+NDJSON event contract.
+### Qualified Responses reasoning and steering
+
+Rust hosts can call `RunControl::set_reasoning(ReasoningConfig).await` on a run
+qualified by both model and endpoint metadata. Admission coalesces pending
+choices at the next safe response boundary; it is not a provider acknowledgement.
+The run stays active. Ordinary effort changes keep the request baseline pinned
+and chronological typed updates preserve the cache prefix. `Agent::reasoning()`
+returns effective selection, including restored session updates. Use the idle
+`Agent::set_reasoning` setter for an explicit override after reconstruction.
+Explicitly supported Ultra/V2 transitions establish a new host baseline rather
+than sending an ordinary update: they supersede earlier effort updates without
+losing conversation or opaque provider outputs, and do not require a new session.
+Install the observation runtime before selecting Ultra through either setter.
+The delegation manager remains installed when leaving Ultra; future workers
+inherit the effective effort while existing workers retain their pinned choices.
+
+Existing steering controls use the native multi-response path only on a
+qualified WebSocket route without hard cumulative ceilings. Unsupported routes
+retain ordinary queued steering. Native delivery persists an intent before
+socket dispatch, then links the canonical input to its operation/local ID only
+after the completed prefix. `Session::has_unsettled_native_steering()` identifies
+operations lacking an accounted successor settlement. Such sessions also report
+`has_uncertain_usage()` even if no explicit uncertainty record could be appended
+before a crash. They reject new prompts rather than replay uncertain input;
+start a new session. Async tool jobs are bounded, never provisionally dispatched,
+and unresolved jobs are not automatically executed after restart.
+
+These Rust controls add no NDJSON protocol-v1 command or field. See the
+[agent durability contract](design/octet-agent.md#qualified-responses-controls).
+
+### Tool-schema and compaction bounds
+
+Rust embedders can call `Agent::set_tool_schema_budget_bytes(usize)` before a
+run. The default is 128KiB for the exact serialized JSON array of
+provider-visible tool definitions. A non-empty set over the limit is refused
+before provider I/O; octet never silently drops, truncates, or rewrites tools.
+A zero budget permits only `[]`. This is an SDK setter, not a protocol v1 field,
+CLI flag, or persisted setting.
+
+Local compaction similarly refuses empty, whitespace-only, or over-128KiB
+assembled handoffs before writing a checkpoint. The cap includes host-generated
+file-operation evidence; neither the model summary nor that evidence is
+truncated to fit.
 
 ## Run requests
 
@@ -273,7 +333,7 @@ additive uncertainty record evolves its record contract. CLI RPC uses the same
 event type
 with `delayMs`/`errorMessage`; finite retries use `auto_retry_start` with
 `maxAttempts`, rather than the native-host field casing. Plain/print diagnostics
-go to stderr; print stdout remains response-only. See [historical recovery qualification](qualification/v0.7.4-recovery.md).
+go to stderr; print stdout remains response-only.
 
 Auxiliary recovery has a separate core `AgentEvent::ProviderOperationRetry`:
 `operation` is `local_compaction`, `native_compaction`, or `terminal_gate`;
@@ -308,7 +368,6 @@ flag sticky when the live event arrives. Statistics sum the independent durable
 usage ledger rather than only the active conversation branch; when the flag is
 true, numeric tokens/cost are known subtotals. Native-host protocol `1` has no
 separate idle session-inspection command; its resumed runs emit the live warning.
-Historical qualification applies only to its recorded source.
 
 `final_result.data` contains `status`, `output`, `error`, `filesChanged`,
 `toolCalls`, `steps`, and `sessionFile`. Status is `completed`, `blocked`, or

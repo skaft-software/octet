@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use octet_agent::Session;
 use regex::{Captures, Regex};
 use serde::Serialize;
@@ -13,9 +13,17 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::session_store::{
-    active_branch_title, SessionMeta, SessionStore, SessionUserMetadata, MAX_SESSION_FILE_BYTES,
+    active_branch_title, EntryKind, SessionMeta, SessionStore, SessionUserMetadata,
+    MAX_SESSION_FILE_BYTES,
 };
 use crate::session_tree::render_session_tree;
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum ExportFormat {
+    #[default]
+    Json,
+    Html,
+}
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum SessionCommand {
@@ -27,6 +35,14 @@ pub enum SessionCommand {
     },
     /// Inspect one session without modifying it.
     Inspect { id: String },
+    /// Incrementally search session entry text (user and assistant messages).
+    Search {
+        /// Case-insensitive literal substring to match.
+        query: String,
+        /// Maximum number of hits to print.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Give a session a readable name (an empty name clears it).
     Rename { id: String, name: String },
     /// Replace a session's searchable tags.
@@ -36,7 +52,11 @@ pub enum SessionCommand {
         id: String,
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Include raw values. Use only when the destination is trusted.
+        /// Portable JSON (default) or a script-free, self-contained HTML view.
+        #[arg(long, value_enum, default_value = "json")]
+        format: ExportFormat,
+        /// Include raw export-eligible values. Private extension metadata stays excluded.
+        /// Use only when the destination is trusted.
         #[arg(long)]
         include_secrets: bool,
         /// Replace an existing export path.
@@ -47,6 +67,12 @@ pub enum SessionCommand {
     Delete { id: String },
     /// Validate a session and repair only an interrupted final append.
     Repair { id: String },
+    /// Report durable accounting for ephemeral (`--no-session`) runs.
+    ///
+    /// An ephemeral run discards its transcript but must never lose usage,
+    /// cost or unknown-usage accounting, so that accounting lives in a
+    /// conversation-free ledger next to the workspace's sessions.
+    Accounting,
 }
 
 pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
@@ -54,11 +80,13 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
     match command {
         SessionCommand::List { query } => list(&store, query.as_deref()),
         SessionCommand::Inspect { id } => inspect(&store, &id),
+        SessionCommand::Search { query, limit } => search(&store, &query, limit),
         SessionCommand::Rename { id, name } => rename(&store, &id, &name),
         SessionCommand::Tag { id, tags } => tag(&store, &id, tags),
         SessionCommand::Export {
             id,
             output,
+            format,
             include_secrets,
             force,
         } => export_cli(
@@ -68,10 +96,60 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
             &config.invocation_cwd,
             include_secrets,
             force,
+            matches!(format, ExportFormat::Html)
+                .then_some(config.theme.as_deref().unwrap_or("dark")),
         ),
         SessionCommand::Delete { id } => delete(&store, &id),
         SessionCommand::Repair { id } => repair(&store, &id),
+        SessionCommand::Accounting => accounting(&store),
     }
+}
+
+/// Print the workspace's durable ephemeral accounting.
+///
+/// The transcript of an ephemeral run is gone by design; this is the surviving
+/// record of what it used and cost. Uncertainty is fail-closed: while any kept
+/// record is uncertain, the totals are reported as a known subtotal.
+fn accounting(store: &SessionStore) -> anyhow::Result<()> {
+    let summary = store.ephemeral_accounting_summary()?;
+    let ledger = store
+        .dir()
+        .join(".accounting")
+        .join("ephemeral-sessions.jsonl");
+    crate::output::stdout_line(format!(
+        "Ephemeral accounting (transcripts discarded, usage retained): {}",
+        ledger.display()
+    ));
+    if summary.runs == 0 {
+        crate::output::stdout_line("No ephemeral runs recorded for this workspace.".to_owned());
+        return Ok(());
+    }
+    crate::output::stdout_line(format!("Runs: {}", summary.runs));
+    let dollars = summary.total_cost_microdollars as f64 / 1_000_000.0;
+    crate::output::stdout_line(format!(
+        "Recorded cost: ${dollars:.4}{}",
+        if summary.has_uncertain_usage {
+            " (known subtotal)"
+        } else {
+            ""
+        }
+    ));
+    crate::output::stdout_line(format!(
+        "Usage: {} record(s), {} input / {} output tokens",
+        summary.usage_records, summary.input_tokens, summary.output_tokens
+    ));
+    crate::output::stdout_line(format!(
+        "Uncertainty: {}",
+        if summary.has_uncertain_usage {
+            format!(
+                "{} unknown-usage record(s); cost totals are a known subtotal",
+                summary.uncertainty_records
+            )
+        } else {
+            "none recorded".to_owned()
+        }
+    ));
+    Ok(())
 }
 
 fn list(store: &SessionStore, query: Option<&str>) -> anyhow::Result<()> {
@@ -117,6 +195,42 @@ fn matches_query(session: &SessionMeta, query: Option<&str>) -> bool {
     )
     .to_ascii_lowercase();
     haystack.contains(query)
+}
+
+/// Bounded incremental entry search. Reports the index change so a caller can
+/// notify on a real transcript change.
+fn search(store: &SessionStore, query: &str, limit: usize) -> anyhow::Result<()> {
+    if query.trim().is_empty() {
+        anyhow::bail!("sessions search requires a non-empty query");
+    }
+    let outcome = store.search_entries(query, limit.clamp(1, 200))?;
+    if outcome.hits.is_empty() {
+        crate::output::stdout_line(format!("No session entries match {query:?}."));
+    } else {
+        let terminal = crate::output::stdout_is_terminal();
+        crate::output::stdout_table_line("SESSION\tENTRY\tROLE\tTEXT");
+        for hit in &outcome.hits {
+            let role = match hit.kind {
+                EntryKind::User => "user",
+                EntryKind::Assistant => "assistant",
+            };
+            let text = hit.text.replace('\n', " ");
+            crate::output::stdout_table_line(format!(
+                "{}\t{}\t{}\t{}",
+                crate::output::table_field(&hit.session_id, terminal),
+                crate::output::table_field(&hit.entry_id, terminal),
+                role,
+                crate::output::table_field(&text, terminal),
+            ));
+        }
+    }
+    if outcome.index_changed {
+        crate::output::stderr_line(format!(
+            "Indexed {} session(s); entry-index revision {}.",
+            outcome.scanned_sessions, outcome.revision
+        ));
+    }
+    Ok(())
 }
 
 fn inspect(store: &SessionStore, id: &str) -> anyhow::Result<()> {
@@ -234,13 +348,26 @@ pub(crate) fn export_portable(
     include_secrets: bool,
     force: bool,
 ) -> anyhow::Result<SessionExportReport> {
+    export_with_format(store, id, output, cwd, include_secrets, force, None)
+}
+
+fn export_with_format(
+    store: &SessionStore,
+    id: &str,
+    output: Option<PathBuf>,
+    cwd: &Path,
+    include_secrets: bool,
+    force: bool,
+    html_theme: Option<&str>,
+) -> anyhow::Result<SessionExportReport> {
     let path = store.path_by_id(id)?;
     Session::open_read_only(&path)
         .map_err(|error| anyhow::anyhow!("refusing to export corrupt session {id:?}: {error}"))?;
     let opened_path = crate::session_store::absolute_read_path(&path)?;
     let bytes =
         octet_agent::secure_fs::read_regular_file_bounded(&opened_path, MAX_SESSION_FILE_BYTES)?;
-    let (records, ignored_torn_tail) = parse_export_records(&bytes)?;
+    let (mut records, ignored_torn_tail) = parse_export_records(&bytes)?;
+    project_export_visibility(&mut records);
     let mut redaction_count = 0usize;
     let meta = store
         .list()
@@ -266,7 +393,13 @@ pub(crate) fn export_portable(
         redact_value(&mut package, None, &mut redaction_count)?;
     }
     package["redaction_count"] = Value::from(redaction_count);
-    let destination = output.unwrap_or_else(|| PathBuf::from(format!("{id}.octet-session.json")));
+    let destination = output.unwrap_or_else(|| {
+        PathBuf::from(if html_theme.is_some() {
+            format!("{id}.html")
+        } else {
+            format!("{id}.octet-session.json")
+        })
+    });
     let destination = if destination.is_absolute() {
         destination
     } else {
@@ -278,7 +411,10 @@ pub(crate) fn export_portable(
             destination.display()
         );
     }
-    let payload = serde_json::to_vec_pretty(&package)?;
+    let payload = match html_theme {
+        Some(theme) => crate::modes::export_html::render(&package, theme)?,
+        None => serde_json::to_vec_pretty(&package)?,
+    };
     crate::auth::write_private_atomic(&destination, &payload, ".session-export-")?;
     Ok(SessionExportReport {
         destination,
@@ -295,8 +431,9 @@ fn export_cli(
     cwd: &Path,
     include_secrets: bool,
     force: bool,
+    html_theme: Option<&str>,
 ) -> anyhow::Result<()> {
-    let report = export_portable(store, id, output, cwd, include_secrets, force)?;
+    let report = export_with_format(store, id, output, cwd, include_secrets, force, html_theme)?;
     crate::output::stdout_line(format!(
         "Exported session {id} to {}.",
         report.destination.display()
@@ -315,6 +452,30 @@ fn export_cli(
         ));
     }
     Ok(())
+}
+
+/// Visibility is independent of credential scrubbing and applies to all export
+/// formats, including --include-secrets. Match EntryMetadata's public-only
+/// projection without round-tripping or deleting unrelated/unknown record data.
+fn project_export_visibility(records: &mut [Value]) {
+    for record in records {
+        if record["type"] != "entry" {
+            continue;
+        }
+        let Some(metadata) = record.get_mut("metadata").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if let Some(extensions) = metadata
+            .get_mut("extension_metadata")
+            .and_then(Value::as_object_mut)
+        {
+            extensions
+                .retain(|_, value| value.get("public").and_then(Value::as_bool) == Some(true));
+            if extensions.is_empty() {
+                metadata.remove("extension_metadata");
+            }
+        }
+    }
 }
 
 fn parse_export_records(bytes: &[u8]) -> anyhow::Result<(Vec<Value>, bool)> {
@@ -862,6 +1023,29 @@ mod tests {
     }
 
     #[test]
+    fn export_visibility_uses_only_actual_entry_metadata_and_keeps_public_values() {
+        let ordinary = serde_json::json!({"extension_metadata": {"data": {"public": false, "value": "ordinary tool data"}}});
+        let public = serde_json::json!({"public": true, "value": ordinary.clone()});
+        let mut records = vec![
+            serde_json::json!({"type": "entry", "metadata": {
+                "display_text": "keep host field",
+                "extension_metadata": {"public": public.clone(), "private": {"public": false, "value": "hidden"}, "default": {"value": "also hidden"}}
+            }, "value": ordinary.clone()}),
+            serde_json::json!({"type": "entry", "metadata": {"extension_metadata": {"private": {"value": "hidden"}}}}),
+            serde_json::json!({"type": "other", "metadata": ordinary.clone()}),
+        ];
+        project_export_visibility(&mut records);
+        assert_eq!(
+            records[0]["metadata"]["extension_metadata"],
+            serde_json::json!({"public": public})
+        );
+        assert_eq!(records[0]["metadata"]["display_text"], "keep host field");
+        assert_eq!(records[0]["value"], ordinary);
+        assert!(records[1]["metadata"].get("extension_metadata").is_none());
+        assert_eq!(records[2]["metadata"], ordinary);
+    }
+
+    #[test]
     fn export_redacts_keys_and_recognizable_tokens() {
         let mut value = serde_json::json!({
             "authorization": "Bearer abc",
@@ -1199,6 +1383,7 @@ mod tests {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId(call_id_secret.into()),
                     name: "extension-review".into(),
                     arguments_json: serde_json::json!({
@@ -1307,6 +1492,7 @@ mod tests {
         session
             .append(EntryValue::Message(Message::Assistant(AssistantMessage {
                 content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
                     id: ToolCallId("ordinary-call-id".into()),
                     name: "extension-review".into(),
                     arguments_json: nested_arguments,

@@ -1,28 +1,25 @@
 # Experimental `octet serve`
 
-This guide describes the experimental Serve source in octet **0.7.6**. With
-[the matching octet version installed](../../installation.md) and its Serve
-assets available on the
-[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6),
-install the package and start the graphical client:
+This guide describes experimental Serve in octet **0.8.0**. Install the
+[version-matched package](#install-or-update-a-package), or use a reviewed source checkout:
 
 ```console
-octet extension install octet-serve
-octet serve --port 0
+cargo run --features serve -- serve --port 0
 ```
 
-For development from a source checkout, use
-`cargo run --features serve -- serve --port 0`.
+A reviewed local package must match the source-built host exactly; see
+[package installation](#install-or-update-a-package). Catalog installation
+requires verified matching published assets from the version-pinned release.
 
 This starts a headless host for the launch workspace and opens its local web
 client. `--port 0` requests an available port. Add `--no-open` to skip opening the
 browser; `--web-root <directory>` selects a development asset directory.
 
-The [0.7.6 notes](../../releases/v0.7.6.md) describe source changes; the exact
-GitHub release is authoritative for availability, signed assets, and
-public-install verification. [0.7.4](../../releases/v0.7.4.md) is a published,
-immutable release with signed Serve packages and installation checks; those
-results do not qualify 0.7.6. Serve remains experimental. Live-provider and
+The [0.8.0 release notes](../../releases/v0.8.0.md) describe changes and link
+current signed-asset and public-install evidence. Historical [0.7.6](../../releases/v0.7.6.md) and
+[0.7.4](../../releases/v0.7.4.md) release records retain their signed-asset and
+public-install evidence; those results do not qualify 0.8.0. Serve remains
+experimental. Live-provider and
 native-host audio checks are optional and **NOT RUN** in this source review.
 Package smoke does not qualify private-LAN access, actual-terminal/SSH behavior,
 endurance, or every graphical media, recovery, and visual journey.
@@ -63,14 +60,12 @@ indicator reflects the host's immutable launch policy; per-session changes are
 unavailable and rejected server-side. Configure restrictions before launch and
 restart the host to change them. Enabled commands run with the local user's OS
 authority; use a restricted user, container, VM, or OS sandbox for hostile work.
-Pairing would not grant project trust, Remote Read, or more tool authority.
 
 **LAN pairing is not implemented.** There is no working `--lan`, `--demo`, or
 `--local-only` switch. Do not expose this listener through `0.0.0.0`, a proxy, or
-port forwarding. The [LAN specification](lan-pairing.md) describes a separate,
-opt-in pinned-TLS transport with explicit pairing and revocable device
-credentials; it is not setup guidance. [Native apps](native-delivery.md) are
-also unimplemented.
+port forwarding. The native companion source is not a supported connection
+path. In a source checkout, `apps/ios/README.md` and `apps/macos/README.md`
+describe those limitations.
 
 ## Terminal and recovery
 
@@ -98,9 +93,9 @@ qualification.
 
 ## Install or update a package
 
-With octet `0.7.6`, first check that the matching Serve assets are available on
-the [exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6).
-Then install or update the public package:
+With octet `0.8.0`, install or update by name only after matching Serve assets
+are published and verified on the exact GitHub release. No 0.8.0 publication is
+claimed by this checkout. Once that gate is met:
 
 ```console
 octet extension install octet-serve
@@ -110,13 +105,13 @@ octet extension update octet-serve
 For a reviewed matching local archive instead:
 
 ```console
-octet extension install --path ./octet-serve-0.7.6-TARGET.tar.gz
+octet extension install --path ./octet-serve-0.8.0-TARGET.tar.gz
 octet extension list
 octet serve
 ```
 
 Local archive installation does not need GitHub network access. The package
-requires exactly `=0.7.6`. Replace `TARGET` with `x86_64-unknown-linux-gnu`,
+requires exactly `=0.8.0`. Replace `TARGET` with `x86_64-unknown-linux-gnu`,
 `x86_64-apple-darwin`, or `aarch64-apple-darwin`; Linux musl is unsupported.
 A local build/archive is not evidence of signed publication.
 
@@ -131,7 +126,7 @@ other user data. See [package and release details](../../../extensions/octet-ser
 
 Production live previews and child-agent trees are disabled. Durable source,
 diff, and output evidence covers successful built-in `read`,
-`read_skill_resource`, `edit`, and `write`, not all Bash or extension mutations.
+`edit`, and `write`, not all Bash or extension mutations.
 There is no arbitrary-folder import from the browser, MCP or LSP management,
 extension catalog/lifecycle UI, scheduling, WAN access, multi-host replication,
 or hosted account service. Missing capabilities should stay hidden, not appear
@@ -142,8 +137,6 @@ as empty dashboard sections.
 
 ## Reference
 
-- [Implementation coverage and limitations](current-state.md) — maintainer reference.
 - [Architecture](architecture.md) and [lifecycle safety](../../design/serve-lifecycle-safety.md) — technical contracts.
 - [Web acceptance](web-acceptance.md) and [provider acceptance](provider-acceptance.md) — criteria, not a current pass.
-- [Historical checklist](p0-p1-delivery.md) and [validation record](current-state.md#validation-evidence) — evidence with its original scope.
 - [Project](https://github.com/orgs/skaft-software/projects/5) — work tracking.

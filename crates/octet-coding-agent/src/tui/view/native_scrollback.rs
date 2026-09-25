@@ -10,16 +10,14 @@ use super::transcript_commit::transcript_pinned_frame;
 use super::viewport::{overlay_lines, transcript_lines};
 use super::{ShellState, TranscriptBlock};
 
-/// Live tool output is replaceable telemetry, not a final result. Keep a
-/// trailing pending call wholly addressable until its authoritative result
-/// arrives. In particular, a five-line preview in an eight-row terminal must
-/// not push the mutable tool heading into saved lines. Final results are never
-/// clipped by this policy; they flow into native history in their entirety
-/// (subject only to the existing explicit disclosure policy).
+/// Keep only an ordinary trailing pending call wholly addressable until its
+/// authoritative result arrives. A tall preview must not push its mutable
+/// heading into saved lines. Final results use the normal disclosure policy.
 ///
-/// This intentionally handles only an ordinary trailing call. Historical live
-/// calls/rosters and Markdown finalization still need a separate emitted-
-/// presentation policy; silently freezing those rows would lose real updates.
+/// A non-trailing tool cannot own the rest of the transcript:
+/// clipping that suffix would hide unrelated answers and completed results.
+/// Those blocks retain their canonical rows, and real historical updates take
+/// Pi's visible repaint or saved-line clear/replay path rather than being frozen.
 fn pending_tool_tail(
     state: &ShellState,
     chrome: &ShellChrome,
@@ -29,7 +27,7 @@ fn pending_tool_tail(
     let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
         return None;
     };
-    if panel.finished || panel.subagent_activity.is_some() {
+    if panel.finished {
         return None;
     }
     let cache = state.transcript_cache.borrow();
@@ -94,6 +92,7 @@ fn native_viewport_surface(state: &ShellState, chrome: &ShellChrome) -> bool {
         || state.panel.is_some()
         || !state.editor.is_empty()
         || state.tool_input_prompt.is_some()
+        || !chrome.subagents.is_empty()
         || !chrome.pending.is_empty()
         || !chrome.suggestions.is_empty()
         || !chrome.error.is_empty()

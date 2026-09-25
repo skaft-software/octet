@@ -1,0 +1,9 @@
+: cite: docs/research/apidocs/openai-responses/07-streaming-events.md (computer_call output_item.added/done with call_id + action)
+: cite: docs/research/apidocs/openai-responses/02-create.md:986 (ComputerCallOutput computer_call_output), :1598 (ComputerUsePreview computer_use_preview declaration)
+data: {"type":"response.created","response":{"id":"resp_computer"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"cc_1","type":"computer_call","call_id":"call_comp_1","status":"completed","action":{"type":"click","button":"left","x":120,"y":340},"pending_safety_checks":[{"id":"sc_1","code":"malicious_instruction","message":"Possible prompt injection"}]}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"cc_1","type":"computer_call","call_id":"call_comp_1","status":"completed","action":{"type":"click","button":"left","x":120,"y":340}}}
+
+data: {"type":"response.completed","response":{"output":[{"id":"cc_1","type":"computer_call","call_id":"call_comp_1","status":"completed","action":{"type":"click","button":"left","x":120,"y":340}}],"usage":{"input_tokens":40,"output_tokens":12,"total_tokens":52}}}

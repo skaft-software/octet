@@ -6,10 +6,10 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import re
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
-VERSION = "0.7.6"
+VERSION = "0.8.0"
 MAX_ACTIVE_CHILDREN = 8
 MAX_DEPTH = 1
 MAX_WORKERS_PER_OWNER = 32
@@ -54,6 +54,19 @@ ACTIVE_STATES = frozenset({"queued", "running", "waiting", "stopping"})
 _NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])?$")
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_./:-]{1,512}$")
+# Provider and model ids as the product spells them (`provider/model`), never a
+# free-form command line. `inherit` means "the parent session's selection".
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9._+:/@-]{0,255}$")
+INHERIT = "inherit"
+# The state the host produces when an owning run retires a child record before
+# the extension observes it. It means "still owned by this session, currently
+# detached from any run" -- a recoverable state, not a dead one.
+DETACHED_STATE = "orphaned"
+DETACHED_LABEL = "detached"
+# A detached worker parked at the host approval boundary: still owned by the
+# session, but it must not mutate unattended. It is rendered as an explicit
+# bounded state (never a silent stall and never a fake success).
+AWAITING_APPROVAL_STATE = "awaiting_approval"
 
 
 class SubagentError(Exception):
@@ -140,7 +153,10 @@ class SpawnRequest:
     name: str
     task: str
     profile: str
+    provider: str
     model: str
+    reasoning: str
+    reasoning_capability: "Any"
     tools: Tuple[str, ...]
     timeout_seconds: Optional[int]
     max_turns: Optional[int]
@@ -150,15 +166,31 @@ class SpawnRequest:
     idempotency_key: str
     fingerprint: str
 
+    @property
+    def model_selection(self) -> Optional[Dict[str, str]]:
+        selection = {key: value for key, value in (
+            ("provider", self.provider), ("model", self.model), ("reasoning", self.reasoning)
+        ) if value != INHERIT}
+        return selection or None
+
+    @property
+    def inherits_model_policy(self) -> bool:
+        return self.provider == INHERIT and self.model == INHERIT and self.reasoning == INHERIT
+
     @classmethod
-    def parse(cls, arguments: Mapping[str, Any]) -> "SpawnRequest":
+    def parse(
+        cls, arguments: Mapping[str, Any]
+    ) -> "SpawnRequest":
         if not isinstance(arguments, Mapping):
             raise SubagentError("subagent_spawn arguments must be an object")
         allowed = {
             "name",
             "task",
             "profile",
+            "provider",
             "model",
+            "reasoning",
+            "reasoning_capability",
             "tools",
             "timeout_seconds",
             "max_turns",
@@ -188,10 +220,19 @@ class SpawnRequest:
             raise SubagentError(
                 "profile must be one of: %s" % ", ".join(sorted(PROFILE_INSTRUCTIONS))
             )
-        model = arguments.get("model", "inherit")
-        if model != "inherit":
+
+        # Validate syntax here; only the host's configured catalog can admit
+        # a route or normalize its reasoning. Caller capability hints are not
+        # execution authority and are never forwarded as model metadata.
+        provider = _model_id(arguments.get("provider", INHERIT), "provider")
+        model = _model_id(arguments.get("model", INHERIT), "model")
+        from .reasoning import ReasoningCapability, parse_level
+
+        reasoning = parse_level(arguments.get("reasoning", INHERIT))
+        capability = ReasoningCapability.parse(arguments.get("reasoning_capability"))
+        if provider != INHERIT and model == INHERIT:
             raise SubagentError(
-                "API 0.2 agent_sessions can only inherit the parent model; model must be 'inherit'",
+                "provider selection requires an explicit model; pass provider and model together",
                 code="unsupported_model",
             )
 
@@ -250,7 +291,18 @@ class SpawnRequest:
             "name": name,
             "task": task,
             "profile": profile,
+            "provider": provider,
             "model": model,
+            "reasoning": reasoning,
+            "reasoning_capability": (
+                None
+                if capability == ReasoningCapability()
+                else {
+                    "ceiling": capability.ceiling,
+                    "floor": capability.floor,
+                    "ultra": capability.ultra_advertised,
+                }
+            ),
             "tools": tools,
             "timeout_seconds": timeout_seconds,
             "max_turns": max_turns,
@@ -271,7 +323,10 @@ class SpawnRequest:
             name=name,
             task=task,
             profile=profile,
+            provider=provider,
             model=model,
+            reasoning=reasoning,
+            reasoning_capability=capability,
             tools=tuple(tools),
             timeout_seconds=timeout_seconds,
             max_turns=max_turns,
@@ -326,7 +381,7 @@ HARD ORCHESTRATION BOUNDARIES
 BOUNDS
 - {wall_line}
 - {turns_line}
-- Token/context ceilings: inherit the parent session exactly; no separate child token budget is requested.
+- Token/context ceilings: inherit the parent's session token ceiling; the selected model's context/output capabilities bound inherited settings. No separate child token budget is requested.
 - {cost_line}
 - Final output must be no more than {self.max_output_bytes} UTF-8 bytes.
 octet owns the actual session, persistence, approvals, cancellation, hard limits, and descendant cleanup. Stop earlier if a host limit is lower.
@@ -402,6 +457,28 @@ class Worker:
     generation: int = 0
     delivery_state: str = "host_managed"
     host_present: bool = True
+    # Launchability is a host observation, never inferred from lifecycle state.
+    launchable: bool = False
+    launch_blocked: Optional[str] = None
+    live_task: Optional[bool] = None
+    # Requested selections remain separate from host-confirmed execution
+    # settings, including across continuation and recovery.
+    requested_provider: str = INHERIT
+    effective_provider: str = "inherited"
+    requested_reasoning: str = INHERIT
+    effective_reasoning: str = "inherited"
+    model_policy_applied: bool = False
+    reasoning_note: Optional[str] = None
+    # Session-scoped delegation: a worker whose host record disappeared is
+    # *detached*, not dead. It stays visible, keeps its evidence, and can be
+    # reattached once the host exposes its live session again.
+    detached_at_ms: Optional[int] = None
+    reattach_count: int = 0
+    last_reattached_at_ms: Optional[int] = None
+    # Bounded host diagnostic carried by the record itself. It names why a
+    # detached worker was not reattached, or why it is parked at the approval
+    # boundary, and is never inferred by this process.
+    host_diagnostic: Optional[str] = None
 
     @property
     def terminal(self) -> bool:
@@ -415,6 +492,26 @@ class Worker:
     def read_only(self) -> bool:
         return all(tool in READ_ONLY_TOOLS for tool in self.tools)
 
+    @property
+    def detached(self) -> bool:
+        """Session-owned but currently not attached to any host run."""
+        return self.state == DETACHED_STATE
+
+    @property
+    def awaiting_approval(self) -> bool:
+        """Detached at the approval boundary: visible, parked, not mutating."""
+        return self.state == AWAITING_APPROVAL_STATE
+
+    @property
+    def reattachable(self) -> bool:
+        """A detached worker keeps its durable session reference for reattachment."""
+        return self.detached and bool(self.session)
+
+    @property
+    def reattached(self) -> bool:
+        """A session-owned worker that has been reattached at least once."""
+        return self.reattach_count > 0 and not self.detached
+
     def elapsed_ms(self, now_ms: int) -> int:
         end = self.completed_at_ms if self.completed_at_ms is not None else now_ms
         return max(0, end - self.started_at_ms)
@@ -427,8 +524,14 @@ class Worker:
             "depth": self.depth,
             "name": self.name,
             "profile": self.profile,
+            "provider": self.effective_provider,
+            "provider_policy": self.requested_provider,
             "model": self.effective_model,
             "model_policy": self.requested_model,
+            "model_policy_applied": self.model_policy_applied,
+            "reasoning": self.effective_reasoning,
+            "reasoning_policy": self.requested_reasoning,
+            "reasoning_note": self.reasoning_note,
             "tools": list(self.tools),
             "state": self.state,
             "phase": self.phase,
@@ -451,12 +554,21 @@ class Worker:
             "timeout_seconds": self.timeout_seconds,
             "deadline_at_ms": self.deadline_at_ms,
             "session": self.session,
+            "launchable": self.launchable,
+            "launch_blocked": self.launch_blocked,
+            "live_task": self.live_task,
             "export_reference": self.export_reference,
             "artifacts": [artifact.public() for artifact in self.artifacts],
             "current_tool": self.current_tool,
             "recent_tools": list(self.recent_tools),
             "recovered_after_restart": self.recovered,
             "restart_count": self.restart_count,
+            "detached": self.detached,
+            "reattachable": self.reattachable,
+            "detached_at_ms": self.detached_at_ms,
+            "reattach_count": self.reattach_count,
+            "last_reattached_at_ms": self.last_reattached_at_ms,
+            "host_diagnostic": self.host_diagnostic,
             "delivery": self.delivery_state,
         }
         if include_summary:
@@ -489,9 +601,34 @@ def bounded_int(value: Any, name: str, minimum: int, maximum: int) -> int:
     return value
 
 
+def _model_id(value: Any, name: str) -> str:
+    """Validate a requested provider/model id; `inherit` is the default."""
+    if value is None:
+        return INHERIT
+    if not isinstance(value, str) or (
+        value != INHERIT and _MODEL_ID_RE.fullmatch(value) is None
+    ):
+        raise SubagentError(
+            "%s must be `inherit` or a bounded provider/model id" % name,
+            code="unsupported_model",
+        )
+    return value
+
+
 def _is_control(character: str) -> bool:
     codepoint = ord(character)
     return codepoint < 32 or 127 <= codepoint <= 159
+
+
+def _unsafe_presentation_character(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        _is_control(character)
+        or codepoint in {0x061C, 0x2060, 0xFEFF}
+        or 0x200B <= codepoint <= 0x200F
+        or 0x202A <= codepoint <= 0x202E
+        or 0x2066 <= codepoint <= 0x2069
+    )
 
 
 def validate_plain_text(value: str, name: str, *, allow_newline: bool) -> None:
@@ -523,7 +660,7 @@ def sanitize_document(value: Any, limit: int) -> str:
     text = str(value)
     pieces = []
     for character in text:
-        if _is_control(character) and character not in {"\n", "\r", "\t"}:
+        if _unsafe_presentation_character(character) and character not in {"\n", "\r", "\t"}:
             pieces.append("\\u%04x" % ord(character))
         else:
             pieces.append(character)

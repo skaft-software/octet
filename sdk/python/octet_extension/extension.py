@@ -57,9 +57,11 @@ API_V02_FEATURES = (
     "policy_intents",
     "dynamic_tools",
     "agent_sessions",
+    "agent_model_selection_v1",
     "delegation_telemetry_v1",
     "approvals",
     "secrets",
+    "compaction_strategy",
 )
 LIFECYCLE_METHODS = (
     "session/started",
@@ -579,7 +581,7 @@ class Extension:
             raise ValueError("tool description must be non-empty")
         schema = dict(parameters) if parameters is not None else {"type": "object"}
         result_schema = dict(output_schema) if output_schema is not None else None
-        if result_schema is not None and self.api_version != "0.2":
+        if result_schema is not None and self.api_version not in ("0.2", "0.4"):
             raise ValueError("output_schema requires extension API 0.2")
 
         def decorate(handler: Handler) -> Handler:
@@ -613,7 +615,9 @@ class Extension:
 
     def hook(self, name: str) -> Callable[[Handler], Handler]:
         self._validate_name("hook", name)
-        if name in _TYPED_MUTATION_HOOKS and self.api_version != "0.2":
+        if name == "compaction_strategy" and self.api_version != "0.4":
+            raise ValueError("compaction_strategy requires API 0.4")
+        if name in _TYPED_MUTATION_HOOKS and self.api_version not in ("0.2", "0.4"):
             raise ValueError(f"{name} requires extension API 0.2")
 
         def decorate(handler: Handler) -> Handler:
@@ -708,7 +712,7 @@ class Extension:
         process-scoped state.
         """
 
-        if self.api_version != "0.2":
+        if self.api_version not in ("0.2", "0.4"):
             raise RpcError(-32601, "semantic presentation requires extension API 0.2")
         self._require_capability("presentation")
         if not isinstance(snapshot, Mapping):
@@ -829,7 +833,7 @@ class Extension:
             raise ValueError("request method must be non-empty")
         self._require_initialized()
         payload = dict(params) if params is not None else {}
-        if self.api_version == "0.2" and correlate_parent:
+        if self.api_version in ("0.2", "0.4") and correlate_parent:
             parent = self._resolve_parent(parent_request_id, required=operation_scoped)
             if parent is not _MISSING:
                 payload["parent_request_id"] = parent
@@ -1052,7 +1056,7 @@ class Extension:
             "confirmation/request",
             params,
             parent_request_id=parent_request_id,
-            operation_scoped=self.api_version == "0.2",
+            operation_scoped=self.api_version in ("0.2", "0.4"),
         )
         if not isinstance(result, Mapping) or not isinstance(result.get("confirmed"), bool):
             raise RpcError(-32603, "invalid confirmation response")
@@ -1083,7 +1087,7 @@ class Extension:
         if not isinstance(secret, bool):
             raise TypeError("input secret must be a boolean")
         self._require_initialized()
-        if self.api_version != "0.2":
+        if self.api_version not in ("0.2", "0.4"):
             raise RpcError(-32601, "input/request requires extension API 0.2")
         result = self.request(
             "input/request",
@@ -1361,6 +1365,7 @@ class Extension:
         timeout_ms: Optional[int] = None,
         profile: Optional[str] = None,
         fingerprint: Optional[str] = None,
+        model_selection: Optional[Mapping[str, str]] = None,
         parent_request_id: Any = _MISSING,
     ) -> dict[str, Any]:
         """Create a host-bounded child owned by the active request; omitted ceilings inherit the parent session's limits."""
@@ -1456,6 +1461,21 @@ class Extension:
                 "timeout_ms": timeout_ms,
             },
         }
+        if model_selection is not None:
+            self._require_feature("agent_model_selection_v1")
+            if not isinstance(model_selection, Mapping) or set(model_selection) - {"provider", "model", "reasoning"}:
+                raise ValueError("agent model_selection must contain only provider, model, reasoning")
+            for key, value in model_selection.items():
+                if key == "reasoning":
+                    if not isinstance(value, str) or value not in {
+                        "inherit", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+                    }:
+                        raise ValueError("agent reasoning must be inherit or a supported effort identifier")
+                elif (not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256
+                      or not (value[0].isascii() and (value[0].isalnum() or value[0] == "@"))
+                      or any(not (c.isascii() and (c.isalnum() or c in "._+:/@-")) for c in value)):
+                    raise ValueError("agent model_selection identifiers must be bounded plain identifiers")
+            params["policy"]["model_selection"] = dict(model_selection)
         if profile is not None:
             params["profile"] = profile
         if fingerprint is not None:
@@ -1523,6 +1543,28 @@ class Extension:
         )
         if not isinstance(result, Mapping):
             raise RpcError(-32603, f"invalid {method} response")
+        return dict(result)
+
+    def list_agent_models(
+        self, *, query: Optional[str] = None, limit: int = 50,
+        parent_request_id: Any = _MISSING,
+    ) -> dict[str, Any]:
+        """Discover bounded configured routes available to the current owner, without credentials."""
+        self._require_feature("agent_sessions")
+        self._require_feature("agent_model_selection_v1")
+        if query is not None and (not isinstance(query, str) or len(query.encode("utf-8")) > 128
+                                  or any(ord(c) < 32 or ord(c) == 127 for c in query)):
+            raise ValueError("agent model query must be plain text of at most 128 bytes")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("agent model limit must be an integer between 1 and 100")
+        params: dict[str, Any] = {"limit": limit}
+        if query is not None:
+            params["query"] = query
+        result = self.request("agent/models", params, parent_request_id=parent_request_id,
+                              operation_scoped=True)
+        if (not isinstance(result, Mapping) or not isinstance(result.get("models"), list)
+            or len(result["models"]) > limit or type(result.get("truncated")) is not bool):
+            raise RpcError(-32603, "invalid agent models response")
         return dict(result)
 
     def list_agents(
@@ -1876,11 +1918,11 @@ class Extension:
         self._validate_declarations()
 
         protocol_response: Optional[dict[str, Any]] = None
-        if self.api_version == "0.2":
+        if self.api_version in ("0.2", "0.4"):
             protocol = params.get("protocol")
             if not isinstance(protocol, Mapping):
                 raise RpcError(-32602, "API 0.2 initialize requires a protocol object")
-            if protocol.get("version") != "0.2":
+            if protocol.get("version") not in ("0.2", "0.4"):
                 raise RpcError(-32000, "unsupported executable-extension protocol version")
             required = self._feature_list(protocol.get("required_features", []), "required_features")
             optional = self._feature_list(protocol.get("optional_features", []), "optional_features")
@@ -1910,7 +1952,7 @@ class Extension:
                 with self._tool_catalog_lock:
                     self._tool_catalogs[0] = dict(self._tools)
             protocol_response = {
-                "version": "0.2",
+                "version": self.api_version,
                 "features": features,
                 "limits": {"max_concurrent_requests": self._negotiated_concurrency},
             }
@@ -1973,7 +2015,7 @@ class Extension:
             if catalog_revision is _MISSING:
                 catalog = self._tools
             else:
-                if self.api_version != "0.2" or "dynamic_tools" not in self._features:
+                if self.api_version not in ("0.2", "0.4") or "dynamic_tools" not in self._features:
                     raise RpcError(
                         -32602,
                         "tool/call catalog_revision requires negotiated dynamic_tools",
@@ -2012,7 +2054,7 @@ class Extension:
             raise
         except Exception as error:
             self.logger.error("tool handler failed", tool=name, error=str(error))
-            if self.api_version == "0.2":
+            if self.api_version in ("0.2", "0.4"):
                 return self._tool_result(
                     tool_result(text_content(str(error)), is_error=True),
                     tool,
@@ -2277,6 +2319,15 @@ class Extension:
             result["post_mutation"] = self._validate_post_mutation_disposition(
                 value["post_mutation"]
             )
+        elif hook == "compaction_strategy":
+            if "compaction_strategy" not in self._features:
+                raise RpcError(-32603, "compaction_strategy was not negotiated")
+            frames = value.get("compaction_frames")
+            if (not isinstance(frames, list) or not 1 <= len(frames) <= 32
+                    or any(not isinstance(frame, str) or len(frame) > 512 * 1024
+                           for frame in frames)):
+                raise RpcError(-32603, "invalid compaction frames")
+            result["compaction_frames"] = frames
         return result
 
     @staticmethod
@@ -2414,10 +2465,15 @@ class Extension:
         ).start()
 
     def _start_eof_drain(self) -> None:
+        shutdown_requested = self._draining
         self._draining = True
 
         def eof_flow() -> None:
-            if not self._wait_for_futures(self.shutdown_timeout):
+            if shutdown_requested:
+                # EOF must not overtake an admitted shutdown hook and its ACK.
+                # A non-cooperative hook still cannot extend the EOF drain forever.
+                self._shutdown_done.wait(self.shutdown_timeout + self.cancellation_grace)
+            elif not self._wait_for_futures(self.shutdown_timeout):
                 self._cancel_all("transport_lost")
                 self._wait_for_futures(self.cancellation_grace)
             self._fail_pending(RpcError(-32000, "stdin closed while waiting for host response"))
@@ -2491,7 +2547,7 @@ class Extension:
 
     def _require_feature(self, feature: str) -> None:
         self._require_initialized()
-        if self.api_version != "0.2" or feature not in self._features:
+        if self.api_version not in ("0.2", "0.4") or feature not in self._features:
             raise RpcError(-32601, f"API 0.2 feature is not negotiated: {feature}")
 
     def _require_declared_name(self, key: str, name: str) -> None:

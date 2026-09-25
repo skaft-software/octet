@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::catalog::Model;
 use crate::types::{
-    AssistantMessage, AssistantPart, AudioPayload, ImageSource, Media, Message, Modality,
+    AssistantMessage, AssistantPart, AudioPayload, ImageSource, Media, Message, Modality, Protocol,
     ToolCallId, ToolResult, ToolResultPart, UserMessage, UserPart,
 };
 
@@ -43,12 +43,18 @@ fn audio_fallback_text(audio: &crate::types::AudioMedia, placeholder: &str) -> S
 ///   text while dropping opaque/empty cross-model reasoning;
 /// - normalizes tool-call IDs to the common provider-safe wire shape; and
 /// - inserts synthetic error results for tool calls that have no result before
-///   the next assistant message (or the end of history).
+///   the next assistant message (or the end of history), except async calls
+///   whose pending state must survive until subsequent strict validation.
 ///
 /// [`crate::AiClient`] applies this automatically before validation and wire
 /// serialization. It is public for callers that need to inspect or estimate the
 /// exact replay history in advance.
 pub fn transform_messages(messages: &[Message], target: &Model) -> Vec<Message> {
+    if target.spec.protocol == Protocol::MistralConversations {
+        // Native entries have unconstrained string call IDs. Keep content intact
+        // for explicit Strict/Lossy handling by the codec, not Chat placeholders.
+        return insert_missing_tool_results(messages.to_vec());
+    }
     let transformed = messages
         .iter()
         .map(|message| transform_message(message, target))
@@ -63,6 +69,9 @@ pub fn transform_messages(messages: &[Message], target: &Model) -> Vec<Message> 
 /// placeholders before validation.
 #[cfg(test)]
 pub(crate) fn transform_request_messages(messages: &[Message], target: &Model) -> Vec<Message> {
+    if target.spec.protocol == Protocol::MistralConversations {
+        return insert_missing_tool_results(messages.to_vec());
+    }
     let final_assistant = messages
         .iter()
         .rposition(|message| matches!(message, Message::Assistant(_)));
@@ -95,6 +104,9 @@ pub(crate) fn transform_request_messages_owned(
     messages: Vec<Message>,
     target: &Model,
 ) -> Vec<Message> {
+    if target.spec.protocol == Protocol::MistralConversations {
+        return insert_missing_tool_results(messages);
+    }
     let final_assistant = messages
         .iter()
         .rposition(|message| matches!(message, Message::Assistant(_)));
@@ -486,6 +498,12 @@ fn insert_missing_tool_results(messages: Vec<Message>) -> Vec<Message> {
                 push_synthetic_results(&mut out, &mut pending, &mut synthetic_ids);
                 for part in &assistant.content {
                     if let AssistantPart::ToolCall(call) = part {
+                        // Preserve pending async work and its later real result.
+                        // Route/tool/schema authority is checked by request validation;
+                        // a provider marker alone never authorizes execution.
+                        if call.async_execution {
+                            continue;
+                        }
                         pending.push(call.id.clone());
                     }
                 }
@@ -557,12 +575,14 @@ mod tests {
         };
         Model {
             spec: Arc::new(ModelSpec {
+                preset: Default::default(),
                 id: ModelId(id.to_string()),
                 endpoint: EndpointId("test".to_string()),
                 api_name: id.to_string(),
                 display_name: None,
                 protocol,
                 capabilities: Capabilities {
+                    responses_features: Default::default(),
                     input_modalities,
                     output_modalities: ModalitySet::none(),
                     tools: true,
@@ -594,6 +614,7 @@ mod tests {
 
     fn call(id: &str) -> AssistantPart {
         AssistantPart::ToolCall(ToolCall {
+            async_execution: false,
             id: ToolCallId(id.to_string()),
             name: "read".to_string(),
             arguments_json: "{}".to_string(),

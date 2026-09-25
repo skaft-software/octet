@@ -16,6 +16,10 @@ from tests.helpers import MemoryProtocol, OWNER_CONTEXT
 
 TOOLS = [
     "browser_status",
+    "browser_backend_select",
+    "browser_backend_revoke",
+    "browser_backend_stop",
+    "browser_backend_status",
     "browser_launch",
     "browser_tabs",
     "browser_open_url",
@@ -54,6 +58,7 @@ class FakeController:
         self.data = PNG_SIGNATURE + b"fixture"
         self.artifacts = FakeArtifacts(self.data)
         self.typed_values = []
+        self.backend_calls = []
         self.closed = False
         self.confirmation_parent_seen = False
 
@@ -69,6 +74,28 @@ class FakeController:
 
     def browser_status(self, *_: Any, **__: Any) -> dict[str, Any]:
         return self.result("ready")
+
+    def browser_backend_status(self, *_: Any, **__: Any) -> dict[str, Any]:
+        self.backend_calls.append(("status", None))
+        return {**self.result("backend status"), "backends": [], "selected_backend": None}
+
+    def browser_backend_select(
+        self, _owner: Any, selection: Mapping[str, Any], **_: Any
+    ) -> dict[str, Any]:
+        self.backend_calls.append(("select", dict(selection)))
+        return {**self.result("backend selected"), "backend": dict(selection)}
+
+    def browser_backend_revoke(
+        self, _owner: Any, selection: Mapping[str, Any], **_: Any
+    ) -> dict[str, Any]:
+        self.backend_calls.append(("revoke", dict(selection)))
+        return {**self.result("backend revoked"), "backend": dict(selection)}
+
+    def browser_backend_stop(
+        self, _owner: Any, selection: Mapping[str, Any], **_: Any
+    ) -> dict[str, Any]:
+        self.backend_calls.append(("stop", dict(selection)))
+        return {**self.result("backend stopped"), "backend": dict(selection)}
 
     browser_launch = browser_status
     browser_tabs = browser_status
@@ -167,7 +194,7 @@ class ProtocolTests(unittest.TestCase):
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "api_version": "0.2",
+                    "api_version": "0.4",
                     "octet_version": "0.7.0",
                     "extension": {
                         "name": "octet-browse",
@@ -190,7 +217,7 @@ class ProtocolTests(unittest.TestCase):
                     },
                     "host": {},
                     "protocol": {
-                        "version": "0.2",
+                        "version": "0.4",
                         "required_features": ["request_cancellation", "content_parts"],
                         "optional_features": ["artifacts", "request_progress", "policy_intents"],
                         "limits": {"max_concurrent_requests": 8},
@@ -216,7 +243,7 @@ class ProtocolTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_initialize_has_exact_surface_and_bounded_schemas(self) -> None:
-        self.assertEqual(self.initialize["api_version"], "0.2")
+        self.assertEqual(self.initialize["api_version"], "0.4")
         self.assertEqual([tool["name"] for tool in self.initialize["tools"]], TOOLS)
         self.assertEqual([command["name"] for command in self.initialize["commands"]], ["browse"])
         self.assertEqual(
@@ -226,12 +253,39 @@ class ProtocolTests(unittest.TestCase):
         schemas = {tool["name"]: tool["parameters"] for tool in self.initialize["tools"]}
         self.assertFalse(schemas["browser_click"]["additionalProperties"])
         self.assertEqual(schemas["browser_wait"]["properties"]["milliseconds"]["maximum"], 5000)
+        self.assertEqual(
+            set(schemas["browser_backend_select"]["properties"]),
+            {"connector_id", "browser_id", "session_id", "window_id", "tab_id", "target_revision"},
+        )
+        self.assertEqual(
+            schemas["browser_backend_select"]["required"],
+            ["connector_id", "browser_id", "session_id", "window_id", "tab_id"],
+        )
+        self.assertTrue(schemas["browser_backend_select"]["additionalProperties"] is False)
+        self.assertEqual(schemas["browser_backend_status"], {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        })
+        self.assertIn("No browser discovery", self.initialize["tools"][1]["description"])
         self.assertNotIn("browser_evaluate", schemas)
         self.assertNotIn("browser_download", schemas)
 
     def test_every_noninteractive_declared_tool_dispatches_with_exact_arguments(self) -> None:
+        selection = {
+            "connector_id": "connector_fixture",
+            "browser_id": "browser_fixture",
+            "session_id": "session_fixture",
+            "window_id": "window_fixture",
+            "tab_id": "tab_fixture",
+            "target_revision": "revision_2",
+        }
         cases = [
             ("browser_status", {}),
+            ("browser_backend_status", {}),
+            ("browser_backend_select", selection),
+            ("browser_backend_revoke", selection),
+            ("browser_backend_stop", selection),
             ("browser_launch", {}),
             ("browser_tabs", {}),
             ("browser_open_url", {"url": "https://example.test/"}),
@@ -251,6 +305,13 @@ class ProtocolTests(unittest.TestCase):
                 )
                 self.assertIn("result", response)
                 self.assertFalse(response["result"]["is_error"], response)
+        self.assertEqual(
+            [call[0] for call in self.controller.backend_calls],
+            ["status", "select", "revoke", "stop"],
+        )
+        self.assertEqual(self.controller.backend_calls[1][1], selection)
+        self.assertEqual(self.controller.backend_calls[2][1], selection)
+        self.assertEqual(self.controller.backend_calls[3][1], selection)
 
     def test_typed_value_never_appears_on_protocol_output(self) -> None:
         secret_value = "typed-value-must-not-echo"

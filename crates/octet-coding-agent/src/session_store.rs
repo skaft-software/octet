@@ -1,19 +1,25 @@
 #![allow(missing_docs)]
 
-use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use octet_agent::tools::deferred::{DeferredRunLimits, DeferredRunRecord};
 use octet_agent::{EntryId, EntryValue, Session};
 use octet_ai::{EndpointId, Message, ModelId, Protocol, UserPart};
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::session_catalog::{
-    CachedTranscriptSummary, CatalogFingerprint, CatalogUpdate, SessionCatalog,
+    CachedTranscriptSummary, CatalogFingerprint, CatalogUpdate, IndexedEntry, IndexedEntryKind,
+    IndexedEntryUpdate, SessionCatalog, MAX_INDEXED_ENTRIES_PER_SESSION, MAX_INDEXED_ENTRY_CHARS,
 };
+
+mod accounting_index;
+mod search_projection;
 
 static NEXT_SESSION_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
@@ -29,6 +35,15 @@ const MAX_SESSION_TAG_CHARS: usize = 48;
 /// Marker file recording the canonical workspace path in a workspace
 /// directory. Plain text (one path); older binaries ignore it.
 const WORKSPACE_MARKER: &str = ".workspace";
+/// Private delegation directory this workspace's session store owns, beside the
+/// transcripts. The owning session lays out `<session-dir>/.delegation/team-*/`
+/// and its durable roster there (`DelegationConfig::new(session_parent.join(".delegation"))`).
+const DELEGATION_DIRECTORY: &str = ".delegation";
+/// Host-published opaque handle prefix for one session-owned delegated child
+/// (`octet_agent::delegated_session_reference`). The token is path-free and
+/// argv-safe: the launcher passes `octet --resume <handle>` as separate argv
+/// elements.
+const DELEGATED_SESSION_HANDLE_PREFIX: &str = "agent-session:";
 
 /// Filesystem-backed sessions scoped to one canonical workspace.
 #[derive(Clone, Debug)]
@@ -574,10 +589,16 @@ enum SummaryEntryValue {
         _model: ModelId,
         output: SummaryResponsesOutput,
     },
+    ResponsesReasoning {
+        model: ModelId,
+        baseline: octet_ai::ReasoningConfig,
+        update: Option<octet_ai::ResponsesConfigurationUpdate>,
+    },
     Config {
         model: Option<String>,
         reasoning: Option<String>,
     },
+    ResponsesSteering {},
     PromptTemplateSelected {},
     SkillActivated {},
     SkillResourceRead {},
@@ -645,6 +666,19 @@ enum SummaryRecord {
     Usage {
         record: SummaryUsageRecord,
     },
+    DeferredRun {
+        record: DeferredRunRecord,
+    },
+    EntryLabel {
+        entry_id: EntryId,
+        label: String,
+    },
+    ToolInvocation {
+        #[serde(rename = "scope")]
+        _scope: octet_agent::tools::durability::InvocationScope,
+        #[serde(rename = "record")]
+        _record: octet_agent::tools::durability::InvocationRecord,
+    },
 }
 
 /// Derive the oldest user title on the active branch, if one exists.
@@ -656,6 +690,22 @@ fn active_branch_catalog_config(session: &Session) -> (Option<String>, Option<St
         let Some(entry) = session.entry(id) else {
             break;
         };
+        if let EntryValue::ResponsesReasoning {
+            model: selected,
+            baseline,
+            update,
+            ..
+        } = &entry.value
+        {
+            if model.is_none() {
+                model = Some(selected.0.clone());
+            }
+            if reasoning.is_none() {
+                reasoning = Some(crate::app::reasoning_label(
+                    update.as_ref().map_or(baseline, |update| &update.reasoning),
+                ));
+            }
+        }
         if let EntryValue::Config {
             model: configured_model,
             reasoning: configured_reasoning,
@@ -772,6 +822,187 @@ fn session_id_is_valid(id: &str) -> bool {
     )
 }
 
+/// Bounded, typed refusal for a session-owned worker handle that cannot be
+/// opened as an interactive session.
+///
+/// Every variant is a deliberate fail-closed verdict, so an unlaunchable worker
+/// is never silently resolved to a different session (the parent, a stale
+/// transcript) and never panics. The rendered reason is fixed text: it carries
+/// no transcript path, no roster path, no credential, and no session secret,
+/// and never echoes the caller-supplied handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DelegatedHandleRefusal {
+    /// The handle is not `agent-session:` plus exactly 64 lowercase hex digits.
+    /// Rejected before any filesystem work, so a shell metacharacter, a control
+    /// byte, or a path traversal can never reach a path join.
+    MalformedHandle,
+    /// This session has no readable, supported, owned delegation roster, so no
+    /// worker handle can be resolved from it.
+    RosterUnavailable,
+    /// The roster of this session does not know this handle.
+    UnknownWorker,
+    /// The worker is parked at the approval boundary (`awaiting_approval`).
+    /// Opening it elsewhere would be unattended mutation.
+    ParkedAtApprovalBoundary,
+    /// The roster still records a live worker (`pending`/`running`) that owns
+    /// this transcript in the owning process.
+    LiveInOwningProcess {
+        /// Bounded roster state label (`pending` or `running`).
+        status: &'static str,
+    },
+    /// The roster knows the worker but its transcript is gone.
+    VanishedTranscript,
+    /// The roster resolved to a transcript outside this store's private
+    /// delegation directory: refused as a path escape.
+    OutsideDelegationDirectory,
+}
+
+impl DelegatedHandleRefusal {
+    /// Stable, bounded, machine-readable code for frontends and diagnostics.
+    #[cfg(test)]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::MalformedHandle => "malformed_worker_handle",
+            Self::RosterUnavailable => "delegation_roster_unavailable",
+            Self::UnknownWorker => "unknown_worker_handle",
+            Self::ParkedAtApprovalBoundary => "worker_awaiting_approval",
+            Self::LiveInOwningProcess { .. } => "worker_live_in_owning_process",
+            Self::VanishedTranscript => "worker_transcript_missing",
+            Self::OutsideDelegationDirectory => "worker_handle_outside_delegation",
+        }
+    }
+}
+
+impl std::fmt::Display for DelegatedHandleRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedHandle => formatter.write_str(
+                "not a launchable worker handle: expected `agent-session:` followed by exactly 64 lowercase hex digits, with no shell metacharacter, control byte, or path component",
+            ),
+            Self::RosterUnavailable => formatter.write_str(
+                "this session has no readable session-owned delegation roster, so the worker handle cannot be resolved; a handle is launchable only from the session store that owns it",
+            ),
+            Self::UnknownWorker => formatter.write_str(
+                "the session-owned delegation roster of this session does not know this worker handle",
+            ),
+            Self::ParkedAtApprovalBoundary => formatter.write_str(
+                "the worker is parked at the approval boundary (awaiting_approval), so opening it would be unattended mutation; approve or stop it in an interactive session first",
+            ),
+            Self::LiveInOwningProcess { status } => write!(
+                formatter,
+                "the roster still records a live worker (state `{status}`) that owns this transcript in the owning process; stop or detach it before opening the session elsewhere, because one session has one writer",
+            ),
+            Self::VanishedTranscript => formatter.write_str(
+                "the worker is in the session-owned roster but its transcript is gone, so there is nothing to open",
+            ),
+            Self::OutsideDelegationDirectory => formatter.write_str(
+                "the worker handle resolved outside this session store's private delegation directory, so it was refused as a path escape",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DelegatedHandleRefusal {}
+
+/// Strict `agent-session:<sha256>` shape check, run before any filesystem work.
+///
+/// One argv element, no shell metacharacter, no control byte, no path
+/// separator, no traversal: exactly the boring identifier the host publishes.
+fn delegated_handle_digest(handle: &str) -> Option<&str> {
+    let digest = handle.strip_prefix(DELEGATED_SESSION_HANDLE_PREFIX)?;
+    (digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(digest)
+}
+
+/// The bounded roster state label of a worker that still owns its transcript in
+/// the owning process, matching `DelegatedAgentStatus::label` for the two live
+/// states. Liveness itself is process-local and cannot cross the roster, so a
+/// live record is the fail-closed signal available to a separate process.
+fn live_worker_state(status: &str) -> Option<&'static str> {
+    match status {
+        "pending" => Some("pending"),
+        "running" => Some("running"),
+        _ => None,
+    }
+}
+
+/// Classify the host resolver's refusal into this store's typed, bounded
+/// verdict.
+///
+/// The resolver's messages are fixed, but two of them interpolate an I/O or
+/// JSON error that can name a private path. Only recognized bounded verdicts are
+/// relayed; every unrecognized one (and every non-`Unlaunchable` variant) fails
+/// closed as [`DelegatedHandleRefusal::RosterUnavailable`], so no dynamic text
+/// can reach the error and no path, credential, or secret can leak into it.
+fn classify_delegated_handle_error(
+    error: &octet_agent::delegation::DelegationError,
+) -> DelegatedHandleRefusal {
+    let octet_agent::delegation::DelegationError::Unlaunchable(reason) = error else {
+        return DelegatedHandleRefusal::RosterUnavailable;
+    };
+    let reason = reason.as_str();
+    if reason.starts_with("worker handle must") {
+        DelegatedHandleRefusal::MalformedHandle
+    } else if reason.starts_with("worker is parked at the approval boundary") {
+        DelegatedHandleRefusal::ParkedAtApprovalBoundary
+    } else if reason.starts_with("the worker session file is gone") {
+        DelegatedHandleRefusal::VanishedTranscript
+    } else if reason.starts_with("unknown worker handle") {
+        DelegatedHandleRefusal::UnknownWorker
+    } else {
+        DelegatedHandleRefusal::RosterUnavailable
+    }
+}
+
+/// Confine a roster-resolved child transcript to this store's private
+/// delegation directory.
+///
+/// The handle is derived from the opaquely random team directory name plus the
+/// host-generated child filename, so a forged or copied roster entry can name
+/// the same pair somewhere else and hashes to the same handle. The resolved path
+/// is therefore re-checked here: it must be `<delegation>/team-*/<child>.jsonl`,
+/// with no `..` component, no symlinked team directory, and no non-regular final
+/// entry. Anything else fails closed as a path escape.
+fn confine_delegated_session_path(
+    delegation_directory: &Path,
+    path: &Path,
+) -> Result<(), DelegatedHandleRefusal> {
+    let relative = path
+        .strip_prefix(delegation_directory)
+        .map_err(|_| DelegatedHandleRefusal::OutsideDelegationDirectory)?;
+    let mut components = relative.components();
+    let (team, child) = match (components.next(), components.next(), components.next()) {
+        (Some(Component::Normal(team)), Some(Component::Normal(child)), None) => (team, child),
+        _ => return Err(DelegatedHandleRefusal::OutsideDelegationDirectory),
+    };
+    let team_name = team
+        .to_str()
+        .ok_or(DelegatedHandleRefusal::OutsideDelegationDirectory)?;
+    let child_name = child
+        .to_str()
+        .ok_or(DelegatedHandleRefusal::OutsideDelegationDirectory)?;
+    if !team_name.starts_with("team-") || !child_name.ends_with(".jsonl") {
+        return Err(DelegatedHandleRefusal::OutsideDelegationDirectory);
+    }
+    let team_path = delegation_directory.join(team);
+    let Ok(team_metadata) = team_path.symlink_metadata() else {
+        return Err(DelegatedHandleRefusal::VanishedTranscript);
+    };
+    if team_metadata.file_type().is_symlink() || !team_metadata.file_type().is_dir() {
+        return Err(DelegatedHandleRefusal::OutsideDelegationDirectory);
+    }
+    let Ok(child_metadata) = path.symlink_metadata() else {
+        return Err(DelegatedHandleRefusal::VanishedTranscript);
+    };
+    if child_metadata.file_type().is_symlink() || !child_metadata.file_type().is_file() {
+        return Err(DelegatedHandleRefusal::OutsideDelegationDirectory);
+    }
+    Ok(())
+}
+
 fn sanitize_session_name(name: &str) -> anyhow::Result<Option<String>> {
     let name = name.trim();
     if name.is_empty() {
@@ -859,6 +1090,71 @@ struct TranscriptSummary {
     message_count: usize,
     usage_records: Vec<SessionUsageRecord>,
     usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
+    #[cfg(test)]
+    deferred_run_records: Vec<DeferredRunRecord>,
+}
+
+/// Replay of the deferred-run replaceable session state.
+///
+/// Mirrors `octet_agent::tools::deferred::DeferredRunStore::restore` (the
+/// validation `Session::open_read_only` applies) so the lightweight mirror
+/// cannot bless a file a normal resume rejects: every record is validated
+/// against the store's default hard bounds, a terminal record is never followed
+/// by another record for the same operation, and generations only move forward.
+/// The last record per operation is authoritative, exactly like the store, and
+/// retention is bounded by the store's own `max_runs` bound.
+#[derive(Default)]
+struct SummaryDeferredRuns {
+    records: BTreeMap<String, DeferredRunRecord>,
+    terminal: VecDeque<String>,
+    limits: DeferredRunLimits,
+}
+
+impl SummaryDeferredRuns {
+    fn restore(&mut self, record: DeferredRunRecord) -> Result<(), String> {
+        record
+            .validate(&self.limits)
+            .map_err(|error| error.to_string())?;
+        if let Some(existing) = self.records.get(&record.operation_id) {
+            if existing.is_terminal() {
+                return Err("a terminal deferred record may not be followed".to_owned());
+            }
+            if record.generation <= existing.generation {
+                return Err(format!(
+                    "deferred run {} generation regressed from {} to {}",
+                    record.operation_id, existing.generation, record.generation
+                ));
+            }
+        }
+        let operation_id = record.operation_id.clone();
+        let terminal = record.is_terminal();
+        if !self.records.contains_key(&operation_id) && self.records.len() >= self.limits.max_runs {
+            let mut evicted = false;
+            while let Some(oldest) = self.terminal.pop_front() {
+                if self.records.remove(&oldest).is_some() {
+                    evicted = true;
+                    break;
+                }
+            }
+            if !evicted {
+                return Err(format!(
+                    "{} deferred runs retained (limit {})",
+                    self.records.len(),
+                    self.limits.max_runs
+                ));
+            }
+        }
+        if terminal {
+            self.terminal.push_back(operation_id.clone());
+        }
+        self.records.insert(operation_id, record);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn into_records(self) -> Vec<DeferredRunRecord> {
+        self.records.into_values().collect()
+    }
 }
 
 /// Replay only the graph metadata needed by the session picker and serve
@@ -890,6 +1186,7 @@ fn summarize_session_with_usage(
     let mut checkpoints = Vec::<(EntryId, EntryId, usize)>::new();
     let mut usage_records = Vec::<SessionUsageRecord>::new();
     let mut usage_uncertainty_records = Vec::new();
+    let mut deferred_runs = SummaryDeferredRuns::default();
     let mut line_bytes = Vec::new();
     let mut observed_bytes = 0usize;
     let mut line_no = 0usize;
@@ -1042,10 +1339,29 @@ fn summarize_session_with_usage(
                             }
                             (SummaryEntryKind::Other, None, None, None, None)
                         }
+                        SummaryEntryValue::ResponsesReasoning {
+                            model,
+                            baseline,
+                            update,
+                        } => {
+                            let reasoning = crate::app::reasoning_label(
+                                update
+                                    .as_ref()
+                                    .map_or(&baseline, |update| &update.reasoning),
+                            );
+                            (
+                                SummaryEntryKind::Other,
+                                None,
+                                None,
+                                Some(model.0),
+                                Some(reasoning),
+                            )
+                        }
                         SummaryEntryValue::Config { model, reasoning } => {
                             (SummaryEntryKind::Other, None, None, model, reasoning)
                         }
-                        SummaryEntryValue::PromptTemplateSelected {}
+                        SummaryEntryValue::ResponsesSteering {}
+                        | SummaryEntryValue::PromptTemplateSelected {}
                         | SummaryEntryValue::SkillActivated {}
                         | SummaryEntryValue::SkillResourceRead {}
                         | SummaryEntryValue::SkillDeactivated {} => {
@@ -1117,6 +1433,25 @@ fn summarize_session_with_usage(
                 if retain_usage_records {
                     usage_uncertainty_records.push(record);
                 }
+            }
+            SummaryRecord::EntryLabel { entry_id, label } => {
+                if !entries.contains_key(&entry_id)
+                    || label.len() > octet_agent::session::MAX_ENTRY_LABEL_BYTES
+                    || label.chars().any(char::is_control)
+                {
+                    return Err(corrupt_summary(line_no, "invalid entry label"));
+                }
+            }
+            // Invocation memos/checkpoints are auxiliary, not transcript,
+            // model selection, or usage. Their wire shape is still decoded.
+            SummaryRecord::ToolInvocation { .. } => {}
+            SummaryRecord::DeferredRun { record } => {
+                // Replaceable state, not model-visible context: the record still
+                // has to be valid and monotonic, and the last one per operation
+                // wins, exactly as the durable store replays it.
+                deferred_runs
+                    .restore(record)
+                    .map_err(|message| corrupt_summary(line_no, message))?;
             }
             SummaryRecord::Usage { record } => {
                 if let SummaryUsageKind::AssistantTurn { assistant } = &record.kind {
@@ -1199,7 +1534,313 @@ fn summarize_session_with_usage(
         message_count,
         usage_records,
         usage_uncertainty_records,
+        #[cfg(test)]
+        deferred_run_records: deferred_runs.into_records(),
     })
+}
+
+/// One session-entry search hit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntrySearchHit {
+    /// Workspace-local session id.
+    pub session_id: String,
+    /// Durable entry id inside that session.
+    pub entry_id: String,
+    /// Which conversation role produced the entry.
+    pub kind: EntryKind,
+    /// Bounded matching entry text.
+    pub text: String,
+}
+
+/// Which conversation role produced an indexed entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    User,
+    Assistant,
+}
+
+/// Result of one bounded incremental entry search.
+#[derive(Clone, Debug, Default)]
+pub struct EntrySearchOutcome {
+    /// Matching entries, ordered by `(session_id, entry ordinal)`.
+    pub hits: Vec<EntrySearchHit>,
+    /// Whether the disposable index changed during this search.
+    pub index_changed: bool,
+    /// The entry-index revision observed after the search.
+    pub revision: i64,
+    /// How many transcripts this search had to re-read (the incremental bound).
+    pub scanned_sessions: usize,
+}
+
+/// Watches the disposable entry-index revision so a caller is notified exactly
+/// when the index changed since its previous observation.
+///
+/// The revision only advances when a session's fingerprint changed or a session
+/// vanished, so a repeated observation with no transcript change is silent.
+#[derive(Clone, Debug, Default)]
+#[cfg(test)]
+pub struct SessionSearchWatcher {
+    last_revision: Option<i64>,
+}
+
+#[cfg(test)]
+impl SessionSearchWatcher {
+    /// Observe the current revision. Returns `true` exactly once per change.
+    pub fn observe(&mut self, revision: i64) -> bool {
+        let changed = self.last_revision != Some(revision);
+        self.last_revision = Some(revision);
+        changed
+    }
+}
+
+/// Extract a bounded, user-visible entry projection for the incremental search
+/// index.
+///
+/// Only submitted user text and assistant-visible text are retained; reasoning,
+/// tool calls/arguments, media, provider metadata and private answers are never
+/// indexed. The index is disposable and rebuilt from JSONL, so this is a lenient
+/// scan that does not re-run the graph validation `summarize_session` performs;
+/// it still honours the same byte and record bounds.
+pub(crate) fn index_session_entries(path: &Path) -> anyhow::Result<Vec<IndexedEntry>> {
+    search_projection::index(path)
+}
+
+#[cfg(test)]
+fn indexed_entry_from_record(record: &serde_json::Value) -> Option<IndexedEntry> {
+    search_projection::from_value(record)
+}
+
+/// Directory (inside the workspace session store) holding accounting-only
+/// records for ephemeral `--no-session` runs.
+const EPHEMERAL_ACCOUNTING_DIRECTORY: &str = ".accounting";
+const EPHEMERAL_ACCOUNTING_FILE: &str = "ephemeral-sessions.jsonl";
+const EPHEMERAL_ACCOUNTING_RECOVERY: &str = ".accounting-recovery.json";
+const MAX_EPHEMERAL_ACCOUNTING_LINE_BYTES: usize = 256 * 1024;
+const MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Durable, conversation-free accounting for one ephemeral (`--no-session`) run.
+///
+/// The transcript is discarded, but provider usage, cost and any
+/// usage-uncertainty exposure are recorded so cost accounting stays complete
+/// and fail-closed across the run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EphemeralAccountingRecord {
+    /// Stable invocation key, allowing recovery after an ambiguous append.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_id: Option<String>,
+    /// Wall-clock time the record was durably appended.
+    pub recorded_at_unix_ms: u64,
+    /// Cumulative session cost after the run, in microdollars.
+    pub session_cost_microdollars: u64,
+    /// Whether the run has unknown usage or completed operations without exact pricing.
+    pub has_uncertain_usage: bool,
+    /// Provider usage records, exactly as the transcript recorded them.
+    pub usage_records: Vec<octet_agent::UsageRecord>,
+    /// Unknown-usage exposure records.
+    pub usage_uncertainty_records: Vec<octet_agent::UsageUncertaintyRecord>,
+}
+
+impl EphemeralAccountingRecord {
+    /// Derive price uncertainty from the retained receipts as well as the flag:
+    /// historical accounting-only ledgers predate unpriced-call reporting.
+    fn retain_accounting_uncertainty(&mut self) {
+        self.has_uncertain_usage |= !self.usage_uncertainty_records.is_empty()
+            || self
+                .usage_records
+                .iter()
+                .any(|record| record.cost.is_none() && record.cost_microdollars.is_none());
+    }
+}
+
+/// Aggregate durable ephemeral accounting for one workspace store.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EphemeralAccountingSummary {
+    /// Number of ephemeral runs recorded.
+    pub runs: usize,
+    /// Sum of every recorded run's cumulative session cost.
+    pub total_cost_microdollars: u64,
+    /// Whether any recorded run had unknown usage or absent exact pricing.
+    pub has_uncertain_usage: bool,
+    /// Provider usage records kept across every ephemeral run.
+    pub usage_records: usize,
+    /// Input tokens across every kept usage record.
+    pub input_tokens: u64,
+    /// Output tokens across every kept usage record.
+    pub output_tokens: u64,
+    /// Unknown-usage exposure records kept across every ephemeral run.
+    pub uncertainty_records: usize,
+}
+
+struct EphemeralRun {
+    transcript_root: PathBuf,
+    accounting_session_dir: PathBuf,
+    workspace: PathBuf,
+    pending: Option<EphemeralAccountingRecord>,
+}
+
+/// The one active ephemeral run, if any. A shared process may take a single
+/// `--no-session` run at a time.
+static EPHEMERAL_RUN: Mutex<Option<EphemeralRun>> = Mutex::new(None);
+
+// Unit tests share the process-wide invocation slot even when the test runner
+// executes unrelated cases concurrently. Keep their separate fixtures serialized.
+#[cfg(test)]
+pub(crate) static EPHEMERAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Register an ephemeral run: its transcript lives under `transcript_root` and
+/// is deleted afterwards, while accounting is persisted into
+/// `SessionStore::new(accounting_session_dir, workspace)`.
+pub fn begin_ephemeral_run(
+    transcript_root: PathBuf,
+    accounting_session_dir: PathBuf,
+    workspace: PathBuf,
+) {
+    *EPHEMERAL_RUN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(EphemeralRun {
+        transcript_root,
+        accounting_session_dir,
+        workspace,
+        pending: None,
+    });
+}
+
+/// Persist all sessions in the active ephemeral invocation and discard conversations.
+///
+/// Failure keeps the run registered for retry. A private accounting-only snapshot
+/// is staged before append, so an append failure never requires a transcript to
+/// survive. The returned error retains the original append failure and identifies
+/// the recovery file (which also survives process exit).
+pub fn finish_ephemeral_run() -> anyhow::Result<Option<EphemeralAccountingRecord>> {
+    let mut active = EPHEMERAL_RUN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(run) = active.as_mut() else {
+        return Ok(None);
+    };
+    let result = finish_ephemeral_run_state(run);
+    if result.is_ok() {
+        *active = None;
+    }
+    result
+}
+
+fn finish_ephemeral_run_state(
+    run: &mut EphemeralRun,
+) -> anyhow::Result<Option<EphemeralAccountingRecord>> {
+    use anyhow::Context as _;
+
+    let workspace_dir = run.transcript_root.join(workspace_key(&run.workspace));
+    let recovery = run.transcript_root.join(EPHEMERAL_ACCOUNTING_RECOVERY);
+    let snapshot = (|| -> anyhow::Result<()> {
+        if run.pending.is_none() {
+            // A caller may re-register the same recovery root after process exit.
+            run.pending = if recovery.exists() {
+                Some(serde_json::from_slice(
+                    &octet_agent::secure_fs::read_private_file_bounded(
+                        &recovery,
+                        MAX_SESSION_FILE_BYTES,
+                    )?,
+                )?)
+            } else {
+                collect_ephemeral_accounting(&workspace_dir, &run.transcript_root)?
+            };
+        }
+        if let Some(record) = &mut run.pending {
+            record.retain_accounting_uncertainty();
+            let bytes = serde_json::to_vec(record)?;
+            octet_agent::secure_fs::write_private_atomic(
+                &recovery,
+                &bytes,
+                MAX_SESSION_FILE_BYTES,
+            )?;
+        }
+        Ok(())
+    })();
+    // Privacy does not depend on the ledger (or recovery filesystem) being writable.
+    // If even staging fails, the in-process accounting-only snapshot still permits
+    // retry; report that failure, rather than falsely claiming durable recovery.
+    let cleanup = match std::fs::remove_dir_all(&workspace_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    };
+    snapshot.context("could not stage ephemeral accounting recovery; retry before exit")?;
+    cleanup.context("could not remove ephemeral conversation directory")?;
+    if let Some(record) = &run.pending {
+        let store = SessionStore::new(&run.accounting_session_dir, &run.workspace);
+        store.append_ephemeral_accounting(record).with_context(|| {
+            format!(
+                "ephemeral accounting append failed; accounting-only recovery retained at {}",
+                recovery.display()
+            )
+        })?;
+    }
+    std::fs::remove_dir_all(&run.transcript_root)?;
+    Ok(run.pending.clone())
+}
+
+fn collect_ephemeral_accounting(
+    directory: &Path,
+    invocation: &Path,
+) -> anyhow::Result<Option<EphemeralAccountingRecord>> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    let mut combined: Option<EphemeralAccountingRecord> = None;
+    for path in paths {
+        let record = read_ephemeral_accounting(&path)?;
+        if let Some(total) = &mut combined {
+            total.session_cost_microdollars = total
+                .session_cost_microdollars
+                .saturating_add(record.session_cost_microdollars);
+            total.has_uncertain_usage |= record.has_uncertain_usage;
+            total.usage_records.extend(record.usage_records);
+            total
+                .usage_uncertainty_records
+                .extend(record.usage_uncertainty_records);
+        } else {
+            combined = Some(record);
+        }
+    }
+    if let Some(record) = &mut combined {
+        record.accounting_id = Some(workspace_key(invocation));
+    }
+    Ok(combined)
+}
+
+fn read_ephemeral_accounting(transcript: &Path) -> anyhow::Result<EphemeralAccountingRecord> {
+    let session = Session::open_read_only(transcript.to_path_buf())
+        .map_err(|error| anyhow::anyhow!("ephemeral accounting could not read the run: {error}"))?;
+    let usage_uncertainty_records = session.usage_uncertainty_records().to_vec();
+    Ok(EphemeralAccountingRecord {
+        accounting_id: None,
+        recorded_at_unix_ms: now_unix_ms(),
+        session_cost_microdollars: session.total_cost_microdollars(),
+        has_uncertain_usage: session.has_uncertain_usage() || session.has_unpriced_usage(),
+        usage_records: session.usage_records().to_vec(),
+        usage_uncertainty_records,
+    })
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 impl SessionStore {
@@ -1304,8 +1945,208 @@ impl SessionStore {
         self.dir.join(format!("{stamp}-{suffix:04x}.jsonl"))
     }
 
-    fn candidates(&self) -> Vec<SessionCandidate> {
-        let mut candidates = std::fs::read_dir(&self.dir)
+    /// Bounded incremental entry search over this workspace's sessions.
+    ///
+    /// Only transcripts whose fingerprint changed since the last search are
+    /// re-read; unchanged sessions are served from the disposable catalog, so a
+    /// repeat search does not re-read transcript bytes. Reconciliation still
+    /// enumerates/stats files: directory mtime cannot detect existing-file edits.
+    pub fn search_entries(&self, query: &str, limit: usize) -> anyhow::Result<EntrySearchOutcome> {
+        self.search_entries_with(query, limit, index_session_entries)
+    }
+
+    /// Inspect the entry-index revision while testing batch reconciliation.
+    #[cfg(test)]
+    pub fn entry_index_revision(&self) -> anyhow::Result<i64> {
+        let catalog = SessionCatalog::open_recovering(&self.dir)?;
+        catalog.entry_revision()
+    }
+
+    pub(crate) fn search_entries_with<F>(
+        &self,
+        query: &str,
+        limit: usize,
+        extractor: F,
+    ) -> anyhow::Result<EntrySearchOutcome>
+    where
+        F: Fn(&Path) -> anyhow::Result<Vec<IndexedEntry>>,
+    {
+        const BATCH_SESSIONS: usize = 32;
+        const BATCH_BYTES: usize = 8 * 1024 * 1024;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
+        let mut indexed = catalog.entry_fingerprints()?;
+        let mut scanned_sessions = 0;
+        let mut index_changed = false;
+        let mut updates = Vec::new();
+        let mut removals = HashSet::new();
+        let mut pending_bytes = 0;
+        // A search has no recency-order requirement. Stream directory entries,
+        // removing seen IDs from the old map rather than building/sorting an
+        // additional workspace-sized candidate list and current-ID set.
+        // Do not cache directory mtimes: appends/in-place edits do not change it.
+        for candidate in self.unsorted_candidates() {
+            let Some(id) = candidate
+                .path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let prior = indexed.remove(&id);
+            let Some(fingerprint) = catalog_fingerprint(&candidate) else {
+                if prior.is_some() {
+                    removals.insert(id);
+                }
+                if updates.len() + removals.len() >= BATCH_SESSIONS {
+                    index_changed |= catalog.apply_entries(&updates, &removals)?;
+                    updates.clear();
+                    removals.clear();
+                    pending_bytes = 0;
+                }
+                continue;
+            };
+            if prior == Some(fingerprint) {
+                continue;
+            }
+            match extractor(&candidate.path) {
+                Ok(entries) => {
+                    let bytes = entries
+                        .iter()
+                        .map(|entry| entry.text.len() + entry.entry_id.len())
+                        .sum::<usize>();
+                    if !updates.is_empty() && pending_bytes + bytes > BATCH_BYTES {
+                        index_changed |= catalog.apply_entries(&updates, &removals)?;
+                        updates.clear();
+                        removals.clear();
+                        pending_bytes = 0;
+                    }
+                    updates.push(IndexedEntryUpdate {
+                        session_id: id,
+                        fingerprint,
+                        entries,
+                    });
+                    pending_bytes += bytes;
+                    scanned_sessions += 1;
+                }
+                Err(_) => {
+                    // Changed/unreadable transcripts must never retain old hits.
+                    if prior.is_some() {
+                        removals.insert(id);
+                    }
+                }
+            }
+            if updates.len() + removals.len() >= BATCH_SESSIONS || pending_bytes >= BATCH_BYTES {
+                index_changed |= catalog.apply_entries(&updates, &removals)?;
+                updates.clear();
+                removals.clear();
+                pending_bytes = 0;
+            }
+        }
+        for id in indexed.into_keys() {
+            removals.insert(id);
+            if updates.len() + removals.len() >= BATCH_SESSIONS {
+                index_changed |= catalog.apply_entries(&updates, &removals)?;
+                updates.clear();
+                removals.clear();
+            }
+        }
+        index_changed |= catalog.apply_entries(&updates, &removals)?;
+        let revision = catalog.entry_revision()?;
+        let hits = catalog
+            .search_entries(query, limit)?
+            .into_iter()
+            .map(|hit| EntrySearchHit {
+                session_id: hit.session_id,
+                entry_id: hit.entry_id,
+                kind: match hit.kind {
+                    IndexedEntryKind::User => EntryKind::User,
+                    IndexedEntryKind::Assistant => EntryKind::Assistant,
+                },
+                text: hit.text,
+            })
+            .collect();
+        Ok(EntrySearchOutcome {
+            hits,
+            index_changed,
+            revision,
+            scanned_sessions,
+        })
+    }
+
+    /// Persist only the durable accounting for one ephemeral transcript.
+    ///
+    /// Reads the run's usage and unknown-usage records plus its cumulative cost
+    /// and appends them to the workspace's accounting ledger. The conversation
+    /// itself is never copied.
+    #[cfg(test)]
+    pub fn record_ephemeral_accounting(
+        &self,
+        transcript: &Path,
+    ) -> anyhow::Result<EphemeralAccountingRecord> {
+        let record = read_ephemeral_accounting(transcript)?;
+        self.append_ephemeral_accounting(&record)?;
+        Ok(record)
+    }
+
+    fn append_ephemeral_accounting(
+        &self,
+        record: &EphemeralAccountingRecord,
+    ) -> anyhow::Result<()> {
+        let mut record = record.clone();
+        record.retain_accounting_uncertainty();
+        accounting_index::append(&self.dir.join(EPHEMERAL_ACCOUNTING_DIRECTORY), &record)
+    }
+
+    /// Aggregate durable accounting for every ephemeral run in this workspace.
+    ///
+    /// `has_uncertain_usage` is fail-closed: while any recorded run exposed
+    /// unknown usage or absent exact pricing, the workspace total remains uncertain.
+    pub fn ephemeral_accounting_summary(&self) -> anyhow::Result<EphemeralAccountingSummary> {
+        let path = self
+            .dir
+            .join(EPHEMERAL_ACCOUNTING_DIRECTORY)
+            .join(EPHEMERAL_ACCOUNTING_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(EphemeralAccountingSummary::default())
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if bytes.len() as u64 > MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES {
+            anyhow::bail!(
+                "ephemeral accounting ledger is {} bytes (limit {MAX_EPHEMERAL_ACCOUNTING_LEDGER_BYTES})",
+                bytes.len()
+            );
+        }
+        let mut summary = EphemeralAccountingSummary::default();
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let Ok(mut record) = serde_json::from_str::<EphemeralAccountingRecord>(line) else {
+                continue;
+            };
+            record.retain_accounting_uncertainty();
+            summary.runs += 1;
+            summary.total_cost_microdollars = summary
+                .total_cost_microdollars
+                .saturating_add(record.session_cost_microdollars);
+            summary.has_uncertain_usage |= record.has_uncertain_usage;
+            summary.usage_records += record.usage_records.len();
+            summary.uncertainty_records += record.usage_uncertainty_records.len();
+            for usage in &record.usage_records {
+                summary.input_tokens = summary
+                    .input_tokens
+                    .saturating_add(usage.usage.input_tokens);
+                summary.output_tokens = summary
+                    .output_tokens
+                    .saturating_add(usage.usage.output_tokens);
+            }
+        }
+        Ok(summary)
+    }
+
+    fn unsorted_candidates(&self) -> impl Iterator<Item = SessionCandidate> {
+        std::fs::read_dir(&self.dir)
             .ok()
             .into_iter()
             .flatten()
@@ -1326,7 +2167,10 @@ impl SessionStore {
                     file_size: metadata.len(),
                 })
             })
-            .collect::<Vec<_>>();
+    }
+
+    fn candidates(&self) -> Vec<SessionCandidate> {
+        let mut candidates = self.unsorted_candidates().collect::<Vec<_>>();
         candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.modified));
         candidates
     }
@@ -1511,7 +2355,7 @@ impl SessionStore {
         &self,
         ids: impl IntoIterator<Item = &'a str>,
     ) -> anyhow::Result<Vec<(String, SessionCatalogEntry)>> {
-        let (mut catalog, cached) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         let mut updates = Vec::new();
         let mut entries = Vec::new();
 
@@ -1520,9 +2364,10 @@ impl SessionStore {
                 continue;
             };
             let fingerprint = catalog_fingerprint(&candidate);
+            let cached = catalog.lookup(id)?;
             if let Some(summary) = fingerprint.and_then(|fingerprint| {
                 cached
-                    .get(id)
+                    .as_ref()
                     .filter(|cached| cached.fingerprint == fingerprint)
                     .map(|cached| cached.summary.clone())
             }) {
@@ -1614,7 +2459,7 @@ impl SessionStore {
                 message_count: active_branch_message_count(session),
             },
         };
-        let (mut catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         catalog.apply(&[update], &HashSet::new())
     }
 
@@ -1626,7 +2471,7 @@ impl SessionStore {
         if !SessionCatalog::exists(&self.dir) {
             return Ok(());
         }
-        let (mut catalog, _) = SessionCatalog::open_loaded(&self.dir)?;
+        let mut catalog = SessionCatalog::open_recovering(&self.dir)?;
         catalog.apply(&[], &HashSet::from([id.to_owned()]))
     }
 
@@ -1674,15 +2519,13 @@ impl SessionStore {
                     .map(str::to_owned)
             })
             .collect::<HashSet<_>>();
-        let (catalog, cached) = match SessionCatalog::open_loaded(&self.dir) {
-            Ok((catalog, cached)) => (Some(catalog), cached),
-            Err(_) => (None, HashMap::new()),
-        };
-        let stale_ids = cached
-            .keys()
-            .filter(|id| !current_ids.contains(*id))
-            .cloned()
-            .collect::<HashSet<_>>();
+        let mut catalog = SessionCatalog::open_recovering(&self.dir).ok();
+        if let Some(catalog) = &mut catalog {
+            if let Ok(cached_ids) = catalog.session_ids() {
+                let stale_ids = cached_ids.difference(&current_ids).cloned().collect();
+                let _ = catalog.apply(&[], &stale_ids);
+            }
+        }
         let mut updates = Vec::new();
         let mut discovered = Vec::new();
 
@@ -1696,10 +2539,13 @@ impl SessionStore {
                 continue;
             };
             let fingerprint = catalog_fingerprint(&candidate);
+            let cached = catalog
+                .as_ref()
+                .and_then(|catalog| catalog.lookup(&id).ok().flatten());
             let summary = fingerprint
                 .and_then(|fingerprint| {
                     cached
-                        .get(&id)
+                        .as_ref()
                         .filter(|cached| cached.fingerprint == fingerprint)
                 })
                 .map(|cached| cached.summary.clone())
@@ -1724,6 +2570,12 @@ impl SessionStore {
                     // are shown but deliberately not retained in the catalog.
                     Err(_) => CachedTranscriptSummary::Unreadable,
                 });
+            if updates.len() >= 32 {
+                if let Some(catalog) = &mut catalog {
+                    let _ = catalog.apply(&updates, &HashSet::new());
+                }
+                updates.clear();
+            }
             if let Some(meta) = self.meta_from_cached_summary(candidate, id, summary) {
                 discovered.push(meta);
                 if first_only {
@@ -1733,7 +2585,7 @@ impl SessionStore {
         }
 
         if let Some(mut catalog) = catalog {
-            let _ = catalog.apply(&updates, &stale_ids);
+            let _ = catalog.apply(&updates, &HashSet::new());
         }
         discovered
     }
@@ -1781,11 +2633,59 @@ impl SessionStore {
     }
 
     /// Resolve a filename stem without enumerating or parsing unrelated sessions.
+    ///
+    /// A session-owned worker handle (`agent-session:<sha256>`) is resolved
+    /// through this session's durable delegation roster instead of a flat
+    /// `<session-dir>/<id>.jsonl` join, so `octet --resume <handle>` can open a
+    /// detached delegated child as its own interactive session. Every
+    /// non-launchable handle fails closed with a typed, bounded
+    /// [`DelegatedHandleRefusal`]; an ordinary session id keeps exactly its
+    /// previous resolution path.
     pub fn path_by_id(&self, id: &str) -> anyhow::Result<PathBuf> {
+        if id.starts_with(DELEGATED_SESSION_HANDLE_PREFIX) {
+            return self.path_for_delegated_handle(id);
+        }
         if !self.session_file_exists(id)? {
             anyhow::bail!("session {id:?} was not found");
         }
         Ok(self.dir.join(format!("{id}.jsonl")))
+    }
+
+    /// Resolve one launchable session-owned worker handle to its transcript.
+    ///
+    /// The handle is the only reference an extension ever receives for a
+    /// session-owned delegated child (`octet_agent::delegated_session_reference`),
+    /// and it is deliberately path-free, argv-safe, and credential-free. It is
+    /// resolved through `octet_agent::delegation::resolve_launchable_child_session`,
+    /// which needs no live agent:
+    ///
+    /// 1. the token is validated *before any filesystem work*, so a shell
+    ///    metacharacter, a control byte, or a path component can never reach a
+    ///    path join;
+    /// 2. the owning session's durable roster is read, and a parked
+    ///    (`awaiting_approval`) worker, an unknown handle, a missing roster, and
+    ///    a vanished transcript each refuse with their own bounded reason;
+    /// 3. a worker the roster still records as live (`pending`/`running`) is
+    ///    refused here too: process-local liveness cannot be read from the
+    ///    roster, but a live record means another process owns this transcript,
+    ///    and one session has one writer;
+    /// 4. the resolved path is confined to this store's private delegation
+    ///    directory, so a forged roster entry cannot escape it.
+    pub fn path_for_delegated_handle(&self, handle: &str) -> anyhow::Result<PathBuf> {
+        if delegated_handle_digest(handle).is_none() {
+            return Err(DelegatedHandleRefusal::MalformedHandle.into());
+        }
+        let delegation_directory = self.dir.join(DELEGATION_DIRECTORY);
+        let resolved = octet_agent::delegation::resolve_launchable_child_session(
+            &delegation_directory,
+            handle,
+        )
+        .map_err(|error| anyhow::Error::from(classify_delegated_handle_error(&error)))?;
+        if let Some(status) = live_worker_state(&resolved.status) {
+            return Err(DelegatedHandleRefusal::LiveInOwningProcess { status }.into());
+        }
+        confine_delegated_session_path(&delegation_directory, &resolved.session_path)?;
+        Ok(resolved.session_path)
     }
 
     fn metadata_dir(&self) -> PathBuf {
@@ -2123,6 +3023,316 @@ fn staged_deletion_files(directory: &Path, id: &str) -> anyhow::Result<Vec<PathB
 mod tests {
     use super::*;
 
+    /// One transcript worth of usage plus an unknown-usage exposure, appended
+    /// through the session's own durable path.
+    fn write_ephemeral_transcript(path: &Path, uncertain: bool) -> PathBuf {
+        let mut session = Session::create(path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("ephemeral prompt".into())],
+            })))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(
+                octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::Text("ephemeral answer".into())],
+                    model: ModelId("custom/model".into()),
+                    protocol: Protocol::OpenAiChat,
+                },
+            )))
+            .unwrap();
+        session
+            .record_terminal_gate_usage(
+                EndpointId("custom".into()),
+                ModelId("probe".into()),
+                octet_ai::Usage {
+                    input_tokens: 40,
+                    output_tokens: 10,
+                    total_tokens: 50,
+                    ..octet_ai::Usage::default()
+                },
+                Some(octet_ai::Cost {
+                    total: 7,
+                    ..octet_ai::Cost::default()
+                }),
+                Some(true),
+            )
+            .unwrap();
+        if uncertain {
+            // The operation id the Codex above-272K policy exports.
+            session
+                .record_usage_uncertainty(
+                    EndpointId("custom".into()),
+                    ModelId("probe".into()),
+                    crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION,
+                )
+                .unwrap();
+        }
+        drop(session);
+        path.to_path_buf()
+    }
+
+    #[test]
+    fn ephemeral_accounting_keeps_usage_and_uncertainty_without_the_transcript() {
+        let transcript_root = tempfile::tempdir().unwrap();
+        let accounting_root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(accounting_root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+
+        let transcript = transcript_root
+            .path()
+            .join(workspace_key(workspace.path()))
+            .join("ephemeral.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        write_ephemeral_transcript(&transcript, true);
+
+        let record = store.record_ephemeral_accounting(&transcript).unwrap();
+        assert_eq!(record.usage_records.len(), 1);
+        assert_eq!(record.usage_records[0].usage.input_tokens, 40);
+        assert_eq!(record.usage_uncertainty_records.len(), 1);
+        assert_eq!(
+            record.usage_uncertainty_records[0].operation,
+            crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
+        );
+        assert!(record.has_uncertain_usage, "unknown usage must survive");
+
+        // The conversation itself is never copied into the durable ledger.
+        let ledger = store
+            .dir()
+            .join(EPHEMERAL_ACCOUNTING_DIRECTORY)
+            .join(EPHEMERAL_ACCOUNTING_FILE);
+        let bytes = std::fs::read_to_string(&ledger).unwrap();
+        assert!(!bytes.contains("ephemeral prompt"), "{bytes}");
+        assert!(!bytes.contains("ephemeral answer"), "{bytes}");
+
+        // A second run accumulates, and uncertainty stays fail-closed across the
+        // whole workspace ledger.
+        let clean = transcript_root
+            .path()
+            .join(workspace_key(workspace.path()))
+            .join("ephemeral-two.jsonl");
+        write_ephemeral_transcript(&clean, false);
+        let second = store.record_ephemeral_accounting(&clean).unwrap();
+        assert!(!second.has_uncertain_usage);
+
+        let summary = store.ephemeral_accounting_summary().unwrap();
+        assert_eq!(summary.runs, 2);
+        assert!(
+            summary.has_uncertain_usage,
+            "one uncertain run keeps the total uncertain"
+        );
+
+        // The transcript can now be discarded: accounting still answers.
+        std::fs::remove_file(&transcript).unwrap();
+        std::fs::remove_file(&clean).unwrap();
+        let after = store.ephemeral_accounting_summary().unwrap();
+        assert_eq!(after.runs, 2);
+        assert!(after.has_uncertain_usage);
+    }
+
+    #[test]
+    fn unpriced_ephemeral_receipts_survive_legacy_ledger_and_recovery_flags() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let workspace = root_path.join("workspace");
+        let transcript_root = root_path.join("transcripts");
+        let accounting_root = root_path.join("durable");
+        let store = SessionStore::new(&accounting_root, &workspace);
+        let directory = transcript_root.join(workspace_key(&workspace));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("unpriced.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .record_compaction_usage(
+                EndpointId("fixture".into()),
+                ModelId("fixture".into()),
+                octet_ai::Usage {
+                    input_tokens: 4,
+                    output_tokens: 2,
+                    total_tokens: 6,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert!(session.has_unpriced_usage());
+        assert!(!session.has_uncertain_usage());
+        drop(session);
+        let mut record = read_ephemeral_accounting(&path).unwrap();
+        assert!(record.has_uncertain_usage);
+        assert!(record.usage_uncertainty_records.is_empty());
+        record.accounting_id = Some(workspace_key(&transcript_root));
+        store.append_ephemeral_accounting(&record).unwrap();
+        // Persist the pre-unpriced-reporting flag to exercise old accounting-only
+        // ledgers and recovery after the transcript itself is discarded.
+        record.has_uncertain_usage = false;
+        let legacy = serde_json::to_vec(&record).unwrap();
+        let ledger = store
+            .dir()
+            .join(EPHEMERAL_ACCOUNTING_DIRECTORY)
+            .join(EPHEMERAL_ACCOUNTING_FILE);
+        let mut line = legacy.clone();
+        line.push(b'\n');
+        std::fs::write(&ledger, &line).unwrap();
+        octet_agent::secure_fs::write_private_atomic(
+            &transcript_root.join(EPHEMERAL_ACCOUNTING_RECOVERY),
+            &legacy,
+            MAX_SESSION_FILE_BYTES,
+        )
+        .unwrap();
+        let summary = store.ephemeral_accounting_summary().unwrap();
+        assert!(summary.has_uncertain_usage);
+        assert_eq!(summary.uncertainty_records, 0);
+        let mut run = EphemeralRun {
+            transcript_root: transcript_root.clone(),
+            accounting_session_dir: accounting_root,
+            workspace,
+            pending: None,
+        };
+        let recovered = finish_ephemeral_run_state(&mut run).unwrap().unwrap();
+        assert!(recovered.has_uncertain_usage);
+        assert!(!transcript_root.exists());
+        let summary = store.ephemeral_accounting_summary().unwrap();
+        assert_eq!(
+            summary.runs, 1,
+            "normalizing the flag must not duplicate a recovery receipt"
+        );
+        assert_eq!(summary.input_tokens, 4);
+        assert_eq!(summary.output_tokens, 2);
+        assert!(summary.has_uncertain_usage);
+        assert_eq!(
+            std::fs::read(ledger).unwrap(),
+            line,
+            "historical receipts are not rewritten"
+        );
+    }
+
+    #[test]
+    fn ephemeral_finish_accounts_for_all_sessions_including_an_empty_newest_session() {
+        for second_has_usage in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let workspace = root.path().join("workspace");
+            let transcript_root = root.path().join("transcripts");
+            let store = SessionStore::new(&root.path().join("durable"), &workspace);
+            let directory = transcript_root.join(workspace_key(&workspace));
+            std::fs::create_dir_all(&directory).unwrap();
+            write_ephemeral_transcript(&directory.join("first.jsonl"), true);
+            if second_has_usage {
+                write_ephemeral_transcript(&directory.join("second.jsonl"), false);
+            } else {
+                Session::create(directory.join("second.jsonl")).unwrap();
+            }
+            let mut run = EphemeralRun {
+                transcript_root: transcript_root.clone(),
+                accounting_session_dir: root.path().join("durable"),
+                workspace,
+                pending: None,
+            };
+            let record = finish_ephemeral_run_state(&mut run).unwrap().unwrap();
+            let count = if second_has_usage { 2 } else { 1 };
+            assert_eq!(record.usage_records.len(), count);
+            assert_eq!(record.session_cost_microdollars, 7 * count as u64);
+            assert!(record.has_uncertain_usage);
+            assert_eq!(record.usage_uncertainty_records.len(), 1);
+            assert!(!transcript_root.exists());
+            let summary = store.ephemeral_accounting_summary().unwrap();
+            assert_eq!(
+                summary.runs, 1,
+                "one invocation, not one record per RPC session"
+            );
+            assert_eq!(summary.input_tokens, 40 * count as u64);
+            assert_eq!(summary.usage_records, count);
+        }
+    }
+
+    #[test]
+    fn ephemeral_append_failure_keeps_private_accounting_only_and_retries_once() {
+        let _exclusive_ephemeral = EPHEMERAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let transcript_root = root.path().join("transcripts");
+        let accounting_root = root.path().join("durable");
+        let store = SessionStore::new(&accounting_root, &workspace);
+        let directory = transcript_root.join(workspace_key(&workspace));
+        std::fs::create_dir_all(&directory).unwrap();
+        write_ephemeral_transcript(&directory.join("first.jsonl"), true);
+        write_ephemeral_transcript(&directory.join("second.jsonl"), false);
+        // A directory in place of the ledger fails deterministically, even as root.
+        let ledger = store
+            .dir()
+            .join(EPHEMERAL_ACCOUNTING_DIRECTORY)
+            .join(EPHEMERAL_ACCOUNTING_FILE);
+        std::fs::create_dir_all(&ledger).unwrap();
+        begin_ephemeral_run(
+            transcript_root.clone(),
+            accounting_root.clone(),
+            workspace.clone(),
+        );
+        let error = finish_ephemeral_run().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("accounting-only recovery retained"),
+            "{error:#}"
+        );
+        assert!(
+            error.chain().count() > 1,
+            "original append failure must be retained"
+        );
+        assert!(
+            !directory.exists(),
+            "no conversation survives failed accounting"
+        );
+        let recovery = transcript_root.join(EPHEMERAL_ACCOUNTING_RECOVERY);
+        let bytes =
+            octet_agent::secure_fs::read_private_file_bounded(&recovery, MAX_SESSION_FILE_BYTES)
+                .unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!text.contains("ephemeral prompt"));
+        assert!(!text.contains("ephemeral answer"));
+        let record: EphemeralAccountingRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(record.usage_records.len(), 2);
+        assert!(record.has_uncertain_usage);
+        // Retrying before repair reports the original failure again, never a no-op.
+        assert!(finish_ephemeral_run().is_err());
+        std::fs::remove_dir(&ledger).unwrap();
+        // Simulate a complete but unacknowledged append (e.g. sync failure), then
+        // process-state loss. Disk-only recovery must not double-count that append.
+        store.append_ephemeral_accounting(&record).unwrap();
+        begin_ephemeral_run(transcript_root.clone(), accounting_root, workspace);
+        let recovered = finish_ephemeral_run().unwrap().unwrap();
+        assert_eq!(recovered.usage_records.len(), 2);
+        assert!(!transcript_root.exists());
+        assert!(finish_ephemeral_run().unwrap().is_none());
+        let summary = store.ephemeral_accounting_summary().unwrap();
+        assert_eq!(summary.runs, 1);
+        assert_eq!(summary.usage_records, 2);
+        assert_eq!(summary.total_cost_microdollars, 14);
+        assert!(summary.has_uncertain_usage);
+    }
+
+    #[test]
+    fn ephemeral_accounting_retry_repairs_a_torn_append() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), root.path());
+        let transcript = root.path().join("source.jsonl");
+        write_ephemeral_transcript(&transcript, true);
+        let mut record = read_ephemeral_accounting(&transcript).unwrap();
+        record.accounting_id = Some("retry-key".into());
+        let directory = store.dir().join(EPHEMERAL_ACCOUNTING_DIRECTORY);
+        std::fs::create_dir_all(&directory).unwrap();
+        let ledger = directory.join(EPHEMERAL_ACCOUNTING_FILE);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        std::fs::write(&ledger, &bytes[..bytes.len() / 2]).unwrap();
+        store.append_ephemeral_accounting(&record).unwrap();
+        store.append_ephemeral_accounting(&record).unwrap();
+        assert_eq!(store.ephemeral_accounting_summary().unwrap().runs, 1);
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1);
+    }
+
     #[test]
     fn per_workspace_dirs_are_stable_and_distinct() {
         let root = tempfile::tempdir().unwrap();
@@ -2422,6 +3632,76 @@ mod tests {
     }
 
     #[test]
+    fn responses_steering_metadata_is_not_a_catalog_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("steering.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let input = octet_ai::UserMessage {
+            content: vec![UserPart::Text("steered instruction".into())],
+        };
+        session
+            .append(EntryValue::ResponsesSteering {
+                endpoint: EndpointId("fixture".into()),
+                model: ModelId("fixture".into()),
+                operation: "fixture-operation".into(),
+                local_id: 1,
+                input: Some(input.clone()),
+                state: None,
+                completed: None,
+            })
+            .unwrap();
+        assert!(summarize_session(&path).unwrap().title.is_none());
+        session
+            .append(EntryValue::Message(Message::User(input)))
+            .unwrap();
+        assert_eq!(
+            summarize_session(&path).unwrap().title.as_deref(),
+            Some("steered instruction")
+        );
+    }
+
+    #[test]
+    fn responses_reasoning_catalog_uses_durable_effective_choice() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("reasoning.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Config {
+                model: Some("fixture".into()),
+                reasoning: Some("low".into()),
+                reasoning_mode: None,
+            })
+            .unwrap();
+        let baseline = octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
+        for update in [
+            None,
+            Some(octet_ai::ResponsesConfigurationUpdate {
+                reasoning: octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+            }),
+        ] {
+            session
+                .append(EntryValue::ResponsesReasoning {
+                    endpoint: EndpointId("fixture".into()),
+                    model: ModelId("fixture".into()),
+                    baseline: baseline.clone(),
+                    update,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            active_branch_catalog_config(&session),
+            (Some("fixture".into()), Some("high".into()))
+        );
+        let summary = summarize_session(&path).unwrap();
+        assert_eq!(summary.configured_model.as_deref(), Some("fixture"));
+        assert_eq!(summary.configured_reasoning.as_deref(), Some("high"));
+        assert!(
+            summary.title.is_none(),
+            "internal control is not a user prompt"
+        );
+    }
+
+    #[test]
     fn latest_skips_a_newer_config_only_session() {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -2537,6 +3817,298 @@ mod tests {
     }
 
     #[test]
+    fn entry_search_is_incremental_and_notifies_only_on_change() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let mut first = Session::create(store.dir().join("one.jsonl")).unwrap();
+        first
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("alpha needle".into())],
+            })))
+            .unwrap();
+        drop(first);
+        let mut second = Session::create(store.dir().join("two.jsonl")).unwrap();
+        second
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("beta needle".into())],
+            })))
+            .unwrap();
+        drop(second);
+
+        let scans = std::cell::Cell::new(0usize);
+        let cold = store
+            .search_entries_with("needle", 10, |path| {
+                scans.set(scans.get() + 1);
+                index_session_entries(path)
+            })
+            .unwrap();
+        assert_eq!(
+            scans.get(),
+            2,
+            "a cold index reads every session exactly once"
+        );
+        assert_eq!(cold.scanned_sessions, 2);
+        assert!(cold.index_changed);
+        assert_eq!(cold.hits.len(), 2);
+        assert!(cold.hits.iter().any(|hit| hit.session_id == "one"));
+        assert!(cold
+            .hits
+            .iter()
+            .any(|hit| hit.text.contains("alpha needle")));
+
+        let mut watcher = SessionSearchWatcher::default();
+        assert!(
+            watcher.observe(cold.revision),
+            "the first observation is a change"
+        );
+        assert!(
+            !watcher.observe(cold.revision),
+            "an unchanged index is silent"
+        );
+
+        scans.set(0);
+        let warm = store
+            .search_entries_with("needle", 10, |path| {
+                scans.set(scans.get() + 1);
+                index_session_entries(path)
+            })
+            .unwrap();
+        assert_eq!(
+            scans.get(),
+            0,
+            "a warm index must not re-read any transcript"
+        );
+        assert!(!warm.index_changed);
+        assert!(!watcher.observe(warm.revision));
+
+        // Only the new/changed transcript is re-read.
+        let mut third = Session::create(store.dir().join("three.jsonl")).unwrap();
+        third
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("gamma needle".into())],
+            })))
+            .unwrap();
+        drop(third);
+        scans.set(0);
+        let delta = store
+            .search_entries_with("needle", 10, |path| {
+                scans.set(scans.get() + 1);
+                index_session_entries(path)
+            })
+            .unwrap();
+        assert_eq!(scans.get(), 1, "only the changed session is re-read");
+        assert!(delta.index_changed);
+        assert!(
+            watcher.observe(delta.revision),
+            "the change fires the notification"
+        );
+        assert_eq!(delta.hits.len(), 3);
+    }
+
+    #[test]
+    fn entry_reconciliation_batches_refreshes_and_removals() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), root.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        for id in 0..65 {
+            std::fs::write(store.dir().join(format!("s{id:03}.jsonl")), b"{}\n").unwrap();
+        }
+        let initial = store.entry_index_revision().unwrap();
+        let cold = store
+            .search_entries_with("needle", 100, |_| {
+                Ok(vec![IndexedEntry {
+                    entry_id: "entry".into(),
+                    kind: IndexedEntryKind::User,
+                    text: "needle".into(),
+                }])
+            })
+            .unwrap();
+        assert_eq!(cold.scanned_sessions, 65);
+        assert_eq!(cold.hits.len(), 65);
+        assert_eq!(
+            cold.revision - initial,
+            3,
+            "32-session batches, not one transaction per session"
+        );
+        let warm = store
+            .search_entries_with("needle", 100, |_| panic!("unchanged transcript"))
+            .unwrap();
+        assert_eq!(warm.revision, cold.revision);
+        for id in 0..65 {
+            std::fs::remove_file(store.dir().join(format!("s{id:03}.jsonl"))).unwrap();
+        }
+        let empty = store.search_entries("needle", 100).unwrap();
+        assert!(empty.hits.is_empty());
+        assert_eq!(
+            empty.revision - cold.revision,
+            3,
+            "stale removals are bounded too"
+        );
+    }
+
+    #[test]
+    fn search_reconciles_existing_file_edits_without_directory_mtime_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), root.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("existing.jsonl");
+        let record = |text: &str| {
+            format!("{{\"type\":\"entry\",\"id\":\"e\",\"value\":{{\"type\":\"message\",\"User\":{{\"content\":[{{\"Text\":\"{text}\"}}]}}}}}}\n")
+        };
+        std::fs::write(&path, record("old needle")).unwrap();
+        assert_eq!(
+            store.search_entries("old needle", 10).unwrap().hits.len(),
+            1
+        );
+        let directory_mtime = store.dir().metadata().unwrap().modified().unwrap();
+        let previous = path.metadata().unwrap().modified().unwrap();
+        std::fs::write(&path, record("new needle")).unwrap();
+        // No clock-resolution/timing assumption in the invalidation regression.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(previous + std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            store.dir().metadata().unwrap().modified().unwrap(),
+            directory_mtime
+        );
+        let refreshed = store.search_entries("new needle", 10).unwrap();
+        assert_eq!(refreshed.scanned_sessions, 1);
+        assert_eq!(refreshed.hits.len(), 1);
+        assert!(store
+            .search_entries("old needle", 10)
+            .unwrap()
+            .hits
+            .is_empty());
+    }
+
+    #[test]
+    fn large_legacy_projection_stays_searchable_and_cached() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), root.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("legacy.jsonl");
+        let id = "long-legacy-id".repeat(100);
+        let record = serde_json::json!({"type":"entry", "id":id, "value":{"type":"message", "User":{"content":[
+            {"Media":{"data":"A".repeat(2 * 1024 * 1024)}}, {"Text":"retained needle"}
+        ]}}});
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let cold = store.search_entries("needle", 10).unwrap();
+        assert_eq!(cold.hits.len(), 1);
+        assert_eq!(cold.hits[0].entry_id, id);
+        assert_eq!(cold.hits[0].text, "retained needle");
+        let warm = store
+            .search_entries_with("needle", 10, |_| {
+                panic!("warm legacy projection must stay cached")
+            })
+            .unwrap();
+        assert_eq!(warm.hits, cold.hits);
+        assert_eq!(warm.scanned_sessions, 0);
+    }
+
+    #[test]
+    fn old_search_schema_rebuilds_and_unreadable_refresh_removes_stale_hits() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("search.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("migration needle".into())],
+            })))
+            .unwrap();
+        drop(session);
+        assert_eq!(store.search_entries("needle", 10).unwrap().hits.len(), 1);
+        let connection = rusqlite::Connection::open(SessionCatalog::path(store.dir())).unwrap();
+        connection
+            .execute_batch("DROP TABLE indexed_entry_grams; PRAGMA user_version = 4;")
+            .unwrap();
+        drop(connection);
+        let rebuilt = store.search_entries("needle", 10).unwrap();
+        assert_eq!(rebuilt.scanned_sessions, 1);
+        assert_eq!(rebuilt.hits.len(), 1);
+        std::fs::write(&path, "changed and temporarily unreadable").unwrap();
+        let refreshed = store
+            .search_entries_with("needle", 10, |_| anyhow::bail!("unreadable"))
+            .unwrap();
+        assert!(refreshed.hits.is_empty());
+        assert!(refreshed.index_changed);
+        let retry = store
+            .search_entries_with("needle", 10, |_| anyhow::bail!("unreadable"))
+            .unwrap();
+        assert!(retry.hits.is_empty());
+        assert!(!retry.index_changed);
+    }
+
+    #[test]
+    fn oversized_catalog_keeps_warm_discovery_and_search_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let mut session = Session::create(store.dir().join("oldest.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("retained needle".into())],
+            })))
+            .unwrap();
+        drop(session);
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.search_entries("needle", 10).unwrap().hits.len(), 1);
+        let connection = rusqlite::Connection::open(SessionCatalog::path(store.dir())).unwrap();
+        connection.execute_batch("CREATE TABLE padding (data BLOB); INSERT INTO padding VALUES (zeroblob(65 * 1024 * 1024)); PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        drop(connection);
+        let discovered = store.discover_with_summarizer(store.candidates(), false, |_| {
+            panic!("warm oversized catalog must not rescan transcripts")
+        });
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].title, "retained needle");
+        let search = store
+            .search_entries_with("needle", 10, |_| {
+                panic!("warm oversized index must not rescan transcripts")
+            })
+            .unwrap();
+        assert_eq!(search.hits.len(), 1);
+        assert_eq!(search.scanned_sessions, 0);
+    }
+
+    #[test]
+    fn indexed_entries_keep_only_user_and_assistant_text() {
+        let record = serde_json::json!({
+            "type": "entry",
+            "id": "e1",
+            "value": {"type": "message", "Assistant": {"content": [
+                {"Text": "visible answer"},
+                {"Reasoning": {"text": "hidden needle"}},
+                {"ToolCall": {"name": "bash", "arguments": {"command": "secret needle"}}}
+            ]}}
+        });
+        let entry = indexed_entry_from_record(&record).unwrap();
+        assert_eq!(entry.kind, IndexedEntryKind::Assistant);
+        assert!(entry.text.contains("visible answer"));
+        assert!(!entry.text.contains("hidden needle"));
+        assert!(!entry.text.contains("secret needle"));
+
+        let user = serde_json::json!({
+            "type": "entry",
+            "id": "e2",
+            "value": {"type": "message", "User": {"content": [
+                {"Text": "user needle"},
+                {"Media": {"mime": "image/png"}}
+            ]}}
+        });
+        let entry = indexed_entry_from_record(&user).unwrap();
+        assert_eq!(entry.kind, IndexedEntryKind::User);
+        assert_eq!(entry.text, "user needle");
+    }
+
+    #[test]
     fn open_session_refresh_keeps_mutated_transcripts_warm() {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -2576,6 +4148,46 @@ mod tests {
         });
         assert_eq!(scans.get(), 0);
         assert_eq!(listed[0].title, "second branch");
+    }
+
+    #[test]
+    fn cold_catalog_accepts_labels_and_tool_invocation_records() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("with-metadata.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let prompt = session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("retained title".into())],
+            })))
+            .unwrap();
+        session.set_entry_label(&prompt, "checkpoint").unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(
+                octet_ai::AssistantMessage {
+                    model: ModelId("model".into()),
+                    protocol: Protocol::OpenAiResponses,
+                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        id: octet_ai::ToolCallId("call".into()),
+                        name: "test".into(),
+                        arguments_json: "{}".into(),
+                        argument_error: None,
+                        async_execution: false,
+                    })],
+                },
+            )))
+            .unwrap();
+        session
+            .tool_invocation(0)
+            .unwrap()
+            .set_memo("progress", serde_json::json!(true))
+            .unwrap();
+        drop(session);
+        assert!(Session::open_read_only(&path).is_ok());
+        assert!(summarize_catalog_session(&path).is_ok());
+        assert_eq!(store.list()[0].title, "retained title");
     }
 
     #[test]
@@ -3047,6 +4659,154 @@ mod tests {
         );
     }
 
+    /// One durably parked deferred run, written through the session's own
+    /// deferred-run store so the record lands in the transcript exactly as a
+    /// real suspension would. The open session is returned so a test can drive
+    /// the next durable change through the same store.
+    fn park_deferred_run(path: &Path) -> (Session, DeferredRunRecord) {
+        use octet_agent::tools::deferred::{
+            DeferredHandle, DeferredResponseDeclaration, DeferredStopReason,
+            DeferredSuspendDecision, ModelIdentity,
+        };
+
+        let mut session = Session::create(path).unwrap();
+        let source = session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("parked prompt".into())],
+            })))
+            .unwrap();
+        let identity = ModelIdentity::new("provider", "model");
+        let declaration = DeferredResponseDeclaration {
+            stop_reason: DeferredStopReason::Deferred,
+            api: "anthropic_messages".into(),
+            handle: Some(DeferredHandle::new(
+                "provider",
+                "model",
+                "anthropic_messages",
+                "resp-1",
+            )),
+        };
+        let store = session.deferred_run_store();
+        assert!(matches!(
+            store
+                .suspend(&identity, "op-1", &source.0, declaration)
+                .unwrap(),
+            DeferredSuspendDecision::Suspended(_)
+        ));
+        let record = store.record("op-1").expect("the suspension is durable");
+        (session, record)
+    }
+
+    #[test]
+    fn deferred_run_records_round_trip_through_the_lightweight_mirror() {
+        use octet_agent::tools::deferred::{
+            DeferredResumeIntent, DeferredResumeStart, DeferredRunState,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deferred.jsonl");
+        let (session, parked) = park_deferred_run(&path);
+
+        // The parked leaf survives the mirror with its operation identity, grade
+        // and provider handle intact.
+        let mirrored = summarize_session(&path).unwrap();
+        assert_eq!(mirrored.deferred_run_records, vec![parked.clone()]);
+        let record = &mirrored.deferred_run_records[0];
+        assert_eq!(record.operation_id, "op-1");
+        assert_eq!(record.state_label(), "suspended");
+        assert_eq!(record.generation, 0);
+        let leaf = record.leaf().expect("a parked record keeps its leaf");
+        assert_eq!(leaf.poll, 0);
+        assert_eq!(leaf.handle.id, "resp-1");
+        assert_eq!(leaf.response_api, "anthropic_messages");
+
+        // A permitted poll replaces the leaf under a bumped generation before the
+        // provider runs; the mirror must keep the last authoritative state and
+        // never the abandoned one.
+        let DeferredResumeStart::Admitted(poll) = session
+            .deferred_run_store()
+            .begin_pass("op-1", "pass-1", DeferredResumeIntent::Poll, 0)
+            .unwrap()
+        else {
+            panic!("the first permitted poll must be admitted");
+        };
+        drop(session);
+
+        let mirrored = summarize_session(&path).unwrap();
+        assert_eq!(
+            mirrored.deferred_run_records,
+            vec![poll.effect_pending.clone()]
+        );
+        assert_eq!(
+            mirrored.deferred_run_records[0].state_label(),
+            "effect_pending"
+        );
+        assert!(matches!(
+            mirrored.deferred_run_records[0].state,
+            DeferredRunState::EffectPending { .. }
+        ));
+        assert_eq!(mirrored.deferred_run_records[0].generation, 1);
+
+        // A reopened session replays the same replaceable state, so the mirror
+        // and the authoritative store agree after a restart.
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(reopened.deferred_runs(), mirrored.deferred_run_records);
+    }
+
+    #[test]
+    fn lightweight_mirror_refuses_deferred_records_normal_resume_rejects() {
+        let directory = tempfile::tempdir().unwrap();
+
+        // A record replaying a generation the store already holds is refused by
+        // the durable store on reopen; the mirror must refuse it too.
+        let stale_path = directory.path().join("stale-deferred.jsonl");
+        let (session, parked) = park_deferred_run(&stale_path);
+        drop(session);
+        append_session_record(
+            &stale_path,
+            &octet_agent::SessionRecord::DeferredRun {
+                record: parked.clone(),
+            },
+        );
+        let error = summarize_session(&stale_path).unwrap_err();
+        assert!(
+            error.to_string().contains("generation regressed"),
+            "{error:#}"
+        );
+
+        // A terminal tombstone is authoritative: no later record may follow it.
+        let terminal_path = directory.path().join("terminal-deferred.jsonl");
+        let (session, parked) = park_deferred_run(&terminal_path);
+        drop(session);
+        append_session_record(
+            &terminal_path,
+            &octet_agent::SessionRecord::DeferredRun {
+                record: DeferredRunRecord::cancelled("op-1", parked.generation + 1),
+            },
+        );
+        append_session_record(
+            &terminal_path,
+            &octet_agent::SessionRecord::DeferredRun {
+                record: parked.clone(),
+            },
+        );
+        let error = summarize_session(&terminal_path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("terminal deferred record may not be followed"),
+            "{error:#}"
+        );
+    }
+
+    /// Append one already-built session record byte-for-byte, the way a torn or
+    /// hostile transcript would carry it.
+    fn append_session_record(path: &Path, record: &octet_agent::SessionRecord) {
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        serde_json::to_writer(&mut file, record).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+
     #[test]
     fn list_omits_empty_and_config_only_sessions() {
         let root = tempfile::tempdir().unwrap();
@@ -3382,5 +5142,371 @@ mod tests {
                 session.path.file_stem().and_then(|stem| stem.to_str()) == Some("linked")
             }));
         }
+    }
+
+    /// A credential-shaped string a hostile roster could carry as free text; it
+    /// must never reach a handle or a refusal reason.
+    const HANDLE_TEST_SECRET: &str = "sk-handle-secret-9f2b7c41d6ea";
+
+    /// One owner-only directory, the mode the host's private `team-*` directory
+    /// uses.
+    fn private_directory(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    /// The durable delegation roster exactly as the host writes it: one
+    /// owner-only `fleet.json` in the session store's private delegation
+    /// directory, whose record carries `session_path` in `status`.
+    fn write_roster(
+        delegation: &Path,
+        session_path: &Path,
+        status: serde_json::Value,
+        detached: bool,
+    ) {
+        let record = serde_json::json!({
+            "agent_id": "agent-1",
+            "agent_path": "/root/worker",
+            "parent_id": "agent-0",
+            "depth": 1,
+            "task_name": "worker task",
+            "display_task_name": "worker task",
+            "session_path": session_path,
+            "status": status,
+            "detached": detached,
+            "created_at_ms": 1,
+            "started_at_ms": 2,
+            "completed_at_ms": null,
+            "turn_count": 0,
+            "tool_call_count": 0,
+            "usage": {
+                "input_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "cache_write_1h_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "total_tokens": 0,
+            },
+            "usage_uncertain": false,
+            "cost": null,
+            "cost_microdollars": null,
+            "deadline_at_ms": null,
+            "turn_limit": null,
+            "extension_principal": null,
+            "extension_profile": null,
+            "extension_idempotency_key": null,
+            "extension_fingerprint": null,
+            "extension_policy": null,
+            // Free text a forged or buggy roster could carry: the resolver's
+            // durable diagnostic must never be relayed into a refusal.
+            "durable_diagnostic": format!("credential {} must not leak", HANDLE_TEST_SECRET),
+        });
+        let fleet = serde_json::json!({
+            "version": 1,
+            "root_session": delegation.join("parent.jsonl"),
+            "records": [record],
+        });
+        let path = delegation.join("fleet.json");
+        std::fs::write(&path, fleet.to_string()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    /// The typed verdict behind one refusal, which is what a frontend branches
+    /// on instead of matching message text.
+    fn refusal(error: &anyhow::Error) -> DelegatedHandleRefusal {
+        *error
+            .downcast_ref::<DelegatedHandleRefusal>()
+            .unwrap_or_else(|| panic!("typed worker-handle refusal expected, got {error:#}"))
+    }
+
+    #[test]
+    fn a_launchable_worker_handle_resolves_to_the_child_transcript() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let parent_path = store.dir().join("parent.jsonl");
+        Session::create(&parent_path).unwrap();
+
+        let delegation = store.dir().join(DELEGATION_DIRECTORY);
+        let team = delegation.join("team-alpha");
+        private_directory(&team);
+        let child = team.join("0001-worker.jsonl");
+        Session::create(&child).unwrap();
+        write_roster(
+            &delegation,
+            &child,
+            serde_json::json!({"state": "detached"}),
+            true,
+        );
+
+        let handle = octet_agent::delegated_session_reference(&child).unwrap();
+        assert_eq!(handle.len(), DELEGATED_SESSION_HANDLE_PREFIX.len() + 64);
+        // Opaque, path-free, argv-safe, and credential-free.
+        assert!(handle
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b':'));
+        assert!(!handle.contains('/'));
+        assert!(!handle.contains(HANDLE_TEST_SECRET));
+
+        assert_eq!(store.path_by_id(&handle).unwrap(), child);
+        assert_eq!(store.path_for_delegated_handle(&handle).unwrap(), child);
+        // An ordinary session id keeps exactly its previous resolution.
+        assert_eq!(store.path_by_id("parent").unwrap(), parent_path);
+        // A settled worker is still launchable: a detached, completed, or
+        // shutdown record is not a live writer. The store adds only the
+        // roster-level liveness rule the durable record cannot carry.
+        write_roster(
+            &delegation,
+            &child,
+            serde_json::json!({"state": "completed", "output": "done"}),
+            true,
+        );
+        assert_eq!(store.path_by_id(&handle).unwrap(), child);
+    }
+
+    #[test]
+    fn every_unlaunchable_worker_handle_refuses_with_a_distinct_bounded_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let delegation = store.dir().join(DELEGATION_DIRECTORY);
+        let team = delegation.join("team-alpha");
+        private_directory(&team);
+        let child = team.join("0001-worker.jsonl");
+        Session::create(&child).unwrap();
+        let handle = octet_agent::delegated_session_reference(&child).unwrap();
+        let unknown = format!("agent-session:{}", "0".repeat(64));
+        let detached = || serde_json::json!({"state": "detached"});
+
+        // Parked at the approval boundary: opening it elsewhere would be
+        // unattended mutation.
+        write_roster(
+            &delegation,
+            &child,
+            serde_json::json!({"state": "awaiting_approval", "reason": "approval is unavailable"}),
+            false,
+        );
+        assert_eq!(
+            refusal(&store.path_by_id(&handle).unwrap_err()),
+            DelegatedHandleRefusal::ParkedAtApprovalBoundary
+        );
+
+        // Live in the owning process: the durable roster cannot carry the
+        // process-local liveness flag, so the live roster state is the
+        // fail-closed signal, and one session has one writer.
+        for state in ["pending", "running"] {
+            write_roster(
+                &delegation,
+                &child,
+                serde_json::json!({ "state": state }),
+                false,
+            );
+            assert_eq!(
+                refusal(&store.path_by_id(&handle).unwrap_err()),
+                DelegatedHandleRefusal::LiveInOwningProcess { status: state }
+            );
+        }
+
+        // Vanished transcript: nothing to open, so no fabricated launch.
+        std::fs::remove_file(&child).unwrap();
+        write_roster(&delegation, &child, detached(), true);
+        assert_eq!(
+            refusal(&store.path_by_id(&handle).unwrap_err()),
+            DelegatedHandleRefusal::VanishedTranscript
+        );
+
+        // Unknown handle: the roster is readable and simply does not know it.
+        assert_eq!(
+            refusal(&store.path_by_id(&unknown).unwrap_err()),
+            DelegatedHandleRefusal::UnknownWorker
+        );
+
+        // Missing roster: an explicit refusal, never an empty success.
+        std::fs::remove_file(delegation.join("fleet.json")).unwrap();
+        assert_eq!(
+            refusal(&store.path_by_id(&handle).unwrap_err()),
+            DelegatedHandleRefusal::RosterUnavailable
+        );
+
+        let verdicts = [
+            DelegatedHandleRefusal::MalformedHandle,
+            DelegatedHandleRefusal::RosterUnavailable,
+            DelegatedHandleRefusal::UnknownWorker,
+            DelegatedHandleRefusal::ParkedAtApprovalBoundary,
+            DelegatedHandleRefusal::LiveInOwningProcess { status: "running" },
+            DelegatedHandleRefusal::VanishedTranscript,
+            DelegatedHandleRefusal::OutsideDelegationDirectory,
+        ];
+        let mut codes = HashSet::new();
+        let mut reasons = HashSet::new();
+        let store_directory = store.dir().to_string_lossy().into_owned();
+        let child_path = child.to_string_lossy().into_owned();
+        for verdict in verdicts {
+            let reason = verdict.to_string();
+            assert!(
+                reason.len() <= 400,
+                "every reason is bounded: {} bytes",
+                reason.len()
+            );
+            assert!(!reason.chars().any(char::is_control), "{reason}");
+            // No credential, no session secret, no transcript path, and no
+            // roster path in any reason.
+            assert!(!reason.contains(HANDLE_TEST_SECRET), "{reason}");
+            assert!(!reason.contains(&store_directory), "{reason}");
+            assert!(!reason.contains(&child_path), "{reason}");
+            assert!(!reason.contains("fleet.json"), "{reason}");
+            assert!(codes.insert(verdict.code()), "codes are distinct");
+            assert!(reasons.insert(reason), "reasons are distinct");
+        }
+        assert_eq!(codes.len(), 7);
+        // The stable codes are the machine-readable half of the same reason.
+        assert_eq!(
+            DelegatedHandleRefusal::MalformedHandle.code(),
+            "malformed_worker_handle"
+        );
+        assert_eq!(
+            DelegatedHandleRefusal::ParkedAtApprovalBoundary.code(),
+            "worker_awaiting_approval"
+        );
+        assert_eq!(
+            DelegatedHandleRefusal::LiveInOwningProcess { status: "pending" }.code(),
+            "worker_live_in_owning_process"
+        );
+    }
+
+    #[test]
+    fn a_malformed_worker_handle_is_refused_before_any_filesystem_work() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        // Deliberately nothing on disk: no session directory, no delegation
+        // directory, no roster. The shape check must not need any of them, so a
+        // shell metacharacter, a control byte, or a path component can never
+        // reach a path join.
+        assert!(!store.dir().exists());
+        let mut malformed = vec![
+            "agent-session:".to_owned(),
+            "agent-session:0".to_owned(),
+            format!("agent-session:{}", "a".repeat(63)),
+            format!("agent-session:{}", "A".repeat(64)),
+            format!("agent-session:{}x", "a".repeat(64)),
+            format!("agent-session:x{}", "a".repeat(64)),
+            format!("agent-session:{}\n", "a".repeat(64)),
+            format!("agent-session:{} ", "a".repeat(64)),
+            "agent-session:../../etc/passwd".to_owned(),
+            "agent-session:$(id)".to_owned(),
+            "agent-session:a;rm -rf /.jsonl".to_owned(),
+            "agent-session:/tmp/0001-worker.jsonl".to_owned(),
+            "agent-session:team-alpha/0001-worker.jsonl".to_owned(),
+            "agent-session:é".to_owned(),
+        ];
+        malformed.push(format!("agent-session:{}", "\u{0}".repeat(64)));
+        for value in malformed {
+            assert_eq!(
+                refusal(&store.path_by_id(&value).unwrap_err()),
+                DelegatedHandleRefusal::MalformedHandle,
+                "accepted {value:?}"
+            );
+            assert_eq!(
+                refusal(&store.path_for_delegated_handle(&value).unwrap_err()),
+                DelegatedHandleRefusal::MalformedHandle
+            );
+        }
+        assert!(
+            !store.dir().exists(),
+            "shape validation must not touch the filesystem"
+        );
+    }
+
+    #[test]
+    fn a_forged_roster_entry_cannot_escape_the_delegation_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let delegation = store.dir().join(DELEGATION_DIRECTORY);
+        private_directory(&delegation);
+        let detached = || serde_json::json!({"state": "detached"});
+
+        // The handle is derived only from the two trailing path components
+        // (`octet_agent::delegated_session_reference`), so a copied or forged
+        // roster entry can name the same pair *outside* the private delegation
+        // directory and hash to the same handle.
+        let escape_team = store.dir().join("team-escape");
+        private_directory(&escape_team);
+        let escaped = escape_team.join("0001-worker.jsonl");
+        Session::create(&escaped).unwrap();
+        let escaped_handle = octet_agent::delegated_session_reference(&escaped).unwrap();
+        assert_eq!(
+            octet_agent::delegated_session_reference(
+                &delegation.join("team-escape").join("0001-worker.jsonl")
+            )
+            .unwrap(),
+            escaped_handle
+        );
+        write_roster(&delegation, &escaped, detached(), true);
+        assert_eq!(
+            refusal(&store.path_by_id(&escaped_handle).unwrap_err()),
+            DelegatedHandleRefusal::OutsideDelegationDirectory
+        );
+
+        // A traversal-bearing record path is not a two-component path inside the
+        // delegation directory, so it is refused outright, even when it resolves
+        // to a file that exists.
+        let inside_escape_team = delegation.join("team-escape");
+        private_directory(&inside_escape_team);
+        let inside_escape = inside_escape_team.join("0001-worker.jsonl");
+        Session::create(&inside_escape).unwrap();
+        assert_eq!(
+            octet_agent::delegated_session_reference(&inside_escape).unwrap(),
+            escaped_handle,
+            "the traversal form carries the same handle, or the test proves nothing"
+        );
+        let team = delegation.join("team-alpha");
+        private_directory(&team);
+        let child = team.join("0001-worker.jsonl");
+        Session::create(&child).unwrap();
+        let traversing = delegation
+            .join("team-alpha")
+            .join("..")
+            .join("team-escape")
+            .join("0001-worker.jsonl");
+        assert!(traversing.exists(), "the traversal target really exists");
+        write_roster(&delegation, &traversing, detached(), true);
+        assert_eq!(
+            refusal(&store.path_by_id(&escaped_handle).unwrap_err()),
+            DelegatedHandleRefusal::OutsideDelegationDirectory
+        );
+
+        // A symlinked team directory is refused, never followed.
+        #[cfg(unix)]
+        {
+            let linked_team = delegation.join("team-linked");
+            std::os::unix::fs::symlink(&escape_team, &linked_team).unwrap();
+            let linked = linked_team.join("0001-worker.jsonl");
+            let linked_handle = octet_agent::delegated_session_reference(&linked).unwrap();
+            write_roster(&delegation, &linked, detached(), true);
+            assert_eq!(
+                refusal(&store.path_by_id(&linked_handle).unwrap_err()),
+                DelegatedHandleRefusal::OutsideDelegationDirectory
+            );
+        }
+
+        // The legitimate child beside the forged entries still resolves: the
+        // confinement refuses the escape, not delegation itself.
+        let handle = octet_agent::delegated_session_reference(&child).unwrap();
+        write_roster(&delegation, &child, detached(), true);
+        assert_eq!(store.path_by_id(&handle).unwrap(), child);
     }
 }

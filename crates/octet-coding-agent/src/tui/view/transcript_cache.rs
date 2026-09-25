@@ -5,7 +5,8 @@ use super::transcript_render::{
     render_assistant_update_planned, render_block_planned_with_rainbow,
 };
 use super::welcome_card::render_welcome_card;
-use super::ShellState;
+use super::{ShellState, TranscriptBlock};
+use sexy_tui_rs::text_editor::{PromptZone, PromptZones};
 
 /// Final block-local geometry shared by transcript rendering and semantic
 /// selection. Decorative rows and columns never enter copy offsets.
@@ -42,6 +43,8 @@ pub(super) struct RenderedTranscriptBlock {
 pub(super) struct TranscriptCache {
     pub(super) width: Option<u16>,
     pub(super) lines: Vec<String>,
+    pub(super) prompt_zones: PromptZones,
+    prompt_zones_generation: Option<u64>,
     /// Whether the cached welcome prefix was rendered while an overlay was
     /// active. Overlays suppress that prefix without changing transcript
     /// blocks, so this is part of cache staleness rather than a block revision.
@@ -102,6 +105,8 @@ impl Default for TranscriptCache {
         Self {
             width: None,
             lines: Vec::new(),
+            prompt_zones: PromptZones::default(),
+            prompt_zones_generation: None,
             welcome_overlay_active: false,
             block_starts: Vec::new(),
             block_lengths: Vec::new(),
@@ -144,7 +149,41 @@ fn replace_welcome_prefix(
 }
 
 impl ShellState {
+    pub(super) fn prompt_jump_target(&self, row: usize, forward: bool) -> Option<usize> {
+        let mut cache = self.transcript_cache.borrow_mut();
+        // Navigation builds this lazily: streamed tokens must not add an O(history)
+        // pass to the existing block-local render path.
+        if cache.prompt_zones_generation != Some(cache.generation) {
+            // Boundaries come from semantic blocks and the same width/revision
+            // cache as the rows. Host text containing OSC133 cannot forge jumps.
+            cache.prompt_zones = PromptZones::from_boundaries(
+                cache.lines.len(),
+                self.transcript
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, block)| {
+                        let geometry = cache.block_geometries[index];
+                        let row = cache.block_starts[index]
+                            + geometry.transition_rows
+                            + geometry.leading_rows;
+                        let zones: &[PromptZone] = match block {
+                            TranscriptBlock::User { .. } => {
+                                &[PromptZone::PromptStart, PromptZone::CommandStart]
+                            }
+                            TranscriptBlock::Assistant(_) => &[PromptZone::OutputStart],
+                            _ => &[],
+                        };
+                        zones.iter().copied().map(move |zone| (row, zone))
+                    }),
+            );
+
+            cache.prompt_zones_generation = Some(cache.generation);
+        }
+        cache.prompt_zones.jump(row, forward)
+    }
+
     pub(super) fn rendered_transcript(&self, width: u16) -> Ref<'_, Vec<String>> {
+        let width = self.transcript_content_width(width);
         let stale = {
             let cache = self.transcript_cache.borrow();
             cache.dirty
@@ -170,6 +209,9 @@ impl ShellState {
             let previous_line_count = cache.lines.len();
             let rainbow_strength = self.status_rainbow_strength();
             let overlay_active = self.overlay.is_some();
+            // The orchestration row itself owns worker liveness; aggregate
+            // outcomes must not add a second subagent notice.
+            let running_outcome = None;
             let mut first_changed = cache.lines.len();
             let rebuild =
                 cache.width != Some(width) || cache.block_revisions.len() > self.transcript.len();
@@ -202,6 +244,7 @@ impl ShellState {
                         self.event_spinner_frame,
                         self.status_shimmer_frame,
                         rainbow_strength,
+                        running_outcome == Some(index),
                     );
                     let start = cache.lines.len();
                     let length = rendered.lines.len();
@@ -239,6 +282,7 @@ impl ShellState {
                         self.event_spinner_frame,
                         self.status_shimmer_frame,
                         rainbow_strength,
+                        running_outcome == Some(index),
                     );
                     let start = cache.lines.len();
                     first_changed = first_changed.min(start);
@@ -275,7 +319,9 @@ impl ShellState {
                         &self.transcript[index],
                         &self.theme,
                         rich_renderer,
+                        reasoning_renderer,
                         width,
+                        self.show_tool_details(&self.transcript[index]),
                     )
                     .filter(|update| update.stable_rows <= old_length)
                     {
@@ -315,6 +361,7 @@ impl ShellState {
                         self.event_spinner_frame,
                         self.status_shimmer_frame,
                         rainbow_strength,
+                        running_outcome == Some(index),
                     );
                     let new_length = rendered.lines.len();
                     cache
@@ -365,10 +412,75 @@ mod tests {
     use sexy_tui_rs::strip_terminal_sequences;
 
     #[test]
+    fn expanded_reasoning_updates_only_the_tail_and_reexpands_cleanly() {
+        use super::super::AssistantBlock;
+
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_verbose_tools(true);
+        let mut state = shell.state.borrow_mut();
+        state.push_block(TranscriptBlock::Reasoning(Box::new(
+            AssistantBlock::streaming_reasoning("First thought.\n\nSecond thought.\n\nTail"),
+        )));
+        state.rendered_transcript(80);
+        for _ in 0..4 {
+            let TranscriptBlock::Reasoning(reasoning) = &mut state.transcript[0] else {
+                unreachable!()
+            };
+            reasoning.append_reasoning(" more");
+            state.touch_block(0);
+            let actual = state.rendered_transcript(80).clone();
+            let cache = state.transcript_cache.borrow();
+            let start = cache.block_starts[0];
+            assert!(
+                cache.last_update_start > start,
+                "settled prefix was repainted"
+            );
+            drop(cache);
+            let expected = render_block_planned_with_rainbow(
+                None,
+                &state.transcript[0],
+                &state.theme,
+                &state.theme.rich_renderer(),
+                &state.theme.reasoning_renderer(),
+                80,
+                true,
+                0,
+                0,
+                0,
+                false,
+            );
+            assert_eq!(&actual[start..], expected.lines);
+        }
+        drop(state);
+        shell.set_verbose_tools(false);
+        shell.state.borrow().rendered_transcript(80);
+        shell.set_verbose_tools(true);
+        let state = shell.state.borrow();
+        let actual = state.rendered_transcript(80).clone();
+        let start = state.transcript_cache.borrow().block_starts[0];
+        let expected = render_block_planned_with_rainbow(
+            None,
+            &state.transcript[0],
+            &state.theme,
+            &state.theme.rich_renderer(),
+            &state.theme.reasoning_renderer(),
+            80,
+            true,
+            0,
+            0,
+            0,
+            false,
+        );
+        assert_eq!(&actual[start..], expected.lines);
+    }
+
+    #[test]
     fn welcome_prefix_replacement_reanchors_following_blocks() {
         let mut cache = TranscriptCache {
             width: Some(80),
             lines: vec!["old 1".into(), "old 2".into(), "history".into()],
+            prompt_zones: PromptZones::default(),
+            prompt_zones_generation: None,
             welcome_overlay_active: false,
             block_starts: vec![2],
             block_lengths: vec![1],

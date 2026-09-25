@@ -150,10 +150,21 @@ struct RouteSpec {
     transport: String,
     body_encoding: String,
     responses_profile: String,
+    #[serde(default)]
+    responses_features: ResponsesFeaturesSpec,
     #[serde(default = "default_openai_chat_profile")]
     openai_chat_profile: String,
     auth_presentation: String,
     auth_header: Option<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ResponsesFeaturesSpec {
+    async_tools: bool,
+    steering: bool,
+    reasoning_effort_updates: bool,
+    compact_reasoning_effort_updates: bool,
 }
 
 fn default_openai_chat_profile() -> String {
@@ -342,6 +353,7 @@ fn responses_profile_expression(value: &str) -> Option<&'static str> {
     match value {
         "default" => Some("ResponsesRuntimeProfile::Default"),
         "codex" => Some("ResponsesRuntimeProfile::Codex"),
+        "azure" => Some("ResponsesRuntimeProfile::Azure"),
         _ => None,
     }
 }
@@ -741,7 +753,10 @@ fn validate_provider(spec: &ProviderSpec) -> Result<(), io::Error> {
                 "provider declaration has an invalid route",
             ));
         }
-        if route.responses_profile != "default" && route.protocol != "openai_responses" {
+        if (route.responses_profile != "default"
+            || route.responses_features != ResponsesFeaturesSpec::default())
+            && route.protocol != "openai_responses"
+        {
             return Err(provider_manifest_error(
                 "provider Responses runtime profile requires a Responses route",
             ));
@@ -788,6 +803,7 @@ fn validate_provider(spec: &ProviderSpec) -> Result<(), io::Error> {
                     || previous.transport != route.transport
                     || previous.body_encoding != route.body_encoding
                     || previous.responses_profile != route.responses_profile
+                    || previous.responses_features != route.responses_features
                     || previous.openai_chat_profile != route.openai_chat_profile)
             {
                 return Err(provider_manifest_error(
@@ -978,7 +994,7 @@ fn generate_provider_declarations(manifest_dir: &Path, out_dir: &Path) -> io::Re
         for route in &provider.routes {
             writeln!(
                 generated,
-                "        ProviderRoute {{ endpoint_id: {}, base_path: {}, protocol: {}, auth_presentation: {}, transport: {}, runtime: RequestRuntime {{ body_encoding: {}, responses_profile: {}, openai_chat_profile: {}, lifecycle_feedback: false }} }},",
+                "        ProviderRoute {{ endpoint_id: {}, base_path: {}, protocol: {}, auth_presentation: {}, transport: {}, runtime: RequestRuntime {{ body_encoding: {}, responses_profile: {}, openai_chat_profile: {}, lifecycle_feedback: false, responses_features: octet_ai::ResponsesFeatures {{ async_tools: {}, steering: {}, reasoning_effort_updates: {}, compact_reasoning_effort_updates: {} }} }} }},",
                 quote(&route.endpoint_id),
                 quote(&route.base_path),
                 protocol_expression(&route.protocol).expect("validated protocol"),
@@ -990,6 +1006,10 @@ fn generate_provider_declarations(manifest_dir: &Path, out_dir: &Path) -> io::Re
                     .expect("validated responses profile"),
                 openai_chat_profile_expression(&route.openai_chat_profile)
                     .expect("validated OpenAI Chat profile"),
+                route.responses_features.async_tools,
+                route.responses_features.steering,
+                route.responses_features.reasoning_effort_updates,
+                route.responses_features.compact_reasoning_effort_updates,
             )
             .expect("writing to String cannot fail");
         }

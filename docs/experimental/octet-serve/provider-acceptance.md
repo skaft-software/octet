@@ -1,12 +1,12 @@
 # Configured-provider acceptance
 
 Maintainer reference for provider routes and acceptance procedures in the
-octet 0.7.6 source. For usage, see the [Serve guide](README.md). Optional
+octet 0.8.0. For usage, see the [Serve guide](README.md). Optional
 live-provider/native-host audio checks are **NOT RUN** in this source review.
 Graphical media, recovery, and capture work remains separately tracked. The
-[exact GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
-records publication verification and any separately approved live acceptance;
-source contracts are not live-provider or model-capability qualification.
+[historical 0.7.6 release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
+retains its own publication evidence, not qualification of this release.
+Source contracts are not live-provider or model-capability qualification.
 
 The retained [v0.4.0 record](#release-record) is historical Ygg evidence, not a
 pass or waiver of current release gates.
@@ -27,10 +27,11 @@ security, artifact signing and public-install verification remain required.
 Nothing on this page authorizes a live run.
 
 The live procedure below builds `octet-host` and tests **native-host protocol 1**,
-not extension API 0.3 or the graphical Serve transport. In particular, native
+not extension API 0.4 or the graphical Serve transport. In particular, native
 audio acceptance does not establish web attachment support: production Serve
-supports images and bounded prompt documents, not audio. The bundled extension
-runtime examples are not qualified API 0.3 authoring examples.
+supports images and bounded prompt documents, not audio. Current extension
+authoring and its distinct retained wires are documented in the
+[extension guide](../../extensions.md); none is qualified by native-host checks.
 
 <a id="supported-provider-matrix"></a>
 
@@ -114,7 +115,7 @@ loopback-only and credential-free. No current run is reported here.
 The snapshot describes a protected `Stable provider acceptance` workflow. Both
 stable release workflows expose `require_provider_acceptance`, defaulting to
 `false`. Packaging then does not read provider secrets or require an acceptance
-run; this is the credential-free release policy for octet 0.7.6. Setting it to
+run; this remains the credential-free release policy for the 0.8.0 source. Setting it to
 `true` explicitly opts that workflow run into fail-closed exact-SHA and
 protected-approval enforcement.
 
