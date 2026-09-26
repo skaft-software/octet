@@ -50,6 +50,9 @@ _WINDOW_SCOPED_TOOLS = frozenset(
     }
 )
 
+# Driver tools addressed purely by desktop coordinates. These need no window.
+_COORDINATE_ONLY_TOOLS = frozenset({"move_cursor", "click"})
+
 # Driver tools that only observe. They are still gated by the driver's own
 # read-only classification, but a missing OS grant must not hide their failure
 # behind a permission refusal: the user needs to see the real error.
@@ -350,18 +353,14 @@ class ComputerUse:
         # caller that knows only the process should not have to learn WindowServer
         # handles to make progress. Resolve it here so naming the app is enough.
         #
-        # Only resolve for element/keyword targeting. A caller using raw x/y or an
-        # element index already names what it wants, and forcing a window on those
-        # would reject a legitimate call over a handle the caller never needed.
-        targeted = any(
-            key in arguments
-            for key in ("element_index", "element_token", "query", "text", "key")
+        # A gesture that names explicit coordinates is already addressed and needs
+        # no window, whether or not a pid was also given. Everything else resolves.
+        by_coordinates = (
+            driver_tool in _COORDINATE_ONLY_TOOLS
+            and "x" in arguments
+            and "y" in arguments
         )
-        if (
-            driver_tool in _WINDOW_SCOPED_TOOLS
-            and "window_id" not in arguments
-            and targeted
-        ):
+        if driver_tool in _WINDOW_SCOPED_TOOLS and "window_id" not in arguments and not by_coordinates:
             resolved = service.resolve_window_id(
                 client,
                 arguments.get("pid"),
@@ -370,9 +369,9 @@ class ComputerUse:
             if resolved is None:
                 return tool_result(
                     text_content(
-                        f"{driver_tool} needs a window: the process in `pid` has no "
-                        "single top-level window to act on. List windows for that "
-                        "app and pass the window_id you want."
+                        f"{driver_tool} needs a window: no process was named, or the "
+                        "one named has no single top-level window. Call "
+                        "computer_use_windows to find the window_id you want."
                     ),
                     is_error=True,
                 )
@@ -424,6 +423,16 @@ class ComputerUse:
         summary = service.summarize_result(result)
         text = summary["text"][:RESULT_TEXT_LIMIT]
         parts: List[Mapping[str, Any]] = [text_content(text or "(no text content)")]
+        # The driver's markdown tree omits the element tokens and snapshot id an
+        # agent needs to address a control. Without them the only way to click is
+        # screen coordinates, which is guesswork; an agent that cannot find a
+        # token ends up grepping the driver's own source to reverse-engineer one.
+        # Surface the addressing fields in the text so the next call can use them.
+        structured = summary.get("structured")
+        if isinstance(structured, dict):
+            token_hint = _targeting_hint(structured)
+            if token_hint:
+                parts.insert(0, text_content(token_hint))
         # Publish each screenshot as a host artifact and attach it to the result.
         # The driver already returned the pixels; dropping them here is what made
         # computer use blind, because a model that cannot see the screen cannot
@@ -723,6 +732,41 @@ def _render_jev_setup(outcome: Mapping[str, Any]) -> str:
     if state == "declined":
         return "Jev setup declined. Computer use is unaffected."
     return "Jev setup skipped. Computer use is unaffected."
+
+
+def _targeting_hint(structured: Mapping[str, Any]) -> str:
+    """Spell out how to address an element in this window.
+
+    The driver returns an ``element_token`` per control and a ``snapshot_id`` for
+    the snapshot, but its markdown rendering shows neither. An agent therefore
+    cannot click a button by identity and falls back to coordinates or to
+    reverse-engineering the driver's source. State the contract once, in the tool
+    result the agent is already reading.
+    """
+
+    elements = structured.get("elements")
+    if not isinstance(elements, list) or not elements:
+        return ""
+    lines = [
+        "Addressing this window: pass element_token (preferred) or element_index "
+        "together with snapshot_id. Tokens are stable only for this snapshot."
+    ]
+    snapshot = structured.get("snapshot_id")
+    if isinstance(snapshot, str) and snapshot:
+        lines.append(f"snapshot_id: {snapshot}")
+    for element in elements[:200]:
+        if not isinstance(element, dict):
+            continue
+        token = element.get("element_token")
+        index = element.get("element_index")
+        label = element.get("label")
+        role = element.get("role")
+        if token is None and index is None:
+            continue
+        lines.append(
+            f"  token={token} index={index} role={role} label={label}"
+        )
+    return "\n".join(lines)
 
 
 def _handle_jev_choose(values: Mapping[str, Any]) -> Dict[str, Any]:

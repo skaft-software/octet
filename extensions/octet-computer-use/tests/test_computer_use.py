@@ -511,6 +511,32 @@ class OutputSchemaTests(unittest.TestCase):
         self.assertTrue(schema.get("additionalProperties"))
 
 
+class TargetingHintTests(unittest.TestCase):
+    """The addressing fields must be in the text the agent already reads."""
+
+    def test_hint_names_the_snapshot_and_tokens(self):
+        from octet_computer_use.entrypoint import _targeting_hint
+
+        structured = {
+            "snapshot_id": "s00000006",
+            "elements": [
+                {"element_index": 1, "element_token": "s00000006:1", "role": "AXButton", "label": "Delete"},
+                {"element_index": 2, "element_token": "s00000006:2", "role": "AXButton", "label": "Clear"},
+            ],
+        }
+        hint = _targeting_hint(structured)
+        self.assertIn("s00000006", hint)
+        self.assertIn("s00000006:2", hint)
+        self.assertIn("Clear", hint)
+        # Without this the agent cannot address a control by identity.
+        self.assertIn("element_token", hint)
+
+    def test_hint_is_empty_without_elements(self):
+        from octet_computer_use.entrypoint import _targeting_hint
+
+        self.assertEqual(_targeting_hint({"snapshot_id": "s1"}), "")
+
+
 class DesktopHostTests(unittest.TestCase):
     """The desktop host is preferred when present, and is optional.
 
