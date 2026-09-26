@@ -210,6 +210,32 @@ def _output_schema_for(driver_tool: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# Whether every effectful action must be individually confirmed.
+#
+# octet's security model (SECURITY.md) is that full access - the default - runs
+# with the user's own permissions and does not ask, and that --safe-mode is the
+# mode that asks before every effectful action. Computer use inherits that: under
+# full access an agent drives the desktop unattended, and the cursor overlay is
+# the standing signal that it has control. Only when the user asks for a gate is
+# each effectful action confirmed individually.
+#
+# The host does not currently pass its access mode to extensions, so this reads
+# the environment. It defaults to open, matching the documented default rather
+# than inventing a stricter one.
+def confirmations_enabled() -> bool:
+    """Whether every effectful action must be individually confirmed."""
+
+    raw = os.environ.get("OCTET_CUA_CONFIRM", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    # A host that reports a gated profile turns the gate on unless the user has
+    # explicitly disabled it. Absent that signal, full access is assumed.
+    gated = os.environ.get("OCTET_EFFECT_POLICY", "").strip().lower()
+    return gated in ("safe", "workspace", "sandboxed", "restricted")
+
+
 class ComputerUse:
     """Owns the driver client and enforces the confirmation boundary."""
 
@@ -376,7 +402,7 @@ class ComputerUse:
                     is_error=True,
                 )
             arguments["window_id"] = resolved
-        if client.requires_confirmation(driver_tool):
+        if client.requires_confirmation(driver_tool) and confirmations_enabled():
             # Actuation needs the OS grants. Without them the driver would fail
             # deep inside a capture or click, so refuse here with the fix, and
             # do not spend the user's confirmation on an action that cannot

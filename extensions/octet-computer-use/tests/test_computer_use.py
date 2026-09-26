@@ -70,13 +70,64 @@ class SummarizeTests(unittest.TestCase):
         self.assertNotIn("xxxx", summary["text"])
 
 
+class ConfirmationModeTests(unittest.TestCase):
+    """Full access must not prompt; a gated profile must.
+
+    SECURITY.md: full access is the default and does not ask, and --safe-mode is
+    the mode that asks before every effectful action.
+    """
+
+    def setUp(self):
+        self._saved = {
+            name: os.environ.pop(name, None)
+            for name in ("OCTET_CUA_CONFIRM", "OCTET_EFFECT_POLICY")
+        }
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
+
+    def test_defaults_to_open_under_full_access(self):
+        from octet_computer_use.entrypoint import confirmations_enabled
+
+        self.assertFalse(confirmations_enabled())
+
+    def test_explicit_opt_in_gates_every_action(self):
+        from octet_computer_use.entrypoint import confirmations_enabled
+
+        for value in ("1", "true", "on", "yes"):
+            os.environ["OCTET_CUA_CONFIRM"] = value
+            self.assertTrue(confirmations_enabled(), value)
+
+    def test_explicit_opt_out_wins_over_a_gated_profile(self):
+        from octet_computer_use.entrypoint import confirmations_enabled
+
+        os.environ["OCTET_EFFECT_POLICY"] = "safe"
+        os.environ["OCTET_CUA_CONFIRM"] = "0"
+        self.assertFalse(confirmations_enabled())
+
+    def test_gated_profile_turns_the_gate_on(self):
+        from octet_computer_use.entrypoint import confirmations_enabled
+
+        os.environ["OCTET_EFFECT_POLICY"] = "safe"
+        self.assertTrue(confirmations_enabled())
+
+
 class ConfirmationGateTests(unittest.TestCase):
     def setUp(self):
+        # These exercise the gate itself, so opt into it explicitly.
+        self._saved_confirm = os.environ.get("OCTET_CUA_CONFIRM")
+        os.environ["OCTET_CUA_CONFIRM"] = "1"
         self._temporary = tempfile.TemporaryDirectory()
         self.home = Path(self._temporary.name)
 
     def tearDown(self):
         self._temporary.cleanup()
+        os.environ.pop("OCTET_CUA_CONFIRM", None)
+        if self._saved_confirm is not None:
+            os.environ["OCTET_CUA_CONFIRM"] = self._saved_confirm
 
     def use(self, client, *, confirm=True):
         extension = RecordingExtension(confirm=confirm)

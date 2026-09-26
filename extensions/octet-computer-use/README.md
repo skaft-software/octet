@@ -146,6 +146,28 @@ asks for screen recording and Accessibility is a poor thing to hand a user, so
 Cua's signed app is adopted first. The app is optional; without any usable host
 octet uses the direct runtime.
 
+## Confirmation and safe mode
+
+octet's security model ([SECURITY.md](../../SECURITY.md)) is that **full access -
+the default - runs with your own permissions and does not ask**, and that
+`--safe-mode` is the mode that asks before every effectful action. Computer use
+inherits that: under full access an agent drives the desktop unattended, and the
+agent cursor is the standing signal that it currently has control.
+
+To ask before every effectful action instead, opt in:
+
+```console
+OCTET_CUA_CONFIRM=1 octet
+```
+
+`OCTET_CUA_CONFIRM=0` turns the gate off explicitly, even under a gated profile.
+
+**This is the boundary that matters.** octet is not a sandbox: an agent with
+computer use can read what is on your screen and press what it can reach, exactly
+as you can. There is no per-app scoping and no incognito-window filtering, because
+macOS gives a Screen Recording grantee no way to hide a window it can see. If that
+matters, run octet inside a VM.
+
 ## What the agent can do
 
 | Tool | Driver tool | Notes |
