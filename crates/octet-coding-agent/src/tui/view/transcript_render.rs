@@ -253,19 +253,20 @@ pub(super) fn render_block_planned_with_rainbow(
                 "/subagents".to_owned()
             };
             let label = sanitize_for_terminal(&label);
-            let role = if summary.active_count() > 0 {
-                "foreground"
-            } else {
-                summary.settled_role()
-            };
+            // Outcome tone belongs to the one-cell left margin dot, which
+            // `event_margin_marker_with_frame` colours from the settled role.
+            // Every other block keeps its body text in neutral roles, so this
+            // one does too: the whole-line tone below made a long single-line
+            // row render entirely red/yellow whenever a subagent stopped, which
+            // is both noisy and a double encoding of the dot.
             let label = if let Some(rest) = label.strip_prefix("Subagents") {
                 format!(
                     "{}{}",
-                    theme.bold(&theme.fg(role, "Subagents")),
-                    theme.fg(role, rest)
+                    theme.bold(&theme.fg("foreground", "Subagents")),
+                    theme.fg("muted", rest)
                 )
             } else {
-                theme.fg(role, &label)
+                theme.fg("foreground", &label)
             };
             let mut lines = vec![fit_line(&label, width)];
             let hidden = summary
