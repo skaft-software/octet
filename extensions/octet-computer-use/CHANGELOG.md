@@ -4,6 +4,14 @@
 
 ### Added
 
+- App icon for the macOS host, built from the designer's artwork in
+  `host-app/Resources/AppIcon.png` by `host-app/Tools/make-iconset.swift`. The
+  plate's extent is read from the source's alpha channel rather than guessed
+  from colour, so the transparent margin stays genuinely transparent and no
+  background halo is baked in; every size macOS requests is rendered from the
+  source so small sizes stay sharp. A from-scratch vector approximation was
+  tried and removed: redrawing the design lost the exact silhouette, bevel, and
+  gradient.
 - Menu bar indicator on the macOS host, shown whenever computer use is
   available and tinted orange while an agent session is live. Its state is
   polled from `cua-driver sessions --json` so it reflects the driver's own

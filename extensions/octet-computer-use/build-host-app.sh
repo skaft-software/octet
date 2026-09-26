@@ -50,6 +50,22 @@ for command in swift codesign plutil; do
     fi
 done
 
+# The app icon comes from the designer's artwork, not from a redrawn vector
+# approximation. Build the .icns from Resources/AppIcon.png so Finder and the
+# Dock show exactly what was designed, at every size macOS asks for.
+icon_source="$package_dir/Resources/AppIcon.png"
+if [[ -f "$icon_source" ]]; then
+    printf 'building the app icon\n'
+    if ! swift "$package_dir/Tools/make-iconset.swift" \
+        "$icon_source" "$build_dir/AppIcon.icns" "$build_dir/iconwork"; then
+        printf 'error: failed to build the app icon from %s\n' "$icon_source" >&2
+        exit 1
+    fi
+else
+    printf 'error: app icon artwork is missing: %s\n' "$icon_source" >&2
+    exit 1
+fi
+
 printf 'building the host app (%s)\n' "$configuration"
 swift build \
     --package-path "$package_dir" \
@@ -71,6 +87,7 @@ mkdir -p "$staged/Contents/MacOS" "$staged/Contents/Resources"
 ditto "$binary_path" "$staged/Contents/MacOS/OctetComputerUseHost"
 chmod +x "$staged/Contents/MacOS/OctetComputerUseHost"
 cp "$package_dir/Resources/Info.plist" "$staged/Contents/Info.plist"
+ditto "$build_dir/AppIcon.icns" "$staged/Contents/Resources/AppIcon.icns"
 
 # A bundle whose Info.plist is not a readable plist has no identity, so
 # LaunchServices cannot resolve it and the driver cannot attribute TCC to it.

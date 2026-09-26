@@ -301,27 +301,55 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         lastActing = acting
     }
 
-    private static func icon(acting: Bool) -> NSImage? {
-        // A cursor glyph, drawn rather than shipped, so the indicator needs no
-        // bundled artwork and stays crisp on every display scale.
-        let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size, flipped: false) { rect in
+    /// Draw the status glyph: a pointer arrow, the shape the driver uses for
+    /// the agent cursor, so the menu bar and the overlay read as the same thing.
+    ///
+    /// Drawn rather than shipped so the indicator needs no bundled artwork and
+    /// stays crisp at every display scale. The geometry is the classic pointer:
+    /// a sharp tip at the top left, a wide head, a notch, and a short angled
+    /// tail - which is what separates a real cursor from an arbitrary blob.
+    private static func icon(acting: Bool, paused: Bool = false) -> NSImage? {
+        let size = NSSize(width: 16, height: 16)
+        let image = NSImage(size: size, flipped: false) { _ in
             let path = NSBezierPath()
-            // A simple pointer outline.
-            path.move(to: NSPoint(x: 4, y: 3))
-            path.line(to: NSPoint(x: 4, y: 15))
-            path.line(to: NSPoint(x: 7.5, y: 11.5))
-            path.line(to: NSPoint(x: 10, y: 16))
-            path.line(to: NSPoint(x: 12, y: 15))
-            path.line(to: NSPoint(x: 9.5, y: 10.5))
-            path.line(to: NSPoint(x: 14, y: 10.5))
+            // Scaled from a 12x13 design grid to the menu bar's 16pt box.
+            func p(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+                NSPoint(x: x / 12 * size.width, y: y / 13 * size.height)
+            }
+            path.move(to: p(0.7, 12.4))      // tip
+            path.line(to: p(10.9, 7.0))      // right shoulder
+            path.line(to: p(8.0, 4.8))       // notch on the right
+            path.line(to: p(11.9, 0.7))      // tail tip
+            path.line(to: p(8.4, 0.2))       // tail heel
+            path.line(to: p(4.9, 4.1))       // back up the left of the tail
+            path.line(to: p(0.7, 12.4))      // close to the tip
             path.close()
+
             if acting {
                 NSColor.systemOrange.setFill()
             } else {
                 NSColor.labelColor.setFill()
             }
             path.fill()
+
+            // While paused, strike the cursor through. A colour change alone
+            // would be missed by a user who is not looking for it, and "stopped"
+            // must never be mistaken for "live".
+            if paused {
+                let bar = NSBezierPath()
+                bar.lineWidth = 1.8
+                bar.lineCapStyle = .round
+                bar.move(to: p(1.6, 1.2))
+                bar.line(to: p(10.4, 11.4))
+                // Knock the glyph out in the menu bar's own background colour
+                // first, so the slash reads clearly on both light and dark menu
+                // bars without the host having to know which one it is.
+                NSColor.windowBackgroundColor.setStroke()
+                bar.stroke()
+                (acting ? NSColor.systemOrange : NSColor.labelColor).setStroke()
+                bar.lineWidth = 1.0
+                bar.stroke()
+            }
             return true
         }
         return image
