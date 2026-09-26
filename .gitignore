@@ -61,3 +61,6 @@ DerivedData/
 
 # Local session exports are owner-private artifacts, never committed.
 *.octet-session.json
+
+# Local agent scratch (plans, not source)
+.ygg/
