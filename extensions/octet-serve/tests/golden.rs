@@ -450,6 +450,22 @@ fn host_bootstrap_golden_contract() {
 }
 
 #[test]
+fn host_bootstrap_accepts_large_model_catalogs_but_keeps_a_bound() {
+    let mut value = bootstrap();
+    let template = value.models[0].clone();
+    for index in value.models.len()..octet_serve_backend::MAX_MODELS {
+        let mut model = template.clone();
+        model.id = format!("catalog-model-{index}");
+        value.models.push(model);
+    }
+    value.validate().unwrap();
+    let mut extra = template;
+    extra.id = "over-limit".into();
+    value.models.push(extra);
+    assert_eq!(value.validate().unwrap_err().field, "bootstrap.models");
+}
+
+#[test]
 fn session_snapshot_golden_contract() {
     assert_golden(
         snapshot(),
