@@ -64,3 +64,6 @@ DerivedData/
 
 # Local agent scratch (plans, not source)
 .ygg/
+
+# Stale pre-rename ygg layout left by an old stash; not a workspace member
+crates/ygg-coding-agent/
