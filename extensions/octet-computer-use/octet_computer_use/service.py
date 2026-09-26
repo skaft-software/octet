@@ -47,7 +47,7 @@ _ARGUMENTS: Dict[str, Sequence[str]] = {
     "read_driver_health": (),
     "provision": ("version",),
     "list_apps": (),
-    "list_windows": (),
+    "list_windows": ("pid", "on_screen_only"),
     "get_window_state": (
         "pid",
         "window_id",
@@ -133,12 +133,63 @@ def sanitize(driver_tool: str, values: Mapping[str, Any]) -> Dict[str, Any]:
     return forwarded
 
 
+def resolve_window_id(
+    client: Any,
+    pid: Any,
+    window_id: Any = None,
+) -> Optional[int]:
+    """Pick the window a caller meant when it named only a process.
+
+    The driver requires a ``window_id`` for every window-scoped call, but an
+    agent almost always knows the *app* it wants, not a WindowServer handle.
+    Resolving it here keeps that translation out of the model: without it a
+    correct next step ("read this app's window") fails with a schema complaint
+    that gives the agent nothing to act on.
+
+    An explicit ``window_id`` always wins. Otherwise the process's own window is
+    chosen, preferring an on-screen one and then the frontmost by ``z_index``.
+    Returning ``None`` means the caller should report "that app has no single
+    window" rather than act on a guess.
+    """
+
+    if isinstance(window_id, int) and not isinstance(window_id, bool):
+        return window_id
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    try:
+        listed = client.call("list_windows", {"pid": pid})
+    except Exception:
+        return None
+    structured = (listed or {}).get("structuredContent")
+    windows = structured.get("windows") if isinstance(structured, dict) else None
+    if not isinstance(windows, list) or not windows:
+        return None
+
+    def rank(entry: Mapping[str, Any]) -> tuple[int, int]:
+        z = entry.get("z_index")
+        front = z if isinstance(z, int) and not isinstance(z, bool) else -1
+        on_screen = 1 if entry.get("is_on_screen") else 0
+        return (on_screen, front)
+
+    candidates = [
+        entry
+        for entry in windows
+        if isinstance(entry, dict) and isinstance(entry.get("window_id"), int)
+    ]
+    if not candidates:
+        return None
+    chosen = max(candidates, key=rank).get("window_id")
+    return chosen if isinstance(chosen, int) and not isinstance(chosen, bool) else None
+
+
 def summarize_result(result: Mapping[str, Any]) -> Dict[str, Any]:
     """Reduce a driver result to a bounded, presentable summary.
 
-    Full window screenshots and accessibility trees are large. The runtime keeps
-    text blocks intact up to a ceiling and reports the presence of images rather
-    than inlining megabytes of base64 into a tool result.
+    Text blocks are kept intact up to a ceiling. Image blocks are *not* inlined
+    here: they are megabytes of base64 and the extension publishes them as host
+    artifacts instead, so the model actually receives the pixels. The summary
+    only reports how many images the driver returned and preserves the raw
+    content blocks so the caller can publish them.
     """
 
     text_parts: List[str] = []
@@ -160,4 +211,17 @@ def summarize_result(result: Mapping[str, Any]) -> Dict[str, Any]:
         "text": text,
         "image_count": image_count,
         "truncated": truncated,
+        # The driver's own structured payload carries the fields an agent needs
+        # to target something: window_id, app_name, title, bounds, and the
+        # per-app records list_apps returns. Dropping it left callers with a
+        # bare count and no way to act on what they were shown.
+        "structured": result.get("structuredContent")
+        if isinstance(result.get("structuredContent"), dict)
+        else None,
+        # Raw image blocks, kept so the caller can publish them as artifacts.
+        "images": [
+            dict(block)
+            for block in (result.get("content") or [])
+            if isinstance(block, Mapping) and block.get("type") == "image"
+        ],
     }

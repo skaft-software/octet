@@ -8,12 +8,13 @@ unavailable, declined, or failed confirmation denies the call.
 
 from __future__ import annotations
 
+import base64
 import os
 import threading
 import time
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from octet_extension import Extension, text_content, tool_result
+from octet_extension import Extension, image_content, text_content, tool_result
 
 from octet_computer_use import driver as driver_module
 from octet_computer_use import service
@@ -32,6 +33,22 @@ from octet_computer_use.service import ArgumentError
 
 # Driver tools that never change the desktop. Everything else is gated.
 LOCAL_ONLY_TOOLS = frozenset({"read_driver_health", "provision", "jev_status", "jev_choose"})
+
+# Driver tools that address one specific window and therefore need a window_id.
+_WINDOW_SCOPED_TOOLS = frozenset(
+    {
+        "get_window_state",
+        "click",
+        "type_text",
+        "press_key",
+        "scroll",
+        "double_click",
+        "drag",
+        "zoom",
+        "verify_state",
+        "set_window_frame",
+    }
+)
 
 # Driver tools that only observe. They are still gated by the driver's own
 # read-only classification, but a missing OS grant must not hide their failure
@@ -63,11 +80,10 @@ CURSOR_MOTION: Dict[str, Any] = {
     "spring": 1.0,
     "glide_duration_ms": 0.0,
     "dwell_after_click_ms": 0.0,
-    # Keep the agent cursor on screen for as long as the session is active. The
-    # cursor is the always-on indicator that an agent currently has control of
-    # this desktop, so it must not fade out between actions. A session that ends
-    # removes it. A day-long value is effectively "until the session ends".
-    "idle_hide_ms": 86_400_000.0,
+    # Hide the agent cursor shortly after it stops moving. The cursor is the
+    # signal that the agent is acting *right now*; parking it on screen forever
+    # would misreport where the agent is and stop being a signal at all.
+    "idle_hide_ms": 2000.0,
 }
 
 
@@ -307,6 +323,37 @@ class ComputerUse:
             raise ArgumentError(f"{driver_tool} is handled locally")
         arguments = service.sanitize(driver_tool, values)
         client = self.client()
+        # The driver requires a window_id for every window-scoped call, but a
+        # caller that knows only the process should not have to learn WindowServer
+        # handles to make progress. Resolve it here so naming the app is enough.
+        #
+        # Only resolve for element/keyword targeting. A caller using raw x/y or an
+        # element index already names what it wants, and forcing a window on those
+        # would reject a legitimate call over a handle the caller never needed.
+        targeted = any(
+            key in arguments
+            for key in ("element_index", "element_token", "query", "text", "key")
+        )
+        if (
+            driver_tool in _WINDOW_SCOPED_TOOLS
+            and "window_id" not in arguments
+            and targeted
+        ):
+            resolved = service.resolve_window_id(
+                client,
+                arguments.get("pid"),
+                arguments.get("window_id"),
+            )
+            if resolved is None:
+                return tool_result(
+                    text_content(
+                        f"{driver_tool} needs a window: the process in `pid` has no "
+                        "single top-level window to act on. List windows for that "
+                        "app and pass the window_id you want."
+                    ),
+                    is_error=True,
+                )
+            arguments["window_id"] = resolved
         if client.requires_confirmation(driver_tool):
             # Actuation needs the OS grants. Without them the driver would fail
             # deep inside a capture or click, so refuse here with the fix, and
@@ -353,8 +400,33 @@ class ComputerUse:
         result = client.call(driver_tool, arguments)
         summary = service.summarize_result(result)
         text = summary["text"][:RESULT_TEXT_LIMIT]
+        parts: List[Mapping[str, Any]] = [text_content(text or "(no text content)")]
+        # Publish each screenshot as a host artifact and attach it to the result.
+        # The driver already returned the pixels; dropping them here is what made
+        # computer use blind, because a model that cannot see the screen cannot
+        # use it. Publishing bounds the transfer the way an inline base64 blob
+        # would not.
+        for block in summary.get("images") or ():
+            data = block.get("data")
+            mime = str(block.get("mimeType") or block.get("mime_type") or "image/png")
+            if not isinstance(data, str) or not data:
+                continue
+            try:
+                artifact = self._extension.publish_artifact(
+                    mime_type=mime,
+                    data=base64.b64decode(data),
+                )
+            except Exception:
+                # A screenshot that cannot be published must not fail the call;
+                # the text result is still useful.
+                continue
+            parts.append(image_content(artifact, mime))
         return tool_result(
-            text_content(text or "(no text content)"),
+            *parts,
+            # The driver's structured payload carries window_id, app_name,
+            # title, and per-app records. Without it the agent is told how many
+            # windows exist and cannot act on any of them.
+            structured_content=summary.get("structured") or {"text": text or ""},
             is_error=summary["is_error"],
             metadata={
                 "driver_tool": driver_tool,

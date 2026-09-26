@@ -399,6 +399,92 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class ResultFidelityTests(unittest.TestCase):
+    """The tool must forward what the driver actually returned.
+
+    Reducing a driver result to a summary line is what made computer use blind
+    and untargetable: the screenshot was counted and dropped, and the per-window
+    and per-app records were discarded in favour of a count.
+    """
+
+    def test_image_blocks_survive_the_summary(self):
+        from octet_computer_use.service import summarize_result
+
+        result = {
+            "content": [
+                {"type": "text", "text": "desktop screenshot 100x100 px"},
+                {"type": "image", "data": "QUJD", "mimeType": "image/png"},
+            ],
+            "isError": False,
+        }
+        summary = summarize_result(result)
+        self.assertEqual(summary["image_count"], 1)
+        self.assertEqual(len(summary["images"]), 1)
+        self.assertEqual(summary["images"][0]["data"], "QUJD")
+
+    def test_structured_payload_survives_the_summary(self):
+        from octet_computer_use.service import summarize_result
+
+        result = {
+            "content": [{"type": "text", "text": "Found 2 window(s)."}],
+            "structuredContent": {
+                "windows": [
+                    {"window_id": 11, "app_name": "Finder", "pid": 726},
+                    {"window_id": 12, "app_name": "Firefox", "pid": 697},
+                ]
+            },
+            "isError": False,
+        }
+        summary = summarize_result(result)
+        windows = summary["structured"]["windows"]
+        self.assertEqual([w["window_id"] for w in windows], [11, 12])
+        # The count alone is what left the agent unable to target anything.
+        self.assertNotIn("window_id", summary["text"])
+
+
+class WindowResolutionTests(unittest.TestCase):
+    """Naming a process must be enough to act on its window."""
+
+    def _client(self, windows):
+        class Client:
+            def call(self, tool, arguments):
+                if tool == "list_windows":
+                    return {
+                        "structuredContent": {"windows": windows},
+                        "content": [{"type": "text", "text": ""}],
+                    }
+                raise AssertionError(tool)
+
+        return Client()
+
+    def test_explicit_window_id_wins(self):
+        from octet_computer_use.service import resolve_window_id
+
+        self.assertEqual(resolve_window_id(self._client([]), 726, window_id=99), 99)
+
+    def test_pid_resolves_to_a_window_id(self):
+        from octet_computer_use.service import resolve_window_id
+
+        client = self._client([{"window_id": 44, "pid": 726, "is_on_screen": True}])
+        self.assertEqual(resolve_window_id(client, 726), 44)
+
+    def test_frontmost_on_screen_window_is_preferred(self):
+        from octet_computer_use.service import resolve_window_id
+
+        client = self._client(
+            [
+                {"window_id": 5, "pid": 726, "is_on_screen": False, "z_index": 9},
+                {"window_id": 6, "pid": 726, "is_on_screen": True, "z_index": 1},
+            ]
+        )
+        self.assertEqual(resolve_window_id(client, 726), 6)
+
+    def test_no_window_yields_none_rather_than_a_guess(self):
+        from octet_computer_use.service import resolve_window_id
+
+        self.assertIsNone(resolve_window_id(self._client([]), 726))
+
+
 class DesktopHostTests(unittest.TestCase):
     """The desktop host is preferred when present, and is optional.
 
