@@ -848,7 +848,7 @@ class BridgeManager:
         try:
             decision = self.extension.evaluate_policy(intent)
             if decision.get("decision") == "allow":
-                return None
+                return self._confirm_unannotated_call(binding)
             token = decision.get("approval_token")
             if (
                 decision.get("decision") == "ask"
@@ -857,10 +857,45 @@ class BridgeManager:
             ):
                 decision = self.extension.evaluate_policy(intent, approval_token=token)
                 if decision.get("decision") == "allow":
-                    return None
+                    return self._confirm_unannotated_call(binding)
         except Exception:
             return "MCP tool call denied because host policy evaluation failed."
         return "MCP tool call denied by host policy."
+
+    def _confirm_unannotated_call(
+        self, binding: ToolBinding
+    ) -> Optional[str]:
+        """Ask the user before dispatching a call the server did not mark read-only.
+
+        This is cooperative UI layered on top of host policy, not an OS sandbox or
+        a replacement for it. A non-interactive or unavailable confirmation
+        surface denies rather than assuming approval, and a dropped, expired, or
+        declined answer never falls through to dispatch.
+        """
+
+        if not self._server(binding.server_id).config.confirm_unknown_tools:
+            return None
+        confirm = getattr(self.extension, "confirm", None)
+        if not callable(confirm):
+            return (
+                "MCP tool call denied: this server requires user confirmation and the "
+                "host confirmation service is unavailable."
+            )
+        try:
+            approved = confirm(
+                "Allow this configured MCP tool call?",
+                detail=(
+                    f"Server: {binding.server_label}. "
+                    f"Tool: {binding.published_name}."
+                ),
+                destructive=binding.approval == "destructive",
+                default=False,
+            )
+        except Exception:
+            return "MCP tool call denied because the user confirmation request failed."
+        if approved is not True:
+            return "MCP tool call denied: the user did not confirm it."
+        return None
 
     def _acquire_call_slot(self, cancellation: Any, binding: ToolBinding) -> bool:
         deadline = time.monotonic() + self._server(binding.server_id).config.request_timeout_ms / 1000

@@ -69,6 +69,50 @@ Refresh rereads the tool catalog without relaunching. Restart replaces the
 connection; stop removes its tools and closes it. `/mcp snapshot` returns the
 same semantic state used by the TUI and Serve.
 
+## Connect a desktop server
+
+A desktop MCP server such as [Cua Driver](https://github.com/trycua/cua) needs
+the same interactive session variables as your shell to reach the display. The
+bridge never inherits the ambient environment. It forwards exactly the reviewed
+non-secret session names a server descriptor asks for, and only because the
+bundle declares them in its manifest.
+
+Copy `config.cua-driver.example.json`, point `command` at your installed
+`cua-driver`, and set `enabled` to `true` once you have granted the driver's own
+OS permissions. The example keeps two deliberate defaults: the server ships
+**disabled**, and `confirmUnknownTools` is on so any call the driver does not
+mark `readOnly` waits for your explicit approval.
+
+```json
+"cua-driver": {
+  "transport": "stdio",
+  "label": "Cua Driver",
+  "command": "/absolute/path/to/cua-driver",
+  "args": ["mcp"],
+  "inheritEnv": ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"],
+  "confirmUnknownTools": true,
+  "enabled": false
+}
+```
+
+Two independent approvals gate each name: the host forwards only the manifest's
+declared names, and the bridge forwards only what this descriptor lists. A name
+outside the allowlist, a duplicate, a remote descriptor that names one, or a
+value that is not set on the bridge process is a startup error, not a silent
+downgrade. Explicit `env` values still win over an inherited name. Credential-
+like names such as `SSH_AUTH_SOCK` and provider tokens are never inheritable.
+
+`confirmUnknownTools` is a cooperative prompt on top of host policy, not a
+sandbox. An unavailable surface, a declined or cancelled answer, or a failed
+request denies the call rather than assuming approval, so headless and RPC
+frontends stay fail-closed. Confirmations are asked per call and only for tools
+without an exact `readOnlyHint: true`.
+
+The bundled `skills/cua-driver/SKILL.md` documents observation, background
+delivery, the agent cursor, and the credential and confirmation boundaries. The
+driver itself is separate third-party software that octet does not install,
+vendor, or start.
+
 ## Trust and limitations
 
 A local server runs with your OS authority. Neither configuration nor tool
@@ -85,8 +129,9 @@ Calls are never automatically replayed after an ambiguous failure; cancellation
 does not promise rollback.
 
 Server descriptions, schemas, logs, and results are untrusted data. The server
-gets only a small non-secret environment allowlist plus explicit `env` values,
-not ambient provider tokens or dotenv files. Keep secrets out of labels and
+gets only a small non-secret environment allowlist, the reviewed session names it
+explicitly requests through `inheritEnv`, and explicit `env` values, not ambient
+provider tokens or dotenv files. Keep secrets out of labels and
 arguments.
 
 **Remote Streamable HTTP is blocked by default and unsafe for production,
@@ -115,6 +160,7 @@ is a retained bundled-runtime contract, not a general SDK authoring guide.
   - <a id="known-streamable-http-defects"></a>[Known Streamable HTTP defects](REFERENCE.md#known-streamable-http-defects).
 - <a id="requirements-and-installation"></a>[Requirements and installation](REFERENCE.md#requirements-and-installation).
 - <a id="configuration"></a>[Configuration](REFERENCE.md#configuration): strict file validation and schema.
+    - <a id="desktop-session-environment-and-tool-confirmation"></a>[Desktop session environment and tool confirmation](REFERENCE.md#desktop-session-environment-and-tool-confirmation).
   - <a id="streamable-http-configuration"></a>[Streamable HTTP configuration](REFERENCE.md#streamable-http-configuration).
   - <a id="digest-pinned-trusted-project-configuration"></a>[Digest-pinned trusted project configuration](REFERENCE.md#digest-pinned-trusted-project-configuration).
   - <a id="enforced-default-bounds"></a>[Enforced default bounds](REFERENCE.md#enforced-default-bounds).

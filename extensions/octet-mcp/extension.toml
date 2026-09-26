@@ -11,8 +11,29 @@ command = "octet-mcp"
 filesystem = "unrestricted"
 process = true
 network = true
+# A desktop MCP server such as Cua Driver needs the same interactive
+# session variables as this host to reach the user's display. The host
+# forwards only these reviewed names, only because they are declared here, and
+# only to this already-trusted bridge; the bridge still forwards them to a
+# configured server only when that server's descriptor names them in
+# `inheritEnv`.
+environment = [
+  "APPDATA",
+  "DBUS_SESSION_BUS_ADDRESS",
+  "DISPLAY",
+  "LOCALAPPDATA",
+  "USERPROFILE",
+  "WAYLAND_DISPLAY",
+  "XAUTHORITY",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_DIRS",
+  "XDG_DATA_HOME",
+  "XDG_RUNTIME_DIR",
+  "XDG_SESSION_TYPE",
+]
 
 [contributes]
 commands = ["mcp"]
 ui = ["status"]
 presentation = true
+confirmations = true

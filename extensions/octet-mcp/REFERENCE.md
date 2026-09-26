@@ -297,6 +297,48 @@ is never used as a UI label. Relative `cwd` values resolve from the file that
 defines the server. A missing executable or invalid MCP handshake is a
 permanent failure parked until an explicit restart/config refresh.
 
+### Desktop session environment and tool confirmation
+
+Two optional per-server keys exist for servers that drive a real desktop, such
+as a Cua Driver instance. Both default to inert.
+
+`inheritEnv` is an array of environment names copied from the bridge process into
+that server's child process. It is not arbitrary ambient inheritance. Only these
+reviewed non-secret desktop and session names are accepted:
+
+`APPDATA`, `COMSPEC`, `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`, `HOME`,
+`LOCALAPPDATA`, `PATHEXT`, `SYSTEMROOT`, `USERPROFILE`, `WAYLAND_DISPLAY`,
+`WINDIR`, `XAUTHORITY`, `XDG_CONFIG_HOME`, `XDG_DATA_DIRS`, `XDG_DATA_HOME`,
+`XDG_RUNTIME_DIR`, `XDG_SESSION_TYPE`.
+
+Rejection is total and reported at load time: a non-array value, a non-string or
+malformed name, a duplicate, more than 24 entries, any name outside the
+allowlist, and any `inheritEnv` on a `streamable-http` descriptor (which owns no
+child process). Names that are simply unset on the bridge process are skipped
+rather than injected as empty strings. A name present in both `inheritEnv` and
+`env` takes the explicit `env` value.
+
+The grant is deliberately two-stage. The host forwards a name to this bridge
+only because the bundle's `extension.toml` declares it under `[capabilities]
+environment`; the bridge forwards it to a server only because that server's
+descriptor names it. Declaring a name in the manifest does not by itself grant
+it to any server, and a server descriptor cannot widen the manifest. Changing
+either list is a reviewed source change.
+
+`confirmUnknownTools` (default `false`) makes the bridge ask the user through the
+host's confirmation service before dispatching any tool the server does not
+annotate with an exact `readOnlyHint: true`. It applies after host policy has
+already returned `allow`, so it narrows rather than replaces policy. It is
+per-call and never batches. A missing, non-callable, or throwing confirmation
+surface, a declined or cancelled answer, and any answer that is not exactly
+`true` all deny the call with no dispatch. The prompt shows the server label and
+published tool name only; tool arguments are never included. The bundle declares
+`confirmations = true` in `[contributes]` so the host permits the request at all.
+
+Neither key is a sandbox. A server still runs with the user's OS authority, and
+`confirmUnknownTools` cannot constrain a server that does not go through the
+bridge's dispatch path.
+
 ### Streamable HTTP configuration
 
 This experimental configuration is inert without the process-owner

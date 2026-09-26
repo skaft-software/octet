@@ -44,7 +44,10 @@ class ReleaseSmokeTests(unittest.TestCase):
             "octet_mcp/streamable_http.py",
             "config.schema.json",
             "config.example.json",
+            "config.cua-driver.example.json",
             "fixtures/configs/real-local.json",
+            "skills/cua-driver/SKILL.md",
+            "REFERENCE.md",
             "README.md",
             "CHANGELOG.md",
         ):

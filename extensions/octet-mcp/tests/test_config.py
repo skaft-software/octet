@@ -8,7 +8,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from octet_mcp.config import ConfigError, STREAMABLE_HTTP_GATE_ERROR, load_config
+from octet_mcp.config import (
+    INHERITABLE_ENVIRONMENT_NAMES,
+    ConfigError,
+    STREAMABLE_HTTP_GATE_ERROR,
+    load_config,
+)
 from octet_mcp.runtime import build_runtime, static_credential_provider
 from octet_mcp.streamable_http import StaticEnvironmentCredentialProvider
 
@@ -22,6 +27,92 @@ class ConfigTests(unittest.TestCase):
         path.write_bytes(data)
         path.chmod(0o600)
         return data
+
+    def test_inherit_env_is_narrow_deduplicated_and_opt_in_per_server(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            self.write_json(
+                path,
+                {
+                    "version": 1,
+                    "servers": {
+                        "desktop": {
+                            "command": "cua-driver",
+                            "args": ["mcp"],
+                            "inheritEnv": ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"],
+                            "confirmUnknownTools": True,
+                        }
+                    },
+                },
+            )
+            server = load_config(path).servers[0]
+            self.assertEqual(
+                server.inherited_environment,
+                ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"),
+            )
+            self.assertTrue(server.confirm_unknown_tools)
+
+            # Absent means the bridge forwards no additional name at all.
+            self.write_json(
+                path,
+                {"version": 1, "servers": {"plain": {"command": "server"}}},
+            )
+            plain = load_config(path).servers[0]
+            self.assertEqual(plain.inherited_environment, ())
+            self.assertFalse(plain.confirm_unknown_tools)
+
+            invalid = [
+                {"inheritEnv": "DISPLAY"},
+                {"inheritEnv": [1]},
+                {"inheritEnv": ["DISPLAY", "DISPLAY"]},
+                {"inheritEnv": ["DISPLAY", "OPENAI_API_KEY"]},
+                {"inheritEnv": ["not a name"]},
+                {"inheritEnv": ["DISPLAY"] * 25},
+                {"confirmUnknownTools": "yes"},
+            ]
+            for descriptor in invalid:
+                with self.subTest(descriptor=descriptor):
+                    self.write_json(
+                        path,
+                        {
+                            "version": 1,
+                            "servers": {
+                                "desktop": {"command": "server", **descriptor}
+                            },
+                        },
+                    )
+                    with self.assertRaises(ConfigError):
+                        load_config(path)
+
+            # A remote endpoint owns no child process, so it may not name
+            # inherited variables.
+            self.write_json(
+                path,
+                {
+                    "version": 1,
+                    "servers": {
+                        "remote": {
+                            "transport": "streamable-http",
+                            "url": "https://mcp.example.invalid/mcp",
+                            "inheritEnv": ["DISPLAY"],
+                        }
+                    },
+                },
+            )
+            with self.assertRaisesRegex(ConfigError, "inheritEnv"):
+                load_config(path, experimental_streamable_http_mcp=True)
+
+    def test_cua_driver_example_profile_is_strict_and_inert(self):
+        config = load_config(ROOT / "config.cua-driver.example.json")
+        self.assertEqual(len(config.servers), 1)
+        server = config.servers[0]
+        self.assertEqual(server.id, "cua-driver")
+        self.assertEqual(server.args, ("mcp",))
+        self.assertEqual(server.environment, {})
+        self.assertTrue(server.confirm_unknown_tools)
+        self.assertFalse(server.enabled, "the profile must stay opt-in")
+        for name in server.inherited_environment:
+            self.assertIn(name, INHERITABLE_ENVIRONMENT_NAMES)
 
     def test_missing_default_is_inert_empty_configuration(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -28,6 +28,26 @@
 
 ### Added
 
+- Support configured desktop MCP servers through a two-stage environment grant:
+  a per-server `inheritEnv` array naming reviewed non-secret desktop/session
+  variables the bridge copies from its own process, layered on the host's
+  manifest-gated broker list. The default forwards nothing extra; unsupported,
+  duplicate, malformed, oversized, and remote-transport uses are rejected at
+  load time, unset names are skipped, and explicit `env` values still win.
+- Support optional `confirmUnknownTools` (default `false`): after host policy
+  allows a call, the bridge asks the user through the host confirmation service
+  before dispatching any tool without an exact `readOnlyHint: true`. A missing,
+  unavailable, failed, declined, or cancelled confirmation fails closed without
+  dispatch, and the prompt never includes tool arguments.
+- Add a disabled `config.cua-driver.example.json` profile and a bundled
+  `cua-driver` skill for operating an externally installed Cua Driver
+  (macOS, Windows, Linux). The driver is separate third-party software; this
+  bundle never installs, vendors, or starts it, and the example ships disabled
+  with confirmation enabled.
+- Add deterministic regressions for environment filtering, explicit-value
+  precedence, confirm allow/deny/headless behavior, and example-profile
+  inertness.
+
 - Add deterministic nine-defect regressions, including real local TLS verification,
   DNS-child cleanup, overlapping peer IDs, bounded controls, resumptions and
   truncated JSON/SSE/chunked streams. No external server or credential is used.

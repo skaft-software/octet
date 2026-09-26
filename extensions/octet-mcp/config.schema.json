@@ -76,6 +76,38 @@
           "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
           "additionalProperties": {"type": "string"}
         },
+        "inheritEnv": {
+          "description": "Names copied from the bridge process environment into this server. Only reviewed non-secret desktop-session names are accepted; the bridge never forwards arbitrary ambient variables. These are desktop session grants and should be listed only for servers that genuinely need the user's display session.",
+          "type": "array",
+          "maxItems": 24,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "APPDATA",
+              "COMSPEC",
+              "DBUS_SESSION_BUS_ADDRESS",
+              "DISPLAY",
+              "HOME",
+              "LOCALAPPDATA",
+              "PATHEXT",
+              "SYSTEMROOT",
+              "USERPROFILE",
+              "WAYLAND_DISPLAY",
+              "WINDIR",
+              "XAUTHORITY",
+              "XDG_CONFIG_HOME",
+              "XDG_DATA_DIRS",
+              "XDG_DATA_HOME",
+              "XDG_RUNTIME_DIR",
+              "XDG_SESSION_TYPE"
+            ]
+          }
+        },
+        "confirmUnknownTools": {
+          "description": "Ask the user for confirmation before dispatching any tool this server does not mark readOnly. Off by default; an interactive host denial, cancellation, or non-interactive frontend fails closed rather than assuming approval.",
+          "type": "boolean"
+        },
         "enabled": {"type": "boolean"},
         "required": {"type": "boolean"},
         "startupTimeoutMs": {"type": "integer", "minimum": 10, "maximum": 30000},

@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "limits": {
+    "maxToolsPerServer": 128,
+    "startupTimeoutMs": 15000,
+    "requestTimeoutMs": 60000
+  },
+  "servers": {
+    "cua-driver": {
+      "transport": "stdio",
+      "label": "Cua Driver",
+      "command": "/absolute/path/to/cua-driver",
+      "args": ["mcp"],
+      "inheritEnv": [
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+        "XDG_DATA_HOME",
+        "XDG_DATA_DIRS",
+        "XDG_CONFIG_HOME",
+        "DBUS_SESSION_BUS_ADDRESS"
+      ],
+      "confirmUnknownTools": true,
+      "enabled": false,
+      "required": false
+    }
+  },
+  "trustedProjects": []
+}

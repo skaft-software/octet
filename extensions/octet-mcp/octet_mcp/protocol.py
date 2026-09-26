@@ -980,5 +980,9 @@ class McpStdioClient:
         environment = {
             name: value for name in allowed if (value := os.environ.get(name)) is not None
         }
+        for name in self.config.inherited_environment:
+            value = os.environ.get(name)
+            if value:
+                environment[name] = value
         environment.update(self.config.environment)
         return environment
