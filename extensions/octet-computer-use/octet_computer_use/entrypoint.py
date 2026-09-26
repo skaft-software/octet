@@ -8,6 +8,7 @@ unavailable, declined, or failed confirmation denies the call.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Any, Dict, Mapping, Optional, Tuple
@@ -35,10 +36,36 @@ RESULT_TEXT_LIMIT = 24_000
 # How long one macOS permission answer is reused for the effectful-action gate.
 _PERMISSION_CACHE_SECONDS = 30.0
 
-# The driver session that owns the visible agent cursor. Cursors are
-# per-session, and a session name belongs to the transport that created it, so
-# this must be a name no other client (the CLI, another agent) will claim.
-CURSOR_SESSION = "octet-computer-use"
+# Prefix for the driver session that owns the visible agent cursor. A session
+# name belongs permanently to the transport that created it: the owner may
+# re-take it, but any other transport is refused until it ends. A fixed name
+# therefore breaks the second time octet launches, so each transport appends its
+# own identifier and ends the session on shutdown.
+CURSOR_SESSION_PREFIX = "octet-computer-use"
+
+# Straight-line, instant pointer travel. The theme's per-action animations are
+# left alone on purpose: they are how the driver draws the eye to an action, so
+# octet only removes the lag, not the signal.
+CURSOR_MOTION: Dict[str, Any] = {
+    "arc_size": 0.0,
+    "turn_radius": 0.0,
+    "arc_flow": 0.0,
+    "spring": 1.0,
+    "glide_duration_ms": 0.0,
+    "dwell_after_click_ms": 0.0,
+    "idle_hide_ms": 2000.0,
+}
+
+
+def cursor_session() -> str:
+    """A cursor session name unique to this driver transport.
+
+    Uniqueness is what makes the cursor work on every launch: the driver binds a
+    session name to the transport that first claims it, so a shared name would
+    be refused after any restart.
+    """
+
+    return "%s-%d" % (CURSOR_SESSION_PREFIX, os.getpid())
 
 
 def _schema_for(driver_tool: str) -> Dict[str, Any]:
@@ -84,6 +111,7 @@ class ComputerUse:
         # (expires_at_monotonic, blocked) for the effectful-action gate.
         self._permission_cache: Optional[Tuple[float, bool]] = None
         self._app_daemon = False
+        self._cursor_session: Optional[str] = None
 
     # -- driver lifecycle --------------------------------------------------
 
@@ -110,18 +138,27 @@ class ComputerUse:
             return client
 
     def _show_cursor(self, client: DriverClient) -> None:
-        """Start the shared session and make the agent cursor visible.
+        """Start this transport's session and give it a fast, low-latency cursor.
 
-        The cursor is per-session, so the session must be live before the cursor
-        is enabled and must not be left to expire. Both steps are best-effort:
-        a failure here must never block a tool call.
+        The session name is unique to this transport, because the driver binds a
+        name permanently to whoever claims it first and refuses every other
+        transport. Motion is deliberately flat and instant: the default theme's
+        per-action animations stay in place, so the twirl that draws the eye is
+        preserved, while the pointer travels in a straight line with no settle
+        pause. Best-effort throughout - the cursor must never block a tool call.
         """
 
+        session = cursor_session()
+        self._cursor_session = session
         try:
-            client.call("start_session", {"session": CURSOR_SESSION})
+            client.call("start_session", {"session": session})
+            client.call(
+                "set_agent_cursor_motion",
+                {"session": session, **CURSOR_MOTION},
+            )
             client.call(
                 "set_agent_cursor_enabled",
-                {"session": CURSOR_SESSION, "enabled": True},
+                {"session": session, "enabled": True},
             )
         except Exception:
             return
@@ -158,9 +195,18 @@ class ComputerUse:
 
     def shutdown(self) -> None:
         with self._lock:
-            if self._client is not None:
-                self._client.close()
-                self._client = None
+            client, self._client = self._client, None
+            session, self._cursor_session = self._cursor_session, None
+        if client is not None:
+            # End the cursor session so the name is released. The driver binds a
+            # name to its first owner, so a session left open would refuse the
+            # next octet launch outright.
+            if session:
+                try:
+                    client.call("end_session", {"session": session})
+                except Exception:
+                    pass
+            client.close()
 
     # -- dispatch ----------------------------------------------------------
 

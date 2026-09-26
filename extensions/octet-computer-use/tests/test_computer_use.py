@@ -395,12 +395,30 @@ class DesktopHostTests(unittest.TestCase):
         host = DriverClient("cua-driver", app_daemon=True)
         self.assertTrue(host._app_daemon)
 
-    def test_cursor_session_name_is_not_shared_with_other_clients(self):
-        # A session name belongs to the transport that created it, so the cursor
-        # session must not collide with a name the CLI or another agent uses.
-        from octet_computer_use.entrypoint import CURSOR_SESSION
+    def test_cursor_session_is_unique_per_transport(self):
+        # A session name belongs permanently to the transport that claimed it
+        # first, so a shared name is refused on every later launch. Each
+        # transport must therefore take its own name.
+        import os
 
-        self.assertEqual(CURSOR_SESSION, "octet-computer-use")
+        from octet_computer_use.entrypoint import CURSOR_SESSION_PREFIX, cursor_session
+
+        name = cursor_session()
+        self.assertTrue(name.startswith(CURSOR_SESSION_PREFIX + "-"))
+        self.assertNotEqual(name, CURSOR_SESSION_PREFIX)
+        self.assertEqual(name, cursor_session())
+        self.assertIn(str(os.getpid()), name)
+
+    def test_cursor_motion_is_flat_and_instant(self):
+        # Motion removes lag only; the theme keeps the attention-grabbing
+        # per-action animations.
+        from octet_computer_use.entrypoint import CURSOR_MOTION
+
+        self.assertEqual(CURSOR_MOTION["arc_size"], 0.0)
+        self.assertEqual(CURSOR_MOTION["turn_radius"], 0.0)
+        self.assertEqual(CURSOR_MOTION["glide_duration_ms"], 0.0)
+        self.assertEqual(CURSOR_MOTION["dwell_after_click_ms"], 0.0)
+        self.assertEqual(CURSOR_MOTION["spring"], 1.0)
 
     def test_daemon_socket_is_overridable(self):
         from octet_computer_use.driver_client import daemon_socket
