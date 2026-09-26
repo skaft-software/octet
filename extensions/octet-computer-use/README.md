@@ -106,6 +106,29 @@ desktop should never be able to do so invisibly.
 The app is macOS-only and optional. It is not required for computer use, and it
 is not installed by `octet extension install`.
 
+#### Why octet ships its own host on macOS 27
+
+On macOS 27 (Tahoe) the stock `CuaDriver.app` from Cua AI can lose its
+Accessibility/Screen Recording grant on every daemon respawn: the System
+Settings toggle reads ON, yet the driver reports the grants as false and every
+action fails with `permissions_pending`. This is a known upstream issue
+([hermes-agent#99732](https://github.com/NousResearch/hermes-agent/issues/99732),
+duplicate of hermes-agent#78361, tracked against a stale-TCC-row bug in
+trycua/cua). It is not caused by signing, launch, or this bundle.
+
+The root cause is the macOS TCC *responsible process* rule: when a driver daemon
+is launched as a direct child of a terminal or agent, the grant attributes to
+that parent, not to the driver app, so it does not survive a respawn. Cua's own
+recovery is to launch the daemon through LaunchServices
+(`open -n -g -a CuaDriver --args serve`) so attribution stays with the app, and
+to reset a stale row with `tccutil reset Accessibility/ScreenCapture
+com.trycua.driver` before re-granting.
+
+This bundle takes the more robust route: it embeds the driver in a real AppKit
+app with its own identity (`com.octet.computeruse`), launched the same way, so
+the grant keys on an app octet controls end to end and survives a full host
+restart. The app is optional; without it octet uses the direct runtime.
+
 ## What the agent can do
 
 | Tool | Driver tool | Notes |
