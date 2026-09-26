@@ -566,13 +566,75 @@ class StatusRowTests(unittest.TestCase):
 
 
 
+class CursorThemeTests(unittest.TestCase):
+    def test_palette_matches_model_families_and_bundles_every_artifact(self):
+        from octet_computer_use import cursor_theme
+
+        examples = {"gpt-5.6": "openai", "claude-sonnet-4": "anthropic",
+                    "gemini-3": "google", "deepseek-v4": "deepseek",
+                    "qwen3": "alibaba", "grok-4": "xai", "opaque": "unknown"}
+        for model, expected in examples.items():
+            self.assertEqual(cursor_theme.model_lab(model), expected)
+            self.assertTrue((cursor_theme.THEMES / (expected + ".cua-theme")).is_file())
+        self.assertEqual(cursor_theme.model_lab("opaque", "anthropic"), "anthropic")
+        self.assertEqual(cursor_theme.theme_for_host({"host": {"model": "gpt-5.6"}}), "openai")
+        self.assertEqual(len(cursor_theme.PALETTE), 24)
+        self.assertEqual(cursor_theme.PALETTE["openai"]["color"], "#767676")
+
+    def test_only_local_setup_installs_the_bundled_themes(self):
+        from unittest import mock
+        from octet_computer_use import cursor_theme
+
+        extension, computer = entrypoint.create_extension()
+        context = {"host": {"model": "claude-sonnet-4"}}
+        with mock.patch.object(computer, "provision", return_value={
+                "provisioned": True, "binary": "/tmp/cua-driver", "version": "0.29.1"}), \
+             mock.patch.object(computer, "publish_status", return_value={
+                "installed": True, "permissions": "granted", "runtime": "desktop-host",
+                "cursor_enabled": True, "cursor_theme": "com.octet.computeruse.anthropic",
+                "cursor_personalized": True}), \
+             mock.patch.object(entrypoint, "_setup_jev", return_value={"jev_setup": "skipped"}), \
+             mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24) as install:
+            command = extension._commands["computer-use"].handler
+            result = command(["setup"], context)
+            self.assertEqual(result["structured_content"]["cursor_themes_installed"], 24)
+            install.assert_called_once_with(Path("/tmp/cua-driver"))
+            install.reset_mock()
+            extension._tools["computer_use_setup"].handler({}, context)
+            install.assert_not_called()
+            install.side_effect = RuntimeError("invalid artifact")
+            failed = command(["setup"], context)
+            self.assertTrue(failed["is_error"])
+            self.assertIn("cursor theme setup failed", failed["content"][0]["text"])
+
+    def test_installer_uses_only_bundled_artifacts_and_reports_failure(self):
+        from unittest import mock
+        from octet_computer_use import cursor_theme
+
+        with mock.patch.object(cursor_theme.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(cursor_theme.install_bundled_themes(Path("/tmp/cua-driver")), 24)
+            self.assertEqual(run.call_count, 24)
+            for args, _ in run.call_args_list:
+                command = args[0]
+                self.assertEqual(command[:3], ["/tmp/cua-driver", "cursor-theme", "install"])
+                self.assertEqual(Path(command[3]).parent, cursor_theme.THEMES)
+            run.return_value.returncode = 1
+            run.return_value.stderr = "rejected"
+            with self.assertRaisesRegex(RuntimeError, "rejected"):
+                cursor_theme.install_bundled_themes(Path("/tmp/cua-driver"))
+
+
 class CursorSessionTests(unittest.TestCase):
     class _CursorClient:
         started = True
 
-        def __init__(self, *, enabled=True, fail_tool=None):
+        def __init__(self, *, enabled=True, fail_tool=None, motion=None, stale_reads=0):
             self.enabled = enabled
             self.fail_tool = fail_tool
+            self.motion = dict(entrypoint.CURSOR_MOTION if motion is None else motion)
+            self.stale_reads = stale_reads
+            self.selected_theme = "cua.default"
             self.calls = []
 
         def call(self, tool, arguments=None, **kwargs):
@@ -580,9 +642,17 @@ class CursorSessionTests(unittest.TestCase):
             self.calls.append((tool, args))
             if tool == self.fail_tool:
                 return {"isError": True, "content": [{"type": "text", "text": "rejected"}]}
+            if tool == "set_agent_cursor_theme":
+                self.selected_theme = args["theme_id"]
             if tool == "get_agent_cursor_state":
+                if self.stale_reads:
+                    self.stale_reads -= 1
+                    return {"structuredContent": {"enabled": self.enabled,
+                                                   "motion": {"idle_hide_ms": 20000.0},
+                                                   "theme": {"id": self.selected_theme}}}
                 return {"structuredContent": {"enabled": self.enabled,
-                                               "motion": {"glide_duration_ms": 180.0}}}
+                                               "motion": self.motion,
+                                               "theme": {"id": self.selected_theme}}}
             return {"content": [{"type": "text", "text": "ok"}]}
 
         def requires_confirmation(self, tool):
@@ -594,9 +664,10 @@ class CursorSessionTests(unittest.TestCase):
         def close(self):
             self.started = False
 
-    def _computer(self, *, enabled=True, fail_tool=None):
+    def _computer(self, *, enabled=True, fail_tool=None, motion=None, stale_reads=0):
         computer = ComputerUse(RecordingExtension())
-        client = self._CursorClient(enabled=enabled, fail_tool=fail_tool)
+        client = self._CursorClient(enabled=enabled, fail_tool=fail_tool,
+                                    motion=motion, stale_reads=stale_reads)
         computer._client = client
         computer._app_daemon = True
         return computer, client
@@ -647,6 +718,39 @@ class CursorSessionTests(unittest.TestCase):
 
     def test_cursor_initialization_failure_fails_closed_before_action(self):
         computer, client = self._computer(enabled=False)
+        with self.assertRaises(McpError):
+            computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        self.assertFalse(computer._cursor_ready)
+        self.assertNotIn("click", [tool for tool, _args in client.calls])
+
+    def test_model_switch_reselects_installed_theme_on_next_tool_boundary(self):
+        computer, client = self._computer()
+        computer._theme_ids.update({"com.octet.computeruse.anthropic", "com.octet.computeruse.openai"})
+        computer.select_model({"host": {"model": "claude-sonnet-4"}})
+        computer.client()
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.anthropic")
+        computer.select_model({"host": {"model": "gpt-5.6"}})
+        computer.client()
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.openai")
+        self.assertEqual([args["theme_id"] for tool, args in client.calls
+                          if tool == "set_agent_cursor_theme"],
+                         ["com.octet.computeruse.anthropic", "com.octet.computeruse.openai"])
+
+    def test_uninstalled_theme_falls_back_without_claiming_personalization(self):
+        computer, _ = self._computer()
+        computer.select_model({"host": {"model": "gpt-5.6"}})
+        computer.client()
+        self.assertEqual(computer._selected_theme, "cua.default")
+        self.assertTrue(computer._cursor_ready)
+
+    def test_cursor_motion_readback_can_lag_once(self):
+        computer, client = self._computer(stale_reads=1)
+        computer.client()
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(sum(tool == "get_agent_cursor_state" for tool, _ in client.calls), 2)
+
+    def test_cursor_motion_readback_must_match_before_action(self):
+        computer, client = self._computer(motion={"glide_duration_ms": 180.0})
         with self.assertRaises(McpError):
             computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
         self.assertFalse(computer._cursor_ready)
@@ -1086,14 +1190,15 @@ class DesktopHostTests(unittest.TestCase):
         self.assertEqual(name, cursor_session())
         self.assertIn(str(os.getpid()), name)
 
-    def test_cursor_motion_has_visible_nonzero_glide(self):
+    def test_cursor_motion_restores_cua_curves_and_fades_later(self):
         from octet_computer_use.entrypoint import CURSOR_MOTION
 
-        self.assertEqual(CURSOR_MOTION["arc_size"], 0.0)
-        self.assertEqual(CURSOR_MOTION["turn_radius"], 1.0)
-        self.assertGreater(CURSOR_MOTION["glide_duration_ms"], 0.0)
+        self.assertEqual(CURSOR_MOTION["arc_size"], 0.25)
+        self.assertEqual(CURSOR_MOTION["turn_radius"], 80.0)
+        self.assertEqual(CURSOR_MOTION["glide_duration_ms"], 0.0)  # speed-based, not stationary
         self.assertGreater(CURSOR_MOTION["dwell_after_click_ms"], 0.0)
-        self.assertEqual(CURSOR_MOTION["spring"], 1.0)
+        self.assertEqual(CURSOR_MOTION["spring"], 0.72)
+        self.assertEqual(CURSOR_MOTION["idle_hide_ms"], 3500.0)
 
     def test_daemon_socket_is_overridable(self):
         from octet_computer_use.driver_client import daemon_socket

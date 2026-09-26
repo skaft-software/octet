@@ -12,10 +12,11 @@ open-source computer-use driver. This bundle provisions the driver on request,
 connects to it over local stdio MCP, and republishes a reviewed subset of its
 tools as octet tools.
 
-The driver is a separate open-source project. This bundle does not vendor it,
-does not fork it, and does not include any part of OpenAI's CUA runtime. It
-installs the published `cua-driver` Python distribution, the same way
-`octet-browse` provisions its pinned Playwright runtime.
+The driver is a separate open-source project. This bundle does not vendor or
+fork the driver runtime and does not include any part of OpenAI's CUA runtime.
+It includes Cua's MIT-licensed cursor dotLottie source and compiled Octet theme
+variants, with attribution under `themes/`. The driver itself is installed from
+the published `cua-driver` Python distribution.
 
 ## Install and use
 
@@ -24,15 +25,20 @@ octet extension install octet-computer-use
 octet --enable-extension octet-computer-use
 ```
 
-Then provision the driver and check its health:
+Then run the local setup command to provision the driver **and** install the
+bundled model-colored cursor themes:
 
 ```console
-/computer-use
+/computer-use setup
 ```
 
-or ask the agent to run `computer_use_setup` once. The bundle stores the
-provisioned driver under `~/.octet/computer-use` and never touches your Python
-environment or any global install.
+The `computer_use_setup` agent tool provisions only the driver; it cannot
+install themes. Theme installation is deliberately a trusted local setup
+operation, not an agent tool. The bundle stores the provisioned driver under
+`~/.octet/computer-use` and never touches your Python environment or a global
+Python install. Cua Driver stores installed themes in its own per-user registry.
+Setup is idempotent and reports a theme installation failure rather than
+claiming that the personalized cursor is active.
 
 `computer_use_status` reports whether the driver is present, its version, its
 self-check, and your operating system's permission state. It never prompts.
@@ -196,9 +202,16 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   classification and do not prompt; actual permission or capture errors remain
   visible to the caller.
 - **Targeted cursor feedback.** On the macOS host, cursor enablement and motion
-  are verified before any tool call is reported ready. The public cursor-move
-  tool requires a window target and window-local coordinates and cannot move the
-  real OS pointer.
+  are verified before any tool call is reported ready. The cursor uses Cua's
+  curved, speed-based glide and hides after 3.5 seconds of inactivity. The
+  public cursor-move tool requires a window target and window-local coordinates
+  and cannot move the real OS pointer. The bundled Octet-inspired dotLottie
+  pointer is slightly smaller than Cua's default and uses the same stable,
+  model-adaptive prompt color as Octet's TUI. Each model family has a compiled
+  variant; the extension selects the installed variant at the next tool call
+  after a model switch. If themes have not been installed, it uses Cua's default
+  cursor and reports that fact. Cua's own session badge remains session-colored.
+  Custom user-defined TUI palettes are not compiled into these fixed variants.
 - **One action session.** Cursor setup, public session start/end, and eligible
   driver actions share one driver session; ending it clears the binding so a
   subsequent action must establish a new session.

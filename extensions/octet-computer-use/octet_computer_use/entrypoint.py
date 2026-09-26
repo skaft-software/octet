@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import base64
 import os
+import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from octet_extension import Extension, image_content, text_content, tool_result
 
 from octet_computer_use import driver as driver_module
-from octet_computer_use import service
+from octet_computer_use import cursor_theme, service
 from octet_computer_use.driver_client import DriverClient, McpError
 from octet_computer_use.jev import (
     Candidate,
@@ -76,16 +78,17 @@ _PERMISSION_CACHE_SECONDS = 30.0
 # own identifier and ends the session on shutdown.
 CURSOR_SESSION_PREFIX = "octet-computer-use"
 
-# A short, nonzero glide remains visible without delaying action feedback. The
-# driver clamps turn_radius to >=1 and glide_duration_ms to <=5000.
+# Keep Cua's curved, speed-based glide (including its conspicuous turns)
+# instead of forcing every move into a nearly straight 180 ms hop. Match the
+# driver's motion defaults except for a slightly later idle fade.
 CURSOR_MOTION: Dict[str, Any] = {
-    "arc_size": 0.0,
-    "turn_radius": 1.0,
+    "arc_size": 0.25,
+    "turn_radius": 80.0,
     "arc_flow": 0.0,
-    "spring": 1.0,
-    "glide_duration_ms": 180.0,
+    "spring": 0.72,
+    "glide_duration_ms": 0.0,
     "dwell_after_click_ms": 80.0,
-    "idle_hide_ms": 2000.0,
+    "idle_hide_ms": 3500.0,
 }
 
 
@@ -286,6 +289,16 @@ class ComputerUse:
         self._app_daemon = False
         self._cursor_session: Optional[str] = None
         self._cursor_ready = False
+        self._theme_lab = "unknown"
+        self._selected_theme = "cua.default"
+        self._theme_ids = {"cua.default"}
+
+    def select_model(self, context: Mapping[str, Any]) -> None:
+        lab = cursor_theme.theme_for_host(context)
+        with self._lock:
+            if lab != self._theme_lab:
+                self._theme_lab = lab
+                self._cursor_ready = False
 
     _USE_DESKTOP_HOST = 1
 
@@ -322,6 +335,10 @@ class ComputerUse:
             self._client = client
             self._app_daemon = app_daemon
             if app_daemon:
+                try:
+                    self._theme_ids = cursor_theme.installed_theme_ids(binary)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    self._theme_ids = {"cua.default"}
                 try:
                     self._show_cursor(client, self._cursor_session or cursor_session())
                 except Exception:
@@ -365,19 +382,38 @@ class ComputerUse:
             self._checked_call(client, "set_agent_cursor_motion", {"session": session, **CURSOR_MOTION})
         except Exception as error:
             raise McpError(f"agent cursor motion configuration failed: {error}") from error
+        desired = cursor_theme.theme_id(self._theme_lab)
+        selected = desired if desired in self._theme_ids else "cua.default"
+        try:
+            self._checked_call(client, "set_agent_cursor_theme", {
+                "session": session, "theme_id": selected, "reduced_motion": "auto"})
+        except Exception as error:
+            raise McpError(f"agent cursor theme selection failed: {error}") from error
         try:
             self._checked_call(client, "set_agent_cursor_enabled", {"session": session, "enabled": True})
         except Exception as error:
             raise McpError(f"agent cursor enablement failed: {error}") from error
-        try:
-            state = self._payload(self._checked_call(client, "get_agent_cursor_state", {"session": session}))
-        except Exception as error:
-            raise McpError(f"agent cursor state verification failed: {error}") from error
-        motion = state.get("motion")
-        glide = motion.get("glide_duration_ms") if isinstance(motion, Mapping) else None
-        if state.get("enabled") is not True or not isinstance(glide, (int, float)) or glide <= 0:
-            raise McpError("agent cursor is not enabled with visible motion; refusing to report readiness")
+        # The overlay applies configuration asynchronously: its first read-back
+        # can still contain the previous motion even after the setter succeeds.
+        for attempt in range(4):
+            try:
+                state = self._payload(self._checked_call(client, "get_agent_cursor_state", {"session": session}))
+            except Exception as error:
+                raise McpError(f"agent cursor state verification failed: {error}") from error
+            motion = state.get("motion")
+            theme = state.get("theme")
+            # Zero is Cua's speed-based glide, not a stationary cursor.
+            if (state.get("enabled") is True
+                    and isinstance(motion, Mapping)
+                    and all(motion.get(key) == value for key, value in CURSOR_MOTION.items())
+                    and isinstance(theme, Mapping) and theme.get("id") == selected):
+                break
+            if attempt < 3:
+                time.sleep(0.05)
+        else:
+            raise McpError("agent cursor is not enabled with configured motion; refusing to report readiness")
         self._cursor_session = session
+        self._selected_theme = selected
         self._cursor_ready = True
 
     def _permissions_block(self, driver_tool: str) -> bool:
@@ -580,7 +616,9 @@ class ComputerUse:
             client = self.client()
             if self._app_daemon:
                 report.update({"runtime": "desktop-host", "cursor_available": True,
-                               "cursor_enabled": self._cursor_ready})
+                               "cursor_enabled": self._cursor_ready,
+                               "cursor_theme": self._selected_theme,
+                               "cursor_personalized": self._selected_theme != "cua.default"})
             else:
                 report["cursor_enabled"] = False
             probe = driver_module.permission_state(client, prompt=prompt)
@@ -603,14 +641,9 @@ class ComputerUse:
         return report
 
     def provision(self, version: str = "") -> Dict[str, Any]:
+        self.shutdown()
         binary = driver_module.provision(self._paths, version=version)
-        # Provisioning replaces the runtime, so a client that was already
-        # running now points at a replaced binary. Drop it; the next call
-        # starts a fresh session against the new one.
-        with self._lock:
-            if self._client is not None:
-                self._client.close()
-                self._client = None
+        # The next call starts a fresh session against the provisioned runtime.
         return {
             "provisioned": True,
             "binary": str(binary),
@@ -671,6 +704,7 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
     computer_use = ComputerUse(extension, home=home)
 
     def handler(name: str, arguments: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
+        computer_use.select_model(context)
         values = dict(arguments) if isinstance(arguments, Mapping) else {}
         if name == "computer_use_status":
             result = computer_use.status()
@@ -716,10 +750,20 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         )(lambda args, ctx, _n=name: handler(_n, args, ctx))
 
     def setup_command(arguments: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
+        computer_use.select_model(context)
         parts = [str(part) for part in (arguments or [])]
         action = parts[0] if parts else "status"
         if action == "setup":
             result = computer_use.provision()
+            try:
+                result["cursor_themes_installed"] = cursor_theme.install_bundled_themes(
+                    Path(result["binary"]))
+                computer_use._theme_ids = {entry["id"] for entry in cursor_theme.PALETTE.values()}
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                return tool_result(
+                    text_content(f"Cua Driver was provisioned, but cursor theme setup failed: {error}"),
+                    is_error=True,
+                )
             # The user asked for setup, so ask macOS now rather than making
             # them re-run a second command. The dialog is attributed to octet
             # because the driver runs in the host's responsibility chain.
@@ -988,6 +1032,10 @@ def _render_status(status: Mapping[str, Any]) -> str:
     if status.get("runtime") == "desktop-host":
         cursor_state = "enabled" if status.get("cursor_enabled") else "not verified"
         lines.append(f"runtime: desktop host (agent cursor {cursor_state})")
+        if status.get("cursor_enabled"):
+            lines.append(f"cursor theme: {status.get('cursor_theme', 'cua.default')}")
+            if not status.get("cursor_personalized"):
+                lines.append("Run /computer-use setup locally to install the bundled model-color themes.")
     else:
         lines.append("runtime: direct (inherits your terminal's permissions)")
     permissions = status.get("permissions")

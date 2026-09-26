@@ -4,6 +4,11 @@
 
 ### Added
 
+- Bundle 24 MIT-attributed Cua dotLottie cursor themes with an Octet-inspired,
+  slightly smaller silhouette and the stable model-adaptive TUI prompt colors.
+  `/computer-use setup` installs the compiled themes locally; cursor sessions
+  select the matching installed theme on the next tool boundary after a model
+  switch, verify read-back, and fall back to `cua.default` before theme setup.
 - `computer_use_hotkey`, `computer_use_invoke_menu`, and
   `computer_use_move_cursor`. Cursor movement is restricted to an exact window
   target and screenshot-local coordinates; it never moves the real OS pointer.
@@ -43,6 +48,8 @@
 
 ### Changed
 
+- Restore Cua Driver's curved, speed-based cursor motion instead of forcing a
+  near-straight 180 ms hop, and delay its idle fade from 2 to 3.5 seconds.
 - Make the signed `/Applications/CuaDriver.app` the default macOS host because
   it provides the permission identity and visible agent-cursor overlay. A missing
   or ungranted host reports `unavailable`; macOS direct mode is an explicit
