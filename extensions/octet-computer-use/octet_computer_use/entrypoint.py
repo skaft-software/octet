@@ -439,9 +439,17 @@ class ComputerUse:
                     mime_type=mime,
                     data=base64.b64decode(data),
                 )
-            except Exception:
-                # A screenshot that cannot be published must not fail the call;
-                # the text result is still useful.
+            except Exception as error:
+                # Never drop a screenshot silently. A model told a screenshot
+                # exists but given nothing to look at cannot tell a working
+                # capture from a broken one, and the earlier version swallowed
+                # this exact failure, which is why a missing image was
+                # indistinguishable from an absent one for so long.
+                text = (
+                    f"{text}\n\n[octet] the driver returned a screenshot but it could "
+                    f"not be delivered to the model ({type(error).__name__}: {error}). "
+                    "Treat this capture as unavailable rather than as an empty screen."
+                )
                 continue
             parts.append(image_content(artifact, mime))
         return tool_result(
