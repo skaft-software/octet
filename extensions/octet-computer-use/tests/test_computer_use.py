@@ -387,6 +387,73 @@ class DesktopHostTests(unittest.TestCase):
         finally:
             os.environ.pop("OCTET_CUA_DESKTOP_APP", None)
 
+    def test_bundle_executable_is_read_from_its_own_info_plist(self):
+        # Cua ships two official macOS bundles whose executable name differs:
+        # the release bundle declares ``cua-driver`` and the source-built local
+        # bundle declares ``cua-driver-local``. Octet must resolve whichever is
+        # installed instead of assuming a single layout.
+        from octet_computer_use import driver
+
+        original = driver.DESKTOP_APP_CANDIDATES
+        with tempfile.TemporaryDirectory() as directory:
+            for declared, bundle in (("cua-driver", "CuaDriver.app"),
+                                     ("cua-driver-local", "CuaDriverLocal.app")):
+                host = Path(directory) / bundle
+                macos = host / "Contents" / "MacOS"
+                macos.mkdir(parents=True)
+                executable = macos / declared
+                executable.write_text("")
+                (host / "Contents" / "Info.plist").write_text(
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                    '<plist version="1.0"><dict>'
+                    f"<key>CFBundleExecutable</key><string>{declared}</string>"
+                    "</dict></plist>\n"
+                )
+                try:
+                    driver.DESKTOP_APP_CANDIDATES = {"darwin": (str(host),)}
+                    self.assertEqual(driver.desktop_app(), host)
+                    self.assertEqual(driver.desktop_app_binary(), executable)
+                finally:
+                    driver.DESKTOP_APP_CANDIDATES = original
+
+    def test_bundle_executable_falls_back_to_known_names(self):
+        # An unreadable or absent Info.plist must not hide an installed host.
+        from octet_computer_use import driver
+
+        original = driver.DESKTOP_APP_CANDIDATES
+        with tempfile.TemporaryDirectory() as directory:
+            host = Path(directory) / "CuaDriver.app"
+            macos = host / "Contents" / "MacOS"
+            macos.mkdir(parents=True)
+            executable = macos / "cua-driver"
+            executable.write_text("")
+            try:
+                driver.DESKTOP_APP_CANDIDATES = {"darwin": (str(host),)}
+                self.assertEqual(driver.desktop_app_binary(), executable)
+            finally:
+                driver.DESKTOP_APP_CANDIDATES = original
+
+    def test_release_bundle_is_preferred_over_the_local_build(self):
+        # A stock install must win over a source build, so the notarized
+        # release identity is used whenever both bundles are present.
+        from octet_computer_use import driver
+
+        original = driver.DESKTOP_APP_CANDIDATES
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory) / "CuaDriver.app"
+            local = Path(directory) / "CuaDriverLocal.app"
+            release.mkdir()
+            local.mkdir()
+            try:
+                driver.DESKTOP_APP_CANDIDATES = {"darwin": (str(release), str(local))}
+                self.assertEqual(driver.desktop_app(), release)
+                driver.DESKTOP_APP_CANDIDATES = {"darwin": (str(local),)}
+                self.assertEqual(driver.desktop_app(), local)
+            finally:
+                driver.DESKTOP_APP_CANDIDATES = original
+
     def test_missing_host_falls_back_to_the_direct_runtime(self):
         from octet_computer_use.driver_client import DriverClient
 

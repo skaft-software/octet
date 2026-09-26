@@ -265,10 +265,49 @@ class Health:
 # the overlay needs a certified AppKit main thread and Window Server access that
 # a terminal-hosted process does not have. ChatGPT.app takes the same shape - it
 # embeds the driver inside a signed app and inherits that app's TCC grants.
-DESKTOP_APP_CANDIDATES: Dict[str, str] = {
-    "darwin": "/Applications/CuaDriver.app",
-    "win32": os.path.expandvars(r"%LOCALAPPDATA%\\CuaDriver\\CuaDriver.exe"),
+#
+# Cua ships two official macOS bundles, both installed by the driver's own
+# release installer or by ``install-local.sh`` in a source checkout. Octet uses
+# whichever is present rather than shipping an app of its own:
+#
+#   /Applications/CuaDriver.app       release build, com.trycua.driver,
+#                                    Developer ID signed and notarized by Cua AI
+#   /Applications/CuaDriverLocal.app  source build, com.trycua.driver.local
+#
+# Both are listed in preference order, so a stock install wins and the local
+# development build is only used as a fallback.
+DESKTOP_APP_CANDIDATES: Dict[str, Tuple[str, ...]] = {
+    "darwin": ("/Applications/CuaDriver.app", "/Applications/CuaDriverLocal.app"),
+    "win32": (os.path.expandvars(r"%LOCALAPPDATA%\\CuaDriver\\CuaDriver.exe"),),
 }
+
+# Executable names used inside a macOS bundle when ``Info.plist`` cannot be read.
+# The release bundle names it ``cua-driver``; the source-built local bundle names
+# it ``cua-driver-local``.
+_MACOS_BUNDLE_EXECUTABLES = ("cua-driver", "cua-driver-local")
+
+
+def _bundle_executable_name(app: Path) -> Optional[str]:
+    """``CFBundleExecutable`` from a macOS bundle's ``Info.plist``.
+
+    Read through ``plutil`` rather than a plist parser so the extension keeps no
+    extra import and works with the system plist format, including the binary
+    variant the release bundle ships.
+    """
+
+    plist = app / "Contents" / "Info.plist"
+    if not plist.is_file():
+        return None
+    try:
+        completed = _run(
+            ["/usr/bin/plutil", "-extract", "CFBundleExecutable", "raw", "-o", "-", str(plist)]
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    name = (completed.stdout or "").strip()
+    return name or None
 
 
 def desktop_app() -> Optional[Path]:
@@ -282,25 +321,37 @@ def desktop_app() -> Optional[Path]:
     if override:
         path = Path(override)
         return path if path.exists() else None
-    candidate = DESKTOP_APP_CANDIDATES.get(platform.system().lower())
-    if not candidate:
-        return None
-    path = Path(candidate)
-    return path if path.exists() else None
+    for candidate in DESKTOP_APP_CANDIDATES.get(platform.system().lower(), ()):
+        path = Path(candidate)
+        if path.exists():
+            return path
+    return None
 
 
 def desktop_app_binary(app: Optional[Path] = None) -> Optional[Path]:
-    """The driver executable inside an installed desktop host bundle."""
+    """The driver executable inside an installed desktop host bundle.
+
+    On macOS the executable is declared by the bundle's own ``CFBundleExecutable``
+    rather than assumed, so both the release bundle and the source-built local
+    bundle resolve without hardcoding either layout.
+    """
 
     host = app or desktop_app()
     if host is None:
         return None
-    inner = (
-        host / "Contents" / "Resources" / "cua-driver"
-        if platform.system().lower() == "darwin"
-        else host
-    )
-    return inner if inner.is_file() else None
+    if platform.system().lower() != "darwin":
+        return host if host.is_file() else None
+    macos = host / "Contents" / "MacOS"
+    declared = _bundle_executable_name(host)
+    if declared:
+        inner = macos / declared
+        if inner.is_file():
+            return inner
+    for name in _MACOS_BUNDLE_EXECUTABLES:
+        inner = macos / name
+        if inner.is_file():
+            return inner
+    return None
 
 
 def _permission_status(binary: Path) -> str:
