@@ -88,7 +88,7 @@ const DRIVER_MAILBOX_CAPACITY: usize = 64;
 const DRIVER_EVENT_CAPACITY: usize = 512;
 const MAX_BUFFERED_DISCOVERY_EVENTS: usize = 64;
 const DISCOVERY_BACKPRESSURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-const MAX_GRAPHICAL_MODELS: usize = 256;
+const MAX_GRAPHICAL_MODELS: usize = octet_serve_backend::MAX_MODELS;
 const MAX_PROJECTED_SESSION_ITEMS: usize = 9_000;
 const MAX_PROJECTED_BRANCH_ENTRIES: usize = 2_048;
 const MAX_BRANCH_DELTA_ENTRIES: usize = 128;
@@ -17965,20 +17965,55 @@ printf '%s' '{"number":124,"url":"https://github.com/skaft-software/ygg/pull/124
             .unwrap();
         assert!(!summary.reasoning.iter().any(|choice| choice == "ultra"));
         assert_eq!(summary.default_reasoning.as_deref(), Some("max"));
+
+        let mut enabled = config;
+        enabled.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        enabled.sandbox.allow_process = true;
+        enabled.enabled_extensions.push("octet-subagents".into());
+        let models = graphical_model_catalog(&catalog, &enabled);
+        let summary = models
+            .iter()
+            .find(|model| model.id == "ultra-default-fixture")
+            .unwrap();
+        assert_eq!(summary.reasoning.last().map(String::as_str), Some("ultra"));
+        assert_eq!(summary.default_reasoning.as_deref(), Some("ultra"));
+    }
+
+    #[test]
+    fn graphical_catalog_keeps_models_beyond_the_old_cutoff() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = serve_test_config(directory.path());
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let template = (*catalog.resolve(&ModelId("gpt-6-sol".into())).unwrap().spec).clone();
+        for index in 0..300 {
+            let mut spec = template.clone();
+            spec.id = ModelId(format!("catalog-fixture-{index}"));
+            spec.display_name = Some(format!("AAA fixture {index}"));
+            catalog.register_model(spec).unwrap();
+        }
+        let models = graphical_model_catalog(&catalog, &config);
+        assert_eq!(models.len(), catalog.models().count());
+        for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+            assert!(models.iter().any(|model| model.id == id), "{id}");
+        }
     }
 
     #[test]
     fn graphical_catalog_is_stably_bounded_and_retains_the_configured_model() {
-        let forward = (0..300).map(catalog_model).collect::<Vec<_>>();
+        let mut forward = (0..MAX_GRAPHICAL_MODELS + 1)
+            .map(catalog_model)
+            .collect::<Vec<_>>();
+        let configured = ModelId("zz-configured".into());
+        forward.last_mut().unwrap().id = configured.0.clone();
+        forward.last_mut().unwrap().name = "zz-configured".into();
         let mut reverse = forward.clone();
         reverse.reverse();
-        let configured = ModelId("model-299".into());
 
         let models = bound_graphical_models(forward, Some(&configured));
         assert_eq!(models, bound_graphical_models(reverse, Some(&configured)));
         assert_eq!(models.len(), MAX_GRAPHICAL_MODELS);
         assert!(models.iter().any(|summary| summary.id == configured.0));
-        assert!(!models.iter().any(|summary| summary.id == "model-255"));
+        assert!(models.iter().any(|summary| summary.id == "model-255"));
 
         let selected = models
             .iter()
