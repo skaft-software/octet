@@ -115,6 +115,16 @@ class ComputerUse:
 
     # -- driver lifecycle --------------------------------------------------
 
+    #: Select a desktop host automatically. Set to 0 to force the direct runtime.
+    _USE_DESKTOP_HOST = 1
+
+    @classmethod
+    def use_desktop_host(cls) -> bool:
+        override = os.environ.get("OCTET_CUA_DESKTOP_HOST")
+        if override is not None:
+            return override.strip() not in ("0", "false", "no", "off")
+        return bool(cls._USE_DESKTOP_HOST)
+
     def client(self) -> DriverClient:
         with self._lock:
             if self._client is not None and self._client.started:
@@ -122,8 +132,20 @@ class ComputerUse:
             # Prefer an installed desktop host: it owns the OS permission
             # identity and the GUI main thread, which is what enables the agent
             # cursor. Fall back to the direct runtime when no host is present.
-            app_binary = driver_module.desktop_app_binary()
+            #
+            # Presence is not enough. On some macOS releases the host installs
+            # and launches correctly but its Accessibility/Screen Recording
+            # grant is never persisted, so every launch re-prompts and every
+            # tool call returns ``permissions_pending``. In that state the host
+            # is strictly worse than no host: the direct runtime inherits the
+            # *calling host's* grants and works immediately, at the cost of the
+            # cursor overlay. So only adopt the host when its permissions are
+            # actually live, and treat an unusable host as absent.
+            app_binary = driver_module.desktop_app_binary() if self.use_desktop_host() else None
             app_daemon = app_binary is not None
+            if app_daemon and not driver_module.desktop_app_usable(app_binary):
+                app_binary = None
+                app_daemon = False
             binary = app_binary or driver_module.installed_binary(self._paths)
             if binary is None:
                 raise McpError(

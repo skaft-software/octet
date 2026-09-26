@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from octet_computer_use import service
+from octet_computer_use import entrypoint, service
 from octet_computer_use.driver_client import DriverClient, McpError, ToolInfo
 from octet_computer_use.entrypoint import ComputerUse, _DRIVER_TOOLS, _render_status
 from octet_computer_use.service import ArgumentError, sanitize, summarize_result
@@ -453,6 +453,79 @@ class DesktopHostTests(unittest.TestCase):
                 self.assertEqual(driver.desktop_app(), local)
             finally:
                 driver.DESKTOP_APP_CANDIDATES = original
+
+    def test_unusable_host_falls_back_to_the_direct_runtime(self):
+        # A host whose macOS grant never persists reports ``unknown`` and
+        # re-prompts on every launch. Adopting it would make every tool call
+        # fail, so the direct runtime - which inherits the calling host's grants
+        # - must be chosen instead.
+        from octet_computer_use import driver
+        from octet_computer_use.driver_client import DriverClient
+
+        original_status = driver._permission_status
+        original_binary = driver.desktop_app_binary
+        original_installed = driver.installed_binary
+        try:
+            driver._permission_status = lambda binary: "unknown"
+            driver.desktop_app_binary = lambda app=None: Path("/Applications/CuaDriver.app")
+            driver.installed_binary = lambda paths: Path("/opt/cua-driver")
+            self.assertFalse(driver.desktop_app_usable())
+
+            computer = ComputerUse.__new__(ComputerUse)
+            computer._lock = __import__("threading").Lock()
+            computer._client = None
+            computer._app_daemon = False
+            computer._cursor_session = None
+            computer._extension = None
+            computer._paths = None
+            captured = {}
+            class _FakeClient(DriverClient):
+                def __init__(self, binary, *, app_daemon=False, **kwargs):
+                    captured["binary"] = binary
+                    captured["app_daemon"] = app_daemon
+                    self._started = True
+                def start(self, timeout=0.0):
+                    self._started = True
+            entrypoint.DriverClient = _FakeClient
+            try:
+                computer.client()
+            finally:
+                entrypoint.DriverClient = DriverClient
+            self.assertFalse(captured["app_daemon"])
+            self.assertEqual(captured["binary"], Path("/opt/cua-driver"))
+
+            driver._permission_status = lambda binary: "granted"
+            captured.clear()
+            class _FakeHostClient(_FakeClient):
+                pass
+            entrypoint.DriverClient = _FakeHostClient
+            try:
+                computer._client = None
+                computer.client()
+            finally:
+                entrypoint.DriverClient = DriverClient
+            self.assertTrue(captured["app_daemon"])
+        finally:
+            driver._permission_status = original_status
+            driver.desktop_app_binary = original_binary
+            driver.installed_binary = original_installed
+
+    def test_desktop_host_use_can_be_disabled(self):
+        # An explicit opt-out must win over an installed host, so a user on an
+        # OS where the host is broken can force the direct runtime.
+        from octet_computer_use.entrypoint import ComputerUse
+
+        original = os.environ.get("OCTET_CUA_DESKTOP_HOST")
+        try:
+            os.environ["OCTET_CUA_DESKTOP_HOST"] = "0"
+            self.assertFalse(ComputerUse.use_desktop_host())
+            os.environ["OCTET_CUA_DESKTOP_HOST"] = "1"
+            self.assertTrue(ComputerUse.use_desktop_host())
+        finally:
+            if original is None:
+                os.environ.pop("OCTET_CUA_DESKTOP_HOST", None)
+            else:
+                os.environ["OCTET_CUA_DESKTOP_HOST"] = original
 
     def test_missing_host_falls_back_to_the_direct_runtime(self):
         from octet_computer_use.driver_client import DriverClient

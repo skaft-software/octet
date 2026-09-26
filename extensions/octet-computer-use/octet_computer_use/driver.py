@@ -366,6 +366,30 @@ def _permission_status(binary: Path) -> str:
     return status if isinstance(status, str) and status else "unknown"
 
 
+def desktop_app_usable(binary: Optional[Path] = None) -> bool:
+    """Whether the installed desktop host can actually be driven.
+
+    An installed host is not automatically a working one. The macOS grant can
+    install and then fail to persist, in which case the host re-prompts on every
+    launch and every tool call comes back ``permissions_pending``. Adopting such a
+    host would be worse than not having one, because the direct runtime inherits
+    the calling host's grants and works immediately.
+
+    So treat an unknown or non-granted status as unusable and let the caller fall
+    back. This only ever *narrows* host use: an app that cannot prove its grants
+    is never silently trusted to hold the agent cursor.
+    """
+
+    if binary is None:
+        binary = desktop_app_binary()
+    if binary is None:
+        return False
+    # ``granted`` is the only status that lets actions through. ``unknown`` is
+    # what a host reports while its TCC row is missing or not yet read back, and
+    # is exactly the broken case this check exists to catch.
+    return _permission_status(binary) == "granted"
+
+
 def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
     """Report the host's real TCC state over the live ``--direct`` MCP channel.
 
