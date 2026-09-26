@@ -494,6 +494,21 @@ class DesktopHostTests(unittest.TestCase):
             finally:
                 driver.DESKTOP_APP_CANDIDATES = original
 
+    def test_shipped_candidate_order_prefers_cuas_signed_app(self):
+        # Cua's notarized app is the only desktop host a user can be asked to
+        # trust and install, so it must be preferred over octet's self-signed
+        # fallback whenever it is present. Octet's host is still accepted when
+        # the official app is absent, and its identifier is distinct so the two
+        # never share a TCC row.
+        from octet_computer_use import driver
+
+        order = driver.DESKTOP_APP_CANDIDATES["darwin"]
+        self.assertLess(
+            order.index("/Applications/CuaDriver.app"),
+            order.index("/Applications/OctetComputerUse.app"),
+            "Cua's signed app must be preferred over octet's self-signed host",
+        )
+
     def test_unusable_host_falls_back_to_the_direct_runtime(self):
         # A host whose macOS grant never persists reports ``unknown`` and
         # re-prompts on every launch. Adopting it would make every tool call

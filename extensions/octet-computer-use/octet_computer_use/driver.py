@@ -306,24 +306,28 @@ def active_runtime() -> str:
 # a terminal-hosted process does not have. ChatGPT.app takes the same shape - it
 # embeds the driver inside a signed app and inherits that app's TCC grants.
 #
-# Cua ships two official macOS bundles and octet ships its own, all installed
-# by their own tooling. Octet uses whichever is present rather than shipping a
-# driver binary of its own:
+# Cua ships its own signed macOS bundles and octet can also build one. All are
+# installed by their own tooling; octet uses whichever is present rather than
+# shipping a driver binary of its own.
 #
-#   /Applications/OctetComputerUse.app  octet's own host, com.octet.computeruse,
-#                                       built by build-host-app.sh
 #   /Applications/CuaDriver.app         Cua release build, com.trycua.driver,
-#                                       Developer ID signed and notarized
+#                                      Developer ID signed and notarized
+#   /Applications/OctetComputerUse.app  octet's host, com.octet.computeruse
 #   /Applications/CuaDriverLocal.app    Cua source build, com.trycua.driver.local
 #
-# Octet's own host is listed first because it is the only one whose permission
-# identity this project controls end to end. Identifiers are deliberately
-# distinct: sharing Cua's would merge TCC rows, so whichever app installed last
-# would inherit permissions granted for the other.
+# Identifiers are deliberately distinct: sharing one would merge TCC rows, so
+# whichever app installed last would inherit permissions granted for the other.
 DESKTOP_APP_CANDIDATES: Dict[str, Tuple[str, ...]] = {
     "darwin": (
-        "/Applications/OctetComputerUse.app",
+        # Cua's own signed, notarized release app is the preferred host. It is
+        # the only desktop host a user can be asked to trust and ship, so it
+        # must win whenever it is installed.
         "/Applications/CuaDriver.app",
+        # Octet's self-signed host is a fallback, not the default. It works, but
+        # an unnotarized app asking for screen recording and Accessibility is a
+        # poor thing to hand a user, so it is only adopted when the official app
+        # is absent or cannot keep its grant.
+        "/Applications/OctetComputerUse.app",
         "/Applications/CuaDriverLocal.app",
     ),
     "win32": (os.path.expandvars(r"%LOCALAPPDATA%\\CuaDriver\\CuaDriver.exe"),),

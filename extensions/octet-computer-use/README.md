@@ -106,28 +106,45 @@ desktop should never be able to do so invisibly.
 The app is macOS-only and optional. It is not required for computer use, and it
 is not installed by `octet extension install`.
 
-#### Why octet ships its own host on macOS 27
+#### How the macOS permission grant is made to stick
 
-On macOS 27 (Tahoe) the stock `CuaDriver.app` from Cua AI can lose its
-Accessibility/Screen Recording grant on every daemon respawn: the System
+On macOS 27 (Tahoe) the stock `CuaDriver.app` from Cua AI can appear to lose
+its Accessibility/Screen Recording grant on every daemon respawn: the System
 Settings toggle reads ON, yet the driver reports the grants as false and every
 action fails with `permissions_pending`. This is a known upstream issue
 ([hermes-agent#99732](https://github.com/NousResearch/hermes-agent/issues/99732),
 duplicate of hermes-agent#78361, tracked against a stale-TCC-row bug in
-trycua/cua). It is not caused by signing, launch, or this bundle.
+trycua/cua).
 
-The root cause is the macOS TCC *responsible process* rule: when a driver daemon
-is launched as a direct child of a terminal or agent, the grant attributes to
-that parent, not to the driver app, so it does not survive a respawn. Cua's own
-recovery is to launch the daemon through LaunchServices
-(`open -n -g -a CuaDriver --args serve`) so attribution stays with the app, and
-to reset a stale row with `tccutil reset Accessibility/ScreenCapture
-com.trycua.driver` before re-granting.
+The cause is the macOS TCC *responsible process* rule, not the app's signature.
+When a driver daemon is started as a direct child of a terminal or agent, macOS
+attributes the grant to that parent rather than to the driver app, so the grant
+does not survive the process that owns it going away. The fix is to start the
+daemon through LaunchServices so the app is its own responsible process, and to
+clear a stale row before re-granting:
 
-This bundle takes the more robust route: it embeds the driver in a real AppKit
-app with its own identity (`com.octet.computeruse`), launched the same way, so
-the grant keys on an app octet controls end to end and survives a full host
-restart. The app is optional; without it octet uses the direct runtime.
+```console
+# 1. clear a stale row if grants were previously granted and are misreported
+tccutil reset Accessibility com.trycua.driver
+tccutil reset ScreenCapture com.trycua.driver
+# 2. launch the daemon through LaunchServices, never as a child
+open -n -g -a CuaDriver --args serve
+# 3. grant (a macOS prompt appears; approve it)
+cua-driver permissions grant
+# 4. confirm
+cua-driver permissions status --json
+```
+
+After this, `permissions status` reports `source.attribution: "driver-daemon"`
+and the grants survive respawns and reboots. This bundle starts the host through
+LaunchServices for exactly this reason, and prefers Cua's signed, notarized app
+whenever it is installed.
+
+Octet's own host (`build-host-app.sh`) is a fallback for when the official app is
+absent or its grant will not take. It is not the default: an unnotarized app that
+asks for screen recording and Accessibility is a poor thing to hand a user, so
+Cua's signed app is adopted first. The app is optional; without any usable host
+octet uses the direct runtime.
 
 ## What the agent can do
 
