@@ -14012,6 +14012,44 @@ fn default_tool_image_reservation_keeps_following_rows_physically_empty() {
 }
 
 #[test]
+fn finish_transcript_block_preserves_trailing_image_reservation_rows() {
+    use sexy_tui_rs::{ImageAnchor, ImageId, ImageLayout, ImageProtocol};
+
+    // A tool panel whose only output is an image ends its rows with the anchor
+    // plus zero-width reservation rows. The generic trailing-blank trim must not
+    // collapse them, or later transcript rows are painted over the image.
+    for reserved in [1usize, 2, 16] {
+        let layout = ImageLayout::new(50, reserved as u16).unwrap();
+        let anchor =
+            ImageAnchor::new(ImageProtocol::Kitty, ImageId::new(42).unwrap(), layout).marker();
+        let mut rows = vec![
+            "Read screenshot.png".to_string(),
+            format!("\u{2514} {anchor}"),
+        ];
+        rows.extend(vec![String::new(); reserved - 1]);
+        let finished = super::finish_transcript_block(rows);
+        assert_eq!(
+            finished.len(),
+            1 + reserved,
+            "reservation of {reserved} rows must survive the trailing trim"
+        );
+        let start = finished
+            .iter()
+            .position(|row| row.contains(&anchor))
+            .unwrap();
+        for (offset, row) in finished[start + 1..].iter().enumerate() {
+            assert_eq!(visible_width(row), 0, "reserved row {offset}: {row:?}");
+        }
+    }
+
+    // A block with no image still trims its decorative trailing blanks.
+    assert_eq!(
+        super::finish_transcript_block(vec!["done".to_string(), String::new()]),
+        vec!["done".to_string()]
+    );
+}
+
+#[test]
 fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
     use sexy_tui_rs::{ImageDimensions, ImageLayout, ImageProtocol};
 

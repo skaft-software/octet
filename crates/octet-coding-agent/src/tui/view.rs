@@ -19,8 +19,8 @@ use octet_agent::{
 use octet_ai::{ModalitySet, Model, ModelId, ToolCallId, Usage};
 use sexy_tui_rs::{
     parse_markdown, strip_terminal_sequences, visible_width, wrap_text_with_ansi, CellPixelSize,
-    ImageAnchor, ImageCapabilities, ImagePlanner, ImageRegistry, ImageViewport, RichRenderer,
-    TextEditor, TUI,
+    ImageAnchor, ImageCapabilities, ImagePlanner, ImageProtocol, ImageRegistry, ImageViewport,
+    RichRenderer, TextEditor, TUI,
 };
 
 use crate::config::Config;
@@ -2668,9 +2668,40 @@ fn understated_tool_output(theme: &OctetTheme, text: &str) -> String {
 fn finish_transcript_block(mut lines: Vec<String>) -> Vec<String> {
     // Block renderers return content only. Transition spacing is decided once
     // in `render_block`, where both semantic neighbours are known.
+    //
+    // An image reservation ends its block with zero-width rows: the anchor row
+    // carries the placement metadata and the rows after it are the blank cells
+    // the terminal image occupies. Those rows are not decorative spacing, so the
+    // trim must stop at the anchor instead of collapsing the reservation and
+    // letting later transcript rows paint over the placed image.
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
+    if lines.last().is_some_and(|line| {
+        !ImageAnchor::parse_all(line)
+            .iter()
+            .any(|anchor| anchor.protocol() == ImageProtocol::Kitty)
+    }) {
+        return lines;
+    }
+    // Restore the reserved rows the placement still needs. The anchor's layout
+    // records the exact height the terminal will draw, so the reservation and
+    // the placement cannot disagree.
+    let reserved = lines
+        .last()
+        .map(|line| {
+            ImageAnchor::parse_all(line)
+                .into_iter()
+                .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
+                .map(|anchor| usize::from(anchor.layout().rows()))
+                .max()
+                .unwrap_or(1)
+        })
+        .unwrap_or(1);
+    lines.extend(std::iter::repeat_n(
+        String::new(),
+        reserved.saturating_sub(1),
+    ));
     lines
 }
 
