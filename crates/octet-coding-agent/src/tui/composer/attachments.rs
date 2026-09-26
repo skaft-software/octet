@@ -111,6 +111,15 @@ struct PreparedMedia {
     label: &'static str,
     media: Media,
     byte_len: u64,
+    /// The on-disk source the bytes came from.
+    ///
+    /// Retained so the model can be told which file an inline image or audio
+    /// belongs to. Neither the ``Media`` type nor the chat wire formats carry a
+    /// filename (images are bare ``data:`` URIs, audio is ``input_audio``), so
+    /// the path has to travel as text; without it the model sees opaque bytes and
+    /// cannot re-read, crop, or compare the file. ``FileReference`` already does
+    /// exactly this, which is the precedent.
+    path: String,
 }
 
 fn prepare_media(path: &Path, modalities: ModalitySet) -> Result<PreparedMedia, AttachError> {
@@ -165,6 +174,11 @@ fn prepare_media(path: &Path, modalities: ModalitySet) -> Result<PreparedMedia, 
         label,
         media,
         byte_len,
+        // Keep the source path. It was already validated above and is the same
+        // trust level as text the user typed; it is dropped only if the absolute
+        // form cannot be represented, in which case the annotation degrades to
+        // the display path rather than failing an otherwise valid attach.
+        path: path.to_string_lossy().into_owned(),
     })
 }
 
@@ -173,7 +187,15 @@ fn prepare_media(path: &Path, modalities: ModalitySet) -> Result<PreparedMedia, 
 pub enum AttachmentPayload {
     PastedText(String),
     FileReference(String),
-    Media { media: Media, byte_len: u64 },
+    /// Media inline bytes plus the on-disk path they were read from.
+    ///
+    /// The path is what lets the model know which file an image or audio
+    /// attachment refers to; see [`AttachmentPayload::Media`].
+    Media {
+        media: Media,
+        byte_len: u64,
+        path: String,
+    },
 }
 
 /// One chip-backed attachment awaiting submit.
@@ -208,6 +230,7 @@ impl AttachmentLedger {
             payload: AttachmentPayload::Media {
                 media: prepared.media,
                 byte_len: prepared.byte_len,
+                path: prepared.path,
             },
         });
         chip

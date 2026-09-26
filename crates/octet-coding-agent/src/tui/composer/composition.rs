@@ -61,19 +61,58 @@ impl ComposedInput {
     /// Replace textual model input after deterministic prompt composition while
     /// retaining every attached media payload. Text is consolidated ahead of
     /// media so extension/template expansion never mutates opaque media bytes.
+    ///
+    /// Per-attachment annotation lines (the text part immediately preceding each
+    /// media part) are retained too, because they name the file the bytes came
+    /// from. Dropping them here would leave the model with bare media again after
+    /// any template expansion, which is exactly the state this change exists to
+    /// remove.
     pub fn replace_model_text(&mut self, text: String) {
-        let media = self
-            .parts
-            .drain(..)
-            .filter_map(|part| match part {
-                InputPart::Media(media) => Some(InputPart::Media(media)),
-                InputPart::Text(_) => None,
-            })
-            .collect::<Vec<_>>();
-        self.parts = std::iter::once(InputPart::Text(text))
-            .chain(media)
-            .collect();
+        // Pair each media part with the annotation that directly precedes it. A
+        // media part with no preceding text simply has no annotation, which is
+        // the case for a bare media payload composed elsewhere.
+        let mut annotations = Vec::new();
+        let mut pending: Option<String> = None;
+        let mut media = Vec::new();
+        for part in self.parts.drain(..) {
+            match part {
+                InputPart::Media(media_part) => {
+                    annotations.push(pending.take());
+                    media.push(InputPart::Media(media_part));
+                }
+                InputPart::Text(text) => {
+                    // A text part that is an annotation is short and matches the
+                    // annotation shape; anything else is free text and replaces
+                    // the pending annotation only if none is already collected.
+                    if pending.is_none() && is_media_annotation(&text) {
+                        pending = Some(text);
+                    } else {
+                        pending = None;
+                    }
+                }
+            }
+        }
+
+        let mut parts = vec![InputPart::Text(text)];
+        for (annotation, part) in annotations.into_iter().zip(media) {
+            if let Some(annotation) = annotation {
+                parts.push(InputPart::Text(annotation));
+            }
+            parts.push(part);
+        }
+        self.parts = parts;
     }
+}
+
+/// Whether a composed text part is a per-attachment media annotation.
+///
+/// The annotation is the short bracketed line naming an attached file, emitted
+/// immediately before its media part. Recognising it by shape keeps the media
+/// filename attached to its bytes across a model-text replacement.
+fn is_media_annotation(text: &str) -> bool {
+    let trimmed = text.trim();
+    (trimmed.starts_with("[attached image: ") || trimmed.starts_with("[attached audio: "))
+        && trimmed.ends_with(']')
 }
 
 /// Resolve chips against the ledger, draining it entirely.
@@ -95,7 +134,7 @@ pub fn compose(display_text: String, ledger: &mut AttachmentLedger) -> ComposedI
         match &entry.payload {
             AttachmentPayload::PastedText(pasted) => text_run.push_str(pasted),
             AttachmentPayload::FileReference(path) => text_run.push_str(path),
-            AttachmentPayload::Media { media, byte_len } => {
+            AttachmentPayload::Media { media, byte_len, path } => {
                 let limit = match media {
                     Media::Image(_) => MAX_IMAGE_BYTES,
                     Media::Audio(_) => MAX_AUDIO_BYTES,
@@ -104,6 +143,19 @@ pub fn compose(display_text: String, ledger: &mut AttachmentLedger) -> ComposedI
                 if !text_run.is_empty() {
                     parts.push(InputPart::Text(std::mem::take(&mut text_run)));
                 }
+                // Name the file the bytes came from. The wire formats carry no
+                // filename for inline media, so without this the model sees
+                // opaque bytes with no idea which file they belong to and cannot
+                // re-read, crop, or compare it. This is model-bound only: the
+                // human-visible transcript keeps the plain chip label, so an
+                // absolute path is never printed to the user. The wording is
+                // stable for a given attachment so it does not churn the
+                // prompt-cache prefix.
+                let annotation = match media {
+                    Media::Image(_) => format!("[attached image: {path}]"),
+                    Media::Audio(_) => format!("[attached audio: {path}]"),
+                };
+                parts.push(InputPart::Text(annotation));
                 parts.push(InputPart::Media(media.clone()));
             }
         }
