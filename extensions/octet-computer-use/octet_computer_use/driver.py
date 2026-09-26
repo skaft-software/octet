@@ -249,6 +249,10 @@ class Health:
     permissions: str
     doctor_ok: bool
     detail: str
+    #: Which runtime the tools will actually use: ``direct`` or ``desktop-host``.
+    #: The direct runtime inherits the calling host's grants and is the shipped
+    #: default; the desktop host is optional and adds only the agent cursor.
+    runtime: str = "direct"
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -257,7 +261,18 @@ class Health:
             "permissions": self.permissions,
             "doctor_ok": self.doctor_ok,
             "detail": self.detail,
+            "runtime": self.runtime,
         }
+
+
+def active_runtime() -> str:
+    """Which runtime the tools will use right now.
+
+    Kept in one place so the status surface and the client cannot disagree about
+    which path is live.
+    """
+
+    return "desktop-host" if desktop_app_usable() else "direct"
 
 
 # A desktop host, when installed, owns the OS permission identity and the GUI
@@ -475,4 +490,5 @@ def health(paths: DriverPaths) -> Health:
         permissions=permissions,
         doctor_ok=doctor_ok,
         detail=detail,
+        runtime=active_runtime(),
     )

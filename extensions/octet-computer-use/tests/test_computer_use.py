@@ -337,7 +337,47 @@ class StatusRowTests(unittest.TestCase):
             }
         )
         self.assertIn("still needs: Screen Recording", text)
-        self.assertIn("/computer-use setup", text)
+        # The fix must name the app the user actually grants: the one running
+        # octet. Pointing at a helper app would send them to grant the wrong
+        # identity and never succeed.
+        self.assertIn("app you run octet from", text)
+
+    def test_status_reports_the_live_runtime(self):
+        # The permission fix differs per runtime, so a user must be able to see
+        # which one is live instead of guessing.
+        direct = _render_status(
+            {
+                "installed": True,
+                "version": "0.29.1",
+                "doctor_ok": True,
+                "permissions": "granted",
+                "runtime": "direct",
+            }
+        )
+        self.assertIn("runtime: direct", direct)
+        host = _render_status(
+            {
+                "installed": True,
+                "version": "0.29.1",
+                "doctor_ok": True,
+                "permissions": "granted",
+                "runtime": "desktop-host",
+            }
+        )
+        self.assertIn("runtime: desktop host", host)
+        self.assertIn("cursor", host)
+
+    def test_health_reports_direct_runtime_without_a_usable_host(self):
+        from octet_computer_use import driver
+
+        original = driver.desktop_app_usable
+        try:
+            driver.desktop_app_usable = lambda binary=None: False
+            self.assertEqual(driver.active_runtime(), "direct")
+            driver.desktop_app_usable = lambda binary=None: True
+            self.assertEqual(driver.active_runtime(), "desktop-host")
+        finally:
+            driver.desktop_app_usable = original
 
     def test_granted_status_stops_short(self):
         text = _render_status(

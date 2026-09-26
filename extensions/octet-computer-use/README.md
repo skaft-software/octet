@@ -42,16 +42,36 @@ self-check, and your operating system's permission state. It never prompts.
 The driver needs permission to observe and control the desktop. **This bundle
 never grants an operating-system permission for you.** Grant it yourself:
 
-- **macOS** — Accessibility **and** Screen Recording, granted to the CuaDriver
-  helper app. `cua-driver permissions grant` launches the helper so the system
-  dialogs attribute correctly. The bundle only *reports* status.
+- **macOS** — Accessibility **and** Screen & System Audio Recording, granted to
+  **the app you run octet from**: your terminal or your editor. The default
+  runtime runs inside octet's own process and therefore uses that app's
+  permissions, so there is no separate helper to install or grant. Restart octet
+  afterwards so it re-reads the current grants.
 - **Windows** — the driver runs as your user; some stacks need the process to
   be interactive (an unlocked, visible session).
 - **Linux** — a live display session plus AT-SPI 2 accessibility. X11/XWayland
   routes more widely than native Wayland.
 
 Until the permission is granted, observation and action calls fail. That is
-expected, and `computer_use_status` will say so.
+expected, and `computer_use_status` will say so along with the runtime in use.
+
+### Runtime modes
+
+`computer_use_status` reports which runtime is live.
+
+| Runtime | When it is used | Needs | Agent cursor |
+| --- | --- | --- | --- |
+| `direct` | Default, and whenever no usable host is present | Nothing beyond the grants above | No |
+| `desktop-host` | A Cua Driver app is installed **and** its own grants are live | Grants given to that app | Yes |
+
+The desktop host is the optional path to the visible agent cursor. It is used
+only when an installed `CuaDriver.app` reports live permissions, because on some
+macOS releases that app's grant never persists — it re-prompts on every launch,
+and adopting it would make every action fail. When that happens octet falls back
+to the direct runtime automatically, which is the supported default.
+
+Set `OCTET_CUA_DESKTOP_HOST=0` to force the direct runtime, or `=1` to require
+the desktop host.
 
 ## What the agent can do
 

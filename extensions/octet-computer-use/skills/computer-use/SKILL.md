@@ -39,6 +39,14 @@ so: the user must grant Accessibility/Screen Recording (macOS), an interactive
 session (Windows), or AT-SPI in a live display session (Linux) themselves. Do
 not attempt to grant an OS permission.
 
+On macOS the default `direct` runtime inherits the grants of whatever app runs
+octet, so the user grants Accessibility and Screen Recording to their own
+terminal or editor - not to any helper app. `computer_use_status` names the
+runtime in use. A `desktop-host` runtime is only reported when an installed
+Cua Driver app has live permissions of its own, and it is the only mode that
+draws the agent cursor. Do not ask the user to install or grant a helper app to
+make computer use work; the direct runtime is the supported default.
+
 Cua Driver is third-party MIT software from [trycua/cua](https://github.com/trycua/cua).
 It is not OpenAI's CUA and is not vendored here.
 

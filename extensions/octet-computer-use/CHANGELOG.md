@@ -4,6 +4,20 @@
 
 ### Changed
 
+- Make the `direct` runtime the shipped default. It runs inside octet's own
+  process and inherits the Accessibility and Screen Recording grants of the app
+  running octet, so a user needs no separate helper app, no extra bundle, and no
+  desktop-host install. `computer_use_status` now names the live runtime and
+  points at that app rather than at a helper.
+- Treat an installed desktop host as absent unless its own permissions are
+  live. On some macOS releases the host's grant never persists, so it re-prompts
+  on every launch and every action fails; the direct runtime works immediately
+  there. `OCTET_CUA_DESKTOP_HOST=0` forces the direct runtime, `=1` requires the
+  host.
+- Resolve the installed macOS bundle's executable from its own
+  `CFBundleExecutable` rather than assuming one layout, so the stock
+  `CuaDriver.app` and the source-built `CuaDriverLocal.app` both work. The
+  desktop host remains the only path to the visible agent cursor.
 - Replace the inert API `0.3` mocked prototype with a real, Cua Driver–backed
   API `0.4` bundle. The bundle now provisions a locally installed MIT-licensed
   [Cua Driver](https://github.com/trycua/cua) on request and drives native

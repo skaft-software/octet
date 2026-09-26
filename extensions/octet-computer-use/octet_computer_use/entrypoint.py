@@ -451,6 +451,12 @@ def _render_status(status: Mapping[str, Any]) -> str:
         f"Cua Driver {status.get('version') or 'unknown'} is installed.",
         f"driver self-check: {'ok' if status.get('doctor_ok') else 'needs attention'}",
     ]
+    # Say plainly which runtime is live, because the permission fix is different
+    # for each and a user chasing the wrong one will never succeed.
+    if status.get("runtime") == "desktop-host":
+        lines.append("runtime: desktop host (agent cursor enabled)")
+    else:
+        lines.append("runtime: direct (inherits your terminal's permissions)")
     permissions = status.get("permissions")
     if permissions == "granted":
         lines.append("macOS permissions: Accessibility and Screen Recording allowed.")
@@ -458,8 +464,9 @@ def _render_status(status: Mapping[str, Any]) -> str:
     detail = status.get("permission_detail")
     lines.append("macOS permissions: %s" % (detail or permissions or "unknown"))
     lines.append(
-        "Run /computer-use setup and choose Allow when macOS asks. "
-        "octet cannot grant a system permission for you."
+        "Grant Accessibility and Screen Recording to the app you run octet from "
+        "(your terminal or editor), then restart octet. The direct runtime uses "
+        "that app's grants. octet cannot grant a system permission for you."
     )
     return "\n".join(lines)
 
