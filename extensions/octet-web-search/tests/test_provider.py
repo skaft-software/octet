@@ -150,6 +150,13 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
                 + "</body></html>"
             ).encode("utf-8")
             self.respond(200, body, "text/html; charset=utf-8")
+        elif parsed.path == "/large-doc":
+            body = (
+                b"<html><head><title>Large documentation</title><script>"
+                + b"x" * 540000
+                + b"</script></head><body><p>Calibrated confidence needle.</p></body></html>"
+            )
+            self.respond(200, body, "text/html; charset=utf-8")
         elif parsed.path == "/second":
             self.respond(200, b"second plain source", "text/plain; charset=utf-8")
         elif parsed.path == "/redirect":
@@ -164,6 +171,12 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", "600000")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif parsed.path == "/oversized-hard":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(provider_module.MAX_DOWNLOAD_BYTES + 1))
             self.send_header("Connection", "close")
             self.end_headers()
         elif parsed.path == "/slow":
@@ -651,6 +664,26 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(second["cache"], "hit")
         self.assertNotIn("content", first["document"])
         self.assertTrue(all(len(item["excerpt"].encode("utf-8")) <= 512 for item in first["matches"]))
+
+    def test_large_document_fetch_and_find_use_bounded_default_download(self):
+        config = parse_configuration({
+            "version": 1,
+            "provider": {"kind": "searxng", "endpoint": "http://provider.test/search"},
+        })
+        self.assertEqual(config.limits.max_download_bytes, 4 * 1024 * 1024)
+        opened = self.service.open(config, url="http://public.test/large-doc")
+        self.assertEqual(opened["document"]["title"], "Large documentation")
+        self.assertIn("Calibrated confidence needle.", opened["document"]["content"])
+        self.assertNotIn("xxx", opened["document"]["content"])
+        self.assertFalse(opened["document"]["truncated"])
+        found = self.service.find(config, url="http://public.test/large-doc", pattern="needle")
+        self.assertEqual(found["match_count"], 1)
+        self.assertEqual(found["cache"], "hit")
+
+        with self.assertRaisesRegex(TooLarge, "131072-byte download limit"):
+            self.service.open(self.config, url="http://public.test/large-doc")
+        with self.assertRaisesRegex(TooLarge, "4194304-byte download limit"):
+            self.service.open(config, url="http://public.test/oversized-hard")
 
     def test_rejects_oversized_and_unsupported_content(self):
         with self.assertRaises(TooLarge):

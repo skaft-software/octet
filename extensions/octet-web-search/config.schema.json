@@ -66,7 +66,7 @@
         "default_timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 20},
         "max_redirects": {"type": "integer", "minimum": 0, "maximum": 3},
         "max_provider_bytes": {"type": "integer", "minimum": 1024, "maximum": 524288},
-        "max_download_bytes": {"type": "integer", "minimum": 1024, "maximum": 524288},
+        "max_download_bytes": {"type": "integer", "minimum": 1024, "maximum": 4194304},
         "default_content_bytes": {"type": "integer", "minimum": 1024, "maximum": 131072},
         "max_content_bytes": {"type": "integer", "minimum": 1024, "maximum": 131072},
         "cache_ttl_seconds": {"type": "integer", "minimum": 0, "maximum": 900},

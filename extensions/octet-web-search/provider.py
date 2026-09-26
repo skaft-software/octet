@@ -52,7 +52,7 @@ MAX_REDIRECTS = 3
 MAX_TIMEOUT_SECONDS = 20.0
 MIN_TIMEOUT_SECONDS = 0.1
 MAX_PROVIDER_BYTES = 512 * 1024
-MAX_DOWNLOAD_BYTES = 512 * 1024
+MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024
 MAX_CONTENT_BYTES = 128 * 1024
 MAX_SNIPPET_BYTES = 2 * 1024
 MAX_TITLE_BYTES = 512
@@ -1366,7 +1366,7 @@ class HttpClient:
                     if declared_size < 0:
                         raise ProviderFailed("the server returned an invalid Content-Length")
                     if declared_size > max_bytes:
-                        raise TooLarge("the HTTP response exceeds the download byte limit")
+                        raise TooLarge("the HTTP response exceeds the %d-byte download limit" % max_bytes)
                 chunks: List[bytes] = []
                 size = 0
                 while True:
@@ -1381,7 +1381,7 @@ class HttpClient:
                         break
                     size += len(chunk)
                     if size > max_bytes:
-                        raise TooLarge("the HTTP response exceeds the download byte limit")
+                        raise TooLarge("the HTTP response exceeds the %d-byte download limit" % max_bytes)
                     chunks.append(chunk)
                 return HttpPayload(url, response.status, headers, b"".join(chunks), 0)
             except (WebError,):
