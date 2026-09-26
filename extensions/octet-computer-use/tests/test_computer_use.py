@@ -1190,15 +1190,15 @@ class DesktopHostTests(unittest.TestCase):
         self.assertEqual(name, cursor_session())
         self.assertIn(str(os.getpid()), name)
 
-    def test_cursor_motion_restores_cua_curves_and_fades_later(self):
+    def test_cursor_motion_is_short_straight_and_fades_later(self):
         from octet_computer_use.entrypoint import CURSOR_MOTION
 
-        self.assertEqual(CURSOR_MOTION["arc_size"], 0.25)
-        self.assertEqual(CURSOR_MOTION["turn_radius"], 80.0)
-        self.assertEqual(CURSOR_MOTION["glide_duration_ms"], 0.0)  # speed-based, not stationary
-        self.assertGreater(CURSOR_MOTION["dwell_after_click_ms"], 0.0)
-        self.assertEqual(CURSOR_MOTION["spring"], 0.72)
-        self.assertEqual(CURSOR_MOTION["idle_hide_ms"], 3500.0)
+        self.assertEqual(CURSOR_MOTION["arc_size"], 0.0)
+        self.assertEqual(CURSOR_MOTION["turn_radius"], 1.0)
+        self.assertEqual(CURSOR_MOTION["glide_duration_ms"], 80.0)
+        self.assertEqual(CURSOR_MOTION["dwell_after_click_ms"], 40.0)
+        self.assertEqual(CURSOR_MOTION["spring"], 1.0)
+        self.assertEqual(CURSOR_MOTION["idle_hide_ms"], 5000.0)
 
     def test_daemon_socket_is_overridable(self):
         from octet_computer_use.driver_client import daemon_socket

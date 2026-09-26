@@ -78,17 +78,16 @@ _PERMISSION_CACHE_SECONDS = 30.0
 # own identifier and ends the session on shutdown.
 CURSOR_SESSION_PREFIX = "octet-computer-use"
 
-# Keep Cua's curved, speed-based glide (including its conspicuous turns)
-# instead of forcing every move into a nearly straight 180 ms hop. Match the
-# driver's motion defaults except for a slightly later idle fade.
+# Skip Cua's curved turns and spring bounce. A short fixed glide keeps the
+# overlay responsive without spending time animating a longer path.
 CURSOR_MOTION: Dict[str, Any] = {
-    "arc_size": 0.25,
-    "turn_radius": 80.0,
+    "arc_size": 0.0,
+    "turn_radius": 1.0,
     "arc_flow": 0.0,
-    "spring": 0.72,
-    "glide_duration_ms": 0.0,
-    "dwell_after_click_ms": 80.0,
-    "idle_hide_ms": 3500.0,
+    "spring": 1.0,
+    "glide_duration_ms": 80.0,
+    "dwell_after_click_ms": 40.0,
+    "idle_hide_ms": 5000.0,
 }
 
 
@@ -402,7 +401,7 @@ class ComputerUse:
                 raise McpError(f"agent cursor state verification failed: {error}") from error
             motion = state.get("motion")
             theme = state.get("theme")
-            # Zero is Cua's speed-based glide, not a stationary cursor.
+            # Do not report readiness until the quick, straight motion is active.
             if (state.get("enabled") is True
                     and isinstance(motion, Mapping)
                     and all(motion.get(key) == value for key, value in CURSOR_MOTION.items())

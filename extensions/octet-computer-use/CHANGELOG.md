@@ -48,8 +48,8 @@
 
 ### Changed
 
-- Restore Cua Driver's curved, speed-based cursor motion instead of forcing a
-  near-straight 180 ms hop, and delay its idle fade from 2 to 3.5 seconds.
+- Use a short, straight 80 ms cursor glide without pronounced turns or spring
+  bounce, and delay idle fade to 5 seconds.
 - Make the signed `/Applications/CuaDriver.app` the default macOS host because
   it provides the permission identity and visible agent-cursor overlay. A missing
   or ungranted host reports `unavailable`; macOS direct mode is an explicit

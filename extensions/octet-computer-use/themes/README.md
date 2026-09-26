@@ -13,8 +13,8 @@ with Octet's stable model-prompt palette (`tui/theme.rs`, unknown terminal
 background). The native session badge remains Cua's own session color. Cua's
 bounded vector profile does not support the icon's gradient; the fill and glow
 use the model color instead. The custom theme also does not inherit Cua's
-special built-in idle levitation; curved movement is provided by the driver
-motion settings.
+special built-in idle levitation; the extension configures a short, straight
+movement through the driver motion settings.
 
 To regenerate with a Cua Driver version supporting `cua-driver-actions-v2`:
 
