@@ -272,6 +272,59 @@ def _permission_status(binary: Path) -> str:
     return status if isinstance(status, str) and status else "unknown"
 
 
+def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
+    """Report the host's real TCC state over the live ``--direct`` MCP channel.
+
+    ``cua-driver permissions status`` only answers from a CuaDriver *daemon*, so
+    on the pip-provisioned macOS path - which ships a bare binary, never
+    ``/Applications/CuaDriver.app`` - it reports ``unknown`` even when both
+    grants are present. ``check_permissions`` over the already-running direct
+    session reports the responsible host's real state instead, which is the
+    process octet actually is. Pass ``prompt=True`` only from an explicit,
+    user-initiated setup: the driver never prompts in host-inherit mode, so the
+    macOS dialog is raised by this call on the host's behalf.
+    """
+
+    arguments: Dict[str, Any] = {"prompt": bool(prompt)}
+    if prompt:
+        # Staged request: Accessibility + Screen Recording only. Direct-capture
+        # consent is a separate platform step, not part of first-run setup.
+        arguments["probe_direct_capture"] = False
+    try:
+        result = client.call("check_permissions", arguments)
+    except Exception:
+        return {
+            "permissions": "unknown",
+            "accessibility": None,
+            "screen_recording": None,
+            "detail": "the driver did not answer a permission probe",
+        }
+    structured = result.get("structuredContent") or {}
+    accessibility = structured.get("accessibility")
+    screen_recording = structured.get("screen_recording")
+    granted = accessibility is True and screen_recording is True
+    if granted:
+        status = "granted"
+    elif accessibility is False or screen_recording is False:
+        status = "denied"
+    else:
+        status = "unknown"
+    missing = []
+    if accessibility is False:
+        missing.append("Accessibility")
+    if screen_recording is False:
+        missing.append("Screen Recording")
+    detail = "Accessibility and Screen Recording are allowed" if granted else (
+        "still needs: " + " and ".join(missing) if missing else "permission state is unknown"
+    )
+    return {
+        "permissions": status,
+        "accessibility": accessibility,
+        "screen_recording": screen_recording,
+        "detail": detail,
+    }
+
+
 def health(paths: DriverPaths) -> Health:
     """Report whether the driver is present and permitted, without prompting."""
 

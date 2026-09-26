@@ -8,7 +8,7 @@ from pathlib import Path
 
 from octet_computer_use import service
 from octet_computer_use.driver_client import DriverClient, McpError, ToolInfo
-from octet_computer_use.entrypoint import ComputerUse, _DRIVER_TOOLS
+from octet_computer_use.entrypoint import ComputerUse, _DRIVER_TOOLS, _render_status
 from octet_computer_use.service import ArgumentError, sanitize, summarize_result
 
 try:  # the prototype suite discovers tests flat; the bundle suite uses packages
@@ -97,13 +97,16 @@ class ConfirmationGateTests(unittest.TestCase):
         self.assertEqual(len(extension.confirmations), 1)
         self.assertFalse(extension.confirmations[0]["default"])
         self.assertIn("click", extension.confirmations[0]["detail"])
-        self.assertEqual(len(client.calls), 1)
+        # An effectful action may probe the OS grant once before confirming;
+        # the driver must still receive exactly the action itself, never a
+        # second dispatch.
+        self.assertEqual([name for name, _ in client.calls].count("click"), 1)
 
     def test_declined_confirmation_does_not_dispatch(self):
         client = FakeClient(effectful=["click"])
         computer_use, extension = self.use(client, confirm=False)
         result = computer_use.call("click", {"pid": 1, "x": 5, "y": 6})
-        self.assertEqual(client.calls, [])
+        self.assertNotIn("click", [name for name, _ in client.calls])
         self.assertTrue(result["is_error"])
         self.assertIn("did not confirm", result["content"][0]["text"])
 
@@ -111,7 +114,7 @@ class ConfirmationGateTests(unittest.TestCase):
         client = FakeClient(effectful=["click"])
         computer_use, extension = self.use(client, confirm=None)
         result = computer_use.call("click", {"pid": 1, "x": 5, "y": 6})
-        self.assertEqual(client.calls, [])
+        self.assertNotIn("click", [name for name, _ in client.calls])
         self.assertTrue(result["is_error"])
 
     def test_unknown_tool_is_treated_as_effectful(self):
@@ -224,6 +227,131 @@ class VersionSpecTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ProvisionError):
                     _pip_spec(bad)
+
+
+class PermissionProbeTests(unittest.TestCase):
+    """Permission truth must come from the live direct session, not the CLI.
+
+    ``cua-driver permissions status`` only answers from a CuaDriver daemon. The
+    pip-provisioned macOS path ships a bare binary and never installs
+    ``/Applications/CuaDriver.app``, so the CLI probe reported ``unknown`` even
+    when both grants were present. The direct MCP session sees the real host
+    state, so that is what the bundle must use.
+    """
+
+    def _state(self, accessibility, screen_recording, raises=None):
+        from octet_computer_use.driver import permission_state
+
+        structured = {
+            "accessibility": accessibility,
+            "screen_recording": screen_recording,
+        }
+        client = FakeClient(result={"structuredContent": structured}, raises=raises)
+        return permission_state(client), client
+
+    def test_both_grants_report_granted(self):
+        state, client = self._state(True, True)
+        self.assertEqual(state["permissions"], "granted")
+        self.assertEqual(client.calls, [("check_permissions", {"prompt": False})])
+
+    def test_one_missing_grant_is_named_and_not_collapsed(self):
+        state, _ = self._state(True, False)
+        self.assertEqual(state["permissions"], "denied")
+        self.assertIn("Screen Recording", state["detail"])
+        self.assertNotIn("Accessibility", state["detail"])
+
+    def test_unknown_booleans_stay_unknown(self):
+        state, _ = self._state(None, None)
+        self.assertEqual(state["permissions"], "unknown")
+
+    def test_prompt_is_staged_and_never_probes_direct_capture(self):
+        from octet_computer_use.driver import permission_state
+
+        client = FakeClient(
+            result={"structuredContent": {"accessibility": True, "screen_recording": True}}
+        )
+        permission_state(client, prompt=True)
+        self.assertEqual(
+            client.calls,
+            [("check_permissions", {"prompt": True, "probe_direct_capture": False})],
+        )
+
+    def test_a_driver_failure_degrades_to_unknown_instead_of_raising(self):
+        state, _ = self._state(True, True, raises=McpError("driver gone"))
+        self.assertEqual(state["permissions"], "unknown")
+        self.assertIn("did not answer", state["detail"])
+
+
+class StatusRowTests(unittest.TestCase):
+    """An installed bundle reports its own readiness, like web-search does."""
+
+    class _RecordingStatus(RecordingExtension):
+        def __init__(self):
+            super().__init__()
+            self.statuses = []
+
+        def set_status(self, payload):
+            self.statuses.append(payload)
+
+    def _publish(self, status):
+        extension = self._RecordingStatus()
+        computer_use = ComputerUse(extension)
+        computer_use.status = lambda **_: dict(status)
+        computer_use.publish_status()
+        return extension.statuses
+
+    def test_ready_state_reports_active(self):
+        statuses = self._publish({"installed": True, "permissions": "granted"})
+        self.assertEqual(
+            statuses,
+            [{"state": "active", "label": "computer use · ready"}],
+        )
+
+    def test_missing_screen_recording_is_visible_before_any_action(self):
+        statuses = self._publish(
+            {"installed": True, "permissions": "denied", "screen_recording": False}
+        )
+        self.assertEqual(statuses[0]["state"], "pending")
+        self.assertIn("Screen Recording", statuses[0]["label"])
+
+    def test_unprovisioned_bundle_says_so(self):
+        statuses = self._publish({"installed": False})
+        self.assertIn("not set up", statuses[0]["label"])
+
+    def test_a_host_without_the_status_surface_still_reports(self):
+        computer_use = ComputerUse(RecordingExtension())
+        computer_use.status = lambda **_: {"installed": True, "permissions": "granted"}
+        # No set_status on this double: publishing must not raise.
+        self.assertEqual(computer_use.publish_status()["permissions"], "granted")
+
+    def test_rendered_status_names_the_missing_grant_and_the_fix(self):
+        text = _render_status(
+            {
+                "installed": True,
+                "version": "0.29.1",
+                "doctor_ok": True,
+                "permissions": "denied",
+                "screen_recording": False,
+                "permission_detail": "still needs: Screen Recording",
+            }
+        )
+        self.assertIn("still needs: Screen Recording", text)
+        self.assertIn("/computer-use setup", text)
+
+    def test_granted_status_stops_short(self):
+        text = _render_status(
+            {
+                "installed": True,
+                "version": "0.29.1",
+                "doctor_ok": True,
+                "permissions": "granted",
+            }
+        )
+        self.assertIn("Accessibility and Screen Recording allowed", text)
+        self.assertNotIn("cannot grant a system permission", text)
+
+    def test_not_installed_points_at_setup(self):
+        self.assertIn("/computer-use setup", _render_status({"installed": False}))
 
 
 if __name__ == "__main__":

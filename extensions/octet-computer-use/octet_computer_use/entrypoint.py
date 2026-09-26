@@ -9,6 +9,7 @@ unavailable, declined, or failed confirmation denies the call.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from octet_extension import Extension, text_content, tool_result
@@ -21,8 +22,18 @@ from octet_computer_use.service import ArgumentError
 # Driver tools that never change the desktop. Everything else is gated.
 LOCAL_ONLY_TOOLS = frozenset({"read_driver_health", "provision"})
 
+# Driver tools that only observe. They are still gated by the driver's own
+# read-only classification, but a missing OS grant must not hide their failure
+# behind a permission refusal: the user needs to see the real error.
+_READ_ONLY_OVERRIDE = frozenset(
+    {"check_permissions", "get_screen_size", "get_cursor_position", "list_apps"}
+)
+
 # Bound on text returned to the model, matching octet-browse's result bound.
 RESULT_TEXT_LIMIT = 24_000
+
+# How long one macOS permission answer is reused for the effectful-action gate.
+_PERMISSION_CACHE_SECONDS = 30.0
 
 
 def _schema_for(driver_tool: str) -> Dict[str, Any]:
@@ -65,6 +76,8 @@ class ComputerUse:
         self._paths = driver_module.DriverPaths.for_home(home)
         self._client: Optional[DriverClient] = None
         self._lock = threading.Lock()
+        # (expires_at_monotonic, blocked) for the effectful-action gate.
+        self._permission_cache: Optional[Tuple[float, bool]] = None
 
     # -- driver lifecycle --------------------------------------------------
 
@@ -82,6 +95,36 @@ class ComputerUse:
             self._client = client
             return client
 
+    def _permissions_block(self, driver_tool: str) -> bool:
+        """Whether a missing OS grant must hold back this effectful action.
+
+        Read-only observation is allowed to try and report its own failure, so
+        the user can see what is missing. Only actuation is held, and only when
+        the host actually denies a grant. An ``unknown`` probe is not treated as
+        a denial: the driver may simply not be able to read TCC state, and
+        blocking on that would disable a working install.
+
+        The answer is cached for a short window. macOS permission state cannot
+        flip within a conversation turn without a restart or a System Settings
+        visit, and re-probing on every click would add a round trip to each
+        action and pollute the driver's own dispatch sequence.
+        """
+
+        if driver_tool in _READ_ONLY_OVERRIDE:
+            return False
+        now = time.monotonic()
+        cached = self._permission_cache
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        try:
+            probe = driver_module.permission_state(self.client())
+        except Exception:
+            self._permission_cache = (now + _PERMISSION_CACHE_SECONDS, False)
+            return False
+        blocked = probe.get("permissions") == "denied"
+        self._permission_cache = (now + _PERMISSION_CACHE_SECONDS, blocked)
+        return blocked
+
     def shutdown(self) -> None:
         with self._lock:
             if self._client is not None:
@@ -98,6 +141,20 @@ class ComputerUse:
         arguments = service.sanitize(driver_tool, values)
         client = self.client()
         if client.requires_confirmation(driver_tool):
+            # Actuation needs the OS grants. Without them the driver would fail
+            # deep inside a capture or click, so refuse here with the fix, and
+            # do not spend the user's confirmation on an action that cannot
+            # run.
+            if self._permissions_block(driver_tool):
+                return tool_result(
+                    text_content(
+                        "Computer use is not ready: macOS has not allowed "
+                        "Accessibility and Screen Recording for octet. Run "
+                        "/computer-use setup and choose Allow when macOS asks, "
+                        "then retry."
+                    ),
+                    is_error=True,
+                )
             description = next(
                 (info.description for info in client.tools() if info.name == driver_tool),
                 "",
@@ -139,16 +196,75 @@ class ComputerUse:
             },
         )
 
-    def status(self) -> Dict[str, Any]:
-        return driver_module.health(self._paths).as_dict()
+    def status(self, *, prompt: bool = False) -> Dict[str, Any]:
+        report = driver_module.health(self._paths).as_dict()
+        if not report.get("installed"):
+            return report
+        # The CLI probe only answers from a CuaDriver daemon, which the
+        # pip-provisioned path never installs, so it would report `unknown` no
+        # matter what the host actually holds. Ask the live direct session.
+        try:
+            probe = driver_module.permission_state(self.client(), prompt=prompt)
+        except Exception:
+            return report
+        # A fresh probe supersedes any cached answer.
+        self._permission_cache = None
+        report.update(
+            {
+                "permissions": probe["permissions"],
+                "accessibility": probe["accessibility"],
+                "screen_recording": probe["screen_recording"],
+                "permission_detail": probe["detail"],
+            }
+        )
+        return report
 
     def provision(self, version: str = "") -> Dict[str, Any]:
         binary = driver_module.provision(self._paths, version=version)
+        # Provisioning replaces the runtime, so a client that was already
+        # running now points at a replaced binary. Drop it; the next call
+        # starts a fresh session against the new one.
+        with self._lock:
+            if self._client is not None:
+                self._client.close()
+                self._client = None
         return {
             "provisioned": True,
             "binary": str(binary),
             "version": driver_module.driver_version(binary),
         }
+
+    def publish_status(self, *, prompt: bool = False) -> Dict[str, Any]:
+        """Report state and mirror it into octet's status row, then arm or hold.
+
+        This runs on load and after setup, so an installed bundle reports its
+        own readiness the way web-search does - no command required in the
+        normal case. Effectful tools stay unavailable until both grants are
+        present, so a missing permission is visible before a click fails
+        opaquely.
+        """
+
+        status = self.status(prompt=prompt)
+        granted = status.get("permissions") == "granted"
+        if not status.get("installed"):
+            label = "computer use · not set up"
+        elif granted:
+            label = "computer use · ready"
+        else:
+            label = "computer use · needs %s" % (
+                "Screen Recording"
+                if status.get("screen_recording") is False
+                else "macOS permissions"
+            )
+        try:
+            self._extension.set_status(
+                {"state": "active" if granted else "pending", "label": label}
+            )
+        except Exception:
+            # A host without the status surface still gets the report; the
+            # status row is an aid, never authority for actuation.
+            pass
+        return status
 
 
 # Driver tools that end or destroy user state and are labelled destructive in
@@ -194,8 +310,25 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         )(lambda args, ctx, _n=name: handler(_n, args, ctx))
 
     def setup_command(arguments: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
-        result = computer_use.provision()
-        return tool_result(text_content(_render_status(computer_use.status())), structured_content=result)
+        parts = [str(part) for part in (arguments or [])]
+        action = parts[0] if parts else "status"
+        if action == "setup":
+            result = computer_use.provision()
+            # The user asked for setup, so ask macOS now rather than making
+            # them re-run a second command. The dialog is attributed to octet
+            # because the driver runs in the host's responsibility chain.
+            result.update(computer_use.publish_status(prompt=True))
+        elif action == "status":
+            result = computer_use.publish_status()
+        else:
+            return tool_result(
+                text_content("Usage: /computer-use [status|setup]"),
+                is_error=True,
+            )
+        return tool_result(
+            text_content(_render_status(result)),
+            structured_content=result,
+        )
 
     extension.command(
         name="computer-use",
@@ -212,19 +345,23 @@ _DRIVER_TOOLS = {name: driver_tool for name, driver_tool, _ in service.PUBLISHED
 def _render_status(status: Mapping[str, Any]) -> str:
     if not status.get("installed"):
         return (
-            "Cua Driver is not installed. Run the /computer-use command or the "
-            "computer_use_setup tool to provision it from the package index."
+            "Cua Driver is not installed. Run the /computer-use setup command or "
+            "the computer_use_setup tool to provision it from the package index."
         )
     lines = [
         f"Cua Driver {status.get('version') or 'unknown'} is installed.",
         f"driver self-check: {'ok' if status.get('doctor_ok') else 'needs attention'}",
-        f"OS permissions: {status.get('permissions')}",
     ]
-    if status.get("permissions") not in {"granted", "ok", "authorized"}:
-        lines.append(
-            "Grant Accessibility and Screen Recording to the driver before acting. "
-            "The bundle never grants an operating-system permission for you."
-        )
+    permissions = status.get("permissions")
+    if permissions == "granted":
+        lines.append("macOS permissions: Accessibility and Screen Recording allowed.")
+        return "\n".join(lines)
+    detail = status.get("permission_detail")
+    lines.append("macOS permissions: %s" % (detail or permissions or "unknown"))
+    lines.append(
+        "Run /computer-use setup and choose Allow when macOS asks. "
+        "octet cannot grant a system permission for you."
+    )
     return "\n".join(lines)
 
 
