@@ -5484,7 +5484,8 @@ kbd {
   opacity: 1;
   transition:
     width var(--slider-motion-duration) var(--slider-motion-easing),
-    opacity 260ms ease;
+    opacity 260ms ease,
+    background-color 260ms ease;
 }
 
 .power-slider-max-fill {
@@ -5511,6 +5512,11 @@ kbd {
 
 .power-slider-root[data-max="true"] .power-slider-range {
   opacity: 0;
+}
+
+.power-slider-root[data-ultra="true"] .power-slider-range {
+  background-color: #ae6cf4;
+  border-radius: 12px;
 }
 
 .power-slider-fast-particles {
