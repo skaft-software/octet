@@ -18,10 +18,17 @@ from octet_extension import Extension, text_content, tool_result
 from octet_computer_use import driver as driver_module
 from octet_computer_use import service
 from octet_computer_use.driver_client import DriverClient, McpError
+from octet_computer_use.jev import (
+    Candidate,
+    JevContractError,
+    JevUnavailable,
+    choose_action,
+)
+from octet_computer_use.jev import status as jev_status
 from octet_computer_use.service import ArgumentError
 
 # Driver tools that never change the desktop. Everything else is gated.
-LOCAL_ONLY_TOOLS = frozenset({"read_driver_health", "provision"})
+LOCAL_ONLY_TOOLS = frozenset({"read_driver_health", "provision", "jev_status", "jev_choose"})
 
 # Driver tools that only observe. They are still gated by the driver's own
 # read-only classification, but a missing OS grant must not hide their failure
@@ -391,6 +398,12 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         if name == "computer_use_setup":
             result = computer_use.provision(values.get("version", "") or "")
             return tool_result(text_content(_render_status(computer_use.status())), structured_content=result)
+        if name == "computer_use_jev_status":
+            report = jev_status()
+            detail = "Jev is usable." if report["usable"] else "Jev is optional and not currently usable."
+            return tool_result(text_content(detail), structured_content=report)
+        if name == "computer_use_jev_choose":
+            return _handle_jev_choose(values)
         driver_tool = _DRIVER_TOOLS.get(name)
         if driver_tool is None:
             return tool_result(text_content(f"unknown tool: {name}"), is_error=True)
@@ -439,6 +452,88 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
 
 
 _DRIVER_TOOLS = {name: driver_tool for name, driver_tool, _ in service.PUBLISHED_TOOLS}
+
+
+def _handle_jev_choose(values: Mapping[str, Any]) -> Dict[str, Any]:
+    """Offer Jev a bounded candidate set and return the chosen id, or fail closed.
+
+    This never dispatches a driver tool. It only decides which offered candidate
+    the caller should take next; the caller remains responsible for resolving the
+    identifier, executing it, and verifying the result.
+    """
+
+    raw_candidates = values.get("candidates")
+    if not isinstance(raw_candidates, (list, tuple)) or not raw_candidates:
+        return tool_result(
+            text_content("jev_choose requires a non-empty 'candidates' list."),
+            is_error=True,
+        )
+    candidates: list[Candidate] = []
+    for entry in raw_candidates:
+        if isinstance(entry, Mapping):
+            identifier = entry.get("identifier") or entry.get("id")
+            description = entry.get("description") or entry.get("label")
+            if isinstance(identifier, str) and isinstance(description, str):
+                try:
+                    candidates.append(Candidate(identifier, description))
+                except ValueError:
+                    # A malformed candidate is dropped, not fatal: a smaller valid
+                    # set is still a bounded, safe offer.
+                    continue
+    if not candidates:
+        return tool_result(
+            text_content("jev_choose received no usable candidate actions."),
+            is_error=True,
+        )
+
+    goal = values.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        return tool_result(
+            text_content("jev_choose requires a non-empty 'goal' string."),
+            is_error=True,
+        )
+
+    regions = values.get("regions") if isinstance(values.get("regions"), list) else None
+    history = values.get("history") if isinstance(values.get("history"), list) else None
+    capture_id = values.get("capture_id")
+    model = values.get("model") if isinstance(values.get("model"), str) else None
+
+    try:
+        choice = choose_action(
+            goal=goal,
+            candidates=candidates,
+            capture_id=capture_id if isinstance(capture_id, str) else None,
+            regions=regions,
+            history=history,
+            model=model,
+        )
+    except JevUnavailable as error:
+        return tool_result(
+            text_content(f"Jev is unavailable: {error}. Octet will choose without it."),
+            structured_content={"jev": "unavailable", "detail": str(error)},
+        )
+    except JevContractError as error:
+        return tool_result(
+            text_content(
+                f"Jev returned an out-of-contract answer ({error}); no action was taken."
+            ),
+            structured_content={"jev": "contract_error", "detail": str(error)},
+            is_error=True,
+        )
+
+    summary = {
+        "jev": "ok",
+        "chosen": choice.as_dict(),
+        "candidate_ids": [c.identifier for c in candidates],
+    }
+    return tool_result(
+        text_content(
+            f"Jev chose '{choice.identifier}' (confidence {choice.confidence:.2f}). "
+            "This is a suggestion only; octet has not acted on it."
+        ),
+        structured_content=summary,
+    )
+
 
 
 def _render_status(status: Mapping[str, Any]) -> str:

@@ -52,6 +52,8 @@ tools = [
   "computer_use_launch_app",
   "computer_use_start_session",
   "computer_use_end_session",
+  "computer_use_jev_status",
+  "computer_use_jev_choose",
 ]
 commands = ["computer-use"]
 ui = ["status"]

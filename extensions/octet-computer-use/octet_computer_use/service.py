@@ -36,6 +36,8 @@ PUBLISHED_TOOLS: Sequence[Tuple[str, str, str]] = (
     ("computer_use_launch_app", "launch_app", "Launch an application by name or bundle identifier."),
     ("computer_use_start_session", "start_session", "Start a named driver session so per-session cursor and cleanup state is released together."),
     ("computer_use_end_session", "end_session", "End a driver session and run its cleanup hooks."),
+    ("computer_use_jev_status", "jev_status", "Report whether the optional Jev action chooser is installed and configured. Never returns the API key."),
+    ("computer_use_jev_choose", "jev_choose", "Ask Jev to pick which offered candidate action to take next. Chooses only; never acts."),
 )
 
 # Argument allowlists per published tool. Anything not named is dropped before
@@ -56,6 +58,8 @@ _ARGUMENTS: Dict[str, Sequence[str]] = {
         "query",
     ),
     "get_desktop_state": ("max_image_dimension",),
+    "jev_status": (),
+    "jev_choose": ("goal", "candidates", "capture_id", "regions", "history", "model"),
     "click": ("pid", "window_id", "element_index", "element_token", "x", "y", "button", "count", "delivery_mode"),
     "type_text": ("pid", "window_id", "element_index", "element_token", "text", "delivery_mode"),
     "press_key": ("pid", "window_id", "key", "delivery_mode"),

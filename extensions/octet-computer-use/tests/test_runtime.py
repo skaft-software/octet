@@ -8,6 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
+try:  # package discovery (CI) or flat discovery (README), which differ here
+    from .test_backend_macos import MockNative, TARGET, OWNER
+    from .test_policy import Evaluator, scope
+except ImportError:  # pragma: no cover - exercised only by flat discovery
+    from test_backend_macos import MockNative, TARGET, OWNER
+    from test_policy import Evaluator, scope
+
 from main import ComputerUseExtension
 from octet_computer_use.backend_macos import MacOSBackend, MacOSBackendError
 from octet_computer_use.lifecycle import OwnerIdentity
@@ -15,8 +22,6 @@ from octet_computer_use.policy import PolicyDenied, PolicyGate
 from octet_computer_use import protocol
 from octet_computer_use.protocol import ProtocolFailure, canonical_bytes
 from octet_computer_use.runtime import MacOSRuntime
-from test_backend_macos import MockNative, TARGET, OWNER
-from test_policy import Evaluator, scope
 
 
 class RuntimeTests(unittest.TestCase):
