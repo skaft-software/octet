@@ -116,13 +116,34 @@ use crate::presentation::tool_display::is_subagent_tool;
 /// Maximum physical rows retained in a collapsed command-output tail.
 const COMPACT_EXEC_OUTPUT_ROWS: usize = 5;
 /// Maximum physical rows one inline tool image can reserve inside its tool card.
+///
+/// This is an upper bound on how much vertical space an image may claim, not a
+/// target every image is fitted to. The row count an image actually uses is
+/// derived from its own aspect ratio against the card's column budget, so a
+/// portrait screenshot is not stretched to the cap just to fill it.
 const MAX_TOOL_IMAGE_RENDER_ROWS: u16 = 16;
+/// Columns the tool-card gutter (elbow/indent) consumes before the image.
+///
+/// `nest_tool_output` prefixes every nested row with a stem/elbow plus a space,
+/// so the columns actually available to image content are the transcript width
+/// minus this gutter. Fitting against the full width would place the drawn
+/// `c=cols` rectangle wider than the reserved region and let the image drift
+/// right of its reservation.
+const TOOL_IMAGE_GUTTER_COLUMNS: u16 = 2;
+
 fn tool_image_viewport(width: u16, capabilities: ImageCapabilities) -> ImageViewport {
-    // The interactive Kitty path currently has no cell-pixel query. Without
-    // one, ImageLayout::fit would reserve just one cell for a whole screenshot.
-    // Use a typical 1:2 cell aspect as an explicit approximation; a measured
-    // cell size still takes precedence, and the 16-row bound remains intact.
-    ImageViewport::with_capabilities(width.max(1), MAX_TOOL_IMAGE_RENDER_ROWS, capabilities)
+    // The interactive Kitty path currently has no cell-pixel query. Without one,
+    // ImageLayout::fit would reserve a single cell for a whole screenshot. Use a
+    // typical 1:2 cell aspect as an explicit approximation; a measured cell size
+    // still takes precedence when one is available.
+    //
+    // The viewport is bounded by the card's real content width (gutter removed)
+    // and a maximum row budget. ImageLayout::fit then derives the actual cell
+    // rectangle from the source aspect: it fits the image inside this box rather
+    // than always pinning rows to the maximum, so a tall image stays a tall
+    // image scaled to the column budget, and a wide image is never cropped.
+    let content_width = width.saturating_sub(TOOL_IMAGE_GUTTER_COLUMNS).max(1);
+    ImageViewport::with_capabilities(content_width, MAX_TOOL_IMAGE_RENDER_ROWS, capabilities)
         .expect("fixed nonzero tool image viewport is valid")
         .with_estimated_cell_pixels(CellPixelSize::new(8, 16).expect("valid cell aspect"))
 }
@@ -2674,11 +2695,18 @@ fn finish_transcript_block(mut lines: Vec<String>) -> Vec<String> {
     // the terminal image occupies. Those rows are not decorative spacing, so the
     // trim must stop at the anchor instead of collapsing the reservation and
     // letting later transcript rows paint over the placed image.
+    //
+    // The reservation is restored for a trailing anchor today. That is correct
+    // only while every image is the last thing in its block; an image followed
+    // by any text row is not at the tail, so its blank rows were trimmed and the
+    // following text drew over the placed image. Only the trailing-anchor case is
+    // recoverable here, so the invariant is that the renderer never emits a Kitty
+    // anchor except as the final content of its block.
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
-    if lines.last().is_some_and(|line| {
-        !ImageAnchor::parse_all(line)
+    if !lines.last().is_some_and(|line| {
+        ImageAnchor::parse_all(line)
             .iter()
             .any(|anchor| anchor.protocol() == ImageProtocol::Kitty)
     }) {

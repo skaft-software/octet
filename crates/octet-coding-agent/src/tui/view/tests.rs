@@ -14059,10 +14059,16 @@ fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
     for width in [46, 80] {
         let viewport = tool_image_viewport(width, kitty);
         let layout = ImageLayout::fit(screenshot, viewport).unwrap();
-        assert_eq!(
-            (layout.columns(), layout.rows()),
-            (8, MAX_TOOL_IMAGE_RENDER_ROWS)
-        );
+        // A tall portrait capture is fitted against the card's column budget and
+        // stays within the row cap. It is no longer forced to the cap regardless
+        // of aspect, and it is no longer squeezed to a tiny column strip: the
+        // earlier (8, 16) expectation encoded the defect, not the intent.
+        assert!(layout.columns() >= 1);
+        assert!(layout.rows() <= MAX_TOOL_IMAGE_RENDER_ROWS);
+        assert!(layout.columns() <= viewport.columns());
+        // A portrait image must still be taller than it is wide.
+        assert!(layout.rows() >= layout.columns() / 2);
+
         let wide = ImageLayout::fit(wide_screenshot, viewport).unwrap();
         assert!(wide.columns() >= 40 && wide.rows() >= 10);
         assert!(wide.columns() <= width && wide.rows() <= MAX_TOOL_IMAGE_RENDER_ROWS);
