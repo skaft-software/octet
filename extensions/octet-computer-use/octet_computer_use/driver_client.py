@@ -8,9 +8,9 @@ already owns session lifetime, cancellation, confirmation, and presentation.
 
 Safety properties:
 
-* The child is started with ``mcp --direct`` so the driver owns its runtime
-  inside this process. It never auto-launches a separate app or daemon, and it
-  never requests an OS permission prompt of its own accord.
+* The direct client path uses ``mcp --direct``; when ``app_daemon`` is selected,
+  it connects to the explicitly configured desktop-host socket. It never grants
+  an operating-system permission on its own.
 * Only reviewed, non-secret desktop session variables are forwarded. Provider
   tokens and arbitrary ambient environment are never inherited.
 * Every response is size-bounded, and a tool that does not declare an exact
@@ -121,10 +121,9 @@ class DriverClient:
         self._binary = str(binary)
         self._cwd = str(cwd) if cwd is not None else None
         self._environment = environment or {}
-        # When a CuaDriver.app host is available, let it own the runtime so
-        # macOS attributes Accessibility/Screen Recording to the app rather than
-        # to octet, and the app can draw the agent cursor. Without the app the
-        # direct runtime still works; it simply has no cursor overlay.
+        # A selected CuaDriver.app host owns the runtime so macOS attributes
+        # Accessibility/Screen Recording to the app and the app can draw the
+        # agent cursor. Direct mode is explicit and has no cursor overlay.
         self._app_daemon = bool(app_daemon)
         self._process: Optional[subprocess.Popen] = None
         self._next_id = 0

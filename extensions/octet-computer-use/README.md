@@ -42,11 +42,12 @@ self-check, and your operating system's permission state. It never prompts.
 The driver needs permission to observe and control the desktop. **This bundle
 never grants an operating-system permission for you.** Grant it yourself:
 
-- **macOS** — Accessibility **and** Screen & System Audio Recording, granted to
-  **the app you run octet from**: your terminal or your editor. The default
-  runtime runs inside octet's own process and therefore uses that app's
-  permissions, so there is no separate helper to install or grant. Restart octet
-  afterwards so it re-reads the current grants.
+- **macOS** — by default, the signed `/Applications/CuaDriver.app` host needs
+  Accessibility and Screen Recording grants. If it is unavailable or cannot
+  verify its grants, computer use reports `unavailable` rather than silently
+  switching to cursorless direct mode. Set `OCTET_CUA_DESKTOP_HOST=0` only when
+  you explicitly want direct mode, which inherits the grants of the app running
+  octet and has no agent-cursor overlay. Restart octet after changing grants.
 - **Windows** — the driver runs as your user; some stacks need the process to
   be interactive (an unlocked, visible session).
 - **Linux** — a live display session plus AT-SPI 2 accessibility. X11/XWayland
@@ -57,28 +58,25 @@ expected, and `computer_use_status` will say so along with the runtime in use.
 
 ### Runtime modes
 
-`computer_use_status` reports which runtime is live.
+`computer_use_status` reports the selected runtime and its binary.
 
 | Runtime | When it is used | Needs | Agent cursor |
 | --- | --- | --- | --- |
-| `direct` | Default, and whenever no usable host is present | Nothing beyond the grants above | No |
-| `desktop-host` | A Cua Driver app is installed **and** its own grants are live | Grants given to that app | Yes |
+| `desktop-host` | Default on macOS when signed `/Applications/CuaDriver.app` and its grants are live | Grants given to that Cua Driver app | Yes, after cursor-state verification |
+| `direct` | Non-macOS by default, or macOS only with `OCTET_CUA_DESKTOP_HOST=0` | The grants of the app running octet | No |
+| `unavailable` | macOS host is missing or cannot prove live grants while host mode is selected | Install/authorize the signed Cua app, or explicitly opt into direct mode | No |
 
-The desktop host is the optional path to the visible agent cursor. It is used
-only when an installed host reports live permissions, because on some macOS
-releases `CuaDriver.app`'s grant never persists — it re-prompts on every launch,
-and adopting it would make every action fail. When that happens octet falls back
-to the direct runtime automatically, which is the supported default.
+A missing or unusable macOS host never silently falls back when cursor support
+is required. `OCTET_CUA_DESKTOP_APP` is an explicit developer override; no
+`/Applications/OctetComputerUse.app` dependency is introduced by default.
 
-Set `OCTET_CUA_DESKTOP_HOST=0` to force the direct runtime, or `=1` to require
-the desktop host.
+### Developer override: build the octet host app (macOS)
 
-### Optional: build the octet host app (macOS, agent cursor)
-
-The cursor overlay needs an AppKit main thread with Window Server access, which
-only a real application can provide. This bundle ships a small host app that
-supplies exactly that and nothing else: it starts `cua-driver serve` under its
-own permission identity and never shows a window or takes focus.
+This repository contains a small optional host app for development and testing.
+It is not selected by default. To explicitly use it, build/install it and set
+`OCTET_CUA_DESKTOP_APP=/Applications/OctetComputerUse.app` before starting octet.
+The app supplies an AppKit main thread and starts `cua-driver serve` under its
+own permission identity.
 
 ```console
 bash extensions/octet-computer-use/build-host-app.sh --install
@@ -90,9 +88,9 @@ codesigning identity it finds. Pass `--ad-hoc` for a throwaway build (its
 permission grant resets on every rebuild) or `--identity "..."` to choose one.
 
 The host installs to its own identity rather than Cua's `com.trycua.driver`, so
-its permission grants cannot be confused with Cua's own app. When the host is
-present but not running, octet starts it in the background once; if it still
-cannot prove its grant, octet uses the direct runtime instead.
+its permission grants cannot be confused with Cua's own app. It is never selected
+unless named with `OCTET_CUA_DESKTOP_APP`; if selected but unavailable, macOS
+computer use fails closed rather than falling back silently.
 
 **Menu bar indicator.** Once running, the host shows a pointer glyph in the menu
 bar. It is grey while idle and turns orange while an agent session is live, so
@@ -135,16 +133,9 @@ cua-driver permissions grant
 cua-driver permissions status --json
 ```
 
-After this, `permissions status` reports `source.attribution: "driver-daemon"`
-and the grants survive respawns and reboots. This bundle starts the host through
-LaunchServices for exactly this reason, and prefers Cua's signed, notarized app
-whenever it is installed.
-
-Octet's own host (`build-host-app.sh`) is a fallback for when the official app is
-absent or its grant will not take. It is not the default: an unnotarized app that
-asks for screen recording and Accessibility is a poor thing to hand a user, so
-Cua's signed app is adopted first. The app is optional; without any usable host
-octet uses the direct runtime.
+After this, `permissions status` reports `source.attribution: "driver-daemon"` and
+the grants survive respawns and reboots. The extension uses the signed Cua host's
+daemon permission probe and fails closed if the selected host cannot establish them.
 
 ## Confirmation and safe mode
 
@@ -178,13 +169,16 @@ matters, run octet inside a VM.
 | `computer_use_windows` | `list_windows` | Read-only. |
 | `computer_use_window_state` | `get_window_state` | Read-only. Accessibility tree + screenshot. |
 | `computer_use_desktop_state` | `get_desktop_state` | Read-only. Full-screen capture. |
-| `computer_use_click` | `click` | **Confirmation required.** |
-| `computer_use_type_text` | `type_text` | **Confirmation required.** |
-| `computer_use_press_key` | `press_key` | **Confirmation required.** |
-| `computer_use_scroll` | `scroll` | **Confirmation required.** |
-| `computer_use_launch_app` | `launch_app` | **Confirmation required.** |
-| `computer_use_start_session` | `start_session` | **Confirmation required.** |
-| `computer_use_end_session` | `end_session` | **Confirmation required.** |
+| `computer_use_click` | `click` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_type_text` | `type_text` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_press_key` | `press_key` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_hotkey` | `hotkey` | Bounded key chord to a named window. |
+| `computer_use_invoke_menu` | `invoke_menu` | Exact accessible menu path; ambiguous items fail closed. |
+| `computer_use_move_cursor` | `move_cursor` | Moves only the visible overlay, within a named window. |
+| `computer_use_scroll` | `scroll` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_launch_app` | `launch_app` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_start_session` | `start_session` | Starts/switches the session used by later driver actions. |
+| `computer_use_end_session` | `end_session` | Ends the active action session. |
 
 The driver publishes a much larger catalog (58 tools on macOS at the time of
 writing). This bundle republishes a small, reviewed subset so octet's tool
@@ -193,23 +187,35 @@ forwarded; an unrecognised argument is dropped rather than passed through.
 
 ## Safety model
 
-- **Confirmation on effect.** Every driver action that is not annotated
-  `readOnlyHint: true` requires an explicit user confirmation before it is
-  dispatched. A declined, cancelled, or unavailable confirmation denies the
-  call — the agent never proceeds on assumption. A tool the driver has not
-  described is treated as effectful.
-- **Read-only means read-only.** Only `list_apps`, `list_windows`,
-  `get_window_state`, and `get_desktop_state` run without a prompt.
-- **Least environment.** The driver child receives only reviewed, non-secret
-  desktop session variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
-  and the documented equivalents). Provider tokens, `PATH` overrides, and
-  arbitrary ambient variables are not forwarded.
-- **No secrets, no silent installs.** The bundle never types credentials for
-  you and never downloads a driver outside the standard package install you
-  trigger. OS permissions are always yours to grant.
-- **Re-snapshot before acting.** Element indices are replaced by the next
-  window snapshot, so read state before each indexed action. The bundled skill
-  documents the full observe-act-verify loop.
+- **Effect confirmation follows Octet's policy.** In a gated profile (or with
+  `OCTET_CUA_CONFIRM=1`), effectful calls require approval and declined,
+  unavailable, or failed confirmation denies dispatch. Full-access mode does not
+  add per-action prompts by default; `OCTET_CUA_CONFIRM=0` explicitly disables
+  them even in a gated profile. Unknown driver tools are treated as effectful.
+- **Read-only observations.** Observation tools use the driver's read-only
+  classification and do not prompt; actual permission or capture errors remain
+  visible to the caller.
+- **Targeted cursor feedback.** On the macOS host, cursor enablement and motion
+  are verified before any tool call is reported ready. The public cursor-move
+  tool requires a window target and window-local coordinates and cannot move the
+  real OS pointer.
+- **One action session.** Cursor setup, public session start/end, and eligible
+  driver actions share one driver session; ending it clears the binding so a
+  subsequent action must establish a new session.
+- **Bounded outputs.** Text and structured driver output are bounded below
+  Octet's 256 KiB structured-content limit while preserving window IDs, snapshot
+  IDs, element tokens, and coordinates. Screenshots are published as artifacts,
+  not inlined as base64.
+- **Least environment.** The driver receives only reviewed, non-secret desktop
+  session variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and the
+  documented equivalents). Provider tokens, `PATH` overrides, and arbitrary
+  ambient variables are not forwarded.
+- **No secrets, no silent installs.** The bundle never types credentials for you
+  and never downloads a driver outside the standard package install you trigger.
+  OS permissions are always yours to grant.
+- **Re-snapshot before acting.** Element indices are replaced by the next window
+  snapshot, so read state before each indexed action. The bundled skill documents
+  the full observe-act-verify loop.
 
 ## Relationship to octet-browse
 

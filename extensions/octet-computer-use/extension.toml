@@ -2,7 +2,7 @@ name = "octet-computer-use"
 version = "0.8.0"
 api_version = "0.4"
 requires_octet = "=0.8.1-rc.1"
-description = "Native computer use on macOS, Windows, and Linux through a locally installed MIT-licensed Cua Driver, with confirmation on every effectful action"
+description = "Native computer use through Cua Driver with window-scoped cursor feedback and Octet's effect-confirmation policy"
 
 [entrypoint]
 command = "extension.py"
@@ -48,6 +48,9 @@ tools = [
   "computer_use_click",
   "computer_use_type_text",
   "computer_use_press_key",
+  "computer_use_hotkey",
+  "computer_use_invoke_menu",
+  "computer_use_move_cursor",
   "computer_use_scroll",
   "computer_use_launch_app",
   "computer_use_start_session",

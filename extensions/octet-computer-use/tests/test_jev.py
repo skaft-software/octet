@@ -125,6 +125,21 @@ class JevChoiceTests(unittest.TestCase):
                 goal="open calc", candidates=[Candidate("calc", "Open Calculator")], api_key="k"
             )
 
+    def test_low_confidence_real_choice_fails_closed(self):
+        _stub(_StubAnswer("calc", 0.2, {"calc": 0.2, REOBSERVE: 0.8}))
+        with self.assertRaises(JevContractError):
+            choose_action(goal="open calc", candidates=[Candidate("calc", "Open Calculator")], api_key="k")
+
+    def test_invalid_confidence_and_probability_values_fail_closed(self):
+        for confidence in (-0.1, 1.1, float("nan"), True):
+            with self.subTest(confidence=confidence):
+                _stub(_StubAnswer("calc", confidence, {"calc": 0.9}))
+                with self.assertRaises(JevContractError):
+                    choose_action(goal="open calc", candidates=[Candidate("calc", "Open Calculator")], api_key="k")
+        _stub(_StubAnswer("calc", 0.9, {"invented": 0.9}))
+        with self.assertRaises(JevContractError):
+            choose_action(goal="open calc", candidates=[Candidate("calc", "Open Calculator")], api_key="k")
+
     def test_reserved_reobserve_is_accepted(self):
         _stub(_StubAnswer(REOBSERVE, 0.4, {REOBSERVE: 0.4}))
         choice = choose_action(

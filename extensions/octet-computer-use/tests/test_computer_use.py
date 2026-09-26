@@ -50,6 +50,89 @@ class SanitizeTests(unittest.TestCase):
         self.assertEqual(forwarded["urls"], ["https://example.invalid"])
         with self.assertRaises(ArgumentError):
             sanitize("launch_app", {"urls": [{"nested": True}]})
+        with self.assertRaises(ArgumentError):
+            sanitize("launch_app", {"urls": ["https://example.invalid"] * 9})
+
+    def test_hotkey_menu_and_cursor_inputs_are_bounded_and_typed(self):
+        self.assertEqual(
+            sanitize("hotkey", {"keys": ["CTRL", "S"], "snapshot_id": "snap-1"}),
+            {"keys": ["CTRL", "S"], "snapshot_id": "snap-1"},
+        )
+        self.assertEqual(
+            sanitize("invoke_menu", {"pid": 12, "window_id": 3, "path": ["File", "Save"]})["path"],
+            ["File", "Save"],
+        )
+        self.assertEqual(
+            sanitize("move_cursor", {"pid": 12, "window_id": 3, "x": 15, "y": 20}),
+            {"pid": 12, "window_id": 3, "x": 15, "y": 20},
+        )
+        with self.assertRaises(ArgumentError):
+            sanitize("hotkey", {"keys": "CTRL+S"})
+        with self.assertRaises(ArgumentError):
+            sanitize("invoke_menu", {"path": [""]})
+        with self.assertRaises(ArgumentError):
+            sanitize("move_cursor", {"x": -1})
+
+    def test_click_preserves_snapshot_and_capture_handles(self):
+        from octet_computer_use.entrypoint import _schema_for
+
+        values = {"pid": 12, "window_id": 3, "element_index": 4,
+                  "snapshot_id": "s00000001", "capture_id": "capture-1"}
+        self.assertEqual(sanitize("click", values), values)
+        schema = _schema_for("click")
+        self.assertEqual(schema["properties"]["snapshot_id"]["maxLength"], 128)
+        self.assertIn("capture_id", schema["properties"])
+        self.assertEqual(_schema_for("move_cursor")["properties"]["x"]["minimum"], 0)
+        self.assertEqual(_schema_for("get_window_state")["properties"]["max_elements"]["maximum"],
+                         service.MAX_ELEMENTS)
+
+    def test_jev_arrays_are_projected_to_typed_bounds(self):
+        clean = sanitize("jev_choose", {
+            "goal": "open settings",
+            "candidates": [{"identifier": "settings", "description": "Open Settings"}],
+            "regions": [{"id": "r1", "role": "button", "label": "Settings", "enabled": True,
+                         "geometry": {"x": 2}}],
+            "history": ["observed settings button"],
+            "unexpected": "dropped",
+        })
+        self.assertEqual(clean["candidates"], [{"identifier": "settings", "description": "Open Settings"}])
+        self.assertEqual(clean["regions"], [{"id": "r1", "role": "button", "label": "Settings", "enabled": True}])
+        self.assertNotIn("unexpected", clean)
+        with self.assertRaises(ArgumentError):
+            sanitize("jev_choose", {"goal": "x", "candidates": [{"identifier": "a", "description": "a"}],
+                                     "history": "not an array"})
+
+    def test_oversized_structured_state_keeps_targeting_metadata_under_host_limit(self):
+        from octet_computer_use.service import bound_structured_content, _json_size
+
+        snapshot = {
+            "snapshot_id": "snap-1", "pid": 42, "window_id": 7,
+            "elements": [{"element_index": i, "element_token": f"snap-1:{i}",
+                          "role": "AXButton", "label": "x" * 1000,
+                          "frame": {"x": i, "y": 0, "w": 10, "h": 10},
+                          "value": "v" * 1000} for i in range(1000)],
+            "markdown": "m" * 500000,
+        }
+        bounded = bound_structured_content(snapshot)
+        self.assertLessEqual(_json_size(bounded), service.STRUCTURED_CONTENT_BUDGET)
+        self.assertEqual(bounded["snapshot_id"], "snap-1")
+        self.assertEqual(bounded["window_id"], 7)
+        self.assertTrue(bounded["truncated"])
+        self.assertIn("element_token", bounded["elements"][0])
+
+    def test_pathological_target_labels_cannot_exceed_host_limit(self):
+        from octet_computer_use.service import bound_structured_content, _json_size
+
+        bounded = bound_structured_content({
+            "snapshot_id": "snap-2",
+            "pid": 42,
+            "window_id": 7,
+            "title": "t" * 500_000,
+        })
+        self.assertLessEqual(_json_size(bounded), service.STRUCTURED_CONTENT_BUDGET)
+        self.assertEqual(bounded["snapshot_id"], "snap-2")
+        self.assertEqual(bounded["window_id"], 7)
+        self.assertTrue(bounded["truncated"])
 
 
 class SummarizeTests(unittest.TestCase):
@@ -282,13 +365,10 @@ class VersionSpecTests(unittest.TestCase):
 
 
 class PermissionProbeTests(unittest.TestCase):
-    """Permission truth must come from the live direct session, not the CLI.
+    """Permission truth comes from the selected live MCP session, not the CLI.
 
-    ``cua-driver permissions status`` only answers from a CuaDriver daemon. The
-    pip-provisioned macOS path ships a bare binary and never installs
-    ``/Applications/CuaDriver.app``, so the CLI probe reported ``unknown`` even
-    when both grants were present. The direct MCP session sees the real host
-    state, so that is what the bundle must use.
+    The CLI can report unknown for a direct runtime or an alternate app host;
+    check_permissions reports the actual selected runtime's grant state.
     """
 
     def _state(self, accessibility, screen_recording, raises=None):
@@ -370,6 +450,25 @@ class StatusRowTests(unittest.TestCase):
         statuses = self._publish({"installed": False})
         self.assertIn("not set up", statuses[0]["label"])
 
+    def test_unverified_cursor_never_reports_ready(self):
+        statuses = self._publish({"installed": True, "runtime": "desktop-host",
+                                  "permissions": "granted", "cursor_enabled": False})
+        self.assertEqual(statuses[0], {"state": "pending", "label": "computer use · cursor not verified"})
+
+    def test_cursor_start_failure_cannot_retain_a_granted_health_probe(self):
+        from unittest import mock
+
+        computer = ComputerUse(RecordingExtension())
+        health = mock.Mock()
+        health.as_dict.return_value = {"installed": True, "runtime": "desktop-host",
+                                       "permissions": "granted", "cursor_enabled": False,
+                                       "doctor_ok": True}
+        with mock.patch.object(entrypoint.driver_module, "health", return_value=health), \
+             mock.patch.object(computer, "client", side_effect=McpError("cursor refused")):
+            report = computer.status()
+        self.assertEqual(report["permissions"], "unknown")
+        self.assertFalse(report["doctor_ok"])
+
     def test_a_host_without_the_status_surface_still_reports(self):
         computer_use = ComputerUse(RecordingExtension())
         computer_use.status = lambda **_: {"installed": True, "permissions": "granted"}
@@ -417,18 +516,37 @@ class StatusRowTests(unittest.TestCase):
         )
         self.assertIn("runtime: desktop host", host)
         self.assertIn("cursor", host)
+        unavailable = _render_status({"installed": True, "runtime": "unavailable"})
+        self.assertIn("that host", unavailable)
+        self.assertNotIn("app you run octet from", unavailable)
+        denied_host = _render_status({"installed": True, "runtime": "desktop-host",
+                                      "permissions": "denied"})
+        self.assertIn("selected Cua Driver desktop host", denied_host)
+        self.assertNotIn("app you run octet from", denied_host)
 
-    def test_health_reports_direct_runtime_without_a_usable_host(self):
+    def test_runtime_selection_fails_closed_by_default_on_macos(self):
+        # The permission fix differs per runtime, so a user must be able to see
+        # which one is live instead of guessing.
+        from unittest import mock
         from octet_computer_use import driver
 
-        original = driver.desktop_app_usable
+        original_env = os.environ.get("OCTET_CUA_DESKTOP_HOST")
         try:
-            driver.desktop_app_usable = lambda binary=None: False
-            self.assertEqual(driver.active_runtime(), "direct")
-            driver.desktop_app_usable = lambda binary=None: True
-            self.assertEqual(driver.active_runtime(), "desktop-host")
+            with mock.patch.object(driver.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(driver, "desktop_app_usable", return_value=False):
+                os.environ["OCTET_CUA_DESKTOP_HOST"] = "0"
+                self.assertEqual(driver.active_runtime(), "direct")
+                os.environ["OCTET_CUA_DESKTOP_HOST"] = "1"
+                self.assertEqual(driver.active_runtime(), "unavailable")
+            with mock.patch.object(driver.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(driver, "desktop_app_usable", return_value=True):
+                os.environ["OCTET_CUA_DESKTOP_HOST"] = "1"
+                self.assertEqual(driver.active_runtime(), "desktop-host")
         finally:
-            driver.desktop_app_usable = original
+            if original_env is None:
+                os.environ.pop("OCTET_CUA_DESKTOP_HOST", None)
+            else:
+                os.environ["OCTET_CUA_DESKTOP_HOST"] = original_env
 
     def test_granted_status_stops_short(self):
         text = _render_status(
@@ -446,8 +564,118 @@ class StatusRowTests(unittest.TestCase):
         self.assertIn("/computer-use setup", _render_status({"installed": False}))
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+
+class CursorSessionTests(unittest.TestCase):
+    class _CursorClient:
+        started = True
+
+        def __init__(self, *, enabled=True, fail_tool=None):
+            self.enabled = enabled
+            self.fail_tool = fail_tool
+            self.calls = []
+
+        def call(self, tool, arguments=None, **kwargs):
+            args = dict(arguments or {})
+            self.calls.append((tool, args))
+            if tool == self.fail_tool:
+                return {"isError": True, "content": [{"type": "text", "text": "rejected"}]}
+            if tool == "get_agent_cursor_state":
+                return {"structuredContent": {"enabled": self.enabled,
+                                               "motion": {"glide_duration_ms": 180.0}}}
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+        def requires_confirmation(self, tool):
+            return False
+
+        def tools(self):
+            return []
+
+        def close(self):
+            self.started = False
+
+    def _computer(self, *, enabled=True, fail_tool=None):
+        computer = ComputerUse(RecordingExtension())
+        client = self._CursorClient(enabled=enabled, fail_tool=fail_tool)
+        computer._client = client
+        computer._app_daemon = True
+        return computer, client
+
+    def test_initialization_and_window_action_share_the_verified_session(self):
+        original = os.environ.get("OCTET_CUA_CONFIRM")
+        os.environ["OCTET_CUA_CONFIRM"] = "0"
+        try:
+            computer, client = self._computer()
+            computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        finally:
+            if original is None:
+                os.environ.pop("OCTET_CUA_CONFIRM", None)
+            else:
+                os.environ["OCTET_CUA_CONFIRM"] = original
+        session = computer._cursor_session
+        self.assertEqual(session, entrypoint.cursor_session())
+        self.assertTrue(computer._cursor_ready)
+        for tool in ("start_session", "set_agent_cursor_motion", "set_agent_cursor_enabled",
+                     "get_agent_cursor_state", "click"):
+            args = next(args for name, args in client.calls if name == tool)
+            if tool == "click":
+                self.assertEqual(args["session"], session)
+            elif tool != "start_session":
+                self.assertEqual(args["session"], session)
+
+    def test_explicit_session_switch_end_and_reinitialization(self):
+        original = os.environ.get("OCTET_CUA_CONFIRM")
+        os.environ["OCTET_CUA_CONFIRM"] = "0"
+        try:
+            computer, client = self._computer()
+            computer.call("press_key", {"pid": 17, "window_id": 5, "key": "ENTER"})
+            computer.call("start_session", {"session": "review-session"})
+            computer.call("press_key", {"pid": 17, "window_id": 5, "key": "ENTER"})
+            computer.call("end_session", {"session": "review-session"})
+            computer.call("press_key", {"pid": 17, "window_id": 5, "key": "ENTER"})
+        finally:
+            if original is None:
+                os.environ.pop("OCTET_CUA_CONFIRM", None)
+            else:
+                os.environ["OCTET_CUA_CONFIRM"] = original
+
+        dispatched = [(tool, args) for tool, args in client.calls if tool == "press_key"]
+        self.assertEqual([args["session"] for _tool, args in dispatched],
+                         [entrypoint.cursor_session(), "review-session", entrypoint.cursor_session()])
+        self.assertTrue(any(tool == "end_session" and args.get("session") == "review-session"
+                            for tool, args in client.calls))
+
+    def test_cursor_initialization_failure_fails_closed_before_action(self):
+        computer, client = self._computer(enabled=False)
+        with self.assertRaises(McpError):
+            computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        self.assertFalse(computer._cursor_ready)
+        self.assertNotIn("click", [tool for tool, _args in client.calls])
+
+    def test_cursor_driver_error_is_not_reported_as_ready(self):
+        computer, client = self._computer(fail_tool="set_agent_cursor_enabled")
+        with self.assertRaises(McpError):
+            computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        self.assertFalse(computer._cursor_ready)
+        self.assertNotIn("click", [tool for tool, _args in client.calls])
+
+    def test_move_cursor_is_window_scoped_and_uses_driver_target_shape(self):
+        original = os.environ.get("OCTET_CUA_CONFIRM")
+        os.environ["OCTET_CUA_CONFIRM"] = "0"
+        try:
+            computer, client = self._computer()
+            computer.call("move_cursor", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        finally:
+            if original is None:
+                os.environ.pop("OCTET_CUA_CONFIRM", None)
+            else:
+                os.environ["OCTET_CUA_CONFIRM"] = original
+        _tool, arguments = next((tool, args) for tool, args in client.calls if tool == "move_cursor")
+        self.assertEqual(arguments["target"], {"kind": "window", "pid": 17, "window_id": 5})
+        self.assertEqual(arguments["scope"], "window")
+        self.assertNotIn("pid", arguments)
+        self.assertNotIn("window_id", arguments)
+        self.assertEqual(arguments["session"], computer._cursor_session)
 
 
 class ResultFidelityTests(unittest.TestCase):
@@ -472,6 +700,15 @@ class ResultFidelityTests(unittest.TestCase):
         self.assertEqual(summary["image_count"], 1)
         self.assertEqual(len(summary["images"]), 1)
         self.assertEqual(summary["images"][0]["data"], "QUJD")
+
+    def test_failed_screenshot_publication_is_visible(self):
+        computer = ComputerUse(RecordingExtension())  # no artifact publisher
+        result = computer._format_result("get_window_state", {
+            "content": [{"type": "text", "text": "window captured"},
+                        {"type": "image", "data": "QUJD", "mimeType": "image/png"}],
+        })
+        self.assertTrue(any("could not be delivered" in part.get("text", "")
+                            for part in result["content"]))
 
     def test_structured_payload_survives_the_summary(self):
         from octet_computer_use.service import summarize_result
@@ -589,11 +826,10 @@ class TargetingHintTests(unittest.TestCase):
 
 
 class DesktopHostTests(unittest.TestCase):
-    """The desktop host is preferred when present, and is optional.
+    """macOS requires the selected host unless direct mode is explicit.
 
-    The host owns the OS permission identity and the GUI main thread, which is
-    what lets the driver draw the agent cursor. Without it the direct runtime
-    still drives the desktop; only the overlay is unavailable.
+    The host owns the OS permission identity and the GUI main thread needed
+    for the agent cursor. A missing or ungranted required host fails closed.
     """
 
     def test_desktop_app_is_found_only_when_installed(self):
@@ -683,85 +919,70 @@ class DesktopHostTests(unittest.TestCase):
             finally:
                 driver.DESKTOP_APP_CANDIDATES = original
 
-    def test_shipped_candidate_order_prefers_cuas_signed_app(self):
-        # Cua's notarized app is the only desktop host a user can be asked to
-        # trust and install, so it must be preferred over octet's self-signed
-        # fallback whenever it is present. Octet's host is still accepted when
-        # the official app is absent, and its identifier is distinct so the two
-        # never share a TCC row.
+    def test_shipped_candidate_is_only_the_signed_cua_app(self):
         from octet_computer_use import driver
 
-        order = driver.DESKTOP_APP_CANDIDATES["darwin"]
-        self.assertLess(
-            order.index("/Applications/CuaDriver.app"),
-            order.index("/Applications/OctetComputerUse.app"),
-            "Cua's signed app must be preferred over octet's self-signed host",
-        )
+        self.assertEqual(driver.DESKTOP_APP_CANDIDATES["darwin"], ("/Applications/CuaDriver.app",))
 
-    def test_unusable_host_falls_back_to_the_direct_runtime(self):
-        # A host whose macOS grant never persists reports ``unknown`` and
-        # re-prompts on every launch. Adopting it would make every tool call
-        # fail, so the direct runtime - which inherits the calling host's grants
-        # - must be chosen instead.
+    def test_unusable_host_is_unavailable_when_cursor_is_required(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        original_env = os.environ.get("OCTET_CUA_DESKTOP_HOST")
+        try:
+            os.environ.pop("OCTET_CUA_DESKTOP_HOST", None)
+            with mock.patch.object(driver.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(driver, "desktop_app_binary", return_value=None), \
+                 mock.patch.object(driver, "installed_binary") as direct_binary:
+                computer = ComputerUse(RecordingExtension())
+                with self.assertRaises(McpError) as caught:
+                    computer.client()
+                self.assertIn("refusing to fall back", str(caught.exception))
+                direct_binary.assert_not_called()
+        finally:
+            if original_env is None:
+                os.environ.pop("OCTET_CUA_DESKTOP_HOST", None)
+            else:
+                os.environ["OCTET_CUA_DESKTOP_HOST"] = original_env
+
+    def test_direct_runtime_is_used_only_after_explicit_opt_out(self):
+        from unittest import mock
         from octet_computer_use import driver
         from octet_computer_use.driver_client import DriverClient
 
-        original_status = driver._permission_status
-        original_binary = driver.desktop_app_binary
+        original_env = os.environ.get("OCTET_CUA_DESKTOP_HOST")
         original_installed = driver.installed_binary
-        original_start = driver.start_desktop_app
-        original_perms = driver.desktop_app_permissions
+        original_desktop = driver.desktop_app_binary
+        original_usable = driver.desktop_app_usable
         try:
-            driver.desktop_app_permissions = lambda binary=None: "denied"
-            driver._permission_status = lambda binary: "unknown"
-            driver.desktop_app_binary = lambda app=None: Path("/Applications/CuaDriver.app")
+            os.environ["OCTET_CUA_DESKTOP_HOST"] = "0"
             driver.installed_binary = lambda paths: Path("/opt/cua-driver")
-            # Never launch a real app from a test: an ungranted host would
-            # otherwise be started for real by this assertion.
-            driver.start_desktop_app = lambda app=None: False
-            self.assertFalse(driver.desktop_app_usable())
-
-            computer = ComputerUse.__new__(ComputerUse)
-            computer._lock = __import__("threading").Lock()
-            computer._client = None
-            computer._app_daemon = False
-            computer._cursor_session = None
-            computer._extension = None
-            computer._paths = None
+            driver.desktop_app_binary = lambda app=None: Path("/Applications/CuaDriver.app")
+            driver.desktop_app_usable = lambda binary=None: False
             captured = {}
+
             class _FakeClient(DriverClient):
                 def __init__(self, binary, *, app_daemon=False, **kwargs):
                     captured["binary"] = binary
                     captured["app_daemon"] = app_daemon
                     self._started = True
+
                 def start(self, timeout=0.0):
                     self._started = True
-            entrypoint.DriverClient = _FakeClient
-            try:
-                computer.client()
-            finally:
-                entrypoint.DriverClient = DriverClient
+
+            with mock.patch.object(driver.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(entrypoint, "DriverClient", _FakeClient):
+                ComputerUse(RecordingExtension()).client()
             self.assertFalse(captured["app_daemon"])
             self.assertEqual(captured["binary"], Path("/opt/cua-driver"))
-
-            driver._permission_status = lambda binary: "granted"
-            driver.desktop_app_permissions = lambda binary=None: "granted"
-            captured.clear()
-            class _FakeHostClient(_FakeClient):
-                pass
-            entrypoint.DriverClient = _FakeHostClient
-            try:
-                computer._client = None
-                computer.client()
-            finally:
-                entrypoint.DriverClient = DriverClient
-            self.assertTrue(captured["app_daemon"])
         finally:
-            driver._permission_status = original_status
-            driver.desktop_app_binary = original_binary
             driver.installed_binary = original_installed
-            driver.start_desktop_app = original_start
-            driver.desktop_app_permissions = original_perms
+            driver.desktop_app_binary = original_desktop
+            driver.desktop_app_usable = original_usable
+            if original_env is None:
+                os.environ.pop("OCTET_CUA_DESKTOP_HOST", None)
+            else:
+                os.environ["OCTET_CUA_DESKTOP_HOST"] = original_env
 
     def test_ungranted_host_is_started_once_then_rejected(self):
         # A host that is installed but not running is the common case, not a
@@ -843,7 +1064,7 @@ class DesktopHostTests(unittest.TestCase):
             else:
                 os.environ["OCTET_CUA_DESKTOP_HOST"] = original
 
-    def test_missing_host_falls_back_to_the_direct_runtime(self):
+    def test_driver_client_records_direct_and_host_transport_modes(self):
         from octet_computer_use.driver_client import DriverClient
 
         direct = DriverClient("cua-driver")
@@ -865,15 +1086,13 @@ class DesktopHostTests(unittest.TestCase):
         self.assertEqual(name, cursor_session())
         self.assertIn(str(os.getpid()), name)
 
-    def test_cursor_motion_is_flat_and_instant(self):
-        # Motion removes lag only; the theme keeps the attention-grabbing
-        # per-action animations.
+    def test_cursor_motion_has_visible_nonzero_glide(self):
         from octet_computer_use.entrypoint import CURSOR_MOTION
 
         self.assertEqual(CURSOR_MOTION["arc_size"], 0.0)
-        self.assertEqual(CURSOR_MOTION["turn_radius"], 0.0)
-        self.assertEqual(CURSOR_MOTION["glide_duration_ms"], 0.0)
-        self.assertEqual(CURSOR_MOTION["dwell_after_click_ms"], 0.0)
+        self.assertEqual(CURSOR_MOTION["turn_radius"], 1.0)
+        self.assertGreater(CURSOR_MOTION["glide_duration_ms"], 0.0)
+        self.assertGreater(CURSOR_MOTION["dwell_after_click_ms"], 0.0)
         self.assertEqual(CURSOR_MOTION["spring"], 1.0)
 
     def test_daemon_socket_is_overridable(self):
@@ -884,3 +1103,7 @@ class DesktopHostTests(unittest.TestCase):
             self.assertEqual(str(daemon_socket()), "/tmp/custom.sock")
         finally:
             os.environ.pop("OCTET_CUA_DAEMON_SOCKET", None)
+
+
+if __name__ == "__main__":
+    unittest.main()

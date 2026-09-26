@@ -26,8 +26,11 @@ and the caller keeps its existing behavior.
 
 from __future__ import annotations
 
+import importlib
+import math
 import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -262,7 +265,7 @@ def _compact_regions(regions: Optional[Sequence[Mapping[str, Any]]]) -> List[Dic
     return compact
 
 
-def _import_sdk() -> Any:
+def _import_sdk(home: Optional[Path] = None) -> Any:
     """Import ``typesafe_sdk``, falling back to the driver's venv.
 
     The extension runs under octet's own interpreter, which is not guaranteed to
@@ -278,13 +281,10 @@ def _import_sdk() -> Any:
     except ImportError:
         pass
 
-    import importlib
-    import sys
-
     from octet_computer_use import driver as driver_module
 
     try:
-        site_packages = driver_module.DriverPaths.for_home().site_packages
+        site_packages = driver_module.DriverPaths.for_home(home).site_packages
     except Exception:  # noqa: BLE001 - any failure means "not available"
         raise JevUnavailable(
             "the optional typesafe-sdk is not installed in this runtime"
@@ -319,7 +319,7 @@ def sdk_installed(home: Optional[Path] = None) -> bool:
     """Whether the optional SDK is importable from either interpreter."""
 
     try:
-        _import_sdk()
+        _import_sdk(home)
     except JevUnavailable:
         return False
     return True
@@ -382,22 +382,28 @@ def choose_action(
             "Jev returned an action outside the offered candidates"
         )
 
-    confidence = answer.get("confidence")
-    confidence = float(confidence) if isinstance(confidence, (int, float)) else 0.0
+    if isinstance(confidence_floor, bool) or not isinstance(confidence_floor, (int, float)) or not math.isfinite(confidence_floor) or not 0 <= confidence_floor <= 1:
+        raise ValueError("confidence_floor must be a finite number between 0 and 1")
+
+    confidence_raw = answer.get("confidence")
+    if isinstance(confidence_raw, bool) or not isinstance(confidence_raw, (int, float)) or not math.isfinite(confidence_raw) or not 0 <= confidence_raw <= 1:
+        raise JevContractError("Jev returned invalid confidence")
+    confidence = float(confidence_raw)
     probabilities_raw = answer.get("probabilities")
     probabilities: Dict[str, float] = {}
+    if probabilities_raw is not None and not isinstance(probabilities_raw, Mapping):
+        raise JevContractError("Jev returned invalid probabilities")
     if isinstance(probabilities_raw, Mapping):
         for key_name, value in probabilities_raw.items():
-            if isinstance(value, (int, float)):
-                probabilities[str(key_name)] = float(value)
+            if str(key_name) not in allowed:
+                raise JevContractError("Jev returned probabilities for an unoffered action")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise JevContractError("Jev returned invalid probabilities")
+            probabilities[str(key_name)] = float(value)
 
-    # A diffuse distribution is not permission to act. Surface it, but let the
-    # caller decide; the floor is advisory and the choice itself is still valid.
     choice = Choice(identifier=identifier, confidence=confidence, probabilities=probabilities)
     if choice.identifier not in RESERVED_IDS and choice.confidence < confidence_floor:
-        # Return the choice but make the low confidence explicit so a caller that
-        # ignores the floor still sees the evidence via probabilities.
-        pass
+        raise JevContractError("Jev choice confidence is below the configured threshold")
     return choice
 
 
@@ -428,11 +434,7 @@ def _extract_choice(response: Any) -> Mapping[str, Any]:
 def status(*, home: Optional[Path] = None) -> Dict[str, Any]:
     """Non-secret readiness for the optional Jev integration."""
 
-    has_sdk = True
-    try:
-        import typesafe_sdk  # noqa: F401
-    except ImportError:
-        has_sdk = False
+    has_sdk = sdk_installed(home)
     key = resolve_key(home=home)
     from_env = bool(os.environ.get(API_KEY_ENV, "").strip())
     return {

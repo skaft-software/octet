@@ -348,10 +348,11 @@ class Health:
     permissions: str
     doctor_ok: bool
     detail: str
-    #: Which runtime the tools will actually use: ``direct`` or ``desktop-host``.
-    #: The direct runtime inherits the calling host's grants and is the shipped
-    #: default; the desktop host is optional and adds only the agent cursor.
     runtime: str = "direct"
+    runtime_binary: Optional[str] = None
+    host_app: Optional[str] = None
+    cursor_available: bool = False
+    cursor_enabled: bool = False
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -361,49 +362,44 @@ class Health:
             "doctor_ok": self.doctor_ok,
             "detail": self.detail,
             "runtime": self.runtime,
+            "runtime_binary": self.runtime_binary,
+            "host_app": self.host_app,
+            "cursor_available": self.cursor_available,
+            "cursor_enabled": self.cursor_enabled,
         }
 
 
+def desktop_host_requested() -> bool:
+    """Whether desktop-host mode was selected, preserving the explicit opt-out."""
+
+    override = os.environ.get("OCTET_CUA_DESKTOP_HOST")
+    if override is not None:
+        return override.strip().lower() not in ("0", "false", "no", "off")
+    return True
+
+
+def cursor_host_required() -> bool:
+    """macOS defaults to the signed app host because that is the cursor runtime."""
+
+    return platform.system().lower() == "darwin" and desktop_host_requested()
+
+
 def active_runtime() -> str:
-    """Which runtime the tools will use right now.
+    """Return the runtime that can actually be used, or ``unavailable``."""
 
-    Kept in one place so the status surface and the client cannot disagree about
-    which path is live.
-    """
+    requested = desktop_host_requested()
+    if requested and desktop_app_usable():
+        return "desktop-host"
+    if cursor_host_required():
+        return "unavailable"
+    return "direct"
 
-    return "desktop-host" if desktop_app_usable() else "direct"
 
-
-# A desktop host, when installed, owns the OS permission identity and the GUI
-# main thread. On macOS that is the only thing that can draw the agent cursor:
-# the overlay needs a certified AppKit main thread and Window Server access that
-# a terminal-hosted process does not have. ChatGPT.app takes the same shape - it
-# embeds the driver inside a signed app and inherits that app's TCC grants.
-#
-# Cua ships its own signed macOS bundles and octet can also build one. All are
-# installed by their own tooling; octet uses whichever is present rather than
-# shipping a driver binary of its own.
-#
-#   /Applications/CuaDriver.app         Cua release build, com.trycua.driver,
-#                                      Developer ID signed and notarized
-#   /Applications/OctetComputerUse.app  octet's host, com.octet.computeruse
-#   /Applications/CuaDriverLocal.app    Cua source build, com.trycua.driver.local
-#
-# Identifiers are deliberately distinct: sharing one would merge TCC rows, so
-# whichever app installed last would inherit permissions granted for the other.
+# The signed Cua Driver app supplies the macOS daemon, permissions identity,
+# AppKit host, and agent-cursor overlay. Other local host builds are developer
+# overrides only via OCTET_CUA_DESKTOP_APP; they are never silently selected.
 DESKTOP_APP_CANDIDATES: Dict[str, Tuple[str, ...]] = {
-    "darwin": (
-        # Cua's own signed, notarized release app is the preferred host. It is
-        # the only desktop host a user can be asked to trust and ship, so it
-        # must win whenever it is installed.
-        "/Applications/CuaDriver.app",
-        # Octet's self-signed host is a fallback, not the default. It works, but
-        # an unnotarized app asking for screen recording and Accessibility is a
-        # poor thing to hand a user, so it is only adopted when the official app
-        # is absent or cannot keep its grant.
-        "/Applications/OctetComputerUse.app",
-        "/Applications/CuaDriverLocal.app",
-    ),
+    "darwin": ("/Applications/CuaDriver.app",),
     "win32": (os.path.expandvars(r"%LOCALAPPDATA%\\CuaDriver\\CuaDriver.exe"),),
 }
 
@@ -438,10 +434,10 @@ def _bundle_executable_name(app: Path) -> Optional[str]:
 
 
 def desktop_app() -> Optional[Path]:
-    """The installed CuaDriver desktop host, when one is present.
+    """The selected desktop host, if present.
 
-    Absence is not an error: the direct runtime still drives the desktop, it
-    just has no cursor overlay and keeps permissions on the calling process.
+    macOS selects the signed Cua Driver app by default. An alternate host is
+    considered only when explicitly named with OCTET_CUA_DESKTOP_APP.
     """
 
     override = os.environ.get("OCTET_CUA_DESKTOP_APP")
@@ -512,9 +508,9 @@ def desktop_app_display_name(app: Optional[Path] = None) -> Optional[str]:
 def start_desktop_app(app: Optional[Path] = None) -> bool:
     """Launch a desktop host if it is installed but not already running.
 
-    Best-effort: the caller still works without it, because the direct runtime
-    drives the desktop on its own. A host that cannot be launched is not an
-    error, it just means no cursor.
+    Best-effort: when this host is required, failure to launch is reported as
+    unavailable rather than silently switching to a cursorless runtime. The
+    explicit direct-runtime opt-out can still operate without the host.
     """
 
     host = app or desktop_app()
@@ -575,8 +571,8 @@ def desktop_app_permissions(binary: Optional[Path] = None) -> str:
         client.start(timeout=DESKTOP_PROBE_TIMEOUT_SECONDS)
         result = client.call("check_permissions", {})
     except Exception:
-        # Probing must never be the reason a tool call fails: an unreachable
-        # daemon is reported as unknown so the caller falls back cleanly.
+        # An unreachable daemon is unknown; runtime selection decides whether
+        # to fail closed or use an explicitly selected direct mode.
         return "unknown"
     finally:
         try:
@@ -603,13 +599,13 @@ def desktop_app_usable(binary: Optional[Path] = None) -> bool:
 
     An installed host is not automatically a working one. The macOS grant can
     install and then fail to persist, in which case the host re-prompts on every
-    launch and every tool call comes back ``permissions_pending``. Adopting such a
-    host would be worse than not having one, because the direct runtime inherits
-    the calling host's grants and works immediately.
+    launch and every tool call comes back ``permissions_pending``. Such a host's
+    cursor cannot be trusted; direct mode is a separate, explicit choice.
 
-    So treat a non-granted host as unusable and let the caller fall back. This
-    only ever *narrows* host use: an app that cannot prove its grants is never
-    silently trusted to hold the agent cursor.
+    So treat a non-granted host as unusable. On macOS, the default policy then
+    reports computer use as unavailable rather than silently switching to a
+    cursorless direct runtime; direct mode is available only when explicitly
+    selected by the user or on platforms that do not require the cursor host.
     """
 
     if binary is None:
@@ -632,16 +628,15 @@ def desktop_app_usable(binary: Optional[Path] = None) -> bool:
 
 
 def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
-    """Report the host's real TCC state over the live ``--direct`` MCP channel.
+    """Report the host's real TCC state over the selected live MCP channel.
 
     ``cua-driver permissions status`` only answers from a CuaDriver *daemon*, so
-    on the pip-provisioned macOS path - which ships a bare binary, never
-    ``/Applications/CuaDriver.app`` - it reports ``unknown`` even when both
-    grants are present. ``check_permissions`` over the already-running direct
-    session reports the responsible host's real state instead, which is the
-    process octet actually is. Pass ``prompt=True`` only from an explicit,
-    user-initiated setup: the driver never prompts in host-inherit mode, so the
-    macOS dialog is raised by this call on the host's behalf.
+    on the pip-provisioned direct path it reports ``unknown`` even when both
+    grants are present. ``check_permissions`` over the already-running selected
+    session reports the responsible host's real state instead. Pass
+    ``prompt=True`` only from an explicit, user-initiated setup: the driver never
+    prompts in host-inherit mode, so the macOS dialog is raised by this call on
+    the host's behalf.
     """
 
     arguments: Dict[str, Any] = {"prompt": bool(prompt)}
@@ -685,16 +680,36 @@ def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
 
 
 def health(paths: DriverPaths) -> Health:
-    """Report whether the driver is present and permitted, without prompting."""
+    """Report health for the exact binary selected for dispatch, without prompting."""
 
-    binary = installed_binary(paths)
+    runtime = active_runtime()
+    host = desktop_app() if runtime == "desktop-host" else None
+    binary = desktop_app_binary(host) if host is not None else (
+        installed_binary(paths) if runtime == "direct" else None
+    )
+    if runtime == "unavailable":
+        present = desktop_app_binary() is not None or installed_binary(paths) is not None
+        return Health(
+            installed=present,
+            version=None,
+            permissions="unknown",
+            doctor_ok=False,
+            detail=(
+                "The signed Cua Driver app is unavailable or lacks live permissions; "
+                "refusing to fall back to a cursorless direct runtime."
+            ),
+            runtime="unavailable",
+            host_app=str(desktop_app()) if desktop_app() else None,
+        )
     if binary is None:
         return Health(
             installed=False,
             version=None,
             permissions="unknown",
             doctor_ok=False,
-            detail=f"{DISTRIBUTION} is not provisioned yet",
+            detail=f"{DISTRIBUTION} is not provisioned for the selected runtime",
+            runtime=runtime,
+            host_app=str(host) if host else None,
         )
     version = driver_version(binary)
     permissions = _permission_status(binary)
@@ -716,5 +731,8 @@ def health(paths: DriverPaths) -> Health:
         permissions=permissions,
         doctor_ok=doctor_ok,
         detail=detail,
-        runtime=active_runtime(),
+        runtime=runtime,
+        runtime_binary=str(binary),
+        host_app=str(host) if host else None,
+        cursor_available=(runtime == "desktop-host"),
     )

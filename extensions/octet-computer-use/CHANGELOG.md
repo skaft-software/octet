@@ -4,6 +4,15 @@
 
 ### Added
 
+- `computer_use_hotkey`, `computer_use_invoke_menu`, and
+  `computer_use_move_cursor`. Cursor movement is restricted to an exact window
+  target and screenshot-local coordinates; it never moves the real OS pointer.
+- Bind cursor initialization and eligible actions to one session, and make
+  public session start/end operations switch or clear that action binding.
+- Bound candidate/region/history schemas and project oversized structured
+  snapshots below the host's 256 KiB limit while retaining targeting handles.
+- Keep Jev chooser-only: validate confidence and probabilities, reject low
+  confidence real actions, and never execute or verify its suggestion.
 - App icon for the macOS host, built from the designer's artwork in
   `host-app/Resources/AppIcon.png` by `host-app/Tools/make-iconset.swift`. The
   plate's extent is read from the source's alpha channel rather than guessed
@@ -28,27 +37,20 @@
   be confused. Verified on macOS 27: the grant survives a full host restart and
   the cursor renders, which the stock `CuaDriver.app` cannot do on that release.
   macOS-only, optional, and not installed by `octet extension install`.
-- Start an installed-but-idle desktop host once, in the background, when
-  choosing a runtime. If it still cannot prove its grant, octet falls back to the
-  direct runtime.
+- Start a selected desktop host in the background when needed. On macOS, if the
+  signed Cua host cannot prove its grant, runtime selection fails closed instead
+  of silently switching to direct mode.
 
 ### Changed
 
-- Make the `direct` runtime the shipped default. It runs inside octet's own
-  process and inherits the Accessibility and Screen Recording grants of the app
-  running octet, so a user needs no separate helper app, no extra bundle, and no
-  desktop-host install. `computer_use_status` now names the live runtime and
-  points at that app rather than at a helper.
-- Treat an installed desktop host as absent unless its own permissions are
-  live. On some macOS releases the host's grant never persists, so it re-prompts
-  on every launch and every action fails; the direct runtime works immediately
-  there. `OCTET_CUA_DESKTOP_HOST=0` forces the direct runtime, `=1` requires the
-  host.
-  Ask the host's own daemon for its grant state instead of `cua-driver
-  permissions status`. That CLI answers only for a daemon whose identity it
-  recognises and reports `unknown` for any other bundle, including octet's own
-  fully-granted host, so the cursor path was being silently skipped in the
-  running extension while looking correct under test.
+- Make the signed `/Applications/CuaDriver.app` the default macOS host because
+  it provides the permission identity and visible agent-cursor overlay. A missing
+  or ungranted host reports `unavailable`; macOS direct mode is an explicit
+  `OCTET_CUA_DESKTOP_HOST=0` opt-out, not an automatic fallback.
+- Require the selected macOS host to prove live permissions and report its
+  actual runtime/binary. Query the daemon's own permission state rather than the
+  CLI's incomplete status probe; do not report cursor readiness until the same
+  action session has cursor motion configured, enabled, and verified.
 - Resolve the installed macOS bundle's executable from its own
   `CFBundleExecutable` rather than assuming one layout, so the stock
   `CuaDriver.app` and the source-built `CuaDriverLocal.app` both work. The
@@ -74,9 +76,10 @@
 - Republish a reviewed subset of the driver's tools: `computer_use_installed_apps`,
   `computer_use_windows`, `computer_use_window_state`, `computer_use_desktop_state`
   (read-only) and `computer_use_click`, `computer_use_type_text`,
-  `computer_use_press_key`, `computer_use_scroll`, `computer_use_launch_app`,
-  `computer_use_start_session`, `computer_use_end_session` (each requiring an
-  explicit user confirmation). Only allowlisted, bounded arguments are forwarded.
+  `computer_use_press_key`, `computer_use_hotkey`, `computer_use_invoke_menu`,
+  `computer_use_move_cursor`, `computer_use_scroll`, `computer_use_launch_app`,
+  `computer_use_start_session`, and `computer_use_end_session`, forwarding only
+  allowlisted, bounded arguments.
 - Add a `computer-use` skill documenting the observe-act-verify loop, the
   confirmation boundary, and the manual-permission requirement.
 - Add deterministic tests for argument sanitisation, result bounding, the

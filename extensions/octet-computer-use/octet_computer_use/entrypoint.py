@@ -1,9 +1,8 @@
 """Bind the Cua Driver service to the octet extension API.
 
 Tool and command names are registered from :data:`service.PUBLISHED_TOOLS` so
-the manifest and the runtime cannot drift apart. Every effectful driver call
-passes through :meth:`ComputerUse._confirm` before it is dispatched, and an
-unavailable, declined, or failed confirmation denies the call.
+the manifest and the runtime cannot drift apart. Effectful driver calls follow
+the configured confirmation policy; failed or declined prompts deny dispatch.
 """
 
 from __future__ import annotations
@@ -41,6 +40,9 @@ _WINDOW_SCOPED_TOOLS = frozenset(
         "click",
         "type_text",
         "press_key",
+        "hotkey",
+        "invoke_menu",
+        "move_cursor",
         "scroll",
         "double_click",
         "drag",
@@ -50,8 +52,9 @@ _WINDOW_SCOPED_TOOLS = frozenset(
     }
 )
 
-# Driver tools addressed purely by desktop coordinates. These need no window.
-_COORDINATE_ONLY_TOOLS = frozenset({"move_cursor", "click"})
+# Click may be screen-coordinate addressed. The public move_cursor tool always
+# requires a named window; desktop scope is never exposed through it.
+_COORDINATE_ONLY_TOOLS = frozenset({"click"})
 
 # Driver tools that only observe. They are still gated by the driver's own
 # read-only classification, but a missing OS grant must not hide their failure
@@ -73,19 +76,15 @@ _PERMISSION_CACHE_SECONDS = 30.0
 # own identifier and ends the session on shutdown.
 CURSOR_SESSION_PREFIX = "octet-computer-use"
 
-# Straight-line, instant pointer travel. The theme's per-action animations are
-# left alone on purpose: they are how the driver draws the eye to an action, so
-# octet only removes the lag, not the signal.
+# A short, nonzero glide remains visible without delaying action feedback. The
+# driver clamps turn_radius to >=1 and glide_duration_ms to <=5000.
 CURSOR_MOTION: Dict[str, Any] = {
     "arc_size": 0.0,
-    "turn_radius": 0.0,
+    "turn_radius": 1.0,
     "arc_flow": 0.0,
     "spring": 1.0,
-    "glide_duration_ms": 0.0,
-    "dwell_after_click_ms": 0.0,
-    # Hide the agent cursor shortly after it stops moving. The cursor is the
-    # signal that the agent is acting *right now*; parking it on screen forever
-    # would misreport where the agent is and stop being a signal at all.
+    "glide_duration_ms": 180.0,
+    "dwell_after_click_ms": 80.0,
     "idle_hide_ms": 2000.0,
 }
 
@@ -102,35 +101,70 @@ def cursor_session() -> str:
 
 
 def _schema_for(driver_tool: str) -> Dict[str, Any]:
-    """A permissive-but-bounded input schema for a republished driver tool."""
+    """A bounded input schema matching the runtime sanitizer."""
 
     allowed = service._ARGUMENTS.get(driver_tool, ())
     properties: Dict[str, Any] = {}
     for name in allowed:
-        if name in {
-            "pid",
-            "window_id",
-            "element_index",
-            "max_elements",
-            "max_depth",
-            "max_image_dimension",
-            "x",
-            "y",
-            "count",
-            "amount",
-        }:
-            properties[name] = {"type": "integer"}
+        if driver_tool == "jev_choose" and name == "candidates":
+            properties[name] = {
+                "type": "array", "minItems": 1, "maxItems": service.MAX_CANDIDATES,
+                "items": {"type": "object", "additionalProperties": False,
+                          "required": ["identifier", "description"],
+                          "properties": {"identifier": {"type": "string", "maxLength": 64},
+                                         "description": {"type": "string", "maxLength": 1000}}},
+            }
+        elif driver_tool == "jev_choose" and name == "regions":
+            properties[name] = {
+                "type": "array", "maxItems": service.MAX_CANDIDATES,
+                "items": {"type": "object", "additionalProperties": False,
+                          "properties": {"id": {"type": "string", "maxLength": 64},
+                                         "role": {"type": "string", "maxLength": 64},
+                                         "label": {"type": "string", "maxLength": 200},
+                                         "enabled": {"type": "boolean"}}},
+            }
+        elif driver_tool == "jev_choose" and name == "history":
+            properties[name] = {"type": "array", "maxItems": service.MAX_HISTORY,
+                                "items": {"type": "string", "maxLength": 400}}
+        elif name == "keys":
+            properties[name] = {"type": "array", "minItems": 2, "maxItems": service.MAX_HOTKEY_KEYS,
+                                "items": {"type": "string", "maxLength": 32}}
+        elif name == "path":
+            properties[name] = {"type": "array", "minItems": 1, "maxItems": service.MAX_MENU_PATH,
+                                "items": {"type": "string", "minLength": 1, "maxLength": 200}}
+        elif name == "urls":
+            properties[name] = {"anyOf": [{"type": "string", "maxLength": 2048},
+                                           {"type": "array", "maxItems": 8,
+                                            "items": {"type": "string", "maxLength": 2048}}]}
+        elif name in {"pid", "window_id", "element_index", "max_elements", "max_depth",
+                      "max_image_dimension", "x", "y", "count", "amount"}:
+            limit = (service.MAX_ELEMENTS if name == "max_elements" else
+                     1 << 20 if name in {"max_depth", "max_image_dimension", "x", "y"} else
+                     service.MAX_INTEGER)
+            minimum = 0 if driver_tool == "move_cursor" and name in {"x", "y"} else -limit
+            properties[name] = {"type": "integer", "minimum": minimum, "maximum": limit}
         elif name in {"include_screenshot", "include_accessibility_tree"}:
             properties[name] = {"type": "boolean"}
-        elif name == "urls":
-            properties[name] = {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]}
+        elif name in {"key", "query", "session", "direction", "button", "delivery_mode",
+                      "name", "bundle_id", "capture_scope", "version"}:
+            properties[name] = {"type": "string", "maxLength": 256}
+        elif name in {"goal"}:
+            properties[name] = {"type": "string", "maxLength": 4000}
+        elif name in {"capture_id", "model", "snapshot_id", "element_token"}:
+            properties[name] = {"type": "string", "maxLength": 128}
         else:
-            properties[name] = {"type": "string"}
-    return {
-        "type": "object",
-        "properties": properties,
-        "additionalProperties": False,
-    }
+            properties[name] = {"type": "string", "maxLength": 4096}
+    schema: Dict[str, Any] = {"type": "object", "properties": properties, "additionalProperties": False}
+    required = {
+        "get_window_state": ["pid"],
+        "hotkey": ["keys"],
+        "invoke_menu": ["pid", "window_id", "path"],
+        "move_cursor": ["pid", "window_id", "x", "y"],
+        "jev_choose": ["goal", "candidates"],
+    }.get(driver_tool)
+    if required:
+        schema["required"] = required
+    return schema
 
 
 # Tools that return structured content must declare an output schema: the host
@@ -150,6 +184,10 @@ _OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "detail": {"type": "string"},
             "permission_detail": {"type": "string"},
             "runtime": {"type": "string"},
+            "runtime_binary": {"type": ["string", "null"]},
+            "host_app": {"type": ["string", "null"]},
+            "cursor_available": {"type": "boolean"},
+            "cursor_enabled": {"type": "boolean"},
             "provisioned": {"type": "boolean"},
             "jev_note": {"type": "string"},
         },
@@ -237,89 +275,110 @@ def confirmations_enabled() -> bool:
 
 
 class ComputerUse:
-    """Owns the driver client and enforces the confirmation boundary."""
+    """Owns the driver client, action session, and confirmation boundary."""
 
     def __init__(self, extension: Extension, *, home: Optional[Any] = None) -> None:
         self._extension = extension
         self._paths = driver_module.DriverPaths.for_home(home)
         self._client: Optional[DriverClient] = None
         self._lock = threading.Lock()
-        # (expires_at_monotonic, blocked) for the effectful-action gate.
         self._permission_cache: Optional[Tuple[float, bool]] = None
         self._app_daemon = False
         self._cursor_session: Optional[str] = None
+        self._cursor_ready = False
 
-    # -- driver lifecycle --------------------------------------------------
-
-    #: Select a desktop host automatically. Set to 0 to force the direct runtime.
     _USE_DESKTOP_HOST = 1
 
     @classmethod
     def use_desktop_host(cls) -> bool:
         override = os.environ.get("OCTET_CUA_DESKTOP_HOST")
         if override is not None:
-            return override.strip() not in ("0", "false", "no", "off")
+            return override.strip().lower() not in ("0", "false", "no", "off")
         return bool(cls._USE_DESKTOP_HOST)
 
     def client(self) -> DriverClient:
         with self._lock:
             if self._client is not None and self._client.started:
+                if self._app_daemon and not self._cursor_ready:
+                    self._show_cursor(self._client, self._cursor_session or cursor_session())
                 return self._client
-            # Prefer an installed desktop host: it owns the OS permission
-            # identity and the GUI main thread, which is what enables the agent
-            # cursor. Fall back to the direct runtime when no host is present.
-            #
-            # Presence is not enough. On some macOS releases the host installs
-            # and launches correctly but its Accessibility/Screen Recording
-            # grant is never persisted, so every launch re-prompts and every
-            # tool call returns ``permissions_pending``. In that state the host
-            # is strictly worse than no host: the direct runtime inherits the
-            # *calling host's* grants and works immediately, at the cost of the
-            # cursor overlay. So only adopt the host when its permissions are
-            # actually live, and treat an unusable host as absent.
-            app_binary = driver_module.desktop_app_binary() if self.use_desktop_host() else None
-            app_daemon = app_binary is not None
-            if app_daemon and not driver_module.desktop_app_usable(app_binary):
-                app_binary = None
-                app_daemon = False
-            binary = app_binary or driver_module.installed_binary(self._paths)
-            if binary is None:
+
+            use_host = self.use_desktop_host()
+            app_binary = driver_module.desktop_app_binary() if use_host else None
+            host_usable = bool(app_binary and driver_module.desktop_app_usable(app_binary))
+            if driver_module.cursor_host_required() and not host_usable:
                 raise McpError(
-                    "Cua Driver is not installed. Run computer_use_setup to provision it."
+                    "Computer use is unavailable: the signed Cua Driver app at "
+                    "/Applications/CuaDriver.app is unavailable or lacks live permissions; "
+                    "refusing to fall back to a cursorless direct runtime."
                 )
+            app_daemon = bool(app_binary and host_usable)
+            binary = app_binary if app_daemon else driver_module.installed_binary(self._paths)
+            if binary is None:
+                raise McpError("Cua Driver is not installed. Run computer_use_setup to provision it.")
+
             client = DriverClient(binary, app_daemon=app_daemon)
             client.start()
             self._client = client
             self._app_daemon = app_daemon
             if app_daemon:
-                self._show_cursor(client)
+                try:
+                    self._show_cursor(client, self._cursor_session or cursor_session())
+                except Exception:
+                    self._client = None
+                    self._app_daemon = False
+                    self._cursor_ready = False
+                    failed_session, self._cursor_session = self._cursor_session, None
+                    if failed_session:
+                        try:
+                            client.call("end_session", {"session": failed_session})
+                        except Exception:
+                            pass
+                    client.close()
+                    raise
             return client
 
-    def _show_cursor(self, client: DriverClient) -> None:
-        """Start this transport's session and give it a fast, low-latency cursor.
+    @staticmethod
+    def _checked_call(client: DriverClient, tool: str, arguments: Mapping[str, Any]) -> Dict[str, Any]:
+        result = client.call(tool, arguments)
+        if result.get("isError") or result.get("is_error"):
+            content = result.get("content") or []
+            detail = next((str(item.get("text", "")) for item in content if isinstance(item, Mapping)), "")
+            raise McpError(f"{tool} failed: {detail or 'driver rejected the request'}")
+        return result
 
-        The session name is unique to this transport, because the driver binds a
-        name permanently to whoever claims it first and refuses every other
-        transport. Motion is deliberately flat and instant: the default theme's
-        per-action animations stay in place, so the twirl that draws the eye is
-        preserved, while the pointer travels in a straight line with no settle
-        pause. Best-effort throughout - the cursor must never block a tool call.
-        """
+    @staticmethod
+    def _payload(result: Mapping[str, Any]) -> Mapping[str, Any]:
+        payload = result.get("structuredContent", result.get("structured_content"))
+        return payload if isinstance(payload, Mapping) else result
 
-        session = cursor_session()
+    def _show_cursor(self, client: DriverClient, session: str) -> None:
+        self._checked_call(client, "start_session", {"session": session})
         self._cursor_session = session
+        self._configure_cursor(client, session)
+
+    def _configure_cursor(self, client: DriverClient, session: str) -> None:
+        """Enable and verify the overlay on the same session used by actions."""
+
+        self._cursor_ready = False
         try:
-            client.call("start_session", {"session": session})
-            client.call(
-                "set_agent_cursor_motion",
-                {"session": session, **CURSOR_MOTION},
-            )
-            client.call(
-                "set_agent_cursor_enabled",
-                {"session": session, "enabled": True},
-            )
-        except Exception:
-            return
+            self._checked_call(client, "set_agent_cursor_motion", {"session": session, **CURSOR_MOTION})
+        except Exception as error:
+            raise McpError(f"agent cursor motion configuration failed: {error}") from error
+        try:
+            self._checked_call(client, "set_agent_cursor_enabled", {"session": session, "enabled": True})
+        except Exception as error:
+            raise McpError(f"agent cursor enablement failed: {error}") from error
+        try:
+            state = self._payload(self._checked_call(client, "get_agent_cursor_state", {"session": session}))
+        except Exception as error:
+            raise McpError(f"agent cursor state verification failed: {error}") from error
+        motion = state.get("motion")
+        glide = motion.get("glide_duration_ms") if isinstance(motion, Mapping) else None
+        if state.get("enabled") is not True or not isinstance(glide, (int, float)) or glide <= 0:
+            raise McpError("agent cursor is not enabled with visible motion; refusing to report readiness")
+        self._cursor_session = session
+        self._cursor_ready = True
 
     def _permissions_block(self, driver_tool: str) -> bool:
         """Whether a missing OS grant must hold back this effectful action.
@@ -355,10 +414,8 @@ class ComputerUse:
         with self._lock:
             client, self._client = self._client, None
             session, self._cursor_session = self._cursor_session, None
+            self._cursor_ready = False
         if client is not None:
-            # End the cursor session so the name is released. The driver binds a
-            # name to its first owner, so a session left open would refuse the
-            # next octet launch outright.
             if session:
                 try:
                     client.call("end_session", {"session": session})
@@ -369,58 +426,57 @@ class ComputerUse:
     # -- dispatch ----------------------------------------------------------
 
     def call(self, driver_tool: str, values: Mapping[str, Any]) -> Dict[str, Any]:
-        """Run one driver tool, gating it when it is not read-only."""
+        """Run one reviewed driver tool with the owned session and safety gate."""
 
         if driver_tool in LOCAL_ONLY_TOOLS:
             raise ArgumentError(f"{driver_tool} is handled locally")
         arguments = service.sanitize(driver_tool, values)
         client = self.client()
-        # The driver requires a window_id for every window-scoped call, but a
-        # caller that knows only the process should not have to learn WindowServer
-        # handles to make progress. Resolve it here so naming the app is enough.
-        #
-        # A gesture that names explicit coordinates is already addressed and needs
-        # no window, whether or not a pid was also given. Everything else resolves.
-        by_coordinates = (
-            driver_tool in _COORDINATE_ONLY_TOOLS
-            and "x" in arguments
-            and "y" in arguments
-        )
+
+        # A public end may only end the session subsequent actions are attached
+        # to. Refuse unrelated names rather than leaving the action binding stale.
+        if driver_tool == "end_session":
+            active = self._cursor_session
+            requested = arguments.get("session")
+            if not active or (requested is not None and requested != active):
+                return tool_result(text_content("No matching active computer-use session to end."), is_error=True)
+
+        # Window-scoped tools resolve a PID to a unique window when possible.
+        by_coordinates = driver_tool in _COORDINATE_ONLY_TOOLS and "x" in arguments and "y" in arguments
         if driver_tool in _WINDOW_SCOPED_TOOLS and "window_id" not in arguments and not by_coordinates:
-            resolved = service.resolve_window_id(
-                client,
-                arguments.get("pid"),
-                arguments.get("window_id"),
-            )
+            resolved = service.resolve_window_id(client, arguments.get("pid"), arguments.get("window_id"))
             if resolved is None:
                 return tool_result(
                     text_content(
-                        f"{driver_tool} needs a window: no process was named, or the "
-                        "one named has no single top-level window. Call "
-                        "computer_use_windows to find the window_id you want."
+                        f"{driver_tool} needs an exact window. Name its pid and call "
+                        "computer_use_windows to find the window_id."
                     ),
                     is_error=True,
                 )
             arguments["window_id"] = resolved
+
+        if driver_tool == "invoke_menu" and "pid" not in arguments:
+            return tool_result(text_content("invoke_menu requires the target pid and window_id."), is_error=True)
+        if driver_tool == "move_cursor":
+            if "pid" not in arguments or "window_id" not in arguments:
+                return tool_result(text_content("move_cursor requires the exact pid and window_id."), is_error=True)
+            # Driver move_cursor's window target is expressed as an exact target
+            # object. Never forward desktop scope through the public tool.
+            arguments["target"] = {"kind": "window", "pid": arguments.pop("pid"),
+                                   "window_id": arguments.pop("window_id")}
+            arguments["scope"] = "window"
+
         if client.requires_confirmation(driver_tool) and confirmations_enabled():
-            # Actuation needs the OS grants. Without them the driver would fail
-            # deep inside a capture or click, so refuse here with the fix, and
-            # do not spend the user's confirmation on an action that cannot
-            # run.
             if self._permissions_block(driver_tool):
                 return tool_result(
                     text_content(
-                        "Computer use is not ready: macOS has not allowed "
-                        "Accessibility and Screen Recording for octet. Run "
-                        "/computer-use setup and choose Allow when macOS asks, "
-                        "then retry."
+                        "Computer use is not ready: macOS has not allowed Accessibility and "
+                        "Screen Recording for the selected Cua runtime. Grant them to the "
+                        "selected host and retry."
                     ),
                     is_error=True,
                 )
-            description = next(
-                (info.description for info in client.tools() if info.name == driver_tool),
-                "",
-            )
+            description = next((info.description for info in client.tools() if info.name == driver_tool), "")
             try:
                 approved = self._extension.confirm(
                     "Allow this computer-use action?",
@@ -429,76 +485,88 @@ class ComputerUse:
                     default=False,
                 )
             except Exception:
-                # A frontend with no confirmation surface, or a request that
-                # failed, must deny rather than assume approval.
-                return tool_result(
-                    text_content(
-                        f"Denied: the user confirmation request for {driver_tool} "
-                        "could not be completed."
-                    ),
-                    is_error=True,
-                )
+                return tool_result(text_content(f"Denied: confirmation for {driver_tool} could not be completed."), is_error=True)
             if approved is not True:
-                return tool_result(
-                    text_content(
-                        f"Denied: the user did not confirm the Cua Driver tool {driver_tool}."
-                    ),
-                    is_error=True,
-                )
+                return tool_result(text_content(f"Denied: the user did not confirm the Cua Driver tool {driver_tool}."), is_error=True)
+
+        if driver_tool == "start_session":
+            requested = arguments.get("session") or cursor_session()
+            previous = self._cursor_session
+            if previous and previous != requested:
+                try:
+                    self._checked_call(client, "end_session", {"session": previous})
+                finally:
+                    self._cursor_session = None
+                    self._cursor_ready = False
+            start_args = {key: value for key, value in arguments.items() if key in {"capture_scope"}}
+            start_args["session"] = requested
+            result = self._checked_call(client, "start_session", start_args)
+            self._cursor_session = requested
+            self._cursor_ready = False
+            if self._app_daemon:
+                try:
+                    self._configure_cursor(client, requested)
+                except Exception:
+                    try:
+                        client.call("end_session", {"session": requested})
+                    except Exception:
+                        pass
+                    self._cursor_session = None
+                    self._cursor_ready = False
+                    raise
+            return self._format_result(driver_tool, result)
+
+        if driver_tool == "end_session":
+            session = self._cursor_session
+            try:
+                result = self._checked_call(client, "end_session", {"session": session})
+            finally:
+                # A dispatched end can have an uncertain acknowledgement. The
+                # next action must explicitly start/configure a session again.
+                self._cursor_session = None
+                self._cursor_ready = False
+            return self._format_result(driver_tool, result)
+
+        if self._app_daemon and not self._cursor_ready:
+            self._show_cursor(client, self._cursor_session or cursor_session())
+        session = self._cursor_session
+        if driver_tool in service.SESSION_SCOPED_TOOLS and session:
+            arguments["session"] = session
+
         result = client.call(driver_tool, arguments)
+        return self._format_result(driver_tool, result)
+
+    def _format_result(self, driver_tool: str, result: Mapping[str, Any]) -> Dict[str, Any]:
         summary = service.summarize_result(result)
         text = summary["text"][:RESULT_TEXT_LIMIT]
         parts: List[Mapping[str, Any]] = [text_content(text or "(no text content)")]
-        # The driver's markdown tree omits the element tokens and snapshot id an
-        # agent needs to address a control. Without them the only way to click is
-        # screen coordinates, which is guesswork; an agent that cannot find a
-        # token ends up grepping the driver's own source to reverse-engineer one.
-        # Surface the addressing fields in the text so the next call can use them.
         structured = summary.get("structured")
         if isinstance(structured, dict):
             token_hint = _targeting_hint(structured)
             if token_hint:
+                if len(token_hint) > RESULT_TEXT_LIMIT:
+                    token_hint = token_hint[:RESULT_TEXT_LIMIT] + "\n[truncated]"
                 parts.insert(0, text_content(token_hint))
-        # Publish each screenshot as a host artifact and attach it to the result.
-        # The driver already returned the pixels; dropping them here is what made
-        # computer use blind, because a model that cannot see the screen cannot
-        # use it. Publishing bounds the transfer the way an inline base64 blob
-        # would not.
         for block in summary.get("images") or ():
             data = block.get("data")
             mime = str(block.get("mimeType") or block.get("mime_type") or "image/png")
             if not isinstance(data, str) or not data:
                 continue
             try:
-                artifact = self._extension.publish_artifact(
-                    mime_type=mime,
-                    data=base64.b64decode(data),
-                )
+                artifact = self._extension.publish_artifact(mime_type=mime, data=base64.b64decode(data))
             except Exception as error:
-                # Never drop a screenshot silently. A model told a screenshot
-                # exists but given nothing to look at cannot tell a working
-                # capture from a broken one, and the earlier version swallowed
-                # this exact failure, which is why a missing image was
-                # indistinguishable from an absent one for so long.
-                text = (
-                    f"{text}\n\n[octet] the driver returned a screenshot but it could "
-                    f"not be delivered to the model ({type(error).__name__}: {error}). "
-                    "Treat this capture as unavailable rather than as an empty screen."
-                )
+                parts.append(text_content(
+                    "[octet] the driver returned a screenshot but it could not be delivered "
+                    f"({type(error).__name__}). Treat this capture as unavailable."
+                ))
                 continue
             parts.append(image_content(artifact, mime))
         return tool_result(
             *parts,
-            # The driver's structured payload carries window_id, app_name,
-            # title, and per-app records. Without it the agent is told how many
-            # windows exist and cannot act on any of them.
-            structured_content=summary.get("structured") or {"text": text or ""},
+            structured_content=structured or {"text": text or ""},
             is_error=summary["is_error"],
-            metadata={
-                "driver_tool": driver_tool,
-                "image_count": summary["image_count"],
-                "truncated": summary["truncated"],
-            },
+            metadata={"driver_tool": driver_tool, "image_count": summary["image_count"],
+                      "truncated": summary["truncated"]},
         )
 
     def status(self, *, prompt: bool = False) -> Dict[str, Any]:
@@ -506,11 +574,21 @@ class ComputerUse:
         if not report.get("installed"):
             return report
         # The CLI probe only answers from a CuaDriver daemon, which the
-        # pip-provisioned path never installs, so it would report `unknown` no
-        # matter what the host actually holds. Ask the live direct session.
+        # matter what the selected host runtime actually holds. Ask the live
+        # session instead so status reports the permissions for dispatch.
         try:
-            probe = driver_module.permission_state(self.client(), prompt=prompt)
+            client = self.client()
+            if self._app_daemon:
+                report.update({"runtime": "desktop-host", "cursor_available": True,
+                               "cursor_enabled": self._cursor_ready})
+            else:
+                report["cursor_enabled"] = False
+            probe = driver_module.permission_state(client, prompt=prompt)
         except Exception:
+            if report.get("runtime") == "desktop-host":
+                report.update({"permissions": "unknown", "doctor_ok": False,
+                               "cursor_enabled": False,
+                               "detail": "The selected desktop host's cursor session could not be verified."})
             return report
         # A fresh probe supersedes any cached answer.
         self._permission_cache = None
@@ -550,11 +628,17 @@ class ComputerUse:
         """
 
         status = self.status(prompt=prompt)
-        granted = status.get("permissions") == "granted"
+        granted = (status.get("permissions") == "granted"
+                   and status.get("runtime") != "unavailable"
+                   and (status.get("runtime") != "desktop-host" or status.get("cursor_enabled") is True))
         if not status.get("installed"):
             label = "computer use · not set up"
         elif granted:
             label = "computer use · ready"
+        elif status.get("runtime") == "unavailable":
+            label = "computer use · host unavailable"
+        elif status.get("runtime") == "desktop-host" and not status.get("cursor_enabled"):
+            label = "computer use · cursor not verified"
         else:
             label = "computer use · needs %s" % (
                 "Screen Recording"
@@ -803,6 +887,11 @@ def _handle_jev_choose(values: Mapping[str, Any]) -> Dict[str, Any]:
     identifier, executing it, and verifying the result.
     """
 
+    try:
+        values = service.sanitize("jev_choose", values)
+    except ArgumentError as error:
+        return tool_result(text_content(f"invalid arguments: {error}"), is_error=True)
+
     raw_candidates = values.get("candidates")
     if not isinstance(raw_candidates, (list, tuple)) or not raw_candidates:
         return tool_result(
@@ -878,6 +967,13 @@ def _handle_jev_choose(values: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _render_status(status: Mapping[str, Any]) -> str:
+    if status.get("runtime") == "unavailable":
+        return (
+            "runtime: unavailable (the required Cua Driver desktop host is not ready). "
+            f"{status.get('detail') or 'Install and authorize the selected desktop host.'} "
+            "Grant Accessibility and Screen Recording to that host; "
+            "OCTET_CUA_DESKTOP_HOST=0 explicitly selects cursorless direct mode."
+        )
     if not status.get("installed"):
         return (
             "Cua Driver is not installed. Run the /computer-use setup command or "
@@ -890,7 +986,8 @@ def _render_status(status: Mapping[str, Any]) -> str:
     # Say plainly which runtime is live, because the permission fix is different
     # for each and a user chasing the wrong one will never succeed.
     if status.get("runtime") == "desktop-host":
-        lines.append("runtime: desktop host (agent cursor enabled)")
+        cursor_state = "enabled" if status.get("cursor_enabled") else "not verified"
+        lines.append(f"runtime: desktop host (agent cursor {cursor_state})")
     else:
         lines.append("runtime: direct (inherits your terminal's permissions)")
     permissions = status.get("permissions")
@@ -899,11 +996,17 @@ def _render_status(status: Mapping[str, Any]) -> str:
         return "\n".join(lines)
     detail = status.get("permission_detail")
     lines.append("macOS permissions: %s" % (detail or permissions or "unknown"))
-    lines.append(
-        "Grant Accessibility and Screen Recording to the app you run octet from "
-        "(your terminal or editor), then restart octet. The direct runtime uses "
-        "that app's grants. octet cannot grant a system permission for you."
-    )
+    if status.get("runtime") == "desktop-host":
+        lines.append(
+            "Grant Accessibility and Screen Recording to the selected Cua Driver "
+            "desktop host, then retry. octet cannot grant a system permission for you."
+        )
+    else:
+        lines.append(
+            "Grant Accessibility and Screen Recording to the app you run octet from "
+            "(your terminal or editor), then restart octet. The direct runtime uses "
+            "that app's grants. octet cannot grant a system permission for you."
+        )
     return "\n".join(lines)
 
 

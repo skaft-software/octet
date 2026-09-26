@@ -18,11 +18,10 @@ table, and test commands.
   Accessibility/Screen Recording, a Windows interactive session, and Linux
   AT-SPI in a live display session are the user's to grant. `computer_use_status`
   reports status without prompting.
-- `confirmations = true` is declared in the manifest. Every driver action not
-  annotated `readOnlyHint: true` requires an explicit user confirmation before
-  dispatch. A declined, cancelled, unavailable, or failed confirmation denies
-  the call and returns an error without invoking the driver. An unknown (never
-  described) tool is treated as effectful.
+- Effectful actions follow Octet's confirmation policy. Gated profiles and
+  `OCTET_CUA_CONFIRM=1` require approval before dispatch; declined, unavailable,
+  or failed confirmation denies the call. Full-access mode does not add a
+  per-action prompt by default. Unknown driver tools remain effectful.
 - The driver child process receives only a reviewed, non-secret set of desktop
   session variables. Provider tokens and arbitrary ambient environment are not
   forwarded. The manifest `[capabilities] environment` list is the host-level
@@ -33,26 +32,32 @@ table, and test commands.
 
 ## Protocol and lifetime
 
-- One `DriverClient` per host owner, started lazily on first use and started with
-  `mcp --direct` so the driver owns its runtime inside the child rather than
-  auto-launching a separate app or daemon. A single long-lived reader owns the
-  driver's stdout for the process lifetime.
+- One `DriverClient` per host owner, started lazily on first use. The default
+  macOS path connects to the signed Cua Driver app's daemon; direct MCP mode is
+  used only on non-macOS or after an explicit macOS opt-out. A single long-lived
+  reader owns the driver's stdout for the process lifetime.
 - The republished octet tool set is a small reviewed subset of the driver's
   catalog, so octet's published catalog does not churn with upstream releases.
-  Only allowlisted, type-checked, bounded arguments are forwarded to the driver;
-  an unrecognised argument is dropped.
-- Tool results are bounded: text is truncated to a fixed limit and image blocks
-  are reported as a count rather than inlined as base64.
-- Session-scoped work is expected to use `computer_use_start_session` /
-  `computer_use_end_session` so the driver's per-session cursor, recording, and
-  cleanup state is released. The client is closed on extension shutdown.
+  Only allowlisted, type-checked, bounded arguments are forwarded; an
+  unrecognised argument is dropped.
+- Text, image delivery, and structured driver output are bounded. Oversized
+  structured snapshots preserve targeting fields such as snapshot/window IDs,
+  element tokens, and coordinates within Octet's 256 KiB host limit.
+- Cursor setup and eligible driver actions share one action session. On the
+  desktop host, startup configures motion, enables the overlay, and verifies the
+  resulting enabled state before reporting readiness. Failures surface and block
+  actions rather than silently proceeding cursorless.
+- Public start/end operations switch or clear that same session; subsequent
+  actions attach to the active session, and extension shutdown ends it.
 
 ## Platform notes
 
-- **macOS** — the driver reaches the desktop through a helper app identity
-  (`com.trycua.driver`). With `mcp --direct` the runtime runs in-process and
-  relies on the user's Accessibility/Screen Recording grants to that helper.
-  Without them, observation and action fail closed.
+- **macOS** — by default, the signed `/Applications/CuaDriver.app` is the
+  desktop host and owns the daemon's permission identity and cursor overlay. If
+  the host is missing or cannot prove its permissions, runtime status is
+  `unavailable`; octet does not silently fall back to a cursorless direct
+  runtime. `OCTET_CUA_DESKTOP_HOST=0` explicitly opts into direct mode. An
+  alternate app is only selected through the explicit developer override.
 - **Windows** — the driver runs as the interactive user; a locked or
   headless session is not drivable.
 - **Linux** — needs a live display session and AT-SPI 2. X11/XWayland is more
