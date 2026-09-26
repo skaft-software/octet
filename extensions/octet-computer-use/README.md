@@ -65,13 +65,37 @@ expected, and `computer_use_status` will say so along with the runtime in use.
 | `desktop-host` | A Cua Driver app is installed **and** its own grants are live | Grants given to that app | Yes |
 
 The desktop host is the optional path to the visible agent cursor. It is used
-only when an installed `CuaDriver.app` reports live permissions, because on some
-macOS releases that app's grant never persists — it re-prompts on every launch,
+only when an installed host reports live permissions, because on some macOS
+releases `CuaDriver.app`'s grant never persists — it re-prompts on every launch,
 and adopting it would make every action fail. When that happens octet falls back
 to the direct runtime automatically, which is the supported default.
 
 Set `OCTET_CUA_DESKTOP_HOST=0` to force the direct runtime, or `=1` to require
 the desktop host.
+
+### Optional: build the octet host app (macOS, agent cursor)
+
+The cursor overlay needs an AppKit main thread with Window Server access, which
+only a real application can provide. This bundle ships a small host app that
+supplies exactly that and nothing else: it starts `cua-driver serve` under its
+own permission identity and never shows a window or takes focus.
+
+```console
+bash extensions/octet-computer-use/build-host-app.sh --install
+```
+
+It installs `/Applications/OctetComputerUse.app` with the bundle identifier
+`com.octet.computeruse`, builds from source, and signs with the first
+codesigning identity it finds. Pass `--ad-hoc` for a throwaway build (its
+permission grant resets on every rebuild) or `--identity "..."` to choose one.
+
+The host installs to its own identity rather than Cua's `com.trycua.driver`, so
+its permission grants cannot be confused with Cua's own app. When the host is
+present but not running, octet starts it in the background once; if it still
+cannot prove its grant, octet uses the direct runtime instead.
+
+The app is macOS-only and optional. It is not required for computer use, and it
+is not installed by `octet extension install`.
 
 ## What the agent can do
 

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- Optional macOS host app (`build-host-app.sh`, sources under `host-app/`) that
+  supplies the AppKit main thread and Window Server access the agent-cursor
+  overlay needs. It starts `cua-driver serve` under its own bundle identifier
+  `com.octet.computeruse`, shows no window, and never takes focus. Identifiers
+  are distinct from Cua's `com.trycua.driver` so the two apps' TCC grants cannot
+  be confused. Verified on macOS 27: the grant survives a full host restart and
+  the cursor renders, which the stock `CuaDriver.app` cannot do on that release.
+  macOS-only, optional, and not installed by `octet extension install`.
+- Start an installed-but-idle desktop host once, in the background, when
+  choosing a runtime. If it still cannot prove its grant, octet falls back to the
+  direct runtime.
+
 ### Changed
 
 - Make the `direct` runtime the shipped default. It runs inside octet's own
@@ -18,6 +32,10 @@
   `CFBundleExecutable` rather than assuming one layout, so the stock
   `CuaDriver.app` and the source-built `CuaDriverLocal.app` both work. The
   desktop host remains the only path to the visible agent cursor.
+  A declared `CFBundleExecutable` that is not a known driver name is no longer
+  trusted: octet's own host declares the host binary there and ships the driver
+  beside it, and returning the host would hand the client a binary that cannot
+  speak MCP.
 - Replace the inert API `0.3` mocked prototype with a real, Cua Driver–backed
   API `0.4` bundle. The bundle now provisions a locally installed MIT-licensed
   [Cua Driver](https://github.com/trycua/cua) on request and drives native

@@ -505,10 +505,14 @@ class DesktopHostTests(unittest.TestCase):
         original_status = driver._permission_status
         original_binary = driver.desktop_app_binary
         original_installed = driver.installed_binary
+        original_start = driver.start_desktop_app
         try:
             driver._permission_status = lambda binary: "unknown"
             driver.desktop_app_binary = lambda app=None: Path("/Applications/CuaDriver.app")
             driver.installed_binary = lambda paths: Path("/opt/cua-driver")
+            # Never launch a real app from a test: an ungranted host would
+            # otherwise be started for real by this assertion.
+            driver.start_desktop_app = lambda app=None: False
             self.assertFalse(driver.desktop_app_usable())
 
             computer = ComputerUse.__new__(ComputerUse)
@@ -549,6 +553,67 @@ class DesktopHostTests(unittest.TestCase):
             driver._permission_status = original_status
             driver.desktop_app_binary = original_binary
             driver.installed_binary = original_installed
+            driver.start_desktop_app = original_start
+
+    def test_ungranted_host_is_started_once_then_rejected(self):
+        # A host that is installed but not running is the common case, not a
+        # failure. It gets one bounded launch attempt; if it still cannot prove
+        # its grant it is rejected so the direct runtime takes over.
+        from octet_computer_use import driver
+
+        original_status = driver._permission_status
+        original_start = driver.start_desktop_app
+        original_sleep = driver.time.sleep
+        original_attempts = driver.HOST_START_ATTEMPTS
+        try:
+            calls = []
+            driver.start_desktop_app = lambda app=None: calls.append(1) or True
+            driver.time.sleep = lambda seconds: None
+            driver.HOST_START_ATTEMPTS = 2
+            driver._permission_status = lambda binary: "unknown"
+            self.assertFalse(driver.desktop_app_usable(Path("/Applications/OctetComputerUse.app")))
+            self.assertEqual(len(calls), 1, "the host must be started at most once")
+
+            # A host that grants after starting must be adopted, so the cursor
+            # becomes available without the user restarting octet.
+            driver._permission_status = lambda binary: "granted"
+            self.assertTrue(driver.desktop_app_usable(Path("/Applications/OctetComputerUse.app")))
+        finally:
+            driver._permission_status = original_status
+            driver.start_desktop_app = original_start
+            driver.time.sleep = original_sleep
+            driver.HOST_START_ATTEMPTS = original_attempts
+
+    def test_octet_host_resolves_its_driver_not_its_own_executable(self):
+        # Octet's host app declares CFBundleExecutable as the host itself and
+        # ships the driver beside it. Resolving the declared name would hand the
+        # client an app that cannot speak MCP, so the driver must be preferred.
+        from octet_computer_use import driver
+
+        original = driver.DESKTOP_APP_CANDIDATES
+        with tempfile.TemporaryDirectory() as directory:
+            host = Path(directory) / "OctetComputerUse.app"
+            macos = host / "Contents" / "MacOS"
+            macos.mkdir(parents=True)
+            host_binary = macos / "OctetComputerUseHost"
+            host_binary.write_text("")
+            driver_binary = macos / "cua-driver"
+            driver_binary.write_text("")
+            (host / "Contents" / "Info.plist").write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                '<plist version="1.0"><dict>'
+                "<key>CFBundleExecutable</key><string>OctetComputerUseHost</string>"
+                "<key>CFBundleIdentifier</key><string>com.octet.computeruse</string>"
+                "</dict></plist>\n"
+            )
+            try:
+                driver.DESKTOP_APP_CANDIDATES = {"darwin": (str(host),)}
+                self.assertEqual(driver.desktop_app(), host)
+                self.assertEqual(driver.desktop_app_binary(), driver_binary)
+            finally:
+                driver.DESKTOP_APP_CANDIDATES = original
 
     def test_desktop_host_use_can_be_disabled(self):
         # An explicit opt-out must win over an installed host, so a user on an

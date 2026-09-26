@@ -39,6 +39,13 @@ DEFAULT_VERSION = ""
 # unbounded. They are generous relative to the ~70 MiB wheel.
 INSTALL_TIMEOUT_SECONDS = 900
 PROBE_TIMEOUT_SECONDS = 60
+# Launching a desktop host is a quick LaunchServices handoff, not a daemon wait.
+LAUNCH_TIMEOUT_SECONDS = 20
+# After launching a host, allow the driver a bounded moment to publish its socket
+# and read its TCC grants back. Kept short so an ungranted host cannot stall a
+# tool call, and bounded so a host that never becomes usable is given up on.
+HOST_START_ATTEMPTS = 3
+HOST_START_INTERVAL_SECONDS = 2.0
 
 
 class ProvisionError(RuntimeError):
@@ -281,25 +288,34 @@ def active_runtime() -> str:
 # a terminal-hosted process does not have. ChatGPT.app takes the same shape - it
 # embeds the driver inside a signed app and inherits that app's TCC grants.
 #
-# Cua ships two official macOS bundles, both installed by the driver's own
-# release installer or by ``install-local.sh`` in a source checkout. Octet uses
-# whichever is present rather than shipping an app of its own:
+# Cua ships two official macOS bundles and octet ships its own, all installed
+# by their own tooling. Octet uses whichever is present rather than shipping a
+# driver binary of its own:
 #
-#   /Applications/CuaDriver.app       release build, com.trycua.driver,
-#                                    Developer ID signed and notarized by Cua AI
-#   /Applications/CuaDriverLocal.app  source build, com.trycua.driver.local
+#   /Applications/OctetComputerUse.app  octet's own host, com.octet.computeruse,
+#                                       built by build-host-app.sh
+#   /Applications/CuaDriver.app         Cua release build, com.trycua.driver,
+#                                       Developer ID signed and notarized
+#   /Applications/CuaDriverLocal.app    Cua source build, com.trycua.driver.local
 #
-# Both are listed in preference order, so a stock install wins and the local
-# development build is only used as a fallback.
+# Octet's own host is listed first because it is the only one whose permission
+# identity this project controls end to end. Identifiers are deliberately
+# distinct: sharing Cua's would merge TCC rows, so whichever app installed last
+# would inherit permissions granted for the other.
 DESKTOP_APP_CANDIDATES: Dict[str, Tuple[str, ...]] = {
-    "darwin": ("/Applications/CuaDriver.app", "/Applications/CuaDriverLocal.app"),
+    "darwin": (
+        "/Applications/OctetComputerUse.app",
+        "/Applications/CuaDriver.app",
+        "/Applications/CuaDriverLocal.app",
+    ),
     "win32": (os.path.expandvars(r"%LOCALAPPDATA%\\CuaDriver\\CuaDriver.exe"),),
 }
 
-# Executable names used inside a macOS bundle when ``Info.plist`` cannot be read.
-# The release bundle names it ``cua-driver``; the source-built local bundle names
-# it ``cua-driver-local``.
-_MACOS_BUNDLE_EXECUTABLES = ("cua-driver", "cua-driver-local")
+# Driver executables that can appear inside a macOS bundle. Cua's own bundles
+# name their driver after one of these; octet's host app is named
+# ``OctetComputerUseHost`` and ships the driver alongside it under the first of
+# these names.
+_MACOS_BUNDLE_DRIVERS = ("cua-driver", "cua-driver-local")
 
 
 def _bundle_executable_name(app: Path) -> Optional[str]:
@@ -346,9 +362,11 @@ def desktop_app() -> Optional[Path]:
 def desktop_app_binary(app: Optional[Path] = None) -> Optional[Path]:
     """The driver executable inside an installed desktop host bundle.
 
-    On macOS the executable is declared by the bundle's own ``CFBundleExecutable``
-    rather than assumed, so both the release bundle and the source-built local
-    bundle resolve without hardcoding either layout.
+    This must return a *driver*, never the host app itself: the client speaks
+    MCP to it, and an app bundle's declared ``CFBundleExecutable`` is its own
+    entry point. For Cua's bundles those coincide, but octet's host app declares
+    ``OctetComputerUseHost`` and carries the driver beside it, so a declared
+    name that is not a known driver is skipped rather than trusted.
     """
 
     host = app or desktop_app()
@@ -357,16 +375,65 @@ def desktop_app_binary(app: Optional[Path] = None) -> Optional[Path]:
     if platform.system().lower() != "darwin":
         return host if host.is_file() else None
     macos = host / "Contents" / "MacOS"
-    declared = _bundle_executable_name(host)
-    if declared:
-        inner = macos / declared
-        if inner.is_file():
-            return inner
-    for name in _MACOS_BUNDLE_EXECUTABLES:
+    for name in _MACOS_BUNDLE_DRIVERS:
         inner = macos / name
         if inner.is_file():
             return inner
+    declared = _bundle_executable_name(host)
+    if declared and declared in _MACOS_BUNDLE_DRIVERS:
+        inner = macos / declared
+        if inner.is_file():
+            return inner
     return None
+
+
+def desktop_app_display_name(app: Optional[Path] = None) -> Optional[str]:
+    """LaunchServices name for a desktop host, for ``open -a``.
+
+    Resolving by display name is unreliable for an ``LSUIElement`` bundle, so
+    launch by bundle identifier when one is available.
+    """
+
+    host = app or desktop_app()
+    if host is None:
+        return None
+    if platform.system().lower() != "darwin":
+        return None
+    plist = host / "Contents" / "Info.plist"
+    if not plist.is_file():
+        return None
+    try:
+        completed = _run(
+            ["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", str(plist)]
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return (completed.stdout or "").strip() or None
+
+
+def start_desktop_app(app: Optional[Path] = None) -> bool:
+    """Launch a desktop host if it is installed but not already running.
+
+    Best-effort: the caller still works without it, because the direct runtime
+    drives the desktop on its own. A host that cannot be launched is not an
+    error, it just means no cursor.
+    """
+
+    host = app or desktop_app()
+    if host is None or platform.system().lower() != "darwin":
+        return False
+    identifier = desktop_app_display_name(host)
+    arguments = ["/usr/bin/open", "-n", "-g"]
+    # ``-g`` keeps the app in the background: a foreground automation host would
+    # steal focus from whatever the user is actually doing.
+    arguments += ["-b", identifier] if identifier else ["-a", host.name[:-4]]
+    try:
+        completed = _run(arguments, timeout=LAUNCH_TIMEOUT_SECONDS)
+    except ProvisionError:
+        return False
+    return completed.returncode == 0
 
 
 def _permission_status(binary: Path) -> str:
@@ -399,10 +466,20 @@ def desktop_app_usable(binary: Optional[Path] = None) -> bool:
         binary = desktop_app_binary()
     if binary is None:
         return False
-    # ``granted`` is the only status that lets actions through. ``unknown`` is
-    # what a host reports while its TCC row is missing or not yet read back, and
-    # is exactly the broken case this check exists to catch.
-    return _permission_status(binary) == "granted"
+    status = _permission_status(binary)
+    if status == "granted":
+        return True
+    # A host that is installed but has no live grant usually just needs to be
+    # running: the daemon, not the bundle, is what owns the permission probe.
+    # Try once to bring it up before rejecting it, because a running host is
+    # what makes the cursor available.
+    if start_desktop_app():
+        # Give the daemon a moment to publish its socket and read TCC back.
+        for _ in range(HOST_START_ATTEMPTS):
+            time.sleep(HOST_START_INTERVAL_SECONDS)
+            if _permission_status(binary) == "granted":
+                return True
+    return False
 
 
 def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
