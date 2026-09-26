@@ -107,6 +107,58 @@ def _schema_for(driver_tool: str) -> Dict[str, Any]:
     }
 
 
+# Tools that return structured content must declare an output schema: the host
+# rejects a ``structured_content`` payload from a tool that declared none, which
+# would fail every status read. The schema is intentionally permissive about
+# individual fields - the payload is diagnostic, and the host only needs a shape.
+_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "read_driver_health": {
+        "type": "object",
+        "properties": {
+            "installed": {"type": "boolean"},
+            "version": {"type": ["string", "null"]},
+            "permissions": {"type": "string"},
+            "accessibility": {"type": "boolean"},
+            "screen_recording": {"type": "boolean"},
+            "doctor_ok": {"type": "boolean"},
+            "detail": {"type": "string"},
+            "permission_detail": {"type": "string"},
+            "runtime": {"type": "string"},
+            "provisioned": {"type": "boolean"},
+        },
+    },
+    "jev_status": {
+        "type": "object",
+        "properties": {
+            "sdk_installed": {"type": "boolean"},
+            "api_key_configured": {"type": "boolean"},
+            "usable": {"type": "boolean"},
+            "note": {"type": "string"},
+        },
+    },
+    "jev_choose": {
+        "type": "object",
+        "properties": {
+            "jev": {"type": "string"},
+            "chosen": {"type": "object"},
+            "candidate_ids": {"type": "array", "items": {"type": "string"}},
+            "detail": {"type": "string"},
+        },
+    },
+}
+
+
+def _output_schema_for(driver_tool: str) -> Optional[Dict[str, Any]]:
+    """The declared output shape, or ``None`` for tools that return text only.
+
+    Only a permissive top-level object is declared: the host validates that
+    structured content has a schema, not each field. Declaring one where the tool
+    returns no structured content would be the opposite error.
+    """
+
+    return _OUTPUT_SCHEMAS.get(driver_tool)
+
+
 class ComputerUse:
     """Owns the driver client and enforces the confirmation boundary."""
 
@@ -419,6 +471,7 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
             name=name,
             description=description,
             parameters=_schema_for(driver_tool),
+            output_schema=_output_schema_for(driver_tool),
         )(lambda args, ctx, _n=name: handler(_n, args, ctx))
 
     def setup_command(arguments: Any, context: Mapping[str, Any]) -> Dict[str, Any]:
