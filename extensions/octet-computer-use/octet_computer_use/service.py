@@ -133,6 +133,29 @@ def sanitize(driver_tool: str, values: Mapping[str, Any]) -> Dict[str, Any]:
     return forwarded
 
 
+# Driver tools that are republished through `ComputerUse.call` and therefore
+# return the driver's own payload, so each needs a declared output schema.
+PUBLISHED_DRIVER_TOOLS = frozenset(
+    (
+        "read_driver_health",
+        "provision",
+        "list_apps",
+        "list_windows",
+        "get_window_state",
+        "get_desktop_state",
+        "click",
+        "type_text",
+        "press_key",
+        "scroll",
+        "launch_app",
+        "start_session",
+        "end_session",
+        "jev_status",
+        "jev_choose",
+    )
+)
+
+
 def resolve_window_id(
     client: Any,
     pid: Any,

@@ -485,6 +485,32 @@ class WindowResolutionTests(unittest.TestCase):
         self.assertIsNone(resolve_window_id(self._client([]), 726))
 
 
+class OutputSchemaTests(unittest.TestCase):
+    """A tool that returns structured content must declare an output schema.
+
+    The host rejects the result otherwise with -32603. Every republished tool now
+    forwards the driver's payload, so every one needs a declared shape.
+    """
+
+    def test_every_published_tool_declares_an_output_schema(self):
+        from octet_computer_use import entrypoint, service
+
+        for tool, driver_tool, _ in service.PUBLISHED_TOOLS:
+            with self.subTest(tool=tool):
+                self.assertIsNotNone(
+                    entrypoint._output_schema_for(driver_tool),  # noqa: SLF001
+                    f"{tool} returns structured content but declares no output schema",
+                )
+
+    def test_driver_schema_permits_the_drivers_own_fields(self):
+        from octet_computer_use import entrypoint
+
+        schema = entrypoint._output_schema_for("list_windows")  # noqa: SLF001
+        # The driver's per-tool fields change between releases, so the declaration
+        # must not pin them closed.
+        self.assertTrue(schema.get("additionalProperties"))
+
+
 class DesktopHostTests(unittest.TestCase):
     """The desktop host is preferred when present, and is optional.
 

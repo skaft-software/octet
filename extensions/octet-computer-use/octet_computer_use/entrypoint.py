@@ -172,16 +172,39 @@ _OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Every republished driver tool now returns the driver's own structured payload,
+# so every one of them needs a declared output shape or the host rejects the
+# call with "structured_content requires a declared output_schema".
+#
+# The declared shape is deliberately permissive: it states that the payload is an
+# object, without pinning the driver's per-tool fields. The driver's schemas are
+# owned by an external project and change between releases, so a precise schema
+# here would break on upgrade. The contract that actually matters - that the
+# model receives the window ids, app names, and screenshots - is enforced by the
+# forwarding code and covered by tests, not by this declaration.
+_DRIVER_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
 
 def _output_schema_for(driver_tool: str) -> Optional[Dict[str, Any]]:
-    """The declared output shape, or ``None`` for tools that return text only.
+    """The declared output shape for a republished tool.
 
-    Only a permissive top-level object is declared: the host validates that
-    structured content has a schema, not each field. Declaring one where the tool
-    returns no structured content would be the opposite error.
+    A tool that returns structured content must declare a schema or the host
+    refuses the result. Driver tools all forward the driver's payload, so they
+    share one permissive object shape; the local tools declare their own.
     """
 
-    return _OUTPUT_SCHEMAS.get(driver_tool)
+    specific = _OUTPUT_SCHEMAS.get(driver_tool)
+    if specific is not None:
+        return specific
+    if driver_tool in service.PUBLISHED_DRIVER_TOOLS:
+        return dict(_DRIVER_OUTPUT_SCHEMA)
+    return None
 
 
 class ComputerUse:
