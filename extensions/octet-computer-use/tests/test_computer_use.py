@@ -506,7 +506,9 @@ class DesktopHostTests(unittest.TestCase):
         original_binary = driver.desktop_app_binary
         original_installed = driver.installed_binary
         original_start = driver.start_desktop_app
+        original_perms = driver.desktop_app_permissions
         try:
+            driver.desktop_app_permissions = lambda binary=None: "denied"
             driver._permission_status = lambda binary: "unknown"
             driver.desktop_app_binary = lambda app=None: Path("/Applications/CuaDriver.app")
             driver.installed_binary = lambda paths: Path("/opt/cua-driver")
@@ -539,6 +541,7 @@ class DesktopHostTests(unittest.TestCase):
             self.assertEqual(captured["binary"], Path("/opt/cua-driver"))
 
             driver._permission_status = lambda binary: "granted"
+            driver.desktop_app_permissions = lambda binary=None: "granted"
             captured.clear()
             class _FakeHostClient(_FakeClient):
                 pass
@@ -554,6 +557,7 @@ class DesktopHostTests(unittest.TestCase):
             driver.desktop_app_binary = original_binary
             driver.installed_binary = original_installed
             driver.start_desktop_app = original_start
+            driver.desktop_app_permissions = original_perms
 
     def test_ungranted_host_is_started_once_then_rejected(self):
         # A host that is installed but not running is the common case, not a
@@ -565,24 +569,27 @@ class DesktopHostTests(unittest.TestCase):
         original_start = driver.start_desktop_app
         original_sleep = driver.time.sleep
         original_attempts = driver.HOST_START_ATTEMPTS
+        original_perms = driver.desktop_app_permissions
         try:
             calls = []
             driver.start_desktop_app = lambda app=None: calls.append(1) or True
             driver.time.sleep = lambda seconds: None
             driver.HOST_START_ATTEMPTS = 2
+            driver.desktop_app_permissions = lambda binary=None: "denied"
             driver._permission_status = lambda binary: "unknown"
             self.assertFalse(driver.desktop_app_usable(Path("/Applications/OctetComputerUse.app")))
             self.assertEqual(len(calls), 1, "the host must be started at most once")
 
             # A host that grants after starting must be adopted, so the cursor
             # becomes available without the user restarting octet.
-            driver._permission_status = lambda binary: "granted"
+            driver.desktop_app_permissions = lambda binary=None: "granted"
             self.assertTrue(driver.desktop_app_usable(Path("/Applications/OctetComputerUse.app")))
         finally:
             driver._permission_status = original_status
             driver.start_desktop_app = original_start
             driver.time.sleep = original_sleep
             driver.HOST_START_ATTEMPTS = original_attempts
+            driver.desktop_app_permissions = original_perms
 
     def test_octet_host_resolves_its_driver_not_its_own_executable(self):
         # Octet's host app declares CFBundleExecutable as the host itself and

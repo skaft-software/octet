@@ -46,6 +46,24 @@ LAUNCH_TIMEOUT_SECONDS = 20
 # tool call, and bounded so a host that never becomes usable is given up on.
 HOST_START_ATTEMPTS = 3
 HOST_START_INTERVAL_SECONDS = 2.0
+# Probing a host's own daemon is a short MCP round trip, not a full tool
+# timeout. Kept small so a wedged daemon cannot stall runtime selection.
+DESKTOP_PROBE_TIMEOUT_SECONDS = 20
+
+
+def desktop_app_socket() -> Optional[Path]:
+    """The unix socket a desktop host's daemon publishes.
+
+    The driver resolves this itself, so this only answers "is a daemon
+    listening?", which is what decides whether probing is worth attempting.
+    """
+
+    override = os.environ.get("OCTET_CUA_DAEMON_SOCKET")
+    if override:
+        return Path(override)
+    if platform.system().lower() != "darwin":
+        return None
+    return Path.home() / "Library" / "Caches" / "cua-driver" / "cua-driver.sock"
 
 
 class ProvisionError(RuntimeError):
@@ -448,6 +466,60 @@ def _permission_status(binary: Path) -> str:
     return status if isinstance(status, str) and status else "unknown"
 
 
+def desktop_app_permissions(binary: Optional[Path] = None) -> str:
+    """Authoritative grant status for a desktop host, read from its own daemon.
+
+    ``cua-driver permissions status`` is not usable for this decision. That CLI
+    answers only for a daemon whose identity it recognises, and reports
+    ``unknown`` for any other bundle - including octet's own host - even when
+    that host's Accessibility and Screen Recording grants are fully live. It
+    also documents that it deliberately skips the direct-capture probe on
+    Tahoe. So a host verified only through the CLI would be discarded and the
+    cursor silently lost.
+
+    Ask the daemon instead, over the same MCP channel the tools use, and return
+    ``granted`` only when both capabilities are live. ``unknown`` means the
+    daemon could not be reached or the answer was unreadable.
+    """
+
+    if binary is None:
+        binary = desktop_app_binary()
+    if binary is None:
+        return "unknown"
+    socket_path = desktop_app_socket()
+    if socket_path is None or not socket_path.exists():
+        return "unknown"
+
+    from octet_computer_use.driver_client import DriverClient
+
+    client = DriverClient(binary, app_daemon=True)
+    try:
+        client.start(timeout=DESKTOP_PROBE_TIMEOUT_SECONDS)
+        result = client.call("check_permissions", {})
+    except Exception:
+        # Probing must never be the reason a tool call fails: an unreachable
+        # daemon is reported as unknown so the caller falls back cleanly.
+        return "unknown"
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    text = ""
+    content = result.get("content") if isinstance(result, dict) else None
+    if isinstance(content, list) and content:
+        first = content[0]
+        if isinstance(first, dict):
+            text = str(first.get("text") or "")
+    granted = text.count("granted.") >= 2
+    if granted:
+        return "granted"
+    if "pending" in text or "not granted" in text:
+        return "denied"
+    return "unknown"
+
+
 def desktop_app_usable(binary: Optional[Path] = None) -> bool:
     """Whether the installed desktop host can actually be driven.
 
@@ -457,17 +529,16 @@ def desktop_app_usable(binary: Optional[Path] = None) -> bool:
     host would be worse than not having one, because the direct runtime inherits
     the calling host's grants and works immediately.
 
-    So treat an unknown or non-granted status as unusable and let the caller fall
-    back. This only ever *narrows* host use: an app that cannot prove its grants
-    is never silently trusted to hold the agent cursor.
+    So treat a non-granted host as unusable and let the caller fall back. This
+    only ever *narrows* host use: an app that cannot prove its grants is never
+    silently trusted to hold the agent cursor.
     """
 
     if binary is None:
         binary = desktop_app_binary()
     if binary is None:
         return False
-    status = _permission_status(binary)
-    if status == "granted":
+    if desktop_app_permissions(binary) == "granted":
         return True
     # A host that is installed but has no live grant usually just needs to be
     # running: the daemon, not the bundle, is what owns the permission probe.
@@ -477,7 +548,7 @@ def desktop_app_usable(binary: Optional[Path] = None) -> bool:
         # Give the daemon a moment to publish its socket and read TCC back.
         for _ in range(HOST_START_ATTEMPTS):
             time.sleep(HOST_START_INTERVAL_SECONDS)
-            if _permission_status(binary) == "granted":
+            if desktop_app_permissions(binary) == "granted":
                 return True
     return False
 

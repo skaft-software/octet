@@ -4,6 +4,14 @@
 
 ### Added
 
+- Menu bar indicator on the macOS host, shown whenever computer use is
+  available and tinted orange while an agent session is live. Its state is
+  polled from `cua-driver sessions --json` so it reflects the driver's own
+  state rather than anything the agent claims. The menu also offers
+  **Stop computer use**, which runs `cua-driver revoke` to cut every live
+  session in one click; revoke is deny-only, so the control cannot be used to
+  widen access. An agent that can act on the desktop but leaves no trace that it
+  is acting is the failure this prevents.
 - Optional macOS host app (`build-host-app.sh`, sources under `host-app/`) that
   supplies the AppKit main thread and Window Server access the agent-cursor
   overlay needs. It starts `cua-driver serve` under its own bundle identifier
@@ -28,6 +36,11 @@
   on every launch and every action fails; the direct runtime works immediately
   there. `OCTET_CUA_DESKTOP_HOST=0` forces the direct runtime, `=1` requires the
   host.
+  Ask the host's own daemon for its grant state instead of `cua-driver
+  permissions status`. That CLI answers only for a daemon whose identity it
+  recognises and reports `unknown` for any other bundle, including octet's own
+  fully-granted host, so the cursor path was being silently skipped in the
+  running extension while looking correct under test.
 - Resolve the installed macOS bundle's executable from its own
   `CFBundleExecutable` rather than assuming one layout, so the stock
   `CuaDriver.app` and the source-built `CuaDriverLocal.app` both work. The

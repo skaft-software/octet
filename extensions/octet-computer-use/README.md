@@ -94,6 +94,15 @@ its permission grants cannot be confused with Cua's own app. When the host is
 present but not running, octet starts it in the background once; if it still
 cannot prove its grant, octet uses the direct runtime instead.
 
+**Menu bar indicator.** Once running, the host shows a pointer glyph in the menu
+bar. It is grey while idle and turns orange while an agent session is live, so
+you can always tell when the agent has control of your screen. The state is read
+from the driver's own session list, not from anything the agent reports.
+
+Clicking it opens **Stop computer use**, which revokes every live session
+immediately. That is the one-click kill switch: an agent that can drive your
+desktop should never be able to do so invisibly.
+
 The app is macOS-only and optional. It is not required for computer use, and it
 is not installed by `octet extension install`.
 

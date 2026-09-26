@@ -153,15 +153,193 @@ enum HostError: Error, CustomStringConvertible {
     }
 }
 
-/// The application delegate.
+/// A read-only view of what the driver is currently doing.
 ///
-/// This app has no windows and no menu bar: it is an `LSUIElement` background
-/// host whose only job is to keep a certified AppKit main thread alive and the
-/// daemon running. Any window would make it steal focus from whatever the user
-/// is actually doing, which is exactly what a background automation host must
-/// never do.
+/// Polled from `cua-driver sessions --json` rather than pushed by the agent, so
+/// the indicator reflects the driver's own state and cannot claim activity the
+/// driver does not have.
+struct SessionSummary {
+    var activeSessions: Int = 0
+    var cursorVisible: Bool = false
+    var recordingActive: Bool = false
+    var hasSession: Bool = false
+
+    /// True when the agent currently holds the desktop.
+    var isActing: Bool { activeSessions > 0 }
+
+    static func read() -> SessionSummary {
+        guard let binary = Paths.driverBinary() else { return SessionSummary() }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = ["sessions", "--json"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return SessionSummary()
+        }
+        // Read on a background thread so the host's main thread - which owns the
+        // menu bar item - never blocks on a wedged child. A small box keeps the
+        // handoff to the background thread free of a shared mutable capture.
+        final class Box: @unchecked Sendable {
+            var data = Data()
+            let lock = NSLock()
+            func set(_ value: Data) { lock.lock(); data = value; lock.unlock() }
+            func get() -> Data { lock.lock(); defer { lock.unlock() }; return data }
+        }
+        let box = Box()
+        let group = DispatchGroup()
+        DispatchQueue.global(qos: .utility).async(group: group) {
+            box.set(pipe.fileHandleForReading.readDataToEndOfFile())
+        }
+        let finished = group.wait(timeout: .now() + 5) == .success
+        if !finished {
+            process.terminate()
+            _ = group.wait(timeout: .now() + 2)
+            return SessionSummary()
+        }
+        guard let text = String(data: box.get(), encoding: .utf8),
+            let payload = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+            let sessions = payload["sessions"] as? [[String: Any]]
+        else {
+            return SessionSummary()
+        }
+
+        var summary = SessionSummary()
+        for session in sessions {
+            if (session["state"] as? String) == "active" { summary.activeSessions += 1 }
+            if (session["cursor_visible"] as? Bool) == true { summary.cursorVisible = true }
+            if (session["recording_active"] as? Bool) == true { summary.recordingActive = true }
+            if session["session"] is String { summary.hasSession = true }
+        }
+        return summary
+    }
+}
+
+/// The menu bar indicator.
+///
+/// This exists for two reasons, and the second is the important one. It tells
+/// the user that an agent currently has control of their screen, which is a
+/// transparency obligation, and its "Stop" item revokes that control in one
+/// click. An agent that can act on the desktop but leaves no trace that it is
+/// acting is the failure mode this prevents.
+@MainActor
+final class StatusItemController: NSObject, NSMenuDelegate {
+    private var item: NSStatusItem?
+    private var timer: Timer?
+    private let onStop: () -> Void
+    private let onQuit: () -> Void
+    private var lastActing = false
+
+    init(onStop: @escaping () -> Void, onQuit: @escaping () -> Void) {
+        self.onStop = onStop
+        self.onQuit = onQuit
+    }
+
+    func install() {
+        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.image = Self.icon(acting: false)
+        statusItem.button?.image?.isTemplate = true
+        statusItem.button?.toolTip = "Octet computer use is idle"
+        statusItem.menu = buildMenu()
+        item = statusItem
+
+        // Poll rather than wait for a callback: the driver exposes state, not
+        // events, and a poll keeps the host free of any agent-side protocol.
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        refresh()
+    }
+
+    private func buildMenu() -> NSMenu {
+        let menu = NSMenu()
+        let status = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+
+        let stop = NSMenuItem(
+            title: "Stop computer use",
+            action: #selector(handleStop),
+            keyEquivalent: ""
+        )
+        stop.target = self
+        menu.addItem(stop)
+
+        let quit = NSMenuItem(title: "Quit Octet Computer Use", action: #selector(handleQuit), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+        return menu
+    }
+
+    private func refresh() {
+        let summary = SessionSummary.read()
+        let acting = summary.isActing
+        if let button = item?.button {
+            button.image = Self.icon(acting: acting)
+            // A template image tints with the menu bar, which reads as normal.
+            // While the agent is acting, colour is meaningful: it is the signal
+            // that the user is not looking at an idle system.
+            button.image?.isTemplate = !acting
+            button.contentTintColor = acting ? .systemOrange : nil
+            button.toolTip = acting
+                ? "Octet computer use is controlling this Mac"
+                : "Octet computer use is idle"
+        }
+        if let menu = item?.menu, let status = menu.items.first {
+            if acting {
+                status.title = "Active - \(summary.activeSessions) session(s)"
+            } else {
+                status.title = "Idle"
+            }
+        }
+        lastActing = acting
+    }
+
+    private static func icon(acting: Bool) -> NSImage? {
+        // A cursor glyph, drawn rather than shipped, so the indicator needs no
+        // bundled artwork and stays crisp on every display scale.
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let path = NSBezierPath()
+            // A simple pointer outline.
+            path.move(to: NSPoint(x: 4, y: 3))
+            path.line(to: NSPoint(x: 4, y: 15))
+            path.line(to: NSPoint(x: 7.5, y: 11.5))
+            path.line(to: NSPoint(x: 10, y: 16))
+            path.line(to: NSPoint(x: 12, y: 15))
+            path.line(to: NSPoint(x: 9.5, y: 10.5))
+            path.line(to: NSPoint(x: 14, y: 10.5))
+            path.close()
+            if acting {
+                NSColor.systemOrange.setFill()
+            } else {
+                NSColor.labelColor.setFill()
+            }
+            path.fill()
+            return true
+        }
+        return image
+    }
+
+    @objc private func handleStop() {
+        onStop()
+        refresh()
+    }
+
+    @objc private func handleQuit() {
+        onQuit()
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private let daemon = DaemonProcess()
+    private var status: StatusItemController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -177,6 +355,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             try? message.write(to: note, atomically: true, encoding: .utf8)
             return
         }
+
+        // The indicator is a transparency affordance, so it appears even when
+        // the agent is idle: its presence tells the user computer use is
+        // installed and available, and its colour tells them when it is live.
+        let controller = StatusItemController(
+            onStop: { [weak self] in self?.revokeAllSessions() },
+            onQuit: { NSApp.terminate(nil) }
+        )
+        controller.install()
+        status = controller
+    }
+
+    /// Revoke every live agent session.
+    ///
+    /// This is the one-click kill switch. `cua-driver revoke` is deny-only: it
+    /// stops and revokes sessions and never accepts an approval, so it cannot be
+    /// used to widen access. The agent may reconnect later, but the user gets an
+    /// immediate, honest interruption rather than a machine that stays under
+    /// agent control with no way in.
+    private func revokeAllSessions() {
+        guard let binary = Paths.driverBinary() else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = ["revoke"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
     }
 
     /// Ask the daemon to shut down on the way out so it can close its sessions
