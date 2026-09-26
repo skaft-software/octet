@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -134,6 +135,48 @@ class JevChoiceTests(unittest.TestCase):
     def test_missing_key_is_unavailable(self):
         with self.assertRaises(JevUnavailable):
             choose_action(goal="x", candidates=[Candidate("a", "do a")], api_key="")
+
+
+class JevKeyStorageTests(unittest.TestCase):
+    def test_key_is_stored_private_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            path = jev.store_key("ts-secret-value", home=home)
+            self.assertIsNotNone(path)
+            mode = path.stat().st_mode & 0o777
+            self.assertEqual(mode, 0o600, "the key file must be owner-only")
+            self.assertEqual(jev.resolve_key(home=home), "ts-secret-value")
+
+    def test_environment_key_takes_precedence_over_stored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            jev.store_key("stored-value", home=home)
+            os.environ[jev.API_KEY_ENV] = "env-value"
+            try:
+                self.assertEqual(jev.resolve_key(home=home), "env-value")
+            finally:
+                os.environ.pop(jev.API_KEY_ENV, None)
+
+    def test_empty_key_is_not_stored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self.assertIsNone(jev.store_key("   ", home=home))
+            self.assertIsNone(jev.store_key("", home=home))
+
+    def test_clear_removes_the_stored_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            jev.store_key("value", home=home)
+            jev.clear_key(home=home)
+            self.assertIsNone(jev.resolve_key(home=home))
+
+    def test_status_reports_source_but_never_the_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            jev.store_key("ts-super-secret", home=home)
+            report = jev.status(home=home)
+            self.assertEqual(report["api_key_source"], "stored")
+            self.assertNotIn("ts-super-secret", str(report))
 
 
 class JevSecretHygieneTests(unittest.TestCase):

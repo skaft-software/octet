@@ -26,14 +26,82 @@ and the caller keeps its existing behavior.
 
 from __future__ import annotations
 
-import json
 import os
+import stat
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 #: Name of the environment variable holding the TypeSafe API key. The value is
 #: only ever passed to the SDK constructor; it is never logged or returned.
 API_KEY_ENV = "TYPESAFE_API_KEY"
+
+#: Where a key entered through setup is stored, relative to octet's state
+#: directory. This is octet's own private state and is written mode 0600.
+_KEY_FILE = Path("computer-use") / "jev-key"
+
+
+def key_path(home: Optional[Path] = None) -> Path:
+    """Where a setup-entered key lives."""
+
+    base = home or Path(os.environ.get("OCTET_STATE_DIR", Path.home() / ".octet"))
+    return base / _KEY_FILE
+
+
+def store_key(value: str, *, home: Optional[Path] = None) -> Optional[Path]:
+    """Persist a key the user entered, readable only by them.
+
+    Returns the path written, or ``None`` if the value was not a usable key. The
+    value is never logged, and the file is created 0600 inside a 0700 directory.
+    """
+
+    key = (value or "").strip()
+    if not key:
+        return None
+    path = key_path(home)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Write via a private temp file so the key is never briefly world-readable.
+        temporary = path.with_suffix(".tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(key)
+        os.replace(temporary, path)
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        return None
+    return path
+
+
+def clear_key(*, home: Optional[Path] = None) -> None:
+    """Forget a stored key."""
+
+    try:
+        key_path(home).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _stored_key(home: Optional[Path] = None) -> Optional[str]:
+    try:
+        value = key_path(home).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def resolve_key(*, home: Optional[Path] = None) -> Optional[str]:
+    """The key to use: the environment first, then a key stored by setup.
+
+    The environment wins so a user can override a stored key for one run without
+    editing stored state.
+    """
+
+    from_env = os.environ.get(API_KEY_ENV, "").strip()
+    if from_env:
+        return from_env
+    return _stored_key(home)
+
 
 #: Reserved candidate identifiers, always offered so the model can decline or ask
 #: to look again instead of being forced into an action.
@@ -194,16 +262,67 @@ def _compact_regions(regions: Optional[Sequence[Mapping[str, Any]]]) -> List[Dic
     return compact
 
 
-def _client(api_key: str, *, model: Optional[str] = None) -> Any:
+def _import_sdk() -> Any:
+    """Import ``typesafe_sdk``, falling back to the driver's venv.
+
+    The extension runs under octet's own interpreter, which is not guaranteed to
+    have pip or the SDK. The Cua Driver runtime that ``computer_use_setup``
+    provisions *does* have pip, so the optional SDK is installed there and made
+    importable here. This keeps Jev optional: if neither interpreter has it, the
+    caller gets a clean "unavailable" instead of an import crash.
+    """
+
     try:
-        from typesafe_sdk import TypeSafeClient
-    except ImportError as error:  # optional dependency
+        import typesafe_sdk  # noqa: PLC0415
+        return typesafe_sdk
+    except ImportError:
+        pass
+
+    import importlib
+    import sys
+
+    from octet_computer_use import driver as driver_module
+
+    try:
+        site_packages = driver_module.DriverPaths.for_home().site_packages
+    except Exception:  # noqa: BLE001 - any failure means "not available"
+        raise JevUnavailable(
+            "the optional typesafe-sdk is not installed in this runtime"
+        ) from None
+    if not site_packages.is_dir():
+        raise JevUnavailable(
+            "the optional typesafe-sdk is not installed in this runtime"
+        )
+    path = str(site_packages)
+    if path not in sys.path:
+        sys.path.append(path)
+    try:
+        return importlib.import_module("typesafe_sdk")
+    except ImportError as error:
         raise JevUnavailable(
             "the optional typesafe-sdk is not installed in this runtime"
         ) from error
+
+
+def _client(api_key: str, *, model: Optional[str] = None) -> Any:
+    sdk = _import_sdk()
     # The key goes straight to the client and nowhere else. It is never placed in
     # a URL, header the caller controls, log, or exception message.
-    return TypeSafeClient(api_key=api_key, model=model) if model else TypeSafeClient(api_key=api_key)
+    return (
+        sdk.TypeSafeClient(api_key=api_key, model=model)
+        if model
+        else sdk.TypeSafeClient(api_key=api_key)
+    )
+
+
+def sdk_installed(home: Optional[Path] = None) -> bool:
+    """Whether the optional SDK is importable from either interpreter."""
+
+    try:
+        _import_sdk()
+    except JevUnavailable:
+        return False
+    return True
 
 
 def choose_action(
@@ -226,9 +345,11 @@ def choose_action(
     result the user never saw offered.
     """
 
-    key = api_key or os.environ.get(API_KEY_ENV, "")
+    key = api_key or resolve_key()
     if not key:
-        raise JevUnavailable(f"{API_KEY_ENV} is not set")
+        raise JevUnavailable(
+            f"{API_KEY_ENV} is not set and no key was stored by setup"
+        )
 
     request = build_request(
         goal=goal,
@@ -304,7 +425,7 @@ def _extract_choice(response: Any) -> Mapping[str, Any]:
     }
 
 
-def status() -> Dict[str, Any]:
+def status(*, home: Optional[Path] = None) -> Dict[str, Any]:
     """Non-secret readiness for the optional Jev integration."""
 
     has_sdk = True
@@ -312,10 +433,13 @@ def status() -> Dict[str, Any]:
         import typesafe_sdk  # noqa: F401
     except ImportError:
         has_sdk = False
+    key = resolve_key(home=home)
+    from_env = bool(os.environ.get(API_KEY_ENV, "").strip())
     return {
         "sdk_installed": has_sdk,
-        "api_key_configured": bool(os.environ.get(API_KEY_ENV, "")),
-        "usable": has_sdk and bool(os.environ.get(API_KEY_ENV, "")),
+        "api_key_configured": bool(key),
+        "api_key_source": "environment" if from_env else ("stored" if key else None),
+        "usable": has_sdk and bool(key),
         "note": (
             "Jev is optional. It only chooses among offered candidate actions; "
             "octet still performs and verifies the action."
@@ -333,5 +457,9 @@ __all__ = [
     "REOBSERVE",
     "build_request",
     "choose_action",
+    "clear_key",
+    "key_path",
+    "resolve_key",
     "status",
+    "store_key",
 ]

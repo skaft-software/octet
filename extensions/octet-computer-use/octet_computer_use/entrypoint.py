@@ -23,7 +23,10 @@ from octet_computer_use.jev import (
     JevContractError,
     JevUnavailable,
     choose_action,
+    clear_key,
+    store_key,
 )
+from octet_computer_use.jev import sdk_installed
 from octet_computer_use.jev import status as jev_status
 from octet_computer_use.service import ArgumentError
 
@@ -60,7 +63,11 @@ CURSOR_MOTION: Dict[str, Any] = {
     "spring": 1.0,
     "glide_duration_ms": 0.0,
     "dwell_after_click_ms": 0.0,
-    "idle_hide_ms": 2000.0,
+    # Keep the agent cursor on screen for as long as the session is active. The
+    # cursor is the always-on indicator that an agent currently has control of
+    # this desktop, so it must not fade out between actions. A session that ends
+    # removes it. A day-long value is effectively "until the session ends".
+    "idle_hide_ms": 86_400_000.0,
 }
 
 
@@ -125,6 +132,7 @@ _OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "permission_detail": {"type": "string"},
             "runtime": {"type": "string"},
             "provisioned": {"type": "boolean"},
+            "jev_note": {"type": "string"},
         },
     },
     "jev_status": {
@@ -132,6 +140,7 @@ _OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "properties": {
             "sdk_installed": {"type": "boolean"},
             "api_key_configured": {"type": "boolean"},
+            "api_key_source": {"type": ["string", "null"]},
             "usable": {"type": "boolean"},
             "note": {"type": "string"},
         },
@@ -452,7 +461,17 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
             return tool_result(text_content(_render_status(computer_use.status())), structured_content=result)
         if name == "computer_use_jev_status":
             report = jev_status()
-            detail = "Jev is usable." if report["usable"] else "Jev is optional and not currently usable."
+            if report["usable"]:
+                source = report.get("api_key_source")
+                detail = "Jev is usable"
+                detail += " (key from environment)" if source == "environment" else " (key stored)"
+                detail += "."
+            elif not report["sdk_installed"]:
+                detail = "Jev is optional; its SDK is not installed. Run /computer-use jev."
+            elif not report["api_key_configured"]:
+                detail = "Jev is optional; no API key yet. Run /computer-use jev to add one."
+            else:
+                detail = "Jev is not usable."
             return tool_result(text_content(detail), structured_content=report)
         if name == "computer_use_jev_choose":
             return _handle_jev_choose(values)
@@ -483,11 +502,20 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
             # them re-run a second command. The dialog is attributed to octet
             # because the driver runs in the host's responsibility chain.
             result.update(computer_use.publish_status(prompt=True))
+            jev_outcome = _setup_jev(extension, computer_use)
+            result.update(jev_outcome)
+            result["jev_note"] = _render_jev_setup(jev_outcome)
+        elif action == "jev":
+            outcome = _setup_jev(extension, computer_use, dedicated=True)
+            return tool_result(
+                text_content(_render_jev_setup(outcome)),
+                structured_content=outcome,
+            )
         elif action == "status":
             result = computer_use.publish_status()
         else:
             return tool_result(
-                text_content("Usage: /computer-use [status|setup]"),
+                text_content("Usage: /computer-use [status|setup|jev]"),
                 is_error=True,
             )
         return tool_result(
@@ -497,7 +525,10 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
 
     extension.command(
         name="computer-use",
-        description="Provision and report the Cua Driver used for native computer use.",
+        description=(
+            "Provision and report the Cua Driver used for native computer use, "
+            "and optionally set up Jev."
+        ),
     )(setup_command)
 
     extension.on_shutdown(computer_use.shutdown)
@@ -505,6 +536,90 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
 
 
 _DRIVER_TOOLS = {name: driver_tool for name, driver_tool, _ in service.PUBLISHED_TOOLS}
+
+
+def _setup_jev(
+    extension: Any,
+    computer_use: "ComputerUse",
+    *,
+    dedicated: bool = False,
+) -> Dict[str, Any]:
+    """Offer the optional Jev setup, once, without ever blocking setup on it.
+
+    Jev is optional. The user is asked a single yes/no question; a "no", a
+    cancelled prompt, or a frontend with no input surface all leave computer use
+    exactly as it was. The API key is requested as a secret, so it is never
+    echoed, logged, or placed in a command argument, and it is stored 0600 under
+    octet's own state.
+    """
+
+    try:
+        offer = extension.confirm(
+            "Set up Jev for computer use?",
+            detail=(
+                "Jev (TypeSafe) can choose which offered action to take next, "
+                "instead of relying only on the model. It is optional and needs "
+                "a TypeSafe API key."
+            ),
+            destructive=False,
+            default=False,
+        )
+    except Exception:
+        # No confirmation surface, or the request failed: stay optional.
+        return {"jev_setup": "skipped"}
+
+    if offer is not True:
+        return {"jev_setup": "declined"}
+
+    # Install the optional SDK into the same octet-owned venv as the driver.
+    try:
+        installed = driver_module.provision_jev(computer_use._paths)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 - JEV must never break setup
+        installed = False
+    if not installed:
+        return {"jev_setup": "sdk_unavailable", "jev": jev_status()}
+
+    # Use a key already present in the environment, or ask for one.
+    if os.environ.get("TYPESAFE_API_KEY", "").strip():
+        return {"jev_setup": "environment", "jev": jev_status()}
+
+    try:
+        entered = extension.request_input(
+            "TypeSafe API key for Jev (stored privately, never logged). "
+            "Leave blank to skip.",
+            secret=True,
+        )
+    except Exception:
+        return {"jev_setup": "sdk_only", "jev": jev_status()}
+
+    if not entered or not entered.strip():
+        return {"jev_setup": "sdk_only", "jev": jev_status()}
+
+    stored = store_key(entered)
+    # The entered value is deliberately not referenced again after this point.
+    del entered
+    if stored is None:
+        return {"jev_setup": "store_failed", "jev": jev_status()}
+    return {"jev_setup": "configured", "jev": jev_status()}
+
+
+def _render_jev_setup(outcome: Mapping[str, Any]) -> str:
+    """A short, key-free line describing what Jev setup did."""
+
+    state = outcome.get("jev_setup")
+    if state == "configured":
+        return "Jev is configured (API key stored)."
+    if state == "environment":
+        return "Jev is using the TYPESAFE_API_KEY from your environment."
+    if state == "sdk_only":
+        return "Jev SDK installed, but no API key was set. Run /computer-use jev to add one."
+    if state == "sdk_unavailable":
+        return "Jev SDK could not be installed. Computer use is unaffected."
+    if state == "store_failed":
+        return "Could not store the Jev API key. Computer use is unaffected."
+    if state == "declined":
+        return "Jev setup declined. Computer use is unaffected."
+    return "Jev setup skipped. Computer use is unaffected."
 
 
 def _handle_jev_choose(values: Mapping[str, Any]) -> Dict[str, Any]:

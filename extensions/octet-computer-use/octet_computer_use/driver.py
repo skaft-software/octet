@@ -86,6 +86,22 @@ class DriverPaths:
         return cls(base.expanduser().absolute() / ".octet" / "computer-use")
 
     @property
+    def site_packages(self) -> Path:
+        """Site-packages inside the provisioned venv.
+
+        The optional TypeSafe SDK is installed here rather than into octet's own
+        interpreter, because that interpreter is not guaranteed to have pip. The
+        extension then imports it from this path.
+        """
+
+        return (
+            self.venv
+            / "lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+        )
+
+    @property
     def venv(self) -> Path:
         return self.root / "runtime"
 
@@ -263,6 +279,64 @@ def provision(
     if binary is None:
         raise ProvisionError(f"{spec} installed but no driver executable was found")
     return binary
+
+
+#: The optional TypeSafe SDK, installed into the same octet-owned venv as the
+#: driver. It is optional: nothing in computer use requires it.
+JEV_DISTRIBUTION = "typesafe-sdk"
+
+
+def provision_jev(
+    paths: DriverPaths,
+    *,
+    version: str = "",
+    timeout: int = INSTALL_TIMEOUT_SECONDS,
+) -> bool:
+    """Install the optional TypeSafe SDK into the driver venv.
+
+    Returns True when the SDK is importable afterwards, False when it could not
+    be installed. This is a convenience for the setup command, not a hard
+    requirement: JEV stays optional and computer use works without it.
+
+    The SDK goes into the octet-owned venv rather than octet's own interpreter,
+    because that interpreter is not guaranteed to have pip.
+    """
+
+    python = _venv_python_for(paths.venv)
+    if not python.is_file():
+        return False
+    environment = _install_environment()
+    spec = f"{JEV_DISTRIBUTION}{version}" if version else JEV_DISTRIBUTION
+    try:
+        install = _run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                "--no-cache-dir",
+                spec,
+            ],
+            env=environment,
+            timeout=timeout,
+        )
+    except ProvisionError:
+        return False
+    if install.returncode != 0:
+        return False
+    # Confirm the SDK is actually importable from the venv before reporting
+    # success; pip can exit zero without the module being usable.
+    try:
+        probe = _run(
+            [str(python), "-c", "import typesafe_sdk"],
+            env=environment,
+            timeout=60,
+        )
+    except ProvisionError:
+        return False
+    return probe.returncode == 0
 
 
 @dataclass(frozen=True)
