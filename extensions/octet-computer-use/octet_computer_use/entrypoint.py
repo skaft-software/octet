@@ -35,6 +35,11 @@ RESULT_TEXT_LIMIT = 24_000
 # How long one macOS permission answer is reused for the effectful-action gate.
 _PERMISSION_CACHE_SECONDS = 30.0
 
+# The driver session that owns the visible agent cursor. Cursors are
+# per-session, and a session name belongs to the transport that created it, so
+# this must be a name no other client (the CLI, another agent) will claim.
+CURSOR_SESSION = "octet-computer-use"
+
 
 def _schema_for(driver_tool: str) -> Dict[str, Any]:
     """A permissive-but-bounded input schema for a republished driver tool."""
@@ -78,6 +83,7 @@ class ComputerUse:
         self._lock = threading.Lock()
         # (expires_at_monotonic, blocked) for the effectful-action gate.
         self._permission_cache: Optional[Tuple[float, bool]] = None
+        self._app_daemon = False
 
     # -- driver lifecycle --------------------------------------------------
 
@@ -85,15 +91,40 @@ class ComputerUse:
         with self._lock:
             if self._client is not None and self._client.started:
                 return self._client
-            binary = driver_module.installed_binary(self._paths)
+            # Prefer an installed desktop host: it owns the OS permission
+            # identity and the GUI main thread, which is what enables the agent
+            # cursor. Fall back to the direct runtime when no host is present.
+            app_binary = driver_module.desktop_app_binary()
+            app_daemon = app_binary is not None
+            binary = app_binary or driver_module.installed_binary(self._paths)
             if binary is None:
                 raise McpError(
                     "Cua Driver is not installed. Run computer_use_setup to provision it."
                 )
-            client = DriverClient(binary)
+            client = DriverClient(binary, app_daemon=app_daemon)
             client.start()
             self._client = client
+            self._app_daemon = app_daemon
+            if app_daemon:
+                self._show_cursor(client)
             return client
+
+    def _show_cursor(self, client: DriverClient) -> None:
+        """Start the shared session and make the agent cursor visible.
+
+        The cursor is per-session, so the session must be live before the cursor
+        is enabled and must not be left to expire. Both steps are best-effort:
+        a failure here must never block a tool call.
+        """
+
+        try:
+            client.call("start_session", {"session": CURSOR_SESSION})
+            client.call(
+                "set_agent_cursor_enabled",
+                {"session": CURSOR_SESSION, "enabled": True},
+            )
+        except Exception:
+            return
 
     def _permissions_block(self, driver_tool: str) -> bool:
         """Whether a missing OS grant must hold back this effectful action.

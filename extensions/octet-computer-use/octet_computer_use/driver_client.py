@@ -25,6 +25,7 @@ import os
 import queue
 import subprocess
 import threading
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 CLIENT_NAME = "octet-computer-use"
@@ -93,6 +94,19 @@ def _child_environment(extra: Optional[Mapping[str, str]] = None) -> Dict[str, s
     return environment
 
 
+def daemon_socket() -> Path:
+    """Where the desktop host's daemon listens.
+
+    The driver resolves this itself, but the client needs the exact path to
+    address an already-running daemon rather than launch a second runtime.
+    """
+
+    override = os.environ.get("OCTET_CUA_DAEMON_SOCKET")
+    if override:
+        return Path(override)
+    return Path.home() / "Library" / "Caches" / "cua-driver" / "cua-driver.sock"
+
+
 class DriverClient:
     """A synchronous, single-owner MCP stdio client for one driver process."""
 
@@ -102,10 +116,16 @@ class DriverClient:
         *,
         cwd=None,
         environment: Optional[Mapping[str, str]] = None,
+        app_daemon: bool = False,
     ) -> None:
         self._binary = str(binary)
         self._cwd = str(cwd) if cwd is not None else None
         self._environment = environment or {}
+        # When a CuaDriver.app host is available, let it own the runtime so
+        # macOS attributes Accessibility/Screen Recording to the app rather than
+        # to octet, and the app can draw the agent cursor. Without the app the
+        # direct runtime still works; it simply has no cursor overlay.
+        self._app_daemon = bool(app_daemon)
         self._process: Optional[subprocess.Popen] = None
         self._next_id = 0
         self._lock = threading.Lock()
@@ -119,9 +139,17 @@ class DriverClient:
     def start(self, timeout: float = STARTUP_TIMEOUT_SECONDS) -> None:
         if self._started:
             return
+        if self._app_daemon:
+            # The desktop host owns the runtime; address its daemon explicitly.
+            # Bare `mcp` assumes an app-daemon proxy that is only reachable
+            # from a launched GUI app, so it exits immediately when run as a
+            # plain child process.
+            arguments = ["mcp", "--socket", str(daemon_socket())]
+        else:
+            arguments = ["mcp", "--direct"]
         try:
             self._process = subprocess.Popen(
-                [self._binary, "mcp", "--direct"],
+                [self._binary, *arguments],
                 cwd=self._cwd,
                 env=_child_environment(self._environment),
                 stdin=subprocess.PIPE,

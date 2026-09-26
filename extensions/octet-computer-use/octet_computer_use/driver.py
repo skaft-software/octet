@@ -260,6 +260,49 @@ class Health:
         }
 
 
+# A desktop host, when installed, owns the OS permission identity and the GUI
+# main thread. On macOS that is the only thing that can draw the agent cursor:
+# the overlay needs a certified AppKit main thread and Window Server access that
+# a terminal-hosted process does not have. ChatGPT.app takes the same shape - it
+# embeds the driver inside a signed app and inherits that app's TCC grants.
+DESKTOP_APP_CANDIDATES: Dict[str, str] = {
+    "darwin": "/Applications/CuaDriver.app",
+    "win32": os.path.expandvars(r"%LOCALAPPDATA%\\CuaDriver\\CuaDriver.exe"),
+}
+
+
+def desktop_app() -> Optional[Path]:
+    """The installed CuaDriver desktop host, when one is present.
+
+    Absence is not an error: the direct runtime still drives the desktop, it
+    just has no cursor overlay and keeps permissions on the calling process.
+    """
+
+    override = os.environ.get("OCTET_CUA_DESKTOP_APP")
+    if override:
+        path = Path(override)
+        return path if path.exists() else None
+    candidate = DESKTOP_APP_CANDIDATES.get(platform.system().lower())
+    if not candidate:
+        return None
+    path = Path(candidate)
+    return path if path.exists() else None
+
+
+def desktop_app_binary(app: Optional[Path] = None) -> Optional[Path]:
+    """The driver executable inside an installed desktop host bundle."""
+
+    host = app or desktop_app()
+    if host is None:
+        return None
+    inner = (
+        host / "Contents" / "Resources" / "cua-driver"
+        if platform.system().lower() == "darwin"
+        else host
+    )
+    return inner if inner.is_file() else None
+
+
 def _permission_status(binary: Path) -> str:
     completed = _run([str(binary), "permissions", "status", "--json"])
     if completed.returncode != 0:

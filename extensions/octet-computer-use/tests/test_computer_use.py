@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -356,3 +357,56 @@ class StatusRowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DesktopHostTests(unittest.TestCase):
+    """The desktop host is preferred when present, and is optional.
+
+    The host owns the OS permission identity and the GUI main thread, which is
+    what lets the driver draw the agent cursor. Without it the direct runtime
+    still drives the desktop; only the overlay is unavailable.
+    """
+
+    def test_desktop_app_is_found_only_when_installed(self):
+        from octet_computer_use import driver
+
+        with tempfile.TemporaryDirectory() as directory:
+            present = Path(directory) / "CuaDriver.app"
+            present.mkdir()
+            os.environ["OCTET_CUA_DESKTOP_APP"] = str(present)
+            try:
+                self.assertEqual(driver.desktop_app(), present)
+                # No embedded binary yet: not usable as a host.
+                self.assertIsNone(driver.desktop_app_binary())
+            finally:
+                os.environ.pop("OCTET_CUA_DESKTOP_APP", None)
+
+        os.environ["OCTET_CUA_DESKTOP_APP"] = str(Path("/nonexistent/CuaDriver.app"))
+        try:
+            self.assertIsNone(driver.desktop_app())
+        finally:
+            os.environ.pop("OCTET_CUA_DESKTOP_APP", None)
+
+    def test_missing_host_falls_back_to_the_direct_runtime(self):
+        from octet_computer_use.driver_client import DriverClient
+
+        direct = DriverClient("cua-driver")
+        self.assertFalse(direct._app_daemon)
+        host = DriverClient("cua-driver", app_daemon=True)
+        self.assertTrue(host._app_daemon)
+
+    def test_cursor_session_name_is_not_shared_with_other_clients(self):
+        # A session name belongs to the transport that created it, so the cursor
+        # session must not collide with a name the CLI or another agent uses.
+        from octet_computer_use.entrypoint import CURSOR_SESSION
+
+        self.assertEqual(CURSOR_SESSION, "octet-computer-use")
+
+    def test_daemon_socket_is_overridable(self):
+        from octet_computer_use.driver_client import daemon_socket
+
+        os.environ["OCTET_CUA_DAEMON_SOCKET"] = "/tmp/custom.sock"
+        try:
+            self.assertEqual(str(daemon_socket()), "/tmp/custom.sock")
+        finally:
+            os.environ.pop("OCTET_CUA_DAEMON_SOCKET", None)
