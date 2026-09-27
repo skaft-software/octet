@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -989,11 +990,19 @@ class ObservationScreenshotTests(unittest.TestCase):
         self.assertNotIn("include_screenshot", forwarded)
 
 
+MACOS_BUNDLE_ONLY = "macOS .app bundle layout and Info.plist resolution are darwin-only"
+
+
 class DesktopHostTests(unittest.TestCase):
     """macOS requires the selected host unless direct mode is explicit.
 
     The host owns the OS permission identity and the GUI main thread needed
     for the agent cursor. A missing or ungranted required host fails closed.
+
+    Bundle-layout tests are macOS-only: the driver resolves an ``.app`` host
+    through ``DESKTOP_APP_CANDIDATES[platform.system()]`` and reads
+    ``CFBundleExecutable`` with ``plutil``, so off darwin the correct answer is
+    ``None`` and only the darwin behaviour is meaningful to pin.
     """
 
     def test_desktop_app_is_found_only_when_installed(self):
@@ -1016,6 +1025,7 @@ class DesktopHostTests(unittest.TestCase):
         finally:
             os.environ.pop("OCTET_CUA_DESKTOP_APP", None)
 
+    @unittest.skipUnless(sys.platform == "darwin", MACOS_BUNDLE_ONLY)
     def test_bundle_executable_is_read_from_its_own_info_plist(self):
         # Cua ships two official macOS bundles whose executable name differs:
         # the release bundle declares ``cua-driver`` and the source-built local
@@ -1047,6 +1057,7 @@ class DesktopHostTests(unittest.TestCase):
                 finally:
                     driver.DESKTOP_APP_CANDIDATES = original
 
+    @unittest.skipUnless(sys.platform == "darwin", MACOS_BUNDLE_ONLY)
     def test_bundle_executable_falls_back_to_known_names(self):
         # An unreadable or absent Info.plist must not hide an installed host.
         from octet_computer_use import driver
@@ -1064,6 +1075,7 @@ class DesktopHostTests(unittest.TestCase):
             finally:
                 driver.DESKTOP_APP_CANDIDATES = original
 
+    @unittest.skipUnless(sys.platform == "darwin", MACOS_BUNDLE_ONLY)
     def test_release_bundle_is_preferred_over_the_local_build(self):
         # A stock install must win over a source build, so the notarized
         # release identity is used whenever both bundles are present.
@@ -1180,6 +1192,7 @@ class DesktopHostTests(unittest.TestCase):
             driver.HOST_START_ATTEMPTS = original_attempts
             driver.desktop_app_permissions = original_perms
 
+    @unittest.skipUnless(sys.platform == "darwin", MACOS_BUNDLE_ONLY)
     def test_octet_host_resolves_its_driver_not_its_own_executable(self):
         # Octet's host app declares CFBundleExecutable as the host itself and
         # ships the driver beside it. Resolving the declared name would hand the

@@ -175,6 +175,25 @@ See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits
 - Deprecate `octet-browse`. It remains published, installable, and unchanged, and
   is retained because its isolated, Octet-owned Chromium profile with a manual-auth
   boundary is a safety property the computer-use path does not provide.
+- Refresh reviewed models.dev metadata to 910 pricing routes, 395 canonical names,
+  and 932 capability routes; preserve the [source provenance](crates/octet-ai/models/SOURCES.md).
+  The re-freeze is required because the pre-release freshness gate compares the
+  checked-in snapshots against live models.dev whenever the workspace version
+  changes, so the 0.8.1 bump re-checked a snapshot last reviewed for 0.8.0. All
+  nine changed prices and seven changed context/output limits are OpenRouter
+  routes; canonical display names are unchanged. Builds and runtime remain
+  offline, direct DeepSeek schedule pricing remains excluded/unknown, and public
+  metadata does not establish live inference acceptance.
+- Restrict the four computer-use `.app`-bundle tests to macOS. They inject a
+  `darwin` host candidate and assert `CFBundleExecutable` resolution, which the
+  driver only performs on darwin; off darwin `None` is the correct answer, so
+  the suite now skips them instead of failing there. The other desktop-host
+  tests, which drive the platform-independent `OCTET_CUA_DESKTOP_APP` override,
+  keep running on every platform.
+- Count a loopback AWS-metadata fixture request when it is read rather than after
+  its response is written, so a caller that has already read the final body
+  always observes the final count. The four request-count assertions could
+  otherwise read one short on a loaded runner.
 
 ## [0.8.1-rc.1] — local dogfood only (unpublished)
 

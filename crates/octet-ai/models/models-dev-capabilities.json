@@ -11917,7 +11917,7 @@
   "openrouter/deepseek/deepseek-chat": {
     "limit": {
       "context": 163840,
-      "output": 16384
+      "output": 16000
     },
     "modalities": {
       "input": [
@@ -12109,7 +12109,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -13968,7 +13968,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 131072
+      "output": 176947
     },
     "modalities": {
       "input": [
@@ -19764,7 +19764,7 @@
   "openrouter/z-ai/glm-5.3": {
     "limit": {
       "context": 1310720,
-      "output": 943718
+      "output": 943717
     },
     "modalities": {
       "input": [
@@ -19792,7 +19792,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1310720,
-      "output": 131072
+      "output": 128000
     },
     "modalities": {
       "input": [
@@ -20414,7 +20414,7 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "limit": {
       "context": 1310720,
-      "output": 131072
+      "output": 128000
     },
     "modalities": {
       "input": [
@@ -20444,7 +20444,7 @@
   "openrouter/~z-ai/glm-latest": {
     "limit": {
       "context": 1310720,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [

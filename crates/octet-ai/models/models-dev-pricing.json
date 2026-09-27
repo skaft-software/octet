@@ -3243,8 +3243,8 @@
   "openrouter/deepseek/deepseek-chat": {
     "cache_read": 0,
     "cache_write_5m": 0,
-    "input": 320000,
-    "output": 890000,
+    "input": 257400,
+    "output": 1028700,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-chat-v3-0324": {
@@ -3304,10 +3304,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash": {
-    "cache_read": 9408,
+    "cache_read": 9380,
     "cache_write_5m": 0,
-    "input": 47040,
-    "output": 94080,
+    "input": 46900,
+    "output": 93800,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
@@ -3332,9 +3332,9 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
-    "cache_read": 244520,
+    "cache_read": 172000,
     "cache_write_5m": 0,
-    "input": 245020,
+    "input": 293040,
     "output": 3500000,
     "reasoning": null
   },
@@ -3810,8 +3810,8 @@
   "openrouter/minimax/minimax-m2": {
     "cache_read": 0,
     "cache_write_5m": 0,
-    "input": 255000,
-    "output": 1020000,
+    "input": 300000,
+    "output": 1200000,
     "reasoning": null
   },
   "openrouter/minimax/minimax-m2-her": {
@@ -5173,10 +5173,10 @@
     "reasoning": null
   },
   "openrouter/tencent/hy3": {
-    "cache_read": 33000,
+    "cache_read": 20625,
     "cache_write_5m": 0,
-    "input": 132000,
-    "output": 528000,
+    "input": 82500,
+    "output": 330000,
     "reasoning": null
   },
   "openrouter/tencent/hy3-preview": {
@@ -5446,17 +5446,17 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3": {
-    "cache_read": 39100,
+    "cache_read": 260000,
     "cache_write_5m": 0,
-    "input": 238000,
-    "output": 748000,
+    "input": 1400000,
+    "output": 4400000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
-    "cache_read": 15000,
+    "cache_read": 10000,
     "cache_write_5m": 0,
-    "input": 40000,
-    "output": 500000,
+    "input": 45000,
+    "output": 140000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flashx": {
@@ -5593,17 +5593,17 @@
     "reasoning": null
   },
   "openrouter/~z-ai/glm-flash-latest": {
-    "cache_read": 15000,
+    "cache_read": 10000,
     "cache_write_5m": 0,
-    "input": 40000,
-    "output": 500000,
+    "input": 45000,
+    "output": 140000,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {
-    "cache_read": 39100,
+    "cache_read": 66040,
     "cache_write_5m": 0,
-    "input": 238000,
-    "output": 748000,
+    "input": 355600,
+    "output": 1117600,
     "reasoning": null
   },
   "qwen-token-plan-cn/deepseek-v3.2": {
