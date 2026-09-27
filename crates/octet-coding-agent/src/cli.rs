@@ -237,7 +237,7 @@ pub struct Cli {
     /// Workspace root override.
     #[arg(long)]
     pub workspace: Option<PathBuf>,
-    /// Terminal theme: auto, light, dark, or a discovered TOML theme name.
+    /// Terminal theme: auto, light, dark, Cards, or a discovered TOML theme name.
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,
     /// Add a TOML theme file or directory (repeatable).
