@@ -114,6 +114,16 @@ built-in; `cards_example_theme_is_valid_for_every_background_profile` in
 `crates/octet-coding-agent/src/tui/theme.rs` fails the build if it stops
 validating for any terminal-background profile.
 
+Three optional top-level tokens shape the startup splash:
+
+- `splash` — colour for the byte-mark and splash text. With a truecolor,
+  animation-capable terminal it shades into a column gradient.
+- `splash_compact` — `true` selects the default's smaller geometry (4-tall
+  mark at 16 columns) instead of the larger file-theme presentation.
+- `splash_model_adaptive` — `true` keeps the default's model-adaptive
+  gradient: the byte-mark follows the active model family instead of shading
+  from `splash`, which still tints the splash text.
+
 A theme file is a bounded TOML document (256 KiB) with these typed sections:
 
 - `[metadata]` — `name`, `description`, `author`, `version`, `terminal`

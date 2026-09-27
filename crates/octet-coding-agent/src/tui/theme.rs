@@ -2688,6 +2688,10 @@ mod tests {
                 theme.resolve::<String>("splash_compact").as_deref(),
                 Some("true")
             );
+            assert_eq!(
+                theme.resolve::<String>("splash_model_adaptive").as_deref(),
+                Some("true")
+            );
         }
     }
 

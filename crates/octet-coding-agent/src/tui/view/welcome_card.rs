@@ -112,19 +112,35 @@ pub(super) fn render_welcome_card(
     } else {
         (usize::from(width) / 3).clamp(14, 24)
     };
-    let adaptive_accent = state
-        .theme
-        .is_compiled_default()
+    // A theme can also keep the default's model-adaptive splash gradient with
+    // `splash_model_adaptive = true`: the byte-mark follows the active model
+    // family instead of shading from its own `splash` colour, while the
+    // splash text keeps that colour. Themes without it paint a gradient
+    // derived from `splash`.
+    let compiled_default = state.theme.is_compiled_default();
+    let model_adaptive_splash = !compiled_default
+        && state
+            .theme
+            .resolve::<bool>("splash_model_adaptive")
+            .unwrap_or(false);
+    let adaptive_accent = (compiled_default || model_adaptive_splash)
         .then(|| state.theme.model_rgb(state.model_lab))
         .flatten();
     let splash_color = state.theme.role_rgb("splash");
+    // An adaptive splash has no solid logo colour to apply, so the byte-mark
+    // falls back to the model-blended gradient columns.
+    let logo_splash_color = if model_adaptive_splash {
+        None
+    } else {
+        splash_color
+    };
     let logo = crate::tui::splash::render_logo(
         &state.theme,
         logo_width,
         rows,
         elapsed,
         adaptive_accent,
-        splash_color,
+        logo_splash_color,
     );
     let splash_text = |text: &str| {
         splash_color
@@ -170,7 +186,7 @@ pub(super) fn render_welcome_card(
                 2,
                 elapsed,
                 adaptive_accent,
-                splash_color,
+                logo_splash_color,
             );
             compact.extend(logo.into_iter().map(|line| fit_line(&line, width)));
         } else {
@@ -591,6 +607,51 @@ mod tests {
         assert!(rendered
             .iter()
             .all(|line| sexy_tui_rs::visible_width(line) == 80));
+    }
+
+    #[test]
+    fn splash_model_adaptive_token_keeps_the_model_blended_gradient() {
+        use std::time::Duration;
+
+        let theme = crate::tui::theme::test_theme_from_source(
+            r##"
+                [metadata]
+                name = "Adaptive splash fixture"
+                adaptive = false
+                [colors]
+                splash = "#d97757"
+                splash_model_adaptive = "true"
+                model.use_lab_color = "true"
+            "##,
+        );
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_identity("anthropic", "claude-sonnet-4", "high");
+        // Settle past the sweep so only the gradient columns remain.
+        shell.state.borrow_mut().startup_card_started_at =
+            Some(Instant::now() - Duration::from_secs(10));
+        let state = shell.state.borrow();
+        let rendered = render_welcome_card(&state, 80, 10, Instant::now()).join("\n");
+        let accent = state
+            .theme
+            .model_rgb(Some(crate::tui::theme::ModelLab::Anthropic))
+            .expect("anthropic accent");
+        let blended = |gradient: (u8, u8, u8)| {
+            let mix = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * 0.58) as u8;
+            (
+                mix(gradient.0, accent.0),
+                mix(gradient.1, accent.1),
+                mix(gradient.2, accent.2),
+            )
+        };
+        let first = blended((0x4b, 0x8d, 0xff));
+        // The byte-mark follows the model family, not the theme's splash hue.
+        assert!(
+            rendered.contains(&format!("38;2;{};{};{}", first.0, first.1, first.2)),
+            "{rendered:?}"
+        );
+        assert!(!rendered.contains("38;2;119;65;47"), "{rendered:?}");
+        // The splash text still carries the theme's own colour.
+        assert!(rendered.contains("38;2;217;119;87"), "{rendered:?}");
     }
 
     #[test]

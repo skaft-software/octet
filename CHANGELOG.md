@@ -30,6 +30,9 @@
 - Let custom themes opt into the compiled default's smaller splash geometry
   with `splash_compact = true` (4-tall byte-mark at 16 columns instead of
   the larger file-theme presentation). Unset themes render as before.
+- Add `splash_model_adaptive = true` so a custom theme can keep the
+  default's model-adaptive splash gradient while still tinting the splash
+  text with its own `splash` colour. `Cards` uses it.
 - Paint `rail` transcript surfaces edge to edge: short rows now pad to the
   full frame like `band` chrome instead of rendering as ragged text-only
   highlights, so shaded fills read as cards.

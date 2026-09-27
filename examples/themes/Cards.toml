@@ -71,6 +71,11 @@ splash = "#d29c54"
 # columns) instead of the larger file-theme presentation.
 splash_compact = true
 
+# Keep the default's model-adaptive splash gradient: the byte-mark follows
+# the active model family instead of shading from the amber `splash`
+# colour above, which still tints the splash text.
+splash_model_adaptive = true
+
 # Shaded fills. `composer_bg` paints the borderless composer; the
 # `surface.*` roles below paint the transcript bands. All tints of one
 # neutral elevation so blocks read as paper, not slabs.
