@@ -93,17 +93,21 @@ pub(super) fn render_welcome_card(
         return render_pi_startup(state, width);
     }
 
-    let rows = if state.theme.is_compiled_default() {
-        4
-    } else {
-        6
-    };
+    // Custom themes can opt into the compiled default's smaller splash
+    // geometry with `splash_compact = true`. Everything else keeps the
+    // larger file-theme presentation.
+    let compact_splash = state.theme.is_compiled_default()
+        || state
+            .theme
+            .resolve::<bool>("splash_compact")
+            .unwrap_or(false);
+    let rows = if compact_splash { 4 } else { 6 };
     let elapsed = if state.theme.capabilities().animation && welcome_is_mutable(state) {
         now.saturating_duration_since(started).as_secs_f32()
     } else {
         crate::tui::splash::DURATION
     };
-    let logo_width = if state.theme.is_compiled_default() {
+    let logo_width = if compact_splash {
         16
     } else {
         (usize::from(width) / 3).clamp(14, 24)
@@ -549,7 +553,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_welcome_theme_is_solid_accent_and_framed() {
+    fn custom_welcome_theme_uses_accent_gradient_and_framing() {
+        use std::time::Duration;
+
         let shell =
             InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_from_source(
                 r##"
@@ -561,12 +567,16 @@ mod tests {
                     splash_box = "#d97757"
                 "##,
             ));
-        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+        // Settle past the sweep so the themed gradient is deterministic.
+        shell.state.borrow_mut().startup_card_started_at =
+            Some(Instant::now() - Duration::from_secs(10));
         let rendered = render_welcome_card(&shell.state.borrow(), 80, 10, Instant::now());
-        assert!(
-            rendered.iter().all(|line| line.contains("38;2;217;119;87")),
-            "{rendered:?}"
-        );
+        let joined = rendered.join("\n");
+        // Splash text and frame keep the exact accent.
+        assert!(joined.contains("38;2;217;119;87"), "{rendered:?}");
+        // The byte mark shades the accent into a truecolor column gradient.
+        assert!(joined.contains("38;2;119;65;47"), "{rendered:?}");
+        assert!(joined.contains("38;2;228;159;137"), "{rendered:?}");
         let plain = rendered
             .iter()
             .map(|line| strip_terminal_sequences(line))
@@ -581,6 +591,32 @@ mod tests {
         assert!(rendered
             .iter()
             .all(|line| sexy_tui_rs::visible_width(line) == 80));
+    }
+
+    #[test]
+    fn splash_compact_token_selects_default_splash_geometry() {
+        for (compact, logo_rows) in [(true, 4), (false, 6)] {
+            let source = format!(
+                r##"
+                    [metadata]
+                    name = "Compact fixture"
+                    adaptive = false
+                    [colors]
+                    splash = "#d97757"
+                    splash_compact = {compact}
+                "##,
+            );
+            let shell = InteractiveShell::test_shell_with_theme(
+                crate::tui::theme::test_theme_from_source(&source),
+            );
+            shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+            let rendered = render_welcome_card(&shell.state.borrow(), 80, 10, Instant::now());
+            let marked = rendered
+                .iter()
+                .filter(|line| strip_terminal_sequences(line).contains('█'))
+                .count();
+            assert_eq!(marked, logo_rows, "compact={compact}: {rendered:?}");
+        }
     }
 
     #[test]

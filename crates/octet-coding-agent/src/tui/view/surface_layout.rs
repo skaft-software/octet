@@ -130,12 +130,23 @@ pub(super) fn compile_surface_plan<'a>(
     let presentation = PresentationLayout::new(theme, outer_width);
     let kind = transcript_surface_kind(block);
     let resolved = theme.surface_for_width(kind, outer_width);
-    let event_gutter =
-        if uses_event_marker_gutter(block) && presentation.content_width > PRIMARY_TEXT_GUTTER {
-            PRIMARY_TEXT_GUTTER
-        } else {
-            0
-        };
+    // File themes paint full-width user surfaces (bands/rails/cards) that
+    // would otherwise start one gutter left of every marker-aligned block.
+    // Reserve the shared gutter so prompt cards align edge to edge with
+    // tool/shell cards; plain user text and the compiled default keep the
+    // historical compact prompt grid.
+    let full_width_user = matches!(block, TranscriptBlock::User { .. })
+        && !theme.is_compiled_default()
+        && matches!(
+            resolved.chrome,
+            ThemeSurfaceChrome::Card | ThemeSurfaceChrome::Band | ThemeSurfaceChrome::Rail
+        );
+    let needs_marker_gutter = uses_event_marker_gutter(block) || full_width_user;
+    let event_gutter = if needs_marker_gutter && presentation.content_width > PRIMARY_TEXT_GUTTER {
+        PRIMARY_TEXT_GUTTER
+    } else {
+        0
+    };
     let inset = presentation.inset.saturating_add(event_gutter);
     let available = presentation
         .content_width
@@ -231,10 +242,14 @@ pub(super) fn compile_surface_plan<'a>(
             }
         );
     // Model-coloured prompt cards retain their breathing row above and below
-    // the content while sharing the global horizontal grid.
+    // the content while sharing the global horizontal grid. Borderless
+    // band/rail surfaces with an explicit padding opt into the same single
+    // cushion row so shaded fills never touch their own edges.
     let vertical_padding_rows = usize::from(
         highlighted_user
-            || (kind == "user" && (layout.prompt_padding || chrome == ThemeSurfaceChrome::Card)),
+            || (kind == "user" && (layout.prompt_padding || chrome == ThemeSurfaceChrome::Card))
+            || ((chrome == ThemeSurfaceChrome::Band || chrome == ThemeSurfaceChrome::Rail)
+                && padding > 0),
     );
     let leading_rows = usize::from(has_heading_row) + vertical_padding_rows;
     let trailing_rows = usize::from(has_bottom_row) + vertical_padding_rows;
@@ -389,6 +404,202 @@ mod tests {
         assert_eq!(
             block_copy_text(&local_shell),
             format!("$ {command} [completed]")
+        );
+    }
+
+    #[test]
+    fn rail_and_band_surfaces_with_padding_keep_vertical_cushion_rows() {
+        let theme = test_theme_from_source(
+            r##"
+                [surfaces.tool]
+                chrome = "rail"
+                padding = 1
+
+                [surfaces.shell]
+                chrome = "band"
+                padding = 1
+
+                [roles."surface.tool"]
+                background = "#1e1e1e"
+
+                [roles."surface.shell"]
+                background = "#1e1e1e"
+            "##,
+        );
+        let block = tool("bash", serde_json::json!({}), "ok".into(), None);
+        let plan = compile_surface_plan(None, &block, &theme, 80);
+        assert_eq!(plan.chrome, ThemeSurfaceChrome::Rail);
+        assert_eq!(plan.geometry.leading_rows, 1);
+        assert_eq!(plan.geometry.trailing_rows, 1);
+        let shell_block = shell("echo hi", "hi");
+        let shell_plan = compile_surface_plan(None, &shell_block, &theme, 80);
+        assert_eq!(shell_plan.chrome, ThemeSurfaceChrome::Band);
+        assert_eq!(shell_plan.geometry.leading_rows, 1);
+        assert_eq!(shell_plan.geometry.trailing_rows, 1);
+
+        // Padding zero keeps borderless surfaces flush.
+        let flush_theme = test_theme_from_source(
+            r##"
+                [surfaces.tool]
+                chrome = "rail"
+                padding = 0
+            "##,
+        );
+        let flush = compile_surface_plan(None, &block, &flush_theme, 80);
+        assert_eq!(flush.geometry.leading_rows, 0);
+        assert_eq!(flush.geometry.trailing_rows, 0);
+    }
+
+    #[test]
+    fn rail_surfaces_fill_the_full_frame_width() {
+        let theme = test_theme_from_source(
+            r##"
+                [surfaces.tool]
+                chrome = "rail"
+                padding = 1
+
+                [roles."surface.tool"]
+                background = "#1e1e1e"
+            "##,
+        );
+        let block = tool("bash", serde_json::json!({}), "ok".into(), None);
+        let plan = compile_surface_plan(None, &block, &theme, 80);
+        let renderer = theme.rich_renderer();
+        let rendered =
+            render_block_planned(None, &block, &theme, &renderer, &renderer, 80, false, 0, 0);
+        let expected = usize::from(plan.frame_left) + usize::from(plan.frame_width);
+        let widths = rendered
+            .lines
+            .iter()
+            .map(|row| strip_terminal_sequences(row))
+            .filter(|row| !row.is_empty())
+            .map(|row| visible_width(&row))
+            .collect::<Vec<_>>();
+        assert!(!widths.is_empty());
+        assert!(
+            widths.iter().all(|&width| width == expected),
+            "{widths:?} expected every row at {expected}"
+        );
+    }
+
+    #[test]
+    fn file_theme_user_surfaces_align_with_marker_gutter_blocks() {
+        let theme = test_theme_from_source(
+            r##"
+                [surfaces.user]
+                chrome = "rail"
+                padding = 1
+
+                [surfaces.tool]
+                chrome = "rail"
+                padding = 1
+            "##,
+        );
+        let user = TranscriptBlock::User {
+            text: "hello".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        };
+        let bash = tool("bash", serde_json::json!({}), "ok".into(), None);
+        let user_plan = compile_surface_plan(None, &user, &theme, 80);
+        let tool_plan = compile_surface_plan(None, &bash, &theme, 80);
+        assert_eq!(user_plan.frame_left, tool_plan.frame_left);
+        assert_eq!(user_plan.frame_width, tool_plan.frame_width);
+        // The compiled default keeps its historical compact prompt grid.
+        let default = test_theme();
+        let default_user = compile_surface_plan(None, &user, &default, 80);
+        let default_tool = compile_surface_plan(None, &bash, &default, 80);
+        assert_eq!(
+            default_user.frame_left + PRIMARY_TEXT_GUTTER,
+            default_tool.frame_left
+        );
+        // Plain user text in a file theme also keeps the historical grid;
+        // only full-width card surfaces reserve the gutter.
+        let plain_theme = test_theme_from_source(
+            r##"
+                [surfaces.user]
+                chrome = "plain"
+                padding = 0
+            "##,
+        );
+        let plain_user = compile_surface_plan(None, &user, &plain_theme, 80);
+        let plain_tool = compile_surface_plan(None, &bash, &plain_theme, 80);
+        assert_eq!(
+            plain_user.frame_left + PRIMARY_TEXT_GUTTER,
+            plain_tool.frame_left
+        );
+    }
+
+    #[test]
+    fn prompt_wash_token_keeps_themed_fill_over_model_wash() {
+        let filled = test_theme_from_source(
+            r##"
+                prompt_wash = false
+
+                [colors]
+                model.use_lab_color = "true"
+
+                [surfaces.user]
+                chrome = "rail"
+                padding = 1
+
+                [roles."surface.user"]
+                background = "#1e1e1e"
+
+                [roles."surface.user.border"]
+                foreground = "#d29c54"
+            "##,
+        );
+        let user = TranscriptBlock::User {
+            text: "hello".into(),
+            model_lab: None,
+            prompt_color: Some("#123456".into()),
+            persisted: true,
+        };
+        let renderer = filled.rich_renderer();
+        let rendered =
+            render_block_planned(None, &user, &filled, &renderer, &renderer, 80, false, 0, 0)
+                .lines
+                .join("\n");
+        // No model-colour wash (18,52,86); the themed fill (30,30,30) wins
+        // while the chevron keeps its prompt colour.
+        assert!(!rendered.contains("48;2;18;52;86"), "{rendered:?}");
+        assert!(rendered.contains("48;2;30;30;30"), "{rendered:?}");
+        assert!(
+            strip_terminal_sequences(&rendered).contains("› hello"),
+            "{rendered:?}"
+        );
+
+        // Without an explicit fill the model wash still applies.
+        let washed = test_theme_from_source(
+            r##"
+                [colors]
+                model.use_lab_color = "true"
+
+                [surfaces.user]
+                chrome = "rail"
+                padding = 1
+            "##,
+        );
+        let renderer = washed.rich_renderer();
+        let rendered =
+            render_block_planned(None, &user, &washed, &renderer, &renderer, 80, false, 0, 0)
+                .lines
+                .join("\n");
+        assert!(rendered.contains("48;2;18;52;86"), "{rendered:?}");
+    }
+
+    #[test]
+    fn margin_markers_token_suppresses_event_dots() {
+        let quiet = test_theme_from_source("margin_markers = false\n");
+        let block = tool("bash", serde_json::json!({}), "ok".into(), None);
+        assert!(
+            super::super::surface_frame::event_margin_marker(&block, &quiet, true, false).is_none()
+        );
+        let loud = test_theme();
+        assert!(
+            super::super::surface_frame::event_margin_marker(&block, &loud, true, false).is_some()
         );
     }
 

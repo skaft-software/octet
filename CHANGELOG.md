@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- Let custom themes opt out of the model-colour prompt wash with
+  `prompt_wash = false`: prompt rows then render on the surface's own fill
+  while the chevron keeps its prompt colour. The default keeps the wash so
+  model provenance stays visible.
+- Let custom themes opt into the compiled default's smaller splash geometry
+  with `splash_compact = true` (4-tall byte-mark at 16 columns instead of
+  the larger file-theme presentation). Unset themes render as before.
+- Paint `rail` transcript surfaces edge to edge: short rows now pad to the
+  full frame like `band` chrome instead of rendering as ragged text-only
+  highlights, so shaded fills read as cards.
+- Align full-width (`card`/`band`/`rail`) user surfaces with the shared
+  marker gutter in file themes, so prompt cards start and end on the same
+  columns as tool/shell cards. Plain user text and the compiled default
+  keep the historical compact prompt grid.
+- Shade the startup byte-mark into a truecolor column gradient derived from
+  a custom theme's `splash` colour, keeping the travelling sweep on
+  animation-capable terminals. Limited palettes, reduced motion, and themes
+  without `splash` render exactly as before.
+- Give borderless `band`/`rail` transcript surfaces a vertical cushion row
+  above and below their content when the theme sets `padding > 0`, matching
+  the breathing room card surfaces already had, so shaded fills never touch
+  their own edges. Themes with `padding = 0` and the compiled default
+  (all-plain surfaces) render exactly as before.
 - Fix custom OpenAI-compatible providers ignoring live context-window changes:
   with `auto_discover: true`, endpoint-asserted limits are now authoritative
   over registry pins (`max_model_len` wins, output is the tighter cap clamped

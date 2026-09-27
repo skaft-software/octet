@@ -39,7 +39,14 @@ pub(crate) fn render_logo(
     let right_pad = width - left_pad - column_width * BYTE.len();
     // Quantizing a per-column gradient can wash out individual bars. Reuse the
     // background-balanced model accent uniformly, without the brightening sweep.
-    // Explicit splash colours retain precedence at every capability tier.
+    // Explicit splash colours retain precedence at every capability tier. On
+    // animation-capable truecolor the splash colour additionally shades into a
+    // column gradient with the travelling sweep instead of a flat block, so a
+    // custom theme keeps a living mark; every other tier stays solid.
+    let animated_gradient = solid_color.filter(|_| {
+        theme.capabilities().color == crate::tui::terminal::ColorDepth::TrueColor
+            && theme.capabilities().animation
+    });
     let solid_color = solid_color.or_else(|| {
         (theme.capabilities().color != crate::tui::terminal::ColorDepth::TrueColor).then(|| {
             model_accent
@@ -61,10 +68,13 @@ pub(crate) fn render_logo(
                     line.push_str(&blank);
                     continue;
                 }
-                let mut color = solid_color.unwrap_or_else(|| {
-                    model_accent.map_or(COLORS[column], |accent| mix(COLORS[column], accent, 0.58))
-                });
-                if solid_color.is_none()
+                let mut color = match (animated_gradient, solid_color) {
+                    (Some(solid), _) => gradient_stop(solid, column),
+                    (None, Some(solid)) => solid,
+                    (None, None) => model_accent
+                        .map_or(COLORS[column], |accent| mix(COLORS[column], accent, 0.58)),
+                };
+                if (solid_color.is_none() || animated_gradient.is_some())
                     && theme.capabilities().animation
                     && (0.0..DURATION).contains(&elapsed)
                 {
@@ -84,6 +94,18 @@ pub(crate) fn render_logo(
 fn mix(a: (u8, u8, u8), b: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
     let channel = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * amount) as u8;
     (channel(a.0, b.0), channel(a.1, b.1), channel(a.2, b.2))
+}
+
+/// Shade one gradient stop from an explicit splash colour: darkened on the
+/// left columns, lifted on the right, keeping the theme's hue across the
+/// byte mark.
+fn gradient_stop(solid: (u8, u8, u8), column: usize) -> (u8, u8, u8) {
+    let position = column as f32 / 7.0;
+    mix(
+        mix(solid, (0, 0, 0), 0.45),
+        mix(solid, (255, 255, 255), 0.30),
+        position,
+    )
 }
 
 #[cfg(test)]
@@ -240,13 +262,36 @@ mod tests {
     }
 
     #[test]
-    fn custom_solid_color_overrides_model_color_and_animation() {
+    fn themed_solid_renders_truecolor_gradient_with_sweep_and_static_solid_elsewhere() {
         let theme = crate::tui::theme::test_theme();
-        let rows = render_logo(&theme, 8, 2, 0.2, Some((255, 0, 0)), Some((217, 119, 87)));
-        assert!(rows.iter().all(|row| row.contains("38;2;217;119;87")));
+        let settled = render_logo(
+            &theme,
+            8,
+            2,
+            DURATION,
+            Some((255, 0, 0)),
+            Some((217, 119, 87)),
+        );
+        // Column gradient derived from the splash colour, settled past the sweep.
+        assert!(settled[1].contains(&theme.rgb_fg((119, 65, 47), "█")));
+        assert!(settled[1].contains(&theme.rgb_fg((228, 159, 137), "█")));
+        let during = render_logo(&theme, 8, 2, 0.5, Some((255, 0, 0)), Some((217, 119, 87)));
+        assert_ne!(during, settled, "sweep still travels over themed gradients");
+        let plain = |rows: &[String]| {
+            rows.iter()
+                .map(|line| strip_terminal_sequences(line))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(plain(&during), plain(&settled), "not geometry");
+        // Without animation the explicit colour stays one flat block.
+        let mut capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+        capabilities.animation = false;
+        let reduced = crate::tui::theme::test_theme_with(capabilities);
+        let flat = render_logo(&reduced, 8, 2, 0.5, Some((255, 0, 0)), Some((217, 119, 87)));
+        assert!(flat.iter().all(|row| row.contains("38;2;217;119;87")));
         assert_eq!(
-            rows,
-            render_logo(&theme, 8, 2, 1.5, None, Some((217, 119, 87)))
+            flat,
+            render_logo(&reduced, 8, 2, DURATION, None, Some((217, 119, 87)))
         );
     }
 }

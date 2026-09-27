@@ -89,7 +89,8 @@ fn render_surface_content_line(
     let right_padding = " ".repeat(usize::from(plan.padding));
     // The compiled prompt was highlighted at its wrapped-text boundary.
     // Padding, blank spacing, and trailing canvas must not inherit its colour.
-    // Explicit custom surfaces keep the existing full-cell/card treatment.
+    // Custom surfaces without their own fill keep the full-cell/card wash;
+    // surfaces with an explicit background keep it instead (see below).
     if plan.kind == "user" && theme.is_compiled_default() && prompt_color.is_some() {
         return if content.is_empty() {
             String::new()
@@ -101,6 +102,13 @@ fn render_surface_content_line(
         let text = padded_to_width(&strip_terminal_sequences(&text), width);
         theme.prompt_color_cell(prompt_color, &text)
     };
+    // Themes can opt out of the model-colour prompt wash with
+    // `prompt_wash = false`: prompt rows then render on the surface's own
+    // fill while the chevron keeps its prompt colour (rendered upstream),
+    // as do rail stripes and borders. The default keeps the wash so model
+    // provenance stays visible.
+    let wash_prompt =
+        prompt_color.is_some() && theme.resolve::<bool>("prompt_wash").unwrap_or(true);
     match plan.chrome {
         ThemeSurfaceChrome::Card => {
             let inner_width = plan.frame_width.saturating_sub(2);
@@ -108,7 +116,7 @@ fn render_surface_content_line(
                 &format!("{left_padding}{content}{right_padding}"),
                 inner_width,
             );
-            let inner = if prompt_color.is_some() {
+            let inner = if wash_prompt {
                 paint_prompt(inner, inner_width)
             } else {
                 theme.apply_semantic_role_layered(content_role, &inner)
@@ -125,7 +133,7 @@ fn render_surface_content_line(
                 &format!("{left_padding}{content}{right_padding}"),
                 plan.frame_width,
             );
-            if prompt_color.is_some() {
+            if wash_prompt {
                 paint_prompt(inner, plan.frame_width)
             } else {
                 theme.apply_semantic_role_layered(content_role, &inner)
@@ -133,12 +141,18 @@ fn render_surface_content_line(
         }
         ThemeSurfaceChrome::Rail => {
             let rail = theme.apply_semantic_role(border_role, theme.glyph("rail"));
-            let body = format!(" {left_padding}{content}{right_padding}");
-            let body = if prompt_color.is_some() {
-                let rail_width = u16::try_from(visible_width(theme.glyph("rail")))
-                    .unwrap_or(u16::MAX)
-                    .min(plan.frame_width);
-                paint_prompt(body, plan.frame_width.saturating_sub(rail_width))
+            let rail_width = u16::try_from(visible_width(theme.glyph("rail")))
+                .unwrap_or(u16::MAX)
+                .min(plan.frame_width);
+            let inner_width = plan.frame_width.saturating_sub(rail_width);
+            // Pad to the full frame like band chrome so short rows keep the
+            // shaded fill edge to edge instead of ragged text highlights.
+            let body = padded_to_width(
+                &format!(" {left_padding}{content}{right_padding}"),
+                inner_width,
+            );
+            let body = if wash_prompt {
+                paint_prompt(body, inner_width)
             } else {
                 theme.apply_semantic_role_layered(content_role, &body)
             };
@@ -146,7 +160,7 @@ fn render_surface_content_line(
         }
         ThemeSurfaceChrome::Plain | ThemeSurfaceChrome::Rule => {
             let body = format!("{left_padding}{content}{right_padding}");
-            if prompt_color.is_some() {
+            if wash_prompt {
                 paint_prompt(body, plan.frame_width)
             } else {
                 theme.apply_semantic_role_layered(content_role, &body)
