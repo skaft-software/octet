@@ -437,7 +437,7 @@ pub struct Config {
     /// Host-owned admission policy for model-requested tool effects.
     pub effect_policy: EffectPolicy,
     pub sandbox: SandboxPolicy,
-    /// Built-in appearance (auto, light, dark, Cards) or a discovered TOML theme name.
+    /// Built-in appearance (auto, light, dark, Cards, Still) or a discovered TOML theme name.
     /// Unrecognized or malformed names fall back to the compiled default.
     pub theme: Option<String>,
     /// Explicit system prompt override. `None` uses composed built-in

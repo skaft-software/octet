@@ -21,6 +21,7 @@ use super::{
     activity_elbow, finish_transcript_block, fit_line, render_shell_output, render_user_prompt,
     subdued_text, wrap_hanging, TranscriptBlock, ACTIVITY_DETAIL_INDENT,
 };
+use crate::presentation::tool_display::compact_path;
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
 
 /// Round display-only token counts; the telemetry and accounting remain exact.
@@ -198,6 +199,27 @@ pub(super) fn render_block_planned_with_rainbow(
     subagents_running: bool,
 ) -> RenderedTranscriptBlock {
     let plan = compile_surface_plan(previous, block, theme, outer_width);
+    let still_grouping = theme
+        .resolve::<bool>("quiet_tool_summaries")
+        .unwrap_or(false);
+    if matches!(
+        block,
+        TranscriptBlock::NoticeStatus {
+            tone: super::NoticeTone::ToolActive
+                | super::NoticeTone::ToolSuccess
+                | super::NoticeTone::ToolError,
+            ..
+        }
+    ) && !still_grouping
+        || matches!(block, TranscriptBlock::Tool(panel) if panel.grouped_child)
+            && still_grouping
+            && !verbose_tools
+    {
+        return RenderedTranscriptBlock {
+            lines: Vec::new(),
+            geometry: super::transcript_cache::SurfaceGeometry::default(),
+        };
+    }
     let width = plan.geometry.content_width;
     let content_background = matches!(
         plan.chrome,
@@ -309,12 +331,16 @@ pub(super) fn render_block_planned_with_rainbow(
             rainbow_strength,
         ),
         TranscriptBlock::Tool(panel) => {
+            let quiet_summary = theme
+                .resolve::<bool>("quiet_tool_summaries")
+                .unwrap_or(false)
+                && !verbose_tools;
             let compact_bash = matches!(panel.name.as_str(), "bash" | "exec")
                 && panel.display.shell_command.is_some();
             let mut lines = if let Some(command) = panel.display.shell_command.as_deref() {
                 render_bash_row(command, rich_renderer, theme, width, verbose_tools)
             } else {
-                let compact = width < 60;
+                let compact = width < 60 || quiet_summary;
                 let summary = if !panel.finished {
                     if compact {
                         &panel.display.compact_active
@@ -333,7 +359,11 @@ pub(super) fn render_block_planned_with_rainbow(
                     &panel.display.success
                 };
                 let tool = tool_grid_label(&tool_display_label(&panel.name));
-                let label = theme.bold(&theme.fg("foreground", &tool));
+                let label = if quiet_summary {
+                    theme.fg("muted", &tool)
+                } else {
+                    theme.bold(&theme.fg("foreground", &tool))
+                };
                 let label_width = visible_width(&tool);
                 let text = match panel.display.value.as_deref() {
                     Some(value) => sanitize_for_terminal(value),
@@ -348,9 +378,23 @@ pub(super) fn render_block_planned_with_rainbow(
                 wrap_hanging(&text, &label_prefix, &continuation, width)
             };
             let nested_width = width.saturating_sub(2).max(1);
+            if quiet_summary {
+                lines.truncate(1);
+            }
+            if panel.grouped_child
+                && verbose_tools
+                && theme
+                    .resolve::<bool>("quiet_tool_summaries")
+                    .unwrap_or(false)
+                && matches!(panel.name.as_str(), "bash" | "exec")
+            {
+                if let Some(first) = lines.first_mut() {
+                    *first = fit_line(&format!("-> {first}"), width);
+                }
+            }
             let mut output_lines = Vec::new();
 
-            if !panel.finished {
+            if !quiet_summary && !panel.finished {
                 if let Some(decoration) = panel.progress_decoration.as_ref() {
                     output_lines.extend(render_progress_decoration(
                         decoration,
@@ -360,34 +404,50 @@ pub(super) fn render_block_planned_with_rainbow(
                 }
             }
             if panel.finished && panel.is_error {
-                output_lines.extend(render_tool_failure_reason(panel, theme, nested_width, ""));
+                if quiet_summary {
+                    let mut reason = super::tool_render::bounded_tool_failure_reason(panel);
+                    if let (Some(reason), Some(path)) =
+                        (reason.as_mut(), panel.display.changed_path.as_deref())
+                    {
+                        *reason = reason.replace(path, &compact_path(path));
+                    }
+                    if let Some(reason) = reason {
+                        output_lines.extend(wrap_hanging(
+                            &theme.fg("error", &reason),
+                            "",
+                            "",
+                            nested_width,
+                        ));
+                    }
+                } else {
+                    output_lines.extend(render_tool_failure_reason(panel, theme, nested_width, ""));
+                }
             }
 
-            match panel.name.as_str() {
-                "bash" | "exec" if compact_bash => output_lines.extend(render_compact_bash_output(
-                    panel,
-                    theme,
-                    nested_width,
-                    verbose_tools,
-                    "",
-                )),
-                "search" if !panel.is_error => output_lines.extend(render_compact_tool_output(
-                    panel,
-                    theme,
-                    nested_width,
-                    verbose_tools,
-                    "",
-                )),
-                "edit" | "write" if !panel.is_error && tool_diff(panel).is_some() => output_lines
-                    .extend(render_diff_only(
+            if !quiet_summary || panel.is_error {
+                match panel.name.as_str() {
+                    "bash" | "exec" if compact_bash => output_lines.extend(
+                        render_compact_bash_output(panel, theme, nested_width, verbose_tools, ""),
+                    ),
+                    "search" if !panel.is_error => output_lines.extend(render_compact_tool_output(
                         panel,
-                        rich_renderer,
                         theme,
                         nested_width,
                         verbose_tools,
                         "",
                     )),
-                _ => {}
+                    "edit" | "write" if !panel.is_error && tool_diff(panel).is_some() => {
+                        output_lines.extend(render_diff_only(
+                            panel,
+                            rich_renderer,
+                            theme,
+                            nested_width,
+                            verbose_tools,
+                            "",
+                        ));
+                    }
+                    _ => {}
+                }
             }
             // Image reservations are visual-only and deliberately remain out
             // of `panel.output`, selection, and plain/print projections.

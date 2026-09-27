@@ -3,7 +3,8 @@ use sexy_tui_rs::visible_width;
 use crate::tui::layout::PresentationLayout;
 use crate::tui::layout::PRIMARY_TEXT_GUTTER;
 use crate::tui::theme::{
-    OctetTheme, ThemeSurfaceAlign, ThemeSurfaceChrome, ThemeSurfaceHeading, ThemeSurfaceWidth,
+    ModelLab, OctetTheme, ThemeSurfaceAlign, ThemeSurfaceChrome, ThemeSurfaceHeading,
+    ThemeSurfaceWidth,
 };
 
 use super::transcript_cache::SurfaceGeometry;
@@ -16,6 +17,7 @@ pub(super) struct SurfacePlan<'a> {
     pub(super) chrome: ThemeSurfaceChrome,
     pub(super) heading: ThemeSurfaceHeading,
     pub(super) label: Option<&'a str>,
+    pub(super) user_model_lab: Option<ModelLab>,
     pub(super) padding: u16,
     pub(super) frame_left: u16,
     pub(super) frame_width: u16,
@@ -141,9 +143,27 @@ pub(super) fn compile_surface_plan<'a>(
             resolved.chrome,
             ThemeSurfaceChrome::Card | ThemeSurfaceChrome::Band | ThemeSurfaceChrome::Rail
         );
-    let needs_marker_gutter = uses_event_marker_gutter(block) || full_width_user;
-    let event_gutter = if needs_marker_gutter && presentation.content_width > PRIMARY_TEXT_GUTTER {
-        PRIMARY_TEXT_GUTTER
+    let flush_rails = theme.resolve::<bool>("transcript_flush").unwrap_or(false);
+    // Still's soft user band occupies the same full column as its shaded
+    // composer. Its prompt chevron is already inside the band; other themes
+    // retain the historical event gutter for cards and rails.
+    let still_user_band = full_width_user
+        && resolved.chrome == ThemeSurfaceChrome::Band
+        && theme
+            .resolve::<bool>("quiet_tool_summaries")
+            .unwrap_or(false);
+    let needs_marker_gutter = uses_event_marker_gutter(block)
+        || (full_width_user && !still_user_band)
+        || (flush_rails && resolved.chrome != ThemeSurfaceChrome::Rail);
+    let marker_gutter_width = theme
+        .resolve::<u16>("event_marker_gutter")
+        .unwrap_or(PRIMARY_TEXT_GUTTER)
+        .max(PRIMARY_TEXT_GUTTER)
+        .min(presentation.content_width.saturating_sub(1));
+    let event_gutter = if flush_rails && resolved.chrome == ThemeSurfaceChrome::Rail {
+        0
+    } else if needs_marker_gutter && presentation.content_width > PRIMARY_TEXT_GUTTER {
+        marker_gutter_width
     } else {
         0
     };
@@ -181,8 +201,8 @@ pub(super) fn compile_surface_plan<'a>(
             }
             ThemeSurfaceChrome::Rail => u16::try_from(visible_width(theme.glyph("rail")))
                 .unwrap_or(u16::MAX)
-                .saturating_add(1)
-                .saturating_add(horizontal_padding),
+                .saturating_add(padding.max(1))
+                .saturating_add(padding),
             ThemeSurfaceChrome::Card => 2u16.saturating_add(horizontal_padding),
         }
     };
@@ -221,7 +241,7 @@ pub(super) fn compile_surface_plan<'a>(
     let chrome_left = match chrome {
         ThemeSurfaceChrome::Rail => u16::try_from(visible_width(theme.glyph("rail")))
             .unwrap_or(u16::MAX)
-            .saturating_add(1),
+            .saturating_add(u16::from(padding == 0)),
         ThemeSurfaceChrome::Card => 1,
         ThemeSurfaceChrome::Plain | ThemeSurfaceChrome::Band | ThemeSurfaceChrome::Rule => 0,
     };
@@ -253,16 +273,41 @@ pub(super) fn compile_surface_plan<'a>(
     );
     let leading_rows = usize::from(has_heading_row) + vertical_padding_rows;
     let trailing_rows = usize::from(has_bottom_row) + vertical_padding_rows;
+    let still = theme
+        .resolve::<bool>("quiet_tool_summaries")
+        .unwrap_or(false);
+    let compact_activity = |block: &TranscriptBlock| {
+        still
+            && matches!(
+                block,
+                TranscriptBlock::Tool(_)
+                    | TranscriptBlock::NoticeStatus {
+                        tone: super::NoticeTone::ToolActive
+                            | super::NoticeTone::ToolSuccess
+                            | super::NoticeTone::ToolError,
+                        ..
+                    }
+            )
+    };
+    let transition_rows = if compact_activity(block) && previous.is_some_and(compact_activity) {
+        0
+    } else {
+        transcript_transition_rows(previous, layout.density)
+    };
     SurfacePlan {
         kind,
         chrome,
         heading,
         label: resolved.label,
+        user_model_lab: match block {
+            TranscriptBlock::User { model_lab, .. } => *model_lab,
+            _ => None,
+        },
         padding,
         frame_left,
         frame_width,
         geometry: SurfaceGeometry {
-            transition_rows: transcript_transition_rows(previous, layout.density),
+            transition_rows,
             leading_rows,
             trailing_rows,
             content_left,
@@ -280,8 +325,95 @@ mod tests {
     use crate::presentation::summarize_tool;
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use crate::tui::theme::{
-        test_theme, test_theme_for, test_theme_from_source, TerminalBackground,
+        test_theme, test_theme_for, test_theme_from_source, test_theme_source_with,
+        TerminalBackground,
     };
+
+    #[test]
+    fn still_prompt_and_tool_rows_share_a_centered_column() {
+        let theme = test_theme_from_source(
+            "[colors]\ncontent_max_width = 112\nevent_marker_gutter = 3\nquiet_tool_summaries = true\n[layout]\ntranscript_inset = 2\n[surfaces.user]\nchrome = \"band\"\npadding = 1\n[surfaces.tool]\nchrome = \"plain\"",
+        );
+        let prompt = TranscriptBlock::User {
+            text: "hello".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        };
+        let activity = tool(
+            "read",
+            serde_json::json!({"path": "src/a.rs"}),
+            String::new(),
+            None,
+        );
+        let prose = TranscriptBlock::Assistant(Box::new(super::super::AssistantBlock::finalized(
+            "hello".into(),
+        )));
+        let renderer = theme.rich_renderer();
+        let text_column = |block: &TranscriptBlock, width| {
+            render_block_planned(
+                None, block, &theme, &renderer, &renderer, width, false, 0, 0,
+            )
+            .lines
+            .iter()
+            .find_map(|line| {
+                let plain = strip_terminal_sequences(line);
+                let start = plain.find("hello")?;
+                Some(visible_width(&plain[..start]))
+            })
+            .expect("hello should be rendered")
+        };
+        for (width, user_expected, tool_expected) in
+            [(160, (24, 112), (27, 109)), (48, (0, 48), (3, 45))]
+        {
+            let user = compile_surface_plan(None, &prompt, &theme, width);
+            let tool = compile_surface_plan(Some(&prompt), &activity, &theme, width);
+            assert_eq!((user.frame_left, user.frame_width), user_expected);
+            assert_eq!((tool.frame_left, tool.frame_width), tool_expected);
+            assert_eq!(text_column(&prompt, width), text_column(&prose, width));
+        }
+    }
+
+    #[test]
+    fn still_keeps_adjacent_activity_tight_without_affecting_other_themes() {
+        let still = test_theme_from_source(
+            "[colors]\nquiet_tool_summaries = true\n[layout]\ndensity = \"comfortable\"",
+        );
+        let ordinary = test_theme_from_source("[layout]\ndensity = \"comfortable\"");
+        let first = tool(
+            "read",
+            serde_json::json!({"path": "src/a.rs"}),
+            String::new(),
+            None,
+        );
+        let next = tool(
+            "edit",
+            serde_json::json!({"path": "src/a.rs"}),
+            String::new(),
+            None,
+        );
+        assert_eq!(
+            compile_surface_plan(Some(&first), &next, &still, 120)
+                .geometry
+                .transition_rows,
+            0
+        );
+        assert_eq!(
+            compile_surface_plan(Some(&first), &next, &ordinary, 120)
+                .geometry
+                .transition_rows,
+            1
+        );
+        let prose = TranscriptBlock::Assistant(Box::new(super::super::AssistantBlock::finalized(
+            "hello".into(),
+        )));
+        assert_eq!(
+            compile_surface_plan(Some(&first), &prose, &still, 120)
+                .geometry
+                .transition_rows,
+            1
+        );
+    }
 
     fn tool(
         name: &str,
@@ -480,6 +612,112 @@ mod tests {
             widths.iter().all(|&width| width == expected),
             "{widths:?} expected every row at {expected}"
         );
+    }
+
+    #[test]
+    fn cards_rails_use_one_padding_cell_and_each_prompts_stored_model_color() {
+        let source = include_str!("../../../../../examples/themes/Cards.toml");
+        for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+            let mut theme = test_theme_source_with(
+                source,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                background,
+            );
+            let bash = tool(
+                "bash",
+                serde_json::json!({"command": "echo hi"}),
+                "ok".into(),
+                None,
+            );
+            let tool_plan = compile_surface_plan(None, &bash, &theme, 80);
+            assert_eq!(tool_plan.frame_left, 0);
+            assert_eq!(tool_plan.geometry.content_left, 2);
+            assert_eq!(tool_plan.geometry.content_width, 77);
+            assert_eq!(tool_plan.geometry.leading_rows, 1);
+            assert_eq!(tool_plan.geometry.trailing_rows, 1);
+            let renderer = theme.rich_renderer();
+            let tool_rows =
+                render_block_planned(None, &bash, &theme, &renderer, &renderer, 80, false, 0, 0)
+                    .lines;
+            assert!(
+                tool_rows
+                    .iter()
+                    .any(|row| { strip_terminal_sequences(row).starts_with("│ Bash") }),
+                "{tool_rows:?}"
+            );
+
+            for source_color in ["#aa0000", "#0000aa"] {
+                let user = TranscriptBlock::User {
+                    text: "hello".into(),
+                    model_lab: None,
+                    prompt_color: Some(source_color.into()),
+                    persisted: true,
+                };
+                let plan = compile_surface_plan(None, &user, &theme, 80);
+                assert_eq!(plan.frame_left, tool_plan.frame_left);
+                assert_eq!(plan.geometry.content_left, 2);
+                let renderer = theme.rich_renderer();
+                let rows = render_block_planned(
+                    None, &user, &theme, &renderer, &renderer, 80, false, 0, 0,
+                )
+                .lines;
+                let rail = theme.prompt_color_marker(Some(source_color), theme.glyph("rail"));
+                assert!(
+                    rows.iter()
+                        .all(|row| { row.is_empty() || row.starts_with(&rail) }),
+                    "{rows:?}"
+                );
+                assert!(
+                    rows.iter()
+                        .any(|row| { strip_terminal_sequences(row).starts_with("│ ❯ hello") }),
+                    "{rows:?}"
+                );
+            }
+            assert_eq!(
+                compile_surface_plan(None, &shell("echo hi", "hi"), &theme, 80).frame_left,
+                0
+            );
+            for block in [
+                TranscriptBlock::Assistant(Box::new(super::super::AssistantBlock::finalized(
+                    "hello".into(),
+                ))),
+                TranscriptBlock::Notice("notice".into()),
+                TranscriptBlock::NoticeStatus {
+                    text: "status".into(),
+                    tone: super::super::NoticeTone::Success,
+                },
+                TranscriptBlock::Reasoning(Box::new(
+                    super::super::AssistantBlock::streaming_reasoning("thinking"),
+                )),
+                TranscriptBlock::Reasoning(Box::new({
+                    let mut working = super::super::AssistantBlock::streaming_reasoning("");
+                    working.reasoning_heading = Some("Working".into());
+                    working
+                })),
+            ] {
+                assert_eq!(compile_surface_plan(None, &block, &theme, 80).frame_left, 2);
+            }
+            crate::tui::theme::apply_model_lab(&mut theme, crate::tui::theme::ModelLab::OpenAi);
+            for model_lab in [None, Some(ModelLab::Anthropic)] {
+                let user = TranscriptBlock::User {
+                    text: "hello".into(),
+                    model_lab,
+                    prompt_color: None,
+                    persisted: true,
+                };
+                let renderer = theme.rich_renderer();
+                let rows = render_block_planned(
+                    None, &user, &theme, &renderer, &renderer, 80, false, 0, 0,
+                )
+                .lines;
+                let fallback = theme.model_fg(model_lab, theme.glyph("rail"));
+                assert!(
+                    rows.iter()
+                        .all(|row| { row.is_empty() || row.starts_with(&fallback) }),
+                    "{rows:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -744,7 +982,10 @@ mod tests {
                 }
             );
             assert_eq!(plan.padding, 1);
-            assert_eq!(plan.geometry.content_width, 26);
+            assert_eq!(
+                plan.geometry.content_width,
+                if width == 46 { 27 } else { 26 }
+            );
             let plan = compile_surface_plan(None, &local_shell, &custom, width);
             assert_eq!(plan.geometry.content_left, 2);
             assert_eq!(plan.geometry.content_width, width - 2);

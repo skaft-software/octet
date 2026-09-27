@@ -7,24 +7,33 @@
   vocabulary, the `extension.<namespace>.<role>` contribution channel, typed
   glyphs with ASCII fallbacks, transcript surfaces, and layout.
 - [`Cards.toml`](Cards.toml) (`Cards`) is a ready-to-use shaded-surfaces
-  theme: rail chrome with quiet stripes, dark/light fills, an amber accent
-  with adaptive model colours, a borderless shaded composer, and a themed
-  splash with compact geometry. Copy it into a discovery directory to use
-  it as-is:
+  theme: compact rail chrome with model-coloured prompt stripes, dark/light
+  fills, a quiet amber UI accent, a borderless shaded composer, and a themed
+  splash with compact geometry.
+- [`Still.toml`](Still.toml) (`Still`) is a calm, contained theme: centered
+  reading width, soft user and composer fills, compact unboxed tool activity,
+  model-adaptive prompt chevrons, and reasoning hidden by default.
 
-It is a reference, not the compiled fallback. octet never reads this file at
-runtime; unknown or partial theme files always fall back to the compiled
-default. Copy it into a discovery directory to start your own theme:
+`Cards` and `Still` are compiled into every release, so they need no copy. They
+appear in `/theme` after the terminal-appearance choices and work with
+`--theme Cards`, `--theme Still`, and `OCTET_THEME`. Their file stems are
+reserved: a local `Cards.toml` or `Still.toml` can neither shadow, nor be
+shadowed by, the built-in it selects.
+
+`octet-default.toml` is a reference, not the compiled fallback. octet never
+reads this file at runtime; unknown or partial theme files always fall back to
+the compiled default. Copy it into a discovery directory to start your own
+theme:
 
 ```console
 mkdir -p ~/.octet/themes
 cp examples/themes/octet-default.toml ~/.octet/themes/mine.toml
-cp examples/themes/Cards.toml ~/.octet/themes/Cards.toml
 ```
 
 Then name it at startup with `--theme mine` or `OCTET_THEME=mine`. The
-interactive `/theme` command still selects only the three built-in terminal
-appearances (`auto`, `light`, `dark`). Theme files are bounded (256 KiB) and
+first-run appearance picker shows only the three terminal appearances (`auto`,
+`light`, `dark`); the full list of built-ins is available later through
+`/theme`. Theme files are bounded (256 KiB) and
 reject control characters, unsafe glyphs, and unknown sections. See
 [docs/themes.md](../../docs/themes.md) for the full contract and the published
 role vocabulary.

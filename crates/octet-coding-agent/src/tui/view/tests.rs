@@ -7163,10 +7163,17 @@ fn compact_edit_keeps_both_replacement_sides_with_long_paths() {
     let path = format!("/work/{}/pagination.py", "long-directory/".repeat(15));
     let args = serde_json::json!({"path": path});
     let panel = TranscriptBlock::Tool(Box::new(ToolPanel::new(
-        ToolCallId("compact-replacement".into()), "edit".into(), args.to_string(),
+        ToolCallId("compact-replacement".into()),
+        "edit".into(),
+        args.to_string(),
         summarize_tool("edit", &args),
-        format!("--- a/{path}\n+++ b/{path}\n@@ -1,5 +1,5 @@\n context\n context\n-start = page * size\n+start = (page - 1) * size\n context\n context\n"),
-        true, false, None, None,
+        format!(
+            "--- a/{path}\n+++ b/{path}\n@@ -1,5 +1,5 @@\n context\n context\n-start = page * size\n+start = (page - 1) * size\n context\n context\n"
+        ),
+        true,
+        false,
+        None,
+        None,
     )));
     let renderer = theme.rich_renderer();
     for width in [60, 80, 120] {
@@ -8967,6 +8974,72 @@ fn notice_markers_use_neutral_success_and_error_lifecycle_tones() {
     assert_eq!(
         event_margin_marker(&denied, &theme, false, false),
         Some(theme.settled_event_dot("error", "•"))
+    );
+}
+
+#[test]
+fn still_tool_dots_breathe_smoothly_without_status_colours_or_blinking() {
+    let source = r##"
+        [colors]
+        tool_dot_breathing = true
+        tool_dot_dim = "#646464"
+        tool_dot_bright = "#a0a0a0"
+    "##;
+    let theme = crate::tui::theme::test_theme_from_source(source);
+    let args = serde_json::json!({"path":"src/lib.rs"});
+    let panel = |finished, is_error| {
+        TranscriptBlock::Tool(Box::new(ToolPanel::new(
+            ToolCallId("read".into()),
+            "read".into(),
+            args.to_string(),
+            summarize_tool("read", &args),
+            String::new(),
+            finished,
+            is_error,
+            is_error.then(|| "failed".into()),
+            None,
+        )))
+    };
+    let marker = |block: &TranscriptBlock, frame| {
+        surface_frame::event_margin_marker_with_frame(block, &theme, frame, None, 0, false).unwrap()
+    };
+    let active = panel(false, false);
+    let frames = (0..12)
+        .map(|frame| marker(&active, frame))
+        .collect::<Vec<_>>();
+    assert_eq!(frames[0], frames[10]);
+    assert_eq!(frames[1], frames[9]);
+    assert_ne!(frames[5], frames[11]);
+    for frame in &frames {
+        assert_eq!(strip_terminal_sequences(frame), "•");
+        assert!(!frame.contains("\x1b[5m"));
+    }
+    assert_eq!(
+        marker(&panel(true, false), 0),
+        marker(&panel(true, true), 0)
+    );
+    let group = |tone| TranscriptBlock::NoticeStatus {
+        text: "Explored".into(),
+        tone,
+    };
+    assert_eq!(marker(&group(NoticeTone::ToolActive), 5), frames[5]);
+    assert_eq!(
+        marker(&group(NoticeTone::ToolSuccess), 0),
+        marker(&group(NoticeTone::ToolError), 0)
+    );
+
+    let ascii = crate::tui::theme::test_theme_source_with(
+        source,
+        crate::tui::terminal::TerminalCapabilities::test(
+            false,
+            false,
+            crate::tui::terminal::ColorDepth::None,
+        ),
+        TerminalBackground::Unknown,
+    );
+    assert_eq!(
+        surface_frame::event_margin_marker_with_frame(&active, &ascii, 1, None, 0, false),
+        Some("*".into())
     );
 }
 
@@ -12593,6 +12666,288 @@ fn ctrl_o_toggles_all_expandable_transcript_blocks() {
     assert!(
         !collapsed_again.contains("private compaction body"),
         "{collapsed_again}"
+    );
+}
+
+#[test]
+fn live_exploration_groups_follow_turn_finished_and_keep_failures_visible() {
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+    );
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    let run = shell.begin_run("test");
+    let read = ToolCallId("live-read".into());
+    let bash = ToolCallId("live-bash".into());
+    let call = |id: ToolCallId, name: &str| octet_ai::ToolCall {
+        async_execution: false,
+        id,
+        name: name.into(),
+        arguments_json: "{}".into(),
+        argument_error: None,
+    };
+    shell.on_run_event(
+        run,
+        &AgentEvent::TurnFinished {
+            message: octet_ai::AssistantMessage {
+                content: vec![
+                    octet_ai::AssistantPart::ToolCall(call(read.clone(), "read")),
+                    octet_ai::AssistantPart::ToolCall(call(bash.clone(), "bash")),
+                ],
+                model: ModelId("test".into()),
+                protocol: octet_ai::Protocol::OpenAiChat,
+            },
+            stop_reason: octet_ai::StopReason::ToolUse,
+            turn_usage: Usage::default(),
+            turn_cost: None,
+            usage: Usage::default(),
+            session_cost_microdollars: None,
+            run_cost_microdollars: 0,
+        },
+    );
+    for (id, name, args) in [
+        (&read, "read", serde_json::json!({"path": "src/one.rs"})),
+        (&bash, "bash", serde_json::json!({"command": "false"})),
+    ] {
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolStarted {
+                id: id.clone(),
+                name: name.into(),
+                args,
+            },
+        );
+    }
+    shell.on_run_event(
+        run,
+        &AgentEvent::ToolFinished {
+            id: read.clone(),
+            result: Ok(octet_agent::ToolOutput::new("content")),
+            duration: Duration::from_millis(1),
+        },
+    );
+    shell.on_run_event(
+        run,
+        &AgentEvent::ToolFinished {
+            id: bash.clone(),
+            result: Err(octet_agent::ToolError::new("permission denied")),
+            duration: Duration::from_millis(1),
+        },
+    );
+    let compact = shell.state.borrow().rendered_transcript(100).join("\n");
+    assert!(
+        compact.contains("Explored → read 1 file, ran 1 command"),
+        "{compact}"
+    );
+    assert!(compact.contains("bash: permission denied"), "{compact}");
+    assert!(
+        !compact.contains("src/one.rs") && !compact.contains("Bash  false"),
+        "{compact}"
+    );
+    shell.set_verbose_tools(true);
+    let detailed =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"));
+    assert!(
+        detailed.contains("src/one.rs") && detailed.contains("Bash  false"),
+        "{detailed}"
+    );
+}
+
+#[test]
+fn still_groups_commands_across_model_responses_and_discloses_each_command() {
+    use octet_agent::{EntryId, FinishReason};
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+    );
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    let run = shell.begin_run("test");
+    for (number, command) in ["cargo check", "cargo fmt --check", "cargo test"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = ToolCallId(format!("command-{number}"));
+        shell.on_run_event(
+            run,
+            &AgentEvent::TurnFinished {
+                message: octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        async_execution: false,
+                        id: id.clone(),
+                        name: "bash".into(),
+                        arguments_json: serde_json::json!({"command": command}).to_string(),
+                        argument_error: None,
+                    })],
+                    model: ModelId("test".into()),
+                    protocol: octet_ai::Protocol::OpenAiChat,
+                },
+                stop_reason: octet_ai::StopReason::ToolUse,
+                turn_usage: Usage::default(),
+                turn_cost: None,
+                usage: Usage::default(),
+                session_cost_microdollars: None,
+                run_cost_microdollars: 0,
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolStarted {
+                id: id.clone(),
+                name: "bash".into(),
+                args: serde_json::json!({"command": command}),
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolFinished {
+                id,
+                result: if number == 2 {
+                    Err(octet_agent::ToolError::new("test failed"))
+                } else {
+                    Ok(octet_agent::ToolOutput::new("ok"))
+                },
+                duration: Duration::from_millis(1),
+            },
+        );
+    }
+    {
+        let state = shell.state.borrow();
+        state.rendered_transcript(100);
+        let index = state.transcript.iter().position(|block| matches!(block, TranscriptBlock::NoticeStatus { text, .. } if text.starts_with("Ran 3 Commands"))).unwrap();
+        let cursor = transcript_commit_cursor(&state, index, FINAL_COMMIT_SEGMENT);
+        assert!(transcript_commit_position(&state, cursor).is_none());
+    }
+    shell.on_run_event(
+        run,
+        &AgentEvent::RunFinished {
+            head: EntryId("head".into()),
+            reason: FinishReason::Completed,
+        },
+    );
+    let compact =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"))
+            .to_owned();
+    assert!(compact.contains("Ran 3 Commands"), "{compact}");
+    assert!(compact.contains("test failed"), "{compact}");
+    assert!(!compact.contains("cargo check"), "{compact}");
+    shell.set_verbose_tools(true);
+    let expanded =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"))
+            .to_owned();
+    for command in ["cargo check", "cargo fmt --check", "cargo test"] {
+        assert!(
+            expanded.contains(&format!("-> Bash  {command}")),
+            "{expanded}"
+        );
+    }
+}
+
+#[test]
+fn still_shows_one_tool_summary_until_disclosure_without_hiding_failures() {
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+    );
+    let renderer = theme.rich_renderer();
+    let args = serde_json::json!({"path": "src/lib.rs"});
+    let edit = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("quiet-edit".into()),
+        "edit".into(),
+        args.to_string(),
+        summarize_tool("edit", &args),
+        "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new".into(),
+        true,
+        false,
+        None,
+        None,
+    )));
+    let render = |block: &TranscriptBlock, expanded| {
+        strip_terminal_sequences(
+            &render_block_planned(
+                None, block, &theme, &renderer, &renderer, 100, expanded, 0, 0,
+            )
+            .lines
+            .join("\n"),
+        )
+        .to_owned()
+    };
+    for width in [48, 100, 160] {
+        let compact = strip_terminal_sequences(
+            &render_block_planned(
+                None, &edit, &theme, &renderer, &renderer, width, false, 0, 0,
+            )
+            .lines
+            .join("\n"),
+        );
+        assert!(
+            compact.contains("Edit")
+                && compact.contains("lib.rs")
+                && !compact.contains("src/lib.rs"),
+            "{width}: {compact}"
+        );
+        assert!(!compact.contains("+new"), "{width}: {compact}");
+    }
+    assert!(render(&edit, true).contains("+new"));
+
+    let failed = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("quiet-failure".into()),
+        "read".into(),
+        args.to_string(),
+        summarize_tool("read", &args),
+        String::new(),
+        true,
+        true,
+        Some("permission denied".into()),
+        None,
+    )));
+    assert!(render(&failed, false).contains("permission denied"));
+
+    let failed_edit = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("quiet-failed-edit".into()),
+        "edit".into(),
+        args.to_string(),
+        summarize_tool("edit", &args),
+        String::new(),
+        true,
+        true,
+        Some("src/lib.rs: no match".into()),
+        None,
+    )));
+    let compact_failure = render(&failed_edit, false);
+    assert!(
+        compact_failure.contains("lib.rs: no match"),
+        "{compact_failure}"
+    );
+    assert!(!compact_failure.contains("src/lib.rs"), "{compact_failure}");
+    assert!(render(&failed_edit, true).contains("src/lib.rs: no match"));
+}
+
+#[test]
+fn theme_can_remove_activity_tree_connectors() {
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[glyphs]\nlast_branch = \" \"\nvertical = \" \"\n[glyphs_ascii]\nlast_branch = \" \"\nvertical = \" \"",
+    );
+    assert_eq!(activity_elbow(&theme), " ");
+    let args = serde_json::json!({"path": "src/lib.rs"});
+    let panel = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("failed-read".into()),
+        "read".into(),
+        args.to_string(),
+        summarize_tool("read", &args),
+        "permission denied".into(),
+        true,
+        true,
+        Some("permission denied".into()),
+        None,
+    )));
+    let renderer = theme.rich_renderer();
+    let rows = render_block(None, &panel, &theme, &renderer, &renderer, 80, false);
+    let plain = rows
+        .iter()
+        .map(|row| strip_terminal_sequences(row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plain.contains("permission denied"), "{plain}");
+    assert!(
+        !plain.contains('└') && !plain.contains('│') && !plain.contains("`-"),
+        "{plain}"
     );
 }
 

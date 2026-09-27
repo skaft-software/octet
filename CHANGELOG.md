@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Compile `examples/themes/Still.toml` into every release as the built-in
+  `Still` selector, available after `Cards` in `/theme` and through `--theme`
+  and `OCTET_THEME`. Reserve the `Still` file stem so local theme files cannot
+  shadow the built-in. Still provides a centered reading column with a softly
+  shaded composer and user prompts, compact unboxed tool activity, and aligned
+  prompt/prose/activity indents. Its model-adaptive prompt and composer markers
+  sit over a restrained blue-and-neutral palette. Validate the embedded theme
+  for every supported terminal background.
 - Ship the `Cards` example theme (`examples/themes/Cards.toml`): shaded
   rail surfaces with quiet stripes, dark/light fills, an amber accent with
   adaptive model colours, a borderless shaded composer, and a themed splash

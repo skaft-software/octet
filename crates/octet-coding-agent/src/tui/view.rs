@@ -194,6 +194,9 @@ impl OutcomeBlock {
 enum NoticeTone {
     Success,
     Error,
+    ToolActive,
+    ToolSuccess,
+    ToolError,
 }
 
 /// A bounded, content-free live worker line; complete detail stays in the inspector.
@@ -400,6 +403,53 @@ impl Default for ToolImageRendering {
     }
 }
 
+struct ActivityGroupView {
+    group: crate::hydrate::ToolActivityGroup,
+    index: usize,
+    settled: std::collections::HashSet<ToolCallId>,
+    failures: Vec<String>,
+    command_run_open: bool,
+    command_run: bool,
+}
+
+fn activity_group_label(
+    group: &crate::hydrate::ToolActivityGroup,
+    failures: &[String],
+    command_run: bool,
+) -> String {
+    let mut parts = Vec::new();
+    for (count, singular, plural) in [
+        (group.read_files, "file", "files"),
+        (group.searches, "search", "searches"),
+        (group.commands, "command", "commands"),
+    ] {
+        if count > 0 {
+            let action = if singular == "file" { "read" } else { "ran" };
+            parts.push(format!(
+                "{action} {count} {}",
+                if count == 1 { singular } else { plural }
+            ));
+        }
+    }
+    let mut label = if command_run {
+        format!(
+            "Ran {} Command{}",
+            group.commands,
+            if group.commands == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("Explored → {}", parts.join(", "))
+    };
+    if !failures.is_empty() {
+        label.push_str(&format!(" · {} failed", failures.len()));
+        for reason in failures {
+            label.push_str("\n  × ");
+            label.push_str(reason);
+        }
+    }
+    label
+}
+
 #[derive(Clone, Debug)]
 struct ToolPanel {
     id: ToolCallId,
@@ -410,6 +460,8 @@ struct ToolPanel {
     /// Validated opaque image media, kept separate from text/copy output.
     images: Vec<ToolResultImage>,
     image_rendering: ToolImageRendering,
+    /// Child of a compact exploration summary; Ctrl+O reveals the ordinary row.
+    grouped_child: bool,
     finished: bool,
     is_error: bool,
     /// Wall time the call took, known once the outcome is final.
@@ -458,6 +510,7 @@ impl ToolPanel {
             output,
             images: Vec::new(),
             image_rendering: ToolImageRendering::default(),
+            grouped_child: false,
             finished,
             is_error,
             duration: None,
@@ -1284,6 +1337,8 @@ pub(crate) struct ShellState {
     pub(crate) error: Option<String>,
     overlay: Option<ShellOverlay>,
     tool_panels: HashMap<ToolCallId, usize>,
+    activity_groups: Vec<ActivityGroupView>,
+    pending_activity_groups: Vec<crate::hydrate::ToolActivityGroup>,
     active_text: Option<usize>,
     /// Stable block identities owned by the unfinished inference attempt.
     provisional_blocks: Vec<u64>,
@@ -1834,6 +1889,9 @@ impl ShellState {
                 *panel_index += 1;
             }
         }
+        for group in &mut self.activity_groups {
+            group.index += usize::from(group.index >= index);
+        }
         if let Some(selection) = &mut self.transcript_selection {
             selection.anchor.block += usize::from(selection.anchor.block >= index);
             selection.focus.block += usize::from(selection.focus.block >= index);
@@ -2092,6 +2150,10 @@ impl ShellState {
                 *panel_index -= 1;
             }
         }
+        self.activity_groups.retain(|group| group.index != index);
+        for group in &mut self.activity_groups {
+            group.index -= usize::from(group.index > index);
+        }
         if !self.follow_tail {
             self.new_output_count = self.new_output_count.saturating_sub(1);
         }
@@ -2122,6 +2184,143 @@ impl ShellState {
 
     fn show_tool_details(&self, _block: &TranscriptBlock) -> bool {
         self.verbose_tools
+    }
+
+    fn start_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
+        self.start_activity_group_kind(group, false);
+    }
+
+    fn start_activity_group_kind(
+        &mut self,
+        group: crate::hydrate::ToolActivityGroup,
+        command_run: bool,
+    ) {
+        let index = self.push_block(TranscriptBlock::NoticeStatus {
+            text: activity_group_label(&group, &[], command_run),
+            tone: NoticeTone::ToolActive,
+        });
+        self.register_active_event(index);
+        self.activity_groups.push(ActivityGroupView {
+            group,
+            index,
+            settled: std::collections::HashSet::new(),
+            failures: Vec::new(),
+            command_run_open: command_run,
+            command_run,
+        });
+    }
+
+    fn command_runs_enabled(&self) -> bool {
+        self.theme
+            .resolve::<bool>("quiet_tool_summaries")
+            .unwrap_or(false)
+    }
+
+    fn seal_command_run(&mut self) {
+        let Some(position) = self
+            .activity_groups
+            .iter()
+            .rposition(|view| view.command_run_open)
+        else {
+            return;
+        };
+        self.activity_groups[position].command_run_open = false;
+        self.refresh_activity_group(position);
+    }
+
+    fn grouped_tool_call(&mut self, id: &ToolCallId, name: &str) -> bool {
+        if self.command_runs_enabled() && matches!(name, "bash" | "exec") {
+            if self
+                .activity_groups
+                .iter()
+                .any(|view| !view.command_run && view.group.member_ids.contains(id))
+            {
+                self.seal_command_run();
+                return self.activity_group_for_call(id);
+            }
+            if let Some(position) = self
+                .activity_groups
+                .iter()
+                .rposition(|view| view.command_run_open)
+            {
+                let view = &mut self.activity_groups[position];
+                view.group.member_ids.push(id.clone());
+                view.group.commands += 1;
+                self.refresh_activity_group(position);
+            } else {
+                self.start_activity_group_kind(
+                    crate::hydrate::ToolActivityGroup {
+                        member_ids: vec![id.clone()],
+                        read_files: 0,
+                        searches: 0,
+                        commands: 1,
+                    },
+                    true,
+                );
+            }
+            true
+        } else {
+            self.seal_command_run();
+            self.activity_group_for_call(id)
+        }
+    }
+
+    fn refresh_activity_group(&mut self, position: usize) {
+        let view = &self.activity_groups[position];
+        let index = view.index;
+        let text = activity_group_label(&view.group, &view.failures, view.command_run);
+        let complete = !view.command_run_open && view.settled.len() == view.group.member_ids.len();
+        if let Some(TranscriptBlock::NoticeStatus { text: label, tone }) =
+            self.transcript.get_mut(index)
+        {
+            *label = text;
+            if complete {
+                *tone = if view.failures.is_empty() {
+                    NoticeTone::ToolSuccess
+                } else {
+                    NoticeTone::ToolError
+                };
+            }
+            self.touch_block(index);
+        }
+        if complete {
+            self.unregister_active_event(index);
+            self.activity_groups.remove(position);
+        }
+    }
+
+    fn activity_group_for_call(&mut self, id: &ToolCallId) -> bool {
+        if let Some(position) = self
+            .pending_activity_groups
+            .iter()
+            .position(|group| group.member_ids.first() == Some(id))
+        {
+            let group = self.pending_activity_groups.remove(position);
+            self.start_activity_group(group);
+        }
+        self.activity_groups
+            .iter()
+            .rev()
+            .any(|view| view.group.member_ids.contains(id) && !view.settled.contains(id))
+    }
+
+    fn settle_activity_tool(&mut self, id: &ToolCallId, name: &str, reason: Option<&str>) {
+        let Some(position) = self
+            .activity_groups
+            .iter()
+            .rposition(|view| view.group.member_ids.contains(id) && !view.settled.contains(id))
+        else {
+            return;
+        };
+        let view = &mut self.activity_groups[position];
+        view.settled.insert(id.clone());
+        if let Some(reason) = reason {
+            view.failures.push(format!(
+                "{name}: {}",
+                crate::presentation::concise_line(&sanitize_for_terminal(reason))
+            ));
+        }
+        self.refresh_activity_group(position);
     }
 
     fn open_working_status(&mut self) {
@@ -2454,6 +2653,10 @@ impl ShellState {
             .any(|index| match self.transcript.get(*index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
                 Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
+                Some(TranscriptBlock::NoticeStatus {
+                    tone: NoticeTone::ToolActive,
+                    ..
+                }) => markers_enabled,
                 Some(TranscriptBlock::Subagents(summary)) => {
                     markers_enabled && summary.active_count() > 0
                 }
@@ -2629,6 +2832,10 @@ impl ShellState {
             let visible = match self.transcript.get(index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
                 Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
+                Some(TranscriptBlock::NoticeStatus {
+                    tone: NoticeTone::ToolActive,
+                    ..
+                }) => markers_enabled,
                 Some(TranscriptBlock::Subagents(summary)) => {
                     markers_enabled && summary.active_count() > 0
                 }
@@ -2677,14 +2884,10 @@ pub(crate) fn semantic_separator(theme: &OctetTheme) -> &str {
 /// Indent continuation rows to the first text cell after an activity marker.
 pub(crate) const ACTIVITY_DETAIL_INDENT: &str = "  ";
 
-/// A shared continuation mark for transient activity details. Keep steering
-/// and collapsed thinking/subagents visually aligned without repurposing tree glyphs.
-pub(crate) fn activity_elbow(theme: &OctetTheme) -> &'static str {
-    if theme.unicode() {
-        "└"
-    } else {
-        "`-"
-    }
+/// Shared theme-owned continuation mark for transient activity details.
+/// A blank glyph lets minimalist themes omit tree connectors entirely.
+pub(crate) fn activity_elbow(theme: &OctetTheme) -> &str {
+    theme.glyph("last_branch")
 }
 
 /// A low-contrast annotation that remains readable without relying on a
@@ -3640,6 +3843,9 @@ impl InteractiveShell {
                 )));
             }
             AgentEvent::OutputDelta { channel, text } => {
+                if *channel == OutputChannel::Text && !text.is_empty() {
+                    state.seal_command_run();
+                }
                 if state.turn_generation_started_at.is_none() {
                     state.turn_generation_started_at = Some(Instant::now());
                     state.turn_streamed_output_bytes = 0;
@@ -3840,6 +4046,7 @@ impl InteractiveShell {
             }
             AgentEvent::ToolStarted { id, name, args } => {
                 state.close_streaming_blocks();
+                let grouped = state.grouped_tool_call(id, name);
                 state.event_dot_visible = true;
                 state.event_spinner_frame = 0;
                 if is_subagent_tool(name) {
@@ -3849,7 +4056,7 @@ impl InteractiveShell {
                     let workspace = state.workspace.clone();
                     let display = summarize_tool_with_workspace(name, args, workspace.as_deref());
                     let model_lab = state.executing_model_lab();
-                    let index = state.push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+                    let mut panel = ToolPanel::new(
                         id.clone(),
                         name.clone(),
                         args.to_string(),
@@ -3859,7 +4066,9 @@ impl InteractiveShell {
                         false,
                         None,
                         model_lab,
-                    ))));
+                    );
+                    panel.grouped_child = grouped;
+                    let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
                     state.tool_panels.insert(id.clone(), index);
                     state.register_active_event(index);
                 }
@@ -3976,6 +4185,15 @@ impl InteractiveShell {
                 if let Some(index) = index {
                     state.unregister_active_event(index);
                     state.touch_block(index);
+                    let reason = state.tool_output_mut(id).and_then(|panel| {
+                        panel.is_error.then(|| {
+                            panel
+                                .failure_reason
+                                .clone()
+                                .unwrap_or_else(|| "tool failed".into())
+                        })
+                    });
+                    state.settle_activity_tool(id, &completed_name, reason.as_deref());
                 }
                 if !completed_name.is_empty() {
                     state.tool_durations.push((completed_name, *duration));
@@ -4003,12 +4221,24 @@ impl InteractiveShell {
                 }
             }
             AgentEvent::TurnFinished {
+                message,
                 turn_usage,
                 session_cost_microdollars,
                 run_cost_microdollars,
                 ..
             } => {
                 state.finish_turn_streaming_blocks();
+                if message.content.iter().any(|part| matches!(part, octet_ai::AssistantPart::Text(text) if !text.trim().is_empty())) {
+                    state.seal_command_run();
+                }
+                state.pending_activity_groups = if state.command_runs_enabled() {
+                    crate::hydrate::tool_activity_groups(message)
+                        .into_iter()
+                        .filter(|group| group.read_files > 0 || group.searches > 0)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let requested_at = state.turn_requested_at;
                 if let Some(started_at) = state.turn_generation_started_at.take() {
                     let elapsed = started_at.elapsed();
@@ -4051,6 +4281,7 @@ impl InteractiveShell {
             AgentEvent::DelegationUpdated { .. } => {}
             AgentEvent::RunFinished { .. } => {
                 state.close_streaming_blocks();
+                state.seal_command_run();
                 if let Some(view) = state.subagent_activity.as_ref() {
                     let costs: Vec<_> = if !view.telemetry.is_empty() {
                         view.telemetry
@@ -4158,6 +4389,7 @@ impl InteractiveShell {
     fn push_local_submission(&mut self, prompt: &str, prompt_color: Option<String>) {
         let mut state = self.state.borrow_mut();
         state.close_streaming_blocks();
+        state.seal_command_run();
         let model_lab = state.model_lab;
         state.push_block(TranscriptBlock::User {
             text: prompt.to_owned(),
@@ -6915,6 +7147,8 @@ impl InteractiveShell {
         if let Some(lab) = state.model_lab {
             crate::tui::theme::apply_model_lab(&mut theme, lab);
         }
+        state.seal_command_run();
+        state.pending_activity_groups.clear();
         state.theme = theme;
         state.theme_epoch = state.theme_epoch.wrapping_add(1);
         state.invalidate_rich_text();
@@ -7002,6 +7236,8 @@ impl InteractiveShell {
         state.invalidate_transcript_layout();
         state.steering_queue = Arc::default();
         state.tool_panels.clear();
+        state.activity_groups.clear();
+        state.pending_activity_groups.clear();
         state.hidden_subagent_calls.clear();
         state.hidden_hydrated_subagent_calls.clear();
         state.hydrated_pending_subagent_calls.clear();
@@ -7044,6 +7280,7 @@ impl InteractiveShell {
         state.overlay = None;
         state.error = None;
         append_hydrated_items(&mut state, items);
+        state.seal_command_run();
         state.deferred_session_history = deferred_snapshot.map(|mut deferred| {
             deferred.retained_id_end = state.next_transcript_commit_id.0;
             deferred

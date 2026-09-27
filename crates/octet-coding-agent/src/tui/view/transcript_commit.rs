@@ -36,6 +36,17 @@ fn transcript_block_is_final(block: &TranscriptBlock) -> bool {
     }
 }
 
+fn transcript_block_is_final_at(state: &ShellState, index: usize) -> bool {
+    // A group summary is mutable until its last tool result arrives. Native
+    // scrollback must not commit the early success-looking row before a later
+    // failure has been projected onto it.
+    !state
+        .activity_groups
+        .iter()
+        .any(|group| group.index == index)
+        && transcript_block_is_final(&state.transcript[index])
+}
+
 pub(super) fn transcript_commit_cursor(
     state: &ShellState,
     block: usize,
@@ -79,7 +90,8 @@ pub(super) fn transcript_commit_position(
     let block_len = *cache.block_lengths.get(block_index)?;
 
     let row = if cursor.segment == FINAL_COMMIT_SEGMENT {
-        transcript_block_is_final(block).then_some(block_start.saturating_add(block_len))?
+        transcript_block_is_final_at(state, block_index)
+            .then_some(block_start.saturating_add(block_len))?
     } else {
         let TranscriptBlock::Assistant(markdown) = block else {
             return None;
@@ -98,6 +110,9 @@ pub(super) fn transcript_commit_position(
 }
 
 fn finalized_tool_rows_are_stable(panel: &ToolPanel) -> bool {
+    if panel.grouped_child {
+        return false;
+    }
     if let Some(disclosure_sensitive) = *panel.cached_disclosure_sensitive.borrow() {
         return !disclosure_sensitive;
     }
@@ -169,7 +184,7 @@ fn transcript_stable_rows(state: &ShellState, acknowledged: Option<CommitCursor>
             break;
         };
         let block_end = block_start.saturating_add(block_len);
-        if transcript_block_is_final(block) {
+        if transcript_block_is_final_at(state, index) {
             if finalized_block_rows_are_stable(block) {
                 stable_rows = block_end;
                 continue;
@@ -239,7 +254,7 @@ fn transcript_commit_target(
             break;
         };
         let block_end = block_start.saturating_add(block_len);
-        let final_block = transcript_block_is_final(block);
+        let final_block = transcript_block_is_final_at(state, index);
 
         if let TranscriptBlock::Assistant(markdown) = block {
             // A completed block can be acknowledged as one outer transcript
@@ -309,6 +324,37 @@ mod tests {
     use octet_ai::ToolCallId;
 
     use super::super::{AssistantBlock, CompactionBlock, ShellOutput, ToolPanel};
+
+    #[test]
+    fn exploration_summary_is_not_committed_before_failure_settles() {
+        let mut state = ShellState::default();
+        let read = ToolCallId("read".into());
+        let bash = ToolCallId("bash".into());
+        state.start_activity_group(crate::hydrate::ToolActivityGroup {
+            member_ids: vec![read.clone(), bash.clone()],
+            read_files: 1,
+            searches: 0,
+            commands: 1,
+        });
+        state.rendered_transcript(80);
+        assert!(state.has_active_event_dot());
+        let cursor = transcript_commit_cursor(&state, 0, FINAL_COMMIT_SEGMENT);
+        assert!(transcript_commit_position(&state, cursor).is_none());
+        state.settle_activity_tool(&read, "read", None);
+        state.rendered_transcript(80);
+        assert!(transcript_commit_position(&state, cursor).is_none());
+        state.settle_activity_tool(&bash, "bash", Some("permission denied"));
+        state.rendered_transcript(80);
+        assert!(!state.has_active_event_dot());
+        assert!(matches!(
+            state.transcript.first(),
+            Some(TranscriptBlock::NoticeStatus {
+                tone: super::super::NoticeTone::ToolError,
+                ..
+            })
+        ));
+        assert!(transcript_commit_position(&state, cursor).is_some());
+    }
 
     fn finalized_tool(
         name: &str,

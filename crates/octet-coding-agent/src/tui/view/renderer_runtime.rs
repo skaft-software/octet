@@ -26,6 +26,9 @@ const RENDER_INTERVAL: Duration = Duration::from_millis(16);
 /// response and active tool or shell dots breathe between foreground and muted
 /// tones without changing size.
 const EVENT_DOT_TOGGLE_INTERVAL: Duration = Duration::from_millis(500);
+/// Still's tool-dot pulse uses shorter steps; other themes keep the existing
+/// restrained event-marker cadence.
+const TOOL_BREATH_INTERVAL: Duration = Duration::from_millis(160);
 /// The optional braille spinner and model-adaptive status shimmer share one
 /// bounded renderer-thread cadence.
 const STATUS_ANIMATION_INTERVAL: Duration = Duration::from_millis(80);
@@ -238,6 +241,19 @@ impl AnimationSchedule {
             thinking_spinner_animating(state) || status_shimmer_animating(state),
             now,
         );
+        let interval = if state
+            .theme
+            .resolve::<bool>("tool_dot_breathing")
+            .unwrap_or(false)
+        {
+            TOOL_BREATH_INTERVAL
+        } else {
+            EVENT_DOT_TOGGLE_INTERVAL
+        };
+        if self.event_dot.interval != interval {
+            self.event_dot.interval = interval;
+            self.event_dot.last_tick = None;
+        }
         self.event_dot.set_active(event_dot_animating(state), now);
         self.timer.set_active(status_timer_active(state), now);
     }
@@ -842,6 +858,40 @@ mod scheduler_tests {
             assert_eq!(state.status_shimmer_frame as u64, ms / 80);
             assert_eq!(state.event_dot_visible, (ms / 500) % 2 == 0);
         }
+    }
+
+    #[test]
+    fn still_tool_breath_uses_a_faster_clock_without_changing_other_themes() {
+        use super::super::{InteractiveShell, ToolPanel, TranscriptBlock};
+        use crate::presentation::summarize_tool;
+        use octet_ai::ToolCallId;
+
+        let theme =
+            crate::tui::theme::test_theme_from_source("[colors]\ntool_dot_breathing = true");
+        let shell = InteractiveShell::test_shell_with_theme(theme);
+        let start = Instant::now();
+        let mut schedule = AnimationSchedule::new();
+        let mut state = shell.state.borrow_mut();
+        let args = serde_json::json!({"path": "src/lib.rs"});
+        let index = state.push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+            ToolCallId("pulse".into()),
+            "read".into(),
+            args.to_string(),
+            summarize_tool("read", &args),
+            String::new(),
+            false,
+            false,
+            None,
+            None,
+        ))));
+        state.register_active_event(index);
+        schedule.observe(&state, start);
+        assert_eq!(schedule.event_dot.interval, TOOL_BREATH_INTERVAL);
+        schedule.advance(&mut state, start + TOOL_BREATH_INTERVAL);
+        assert_eq!(state.event_spinner_frame, 1);
+        state.theme = crate::tui::theme::test_theme();
+        schedule.observe(&state, start + TOOL_BREATH_INTERVAL);
+        assert_eq!(schedule.event_dot.interval, EVENT_DOT_TOGGLE_INTERVAL);
     }
 
     #[test]

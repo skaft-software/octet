@@ -616,7 +616,8 @@ impl ShellState {
                 let glyph = match (thumb, self.theme.unicode()) {
                     (true, true) => "█",
                     (true, false) => "#",
-                    (false, true) => "│",
+                    (false, true) => self.theme.glyph("vertical"),
+                    (false, false) if self.theme.glyph("vertical").trim().is_empty() => " ",
                     (false, false) => ".",
                 };
                 let painted = self.theme.fg(if thumb { "accent" } else { "muted" }, glyph);

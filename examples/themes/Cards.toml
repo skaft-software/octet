@@ -1,21 +1,21 @@
 # Cards theme for octet
 #
 # Shaded minimalism: soft filled rails, almost no visible
-# borders, grayscale-first text with one warm amber accent.
+# borders, grayscale-first text with model-coloured prompt rails.
 #
 # How the look is built (all theme-file supported):
 # - `composer = "shaded"` selects the borderless shaded composer rectangle,
 #   painted with `composer_bg`. No rules, no box.
 # - `rail` transcript chrome + `[roles."surface.<kind>"]` backgrounds paint
 #   padded, filled blocks behind user prompts, tool calls, and shell blocks:
-#   a thin left-edge stripe, blank cushion rows, and content on one soft
+#   a thin left-edge stripe, one-cell inset, blank cushion rows, and content on one soft
 #   fill. No outlines anywhere; the stripe (not a margin dot) carries status.
 # - Syntax is near-monochrome; signal colours (diff, error, success) are
 #   muted rather than neon.
 # - Model styling follows the compiled default: per-model-family adaptive
-#   lab colours (`model.use_lab_color = "true"`), so the composer marker
-#   and shimmer take the active model's colour while the UI accent stays
-#   amber.
+#   lab colours (`model.use_lab_color = "true"`), so the composer marker,
+#   shimmer, and historical prompt rails take the model's colour while the
+#   UI accent stays amber.
 # - `splash_model_adaptive` hands the whole startup splash to the active
 #   model family: the byte-mark uses the model-blended gradient and the
 #   splash text uses the model accent, exactly like the compiled default.
@@ -34,11 +34,15 @@ composer = "shaded"
 # Turn off the margin status dots (green/red `•` left of tool and shell
 # rows). Status now lives in the left-edge stripe of each shaded block.
 margin_markers = false
+# Cards have no margin dots on rails, so they can start at the terminal edge.
+# Plain assistant and notice text keeps its two-cell reading gutter.
+transcript_flush = true
 
 # Keep prompt cards on the dark surface fill instead of washing them with
-# the per-turn model colour. The chevron keeps its model colour and the
-# rail keeps the amber stripe; only the fill stays dark.
+# the per-turn model colour. The chevron and rail keep the prompt's
+# model colour; only the fill stays dark.
 prompt_wash = false
+prompt_rail_model_adaptive = true
 
 [metadata]
 name = "Cards"
@@ -165,13 +169,9 @@ background = "#1e1e1e"
 [roles."surface.shell"]
 background = "#1e1e1e"
 
-# Quiet stripes and dividers. Each `surface.<kind>.border` role paints the
-# rail stripe for rail chrome (and the outcome divider for rule chrome).
-# Amber marks your prompts; tools and shell output get a neutral gray bar.
+# Quiet stripes and dividers. Prompt rails follow each turn's stored model
+# colour; tool/shell rails and the outcome divider use neutral border roles.
 # Without these, rails and rules fall back to bright terminal-white.
-[roles."surface.user.border"]
-foreground = "#d29c54"
-
 [roles."surface.assistant.border"]
 foreground = "#2e2e2e"
 
@@ -365,9 +365,6 @@ background = "#1e1e1e"
 [variants.dark.roles."surface.shell"]
 background = "#1e1e1e"
 
-[variants.dark.roles."surface.user.border"]
-foreground = "#d29c54"
-
 [variants.dark.roles."surface.assistant.border"]
 foreground = "#2e2e2e"
 
@@ -432,9 +429,6 @@ background = "#f2efe9"
 
 [variants.light.roles."surface.shell"]
 background = "#f2efe9"
-
-[variants.light.roles."surface.user.border"]
-foreground = "#8a5a00"
 
 [variants.light.roles."surface.assistant.border"]
 foreground = "#d8d5cf"

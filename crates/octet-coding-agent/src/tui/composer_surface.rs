@@ -187,6 +187,28 @@ fn horiz(state: &super::view::ShellState) -> &str {
     state.theme.glyph("horizontal")
 }
 
+fn render_topline(state: &super::view::ShellState, width: u16, now: Instant) -> String {
+    let theme = &state.theme;
+    let border = theme
+        .role_rgb("composer_border")
+        .unwrap_or_else(|| theme.model_rgb(state.model_lab).unwrap_or((128, 128, 128)));
+    let available = usize::from(width).saturating_sub(3);
+    // Fit the footer into the space between the rule ends first. Clipping a
+    // full-width footer afterward would chop the workspace's rightmost tail.
+    let metadata = render_status_footer_with_gap(state, available as u16, now, Some(border))
+        .trim()
+        .to_owned();
+    let remainder = usize::from(width).saturating_sub(visible_width(&metadata) + 3);
+    fit_line(
+        &format!(
+            "{} {metadata} {}",
+            theme.rgb_fg(border, horiz(state)),
+            theme.rgb_fg(border, &horiz(state).repeat(remainder))
+        ),
+        width,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Unified composer frame
 // ---------------------------------------------------------------------------
@@ -202,6 +224,7 @@ enum ComposerChrome {
     Boxed,
     Framed,
     Shaded,
+    Topline,
 }
 
 fn composer_chrome(theme: &super::theme::OctetTheme) -> ComposerChrome {
@@ -212,6 +235,7 @@ fn composer_chrome(theme: &super::theme::OctetTheme) -> ComposerChrome {
     {
         Some("framed") => ComposerChrome::Framed,
         Some("shaded") => ComposerChrome::Shaded,
+        Some("topline") => ComposerChrome::Topline,
         _ => ComposerChrome::Boxed,
     }
 }
@@ -221,7 +245,7 @@ fn composer_chrome(theme: &super::theme::OctetTheme) -> ComposerChrome {
 /// shaded chrome keeps one painted margin column per side.
 fn composer_inner_width(theme: &super::theme::OctetTheme, frame_width: u16) -> u16 {
     match composer_chrome(theme) {
-        ComposerChrome::Boxed => frame_width,
+        ComposerChrome::Boxed | ComposerChrome::Topline => frame_width,
         ComposerChrome::Framed => frame_width.saturating_sub(4),
         ComposerChrome::Shaded => frame_width.saturating_sub(2),
     }
@@ -337,7 +361,7 @@ fn render_composer_box(
     };
     let finish_row = |row: String| -> String {
         let row = match chrome {
-            ComposerChrome::Boxed => row,
+            ComposerChrome::Boxed | ComposerChrome::Topline => row,
             ComposerChrome::Framed => {
                 let vertical = theme.rgb_fg(border_rgb, theme.glyph("vertical"));
                 format!("{vertical} {row} {vertical}")
@@ -364,6 +388,7 @@ fn render_composer_box(
     let mut lines = Vec::with_capacity(content_rows + 2);
     match chrome {
         ComposerChrome::Boxed => lines.push(render_rule()),
+        ComposerChrome::Topline => lines.push(render_topline(state, width, _now)),
         ComposerChrome::Framed => lines.push(frame_rule(
             theme.glyph("top_left"),
             theme.glyph("top_right"),
@@ -453,6 +478,7 @@ fn render_composer_box(
 
     match chrome {
         ComposerChrome::Boxed => lines.push(render_rule()),
+        ComposerChrome::Topline => {}
         ComposerChrome::Framed => lines.push(frame_rule(
             theme.glyph("bottom_left"),
             theme.glyph("bottom_right"),
@@ -682,7 +708,16 @@ fn context_percent(used: u64, limit: u64) -> u64 {
 /// accounting stays in `/status`, `/cost`, and `/cache`; default chrome keeps
 /// identity, context pressure and durable session spend together on the left,
 /// with the workspace right-aligned when space permits.
-fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Instant) -> String {
+fn render_status_footer(state: &super::view::ShellState, width: u16, now: Instant) -> String {
+    render_status_footer_with_gap(state, width, now, None)
+}
+
+fn render_status_footer_with_gap(
+    state: &super::view::ShellState,
+    width: u16,
+    _now: Instant,
+    gap_rule: Option<(u8, u8, u8)>,
+) -> String {
     let theme_layout = state.theme.layout_for_width(width);
     let total_width = usize::from(width);
     if total_width == 0 {
@@ -692,8 +727,16 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
     // rather than on the full-width surface edge used by rules and cards.
     // Keep this inset independent from the composer frame itself.
     let requested_inset = 1usize.saturating_add(usize::from(theme_layout.composer_padding));
-    let left_inset = if width >= 5 {
-        requested_inset.min(total_width.saturating_sub(1) / 2)
+    // The topline already supplies the rule's own one-cell inset. Do not
+    // charge the footer's separate inset again when fitting embedded metadata.
+    let left_inset = if gap_rule.is_some() {
+        0
+    } else if width >= 5 {
+        requested_inset
+            .max(usize::from(
+                PresentationLayout::new(&state.theme, width).inset,
+            ))
+            .min(total_width.saturating_sub(1) / 2)
     } else {
         0
     };
@@ -905,11 +948,20 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
         left_text
     } else {
         let spacing = available.saturating_sub(left_width + visible_width(&cwd));
-        format!(
-            "{left_text}{}{}",
-            " ".repeat(spacing),
-            state.theme.fg("muted", &cwd)
-        )
+        let gap = gap_rule.map_or_else(
+            || " ".repeat(spacing),
+            |color| {
+                if spacing < 2 {
+                    " ".repeat(spacing)
+                } else {
+                    format!(
+                        " {} ",
+                        state.theme.rgb_fg(color, &horiz(state).repeat(spacing - 2))
+                    )
+                }
+            },
+        );
+        format!("{left_text}{gap}{}", state.theme.fg("muted", &cwd))
     };
     fit_line(&format!("{}{body}", " ".repeat(left_inset)), width)
 }
@@ -917,7 +969,8 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
 pub(crate) fn status_footer_visible(state: &super::view::ShellState, width: u16) -> bool {
     let layout = state.theme.layout_for_width(width);
     let has_identity = layout.show_footer && !layout.show_header;
-    has_identity || layout.show_status_line
+    (has_identity || layout.show_status_line)
+        && composer_chrome(&state.theme) != ComposerChrome::Topline
 }
 
 fn append_status_footer(
@@ -1003,6 +1056,9 @@ fn render_compact(
     editor: &ComposerEditorProjection,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    if composer_chrome(&state.theme) == ComposerChrome::Topline {
+        lines.push(render_topline(state, width, now));
+    }
     let plan = PresentationLayout::new(&state.theme, width);
     let padding_width = usize::from(plan.inset);
     let padding = " ".repeat(padding_width);
@@ -1060,6 +1116,85 @@ fn render_compact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shaded_composer_tracks_the_contained_reading_column() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncomposer = \"shaded\"\ncomposer_bg = \"#202020\"\ncontent_max_width = 112\n[layout]\ntranscript_inset = 2\ncomposer_padding = 1\nshow_footer = true",
+        );
+        state.model_display = "Test Model".into();
+        for (width, inset, frame_width) in [(160, 24, 112), (48, 0, 48)] {
+            let rows = render_composer_surface(&state, width, Instant::now())
+                .into_iter()
+                .map(|row| sexy_tui_rs::strip_terminal_sequences(&row).to_owned())
+                .collect::<Vec<_>>();
+            assert!(rows.len() >= 4, "{width}: {rows:?}");
+            assert_eq!(
+                rows[0].chars().take(inset).collect::<String>(),
+                " ".repeat(inset)
+            );
+            assert_eq!(visible_width(&rows[0]), inset + frame_width);
+            assert!(
+                rows[1].contains(state.theme.glyph("prompt")),
+                "{width}: {rows:?}"
+            );
+            assert!(
+                !rows.iter().any(|row| row.contains('─')),
+                "{width}: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn topline_preserves_the_workspace_tail_at_the_right_edge() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncomposer = \"topline\"\n[layout]\nshow_footer = true\nshow_status_line = true",
+        );
+        state.model_display = "Test".into();
+        state.workspace = Some(std::path::PathBuf::from("/work/long/project-directory"));
+        let row =
+            sexy_tui_rs::strip_terminal_sequences(&render_topline(&state, 45, Instant::now()))
+                .to_owned();
+        assert!(row.contains("project-directory"), "{row:?}");
+        assert!(row.contains("Test"), "{row:?}");
+        assert_eq!(visible_width(&row), 45);
+
+        let wide =
+            sexy_tui_rs::strip_terminal_sequences(&render_topline(&state, 80, Instant::now()))
+                .to_owned();
+        let between = &wide[wide.find("Test").unwrap() + 4..wide.find("/work").unwrap()];
+        assert!(between.contains("────"), "{wide:?}");
+        assert_eq!(visible_width(&wide), 80);
+    }
+
+    #[test]
+    fn topline_embeds_metadata_above_prompt_without_a_bottom_rule() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncomposer = \"topline\"\n[layout]\nshow_footer = true\nshow_status_line = true",
+        );
+        state.model_display = "Test Model".into();
+        for width in [80, 16, 4] {
+            let plain = render_composer_surface(&state, width, Instant::now())
+                .into_iter()
+                .map(|line| sexy_tui_rs::strip_terminal_sequences(&line))
+                .collect::<Vec<_>>();
+            assert_eq!(plain.len(), 2, "{width}: {plain:?}");
+            assert!(plain[0].contains("Test") || width < 8, "{width}: {plain:?}");
+            assert!(
+                plain[1].contains(state.theme.glyph("prompt")),
+                "{width}: {plain:?}"
+            );
+            assert!(
+                plain
+                    .iter()
+                    .all(|line| visible_width(line) <= width as usize),
+                "{width}: {plain:?}"
+            );
+        }
+    }
 
     #[test]
     fn content_rows_starts_at_one() {

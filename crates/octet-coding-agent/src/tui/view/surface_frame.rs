@@ -1,6 +1,6 @@
 use sexy_tui_rs::{strip_terminal_sequences, visible_width};
 
-use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome, ThemeSurfaceHeading};
+use crate::tui::theme::{ModelLab, OctetTheme, ThemeSurfaceChrome, ThemeSurfaceHeading};
 
 use super::reasoning_render::activity_shimmer_marker;
 use super::surface_layout::{surface_roles, SurfacePlan};
@@ -140,15 +140,33 @@ fn render_surface_content_line(
             }
         }
         ThemeSurfaceChrome::Rail => {
-            let rail = theme.apply_semantic_role(border_role, theme.glyph("rail"));
+            let rail = if plan.kind == "user"
+                && theme
+                    .resolve::<bool>("prompt_rail_model_adaptive")
+                    .unwrap_or(false)
+                && theme.uses_model_lab_color()
+            {
+                prompt_color.map_or_else(
+                    || {
+                        let lab = plan.user_model_lab.filter(|lab| *lab != ModelLab::Unknown);
+                        theme.model_fg(lab, theme.glyph("rail"))
+                    },
+                    |color| theme.prompt_color_marker(Some(color), theme.glyph("rail")),
+                )
+            } else {
+                theme.apply_semantic_role(border_role, theme.glyph("rail"))
+            };
             let rail_width = u16::try_from(visible_width(theme.glyph("rail")))
                 .unwrap_or(u16::MAX)
                 .min(plan.frame_width);
             let inner_width = plan.frame_width.saturating_sub(rail_width);
             // Pad to the full frame like band chrome so short rows keep the
             // shaded fill edge to edge instead of ragged text highlights.
+            // A padded rail already has its left cushion; do not add a
+            // second, implicit space before the content.
+            let gap = if plan.padding == 0 { " " } else { "" };
             let body = padded_to_width(
-                &format!(" {left_padding}{content}{right_padding}"),
+                &format!("{gap}{left_padding}{content}{right_padding}"),
                 inner_width,
             );
             let body = if wash_prompt {
@@ -183,6 +201,29 @@ fn surface_bottom_row(plan: &SurfacePlan<'_>, theme: &OctetTheme) -> Option<Stri
     })
 }
 
+fn breathing_tool_dot(theme: &OctetTheme, dot: &str, frame: usize, active: bool) -> String {
+    let bright = theme.role_rgb("tool_dot_bright").unwrap_or((160, 160, 160));
+    let dim = theme.role_rgb("tool_dot_dim").unwrap_or((90, 90, 90));
+    // Twelve small steps at 160 ms give a smooth ~1.9-second cycle without
+    // blinking, while completed calls hold a steady mid-tone dot.
+    let strength = if active {
+        [1u16, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1, 0][frame % 12]
+    } else {
+        3
+    };
+    let mix = |low: u8, high: u8| -> u8 {
+        ((u16::from(low) * (6 - strength) + u16::from(high) * strength) / 6) as u8
+    };
+    theme.rgb_fg(
+        (
+            mix(dim.0, bright.0),
+            mix(dim.1, bright.1),
+            mix(dim.2, bright.2),
+        ),
+        dot,
+    )
+}
+
 #[cfg(test)]
 pub(super) fn event_margin_marker(
     block: &TranscriptBlock,
@@ -214,6 +255,10 @@ pub(super) fn event_margin_marker_with_frame(
         return None;
     }
     let event_dot = if theme.unicode() { "•" } else { "*" };
+    let tool_breathing = theme.resolve::<bool>("tool_dot_breathing").unwrap_or(false);
+    let quiet_transcript = theme
+        .resolve::<bool>("quiet_tool_summaries")
+        .unwrap_or(false);
     let active_dot_visible = spinner_frame % 2 == 0;
     let active_phase_dot = || {
         if active_dot_visible {
@@ -247,6 +292,7 @@ pub(super) fn event_margin_marker_with_frame(
             ))
         }
         TranscriptBlock::Reasoning(_) => None,
+        TranscriptBlock::Assistant(_) if markers_enabled && quiet_transcript => None,
         TranscriptBlock::Assistant(_) if markers_enabled => Some(theme.fg("foreground", event_dot)),
         TranscriptBlock::Subagents(summary) if markers_enabled && summary.active_count() > 0 => {
             Some(active_phase_dot())
@@ -255,9 +301,15 @@ pub(super) fn event_margin_marker_with_frame(
             Some(theme.settled_event_dot(summary.settled_role(), event_dot))
         }
         TranscriptBlock::Tool(panel) if markers_enabled && !panel.finished => {
-            Some(active_phase_dot())
+            Some(if tool_breathing {
+                breathing_tool_dot(theme, event_dot, spinner_frame, true)
+            } else {
+                active_phase_dot()
+            })
         }
-        TranscriptBlock::Tool(panel) if markers_enabled => Some(if panel.is_error {
+        TranscriptBlock::Tool(panel) if markers_enabled => Some(if tool_breathing {
+            breathing_tool_dot(theme, event_dot, spinner_frame, false)
+        } else if panel.is_error {
             theme.settled_event_dot("error", event_dot)
         } else {
             theme.settled_event_dot("success", event_dot)
@@ -270,18 +322,29 @@ pub(super) fn event_margin_marker_with_frame(
         } else {
             theme.settled_event_dot("error", event_dot)
         }),
+        TranscriptBlock::Notice(_) | TranscriptBlock::UpdateAvailable(_)
+            if markers_enabled && quiet_transcript =>
+        {
+            None
+        }
         TranscriptBlock::Notice(_) | TranscriptBlock::UpdateAvailable(_) if markers_enabled => {
             Some(theme.settled_event_dot("neutral", event_dot))
         }
-        TranscriptBlock::NoticeStatus { tone, .. } if markers_enabled => {
-            Some(theme.settled_event_dot(
-                match tone {
-                    super::NoticeTone::Success => "success",
-                    super::NoticeTone::Error => "error",
-                },
-                event_dot,
-            ))
-        }
+        TranscriptBlock::NoticeStatus { tone, .. } if markers_enabled => Some(match tone {
+            super::NoticeTone::ToolActive if tool_breathing => {
+                breathing_tool_dot(theme, event_dot, spinner_frame, true)
+            }
+            super::NoticeTone::ToolActive => active_phase_dot(),
+            super::NoticeTone::ToolSuccess | super::NoticeTone::ToolError if tool_breathing => {
+                breathing_tool_dot(theme, event_dot, spinner_frame, false)
+            }
+            super::NoticeTone::Success | super::NoticeTone::ToolSuccess => {
+                theme.settled_event_dot("success", event_dot)
+            }
+            super::NoticeTone::Error | super::NoticeTone::ToolError => {
+                theme.settled_event_dot("error", event_dot)
+            }
+        }),
         TranscriptBlock::User { .. }
         | TranscriptBlock::Subagents(_)
         | TranscriptBlock::Outcome(_)

@@ -34,15 +34,17 @@ shows the file stem and optional metadata name/description; typing filters it.
 Selecting a file previews its appearance and confirming persists its file stem
 as `theme = "mine"` in the user config, keeping other settings intact.
 `/theme mine` (or `/theme mine.toml`) selects a discovered, valid file directly.
-`/theme Cards` selects the compiled-in `Cards` theme described below.
+`/theme Cards` and `/theme Still` select the compiled-in file themes described
+below.
 Cancelling restores the active theme without modifying the config or session.
 The first-run picker still shows only Auto, Light, and Dark.
 
 Discovery follows global < trusted project < explicit path precedence; duplicate
 file stems show only the winning file, even when that file is invalid. Files that
 fail bounded reads or schema validation are omitted from the interactive list.
-In the interactive picker, file stems `auto`, `light`, `dark`, `default`, and
-`Cards` are reserved for built-in selectors and do not appear as file choices.
+In the interactive picker, file stems `auto`, `light`, `dark`, `default`,
+`Cards`, and `Still` are reserved for built-in selectors and do not appear as
+file choices.
 The built-in choices also work with `--theme` and `OCTET_THEME`; named files may
 be loaded at startup by those selectors. There is no theme marketplace. An
 unrecognized or malformed theme name at startup falls back to the compiled
@@ -103,16 +105,41 @@ octet --theme Cards
 OCTET_THEME=Cards octet
 ```
 
-`Cards` is a shaded-surfaces theme — rail chrome with quiet stripes,
-dark/light fills, an amber accent with adaptive model colours, a borderless
-shaded composer, and a themed compact splash. It is offered in `/theme`
-alongside the terminal-appearance choices, and its `Cards` stem is reserved
-so a local `Cards.toml` can neither shadow nor be shadowed by the built-in.
-Editing
+`Cards` is a shaded-surfaces theme — flush-left transcript rails and prose
+with one-cell content padding inside the rails, dark/light fills, and
+historical prompts' model-coloured rails and chevrons (rather than amber
+rails), a quiet amber UI accent, a borderless shaded composer, and a themed
+compact splash. Its slash-command choices align with the shaded composer's
+chevron and input text. The `prompt_rail_model_adaptive = true` token opts a
+file theme's user rails into each prompt's stored model colour, falling back
+to its historical model family (or the active accent if none is known). Other surface border roles continue to control their own rail colours.
+It is offered in `/theme` alongside the terminal-appearance choices, and its
+`Cards` stem is reserved so a local `Cards.toml` can neither shadow nor be
+shadowed by the built-in. Editing
 [`examples/themes/Cards.toml`](../examples/themes/Cards.toml) changes the
 built-in; `cards_example_theme_is_valid_for_every_background_profile` in
 `crates/octet-coding-agent/src/tui/theme.rs` fails the build if it stops
 validating for any terminal-background profile.
+
+`examples/themes/Still.toml` is compiled into every release the same way, as the
+built-in `Still` selector:
+
+```console
+octet --theme Still
+OCTET_THEME=Still octet
+```
+
+`Still` uses a centered reading column (up to 112 cells) shared with its softly
+shaded composer. A quiet band distinguishes user prompts. One extra breathing
+cell before transcript markers aligns prompt, activity, and prose text. Prose and
+tool activity remain unboxed, with compact adjacent rows and monochrome dots;
+`Ctrl+O` reveals full tool details. Its `model.use_lab_color = "true"` token
+keeps the prompt chevron and composer marker model-adaptive; the dark UI uses a
+restrained blue accent over neutral grays. Reasoning is hidden by default. It is
+offered in `/theme` after `Cards`, its `Still` stem is reserved, and
+`still_example_theme_is_valid_for_every_background_profile` in
+`crates/octet-coding-agent/src/tui/theme.rs` validates the embedded file for
+every terminal-background profile.
 
 Three optional top-level tokens shape the startup splash:
 

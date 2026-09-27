@@ -8480,30 +8480,36 @@ fn terminal_theme_picker_data() -> (Vec<String>, Vec<Option<String>>) {
     (items, descriptions)
 }
 
-/// The compiled-in `Cards` theme, offered after the terminal-appearance
-/// choices and before discovered files so it is reachable without copying a
-/// theme into a discovery root.
-fn cards_theme_picker_entry(
+/// The compiled-in file themes, offered after the terminal-appearance choices
+/// and before discovered files so they are reachable without copying a theme
+/// into a discovery root. A built-in that fails to compile is skipped rather
+/// than offered as a broken preview.
+fn compiled_file_theme_picker_entries(
     config: &Config,
     background: crate::tui::theme::TerminalBackground,
-) -> Option<(String, Option<String>, OctetTheme)> {
-    let mut preview_config = config.clone();
-    preview_config.theme = Some(crate::tui::theme::CARDS_THEME_NAME.to_owned());
-    let theme = load_theme_for_background(&preview_config, background);
-    if theme.is_compiled_default() {
-        return None;
-    }
-    let metadata = theme.metadata();
-    let label = if metadata.name.is_empty() {
-        crate::tui::theme::CARDS_THEME_NAME.to_owned()
-    } else {
-        metadata.name.clone()
-    };
-    Some((
-        label,
-        (!metadata.description.is_empty()).then(|| metadata.description.clone()),
-        theme,
-    ))
+) -> Vec<(String, Option<String>, String, OctetTheme)> {
+    crate::tui::theme::compiled_file_theme_names()
+        .filter_map(|selector| {
+            let mut preview_config = config.clone();
+            preview_config.theme = Some(selector.to_owned());
+            let theme = load_theme_for_background(&preview_config, background);
+            if theme.is_compiled_default() {
+                return None;
+            }
+            let metadata = theme.metadata();
+            let label = if metadata.name.is_empty() {
+                selector.to_owned()
+            } else {
+                metadata.name.clone()
+            };
+            Some((
+                label,
+                (!metadata.description.is_empty()).then(|| metadata.description.clone()),
+                selector.to_owned(),
+                theme,
+            ))
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8567,14 +8573,12 @@ where
         })
         .collect();
     if !onboarding {
-        if let Some((label, description, theme)) =
-            cards_theme_picker_entry(config, original.background())
+        for (label, description, selector, theme) in
+            compiled_file_theme_picker_entries(config, original.background())
         {
             items.push(label);
             descriptions.push(description);
-            choices.push(ThemeSelection::File(
-                crate::tui::theme::CARDS_THEME_NAME.to_owned(),
-            ));
+            choices.push(ThemeSelection::File(selector));
             previews.push(theme);
         }
         for (name, theme) in selectable_file_themes(config, original.background()) {

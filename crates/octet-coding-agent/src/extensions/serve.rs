@@ -10547,7 +10547,8 @@ fn graphical_theme_option(
 
     let source = match theme.source() {
         crate::tui::theme::ThemeSource::CompiledDefault
-        | crate::tui::theme::ThemeSource::CompiledCards => ThemeSourceClass::Bundled,
+        | crate::tui::theme::ThemeSource::CompiledCards
+        | crate::tui::theme::ThemeSource::CompiledStill => ThemeSourceClass::Bundled,
         crate::tui::theme::ThemeSource::File(path) if path.starts_with(&config.workspace) => {
             ThemeSourceClass::Project
         }
