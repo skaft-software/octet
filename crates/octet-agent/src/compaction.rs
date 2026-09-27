@@ -504,8 +504,14 @@ fn model_visible_branch_entries(session: &Session) -> Result<Vec<&Entry>, Sessio
 ///
 /// Candidates are user turn starts and assistant messages, while tool-result
 /// messages are never selected so the retained context stays protocol-valid.
-/// The fallback keeps from the oldest visible candidate when the requested
-/// token budget exceeds the visible history.
+/// When the walk crosses the budget at a non-cut-point (for example a tool
+/// result that alone exceeds `keep_recent_tokens`), the walk continues so the
+/// boundary becomes the newest valid cut point before the crossing, keeping
+/// the retained tail only slightly over budget. Callers whose summary context
+/// cannot absorb that tail then fail honestly instead of the boundary
+/// collapsing to the oldest visible candidate. The fallback keeps from the
+/// oldest visible candidate only when the entire visible history fits under
+/// the requested budget.
 pub fn choose_first_kept_by_tokens<F>(
     session: &Session,
     keep_recent_tokens: u64,
@@ -535,16 +541,18 @@ where
         if let EntryValue::Message(message) = &entries[index].value {
             accumulated = accumulated.saturating_add(estimate_message_tokens(message));
         }
+        // Continue past the budget crossing instead of breaking: when the
+        // crossing lands on a non-cut-point, the boundary becomes the newest
+        // valid cut point at or before it rather than the oldest candidate.
         if accumulated >= budget {
             if let Some((_, id)) = candidates.iter().find(|(candidate, _)| *candidate >= index) {
                 return Ok(Some(id.clone()));
             }
-            break;
         }
     }
 
-    // Match Pi's fallback when the visible history is smaller than the
-    // requested tail: keep from its oldest valid cut point. The caller still
+    // The visible history is smaller than the requested tail: match Pi's
+    // fallback and keep from its oldest valid cut point. The caller still
     // skips the attempt when that leaves no history to summarize.
     Ok(candidates.first().map(|(_, id)| id.clone()))
 }
@@ -809,6 +817,78 @@ mod tests {
             .unwrap()
             .expect("three turns provide a retained boundary");
         assert_eq!(selected, user_ids[2]);
+    }
+
+    #[test]
+    fn crossing_the_budget_on_a_non_cut_point_selects_the_nearest_preceding_cut_point() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        session
+            .append(EntryValue::Message(assistant(vec![AssistantPart::Text(
+                "earlier work".into(),
+            )])))
+            .unwrap();
+        let previous_first_kept = session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("previous retained turn".into())],
+            })))
+            .unwrap();
+        session
+            .compact_with_details(
+                "## Goal\nprevious checkpoint",
+                previous_first_kept.clone(),
+                CompactionDetails::default(),
+            )
+            .unwrap();
+        let retained = session
+            .append(EntryValue::Message(assistant(vec![file_call(
+                "read",
+                "read",
+                "src/huge.rs",
+                None,
+            )])))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: ToolCallId("read".into()),
+                    content: vec![ToolResultPart::Text("x".repeat(4_000))],
+                    is_error: false,
+                    added_tool_names: None,
+                })],
+            })))
+            .unwrap();
+
+        // The newest entry alone exceeds the budget and is not a cut point, so
+        // the boundary must be the assistant that precedes it rather than
+        // collapsing to the previous compaction boundary with nothing to
+        // summarize.
+        let estimate = |message: &Message| {
+            if let Message::User(user) = message {
+                if let Some(UserPart::ToolResult(result)) = user.content.first() {
+                    if let Some(ToolResultPart::Text(text)) = result.content.first() {
+                        if text.len() > 1_000 {
+                            return 10_000;
+                        }
+                    }
+                }
+            }
+            10
+        };
+
+        let selected = choose_first_kept_by_tokens(&session, 2_000, estimate)
+            .unwrap()
+            .expect("a retained boundary exists");
+        assert_eq!(selected, retained);
+        assert_ne!(selected, previous_first_kept);
+
+        let preparation = prepare_handoff(&session, &selected).unwrap();
+        assert!(preparation.previous_summary.is_some());
+        assert!(preparation.turn_prefix_messages.iter().any(|message| {
+            matches!(message, Message::User(user)
+                if user.content.iter().any(|part| matches!(part,
+                    UserPart::Text(text) if text == "previous retained turn")))
+        }));
     }
 
     #[test]

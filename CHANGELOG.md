@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Fix context compaction reporting no prior messages to summarize when a single
+  oversized entry alone exceeds the keep-recent budget: the boundary walk now
+  cuts at the newest valid turn boundary before the crossing instead of
+  collapsing to the oldest visible entry. A re-compact with no new history now
+  reports that explicitly instead of claiming there were no prior messages.
 - Remove the retired `octet-import-aider` and `octet-import-pi` source
   extensions and their packaged-doc, installer, and test references; the
   built-in `octet migrate import pi` host implementation is unchanged.
