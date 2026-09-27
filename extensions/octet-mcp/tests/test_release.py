@@ -22,7 +22,7 @@ class ReleaseSmokeTests(unittest.TestCase):
         self.assertIsNotNone(tomllib)
         manifest = tomllib.loads((ROOT / "extension.toml").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "octet-mcp")
-        self.assertEqual(manifest["version"], "0.8.0")
+        self.assertEqual(manifest["version"], "0.8.1-rc.1")
         self.assertEqual(manifest["api_version"], "0.4")
         self.assertEqual(manifest["requires_octet"], "=0.8.1-rc.1")
         self.assertEqual(manifest["entrypoint"]["command"], "octet-mcp")

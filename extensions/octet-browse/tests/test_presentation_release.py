@@ -215,7 +215,7 @@ class PackageTests(unittest.TestCase):
     def test_manifest_surface_metadata_and_executable(self) -> None:
         manifest = tomllib.loads((PACKAGE / "extension.toml").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "octet-browse")
-        self.assertEqual(manifest["version"], "0.8.0")
+        self.assertEqual(manifest["version"], "0.8.1-rc.1")
         self.assertEqual(manifest["api_version"], "0.4")
         self.assertEqual(manifest["requires_octet"], "=0.8.1-rc.1")
         self.assertEqual(set(manifest["contributes"]["tools"]), TOOLS)
