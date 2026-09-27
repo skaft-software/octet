@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Make octet and `octet-computer-use` work on Linux desktops, including Omarchy
+  (Arch + Hyprland). The TUI now copies through `wl-copy`, `xclip`, or `xsel`
+  alongside OSC 52, matching the existing Linux paste helpers. Extensions may
+  declare `XDG_CURRENT_DESKTOP` and `HYPRLAND_INSTANCE_SIGNATURE`. Computer use
+  reads Linux display-session readiness instead of macOS grants, enables the
+  driver's native Wayland backend, and no longer fails setup on Linux. See the
+  new [Linux setup](docs/linux.md) guide.
+
 ## [0.8.1] - 2026-09-27
 
 See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits.

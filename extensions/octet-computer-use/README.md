@@ -31,6 +31,9 @@ bundled model-colored cursor themes:
 /computer-use setup
 ```
 
+On Linux the driver runs direct with no agent-cursor overlay, and its wheel
+ships no theme compiler, so setup provisions the driver and skips the themes.
+
 The `computer_use_setup` agent tool provisions only the driver; it cannot
 install themes. Theme installation is deliberately a trusted local setup
 operation, not an agent tool. The bundle stores the provisioned driver under
@@ -55,11 +58,19 @@ never grants an operating-system permission for you.** Grant it yourself:
   octet and has no agent-cursor overlay. Restart octet after changing grants.
 - **Windows** — the driver runs as your user; some stacks need the process to
   be interactive (an unlocked, visible session).
-- **Linux** — a live display session plus AT-SPI 2 accessibility. X11/XWayland
-  routes more widely than native Wayland.
+- **Linux** — no system permission exists to grant. Run octet from a terminal
+  inside your graphical session so the driver can reach it: X11, or Wayland
+  such as Hyprland on Omarchy. In a Wayland session the bundle enables the
+  driver's native Wayland backend, so native Wayland windows are visible as
+  well as XWayland ones. AT-SPI 2 (`at-spi2-core`) supplies element trees;
+  without it the driver still captures and acts by pixel. See
+  [Linux setup](../../docs/linux.md) for the Omarchy walkthrough.
 
 Until the permission is granted, observation and action calls fail. That is
 expected, and `computer_use_status` will say so along with the runtime in use.
+On Linux, status reports the reachable display session (X11, native Wayland,
+or both) and whether AT-SPI is available instead of macOS grants, and holds
+effectful actions only when no display session is reachable.
 
 ### Runtime modes
 
@@ -68,7 +79,7 @@ expected, and `computer_use_status` will say so along with the runtime in use.
 | Runtime | When it is used | Needs | Agent cursor |
 | --- | --- | --- | --- |
 | `desktop-host` | Default on macOS when signed `/Applications/CuaDriver.app` and its grants are live | Grants given to that Cua Driver app | Yes, after cursor-state verification |
-| `direct` | Non-macOS by default, or macOS only with `OCTET_CUA_DESKTOP_HOST=0` | The grants of the app running octet | No |
+| `direct` | Non-macOS by default, or macOS only with `OCTET_CUA_DESKTOP_HOST=0` | The grants of the app running octet; on Linux, a reachable display session | No |
 | `unavailable` | macOS host is missing or cannot prove live grants while host mode is selected | Install/authorize the signed Cua app, or explicitly opt into direct mode | No |
 
 A missing or unusable macOS host never silently falls back when cursor support
@@ -220,9 +231,13 @@ forwarded; an unrecognised argument is dropped rather than passed through.
   IDs, element tokens, and coordinates. Screenshots are published as artifacts,
   not inlined as base64.
 - **Least environment.** The driver receives only reviewed, non-secret desktop
-  session variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and the
-  documented equivalents). Provider tokens, `PATH` overrides, and arbitrary
-  ambient variables are not forwarded.
+  session variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
+  `HYPRLAND_INSTANCE_SIGNATURE`, and the documented equivalents). On Linux,
+  where the driver launches apps itself, it also receives the host-sanitized
+  `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, and locale that octet
+  already gives its own tool subprocesses, so launched apps start as they do
+  from the desktop. Provider tokens and arbitrary ambient variables are not
+  forwarded.
 - **No secrets, no silent installs.** The bundle never types credentials for you
   and never downloads a driver outside the standard package install you trigger.
   OS permissions are always yours to grant.

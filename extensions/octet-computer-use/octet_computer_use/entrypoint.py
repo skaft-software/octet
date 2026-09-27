@@ -190,6 +190,12 @@ _OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "host_app": {"type": ["string", "null"]},
             "cursor_available": {"type": "boolean"},
             "cursor_enabled": {"type": "boolean"},
+            "platform": {"type": "string"},
+            "display_server": {"type": ["string", "null"]},
+            "x11": {"type": "boolean"},
+            "wayland": {"type": "boolean"},
+            "atspi": {"type": "boolean"},
+            "cursor_themes_installed": {"type": "integer"},
             "provisioned": {"type": "boolean"},
             "jev_note": {"type": "string"},
         },
@@ -513,14 +519,8 @@ class ComputerUse:
 
         if client.requires_confirmation(driver_tool) and confirmations_enabled():
             if self._permissions_block(driver_tool):
-                return tool_result(
-                    text_content(
-                        "Computer use is not ready: macOS has not allowed Accessibility and "
-                        "Screen Recording for the selected Cua runtime. Grant them to the "
-                        "selected host and retry."
-                    ),
-                    is_error=True,
-                )
+                return tool_result(text_content(_NOT_READY[driver_module.host_platform() == "linux"]),
+                                   is_error=True)
             description = next((info.description for info in client.tools() if info.name == driver_tool), "")
             try:
                 approved = self._extension.confirm(
@@ -639,14 +639,15 @@ class ComputerUse:
             return report
         # A fresh probe supersedes any cached answer.
         self._permission_cache = None
-        report.update(
-            {
-                "permissions": probe["permissions"],
-                "accessibility": probe["accessibility"],
-                "screen_recording": probe["screen_recording"],
-                "permission_detail": probe["detail"],
-            }
-        )
+        # Only report what the probe actually answered: macOS names two grants,
+        # Linux names its display session, and an unanswered field stays absent
+        # rather than becoming a null the declared output shape does not allow.
+        report["permissions"] = probe["permissions"]
+        report["permission_detail"] = probe["detail"]
+        for key in ("accessibility", "screen_recording", "display_server", "x11", "wayland", "atspi"):
+            value = probe.get(key)
+            if value is not None:
+                report[key] = value
         return report
 
     def provision(self, version: str = "") -> Dict[str, Any]:
@@ -681,6 +682,8 @@ class ComputerUse:
             label = "computer use · host unavailable"
         elif status.get("runtime") == "desktop-host" and not status.get("cursor_enabled"):
             label = "computer use · cursor not verified"
+        elif status.get("platform") == "linux":
+            label = "computer use · needs a desktop session"
         else:
             label = "computer use · needs %s" % (
                 "Screen Recording"
@@ -696,6 +699,17 @@ class ComputerUse:
             # status row is an aid, never authority for actuation.
             pass
         return status
+
+
+# Why an effectful action is held back, indexed by whether the host is Linux.
+_NOT_READY = (
+    "Computer use is not ready: macOS has not allowed Accessibility and "
+    "Screen Recording for the selected Cua runtime. Grant them to the "
+    "selected host and retry.",
+    "Computer use is not ready: the driver cannot reach a Linux display "
+    "session. Start octet from a terminal inside your graphical session "
+    "(X11, or Wayland such as Hyprland) and retry.",
+)
 
 
 # Driver tools that end or destroy user state and are labelled destructive in
@@ -764,18 +778,24 @@ def create_extension(*, home: Optional[Any] = None) -> Tuple[Extension, Computer
         action = parts[0] if parts else "status"
         if action == "setup":
             result = computer_use.provision()
-            try:
-                result["cursor_themes_installed"] = cursor_theme.install_bundled_themes(
-                    Path(result["binary"]))
-                computer_use._theme_ids = {entry["id"] for entry in cursor_theme.PALETTE.values()}
-            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                return tool_result(
-                    text_content(f"Cua Driver was provisioned, but cursor theme setup failed: {error}"),
-                    is_error=True,
-                )
+            if cursor_theme.themes_supported():
+                try:
+                    result["cursor_themes_installed"] = cursor_theme.install_bundled_themes(
+                        Path(result["binary"]))
+                    computer_use._theme_ids = {entry["id"] for entry in cursor_theme.PALETTE.values()}
+                except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                    return tool_result(
+                        text_content(f"Cua Driver was provisioned, but cursor theme setup failed: {error}"),
+                        is_error=True,
+                    )
+            else:
+                # The Linux driver runs direct, with no agent-cursor overlay, and
+                # its wheel ships no theme compiler. Installing would only fail.
+                result["cursor_themes_installed"] = 0
             # The user asked for setup, so ask macOS now rather than making
             # them re-run a second command. The dialog is attributed to octet
-            # because the driver runs in the host's responsibility chain.
+            # because the driver runs in the host's responsibility chain. On
+            # Linux this only reads the display session; nothing prompts.
             result.update(computer_use.publish_status(prompt=True))
             jev_outcome = _setup_jev(extension, computer_use)
             result.update(jev_outcome)
@@ -1061,6 +1081,10 @@ def _render_status(status: Mapping[str, Any]) -> str:
             lines.append(f"cursor theme: {status.get('cursor_theme', 'cua.default')}")
             if not status.get("cursor_personalized"):
                 lines.append("Run /computer-use setup locally to install the bundled model-color themes.")
+    elif status.get("platform") == "linux":
+        lines.append("runtime: direct (drives the desktop session octet runs in; no agent cursor)")
+        _render_linux_session(status, lines)
+        return "\n".join(lines)
     else:
         lines.append("runtime: direct (inherits your terminal's permissions)")
     permissions = status.get("permissions")
@@ -1081,6 +1105,25 @@ def _render_status(status: Mapping[str, Any]) -> str:
             "that app's grants. octet cannot grant a system permission for you."
         )
     return "\n".join(lines)
+
+
+def _render_linux_session(status: Mapping[str, Any], lines: List[str]) -> None:
+    """Linux has no system grant to name; say which session is reachable."""
+
+    permissions = status.get("permissions")
+    detail = status.get("permission_detail")
+    lines.append("Linux desktop session: %s" % (detail or permissions or "unknown"))
+    if permissions != "granted":
+        lines.append(
+            "Start octet from a terminal inside your graphical session so DISPLAY or "
+            "WAYLAND_DISPLAY, XDG_RUNTIME_DIR, and DBUS_SESSION_BUS_ADDRESS reach the "
+            "driver. There is no system permission to grant on Linux."
+        )
+    elif status.get("atspi") is False:
+        lines.append(
+            "For element trees, install at-spi2-core (Arch/Omarchy: "
+            "`sudo pacman -S at-spi2-core`) and log in again; pixel actions work without it."
+        )
 
 
 def main() -> None:

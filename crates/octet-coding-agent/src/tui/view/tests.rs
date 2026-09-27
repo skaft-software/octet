@@ -16201,3 +16201,24 @@ fn live_model_picker_refresh_preserves_filter_and_model_identity() {
         matches!(action, PanelAction::SelectGroupedModel { models, .. } if models[2].0 == "beta-one")
     );
 }
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn linux_clipboard_writers_follow_the_declared_display() {
+    let writers = |names: &[&str]| {
+        let names = names.to_vec();
+        native_clipboard_writers(move |name| names.contains(&name))
+            .into_iter()
+            .map(|(program, _)| program)
+            .collect::<Vec<_>>()
+    };
+    assert!(writers(&[]).is_empty(), "no display means no helper");
+    assert_eq!(writers(&["WAYLAND_DISPLAY"]), ["wl-copy"]);
+    assert_eq!(writers(&["DISPLAY"]), ["xclip", "xsel"]);
+    // Hyprland with XWayland declares both; the native Wayland helper wins.
+    assert_eq!(
+        writers(&["WAYLAND_DISPLAY", "DISPLAY"]),
+        ["wl-copy", "xclip", "xsel"]
+    );
+    assert_eq!(writers(&["TERMUX_VERSION"]), ["termux-clipboard-set"]);
+}

@@ -26,7 +26,12 @@ table, and test commands.
   session variables. Provider tokens and arbitrary ambient environment are not
   forwarded. The manifest `[capabilities] environment` list is the host-level
   gate; the runtime's `SESSION_ENVIRONMENT` is the bundle-level gate; both must
-  agree before a name reaches the child.
+  agree before a name reaches the child. On Linux only, the child also receives
+  `LINUX_LAUNCH_ENVIRONMENT` (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
+  `TMPDIR`, and locale), the host-sanitized baseline every octet tool
+  subprocess already has, because the Linux driver launches apps with its own
+  environment. In a Wayland session the child also gets
+  `CUA_DRIVER_RS_ENABLE_WAYLAND=1`, the driver's native Wayland opt-in.
 - Credential, payment, and one-time-code entry stays manual. The bundle never
   types secrets and never echoes a typed value.
 
@@ -60,8 +65,14 @@ table, and test commands.
   alternate app is only selected through the explicit developer override.
 - **Windows** — the driver runs as the interactive user; a locked or
   headless session is not drivable.
-- **Linux** — needs a live display session and AT-SPI 2. X11/XWayland is more
-  widely supported than native Wayland; Wayland input is compositor-dependent.
+- **Linux** — needs a live display session; there is no grant. Readiness is
+  read from the driver's `check_permissions` session report: X11 or a Wayland
+  session with the native backend enabled counts as ready, and only a missing
+  display holds effectful actions. AT-SPI 2 is reported but not required,
+  because the driver can act by pixel. Wayland input is compositor-dependent
+  (wlroots virtual pointer on Hyprland/Sway, portal/libei elsewhere). The
+  Linux runtime is always direct, with no cursor overlay, so cursor themes are
+  not installed.
 
 ## Not qualified here
 

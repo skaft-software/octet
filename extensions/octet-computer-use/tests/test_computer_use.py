@@ -333,18 +333,69 @@ class ClientClassificationTests(unittest.TestCase):
         import os
         from unittest import mock
 
+        from octet_computer_use import driver_client
         from octet_computer_use.driver_client import SESSION_ENVIRONMENT, _child_environment
 
-        with mock.patch.dict(
-            os.environ,
-            {"DISPLAY": ":0", "OPENAI_API_KEY": "secret", "AWS_SECRET_ACCESS_KEY": "secret"},
-        ):
+        ambient = {"DISPLAY": ":0", "PATH": "/usr/bin", "HOME": "/home/u",
+                   "OPENAI_API_KEY": "secret", "AWS_SECRET_ACCESS_KEY": "secret"}
+        for system in ("Darwin", "Windows"):
+            with self.subTest(system=system), mock.patch.dict(os.environ, ambient), \
+                    mock.patch.object(driver_client.platform, "system", return_value=system):
+                environment = _child_environment()
+            self.assertEqual(environment.get("DISPLAY"), ":0")
+            self.assertNotIn("OPENAI_API_KEY", environment)
+            self.assertNotIn("AWS_SECRET_ACCESS_KEY", environment)
+            for name in environment:
+                self.assertIn(name, SESSION_ENVIRONMENT)
+
+    def test_linux_child_gets_the_launch_baseline_and_nothing_secret(self):
+        # Linux launch_app spawns through the driver's own environment, so the
+        # launched app needs the same PATH/HOME/locale octet's tools get.
+        import os
+        from unittest import mock
+
+        from octet_computer_use import driver_client
+        from octet_computer_use.driver_client import (
+            LINUX_LAUNCH_ENVIRONMENT, SESSION_ENVIRONMENT, _child_environment)
+
+        ambient = {"DISPLAY": ":0", "PATH": "/usr/bin:/home/u/.local/share/omarchy/bin",
+                   "HOME": "/home/u", "LANG": "en_US.UTF-8",
+                   "HYPRLAND_INSTANCE_SIGNATURE": "abc_123", "XDG_CURRENT_DESKTOP": "Hyprland",
+                   "OPENAI_API_KEY": "secret", "LD_PRELOAD": "/tmp/evil.so"}
+        with mock.patch.dict(os.environ, ambient, clear=True), \
+                mock.patch.object(driver_client.platform, "system", return_value="Linux"):
             environment = _child_environment()
-        self.assertEqual(environment.get("DISPLAY"), ":0")
+        self.assertEqual(environment["PATH"], ambient["PATH"])
+        self.assertEqual(environment["HOME"], "/home/u")
+        self.assertEqual(environment["LANG"], "en_US.UTF-8")
+        self.assertEqual(environment["HYPRLAND_INSTANCE_SIGNATURE"], "abc_123")
+        self.assertEqual(environment["XDG_CURRENT_DESKTOP"], "Hyprland")
         self.assertNotIn("OPENAI_API_KEY", environment)
-        self.assertNotIn("AWS_SECRET_ACCESS_KEY", environment)
+        self.assertNotIn("LD_PRELOAD", environment)
+        # No Wayland socket, so the native Wayland backend stays off.
+        self.assertNotIn(driver_client.WAYLAND_BACKEND_VARIABLE, environment)
+        allowed = set(SESSION_ENVIRONMENT) | set(LINUX_LAUNCH_ENVIRONMENT)
         for name in environment:
-            self.assertIn(name, SESSION_ENVIRONMENT)
+            self.assertIn(name, allowed)
+
+    def test_wayland_sessions_enable_the_native_backend_only_on_linux(self):
+        # Hyprland (Omarchy) is pure Wayland: without the native backend only
+        # XWayland windows would be visible to the driver.
+        import os
+        from unittest import mock
+
+        from octet_computer_use import driver_client
+        from octet_computer_use.driver_client import WAYLAND_BACKEND_VARIABLE, _child_environment
+
+        wayland = {"WAYLAND_DISPLAY": "wayland-1", "XDG_RUNTIME_DIR": "/run/user/1000"}
+        with mock.patch.dict(os.environ, wayland, clear=True):
+            with mock.patch.object(driver_client.platform, "system", return_value="Linux"):
+                self.assertEqual(_child_environment()[WAYLAND_BACKEND_VARIABLE], "1")
+            with mock.patch.object(driver_client.platform, "system", return_value="Darwin"):
+                self.assertNotIn(WAYLAND_BACKEND_VARIABLE, _child_environment())
+        with mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True), \
+                mock.patch.object(driver_client.platform, "system", return_value="Linux"):
+            self.assertNotIn(WAYLAND_BACKEND_VARIABLE, _child_environment())
 
     def test_explicit_overrides_win_over_inherited_names(self):
         from octet_computer_use.driver_client import _child_environment
@@ -371,6 +422,14 @@ class PermissionProbeTests(unittest.TestCase):
     The CLI can report unknown for a direct runtime or an alternate app host;
     check_permissions reports the actual selected runtime's grant state.
     """
+
+    def setUp(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        patcher = mock.patch.object(driver.platform, "system", return_value="Darwin")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _state(self, accessibility, screen_recording, raises=None):
         from octet_computer_use.driver import permission_state
@@ -413,6 +472,133 @@ class PermissionProbeTests(unittest.TestCase):
         state, _ = self._state(True, True, raises=McpError("driver gone"))
         self.assertEqual(state["permissions"], "unknown")
         self.assertIn("did not answer", state["detail"])
+
+
+class LinuxSessionProbeTests(unittest.TestCase):
+    """Linux readiness is a reachable display session; nothing is granted."""
+
+    # The exact structured payload cua-driver 0.30 returns on Linux.
+    HYPRLAND = {"atspi": True, "dbus_session_bus_address": "unix:path=/run/user/1000/bus",
+                "wayland": True, "wayland_enabled": True, "x11": True, "xsend_event": True}
+    HEADLESS = {"atspi": False, "dbus_session_bus_address": None, "wayland": False,
+                "wayland_enabled": False, "x11": False, "xsend_event": False}
+
+    def setUp(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        patcher = mock.patch.object(driver.platform, "system", return_value="Linux")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _state(self, structured, raises=None, prompt=False):
+        from octet_computer_use.driver import permission_state
+
+        client = FakeClient(result={"structuredContent": structured}, raises=raises)
+        return permission_state(client, prompt=prompt), client
+
+    def test_hyprland_with_xwayland_is_ready(self):
+        state, client = self._state(self.HYPRLAND, prompt=True)
+        self.assertEqual(state["permissions"], "granted")
+        self.assertEqual(state["display_server"], "wayland+x11")
+        self.assertTrue(state["atspi"])
+        # Linux never prompts, even from setup.
+        self.assertEqual(client.calls, [("check_permissions", {"prompt": False})])
+        self.assertNotIn("accessibility", state)
+        self.assertNotIn("screen_recording", state)
+
+    def test_pure_wayland_without_atspi_is_ready_but_says_so(self):
+        state, _ = self._state({**self.HYPRLAND, "x11": False, "atspi": False})
+        self.assertEqual(state["permissions"], "granted")
+        self.assertEqual(state["display_server"], "wayland")
+        self.assertIn("AT-SPI unavailable", state["detail"])
+
+    def test_wayland_with_the_backend_off_and_no_xwayland_is_denied(self):
+        state, _ = self._state({**self.HYPRLAND, "x11": False, "wayland_enabled": False})
+        self.assertEqual(state["permissions"], "denied")
+        self.assertIn("native Wayland backend is off", state["detail"])
+
+    def test_x11_session_is_ready(self):
+        state, _ = self._state({**self.HEADLESS, "x11": True, "xsend_event": True})
+        self.assertEqual(state["permissions"], "granted")
+        self.assertEqual(state["display_server"], "x11")
+
+    def test_no_display_is_denied_and_holds_actions(self):
+        state, _ = self._state(self.HEADLESS)
+        self.assertEqual(state["permissions"], "denied")
+        self.assertIsNone(state["display_server"])
+        self.assertIn("inside your graphical session", state["detail"])
+
+    def test_unreadable_or_failed_probe_is_unknown(self):
+        self.assertEqual(self._state({})[0]["permissions"], "unknown")
+        state, _ = self._state(self.HYPRLAND, raises=McpError("driver gone"))
+        self.assertEqual(state["permissions"], "unknown")
+
+    def test_cli_permission_status_is_macos_only(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        with mock.patch.object(driver, "_run") as run:
+            self.assertEqual(driver._permission_status(Path("/opt/cua-driver")), "unknown")
+            run.assert_not_called()
+
+    def test_status_reports_the_session_without_null_grants(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        computer = ComputerUse(RecordingExtension())
+        computer._client = FakeClient(result={"structuredContent": self.HYPRLAND})
+        computer._client.started = True
+        health = driver.Health(installed=True, version="0.30.2", permissions="unknown",
+                               doctor_ok=True, detail="cua-driver 0.30.2")
+        with mock.patch.object(driver, "health", return_value=health):
+            report = computer.status()
+        self.assertEqual(report["platform"], "linux")
+        self.assertEqual(report["permissions"], "granted")
+        self.assertEqual(report["display_server"], "wayland+x11")
+        self.assertNotIn("accessibility", report)
+        self.assertNotIn("screen_recording", report)
+        text = _render_status(report)
+        self.assertIn("Linux desktop session: Wayland (native) and XWayland reachable", text)
+        self.assertNotIn("macOS", text)
+
+    def test_rendered_linux_status_names_the_fix(self):
+        denied = _render_status({"installed": True, "version": "0.30.2", "doctor_ok": True,
+                                 "runtime": "direct", "platform": "linux",
+                                 "permissions": "denied",
+                                 "permission_detail": "no display session is reachable"})
+        self.assertIn("no display session is reachable", denied)
+        self.assertIn("WAYLAND_DISPLAY", denied)
+        self.assertNotIn("macOS", denied)
+        self.assertNotIn("Screen Recording", denied)
+        no_atspi = _render_status({"installed": True, "runtime": "direct", "platform": "linux",
+                                   "permissions": "granted", "atspi": False,
+                                   "permission_detail": "Wayland (native) reachable"})
+        self.assertIn("at-spi2-core", no_atspi)
+
+    def test_status_row_names_the_linux_blocker(self):
+        extension = StatusRowTests._RecordingStatus()
+        computer = ComputerUse(extension)
+        computer.status = lambda **_: {"installed": True, "runtime": "direct",
+                                       "platform": "linux", "permissions": "denied"}
+        computer.publish_status()
+        self.assertEqual(extension.statuses[-1]["label"], "computer use · needs a desktop session")
+        computer.status = lambda **_: {"installed": True, "runtime": "direct",
+                                       "platform": "linux", "permissions": "granted"}
+        computer.publish_status()
+        self.assertEqual(extension.statuses[-1]["label"], "computer use · ready")
+
+    def test_missing_display_blocks_effectful_actions_with_a_linux_message(self):
+        from unittest import mock
+
+        computer = ComputerUse(RecordingExtension())
+        client = FakeClient(effectful=["click"], result={"structuredContent": self.HEADLESS})
+        computer._client = client
+        with mock.patch.object(entrypoint, "confirmations_enabled", return_value=True):
+            result = computer.call("click", {"pid": 1, "window_id": 2, "x": 3, "y": 4})
+        self.assertTrue(result["is_error"])
+        self.assertIn("Linux display session", result["content"][0]["text"])
+        self.assertNotIn(("click", mock.ANY), client.calls)
 
 
 class StatusRowTests(unittest.TestCase):
@@ -586,6 +772,9 @@ class CursorThemeTests(unittest.TestCase):
         from unittest import mock
         from octet_computer_use import cursor_theme
 
+        pinned = mock.patch.object(cursor_theme.platform, "system", return_value="Darwin")
+        pinned.start()
+        self.addCleanup(pinned.stop)
         extension, computer = entrypoint.create_extension()
         context = {"host": {"model": "claude-sonnet-4"}}
         with mock.patch.object(computer, "provision", return_value={
@@ -607,6 +796,26 @@ class CursorThemeTests(unittest.TestCase):
             failed = command(["setup"], context)
             self.assertTrue(failed["is_error"])
             self.assertIn("cursor theme setup failed", failed["content"][0]["text"])
+
+    def test_linux_setup_skips_themes_instead_of_failing(self):
+        # The Linux wheel has no cursor-theme compiler and the direct runtime no
+        # overlay, so setup must provision and report rather than error out.
+        from unittest import mock
+        from octet_computer_use import cursor_theme
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(cursor_theme.platform, "system", return_value="Linux"), \
+             mock.patch.object(computer, "provision", return_value={
+                "provisioned": True, "binary": "/tmp/cua-driver", "version": "0.30.2"}), \
+             mock.patch.object(computer, "publish_status", return_value={
+                "installed": True, "permissions": "granted", "runtime": "direct",
+                "platform": "linux", "permission_detail": "Wayland (native) reachable"}), \
+             mock.patch.object(entrypoint, "_setup_jev", return_value={"jev_setup": "skipped"}), \
+             mock.patch.object(cursor_theme, "install_bundled_themes") as install:
+            result = extension._commands["computer-use"].handler(["setup"], {})
+        install.assert_not_called()
+        self.assertFalse(result.get("is_error"))
+        self.assertEqual(result["structured_content"]["cursor_themes_installed"], 0)
 
     def test_installer_uses_only_bundled_artifacts_and_reports_failure(self):
         from unittest import mock
@@ -1003,7 +1212,18 @@ class DesktopHostTests(unittest.TestCase):
     through ``DESKTOP_APP_CANDIDATES[platform.system()]`` and reads
     ``CFBundleExecutable`` with ``plutil``, so off darwin the correct answer is
     ``None`` and only the darwin behaviour is meaningful to pin.
+
+    The other tests here are macOS host semantics too, so ``setUp`` pins the
+    platform to Darwin rather than depending on the machine the suite runs on.
     """
+
+    def setUp(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        patcher = mock.patch.object(driver.platform, "system", return_value="Darwin")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_desktop_app_is_found_only_when_installed(self):
         from octet_computer_use import driver

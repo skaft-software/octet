@@ -19,7 +19,9 @@ network = true
 # reviewed, non-secret session variables. None is a credential, and none is
 # forwarded unless the host and the bundle both declare it. The bundle strips
 # everything else, so provider tokens and arbitrary ambient variables never
-# reach the child.
+# reach the child. XDG_CURRENT_DESKTOP and HYPRLAND_INSTANCE_SIGNATURE let the
+# Linux driver find the compositor (Hyprland IPC on Omarchy) and give launched
+# apps their desktop identity.
 environment = [
   "DISPLAY",
   "WAYLAND_DISPLAY",
@@ -30,6 +32,8 @@ environment = [
   "XDG_CONFIG_HOME",
   "DBUS_SESSION_BUS_ADDRESS",
   "XAUTHORITY",
+  "XDG_CURRENT_DESKTOP",
+  "HYPRLAND_INSTANCE_SIGNATURE",
   "APPDATA",
   "LOCALAPPDATA",
   "USERPROFILE",

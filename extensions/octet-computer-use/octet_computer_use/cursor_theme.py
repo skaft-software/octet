@@ -8,6 +8,7 @@ on the next Octet tool boundary follows a model switch without recompilation.
 from __future__ import annotations
 
 import json
+import platform
 import subprocess
 from pathlib import Path
 from typing import Any, Mapping
@@ -75,6 +76,16 @@ def theme_for_host(context: Mapping[str, Any]) -> str:
 
 def theme_id(lab: str) -> str:
     return PALETTE[lab]["id"]
+
+
+def themes_supported() -> bool:
+    """Whether this platform's driver can install and show cursor themes.
+
+    Linux runs the driver direct, where there is no agent-cursor overlay, and
+    the Linux wheel ships no ``cua-cursor-theme`` compiler to install with.
+    """
+
+    return platform.system().lower() != "linux"
 
 
 def installed_theme_ids(binary: Path) -> set[str]:

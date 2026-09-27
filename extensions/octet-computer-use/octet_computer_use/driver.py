@@ -436,6 +436,7 @@ class Health:
             "host_app": self.host_app,
             "cursor_available": self.cursor_available,
             "cursor_enabled": self.cursor_enabled,
+            "platform": host_platform(),
         }
 
 
@@ -495,7 +496,7 @@ def _bundle_executable_name(app: Path) -> Optional[str]:
         completed = _run(
             ["/usr/bin/plutil", "-extract", "CFBundleExecutable", "raw", "-o", "-", str(plist)]
         )
-    except OSError:
+    except (OSError, ProvisionError):
         return None
     if completed.returncode != 0:
         return None
@@ -568,7 +569,7 @@ def desktop_app_display_name(app: Optional[Path] = None) -> Optional[str]:
         completed = _run(
             ["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", str(plist)]
         )
-    except OSError:
+    except (OSError, ProvisionError):
         return None
     if completed.returncode != 0:
         return None
@@ -598,7 +599,18 @@ def start_desktop_app(app: Optional[Path] = None) -> bool:
     return completed.returncode == 0
 
 
+def host_platform() -> str:
+    """``darwin``, ``windows``, ``linux``, or another lowercased system name."""
+
+    return platform.system().lower()
+
+
 def _permission_status(binary: Path) -> str:
+    # `permissions status` reads macOS TCC grants through a CuaDriver daemon.
+    # Elsewhere it has nothing to report, and on Linux it answers with macOS
+    # instructions, so leave the decision to the live session probe.
+    if host_platform() != "darwin":
+        return "unknown"
     completed = _run([str(binary), "permissions", "status", "--json"])
     if completed.returncode != 0:
         return "unknown"
@@ -709,6 +721,8 @@ def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
     the host's behalf.
     """
 
+    if host_platform() == "linux":
+        return _linux_session_state(client)
     arguments: Dict[str, Any] = {"prompt": bool(prompt)}
     if prompt:
         # Staged request: Accessibility + Screen Recording only. Direct-capture
@@ -747,6 +761,69 @@ def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
         "screen_recording": screen_recording,
         "detail": detail,
     }
+
+
+def _linux_session_state(client: Any) -> Dict[str, Any]:
+    """Linux readiness is a reachable display session, not a system grant.
+
+    There is no Accessibility or Screen Recording permission to hold on Linux.
+    The driver instead needs an X11 display or a Wayland session with its native
+    backend enabled, and AT-SPI on the session bus for element trees. Without
+    AT-SPI the driver still captures and acts by pixel, so it is reported but
+    does not hold actions back. Nothing here prompts.
+    """
+
+    try:
+        result = client.call("check_permissions", {"prompt": False})
+    except Exception:
+        return {
+            "permissions": "unknown",
+            "detail": "the driver did not answer a desktop-session probe",
+        }
+    structured = result.get("structuredContent") or {}
+    if not isinstance(structured, Mapping):
+        structured = {}
+    x11 = structured.get("x11")
+    wayland = structured.get("wayland")
+    wayland_enabled = structured.get("wayland_enabled")
+    atspi = structured.get("atspi")
+    native_wayland = wayland is True and wayland_enabled is True
+    if x11 is True and native_wayland:
+        display_server = "wayland+x11"
+    elif native_wayland:
+        display_server = "wayland"
+    elif x11 is True:
+        display_server = "x11"
+    else:
+        display_server = None
+
+    if display_server is not None:
+        status = "granted"
+        names = {"wayland+x11": "Wayland (native) and XWayland",
+                 "wayland": "Wayland (native)", "x11": "X11"}
+        detail = names[display_server] + " reachable"
+        if atspi is True:
+            detail += "; AT-SPI accessibility available"
+        elif atspi is False:
+            detail += "; AT-SPI unavailable, so element trees are empty and actions go by pixel"
+    elif x11 is False and wayland is not None:
+        status = "denied"
+        if wayland is True:
+            detail = ("a Wayland session is present but the driver's native Wayland "
+                      "backend is off and no XWayland display is reachable")
+        else:
+            detail = ("no display session is reachable: start octet from a terminal "
+                      "inside your graphical session")
+    else:
+        status = "unknown"
+        detail = "desktop session state is unknown"
+
+    state: Dict[str, Any] = {"permissions": status, "detail": detail,
+                             "display_server": display_server}
+    for key, value in (("x11", x11), ("wayland", wayland), ("atspi", atspi)):
+        if isinstance(value, bool):
+            state[key] = value
+    return state
 
 
 def health(paths: DriverPaths) -> Health:

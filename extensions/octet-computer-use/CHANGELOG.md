@@ -4,6 +4,21 @@
 
 ### Added
 
+- Linux and Omarchy (Hyprland) support. Status and the action gate read the
+  driver's Linux session report (X11, native Wayland, AT-SPI) instead of macOS
+  grants, so a reachable desktop now reports `computer use · ready`. Wayland
+  sessions enable the driver's native backend, the child receives
+  `HYPRLAND_INSTANCE_SIGNATURE` and `XDG_CURRENT_DESKTOP`, and apps launched
+  on Linux inherit the host-sanitized `PATH`, `HOME`, and locale.
+
+### Fixed
+
+- `/computer-use setup` no longer fails on Linux, whose driver ships no
+  cursor-theme compiler; it provisions the driver and skips the themes.
+- Status no longer reports null `accessibility`/`screen_recording` fields on
+  hosts that do not have those grants.
+- The test suite passes on Linux hosts: macOS host tests pin their platform.
+
 - Bundle 24 MIT-attributed Cua dotLottie cursor themes with an Octet-inspired,
   slightly smaller silhouette and the stable model-adaptive TUI prompt colors.
   `/computer-use setup` installs the compiled themes locally; cursor sessions
