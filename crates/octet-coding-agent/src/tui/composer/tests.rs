@@ -158,7 +158,10 @@ fn model_text_replacement_keeps_the_media_filename_annotation() {
         "the attachment path must survive model-text replacement"
     );
     assert!(
-        composed.parts.iter().any(|part| matches!(part, InputPart::Media(_))),
+        composed
+            .parts
+            .iter()
+            .any(|part| matches!(part, InputPart::Media(_))),
         "media must survive model-text replacement"
     );
 }

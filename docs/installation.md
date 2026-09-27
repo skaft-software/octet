@@ -7,15 +7,15 @@
 ## Install native binaries
 
 Native release packages target macOS Apple silicon/Intel and GNU/Linux x86-64.
-See the [v0.8.0 notes](releases/v0.8.0.md) for changes; availability, signed
+See the [v0.8.1-rc.1 notes](releases/v0.8.1-rc.1.md) for changes; availability, signed
 assets and public-install verification are recorded on the version-pinned
 GitHub release. Install using the matching installer from the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0):
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1-rc.1):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.8.0/install-octet.sh | sh
-octet --version   # octet 0.8.0
+  https://github.com/skaft-software/octet/releases/download/v0.8.1-rc.1/install-octet.sh | sh
+octet --version   # octet 0.8.1-rc.1
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
@@ -124,9 +124,9 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
-The four published executable bundles declare API `0.4`, distribution version
-`0.8.0`, and require octet `=0.8.0`. The local RC source manifests instead pin
-`=0.8.1-rc.1`; these candidate files are not published. Distribution and host
+The four executable-bundle manifests declare API `0.4`, distribution version
+`0.8.1-rc.1`, and require octet `=0.8.1-rc.1`; the published 0.8.0 bundles remain
+pinned to their host. Distribution and host
 versions are independent boundaries; an API number does not bypass the exact
 host pin. See [current authoring](extensions.md) for the Python API 0.4 process
 recipe and retained API 0.3 conformance example; generated contract bindings

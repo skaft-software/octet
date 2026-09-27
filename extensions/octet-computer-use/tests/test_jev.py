@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -106,9 +107,16 @@ class JevRequestShapeTests(unittest.TestCase):
 class JevChoiceTests(unittest.TestCase):
     def setUp(self):
         self._original = jev._client
+        # Isolate the ambient TypeSafe key so a missing-key test never reaches
+        # the network just because this machine has a key configured.
+        self._saved_env_key = os.environ.pop(jev.API_KEY_ENV, None)
 
     def tearDown(self):
         jev._client = self._original
+        if self._saved_env_key is not None:
+            os.environ[jev.API_KEY_ENV] = self._saved_env_key
+        else:
+            os.environ.pop(jev.API_KEY_ENV, None)
 
     def test_valid_choice_is_returned(self):
         _stub(_StubAnswer("calc", 0.9, {"calc": 0.9, REOBSERVE: 0.1}))
@@ -148,11 +156,25 @@ class JevChoiceTests(unittest.TestCase):
         self.assertEqual(choice.identifier, REOBSERVE)
 
     def test_missing_key_is_unavailable(self):
-        with self.assertRaises(JevUnavailable):
-            choose_action(goal="x", candidates=[Candidate("a", "do a")], api_key="")
+        # resolve_key() falls back to the default home when no key is passed,
+        # so stub the stored key too: this machine may have one configured.
+        with mock.patch.object(jev, "_stored_key", return_value=None):
+            with self.assertRaises(JevUnavailable):
+                choose_action(goal="x", candidates=[Candidate("a", "do a")], api_key="")
 
 
 class JevKeyStorageTests(unittest.TestCase):
+    def setUp(self):
+        # resolve_key() prefers the environment, so an ambient key would leak
+        # into these temp-home assertions.
+        self._saved_env_key = os.environ.pop(jev.API_KEY_ENV, None)
+
+    def tearDown(self):
+        if self._saved_env_key is not None:
+            os.environ[jev.API_KEY_ENV] = self._saved_env_key
+        else:
+            os.environ.pop(jev.API_KEY_ENV, None)
+
     def test_key_is_stored_private_and_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

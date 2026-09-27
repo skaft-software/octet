@@ -15111,7 +15111,7 @@ mod tests {
             );
             assert_eq!(
                 shell.selected_identity().1,
-                if accepted { "high (queued)" } else { "off" }
+                if accepted { "high" } else { "off" }
             );
             let bodies = server.bodies.lock().unwrap();
             if !accepted {

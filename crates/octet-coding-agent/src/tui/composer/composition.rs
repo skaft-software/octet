@@ -134,7 +134,11 @@ pub fn compose(display_text: String, ledger: &mut AttachmentLedger) -> ComposedI
         match &entry.payload {
             AttachmentPayload::PastedText(pasted) => text_run.push_str(pasted),
             AttachmentPayload::FileReference(path) => text_run.push_str(path),
-            AttachmentPayload::Media { media, byte_len, path } => {
+            AttachmentPayload::Media {
+                media,
+                byte_len,
+                path,
+            } => {
                 let limit = match media {
                     Media::Image(_) => MAX_IMAGE_BYTES,
                     Media::Audio(_) => MAX_AUDIO_BYTES,

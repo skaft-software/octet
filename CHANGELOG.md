@@ -9,6 +9,17 @@
   instead of re-entombing a stale pin in every cache write. `auto_discover:
   false` remains the explicit registry-truth opt-out. Custom model caches
   advance to version 10 to discard entombed pins.
+- Align the release-candidate bookkeeping with `0.8.1-rc.1`: the Python and
+  TypeScript SDKs, the shell installer, and the four executable-bundle
+  manifests follow the candidate, and the install guides, distribution notes,
+  and `v0.8.1-rc.1` release notes point at it. Refresh the checked-in
+  models.dev pricing, capabilities, and source snapshots and update the
+  deterministic OpenRouter DeepSeek price assertion to the reviewed catalog.
+- Fix the `octet-computer-use` test bootstrap to use the vendored SDK and
+  isolate the ambient TypeSafe key so the Jev suite never reaches the network.
+- Fix the active-run thinking-control test to expect the committed footer
+  label after the wire update is admitted, and format the composer sources
+  for the current toolchain.
 - Fix context compaction reporting no prior messages to summarize when a single
   oversized entry alone exceeds the keep-recent budget: the boundary walk now
   cuts at the newest valid turn boundary before the crossing instead of

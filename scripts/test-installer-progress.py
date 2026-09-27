@@ -185,7 +185,10 @@ class InstallerProgressTests(unittest.TestCase):
                 else:
                     self.assertNotIn(b"#", heading)
                 self.assertIn(f"v{VERSION}".encode(), heading.replace(b"\n", b""))
-                self.assertEqual(b"   octet\n" in heading, width >= 31)
+                # The side-by-side heading needs 31 columns and room for the
+                # full tag beside the mark; longer versions stack instead.
+                full_heading = width >= 31 and width >= 21 + len(VERSION) + 1
+                self.assertEqual(b"   octet\n" in heading, full_heading)
 
     def test_header_wraps_complete_long_version(self):
         version = "v123.456.789+long-build-metadata"

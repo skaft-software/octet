@@ -1,9 +1,9 @@
 # Distribution channels
 
-Octet 0.8.0 native, Serve and four executable-bundle asset availability is recorded
-on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0).
+Octet 0.8.1-rc.1 native, Serve and four executable-bundle asset availability is recorded
+on the [version-pinned GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1-rc.1).
 Public-install results are recorded there. See [installation](installation.md) for
-native installation or a source build, and [release notes](releases/v0.8.0.md)
+native installation or a source build, and [release notes](releases/v0.8.1-rc.1.md)
 for changes; the GitHub release records publication verification.
 npm, Homebrew, crates.io and SDK registries remain separate, unpublished channels.
 The repository is now `skaft-software/octet`. The immutable v0.7.0 assets retain
@@ -13,7 +13,7 @@ Do not recreate the old name.
 
 ## Package identities
 
-This release's distribution is **0.8.0**. The distribution version does not
+This release's distribution is **0.8.1-rc.1**. The distribution version does not
 change independent API and schema versions. The [0.7.6 release](releases/v0.7.6.md)
 retains its historical version-matched assets and channel evidence.
 
@@ -28,7 +28,7 @@ retains its historical version-matched assets and channel evidence.
 | Independent source extensions | `octet-computer-use` |
 | Separate application package | `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK, Serve and four executable-bundle distribution versions | `0.8.0`; installed compatibility `requires_octet = "=0.8.0"` |
+| Product, SDK, Serve and four executable-bundle distribution versions | `0.8.1-rc.1`; installed compatibility `requires_octet = "=0.8.1-rc.1"` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
@@ -67,10 +67,10 @@ Cargo can build the published canonical tag's exact source
 (Rust 1.86+ and ripgrep):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/octet --tag v0.8.0 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.8.1-rc.1 --bins octet-coding-agent
 ```
 
-The public `v0.8.0` tag must exist before using this command. `cargo install octet`
+The public `v0.8.1-rc.1` tag must exist before using this command. `cargo install octet`
 and registry-based `cargo install octet-coding-agent` are not the supported
 Cargo path.
 
@@ -78,7 +78,7 @@ The npm channel remains unpublished pending functional first-package bootstrap,
 trusted publishers and registry provenance verification. Its future command is:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.0
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1-rc.1
 ```
 
 ## Reviewed model metadata
@@ -147,7 +147,7 @@ release alias.
 
 ## Other channels
 
-The v0.8.0 version-pinned shell installer targets macOS
+The v0.8.1-rc.1 version-pinned shell installer targets macOS
 arm64/x64 and GNU/Linux x64. The no-lifecycle npm launcher targets the same
 platforms but remains unavailable through npm. See
 the [npm release contract](release/npm-trusted-publishing.md) for platform-first
