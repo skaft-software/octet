@@ -436,7 +436,7 @@ fn static_reasoning_capability(model: &StaticModelPreset) -> Option<ReasoningCap
 }
 
 fn has_model_id(catalog: &ModelCatalog, id: &str) -> bool {
-    catalog.models().any(|model| model.id.0 == id)
+    catalog.resolve(&ModelId(id.to_owned())).is_ok()
 }
 
 /// Return all endpoint ids declared by a provider. Tests use this to ensure

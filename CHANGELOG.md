@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Split startup tracing around the workspace marker and HTTP-client construction;
+  skip an unchanged private workspace-marker rewrite while retaining no-follow
+  validation and atomic repair. Use indexed model lookup during provider
+  registration and check credentials once per endpoint during model pruning.
+- Avoid cloning full conversation history for the native-steering continuation
+  request, and skip that request entirely for ordinary provider turns.
+
 - Give `Still` the compact model-adaptive startup splash. `splash_model_adaptive`
   with `splash_compact` replace the larger file-theme mark and the fixed `splash`
   colour with the compiled default's 16x4 byte that shades from the active model

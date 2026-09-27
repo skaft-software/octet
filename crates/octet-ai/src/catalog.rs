@@ -1,7 +1,7 @@
 //! Model catalog, configuration loading, and the embedded snapshot.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::auth::CredentialResolverRegistry;
@@ -330,11 +330,14 @@ impl ModelCatalog {
     /// unset `*_API_KEY` cannot be selected, while local unauthenticated and
     /// dynamically authenticated endpoints remain available.
     pub fn retain_configured_models(&mut self) {
-        self.models.retain(|_, model| {
-            self.endpoints
-                .get(&model.endpoint)
-                .is_some_and(|endpoint| endpoint.auth.is_configured())
-        });
+        let configured: HashSet<_> = self
+            .endpoints
+            .iter()
+            .filter(|(_, endpoint)| endpoint.auth.is_configured())
+            .map(|(id, _)| id)
+            .collect();
+        self.models
+            .retain(|_, model| configured.contains(&model.endpoint));
     }
 }
 

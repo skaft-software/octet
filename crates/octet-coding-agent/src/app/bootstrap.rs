@@ -6667,7 +6667,7 @@ fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
 /// `process.enter`, `cli.configured`, `selection.resolved`, `catalog.base`,
 /// `catalog.selected`, `catalog.codex`, `catalog.copilot`,
 /// `catalog.fallback`, `catalog.enrich`, `codex.credentials`, `codex.inventory`,
-/// `bootstrap.ready`, `session.resolve`, `session.replay`,
+/// `session.marker`, `catalog.client`, `bootstrap.ready`, `session.resolve`, `session.replay`,
 /// `extensions.provider-preflight`, `extensions.prestart`, `extensions.activate`,
 /// `app.build`, `history.hydrate`, `frame.ready`. `process.enter` starts after
 /// the Tokio runtime has initialized; spawn-to-first-editable-frame latency must
@@ -6830,7 +6830,9 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
         sessions.write_workspace_marker(),
         |error| format!("warning: could not write session workspace marker: {error}"),
     );
+    startup_phase("session.marker");
     let client = AiClient::try_new()?;
+    startup_phase("catalog.client");
     startup_phase("bootstrap.ready");
     Ok(Bootstrap {
         config,

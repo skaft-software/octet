@@ -10111,7 +10111,7 @@ impl Agent {
                     continue 'run;
                 }
                 let input_tokens = prepared.input_tokens;
-                let request = prepared.request;
+                let mut request = prepared.request;
 
                 let reserved_output_tokens = match reservation_output_tokens(
                     session, &model, request_max_output_tokens, max_session_tokens, max_session_cost_microdollars,
@@ -10157,9 +10157,22 @@ impl Agent {
                 notify_observers(&observers, &ev);
                 yield ev;
                 let qualified = !native_enabled && qualified_inference_replacement(&model, &request);
-                let native_delta = match native_steering::required_input_request(request.clone(), session, &model) {
-                    Ok(request) => request, Err(error) => break 'run FinishReason::Failed(error),
+                // A continuation needs the same settings, but not a clone of
+                // the full history: required_input_request replaces messages
+                // with only the new tool results. Ordinary streams need no
+                // continuation request at all.
+                let native_delta = if native_enabled {
+                    let messages = std::mem::take(&mut request.messages);
+                    let delta = native_steering::required_input_request(request.clone(), session, &model);
+                    request.messages = messages;
+                    match delta {
+                        Ok(delta) => Some(delta),
+                        Err(error) => break 'run FinishReason::Failed(error),
+                    }
+                } else {
+                    None
                 };
+                let native_delta_has_results = native_delta.as_ref().is_some_and(|delta| delta.messages.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_))))));
                 let opening_client = client.track_request_dispatch();
                 let opened = tokio::select! {
                     biased;
@@ -10294,10 +10307,10 @@ impl Agent {
                 if let Some(control) = response_stream.control() {
                     if native.control.is_none() { native.begin(format!("{effect_run_id}:{completed_turns}"), control); }
                 }
-                if native.required_input && native_delta.messages.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_))))) {
+                if let Some(delta) = native_delta.as_ref().filter(|_| native.required_input && native_delta_has_results) {
                     native.required_input = false;
                     if let Some(control) = native.control.as_ref() {
-                        if let Err(error) = control.continue_with(native_delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
+                        if let Err(error) = control.continue_with(delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
                     }
                 }
                 // Parity 1e.2 durability half: encode the in-flight assistant
@@ -10354,10 +10367,10 @@ impl Agent {
                     while let Ok(update) = native_updates_rx.try_recv() {
                         if let Err(error) = native.update(update, session, &model) { break 'run FinishReason::Failed(error); }
                     }
-                    if native.required_input && native_delta.messages.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_))))) {
+                    if let Some(delta) = native_delta.as_ref().filter(|_| native.required_input && native_delta_has_results) {
                         native.required_input = false;
                         if let Some(control) = native.control.as_ref() {
-                            if let Err(error) = control.continue_with(native_delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
+                            if let Err(error) = control.continue_with(delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
                         }
                     }
                     match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {

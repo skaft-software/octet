@@ -85,6 +85,23 @@ Do not ask users to enable telemetry for a report. If they volunteer diagnostics
 they should inspect it before sharing. See [voluntary diagnostics](#voluntary-diagnostics)
 for the sharing boundary.
 
+## Startup phase audit
+
+`startup-phase-audit.py` compares two prebuilt binaries using separate
+credential-free disposable homes and alternating-order warm `--offline --print`
+launches. It prints binary hashes, per-trial phase deltas, and spawn-to-error
+exit times; the first process per cell primes the home and is excluded. Example:
+
+```sh
+python3 docs/benchmarks/startup-phase-audit.py /path/to/before/octet target/release/octet
+```
+
+The offline request deliberately fails after bootstrap. This is an in-process
+attribution aid, **not** a first-editable-frame, provider-readiness, or
+extension-enabled benchmark. Use the PTY driver in
+[v0.7.4-local](v0.7.4-local/README.md) for the credential-free core frame
+boundary, and qualify extensions separately before claiming their startup cost.
+
 ## Systems measurements
 
 `scripts/bench-systems.py` uses only the Python standard library and real OS
