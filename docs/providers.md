@@ -101,13 +101,16 @@ unsupported protocol declarations fail closed. This schema cannot enable Lite,
 Ultra/delegation, deferred tools, native budgets/toggles, arbitrary profiles,
 authentication, URLs or transport changes. Explicit legacy endpoint assertions
 (including false/null/unknown) win per field; configured model overrides still
-win over discovery. No capability is borrowed from models.dev. The decoder's
+win over discovery except for custom-provider limits with discovery enabled,
+where the live endpoint window is authoritative (see the custom registry
+contract below). No capability is borrowed from models.dev. The decoder's
 provenance identifies the host-selected endpoint, returned model and codec,
 never an authority or URL claimed by response data.
 
 Built-in raw caches remain URL/account isolated and are decoded on use without
-persisting synthesized fields. Custom normalized caches advance to version 9 so
-old sparse results cannot hide self-descriptions. These are deterministic source
+persisting synthesized fields. Custom normalized caches advance to version 10 so
+old sparse results cannot hide self-descriptions and old configured-wins limit
+pins cannot entomb a live window. These are deterministic source
 contracts, not evidence that any public provider currently emits the extension.
 
 <a id="first-run-setup-unreleased"></a>
@@ -479,8 +482,15 @@ with `chmod 600`. Reference keys through environment variables, not literal valu
 
 Each provider is discovered independently. Stable IDs are
 `custom/<provider-id>/<model-id>`; labels appear in the picker and `/status`.
-Configured model metadata overrides matching discovery results. Use
-`auto_discover: false` with an explicit `models` inventory if `GET /v1/models`
+For providers with `auto_discover: true`, endpoint-asserted limits are
+authoritative and the registry is a seed/fallback: a live `max_model_len` (or
+`context_window`/`context_length`) assertion wins over a stale registry
+`context_window` pin, and `max_output_tokens` is the tighter of the endpoint
+and registry caps clamped to the live window, so a vLLM profile switch in
+either direction is followed without editing the registry. Every other
+registry field — display name, tools/vision flags, reasoning values, pricing,
+presets — keeps configured-wins behavior. Use `auto_discover: false` with an
+explicit `models` inventory to pin the registry as truth when `GET /v1/models`
 is not useful. Legacy single-object files normalize in memory to `custom-openai`
 without breaking existing IDs; new files should use the versioned registry above.
 

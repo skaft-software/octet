@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Fix custom OpenAI-compatible providers ignoring live context-window changes:
+  with `auto_discover: true`, endpoint-asserted limits are now authoritative
+  over registry pins (`max_model_len` wins, output is the tighter cap clamped
+  to the live window) so vLLM profile switches converge via background refresh
+  instead of re-entombing a stale pin in every cache write. `auto_discover:
+  false` remains the explicit registry-truth opt-out. Custom model caches
+  advance to version 10 to discard entombed pins.
 - Fix context compaction reporting no prior messages to summarize when a single
   oversized entry alone exceeds the keep-recent budget: the boundary walk now
   cuts at the newest valid turn boundary before the crossing instead of

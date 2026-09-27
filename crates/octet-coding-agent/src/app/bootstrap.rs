@@ -375,7 +375,10 @@ const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 // Apple Foundation Models metadata was applied to sparse model responses.
 // Version 8 gives PCC its distinct 32,768-token context window.
 // Version 9 decodes endpoint-owned v1 self-descriptions instead of sparse defaults.
-const CUSTOM_MODEL_CACHE_VERSION: u8 = 9;
+// Version 10 invalidates inventories cached with configured-wins limits so a
+// stale registry `context_window` pin can no longer entomb a live
+// `max_model_len` assertion across restarts and background refreshes.
+const CUSTOM_MODEL_CACHE_VERSION: u8 = 10;
 const PROVIDER_INVENTORY_CACHE_VERSION: u8 = 1;
 const MAX_PROVIDER_INVENTORY_CACHE_BYTES: usize = MAX_DISCOVERY_BODY_BYTES + 1024 * 1024;
 const PROVIDER_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -4039,12 +4042,14 @@ fn schedule_custom_model_cache_refresh_for(
     let _ = std::thread::Builder::new()
         .name(format!("octet-custom-{provider_id}-catalog-refresh"))
         .spawn(move || {
+            let auto_discover = cred.auto_discover;
             let discovered = apply_configured_custom_model_overrides(
                 apply_known_custom_model_defaults(
                     &cred,
                     discover_models_blocking(&cred, &provider_id, false),
                 ),
                 &configured,
+                auto_discover,
             );
             if !discovered.is_empty() {
                 if let Ok(bytes) =
@@ -4071,6 +4076,7 @@ where
     let discovered = apply_configured_custom_model_overrides(
         apply_known_custom_model_defaults(cred, discover(cred)),
         &configured_custom_models(cred),
+        cred.auto_discover,
     );
     if persist_empty || !discovered.is_empty() {
         let _ = bootstrap_check(
@@ -4128,20 +4134,63 @@ fn configured_custom_models(
 fn apply_configured_custom_model_overrides(
     discovered: Vec<crate::auth::custom::CustomModel>,
     configured: &[crate::auth::custom::CustomModel],
+    auto_discover: bool,
 ) -> Vec<crate::auth::custom::CustomModel> {
     if configured.is_empty() {
         return discovered;
     }
+    if !auto_discover {
+        // Explicit opt-out: the registry is truth and the endpoint's
+        // self-description is not consulted for this provider.
+        let mut merged = Vec::with_capacity(discovered.len() + configured.len());
+        for model in discovered {
+            merged.push(
+                configured
+                    .iter()
+                    .find(|override_model| override_model.api_name == model.api_name)
+                    .cloned()
+                    .unwrap_or(model),
+            );
+        }
+        for model in configured {
+            if !merged
+                .iter()
+                .any(|existing| existing.api_name == model.api_name)
+            {
+                merged.push(model.clone());
+            }
+        }
+        return merged;
+    }
 
+    // Custom OpenAI-compatible providers with discovery enabled treat
+    // endpoint-asserted limits as authoritative; the registry is a
+    // seed/fallback. A stale `context_window` pin must never clobber a live
+    // `max_model_len` assertion, otherwise every startup cache write and
+    // hourly refresh re-entombs the stale value and restarts can never
+    // converge after a server profile switch. All non-limit fields keep
+    // configured-wins behavior: the user's file remains the better source
+    // for display names, capability flags, reasoning values, pricing, and
+    // presets. Output is the tighter of both caps, clamped to the live
+    // window, so a vLLM `input+output <= max_model_len` profile shrink is
+    // always honored in the safe (smaller) direction.
     let mut merged = Vec::with_capacity(discovered.len() + configured.len());
     for model in discovered {
-        merged.push(
-            configured
-                .iter()
-                .find(|override_model| override_model.api_name == model.api_name)
-                .cloned()
-                .unwrap_or(model),
-        );
+        match configured
+            .iter()
+            .find(|override_model| override_model.api_name == model.api_name)
+        {
+            Some(configured_model) => {
+                let mut effective = configured_model.clone();
+                effective.context_window = model.context_window;
+                effective.max_output_tokens = model
+                    .max_output_tokens
+                    .min(configured_model.max_output_tokens)
+                    .min(model.context_window);
+                merged.push(effective);
+            }
+            None => merged.push(model),
+        }
     }
     for model in configured {
         if !merged
@@ -4792,6 +4841,7 @@ fn register_custom_openai_provider(
     let models = apply_configured_custom_model_overrides(
         apply_known_custom_model_defaults(&cred, models),
         &configured_overrides,
+        cred.auto_discover,
     );
     if models.is_empty() {
         return Ok(());

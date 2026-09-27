@@ -610,13 +610,17 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
         ..Default::default()
     };
 
+    // Discovery enabled: endpoint-asserted limits are authoritative while every
+    // other registry field keeps configured-wins behavior. Output stays the
+    // tighter of both caps so a profile shrink is honored in the safe direction.
     let merged = apply_configured_custom_model_overrides(
-        vec![discovered_system, discovered_other],
-        &[configured, configured_missing],
+        vec![discovered_system.clone(), discovered_other.clone()],
+        &[configured.clone(), configured_missing.clone()],
+        true,
     );
 
     assert_eq!(merged[0].api_name, "system");
-    assert_eq!(merged[0].context_window, 4_096);
+    assert_eq!(merged[0].context_window, 262_144);
     assert_eq!(merged[0].max_output_tokens, 1_024);
     assert!(merged[0].tools);
     assert!(merged[0].reasoning);
@@ -629,6 +633,65 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
     assert_eq!(merged[1].context_window, 8_192);
     assert_eq!(merged[2].api_name, "configured-only");
     assert_eq!(merged[2].context_window, 12_288);
+
+    // Explicit opt-out: `auto_discover: false` pins the registry inventory.
+    let pinned = apply_configured_custom_model_overrides(
+        vec![discovered_system, discovered_other],
+        &[configured, configured_missing],
+        false,
+    );
+    assert_eq!(pinned[0].context_window, 4_096);
+    assert_eq!(pinned[0].max_output_tokens, 1_024);
+}
+
+#[test]
+fn custom_endpoint_limits_follow_live_assertions_not_registry_pins() {
+    use crate::auth::custom::CustomModel;
+
+    // A vLLM profile switch from 131k to 161k: the registry still declares the
+    // old pin, but the live `max_model_len` assertion must win so restarts
+    // converge instead of re-entombing the stale value in the cache.
+    let configured = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 131_072,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    };
+    let discovered = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 161_000,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![discovered],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 161_000);
+    assert_eq!(merged[0].max_output_tokens, 16_384);
+
+    // A shrink to a smaller profile must also be followed, with output clamped
+    // to the live window.
+    let configured = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 161_000,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    };
+    let discovered = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 32_768,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![discovered],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 32_768);
+    assert_eq!(merged[0].max_output_tokens, 16_384);
 }
 
 #[test]
@@ -705,22 +768,43 @@ fn configured_apple_metadata_overrides_embedded_defaults() {
         reasoning: false,
         ..Default::default()
     };
+    // A sparse Apple response resolves through the embedded defaults before
+    // the merge, so the live 8k window wins over the 4k pin while the tighter
+    // 512-token output cap is preserved. Non-limit fields stay configured-wins.
     let merged = apply_configured_custom_model_overrides(
         apply_known_custom_model_defaults(
             &cred,
             vec![CustomModel {
                 api_name: "system".into(),
+                reasoning_source: Some(octet_ai::types::ReasoningMetadataSource::Absent),
                 ..Default::default()
             }],
         ),
-        &[configured],
+        std::slice::from_ref(&configured),
+        true,
     );
 
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].context_window, 4_096);
+    assert_eq!(merged[0].context_window, APPLE_FM_SYSTEM_CONTEXT_WINDOW);
     assert_eq!(merged[0].max_output_tokens, 512);
     assert!(!merged[0].tools);
     assert!(!merged[0].reasoning);
+
+    // With discovery disabled the registry pin is authoritative.
+    let pinned = apply_configured_custom_model_overrides(
+        apply_known_custom_model_defaults(
+            &cred,
+            vec![CustomModel {
+                api_name: "system".into(),
+                reasoning_source: Some(octet_ai::types::ReasoningMetadataSource::Absent),
+                ..Default::default()
+            }],
+        ),
+        std::slice::from_ref(&configured),
+        false,
+    );
+    assert_eq!(pinned[0].context_window, 4_096);
+    assert_eq!(pinned[0].max_output_tokens, 512);
 }
 
 #[test]
@@ -3018,6 +3102,37 @@ fn version_four_custom_cache_is_invalid_after_hlid_tool_fallback_change() {
     );
 }
 
+#[test]
+fn version_nine_custom_cache_is_invalid_after_endpoint_limits_fix() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
+    let base_url = "http://127.0.0.1:8000/v1/";
+    let fingerprint = custom_credential_fingerprint("", &http::HeaderMap::new());
+    // v9 cached the post-override registry pin, so a profile switch from 131k
+    // to 161k could never converge: every refresh re-entombed the stale value.
+    let stale = CustomModelCache {
+        version: 9,
+        base_url: base_url.into(),
+        credential_fingerprint: fingerprint.clone(),
+        models: vec![crate::auth::custom::CustomModel {
+            api_name: "qwen38-gptq-mtp4-stable".into(),
+            context_window: 131_072,
+            ..Default::default()
+        }],
+    };
+    store
+        .save_model_cache(&serde_json::to_vec(&stale).unwrap())
+        .unwrap();
+
+    assert!(
+        load_custom_model_cache(&store, base_url, &fingerprint)
+            .unwrap()
+            .is_none(),
+        "v9 may contain a configured-wins context_window pin over a live max_model_len assertion"
+    );
+}
+
 #[tokio::test]
 async fn stale_positive_custom_cache_is_available_without_waiting_for_discovery() {
     use wiremock::{
@@ -4785,7 +4900,9 @@ async fn custom_catalog_discovery_bounds_batches_and_isolates_endpoints_and_offl
         }
         let online = online.resolve(&id).unwrap();
         let offline = offline.resolve(&id).unwrap();
-        assert_eq!(online.spec.limits.context_window, 32000);
+        // Discovery enabled: the live 64k assertion wins over the 32k registry
+        // pin online, and the offline run reuses the same normalized cache.
+        assert_eq!(online.spec.limits.context_window, 64000);
         assert_eq!(
             online.spec.limits.context_window,
             offline.spec.limits.context_window
