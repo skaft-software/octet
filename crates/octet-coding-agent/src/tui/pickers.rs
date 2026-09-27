@@ -626,7 +626,7 @@ pub async fn session_picker(
     let current_session_path = current_session_path.map(Path::to_owned);
     let mut all_rows = None;
     shell.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(rows.clone(), current_session_path),
+        picker: PickerState::new(rows.clone(), current_session_path.clone()),
     });
     shell.render();
 
@@ -750,11 +750,14 @@ pub async fn session_picker(
                     let target_store = store_for_session_path(store, &path);
                     let result =
                         run_blocking_lifecycle(shell, input, "renaming session…", move || {
-                            target_store.rename(&id, &name).map(|_| ())
+                            target_store.rename(&id, &name)
                         })
                         .await;
                     match result {
-                        Ok(()) => {
+                        Ok(metadata) => {
+                            if current_session_path.as_deref() == Some(path.as_path()) {
+                                shell.set_session_name(metadata.name.as_deref());
+                            }
                             let (next_rows, next_all) =
                                 refresh_session_rows(shell, input, store, all_rows.is_some())
                                     .await?;

@@ -187,6 +187,28 @@ fn horiz(state: &super::view::ShellState) -> &str {
     state.theme.glyph("horizontal")
 }
 
+fn render_topline(state: &super::view::ShellState, width: u16, now: Instant) -> String {
+    let theme = &state.theme;
+    let border = theme
+        .role_rgb("composer_border")
+        .unwrap_or_else(|| theme.model_rgb(state.model_lab).unwrap_or((128, 128, 128)));
+    let available = usize::from(width).saturating_sub(3);
+    // Fit the footer into the space between the rule ends first. Clipping a
+    // full-width footer afterward would chop the workspace's rightmost tail.
+    let metadata = render_status_footer_with_gap(state, available as u16, now, Some(border))
+        .trim()
+        .to_owned();
+    let remainder = usize::from(width).saturating_sub(visible_width(&metadata) + 3);
+    fit_line(
+        &format!(
+            "{} {metadata} {}",
+            theme.rgb_fg(border, horiz(state)),
+            theme.rgb_fg(border, &horiz(state).repeat(remainder))
+        ),
+        width,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Unified composer frame
 // ---------------------------------------------------------------------------
@@ -202,6 +224,7 @@ enum ComposerChrome {
     Boxed,
     Framed,
     Shaded,
+    Topline,
 }
 
 fn composer_chrome(theme: &super::theme::OctetTheme) -> ComposerChrome {
@@ -212,6 +235,7 @@ fn composer_chrome(theme: &super::theme::OctetTheme) -> ComposerChrome {
     {
         Some("framed") => ComposerChrome::Framed,
         Some("shaded") => ComposerChrome::Shaded,
+        Some("topline") => ComposerChrome::Topline,
         _ => ComposerChrome::Boxed,
     }
 }
@@ -221,7 +245,7 @@ fn composer_chrome(theme: &super::theme::OctetTheme) -> ComposerChrome {
 /// shaded chrome keeps one painted margin column per side.
 fn composer_inner_width(theme: &super::theme::OctetTheme, frame_width: u16) -> u16 {
     match composer_chrome(theme) {
-        ComposerChrome::Boxed => frame_width,
+        ComposerChrome::Boxed | ComposerChrome::Topline => frame_width,
         ComposerChrome::Framed => frame_width.saturating_sub(4),
         ComposerChrome::Shaded => frame_width.saturating_sub(2),
     }
@@ -335,35 +359,57 @@ fn render_composer_box(
             )
         )
     };
-    let finish_row = |row: String| -> String {
-        let row = match chrome {
-            ComposerChrome::Boxed => row,
-            ComposerChrome::Framed => {
-                let vertical = theme.rgb_fg(border_rgb, theme.glyph("vertical"));
-                format!("{vertical} {row} {vertical}")
-            }
-            ComposerChrome::Shaded => {
-                let padded = format!(" {row} ");
-                match shaded_bg {
-                    Some(bg) => theme.paint_row_background(bg, &padded),
-                    None => padded,
-                }
-            }
-        };
-        fit_line(&format!("{frame_prefix}{row}"), width)
-    };
-    let blank_shaded_row = || -> String {
-        let padded = " ".repeat(frame_width);
-        let row = match shaded_bg {
+    // A theme that caps its reading column would otherwise float a narrow
+    // shaded composer in the middle of the terminal, with unpainted columns
+    // beside it. The fill reaches the terminal edges instead, while the draft
+    // stays inside the column. A theme that only insets its content keeps the
+    // historical inset rectangle.
+    let bleeds = layout.capped;
+    // One padding cell inside the fill, on both sides of the draft.
+    //
+    // A capped theme keeps its draft on the reading column, so the column offset
+    // is part of the painted row and the fill spans the whole terminal. An
+    // uncapped theme keeps the historical inset rectangle, where the offset
+    // stays outside the fill.
+    let paint_shaded = |lead: &str, row: &str, fill_width: usize| -> String {
+        let painted = format!("{lead} {row} ");
+        let padding = fill_width.saturating_sub(visible_width(&painted));
+        let padded = format!("{painted}{}", " ".repeat(padding));
+        match shaded_bg {
             Some(bg) => theme.paint_row_background(bg, &padded),
             None => padded,
-        };
-        format!("{frame_prefix}{row}")
+        }
+    };
+    let finish_row = |row: String| -> String {
+        match chrome {
+            ComposerChrome::Boxed | ComposerChrome::Topline => {
+                fit_line(&format!("{frame_prefix}{row}"), width)
+            }
+            ComposerChrome::Framed => {
+                let vertical = theme.rgb_fg(border_rgb, theme.glyph("vertical"));
+                fit_line(&format!("{frame_prefix}{vertical} {row} {vertical}"), width)
+            }
+            ComposerChrome::Shaded if bleeds => {
+                fit_line(&paint_shaded(&frame_prefix, &row, terminal_width), width)
+            }
+            ComposerChrome::Shaded => fit_line(
+                &format!("{frame_prefix}{}", paint_shaded("", &row, frame_width)),
+                width,
+            ),
+        }
+    };
+    let blank_shaded_row = || -> String {
+        if bleeds {
+            paint_shaded(&frame_prefix, "", terminal_width)
+        } else {
+            format!("{frame_prefix}{}", paint_shaded("", "", frame_width))
+        }
     };
 
     let mut lines = Vec::with_capacity(content_rows + 2);
     match chrome {
         ComposerChrome::Boxed => lines.push(render_rule()),
+        ComposerChrome::Topline => lines.push(render_topline(state, width, _now)),
         ComposerChrome::Framed => lines.push(frame_rule(
             theme.glyph("top_left"),
             theme.glyph("top_right"),
@@ -453,6 +499,7 @@ fn render_composer_box(
 
     match chrome {
         ComposerChrome::Boxed => lines.push(render_rule()),
+        ComposerChrome::Topline => {}
         ComposerChrome::Framed => lines.push(frame_rule(
             theme.glyph("bottom_left"),
             theme.glyph("bottom_right"),
@@ -682,7 +729,16 @@ fn context_percent(used: u64, limit: u64) -> u64 {
 /// accounting stays in `/status`, `/cost`, and `/cache`; default chrome keeps
 /// identity, context pressure and durable session spend together on the left,
 /// with the workspace right-aligned when space permits.
-fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Instant) -> String {
+fn render_status_footer(state: &super::view::ShellState, width: u16, now: Instant) -> String {
+    render_status_footer_with_gap(state, width, now, None)
+}
+
+fn render_status_footer_with_gap(
+    state: &super::view::ShellState,
+    width: u16,
+    _now: Instant,
+    gap_rule: Option<(u8, u8, u8)>,
+) -> String {
     let theme_layout = state.theme.layout_for_width(width);
     let total_width = usize::from(width);
     if total_width == 0 {
@@ -692,8 +748,16 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
     // rather than on the full-width surface edge used by rules and cards.
     // Keep this inset independent from the composer frame itself.
     let requested_inset = 1usize.saturating_add(usize::from(theme_layout.composer_padding));
-    let left_inset = if width >= 5 {
-        requested_inset.min(total_width.saturating_sub(1) / 2)
+    // The topline already supplies the rule's own one-cell inset. Do not
+    // charge the footer's separate inset again when fitting embedded metadata.
+    let left_inset = if gap_rule.is_some() {
+        0
+    } else if width >= 5 {
+        requested_inset
+            .max(usize::from(
+                PresentationLayout::new(&state.theme, width).inset,
+            ))
+            .min(total_width.saturating_sub(1) / 2)
     } else {
         0
     };
@@ -905,11 +969,20 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
         left_text
     } else {
         let spacing = available.saturating_sub(left_width + visible_width(&cwd));
-        format!(
-            "{left_text}{}{}",
-            " ".repeat(spacing),
-            state.theme.fg("muted", &cwd)
-        )
+        let gap = gap_rule.map_or_else(
+            || " ".repeat(spacing),
+            |color| {
+                if spacing < 2 {
+                    " ".repeat(spacing)
+                } else {
+                    format!(
+                        " {} ",
+                        state.theme.rgb_fg(color, &horiz(state).repeat(spacing - 2))
+                    )
+                }
+            },
+        );
+        format!("{left_text}{gap}{}", state.theme.fg("muted", &cwd))
     };
     fit_line(&format!("{}{body}", " ".repeat(left_inset)), width)
 }
@@ -917,7 +990,8 @@ fn render_status_footer(state: &super::view::ShellState, width: u16, _now: Insta
 pub(crate) fn status_footer_visible(state: &super::view::ShellState, width: u16) -> bool {
     let layout = state.theme.layout_for_width(width);
     let has_identity = layout.show_footer && !layout.show_header;
-    has_identity || layout.show_status_line
+    (has_identity || layout.show_status_line)
+        && composer_chrome(&state.theme) != ComposerChrome::Topline
 }
 
 fn append_status_footer(
@@ -1003,6 +1077,9 @@ fn render_compact(
     editor: &ComposerEditorProjection,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    if composer_chrome(&state.theme) == ComposerChrome::Topline {
+        lines.push(render_topline(state, width, now));
+    }
     let plan = PresentationLayout::new(&state.theme, width);
     let padding_width = usize::from(plan.inset);
     let padding = " ".repeat(padding_width);
@@ -1060,6 +1137,186 @@ fn render_compact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Columns of one rendered row carrying the shaded fill.
+    fn shaded_columns(row: &str, width: u16) -> Vec<u16> {
+        let mut terminal = vt100::Parser::new(1, width, 0);
+        terminal.process(row.as_bytes());
+        (0..width)
+            .filter(|column| {
+                !matches!(
+                    terminal.screen().cell(0, *column).expect("cell").bgcolor(),
+                    vt100::Color::Default
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn built_in_still_composer_uses_full_width_with_left_aligned_draft() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(include_str!(
+            "../../../../examples/themes/Still.toml"
+        ));
+        state.model_display = "Test Model".into();
+        for width in [48, 160] {
+            let rows = render_composer_surface(&state, width, Instant::now());
+            let fill = shaded_columns(&rows[0], width);
+            assert_eq!(
+                fill.len(),
+                usize::from(width),
+                "Still composer fill at {width}"
+            );
+            assert_eq!((fill.first(), fill.last()), (Some(&0), Some(&(width - 1))));
+            let prompt = sexy_tui_rs::strip_terminal_sequences(&rows[1]);
+            assert_eq!(
+                prompt.find(state.theme.glyph("prompt")),
+                Some(1),
+                "{width}: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shaded_composer_fills_the_terminal_while_the_draft_holds_the_reading_column() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncomposer = \"shaded\"\ncomposer_bg = \"#202020\"\ncontent_max_width = 112\n[layout]\ntranscript_inset = 2\ncomposer_padding = 1\nshow_footer = true",
+        );
+        state.model_display = "Test Model".into();
+        for (width, text_column) in [(160, 25), (48, 1)] {
+            let rows = render_composer_surface(&state, width, Instant::now());
+            assert!(rows.len() >= 4, "{width}: {rows:?}");
+            // The fill reaches both terminal edges: no unpainted bars beside a
+            // capped theme's shaded composer. The blank rows are used for
+            // whole-row coverage; a row holding the draft carries the hardware
+            // cursor's reverse-video cell, which inverts the rest of its row.
+            for row in [&rows[0], &rows[2]] {
+                let painted = shaded_columns(row, width);
+                assert_eq!(
+                    (
+                        painted.first().copied(),
+                        painted.last().copied(),
+                        painted.len()
+                    ),
+                    (Some(0), width.checked_sub(1), usize::from(width)),
+                    "composer row left bars at width {width}: {row:?}"
+                );
+            }
+            // The draft row starts filled too, so the fill has no left edge.
+            let draft = shaded_columns(&rows[1], width);
+            assert_eq!(
+                draft.first().copied(),
+                Some(0),
+                "draft row left a bar at width {width}: {:?}",
+                rows[1]
+            );
+            // The draft still starts on the reading column, inset and all.
+            let plain = rows
+                .iter()
+                .map(|row| sexy_tui_rs::strip_terminal_sequences(row).to_owned())
+                .collect::<Vec<_>>();
+            let prompt = plain
+                .iter()
+                .find(|row| row.contains(state.theme.glyph("prompt")))
+                .expect("composer prompt row");
+            assert_eq!(
+                prompt
+                    .find(state.theme.glyph("prompt"))
+                    .expect("prompt cell"),
+                text_column,
+                "{width}: {plain:?}"
+            );
+            assert!(
+                !plain.iter().any(|row| row.contains('─')),
+                "{width}: {plain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_uncapped_shaded_composer_keeps_its_column_width() {
+        // `Cards` insets its content without capping the column, so its shaded
+        // composer keeps the historical column width instead of bleeding. The
+        // two paths must differ, or the cap check is doing nothing.
+        let render = |max_width: Option<&str>| {
+            let mut state = crate::tui::view::ShellState::default();
+            let cap = max_width.map_or_else(String::new, |width| {
+                format!("content_max_width = {width}\n")
+            });
+            state.theme = crate::tui::theme::test_theme_from_source(&format!(
+                "[colors]\ncomposer = \"shaded\"\ncomposer_bg = \"#202020\"\n{cap}[layout]\ntranscript_inset = 6\ncomposer_padding = 1"
+            ));
+            state.model_display = "Test Model".into();
+            render_composer_surface(&state, 160, Instant::now())
+        };
+        let capped = shaded_columns(&render(Some("112"))[0], 160);
+        let uncapped = shaded_columns(&render(None)[0], 160);
+        assert_eq!(capped.first().copied(), Some(0), "{capped:?}");
+        assert_eq!(
+            capped.len(),
+            160,
+            "a capped fill spans the terminal: {capped:?}"
+        );
+        assert!(
+            uncapped.first().copied().unwrap_or(0) > 0,
+            "an uncapped theme keeps its inset rectangle: {uncapped:?}"
+        );
+        assert!(
+            uncapped.len() < capped.len(),
+            "an uncapped theme must keep its column width"
+        );
+    }
+
+    #[test]
+    fn topline_preserves_the_workspace_tail_at_the_right_edge() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncomposer = \"topline\"\n[layout]\nshow_footer = true\nshow_status_line = true",
+        );
+        state.model_display = "Test".into();
+        state.workspace = Some(std::path::PathBuf::from("/work/long/project-directory"));
+        let row =
+            sexy_tui_rs::strip_terminal_sequences(&render_topline(&state, 45, Instant::now()))
+                .to_owned();
+        assert!(row.contains("project-directory"), "{row:?}");
+        assert!(row.contains("Test"), "{row:?}");
+        assert_eq!(visible_width(&row), 45);
+
+        let wide =
+            sexy_tui_rs::strip_terminal_sequences(&render_topline(&state, 80, Instant::now()))
+                .to_owned();
+        let between = &wide[wide.find("Test").unwrap() + 4..wide.find("/work").unwrap()];
+        assert!(between.contains("────"), "{wide:?}");
+        assert_eq!(visible_width(&wide), 80);
+    }
+
+    #[test]
+    fn topline_embeds_metadata_above_prompt_without_a_bottom_rule() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncomposer = \"topline\"\n[layout]\nshow_footer = true\nshow_status_line = true",
+        );
+        state.model_display = "Test Model".into();
+        for width in [80, 16, 4] {
+            let plain = render_composer_surface(&state, width, Instant::now())
+                .into_iter()
+                .map(|line| sexy_tui_rs::strip_terminal_sequences(&line))
+                .collect::<Vec<_>>();
+            assert_eq!(plain.len(), 2, "{width}: {plain:?}");
+            assert!(plain[0].contains("Test") || width < 8, "{width}: {plain:?}");
+            assert!(
+                plain[1].contains(state.theme.glyph("prompt")),
+                "{width}: {plain:?}"
+            );
+            assert!(
+                plain
+                    .iter()
+                    .all(|line| visible_width(line) <= width as usize),
+                "{width}: {plain:?}"
+            );
+        }
+    }
 
     #[test]
     fn content_rows_starts_at_one() {

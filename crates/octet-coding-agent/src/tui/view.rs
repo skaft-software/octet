@@ -19,8 +19,8 @@ use octet_agent::{
 use octet_ai::{ModalitySet, Model, ModelId, ToolCallId, Usage};
 use sexy_tui_rs::{
     parse_markdown, strip_terminal_sequences, visible_width, wrap_text_with_ansi, CellPixelSize,
-    ImageAnchor, ImageCapabilities, ImagePlanner, ImageRegistry, ImageViewport, RichRenderer,
-    TextEditor, TUI,
+    ImageAnchor, ImageCapabilities, ImagePlanner, ImageProtocol, ImageRegistry, ImageViewport,
+    RichRenderer, TextEditor, TUI,
 };
 
 use crate::config::Config;
@@ -116,13 +116,34 @@ use crate::presentation::tool_display::is_subagent_tool;
 /// Maximum physical rows retained in a collapsed command-output tail.
 const COMPACT_EXEC_OUTPUT_ROWS: usize = 5;
 /// Maximum physical rows one inline tool image can reserve inside its tool card.
+///
+/// This is an upper bound on how much vertical space an image may claim, not a
+/// target every image is fitted to. The row count an image actually uses is
+/// derived from its own aspect ratio against the card's column budget, so a
+/// portrait screenshot is not stretched to the cap just to fill it.
 const MAX_TOOL_IMAGE_RENDER_ROWS: u16 = 16;
+/// Columns the tool-card gutter (elbow/indent) consumes before the image.
+///
+/// `nest_tool_output` prefixes every nested row with a stem/elbow plus a space,
+/// so the columns actually available to image content are the transcript width
+/// minus this gutter. Fitting against the full width would place the drawn
+/// `c=cols` rectangle wider than the reserved region and let the image drift
+/// right of its reservation.
+const TOOL_IMAGE_GUTTER_COLUMNS: u16 = 2;
+
 fn tool_image_viewport(width: u16, capabilities: ImageCapabilities) -> ImageViewport {
-    // The interactive Kitty path currently has no cell-pixel query. Without
-    // one, ImageLayout::fit would reserve just one cell for a whole screenshot.
-    // Use a typical 1:2 cell aspect as an explicit approximation; a measured
-    // cell size still takes precedence, and the 16-row bound remains intact.
-    ImageViewport::with_capabilities(width.max(1), MAX_TOOL_IMAGE_RENDER_ROWS, capabilities)
+    // The interactive Kitty path currently has no cell-pixel query. Without one,
+    // ImageLayout::fit would reserve a single cell for a whole screenshot. Use a
+    // typical 1:2 cell aspect as an explicit approximation; a measured cell size
+    // still takes precedence when one is available.
+    //
+    // The viewport is bounded by the card's real content width (gutter removed)
+    // and a maximum row budget. ImageLayout::fit then derives the actual cell
+    // rectangle from the source aspect: it fits the image inside this box rather
+    // than always pinning rows to the maximum, so a tall image stays a tall
+    // image scaled to the column budget, and a wide image is never cropped.
+    let content_width = width.saturating_sub(TOOL_IMAGE_GUTTER_COLUMNS).max(1);
+    ImageViewport::with_capabilities(content_width, MAX_TOOL_IMAGE_RENDER_ROWS, capabilities)
         .expect("fixed nonzero tool image viewport is valid")
         .with_estimated_cell_pixels(CellPixelSize::new(8, 16).expect("valid cell aspect"))
 }
@@ -173,6 +194,9 @@ impl OutcomeBlock {
 enum NoticeTone {
     Success,
     Error,
+    ToolActive,
+    ToolSuccess,
+    ToolError,
 }
 
 /// A bounded, content-free live worker line; complete detail stays in the inspector.
@@ -358,6 +382,7 @@ enum TranscriptBlock {
     NoticeStatus {
         text: String,
         tone: NoticeTone,
+        reserved_rows: usize,
     },
     Compaction(Box<CompactionBlock>),
 }
@@ -379,6 +404,66 @@ impl Default for ToolImageRendering {
     }
 }
 
+struct ActivityGroupView {
+    group: crate::hydrate::ToolActivityGroup,
+    index: usize,
+    settled: std::collections::HashSet<ToolCallId>,
+    failures: Vec<String>,
+    open: bool,
+    kind: crate::hydrate::ToolActivityKind,
+}
+
+fn activity_group_label(
+    group: &crate::hydrate::ToolActivityGroup,
+    failures: &[String],
+    kind: crate::hydrate::ToolActivityKind,
+) -> String {
+    let mut label = match kind {
+        crate::hydrate::ToolActivityKind::Explore if group.read_files > 0 => format!(
+            "Explored {} file{}",
+            group.read_files,
+            if group.read_files == 1 { "" } else { "s" }
+        ),
+        crate::hydrate::ToolActivityKind::Explore if group.searches > 0 => format!(
+            "Searched {} time{}",
+            group.searches,
+            if group.searches == 1 { "" } else { "s" }
+        ),
+        crate::hydrate::ToolActivityKind::Explore => format!(
+            "Ran {} Command{}",
+            group.commands,
+            if group.commands == 1 { "" } else { "s" }
+        ),
+        crate::hydrate::ToolActivityKind::Edit => format!(
+            "Edited {} file{}",
+            group.edited_files,
+            if group.edited_files == 1 { "" } else { "s" }
+        ),
+    };
+    if group.read_files > 0 && group.searches > 0 {
+        label.push_str(&format!(
+            " · {} search{}",
+            group.searches,
+            if group.searches == 1 { "" } else { "es" }
+        ));
+    }
+    if group.commands > 0 && (group.read_files > 0 || group.searches > 0) {
+        label.push_str(&format!(
+            " · {} command{}",
+            group.commands,
+            if group.commands == 1 { "" } else { "s" }
+        ));
+    }
+    if !failures.is_empty() {
+        label.push_str(&format!(" · {} failed", failures.len()));
+        for reason in failures {
+            label.push_str("\n  × ");
+            label.push_str(reason);
+        }
+    }
+    label
+}
+
 #[derive(Clone, Debug)]
 struct ToolPanel {
     id: ToolCallId,
@@ -389,6 +474,8 @@ struct ToolPanel {
     /// Validated opaque image media, kept separate from text/copy output.
     images: Vec<ToolResultImage>,
     image_rendering: ToolImageRendering,
+    /// Child of a compact exploration summary; Ctrl+O reveals the ordinary row.
+    grouped_child: bool,
     finished: bool,
     is_error: bool,
     /// Wall time the call took, known once the outcome is final.
@@ -437,6 +524,7 @@ impl ToolPanel {
             output,
             images: Vec::new(),
             image_rendering: ToolImageRendering::default(),
+            grouped_child: false,
             finished,
             is_error,
             duration: None,
@@ -1189,9 +1277,23 @@ pub(crate) struct ShellState {
     ledger: composer::AttachmentLedger,
     /// Input modalities of the active model; gates attach attempts.
     pub(crate) input_modalities: ModalitySet,
-    /// Workspace root and its lazily built mention-completion index.
+    /// Workspace root and its mention-completion index.
     pub(crate) workspace: Option<PathBuf>,
-    file_index: Option<Arc<Vec<String>>>,
+    /// Completed mention index, or `None` while a walk is in flight, before one
+    /// has been requested, or after invalidation.
+    file_index: Option<Arc<composer::WorkspaceFileIndex>>,
+    /// A workspace walk is running off-thread. The popup reports this instead of
+    /// silently offering nothing.
+    file_index_scanning: bool,
+    /// Invalidates an in-flight walk. Bumping it retires any walk started under
+    /// an older workspace or before an explicit invalidation, so a late result
+    /// cannot resurrect a stale index.
+    file_index_generation: u64,
+    file_index_tx: Option<mpsc::Sender<(u64, Arc<composer::WorkspaceFileIndex>)>>,
+    file_index_rx: Option<mpsc::Receiver<(u64, Arc<composer::WorkspaceFileIndex>)>>,
+    /// Set by a finished walk so the render loop can test for a result without
+    /// taking the state lock on every idle wake.
+    file_index_ready: Arc<AtomicBool>,
     /// Selected result in the bounded path/mention completion list.
     path_selection: usize,
     /// Cached wrapped transcript lines. Scrolling only slices this cache, and
@@ -1249,6 +1351,8 @@ pub(crate) struct ShellState {
     pub(crate) error: Option<String>,
     overlay: Option<ShellOverlay>,
     tool_panels: HashMap<ToolCallId, usize>,
+    activity_groups: Vec<ActivityGroupView>,
+    pending_activity_groups: Vec<crate::hydrate::ToolActivityGroup>,
     active_text: Option<usize>,
     /// Stable block identities owned by the unfinished inference attempt.
     provisional_blocks: Vec<u64>,
@@ -1355,6 +1459,9 @@ pub(crate) struct ShellState {
     pub(crate) price_display: PriceDisplay,
     pub(crate) latest_compaction_summary: Option<String>,
     pub(crate) reasoning: String,
+    /// The foreground session's validated, user-assigned name, independent of
+    /// model identity and transcript chrome.
+    pub(crate) session_name: Option<String>,
     /// Non-agent work such as compaction or sign-in. Agent runs never use this
     /// field; their phase always comes from `run`.
     pub(crate) run_label: String,
@@ -1796,6 +1903,9 @@ impl ShellState {
                 *panel_index += 1;
             }
         }
+        for group in &mut self.activity_groups {
+            group.index += usize::from(group.index >= index);
+        }
         if let Some(selection) = &mut self.transcript_selection {
             selection.anchor.block += usize::from(selection.anchor.block >= index);
             selection.focus.block += usize::from(selection.focus.block >= index);
@@ -2054,6 +2164,10 @@ impl ShellState {
                 *panel_index -= 1;
             }
         }
+        self.activity_groups.retain(|group| group.index != index);
+        for group in &mut self.activity_groups {
+            group.index -= usize::from(group.index > index);
+        }
         if !self.follow_tail {
             self.new_output_count = self.new_output_count.saturating_sub(1);
         }
@@ -2084,6 +2198,150 @@ impl ShellState {
 
     fn show_tool_details(&self, _block: &TranscriptBlock) -> bool {
         self.verbose_tools
+    }
+
+    fn start_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
+        let kind = group.kind();
+        let index = self.push_block(TranscriptBlock::NoticeStatus {
+            text: activity_group_label(&group, &[], kind),
+            tone: NoticeTone::ToolActive,
+            reserved_rows: 1,
+        });
+        self.register_active_event(index);
+        self.activity_groups.push(ActivityGroupView {
+            group,
+            index,
+            settled: std::collections::HashSet::new(),
+            failures: Vec::new(),
+            open: true,
+            kind,
+        });
+    }
+
+    fn activity_groups_enabled(&self) -> bool {
+        self.theme
+            .resolve::<bool>("quiet_tool_summaries")
+            .unwrap_or(false)
+    }
+
+    fn seal_activity_group(&mut self) {
+        let Some(position) = self.activity_groups.iter().rposition(|view| view.open) else {
+            return;
+        };
+        self.activity_groups[position].open = false;
+        self.refresh_activity_group(position);
+    }
+
+    fn extend_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
+        if let Some(position) = self.activity_groups.iter().rposition(|view| view.open) {
+            if self.activity_groups[position].kind == group.kind() {
+                let had_settled = !self.activity_groups[position].settled.is_empty();
+                self.activity_groups[position].group.merge(group);
+                let index = self.activity_groups[position].index;
+                if had_settled {
+                    if let Some(TranscriptBlock::NoticeStatus { reserved_rows, .. }) =
+                        self.transcript.get_mut(index)
+                    {
+                        *reserved_rows = 3;
+                    }
+                }
+                self.register_active_event(index);
+                self.refresh_activity_group(position);
+                return;
+            }
+            self.seal_activity_group();
+        }
+        self.start_activity_group(group);
+    }
+
+    fn grouped_tool_call(&mut self, id: &ToolCallId, name: &str, args: &serde_json::Value) -> bool {
+        if !self.activity_groups_enabled()
+            || crate::hydrate::ToolActivityKind::for_name(name).is_none()
+        {
+            self.seal_activity_group();
+            return false;
+        }
+        if let Some(view) = self
+            .activity_groups
+            .iter()
+            .find(|view| view.group.member_ids.contains(id))
+        {
+            let index = view.index;
+            if !view.settled.is_empty() && !view.settled.contains(id) {
+                if let Some(TranscriptBlock::NoticeStatus { reserved_rows, .. }) =
+                    self.transcript.get_mut(index)
+                {
+                    *reserved_rows = 3;
+                }
+                self.touch_block(index);
+            }
+            return true;
+        }
+        let group = if let Some(position) = self
+            .pending_activity_groups
+            .iter()
+            .position(|group| group.member_ids.first() == Some(id))
+        {
+            self.pending_activity_groups.remove(position)
+        } else {
+            let mut group = crate::hydrate::ToolActivityGroup::default();
+            group.add(id.clone(), name, args);
+            group
+        };
+        self.extend_activity_group(group);
+        true
+    }
+
+    fn refresh_activity_group(&mut self, position: usize) {
+        let view = &self.activity_groups[position];
+        let index = view.index;
+        let text = activity_group_label(&view.group, &view.failures, view.kind);
+        let all_settled = view.settled.len() == view.group.member_ids.len();
+        let complete = !view.open && all_settled;
+        if let Some(TranscriptBlock::NoticeStatus {
+            text: label,
+            tone,
+            reserved_rows,
+        }) = self.transcript.get_mut(index)
+        {
+            *label = text;
+            if all_settled {
+                *reserved_rows = 0;
+            }
+            *tone = if !all_settled {
+                NoticeTone::ToolActive
+            } else if view.failures.is_empty() {
+                NoticeTone::ToolSuccess
+            } else {
+                NoticeTone::ToolError
+            };
+            self.touch_block(index);
+        }
+        if all_settled {
+            self.unregister_active_event(index);
+        }
+        if complete {
+            self.activity_groups.remove(position);
+        }
+    }
+
+    fn settle_activity_tool(&mut self, id: &ToolCallId, name: &str, reason: Option<&str>) {
+        let Some(position) = self
+            .activity_groups
+            .iter()
+            .rposition(|view| view.group.member_ids.contains(id) && !view.settled.contains(id))
+        else {
+            return;
+        };
+        let view = &mut self.activity_groups[position];
+        view.settled.insert(id.clone());
+        if let Some(reason) = reason {
+            view.failures.push(format!(
+                "{name}: {}",
+                crate::presentation::concise_line(&sanitize_for_terminal(reason))
+            ));
+        }
+        self.refresh_activity_group(position);
     }
 
     fn open_working_status(&mut self) {
@@ -2416,6 +2674,10 @@ impl ShellState {
             .any(|index| match self.transcript.get(*index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
                 Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
+                Some(TranscriptBlock::NoticeStatus {
+                    tone: NoticeTone::ToolActive,
+                    ..
+                }) => markers_enabled,
                 Some(TranscriptBlock::Subagents(summary)) => {
                     markers_enabled && summary.active_count() > 0
                 }
@@ -2435,8 +2697,16 @@ impl ShellState {
         )
     }
 
+    /// Gate the shared status shimmer on the *rendered* label rather than on the
+    /// pre-delta `Working` row alone.
+    ///
+    /// The clock used to start only while `is_working_activity()` held, so the
+    /// first reasoning delta froze it: `Thinking` kept rendering the sweep
+    /// from a stalled frame, and the two labels could not share a phase. Gating
+    /// on the label makes `Working` and `Thinking` one continuous sweep, while
+    /// retry, compaction, and provider lifecycle labels stay timer-only.
     fn status_shimmer_active(&self, reasoning: &AssistantBlock) -> bool {
-        reasoning.is_working_activity() && reasoning.retry_activity.is_none()
+        reasoning.is_shimmering_activity()
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {
@@ -2583,6 +2853,10 @@ impl ShellState {
             let visible = match self.transcript.get(index) {
                 Some(TranscriptBlock::Reasoning(_)) => false,
                 Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
+                Some(TranscriptBlock::NoticeStatus {
+                    tone: NoticeTone::ToolActive,
+                    ..
+                }) => markers_enabled,
                 Some(TranscriptBlock::Subagents(summary)) => {
                     markers_enabled && summary.active_count() > 0
                 }
@@ -2631,14 +2905,10 @@ pub(crate) fn semantic_separator(theme: &OctetTheme) -> &str {
 /// Indent continuation rows to the first text cell after an activity marker.
 pub(crate) const ACTIVITY_DETAIL_INDENT: &str = "  ";
 
-/// A shared continuation mark for transient activity details. Keep steering
-/// and collapsed thinking/subagents visually aligned without repurposing tree glyphs.
-pub(crate) fn activity_elbow(theme: &OctetTheme) -> &'static str {
-    if theme.unicode() {
-        "└"
-    } else {
-        "`-"
-    }
+/// Shared theme-owned continuation mark for transient activity details.
+/// A blank glyph lets minimalist themes omit tree connectors entirely.
+pub(crate) fn activity_elbow(theme: &OctetTheme) -> &str {
+    theme.glyph("last_branch")
 }
 
 /// A low-contrast annotation that remains readable without relying on a
@@ -2657,9 +2927,50 @@ fn understated_tool_output(theme: &OctetTheme, text: &str) -> String {
 fn finish_transcript_block(mut lines: Vec<String>) -> Vec<String> {
     // Block renderers return content only. Transition spacing is decided once
     // in `render_block`, where both semantic neighbours are known.
+    //
+    // An image reservation ends its block with zero-width rows: the anchor row
+    // carries the placement metadata and the rows after it are the blank cells
+    // the terminal image occupies. Those rows are not decorative spacing, so the
+    // trim must stop at the anchor instead of collapsing the reservation and
+    // letting later transcript rows paint over the placed image.
+    //
+    // The reservation is restored for a trailing anchor today. That is correct
+    // only while every image is the last thing in its block; an image followed
+    // by any text row is not at the tail, so its blank rows were trimmed and the
+    // following text drew over the placed image. Only the trailing-anchor case is
+    // recoverable here, so the invariant is that the renderer never emits a Kitty
+    // anchor except as the final content of its block.
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
+    // Parse the tail line once and reuse it for both the predicate and the
+    // reservation computation.
+    let tail_anchors = lines.last().map(|line| ImageAnchor::parse_all(line));
+    let has_kitty = tail_anchors.as_ref().is_some_and(|anchors| {
+        anchors
+            .iter()
+            .any(|anchor| anchor.protocol() == ImageProtocol::Kitty)
+    });
+    if !has_kitty {
+        return lines;
+    }
+    // Restore the reserved rows the placement still needs. The anchor's layout
+    // records the exact height the terminal will draw, so the reservation and
+    // the placement cannot disagree.
+    let reserved = tail_anchors
+        .map(|anchors| {
+            anchors
+                .into_iter()
+                .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
+                .map(|anchor| usize::from(anchor.layout().rows()))
+                .max()
+                .unwrap_or(1)
+        })
+        .unwrap_or(1);
+    lines.extend(std::iter::repeat_n(
+        String::new(),
+        reserved.saturating_sub(1),
+    ));
     lines
 }
 
@@ -2695,6 +3006,9 @@ fn render_user_prompt(
     let render_result = renderer.render(&document, inner_width);
     // New records use their exact persisted source colour; legacy records
     // retain their historical marker fallback without inventing provenance.
+    // The marker is the only colour applied here: the prompt's own cell is
+    // painted by the surface frame, which layers the stored colour under these
+    // rich runs instead of flattening the Markdown styling they carry.
     let marker = if prompt_color.is_some() {
         theme.prompt_color_marker(prompt_color, &marker_glyph)
     } else {
@@ -2711,41 +3025,7 @@ fn render_user_prompt(
         } else {
             continuation_prefix.clone()
         };
-        let content = if theme.is_compiled_default()
-            && prompt_color.is_some()
-            && theme.background() != crate::tui::theme::TerminalBackground::Unknown
-            && theme.capabilities().color != crate::tui::terminal::ColorDepth::None
-        {
-            // Style only visible body cells after rich layout. Leave renderer
-            // padding and the marker gutter on the terminal canvas; never
-            // alter the source or the semantic copy projection.
-            let painted = line.plain.trim_end_matches(' ');
-            // Rich Markdown has already supplied its own foreground and text
-            // attributes. Apply the provenance surface around those escapes,
-            // restoring it after each inline reset rather than replacing the
-            // styled runs with uniformly painted plain text.
-            let mut styled = line.styled.as_str();
-            let mut resets = String::new();
-            // The rich renderer pads some technical rows. Its styled bytes
-            // include SGR controls, so byte lengths cannot be inferred from
-            // `plain`. Trim only actual trailing spaces (and their resets).
-            if painted.len() != line.plain.len() {
-                for _ in 0..line.plain.len() - painted.len() {
-                    while let Some(before) = styled.strip_suffix("\x1b[0m") {
-                        styled = before;
-                        resets.push_str("\x1b[0m");
-                    }
-                    if let Some(before) = styled.strip_suffix(' ') {
-                        styled = before;
-                    }
-                }
-            }
-            let sample = theme.prompt_text_highlight(prompt_color, "X");
-            let (open, close) = sample.split_once('X').expect("highlight preserves text");
-            let mut rich = styled.replace("\x1b[0m", &format!("\x1b[0m{open}"));
-            rich.insert_str(0, open);
-            format!("{rich}{resets}{close}{}", &line.plain[painted.len()..])
-        } else if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
+        let content = if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
             line.plain
         } else {
             line.styled
@@ -2884,6 +3164,78 @@ pub(crate) fn fit_line(line: &str, width: u16) -> String {
     }
 }
 
+/// Retire the mention index, and any walk still in flight for it.
+///
+/// Bumping the generation is what makes a late walk harmless: a finished walk
+/// carries the generation it started under, so one that completes after the
+/// workspace changed is dropped instead of overwriting the new index.
+fn retire_file_index(state: &mut ShellState) {
+    state.file_index = None;
+    state.file_index_scanning = false;
+    state.file_index_generation = state.file_index_generation.wrapping_add(1);
+    state.path_selection = 0;
+    state
+        .file_index_ready
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Start a background workspace walk unless one is already known or in flight.
+///
+/// The walk is unbounded filesystem I/O and used to run inline on the first
+/// `@`, which froze the composer for as long as the tree took to read. It now
+/// runs on its own thread, and the popup reports the scan instead of silently
+/// offering nothing while input stays live.
+fn request_file_index_scan(state: &mut ShellState) {
+    if state.file_index.is_some() || state.file_index_scanning {
+        return;
+    }
+    let Some(root) = state.workspace.clone() else {
+        return;
+    };
+    let (sender, receiver) = mpsc::channel();
+    state.file_index_tx = Some(sender.clone());
+    state.file_index_rx = Some(receiver);
+    state.file_index_scanning = true;
+    let generation = state.file_index_generation;
+    let ready = state.file_index_ready.clone();
+    let _ = thread::Builder::new()
+        .name("octet-file-index".to_owned())
+        .spawn(move || {
+            let index = Arc::new(composer::workspace_files(&root));
+            let _ = sender.send((generation, index));
+            // Published after the value so a reader that sees this flag always
+            // finds the completed walk waiting to be drained.
+            ready.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+}
+
+/// Adopt a finished walk, reporting whether the index changed.
+///
+/// The caller must gate this on `file_index_ready` so the idle render loop
+/// does not take the state lock on every wake just to observe an empty queue.
+pub(super) fn poll_file_index_scan(state: &mut ShellState) -> bool {
+    state
+        .file_index_ready
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let Some(receiver) = state.file_index_rx.as_ref() else {
+        return false;
+    };
+    let mut latest = None;
+    while let Ok((generation, index)) = receiver.try_recv() {
+        latest = Some((generation, index));
+    }
+    let Some((generation, index)) = latest else {
+        return false;
+    };
+    if generation != state.file_index_generation {
+        // Retired walk: the current workspace already superseded it.
+        return false;
+    }
+    state.file_index_scanning = false;
+    state.file_index = Some(index);
+    true
+}
+
 /// Full-screen terminal shell. It owns all terminal I/O and no Agent state.
 pub struct InteractiveShell {
     input_dispatch: input_dispatch::InputDispatch,
@@ -2964,6 +3316,30 @@ impl InteractiveShell {
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             herdr: crate::herdr::PaneReporter::detect(),
         })
+    }
+
+    #[cfg(test)]
+    /// Wait for an in-flight workspace walk to land, then adopt it.
+    ///
+    /// A test shell has no renderer thread, so the loop that normally drains a
+    /// completed scan is absent. Tests drive it explicitly instead of racing
+    /// the walk. Returns immediately when no walk was started: a path-shaped
+    /// query completes from the directory itself and never needs the index.
+    #[cfg(test)]
+    pub(crate) fn settle_file_index(&self) {
+        if !self.state.borrow().file_index_scanning {
+            return;
+        }
+        for _ in 0..2_000 {
+            {
+                let mut state = self.state.borrow_mut();
+                if poll_file_index_scan(&mut state) {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("workspace file index scan did not complete");
     }
 
     #[cfg(test)]
@@ -3457,6 +3833,9 @@ impl InteractiveShell {
                 )));
             }
             AgentEvent::OutputDelta { channel, text } => {
+                if *channel == OutputChannel::Text && !text.is_empty() {
+                    state.seal_activity_group();
+                }
                 if state.turn_generation_started_at.is_none() {
                     state.turn_generation_started_at = Some(Instant::now());
                     state.turn_streamed_output_bytes = 0;
@@ -3657,6 +4036,7 @@ impl InteractiveShell {
             }
             AgentEvent::ToolStarted { id, name, args } => {
                 state.close_streaming_blocks();
+                let grouped = state.grouped_tool_call(id, name, args);
                 state.event_dot_visible = true;
                 state.event_spinner_frame = 0;
                 if is_subagent_tool(name) {
@@ -3666,7 +4046,7 @@ impl InteractiveShell {
                     let workspace = state.workspace.clone();
                     let display = summarize_tool_with_workspace(name, args, workspace.as_deref());
                     let model_lab = state.executing_model_lab();
-                    let index = state.push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+                    let mut panel = ToolPanel::new(
                         id.clone(),
                         name.clone(),
                         args.to_string(),
@@ -3676,7 +4056,9 @@ impl InteractiveShell {
                         false,
                         None,
                         model_lab,
-                    ))));
+                    );
+                    panel.grouped_child = grouped;
+                    let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
                     state.tool_panels.insert(id.clone(), index);
                     state.register_active_event(index);
                 }
@@ -3793,6 +4175,15 @@ impl InteractiveShell {
                 if let Some(index) = index {
                     state.unregister_active_event(index);
                     state.touch_block(index);
+                    let reason = state.tool_output_mut(id).and_then(|panel| {
+                        panel.is_error.then(|| {
+                            panel
+                                .failure_reason
+                                .clone()
+                                .unwrap_or_else(|| "tool failed".into())
+                        })
+                    });
+                    state.settle_activity_tool(id, &completed_name, reason.as_deref());
                 }
                 if !completed_name.is_empty() {
                     state.tool_durations.push((completed_name, *duration));
@@ -3820,12 +4211,21 @@ impl InteractiveShell {
                 }
             }
             AgentEvent::TurnFinished {
+                message,
                 turn_usage,
                 session_cost_microdollars,
                 run_cost_microdollars,
                 ..
             } => {
                 state.finish_turn_streaming_blocks();
+                if message.content.iter().any(|part| matches!(part, octet_ai::AssistantPart::Text(text) if !text.trim().is_empty())) {
+                    state.seal_activity_group();
+                }
+                state.pending_activity_groups = if state.activity_groups_enabled() {
+                    crate::hydrate::tool_activity_groups(message)
+                } else {
+                    Vec::new()
+                };
                 let requested_at = state.turn_requested_at;
                 if let Some(started_at) = state.turn_generation_started_at.take() {
                     let elapsed = started_at.elapsed();
@@ -3868,6 +4268,7 @@ impl InteractiveShell {
             AgentEvent::DelegationUpdated { .. } => {}
             AgentEvent::RunFinished { .. } => {
                 state.close_streaming_blocks();
+                state.seal_activity_group();
                 if let Some(view) = state.subagent_activity.as_ref() {
                     let costs: Vec<_> = if !view.telemetry.is_empty() {
                         view.telemetry
@@ -3975,6 +4376,7 @@ impl InteractiveShell {
     fn push_local_submission(&mut self, prompt: &str, prompt_color: Option<String>) {
         let mut state = self.state.borrow_mut();
         state.close_streaming_blocks();
+        state.seal_activity_group();
         let model_lab = state.model_lab;
         state.push_block(TranscriptBlock::User {
             text: prompt.to_owned(),
@@ -4311,11 +4713,8 @@ impl InteractiveShell {
         if state.editor.cursor() == state.editor.text().len()
             && composer::active_mention(state.editor.text())
                 .is_some_and(|query| !composer::is_path_query(query))
-            && state.file_index.is_none()
         {
-            if let Some(root) = state.workspace.clone() {
-                state.file_index = Some(Arc::new(composer::workspace_files(&root, 10_000)));
-            }
+            request_file_index_scan(&mut state);
         }
         invalidate_editor_autocomplete(&mut state);
     }
@@ -4410,8 +4809,24 @@ impl InteractiveShell {
     /// workspace. Called after a run ends, when tools may have created files.
     pub fn invalidate_file_index(&mut self) {
         let mut state = self.state.borrow_mut();
-        state.file_index = None;
-        state.path_selection = 0;
+        retire_file_index(&mut state);
+    }
+
+    /// Update the foreground session name shown in the terminal window title.
+    /// Unnamed sessions use the default `octet` title.
+    pub fn set_session_name(&mut self, name: Option<&str>) {
+        let mut state = self.state.borrow_mut();
+        if state.session_name.as_deref() == name {
+            return;
+        }
+        state.session_name = name.map(str::to_owned);
+        drop(state);
+        self.render();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_session_name(&self) -> Option<String> {
+        self.state.borrow().session_name.clone()
     }
 
     pub fn set_workspace(&mut self, root: PathBuf) {
@@ -4421,8 +4836,7 @@ impl InteractiveShell {
         if state.workspace.as_deref() == Some(root.as_path()) {
             return;
         }
-        state.file_index = None;
-        state.path_selection = 0;
+        retire_file_index(&mut state);
         state.workspace = Some(root);
         state.refresh_tool_displays();
     }
@@ -4540,17 +4954,16 @@ impl InteractiveShell {
         if state.editor.cursor() != state.editor.text().len() {
             return;
         }
-        let Some(root) = state.workspace.clone() else {
+        if state.workspace.is_none() {
             return;
-        };
+        }
 
         let mention = composer::active_mention(state.editor.text()).map(str::to_owned);
         if mention
             .as_deref()
             .is_some_and(|query| !composer::is_path_query(query))
-            && state.file_index.is_none()
         {
-            state.file_index = Some(Arc::new(composer::workspace_files(&root, 10_000)));
+            request_file_index_scan(&mut state);
         }
         let suggestions = input_path_suggestions(&state);
         let selected = state
@@ -6604,6 +7017,7 @@ impl InteractiveShell {
         state.push_block(TranscriptBlock::NoticeStatus {
             text: message.into(),
             tone: NoticeTone::Success,
+            reserved_rows: 0,
         });
     }
 
@@ -6614,6 +7028,7 @@ impl InteractiveShell {
         state.push_block(TranscriptBlock::NoticeStatus {
             text: message.into(),
             tone: NoticeTone::Error,
+            reserved_rows: 0,
         });
     }
 
@@ -6721,6 +7136,8 @@ impl InteractiveShell {
         if let Some(lab) = state.model_lab {
             crate::tui::theme::apply_model_lab(&mut theme, lab);
         }
+        state.seal_activity_group();
+        state.pending_activity_groups.clear();
         state.theme = theme;
         state.theme_epoch = state.theme_epoch.wrapping_add(1);
         state.invalidate_rich_text();
@@ -6808,6 +7225,8 @@ impl InteractiveShell {
         state.invalidate_transcript_layout();
         state.steering_queue = Arc::default();
         state.tool_panels.clear();
+        state.activity_groups.clear();
+        state.pending_activity_groups.clear();
         state.hidden_subagent_calls.clear();
         state.hidden_hydrated_subagent_calls.clear();
         state.hydrated_pending_subagent_calls.clear();
@@ -6850,6 +7269,7 @@ impl InteractiveShell {
         state.overlay = None;
         state.error = None;
         append_hydrated_items(&mut state, items);
+        state.seal_activity_group();
         state.deferred_session_history = deferred_snapshot.map(|mut deferred| {
             deferred.retained_id_end = state.next_transcript_commit_id.0;
             deferred

@@ -48,6 +48,20 @@ host-owned task state; sources, changes, outputs, approvals, and progress appear
 only when structured evidence supports them. There is no extra agent mode or
 synchronized TUI.
 
+## Models and reasoning
+
+Serve uses the CLI bootstrap catalog, with a 4,096-model safety bound (previously
+256) and the existing bootstrap byte limit. Model availability still depends on
+credentials and provider inventory; GPT-6 Sol/Luna are not injected when Codex
+does not advertise them. Restart Serve after changing provider configuration.
+The installed Serve runtime must also be rebuilt/updated to the matching source;
+updating the CLI alone does not update that separate runtime's discovery code.
+
+The slider displays advertised Ultra as **Ultra**, transitioning from Max's
+rainbow to purple. Ultra still requires advertised Ultra/V2 support and the
+enabled, trusted, live `octet-subagents` service; the UI does not bypass those
+checks. See [provider reasoning](../../providers.md#reasoning).
+
 ## Access and authority
 
 The host binds **IPv4 loopback only**. A one-use launch capability is exchanged

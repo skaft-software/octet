@@ -2020,6 +2020,9 @@ ignored key = ignored
     ///
     /// The server answers exactly `routes.len()` requests and then exits, so a
     /// test that asserts the counter also asserts how many requests were made.
+    /// A request is counted as soon as it is read, before its response is
+    /// written, so the counter is already authoritative once a client can
+    /// observe that response and an assert never races the fixture thread.
     fn metadata_fixture(
         routes: Vec<(&'static str, &'static str, &'static str)>,
     ) -> (url::Url, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
@@ -2058,9 +2061,13 @@ ignored key = ignored
                     "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
+                // Count the request before answering it: the client cannot
+                // observe this response until the write below, so incrementing
+                // afterwards would let a caller that has already read the final
+                // body observe a stale count.
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let _ = stream.write_all(response.as_bytes());
                 let _ = stream.flush();
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         });
         (

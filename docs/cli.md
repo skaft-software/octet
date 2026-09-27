@@ -26,6 +26,7 @@ choices, generated extension flags, and defaults are not inferred here.
 | `--mouse auto\|terminal\|off\|app` | Default `auto`; only `app` captures mouse and selects the semantic viewport from startup. |
 | `--show-reasoning` | Show reasoning rather than the default collapsed presentation. |
 | `--show-images` | Opt in to bounded inline **tool-result display** on compatible interactive terminals; off by default. Not upload permission or input-attachment consent. [Display behavior](terminal.md#tool-evidence-and-worker-activity). |
+| `--theme NAME` | Choose built-in `auto`, `light`, `dark`, or a discovered TOML theme by file stem. [Theme discovery](themes.md). |
 | `--model ID` | Select model; explicitly overrides a resumed selection. |
 | `--reasoning LEVEL` / `--reasoning budget=N` | Model-capability-gated effort or compatible token budget. [Exact levels](providers.md#reasoning). |
 | `--cache-retention VALUE` | Provider cache-retention selection; documented example `short`. |
@@ -79,9 +80,12 @@ available; this does not clear historical usage uncertainty.
 In the interactive first-run flow, an empty catalog with no explicit
 model selection opens **Add an API key** first, then **Sign in with ChatGPT /
 other supported OAuth subscriptions**, **Local/self-hosted models**, and
-**Continue without a provider**. API-key entry is masked and saved only after
-review to owner-private, recoverable storage; it is not a command-line secret
-argument. Subscription choices are ChatGPT (Codex) and GitHub Copilot. See
+**Continue without a provider**. Use `/setup` in an existing TUI session to
+open that wizard on demand; the current model/session and default stay in place
+until the user explicitly switches with `/model`. API-key entry is masked and
+saved only after review to owner-private, recoverable storage; it is not a
+command-line secret argument. Subscription choices are ChatGPT (Codex) and
+GitHub Copilot. See
 [first-run behavior and credential privacy](providers.md#first-run-setup-unreleased).
 The `octet setup` subcommand below still configures explicit custom endpoints;
 print/RPC modes never open onboarding.
@@ -100,8 +104,8 @@ The Copilot integration accepts `--login copilot [--headless]` and
 `--logout copilot`, also under the alias `github-copilot`. It uses only its private
 OAuth store, not environment or editor credentials. Online shared catalogs can
 then discover eligible `github-copilot/<id>` models; offline adds none. First-run
-subscription setup also offers this device flow, but TUI slash auth commands
-are not yet integrated. Native-host protocol 1 gains no auth command or
+subscription setup also offers this device flow through `/setup`, but TUI
+`/login copilot` is not integrated. Native-host protocol 1 gains no auth command or
 credential field. [Limits and unrun live qualification](providers.md#github-copilot-unreleased-candidate).
 
 Setup reviews without writing by default. `--yes` commits only the reviewed
@@ -213,6 +217,7 @@ the report, not necessarily a nonzero harness exit.
 | `--prompt NAME` | Select a named startup/print prompt. |
 | `--debug-prompt` | Show exact final expansion and template hash before provider submission; can expose sensitive included content. |
 | `--prompt-template FILE-OR-DIR` | Explicit prompt source, repeatable in order. |
+| `--theme-dir FILE-OR-DIR` | Additional theme directory or TOML file; repeated paths use normal resource precedence. [Themes](themes.md). |
 | `--skill-dir PATH` | Explicit skill root. |
 | `--extension-dir PATH` | Explicit executable-extension source. |
 | `--enable-extension NAME` | One-invocation activation; not trust. |
@@ -231,10 +236,10 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The four official executable bundles and the separate Serve application must
-match the running host exactly. Current source packages are `0.8.0` with
-`requires_octet = "=0.8.0"`. The
-[0.8.0 release](https://github.com/skaft-software/octet/releases/tag/v0.8.0)
+The five executable bundles and separate Serve application are pinned to the
+running host exactly. This checkout's source manifests require `=0.8.1`;
+previously published 0.8.0 bundles require `=0.8.0`. The
+[0.8.1 release](https://github.com/skaft-software/octet/releases/tag/v0.8.1)
 records signed assets and public-install evidence. Catalog forms below require
 verified published assets matching the running host version:
 
@@ -244,8 +249,8 @@ octet extension update NAME
 octet extension remove NAME
 ```
 
-The executable catalog is `octet-browse`, `octet-mcp`, `octet-subagents`, and
-`octet-web-search`. Checksummed bundles publish atomically under
+The executable catalog is `octet-browse`, `octet-computer-use`, `octet-mcp`,
+`octet-subagents`, and `octet-web-search`. Checksummed bundles publish atomically under
 `~/.octet/extensions/<id>`; local updates must match the managed package ID.
 No install hook, dependency provisioning, activation, trust, or process launch
 occurs. Packaged skills require explicit loading. [Packaging contract](extensions.md).
@@ -308,6 +313,5 @@ and [historical Ygg update behavior](reference/historical-installation.md#updati
 are deliberately separate.
 
 `--safe` is hidden compatibility for `--safe-mode`; `--yolo` is rejected.
-`--reasoning-mode pro` loads legacy state only. `--theme-dir` and arbitrary
-theme names remain compatibility inputs; built-in terminal appearance choices
-are documented in [Theme status](themes.md). See [compatibility inputs](configuration.md#compatibility-inputs).
+`--reasoning-mode pro` loads legacy state only. Built-in and file theme
+selection are documented in [Themes](themes.md). See [compatibility inputs](configuration.md#compatibility-inputs).

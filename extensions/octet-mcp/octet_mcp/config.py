@@ -26,6 +26,31 @@ MAX_ARGS = 64
 MAX_ARGUMENT_BYTES = 16 * 1024
 MAX_ENVIRONMENT_ENTRIES = 32
 MAX_ENVIRONMENT_BYTES = 64 * 1024
+MAX_INHERITED_ENVIRONMENT_NAMES = 24
+# A server may inherit only these explicitly reviewed names from the already
+# sanitized octet-mcp process. This is intentionally not arbitrary ambient
+# inheritance: desktop-session names can grant access to the user's display.
+INHERITABLE_ENVIRONMENT_NAMES = frozenset(
+    {
+        "APPDATA",
+        "COMSPEC",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "DISPLAY",
+        "HOME",
+        "LOCALAPPDATA",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "USERPROFILE",
+        "WAYLAND_DISPLAY",
+        "WINDIR",
+        "XAUTHORITY",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_DIRS",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+    }
+)
 _SERVER_ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _CREDENTIAL_REFERENCE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
@@ -102,6 +127,8 @@ class ServerConfig:
     args: tuple[str, ...]
     cwd: Path
     environment: Mapping[str, str] = field(repr=False)
+    inherited_environment: tuple[str, ...] = ()
+    confirm_unknown_tools: bool = False
     enabled: bool = True
     required: bool = False
     startup_timeout_ms: int = 5000
@@ -152,6 +179,8 @@ _SERVER_FIELDS = {
     "args",
     "cwd",
     "env",
+    "inheritEnv",
+    "confirmUnknownTools",
     "url",
     "auth",
     "enabled",
@@ -516,6 +545,10 @@ def _parse_servers(
         )
         enabled = _boolean(descriptor.get("enabled", True), f"server {server_id} enabled")
         required = _boolean(descriptor.get("required", False), f"server {server_id} required")
+        confirm_unknown_tools = _boolean(
+            descriptor.get("confirmUnknownTools", False),
+            f"server {server_id} confirmUnknownTools",
+        )
         startup = _optional_bounded_integer(
             descriptor,
             "startupTimeoutMs",
@@ -562,6 +595,9 @@ def _parse_servers(
                 for item in args_value
             )
             environment = _parse_environment(descriptor.get("env", {}), server_id)
+            inherited_environment = _parse_inherited_environment(
+                descriptor.get("inheritEnv", []), server_id
+            )
             cwd_value = descriptor.get("cwd")
             if cwd_value is None:
                 cwd = default_cwd
@@ -577,13 +613,14 @@ def _parse_servers(
             _reject_transport_fields(
                 descriptor,
                 server_id,
-                {"command", "args", "cwd", "env"},
+                {"command", "args", "cwd", "env", "inheritEnv"},
                 "streamable-http",
             )
             command = ""
             args = ()
             cwd = default_cwd
             environment = {}
+            inherited_environment = ()
             url = _parse_streamable_http_url(descriptor.get("url"), server_id)
             auth = (
                 _parse_http_auth(descriptor["auth"], server_id)
@@ -599,6 +636,8 @@ def _parse_servers(
                 args=args,
                 cwd=cwd,
                 environment=environment,
+                inherited_environment=inherited_environment,
+                confirm_unknown_tools=confirm_unknown_tools,
                 enabled=enabled,
                 required=required,
                 startup_timeout_ms=startup,
@@ -718,6 +757,23 @@ def _parse_environment(value: Any, server_id: str) -> dict[str, str]:
             )
         result[name] = secret_value
     return result
+
+
+def _parse_inherited_environment(value: Any, server_id: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ConfigError(f"server {server_id} inheritEnv must be an array")
+    if len(value) > MAX_INHERITED_ENVIRONMENT_NAMES:
+        raise ConfigError(
+            f"server {server_id} inheritEnv exceeds the {MAX_INHERITED_ENVIRONMENT_NAMES}-name limit"
+        )
+    if any(not isinstance(name, str) or not _ENVIRONMENT_NAME.fullmatch(name) for name in value):
+        raise ConfigError(f"server {server_id} inheritEnv contains an invalid environment name")
+    if len(set(value)) != len(value):
+        raise ConfigError(f"server {server_id} inheritEnv contains duplicate names")
+    unsupported = set(value) - INHERITABLE_ENVIRONMENT_NAMES
+    if unsupported:
+        raise ConfigError(f"server {server_id} inheritEnv contains an unsupported name")
+    return tuple(value)
 
 
 def _trusted_project_descriptor(value: Any, index: int) -> tuple[Path, str]:

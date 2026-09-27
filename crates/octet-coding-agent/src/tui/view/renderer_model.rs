@@ -204,6 +204,7 @@ impl PublishedBlock {
                     output: panel.output.clone(),
                     images: panel.images.clone(),
                     image_rendering: panel.image_rendering,
+                    grouped_child: panel.grouped_child,
                     finished: panel.finished,
                     is_error: panel.is_error,
                     duration: panel.duration,

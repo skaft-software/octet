@@ -3,6 +3,7 @@
 use super::renderer_model::{RenderModel, RenderOwner};
 use std::cell::{RefCell, RefMut};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -25,6 +26,9 @@ const RENDER_INTERVAL: Duration = Duration::from_millis(16);
 /// response and active tool or shell dots breathe between foreground and muted
 /// tones without changing size.
 const EVENT_DOT_TOGGLE_INTERVAL: Duration = Duration::from_millis(500);
+/// Still's tool-dot pulse uses shorter steps; other themes keep the existing
+/// restrained event-marker cadence.
+const TOOL_BREATH_INTERVAL: Duration = Duration::from_millis(160);
 /// The optional braille spinner and model-adaptive status shimmer share one
 /// bounded renderer-thread cadence.
 const STATUS_ANIMATION_INTERVAL: Duration = Duration::from_millis(80);
@@ -41,6 +45,9 @@ const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) struct SharedState(
     Arc<Mutex<ShellState>>,
     Arc<Mutex<Option<Arc<super::renderer_geometry::RenderedGeometry>>>>,
+    /// Shared with the shell state so a finished workspace walk is detectable
+    /// without taking the state lock on every renderer wake.
+    Arc<AtomicBool>,
 );
 
 impl SharedState {
@@ -53,7 +60,20 @@ impl SharedState {
     }
 
     pub(super) fn new(state: ShellState) -> Self {
-        Self(Arc::new(Mutex::new(state)), Arc::new(Mutex::new(None)))
+        let mut state = state;
+        let file_index_ready = Arc::new(AtomicBool::new(false));
+        state.file_index_ready = file_index_ready.clone();
+        Self(
+            Arc::new(Mutex::new(state)),
+            Arc::new(Mutex::new(None)),
+            file_index_ready,
+        )
+    }
+
+    /// Lock-free test for a completed workspace walk. Idle wakes with nothing
+    /// new never take the state lock to find out.
+    pub(super) fn file_index_ready(&self) -> bool {
+        self.2.load(Ordering::Relaxed)
     }
 
     fn frame_written(&self) {
@@ -221,6 +241,19 @@ impl AnimationSchedule {
             thinking_spinner_animating(state) || status_shimmer_animating(state),
             now,
         );
+        let interval = if state
+            .theme
+            .resolve::<bool>("tool_dot_breathing")
+            .unwrap_or(false)
+        {
+            TOOL_BREATH_INTERVAL
+        } else {
+            EVENT_DOT_TOGGLE_INTERVAL
+        };
+        if self.event_dot.interval != interval {
+            self.event_dot.interval = interval;
+            self.event_dot.last_tick = None;
+        }
         self.event_dot.set_active(event_dot_animating(state), now);
         self.timer.set_active(status_timer_active(state), now);
     }
@@ -323,9 +356,41 @@ fn coalesce_render_commands(
     }
 }
 
-/// Flush the retained final frame, restore the process terminal through the
-/// same idempotent lifecycle path used by exit and panic, and acknowledge once.
-/// The caller (not this thread) re-enters on resume.
+/// Send OSC 2 only after startup resolved the session, and only when the
+/// desired title differs from this renderer instance's last write.
+///
+/// The composed title is built only when the session name actually changed.
+/// This runs on every painted frame, so formatting it unconditionally would
+/// allocate a string per frame to compare against a value that almost never
+/// moved.
+fn sync_window_title(
+    tui: &mut TUI<'_>,
+    state: &SharedState,
+    last_title: &mut Option<(Option<String>, String)>,
+) {
+    let shell = state.borrow();
+    if shell.startup_pending {
+        return;
+    }
+    // Compare borrowed names: a session name that has not moved must not cost
+    // a clone or a format on every frame.
+    if last_title
+        .as_ref()
+        .is_some_and(|(previous, _)| *previous == shell.session_name)
+    {
+        return;
+    }
+    let name = shell.session_name.clone();
+    drop(shell);
+    let title = name
+        .as_deref()
+        .map_or_else(|| "octet".to_owned(), |name| format!("octet · {name}"));
+    tui.set_window_title(&title);
+    *last_title = Some((name, title));
+}
+
+/// Flush the retained final frame, restore the process terminal, and
+/// acknowledge once. The caller re-enters with a new renderer on resume.
 fn suspend_terminal(tui: &mut TUI<'_>, acknowledged: mpsc::Sender<()>) {
     tui.request_render();
     tui.stop();
@@ -460,6 +525,10 @@ pub(super) fn render_loop_with_terminal(
     }
     tui.start();
     state.frame_written();
+    // Startup waits for resolved session metadata; a newly resumed renderer
+    // writes its title once even if the semantic name has not changed.
+    let mut last_title = None;
+    sync_window_title(&mut tui, &state, &mut last_title);
 
     let mut last_render: Option<Instant> = None;
     // Capture before each paint: an edit admitted during a slow terminal write
@@ -470,6 +539,14 @@ pub(super) fn render_loop_with_terminal(
     // final frame and the terminal handback belong.
     let mut suspended: Option<mpsc::Sender<()>> = None;
     loop {
+        // A finished workspace walk changes what the mention popup offers, so
+        // admit it as semantic work: the scan indicator has to clear on its own
+        // frame while the composer is otherwise idle. The atomic is tested
+        // first so an idle wake does not take the state lock for nothing.
+        let index_loaded = state.file_index_ready() && {
+            let mut shell = state.borrow_mut();
+            super::poll_file_index_scan(&mut shell)
+        };
         let welcome = {
             let shell = state.borrow();
             let now = Instant::now();
@@ -494,6 +571,7 @@ pub(super) fn render_loop_with_terminal(
             break;
         }
         if let Some(RenderCommand::Suspend(reply)) = command {
+            sync_window_title(&mut tui, &state, &mut last_title);
             suspend_terminal(&mut tui, reply);
             return;
         }
@@ -511,7 +589,8 @@ pub(super) fn render_loop_with_terminal(
         };
         // The idle poll also services diagnostics emitted by lifecycle workers.
         // They enter semantic rows, never the physical terminal stream.
-        let semantic_command = matches!(command, Some(RenderCommand::Render))
+        let semantic_command = index_loaded
+            || matches!(command, Some(RenderCommand::Render))
             || (crate::output::has_tui_diagnostics() && !state.borrow().startup_pending);
         if !render_wake_requires_frame(
             semantic_command,
@@ -532,6 +611,7 @@ pub(super) fn render_loop_with_terminal(
             animations.remaining(Instant::now()),
         ) {
             if let Some(reply) = suspended.take() {
+                sync_window_title(&mut tui, &state, &mut last_title);
                 suspend_terminal(&mut tui, reply);
                 return;
             }
@@ -549,6 +629,7 @@ pub(super) fn render_loop_with_terminal(
             shell.expire_transcript_scrollbar(now);
         }
         last_editor_revision = state.borrow().editor.revision();
+        sync_window_title(&mut tui, &state, &mut last_title);
         tui.request_render();
         state.frame_written();
         last_render = Some(Instant::now());
@@ -556,6 +637,7 @@ pub(super) fn render_loop_with_terminal(
 
     // Stop (or channel closure) can overtake a coalesced Render. Publish the
     // latest semantic state before restoring the terminal, not after it.
+    sync_window_title(&mut tui, &state, &mut last_title);
     tui.request_render();
     state.frame_written();
     tui.stop();
@@ -564,6 +646,9 @@ pub(super) fn render_loop_with_terminal(
 #[cfg(test)]
 #[path = "renderer_shutdown_tests.rs"]
 mod shutdown_tests;
+#[cfg(test)]
+#[path = "renderer_title_tests.rs"]
+mod title_tests;
 
 #[cfg(test)]
 mod scheduler_tests {
@@ -773,6 +858,40 @@ mod scheduler_tests {
             assert_eq!(state.status_shimmer_frame as u64, ms / 80);
             assert_eq!(state.event_dot_visible, (ms / 500) % 2 == 0);
         }
+    }
+
+    #[test]
+    fn still_tool_breath_uses_a_faster_clock_without_changing_other_themes() {
+        use super::super::{InteractiveShell, ToolPanel, TranscriptBlock};
+        use crate::presentation::summarize_tool;
+        use octet_ai::ToolCallId;
+
+        let theme =
+            crate::tui::theme::test_theme_from_source("[colors]\ntool_dot_breathing = true");
+        let shell = InteractiveShell::test_shell_with_theme(theme);
+        let start = Instant::now();
+        let mut schedule = AnimationSchedule::new();
+        let mut state = shell.state.borrow_mut();
+        let args = serde_json::json!({"path": "src/lib.rs"});
+        let index = state.push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+            ToolCallId("pulse".into()),
+            "read".into(),
+            args.to_string(),
+            summarize_tool("read", &args),
+            String::new(),
+            false,
+            false,
+            None,
+            None,
+        ))));
+        state.register_active_event(index);
+        schedule.observe(&state, start);
+        assert_eq!(schedule.event_dot.interval, TOOL_BREATH_INTERVAL);
+        schedule.advance(&mut state, start + TOOL_BREATH_INTERVAL);
+        assert_eq!(state.event_spinner_frame, 1);
+        state.theme = crate::tui::theme::test_theme();
+        schedule.observe(&state, start + TOOL_BREATH_INTERVAL);
+        assert_eq!(schedule.event_dot.interval, EVENT_DOT_TOGGLE_INTERVAL);
     }
 
     #[test]

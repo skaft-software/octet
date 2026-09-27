@@ -594,6 +594,8 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
         api_name: "system".into(),
         context_window: 262_144,
         max_output_tokens: 16_384,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
         tools: true,
         ..Default::default()
     };
@@ -610,13 +612,17 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
         ..Default::default()
     };
 
+    // Discovery enabled: endpoint-asserted limits are authoritative while every
+    // other registry field keeps configured-wins behavior. Output stays the
+    // tighter of both caps so a profile shrink is honored in the safe direction.
     let merged = apply_configured_custom_model_overrides(
-        vec![discovered_system, discovered_other],
-        &[configured, configured_missing],
+        vec![discovered_system.clone(), discovered_other.clone()],
+        &[configured.clone(), configured_missing.clone()],
+        true,
     );
 
     assert_eq!(merged[0].api_name, "system");
-    assert_eq!(merged[0].context_window, 4_096);
+    assert_eq!(merged[0].context_window, 262_144);
     assert_eq!(merged[0].max_output_tokens, 1_024);
     assert!(merged[0].tools);
     assert!(merged[0].reasoning);
@@ -629,6 +635,261 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
     assert_eq!(merged[1].context_window, 8_192);
     assert_eq!(merged[2].api_name, "configured-only");
     assert_eq!(merged[2].context_window, 12_288);
+
+    // Explicit opt-out: `auto_discover: false` pins the registry inventory.
+    let pinned = apply_configured_custom_model_overrides(
+        vec![discovered_system, discovered_other],
+        &[configured, configured_missing],
+        false,
+    );
+    assert_eq!(pinned[0].context_window, 4_096);
+    assert_eq!(pinned[0].max_output_tokens, 1_024);
+}
+
+#[test]
+fn custom_endpoint_limits_follow_live_assertions_not_registry_pins() {
+    use crate::auth::custom::CustomModel;
+
+    // A vLLM profile switch from 131k to 161k: the registry still declares the
+    // old pin, but the live `max_model_len` assertion must win so restarts
+    // converge instead of re-entombing the stale value in the cache.
+    let configured = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 131_072,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    };
+    let discovered = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 161_000,
+        max_output_tokens: 16_384,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![discovered],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 161_000);
+    assert_eq!(merged[0].max_output_tokens, 16_384);
+
+    // A shrink to a smaller profile must also be followed, with output clamped
+    // to the live window.
+    let configured = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 161_000,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    };
+    let discovered = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 32_768,
+        max_output_tokens: 16_384,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![discovered],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 32_768);
+    assert_eq!(merged[0].max_output_tokens, 16_384);
+}
+
+#[test]
+fn unasserted_discovery_fallbacks_never_overwrite_configured_limits() {
+    use crate::auth::custom::CustomModel;
+
+    let configured = CustomModel {
+        api_name: "system".into(),
+        context_window: 8_192,
+        max_output_tokens: 1_024,
+        ..Default::default()
+    };
+    // A sparse inventory: the entry carries only an id, so both limits are the
+    // discovery fallback rather than something the endpoint said.
+    let sparse = CustomModel {
+        api_name: "system".into(),
+        context_window: 262_144,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![sparse],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 8_192);
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+    assert!(!merged[0].context_window_asserted);
+    assert!(!merged[0].max_output_tokens_asserted);
+
+    // The two limits are asserted independently. A llama.cpp gateway reports
+    // its served context but no output cap, so the window must follow the live
+    // assertion while the configured output cap survives.
+    let context_only = CustomModel {
+        api_name: "system".into(),
+        context_window: 131_072,
+        max_output_tokens: 16_384,
+        context_window_asserted: true,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![context_only],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 131_072);
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+    assert!(merged[0].context_window_asserted);
+    assert!(!merged[0].max_output_tokens_asserted);
+
+    // The mirror case: an asserted output cap is honored, and the unasserted
+    // window keeps the configured pin rather than the 262144 fallback.
+    let output_only = CustomModel {
+        api_name: "system".into(),
+        context_window: 262_144,
+        max_output_tokens: 4_096,
+        max_output_tokens_asserted: true,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![output_only],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 8_192);
+    // min(asserted 4096, configured 1024) clamped to the effective window.
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+    assert!(!merged[0].context_window_asserted);
+    assert!(merged[0].max_output_tokens_asserted);
+
+    // An asserted output cap larger than the configured one still cannot raise
+    // the user's tighter cap; the tighter of the two wins.
+    let generous = CustomModel {
+        api_name: "system".into(),
+        context_window: 262_144,
+        max_output_tokens: 32_000,
+        max_output_tokens_asserted: true,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![generous],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+}
+
+#[test]
+fn merging_twice_keeps_a_live_assertion_over_a_registry_pin() {
+    use crate::auth::custom::CustomModel;
+
+    // Registration runs the merge once while caching and again over that
+    // output. The provenance has to survive the first pass, or the second one
+    // silently restores the stale pin.
+    let configured = CustomModel {
+        api_name: "alpha".into(),
+        context_window: 32_000,
+        ..Default::default()
+    };
+    let discovered = CustomModel {
+        api_name: "alpha".into(),
+        context_window: 64_000,
+        context_window_asserted: true,
+        ..Default::default()
+    };
+    let once = apply_configured_custom_model_overrides(
+        vec![discovered.clone()],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(once[0].context_window, 64_000);
+    assert!(once[0].context_window_asserted);
+
+    let twice =
+        apply_configured_custom_model_overrides(once, std::slice::from_ref(&configured), true);
+    assert_eq!(twice[0].context_window, 64_000);
+    assert!(twice[0].context_window_asserted);
+}
+
+#[test]
+fn a_sparse_id_only_inventory_keeps_configured_limits_through_registration_and_cache() {
+    use crate::auth::custom::{CredentialStore, CustomCredential, CustomModel};
+
+    // The real-world shape: a local OpenAI-compatible gateway whose /v1/models
+    // lists ids and nothing else. Discovery must not replace the user's small
+    // window and output cap with the 262144/16384 fallbacks, and the cached
+    // inventory must carry the same effective limits on the next start.
+    let directory = tempfile::tempdir().unwrap();
+    let store = CredentialStore::new(directory.path().join("custom.json"));
+    let cred = CustomCredential {
+        base_url: "http://127.0.0.1:9/v1/".into(),
+        api_key: "fixture".into(),
+        api_name: String::new(),
+        headers: Vec::new(),
+        models: vec![CustomModel {
+            api_name: "local".into(),
+            display_name: "Local".into(),
+            context_window: 8_192,
+            max_output_tokens: 1_024,
+            tools: true,
+            ..Default::default()
+        }],
+        auto_discover: true,
+    };
+
+    // Stand in for the id-only response: every limit came from a fallback.
+    let sparse = |api_name: &str| CustomModel {
+        api_name: api_name.to_owned(),
+        context_window: 262_144,
+        max_output_tokens: 16_384,
+        context_window_asserted: false,
+        max_output_tokens_asserted: false,
+        ..Default::default()
+    };
+    let discovered = vec![sparse("local"), sparse("local-extra")];
+
+    let merged = apply_configured_custom_model_overrides(
+        apply_known_custom_model_defaults(&cred, discovered),
+        &cred.models,
+        true,
+    );
+    assert_eq!(merged[0].context_window, 8_192);
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+    // A model with no configured counterpart keeps the discovery fallback.
+    assert_eq!(merged[1].api_name, "local-extra");
+    assert_eq!(merged[1].context_window, 262_144);
+
+    // The cached inventory is the already-merged effective limit, so the next
+    // start must read back the same numbers rather than re-deriving them.
+    let fingerprint = "fixture-fingerprint";
+    save_custom_model_cache_for(
+        &store,
+        "local-provider",
+        &cred.base_url,
+        fingerprint,
+        &merged,
+    )
+    .unwrap();
+    let loaded = load_custom_model_cache_for(&store, "local-provider", &cred.base_url, fingerprint)
+        .unwrap()
+        .expect("inventory must round-trip through the cache");
+    let cached = match loaded {
+        CachedCustomInventory::Available(models) => models,
+        CachedCustomInventory::Unavailable => panic!("inventory cached as unavailable"),
+    };
+    assert_eq!(cached[0].api_name, "local");
+    assert_eq!(cached[0].context_window, 8_192);
+    assert_eq!(cached[0].max_output_tokens, 1_024);
+    // The cached limit came from this file, not the endpoint, so the
+    // provenance must round-trip or the next start cannot tell them apart.
+    assert!(!cached[0].context_window_asserted);
+    assert!(!cached[0].max_output_tokens_asserted);
 }
 
 #[test]
@@ -705,22 +966,43 @@ fn configured_apple_metadata_overrides_embedded_defaults() {
         reasoning: false,
         ..Default::default()
     };
+    // A sparse Apple response resolves through the embedded defaults before
+    // the merge, so the live 8k window wins over the 4k pin while the tighter
+    // 512-token output cap is preserved. Non-limit fields stay configured-wins.
     let merged = apply_configured_custom_model_overrides(
         apply_known_custom_model_defaults(
             &cred,
             vec![CustomModel {
                 api_name: "system".into(),
+                reasoning_source: Some(octet_ai::types::ReasoningMetadataSource::Absent),
                 ..Default::default()
             }],
         ),
-        &[configured],
+        std::slice::from_ref(&configured),
+        true,
     );
 
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].context_window, 4_096);
+    assert_eq!(merged[0].context_window, APPLE_FM_SYSTEM_CONTEXT_WINDOW);
     assert_eq!(merged[0].max_output_tokens, 512);
     assert!(!merged[0].tools);
     assert!(!merged[0].reasoning);
+
+    // With discovery disabled the registry pin is authoritative.
+    let pinned = apply_configured_custom_model_overrides(
+        apply_known_custom_model_defaults(
+            &cred,
+            vec![CustomModel {
+                api_name: "system".into(),
+                reasoning_source: Some(octet_ai::types::ReasoningMetadataSource::Absent),
+                ..Default::default()
+            }],
+        ),
+        std::slice::from_ref(&configured),
+        false,
+    );
+    assert_eq!(pinned[0].context_window, 4_096);
+    assert_eq!(pinned[0].max_output_tokens, 512);
 }
 
 #[test]
@@ -2870,6 +3152,8 @@ fn custom_model_cache_is_scoped_to_endpoint_and_reuses_discovery() {
         display_name: "Local Model".into(),
         context_window: 262_144,
         max_output_tokens: 16_384,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
         tools: true,
         parallel_tool_calls: true,
         vision: false,
@@ -3018,6 +3302,37 @@ fn version_four_custom_cache_is_invalid_after_hlid_tool_fallback_change() {
     );
 }
 
+#[test]
+fn version_nine_custom_cache_is_invalid_after_endpoint_limits_fix() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
+    let base_url = "http://127.0.0.1:8000/v1/";
+    let fingerprint = custom_credential_fingerprint("", &http::HeaderMap::new());
+    // v9 cached the post-override registry pin, so a profile switch from 131k
+    // to 161k could never converge: every refresh re-entombed the stale value.
+    let stale = CustomModelCache {
+        version: 9,
+        base_url: base_url.into(),
+        credential_fingerprint: fingerprint.clone(),
+        models: vec![crate::auth::custom::CustomModel {
+            api_name: "qwen38-gptq-mtp4-stable".into(),
+            context_window: 131_072,
+            ..Default::default()
+        }],
+    };
+    store
+        .save_model_cache(&serde_json::to_vec(&stale).unwrap())
+        .unwrap();
+
+    assert!(
+        load_custom_model_cache(&store, base_url, &fingerprint)
+            .unwrap()
+            .is_none(),
+        "v9 may contain a configured-wins context_window pin over a live max_model_len assertion"
+    );
+}
+
 #[tokio::test]
 async fn stale_positive_custom_cache_is_available_without_waiting_for_discovery() {
     use wiremock::{
@@ -3103,7 +3418,11 @@ fn hlid_llama_cpp_metadata_reports_the_served_context_window() {
         }
     });
 
-    assert_eq!(extract_ctx_from_model_entry(&entry), 131_072);
+    assert_eq!(extract_ctx_from_model_entry(&entry), Some(131_072));
+    assert_eq!(
+        extract_ctx_from_model_entry(&serde_json::json!({"id": "sparse"})),
+        None
+    );
 }
 
 #[test]
@@ -4785,7 +5104,9 @@ async fn custom_catalog_discovery_bounds_batches_and_isolates_endpoints_and_offl
         }
         let online = online.resolve(&id).unwrap();
         let offline = offline.resolve(&id).unwrap();
-        assert_eq!(online.spec.limits.context_window, 32000);
+        // Discovery enabled: the live 64k assertion wins over the 32k registry
+        // pin online, and the offline run reuses the same normalized cache.
+        assert_eq!(online.spec.limits.context_window, 64000);
         assert_eq!(
             online.spec.limits.context_window,
             offline.spec.limits.context_window

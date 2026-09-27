@@ -60,12 +60,29 @@ fn should_offer(config: &Config, catalog: &octet_ai::ModelCatalog) -> bool {
     !config.model_explicit && catalog.models().next().is_none()
 }
 
-/// The selected local model is already reviewed/persisted by guided setup. Cloud
-/// authentication refreshes the inventory, then uses the ordinary startup model
-/// picker (including its persistence and resumed-session precedence).
-struct SetupResult {
-    catalog: octet_ai::ModelCatalog,
-    model: Option<ModelId>,
+/// First-run local selection can persist a default; in-session setup leaves it
+/// alone. Cloud authentication refreshes the inventory, then first-run setup
+/// uses the ordinary startup model picker (including resumed-session precedence).
+pub(super) struct SetupResult {
+    pub(super) catalog: octet_ai::ModelCatalog,
+    pub(super) notes: crate::app::bootstrap::CodexContextNotes,
+    pub(super) model: Option<ModelId>,
+    pub(super) configured_endpoint: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+enum SetupTarget {
+    Endpoint(&'static str),
+    ModelPrefix(&'static str),
+}
+
+impl SetupTarget {
+    fn available(self, catalog: &octet_ai::ModelCatalog) -> bool {
+        catalog.models().any(|model| match self {
+            Self::Endpoint(endpoint) => model.endpoint.0 == endpoint,
+            Self::ModelPrefix(prefix) => model.id.0.starts_with(prefix),
+        })
+    }
 }
 
 pub(super) async fn run(
@@ -73,51 +90,81 @@ pub(super) async fn run(
     input: &mut EventStream,
     boot: &mut Bootstrap,
 ) -> anyhow::Result<()> {
-    if !should_offer(&boot.config, &boot.catalog) {
-        return Ok(());
-    }
-    while !shell.close_requested() {
-        let Some(route) = choose_route(shell, input).await? else {
-            return Ok(());
-        };
-        let result = match route {
-            SetupRoute::Local => guided_provider_setup(shell, input, &boot.config)
-                .await?
-                .map(|completed| SetupResult {
-                    catalog: completed.catalog,
-                    model: Some(completed.model),
-                }),
-            SetupRoute::ApiKey => {
-                if !add_api_key(shell, input).await? {
-                    continue;
-                }
-                refresh_catalog(shell, input, boot.config.offline).await?
-            }
-            SetupRoute::Subscription => {
-                if !sign_in(shell, input, boot.config.offline).await? {
-                    continue;
-                }
-                refresh_catalog(shell, input, boot.config.offline).await?
-            }
-        };
-        if let Some(result) = result {
-            let notice = match &result.model {
-                Some(model) => format!("provider setup saved · {}", model.0),
-                None => "provider configured; select a model to get started".to_owned(),
-            };
-            install_result(boot, result);
-            shell.set_runtime_config(boot.config.clone());
-            shell.clear_error();
-            shell.notice(notice);
-            shell.render();
-            return Ok(());
-        }
+    if should_offer(&boot.config, &boot.catalog) {
+        run_setup(shell, input, boot).await?;
     }
     Ok(())
 }
 
+pub(super) async fn run_setup(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    boot: &mut Bootstrap,
+) -> anyhow::Result<()> {
+    if let Some(result) = configure(shell, input, &boot.config, true).await? {
+        let notice = match &result.model {
+            Some(model) => format!("provider setup saved · {}", model.0),
+            None => "provider configured; select a model to get started".to_owned(),
+        };
+        install_result(boot, result);
+        shell.set_runtime_config(boot.config.clone());
+        shell.clear_error();
+        shell.notice(notice);
+        shell.render();
+    }
+    Ok(())
+}
+
+/// The same wizard is available after startup. An existing session does not
+/// change its active model or persisted default just to add another provider.
+pub(super) async fn configure(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    config: &Config,
+    persist_local_model: bool,
+) -> anyhow::Result<Option<SetupResult>> {
+    while !shell.close_requested() {
+        let Some(route) = choose_route(shell, input).await? else {
+            return Ok(None);
+        };
+        let result = match route {
+            SetupRoute::Local => guided_provider_setup(shell, input, config, persist_local_model)
+                .await?
+                .map(|completed| SetupResult {
+                    catalog: completed.catalog,
+                    notes: Default::default(),
+                    model: Some(completed.model),
+                    configured_endpoint: None,
+                }),
+            SetupRoute::ApiKey => {
+                let Some(endpoint) = add_api_key(shell, input).await? else {
+                    continue;
+                };
+                refresh_catalog(
+                    shell,
+                    input,
+                    config.offline,
+                    SetupTarget::Endpoint(endpoint),
+                )
+                .await?
+            }
+            SetupRoute::Subscription => {
+                let Some(target) = sign_in(shell, input, config.offline).await? else {
+                    continue;
+                };
+                refresh_catalog(shell, input, config.offline, target).await?
+            }
+        };
+        if result.is_some() {
+            return Ok(result);
+        }
+    }
+    Ok(None)
+}
+
 fn install_result(boot: &mut Bootstrap, result: SetupResult) {
     boot.catalog = result.catalog;
+    boot.merge_catalog_notes(result.notes);
     if let Some(model) = result.model {
         boot.config.model = Some(model);
         boot.config.model_explicit = false;
@@ -128,21 +175,30 @@ async fn refresh_catalog<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
     offline: bool,
+    target: SetupTarget,
 ) -> anyhow::Result<Option<SetupResult>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     match run_blocking_lifecycle(shell, input, "refreshing provider models…", move || {
-        crate::app::bootstrap::model_catalog_with_offline(offline)
+        crate::app::bootstrap::model_catalog_for_readiness(
+            offline,
+            &crate::app::bootstrap::CatalogReadiness::Fleet,
+        )
     })
     .await
     {
-        Ok(catalog) if catalog.models().next().is_some() => Ok(Some(SetupResult {
+        Ok((catalog, notes)) if target.available(&catalog) => Ok(Some(SetupResult {
             catalog,
+            notes,
             model: None,
+            configured_endpoint: match target {
+                SetupTarget::Endpoint(endpoint) => Some(endpoint),
+                SetupTarget::ModelPrefix(_) => None,
+            },
         })),
         Ok(_) => {
-            shell.error("Credential saved, but no models are available. Retry setup or continue without a provider; offline discovery may require restarting online.".into());
+            shell.error("Credential saved, but no models are available for that provider. Retry setup or restart online; the current model is unchanged.".into());
             shell.render();
             Ok(None)
         }
@@ -157,7 +213,10 @@ where
     }
 }
 
-async fn add_api_key<S>(shell: &mut InteractiveShell, input: &mut S) -> anyhow::Result<bool>
+async fn add_api_key<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+) -> anyhow::Result<Option<&'static str>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
@@ -178,10 +237,10 @@ where
     )
     .await?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(provider) = providers.get(selected) else {
-        return Ok(false);
+        return Ok(None);
     };
     let storage = (|| -> anyhow::Result<_> {
         let store = crate::provider_setup::BuiltinApiKeyStore::default_store()?;
@@ -193,7 +252,7 @@ where
         Err(_) => {
             shell.error("The private credential location is unavailable. Check permissions and retry, or choose another setup method.".into());
             shell.render();
-            return Ok(false);
+            return Ok(None);
         }
     };
     if replace_existing
@@ -211,15 +270,61 @@ where
         .await?
             != Some(0)
     {
-        return Ok(false);
+        return Ok(None);
     }
-    enter_and_save_api_key(shell, input, provider.label, |key| {
+    let environment_override = match credential_environment_override(provider.id) {
+        Ok(variable) => variable,
+        Err(_) => {
+            shell.error("The provider's credential environment is invalid. Fix or unset it before saving an API key.".into());
+            shell.render();
+            return Ok(None);
+        }
+    };
+    if let Some(variable) = environment_override {
+        if provider_setup_picker(
+            shell,
+            input,
+            "Environment key takes precedence",
+            vec!["Save a fallback key anyway".into(), "Back".into()],
+            vec![
+                Some(format!("{variable} currently takes precedence over saved keys; this new key will not be used until that variable is unset")),
+                None,
+            ],
+            1,
+        )
+        .await?
+            != Some(0)
+        {
+            return Ok(None);
+        }
+    }
+    let saved = enter_and_save_api_key(shell, input, provider.label, |key| {
         store
             .save(provider.id, key, replace_existing)
             .map(|_| ())
             .map_err(Into::into)
     })
-    .await
+    .await?;
+    Ok(saved.then_some(provider.id))
+}
+
+fn credential_environment_override(provider_id: &str) -> anyhow::Result<Option<&'static str>> {
+    let declaration = crate::providers::BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| declaration.id == provider_id)
+        .expect("API-key choice is a built-in declaration");
+    for variable in declaration
+        .authentication
+        .environment_variables()
+        .into_iter()
+        .flatten()
+    {
+        if octet_ai::auth::read_bounded_env(variable)?.is_some_and(|value| !value.trim().is_empty())
+        {
+            return Ok(Some(variable));
+        }
+    }
+    Ok(None)
 }
 
 /// The persistence callback is invoked only after explicit review. Kept narrow
@@ -292,7 +397,7 @@ async fn sign_in<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
     offline: bool,
-) -> anyhow::Result<bool>
+) -> anyhow::Result<Option<SetupTarget>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
@@ -316,12 +421,12 @@ where
     let subscription = match selection {
         Some(0) => Subscription::ChatGpt,
         Some(1) => Subscription::Copilot,
-        _ => return Ok(false),
+        _ => return Ok(None),
     };
     if offline {
         shell.error("Subscription sign-in requires a connection. Restart without --offline to sign in, or choose an API key/local endpoint.".into());
         shell.render();
-        return Ok(false);
+        return Ok(None);
     }
     // Reuse the real host-owned flows, including their browser/device-code
     // fallback. No credentials are imported from other applications.
@@ -351,11 +456,15 @@ where
     shell.resume()?;
     shell.set_run_label("idle");
     match result {
-        Ok(success) => Ok(success),
+        Ok(true) => Ok(Some(match subscription {
+            Subscription::ChatGpt => SetupTarget::Endpoint(crate::auth::codex::ENDPOINT_ID),
+            Subscription::Copilot => SetupTarget::ModelPrefix("github-copilot/"),
+        })),
+        Ok(false) => Ok(None),
         Err(_) => {
             shell.error("Sign-in did not complete. Try again or choose another provider.".into());
             shell.render();
-            Ok(false)
+            Ok(None)
         }
     }
 }
@@ -515,9 +624,10 @@ mod tests {
             vec![key(KeyCode::Down), key(KeyCode::Enter)],
         ] {
             let mut shell = InteractiveShell::test_shell();
-            assert!(!sign_in(&mut shell, &mut tokio_stream::iter(events), true)
+            assert!(sign_in(&mut shell, &mut tokio_stream::iter(events), true)
                 .await
-                .unwrap());
+                .unwrap()
+                .is_none());
         }
     }
 
@@ -559,7 +669,9 @@ mod tests {
             &mut boot,
             SetupResult {
                 catalog: catalog.clone(),
+                notes: Default::default(),
                 model: None,
+                configured_endpoint: None,
             },
         );
         assert_eq!(boot.config.model, Some(ModelId("configured-model".into())));
@@ -570,7 +682,9 @@ mod tests {
             &mut boot,
             SetupResult {
                 catalog,
+                notes: Default::default(),
                 model: Some(model.clone()),
+                configured_endpoint: None,
             },
         );
         assert_eq!(boot.config.model, Some(model));

@@ -1,0 +1,98 @@
+{
+  "ai21": {
+    "color": "#d63864",
+    "id": "com.octet.computeruse.ai21"
+  },
+  "alibaba": {
+    "color": "#c15512",
+    "id": "com.octet.computeruse.alibaba"
+  },
+  "allenai": {
+    "color": "#c74482",
+    "id": "com.octet.computeruse.allenai"
+  },
+  "amazon": {
+    "color": "#a96500",
+    "id": "com.octet.computeruse.amazon"
+  },
+  "anthropic": {
+    "color": "#a9634c",
+    "id": "com.octet.computeruse.anthropic"
+  },
+  "baidu": {
+    "color": "#5c6ae2",
+    "id": "com.octet.computeruse.baidu"
+  },
+  "bytedance": {
+    "color": "#3273d4",
+    "id": "com.octet.computeruse.bytedance"
+  },
+  "cohere": {
+    "color": "#93649f",
+    "id": "com.octet.computeruse.cohere"
+  },
+  "deepseek": {
+    "color": "#4f6aeb",
+    "id": "com.octet.computeruse.deepseek"
+  },
+  "google": {
+    "color": "#298542",
+    "id": "com.octet.computeruse.google"
+  },
+  "ibm": {
+    "color": "#1c6bfe",
+    "id": "com.octet.computeruse.ibm"
+  },
+  "kimi": {
+    "color": "#0471ec",
+    "id": "com.octet.computeruse.kimi"
+  },
+  "meta": {
+    "color": "#0077d3",
+    "id": "com.octet.computeruse.meta"
+  },
+  "microsoft": {
+    "color": "#0077d3",
+    "id": "com.octet.computeruse.microsoft"
+  },
+  "minimax": {
+    "color": "#d93160",
+    "id": "com.octet.computeruse.minimax"
+  },
+  "mistral": {
+    "color": "#c15500",
+    "id": "com.octet.computeruse.mistral"
+  },
+  "nvidia": {
+    "color": "#5d7f26",
+    "id": "com.octet.computeruse.nvidia"
+  },
+  "openai": {
+    "color": "#767676",
+    "id": "com.octet.computeruse.openai"
+  },
+  "perplexity": {
+    "color": "#1b818e",
+    "id": "com.octet.computeruse.perplexity"
+  },
+  "tencent": {
+    "color": "#3d7aa9",
+    "id": "com.octet.computeruse.tencent"
+  },
+  "unknown": {
+    "color": "#16846b",
+    "id": "com.octet.computeruse.unknown"
+  },
+  "xai": {
+    "color": "#6f69cd",
+    "id": "com.octet.computeruse.xai"
+  },
+  "xiaomi": {
+    "color": "#c65100",
+    "id": "com.octet.computeruse.xiaomi"
+  },
+  "zai": {
+    "color": "#1973e0",
+    "id": "com.octet.computeruse.zai"
+  }
+}

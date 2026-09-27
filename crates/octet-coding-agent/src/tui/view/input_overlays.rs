@@ -217,8 +217,15 @@ pub(super) fn render_slash_suggestions(
     }
 
     let layout = crate::tui::layout::PresentationLayout::new(&state.theme, width);
-    let popup_width = layout.content_width;
-    let popup_prefix = " ".repeat(usize::from(layout.inset));
+    // The command marker and label continue the composer marker and draft
+    // text columns, including the shaded/framed chrome's inner cushion.
+    let inner_inset: u16 = match state.theme.resolve::<String>("composer").as_deref() {
+        Some("shaded") => 1,
+        Some("framed") => 2,
+        _ => 0,
+    };
+    let popup_width = layout.content_width.saturating_sub(inner_inset * 2).max(1);
+    let popup_prefix = " ".repeat(usize::from(layout.inset + inner_inset));
 
     // Keep one compact hint row below the choices. Moving the metadata to the
     // footer makes autocomplete read as an inline continuation of the composer
@@ -333,6 +340,19 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
     }
     let matches = input_path_suggestions(state);
     if matches.is_empty() {
+        // A scan in progress is reported rather than drawn as an empty popup:
+        // the walk takes as long as the workspace takes, and silence here reads
+        // as "`@` does not work" rather than "still reading the tree".
+        if state.file_index_scanning
+            && composer::active_mention(state.editor.text())
+                .is_some_and(|query| !composer::is_path_query(query))
+        {
+            let marker = state.theme.glyph("prompt");
+            let label = state
+                .theme
+                .fg("muted", &format!("{marker} scanning project files..."));
+            return vec![fit_line(&format!("  {label}"), width)];
+        }
         return Vec::new();
     }
     let heading_label = if composer::active_mention(state.editor.text())
@@ -674,6 +694,50 @@ pub(super) fn render_pending_steering(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    use crate::tui::theme::{test_theme_source_with, TerminalBackground};
+
+    #[test]
+    fn cards_slash_menu_marker_and_command_align_with_shaded_composer() {
+        let mut state = ShellState {
+            theme: test_theme_source_with(
+                include_str!("../../../../../examples/themes/Cards.toml"),
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                TerminalBackground::Dark,
+            ),
+            ..Default::default()
+        };
+        state.editor.set_text("/");
+        for width in [40, 80, 120] {
+            let composer = crate::tui::composer_surface::render_composer_surface(
+                &state,
+                width,
+                std::time::Instant::now(),
+            );
+            let composer = composer
+                .iter()
+                .map(|row| strip_terminal_sequences(row))
+                .find(|row| row.contains("❯ /"))
+                .expect("composer prompt with slash draft");
+            let choices = render_slash_suggestions(&state, width, 6);
+            let selected = strip_terminal_sequences(&choices[0]);
+            let marker_column = composer.find('❯').unwrap();
+            let command_column = composer.find('/').unwrap();
+            assert_eq!(
+                selected.find('❯'),
+                Some(marker_column),
+                "{width}: {selected:?}"
+            );
+            assert_eq!(
+                selected.find('/'),
+                Some(command_column),
+                "{width}: {selected:?}"
+            );
+            assert!(choices
+                .iter()
+                .all(|row| visible_width(row) <= width as usize));
+        }
+    }
 
     #[test]
     fn queued_edit_binding_resolves_from_the_keybinding_registry() {

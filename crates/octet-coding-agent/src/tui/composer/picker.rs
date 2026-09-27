@@ -7,14 +7,54 @@
 //! the surface/view owners; this module owns only query interpretation and
 //! filesystem discovery.
 
+use std::collections::BinaryHeap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use super::paste::{looks_like_absolute_path, unescape_for_completion};
 
-/// List workspace files (relative, sorted, gitignore-aware), capped.
-pub fn workspace_files(root: &Path, cap: usize) -> Vec<String> {
-    let mut files = Vec::new();
+/// The workspace's mention-completion index.
+///
+/// Matching runs on every keystroke, so a lowercased copy of every path is
+/// retained alongside the original. Lowercasing inside the match instead cost
+/// one fresh `String` per candidate per character typed.
+#[derive(Debug)]
+pub struct WorkspaceFileIndex {
+    paths: Vec<String>,
+    lowered: Vec<String>,
+    // Rendering and navigation can ask for the same query repeatedly. Keep one
+    // bounded result, scoped to this immutable index, without rescanning files.
+    last_match: Mutex<Option<(String, usize, Vec<usize>)>>,
+}
+
+impl WorkspaceFileIndex {
+    /// Build an index over already-collected paths.
+    pub fn from_paths(mut paths: Vec<String>) -> Self {
+        paths.sort();
+        let lowered = paths.iter().map(|path| path.to_lowercase()).collect();
+        Self {
+            paths,
+            lowered,
+            last_match: Mutex::new(None),
+        }
+    }
+
+    /// Every indexed path, sorted.
+    #[cfg(test)]
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+}
+
+/// List workspace files (relative, sorted, gitignore-aware).
+///
+/// The walk is complete and unbounded. A cap here was a silent lie: past the
+/// limit the index quietly stopped offering files and nothing on screen said
+/// so, so `@` completion was quietly wrong on a large workspace. Callers bound
+/// what they *display*; nothing here bounds what is *known*.
+pub fn workspace_files(root: &Path) -> WorkspaceFileIndex {
+    let mut paths = Vec::new();
     // `require_git(false)` honors .gitignore files even when the workspace is
     // not (yet) a git repository, which is also useful for new projects.
     let walker = ignore::WalkBuilder::new(root)
@@ -22,20 +62,16 @@ pub fn workspace_files(root: &Path, cap: usize) -> Vec<String> {
         .require_git(false)
         .build();
     for entry in walker.flatten() {
-        if files.len() >= cap {
-            break;
-        }
         if entry
             .file_type()
             .is_some_and(|file_type| file_type.is_file())
         {
             if let Ok(relative) = entry.path().strip_prefix(root) {
-                files.push(relative.to_string_lossy().into_owned());
+                paths.push(relative.to_string_lossy().into_owned());
             }
         }
     }
-    files.sort();
-    files
+    WorkspaceFileIndex::from_paths(paths)
 }
 
 fn active_token(text: &str) -> Option<&str> {
@@ -84,23 +120,45 @@ pub fn active_path(text: &str) -> Option<&str> {
 }
 
 /// Case-insensitive substring match on relative paths; earlier and shorter
-/// matches rank first.
-pub fn mention_matches<'a>(files: &'a [String], query: &str, limit: usize) -> Vec<&'a str> {
+/// matches rank first. Scan the index but retain only the best `limit` matches.
+/// Equal scores use the index's sorted path order as a stable tie-breaker.
+pub fn mention_matches<'a>(
+    index: &'a WorkspaceFileIndex,
+    query: &str,
+    limit: usize,
+) -> Vec<&'a str> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let cached = index.last_match.lock().expect("mention cache poisoned");
+    if let Some((last_query, last_limit, indices)) = cached.as_ref() {
+        if last_query == query && *last_limit == limit {
+            return indices.iter().map(|&at| index.paths[at].as_str()).collect();
+        }
+    }
+    drop(cached);
+
     let needle = query.to_lowercase();
-    let mut scored: Vec<(usize, usize, &str)> = files
-        .iter()
-        .filter_map(|file| {
-            file.to_lowercase()
-                .find(&needle)
-                .map(|at| (at, file.len(), file.as_str()))
-        })
-        .collect();
-    scored.sort();
-    scored
+    let mut best = BinaryHeap::with_capacity(limit.min(index.paths.len()));
+    for (index_in_paths, lowered) in index.lowered.iter().enumerate() {
+        if let Some(at) = lowered.find(&needle) {
+            let score = (at, index.paths[index_in_paths].len(), index_in_paths);
+            if best.len() < limit {
+                best.push(score);
+            } else if best.peek().is_some_and(|worst| score < *worst) {
+                best.pop();
+                best.push(score);
+            }
+        }
+    }
+    let indices: Vec<usize> = best
+        .into_sorted_vec()
         .into_iter()
-        .take(limit)
-        .map(|(_, _, file)| file)
-        .collect()
+        .map(|(_, _, index_in_paths)| index_in_paths)
+        .collect();
+    *index.last_match.lock().expect("mention cache poisoned") =
+        Some((query.to_owned(), limit, indices.clone()));
+    indices.iter().map(|&at| index.paths[at].as_str()).collect()
 }
 
 /// One filesystem path offered to the composer for Tab completion.
@@ -218,4 +276,50 @@ fn escape_path_token(text: &str) -> String {
         escaped.push(character);
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mention_top_k_preserves_full_sort_ranking_and_caches_only_the_window() {
+        let paths = (0..20_000)
+            .map(|i| format!("src/{:05}/Needle-{i}.rs", 20_000 - i))
+            .chain(["needle.rs".to_owned(), "a/needle.rs".to_owned()])
+            .collect();
+        let index = WorkspaceFileIndex::from_paths(paths);
+        let mut expected = index
+            .paths
+            .iter()
+            .map(|path| {
+                (
+                    path.to_lowercase().find("needle").unwrap(),
+                    path.len(),
+                    path.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        let expected = expected
+            .into_iter()
+            .take(100)
+            .map(|(_, _, path)| path)
+            .collect::<Vec<_>>();
+        assert_eq!(mention_matches(&index, "NEEDLE", 100), expected);
+        assert_eq!(mention_matches(&index, "NEEDLE", 100), expected);
+        let cache = index.last_match.lock().unwrap();
+        assert_eq!(cache.as_ref().unwrap().2.len(), 100);
+        drop(cache);
+        assert_eq!(mention_matches(&index, "missing", 100), Vec::<&str>::new());
+        assert!(index
+            .last_match
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .2
+            .is_empty());
+        assert!(mention_matches(&index, "needle", 0).is_empty());
+    }
 }

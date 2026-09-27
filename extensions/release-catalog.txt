@@ -1,7 +1,16 @@
 # Official executable-extension bundles attached to each canonical octet release.
 # Keep one lowercase package ID per line; release packaging and the compiled
 # package manager consume this same catalog.
+#
+# octet-browse is DEPRECATED but still published and installable. It remains the
+# safer surface for authenticated page work because it uses an isolated,
+# Octet-owned Chromium profile with a manual-auth boundary. New automation
+# should prefer the computer-use extension, which drives a locally installed
+# Cua Driver. The package is retained until that path demonstrably covers the
+# isolated-browser case.
+# deprecated: octet-browse -> octet-computer-use
 octet-browse
+octet-computer-use
 octet-mcp
 octet-subagents
 octet-web-search

@@ -60,10 +60,12 @@ pub(super) fn materialize_deferred_session_history(state: &SharedState) -> Resul
     let mut retained_tail_revisions = std::mem::take(&mut state.block_revisions);
     let local_revisions = retained_tail_revisions.split_off(retained_tail_len);
     let original_tool_panels = std::mem::take(&mut state.tool_panels);
+    let original_activity_groups = std::mem::take(&mut state.activity_groups);
     let original_new_output_count = state.new_output_count;
     let next_commit_id = state.next_transcript_commit_id;
 
     append_hydrated_items(&mut state, items);
+    state.seal_activity_group();
     state.new_output_count = original_new_output_count;
     let identity_plan = (|| {
         let original_snapshot_len = state.transcript.len();
@@ -96,6 +98,7 @@ pub(super) fn materialize_deferred_session_history(state: &SharedState) -> Resul
             state.transcript_commit_ids = retained_tail_ids;
             state.block_revisions = retained_tail_revisions;
             state.tool_panels = original_tool_panels;
+            state.activity_groups = original_activity_groups;
             state.next_transcript_commit_id = next_commit_id;
             state.new_output_count = original_new_output_count;
             state.invalidate_transcript_layout();
@@ -128,6 +131,16 @@ pub(super) fn materialize_deferred_session_history(state: &SharedState) -> Resul
         })
         .collect::<Vec<_>>();
     state.tool_panels.extend(local_tools);
+    state.activity_groups.extend(
+        original_activity_groups
+            .into_iter()
+            .filter_map(|mut group| {
+                (group.index >= retained_tail_len).then(|| {
+                    group.index = local_start + group.index - retained_tail_len;
+                    group
+                })
+            }),
+    );
 
     // Every previously loaded block moves down by the same prepended prefix.
     // Preserve all semantic block-index references, including an in-flight

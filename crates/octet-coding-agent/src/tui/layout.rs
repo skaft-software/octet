@@ -38,6 +38,11 @@ pub(crate) enum PickerLayout {
 pub(crate) struct PresentationLayout {
     pub(crate) inset: u16,
     pub(crate) content_width: u16,
+    /// Whether the theme's `content_max_width` actually narrowed the column on
+    /// this terminal. Filled chrome extends past the column only in this case;
+    /// a theme that merely insets its content (every theme, via
+    /// `transcript_inset`) keeps the historical inset look.
+    pub(crate) capped: bool,
     pub(crate) picker: PickerLayout,
     pub(crate) footer_gap: usize,
 }
@@ -57,12 +62,20 @@ impl PresentationLayout {
                     .composer_padding
                     .saturating_sub(BASE_COMPOSER_PADDING),
             );
-        let inset = if width >= 5 {
+        let base_inset = if width >= 5 {
             requested_inset.min(width.saturating_sub(1) / 2)
         } else {
             0
         };
-        let content_width = width.saturating_sub(inset.saturating_mul(2)).max(1);
+        let available = width.saturating_sub(base_inset.saturating_mul(2)).max(1);
+        let content_width = available.min(
+            theme
+                .resolve::<u16>("content_max_width")
+                .filter(|limit| *limit >= 12)
+                .unwrap_or(available),
+        );
+        let capped = content_width < available;
+        let inset = base_inset.saturating_add(available.saturating_sub(content_width) / 2);
         let picker = if resolved.narrow {
             PickerLayout::Compact
         } else if width >= WIDE_PICKER_COLUMNS {
@@ -74,6 +87,7 @@ impl PresentationLayout {
         Self {
             inset,
             content_width,
+            capped,
             picker,
             footer_gap: if resolved.narrow { 2 } else { 3 },
         }
@@ -100,6 +114,17 @@ pub(crate) fn composer_content_rows(terminal_rows: u16, visual_lines: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contained_theme_centers_reading_and_composer_width_without_narrow_overflow() {
+        let theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncontent_max_width = 112\n[layout]\ntranscript_inset = 2\ncomposer_padding = 1",
+        );
+        let wide = PresentationLayout::new(&theme, 160);
+        assert_eq!((wide.inset, wide.content_width), (24, 112));
+        let narrow = PresentationLayout::new(&theme, 48);
+        assert_eq!((narrow.inset, narrow.content_width), (0, 48));
+    }
 
     #[test]
     fn shared_grid_is_symmetric_and_uses_one_responsive_plan() {

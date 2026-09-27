@@ -1,0 +1,452 @@
+# Cards theme for octet
+#
+# Shaded minimalism: soft filled rails, almost no visible
+# borders, grayscale-first text with model-coloured prompt rails.
+#
+# How the look is built (all theme-file supported):
+# - `composer = "shaded"` selects the borderless shaded composer rectangle,
+#   painted with `composer_bg`. No rules, no box.
+# - `rail` transcript chrome + `[roles."surface.<kind>"]` backgrounds paint
+#   padded, filled blocks behind user prompts, tool calls, and shell blocks:
+#   a thin left-edge stripe, one-cell inset, blank cushion rows, and content on one soft
+#   fill. No outlines anywhere; the stripe (not a margin dot) carries status.
+# - Syntax is near-monochrome; signal colours (diff, error, success) are
+#   muted rather than neon.
+# - Model styling follows the compiled default: per-model-family adaptive
+#   lab colours (`model.use_lab_color = "true"`), so the composer marker,
+#   shimmer, and historical prompt rails take the model's colour while the
+#   UI accent stays amber.
+# - `splash_model_adaptive` hands the whole startup splash to the active
+#   model family: the byte-mark uses the model-blended gradient and the
+#   splash text uses the model accent, exactly like the compiled default.
+#   No `splash` colour is set (it would be ignored) and no `splash_box`,
+#   which would border the splash.
+#
+# Use:
+#   octet --theme Cards
+#   OCTET_THEME=Cards octet
+#   /theme Cards   (inside the TUI; /theme reload previews edits)
+
+# Open composer chrome selector (top-level token): "shaded" paints a
+# borderless filled rectangle with `composer_bg`. ("framed", "boxed".)
+composer = "shaded"
+
+# Turn off the margin status dots (green/red `•` left of tool and shell
+# rows). Status now lives in the left-edge stripe of each shaded block.
+margin_markers = false
+# Cards have no margin dots on rails, so they can start at the terminal edge.
+# Plain assistant and notice text keeps its two-cell reading gutter.
+transcript_flush = true
+
+# Keep prompt cards on the dark surface fill instead of washing them with
+# the per-turn model colour. The chevron and rail keep the prompt's
+# model colour; only the fill stays dark.
+prompt_wash = false
+prompt_rail_model_adaptive = true
+
+[metadata]
+name = "Cards"
+description = "Cards - Shaded surfaces with quiet stripes, amber accent, and adaptive model colours"
+author = "octet"
+version = "2"
+terminal = "light-dark"
+adaptive = false
+
+[colors]
+# Base text and neutral chrome. "default" inherits the terminal.
+foreground = "default"
+muted = "#8a8f98"
+dim = "#6e7480"
+border = "#2e2e2e"
+border_idle = "#2e2e2e"
+border_focused = "#d29c54"
+
+# Single warm accent + muted signal colours.
+accent = "#d29c54"
+success = "#8fc193"
+info = "default"
+error = "#cf7079"
+warning = "#c49a54"
+
+# Startup splash follows the active model family, like the compiled default:
+# the byte-mark uses the model-blended gradient and the splash text uses the
+# model accent. `splash_model_adaptive` claims the whole splash, so no
+# `splash` colour is set here (and no `splash_box`, which would border it).
+splash_model_adaptive = true
+
+# Use the compiled default's smaller splash geometry (4-tall mark at 16
+# columns) instead of the larger file-theme presentation.
+splash_compact = true
+
+# Shaded fills. `composer_bg` paints the borderless composer; the
+# `surface.*` roles below paint the transcript bands. All tints of one
+# neutral elevation so blocks read as paper, not slabs.
+composer_bg = "#202020"
+user_msg_text = "default"
+user_msg_bg = "#202020"
+assistant_msg_text = "default"
+tool_title = "default"
+tool_output = "#b3b8c0"
+diff_added = "default"
+diff_removed = "default"
+diff_context = "default"
+diff_added_marker = "#74a37f"
+diff_removed_marker = "#cf7079"
+diff_added_bg = "#1c2a22"
+diff_removed_bg = "#2d1d20"
+diff_hunk = "#7f9fd4"
+
+# Markdown chrome. Code blocks sit in a slightly deeper well.
+md_heading = "default"
+md_link = "default"
+md_code = "#c9c2b4"
+md_code_block = "default"
+md_code_border = "#2e2e2e"
+md_code_bg = "#181818"
+md_code_inline_bg = "default"
+md_quote = "default"
+md_quote_border = "#3a3a3a"
+md_hr = "#3a3a3a"
+md_list_bullet = "#8a8f98"
+
+# Syntax highlighting. Deliberately near-monochrome: quiet grays with a
+# faint sage for strings. No rainbow output.
+syntax_comment = "#6e7480"
+syntax_keyword = "#c2c7cf"
+syntax_function = "#d7dae0"
+syntax_variable = "#c6ccd4"
+syntax_string = "#8fa58c"
+syntax_number = "#939aa5"
+syntax_type = "#98a1ac"
+syntax_operator = "#939aa5"
+syntax_punctuation = "#6e7480"
+
+# Context-report legend (each category keeps its own channel).
+context_system = "#4aa8c7"
+context_skills = "#d19a35"
+context_tools = "#7f9fd4"
+context_messages = "#d8dee8"
+context_pending = "#d47d3f"
+context_framing = "#73808f"
+context_adjustment = "#a978c5"
+context_tokenizer_adjustment = "#c36f99"
+context_output = "#df6f7c"
+context_free = "#52c878"
+context_buffer = "#8678ba"
+
+# Model styling follows the compiled default: per-model-family adaptive
+# lab colours, with `model_accent` as the neutral fallback before a model
+# family is known. The UI accent above stays amber throughout.
+model_accent = "#d29c54"
+model_assistant = "default"
+model.use_lab_color = "true"
+
+# Semantic roles. Restrained: bold headings, italic emphasis, underline links.
+[roles.heading]
+bold = true
+
+[roles.strong]
+bold = true
+
+[roles.emphasis]
+italic = true
+
+[roles.quote]
+dim = true
+
+[roles.link]
+underline = true
+
+# Shaded transcript fills. The background of each `surface.<kind>` role is
+# the fill painted behind Card/Band content and cushion rows, so the whole
+# card interior reads as one soft block behind a hairline border.
+[roles."surface.user"]
+background = "#202020"
+
+[roles."surface.tool"]
+background = "#1e1e1e"
+
+[roles."surface.shell"]
+background = "#1e1e1e"
+
+# Quiet stripes and dividers. Prompt rails follow each turn's stored model
+# colour; tool/shell rails and the outcome divider use neutral border roles.
+# Without these, rails and rules fall back to bright terminal-white.
+[roles."surface.assistant.border"]
+foreground = "#2e2e2e"
+
+[roles."surface.reasoning.border"]
+foreground = "#2e2e2e"
+
+[roles."surface.tool.border"]
+foreground = "#5a5a5a"
+
+[roles."surface.shell.border"]
+foreground = "#5a5a5a"
+
+[roles."surface.notice.border"]
+foreground = "#2e2e2e"
+
+[roles."surface.outcome.border"]
+foreground = "#333333"
+
+[roles."surface.compaction.border"]
+foreground = "#2e2e2e"
+
+[glyphs]
+top_left = "╭"
+top_right = "╮"
+bottom_left = "╰"
+bottom_right = "╯"
+horizontal = "─"
+vertical = "│"
+branch = "│"
+last_branch = "└"
+rail = "│"
+prompt = "❯"
+shell = "$"
+success = "✓"
+warning = "!"
+note = "i"
+error = "×"
+interrupt = "■"
+pending = "·"
+reasoning = "·"
+collapsed = "▸"
+expanded = "▾"
+separator = " │ "
+ellipsis = "…"
+bullet = "-"
+wordmark = "octet"
+
+[glyphs_ascii]
+top_left = "+"
+top_right = "+"
+bottom_left = "+"
+bottom_right = "+"
+horizontal = "-"
+vertical = "|"
+branch = "|-"
+last_branch = "`-"
+rail = "|"
+prompt = ">"
+shell = "$"
+success = "+"
+warning = "!"
+note = "i"
+error = "x"
+interrupt = "!"
+pending = "."
+reasoning = "."
+collapsed = "[+]"
+expanded = "[-]"
+separator = " | "
+ellipsis = "..."
+bullet = "-"
+wordmark = "octet"
+
+# Transcript surfaces. Padded filled rails for user/tool/shell (stripe +
+# cushion + content + cushion on one fill); plain canvas for prose; a single
+# quiet rule for outcome dividers. Headings stay off to avoid label clutter.
+[surfaces.user]
+chrome = "rail"
+width = "full"
+align = "left"
+padding = 1
+
+[surfaces.assistant]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.reasoning]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.tool]
+chrome = "rail"
+width = "full"
+align = "left"
+padding = 1
+
+[surfaces.notice]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.outcome]
+chrome = "rule"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.shell]
+chrome = "rail"
+width = "full"
+align = "left"
+padding = 1
+
+[surfaces.compaction]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[layout]
+# Comfortable density puts one blank row between blocks; compact puts zero
+# (blocks stack flush) and airy puts two. Bands have no internal vertical
+# cushion by design, so this is the control for breathing room.
+density = "comfortable"
+show_header = false
+show_footer = true
+show_status_line = true
+show_reasoning = true
+show_panel_borders = true
+# Keep a breathing row above/below user prompt cards even if their chrome
+# ever stops being a card.
+prompt_padding = true
+transcript_inset = 2
+composer_padding = 1
+narrow_breakpoint = 64
+narrow_show_header = false
+narrow_show_footer = true
+narrow_show_status_line = true
+narrow_show_reasoning = true
+narrow_show_panel_borders = false
+
+# Background overlays. Both modes are fully pinned below so neither is
+# inherited by accident: `dark` restates the base design, `light` swaps in
+# warm-paper fills and darker text-safe hues.
+[variants.dark.colors]
+muted = "#8a8f98"
+dim = "#6e7480"
+border = "#2e2e2e"
+border_idle = "#2e2e2e"
+border_focused = "#d29c54"
+accent = "#d29c54"
+success = "#8fc193"
+error = "#cf7079"
+warning = "#c49a54"
+composer_bg = "#202020"
+user_msg_bg = "#202020"
+tool_output = "#b3b8c0"
+diff_added_marker = "#74a37f"
+diff_removed_marker = "#cf7079"
+diff_added_bg = "#1c2a22"
+diff_removed_bg = "#2d1d20"
+diff_hunk = "#7f9fd4"
+md_code = "#c9c2b4"
+md_code_bg = "#181818"
+md_code_border = "#2e2e2e"
+md_quote_border = "#3a3a3a"
+md_hr = "#3a3a3a"
+md_list_bullet = "#8a8f98"
+syntax_comment = "#6e7480"
+syntax_keyword = "#c2c7cf"
+syntax_function = "#d7dae0"
+syntax_variable = "#c6ccd4"
+syntax_string = "#8fa58c"
+syntax_number = "#939aa5"
+syntax_type = "#98a1ac"
+syntax_operator = "#939aa5"
+syntax_punctuation = "#6e7480"
+model_accent = "#d29c54"
+
+[variants.dark.roles."surface.user"]
+background = "#202020"
+
+[variants.dark.roles."surface.tool"]
+background = "#1e1e1e"
+
+[variants.dark.roles."surface.shell"]
+background = "#1e1e1e"
+
+[variants.dark.roles."surface.assistant.border"]
+foreground = "#2e2e2e"
+
+[variants.dark.roles."surface.reasoning.border"]
+foreground = "#2e2e2e"
+
+[variants.dark.roles."surface.tool.border"]
+foreground = "#5a5a5a"
+
+[variants.dark.roles."surface.shell.border"]
+foreground = "#5a5a5a"
+
+[variants.dark.roles."surface.notice.border"]
+foreground = "#2e2e2e"
+
+[variants.dark.roles."surface.outcome.border"]
+foreground = "#333333"
+
+[variants.dark.roles."surface.compaction.border"]
+foreground = "#2e2e2e"
+
+[variants.light.colors]
+muted = "#6b7280"
+dim = "#8a8f98"
+border = "#d8d5cf"
+border_idle = "#d8d5cf"
+border_focused = "#8a5a00"
+accent = "#8a5a00"
+success = "#2e7d4f"
+error = "#a33a45"
+warning = "#8a5f00"
+composer_bg = "#efebe4"
+user_msg_bg = "#efebe4"
+tool_output = "#4a4f55"
+diff_added_marker = "#2e7d4f"
+diff_removed_marker = "#a33a45"
+diff_added_bg = "#e8f3ec"
+diff_removed_bg = "#fbe9eb"
+diff_hunk = "#355f9e"
+md_code = "#6b5f45"
+md_code_bg = "#e4e0d6"
+md_code_border = "#d8d5cf"
+md_quote_border = "#d8d5cf"
+md_hr = "#d8d5cf"
+md_list_bullet = "#6b7280"
+syntax_comment = "#8a8f98"
+syntax_keyword = "#3f444b"
+syntax_function = "#2b3036"
+syntax_variable = "#2b3036"
+syntax_string = "#4f7048"
+syntax_number = "#5b616a"
+syntax_type = "#4d5966"
+syntax_operator = "#5b616a"
+syntax_punctuation = "#8a8f98"
+model_accent = "#8a5a00"
+
+[variants.light.roles."surface.user"]
+background = "#efebe4"
+
+[variants.light.roles."surface.tool"]
+background = "#f2efe9"
+
+[variants.light.roles."surface.shell"]
+background = "#f2efe9"
+
+[variants.light.roles."surface.assistant.border"]
+foreground = "#d8d5cf"
+
+[variants.light.roles."surface.reasoning.border"]
+foreground = "#d8d5cf"
+
+[variants.light.roles."surface.tool.border"]
+foreground = "#b5aea1"
+
+[variants.light.roles."surface.shell.border"]
+foreground = "#b5aea1"
+
+[variants.light.roles."surface.notice.border"]
+foreground = "#d8d5cf"
+
+[variants.light.roles."surface.outcome.border"]
+foreground = "#cfccc4"
+
+[variants.light.roles."surface.compaction.border"]
+foreground = "#d8d5cf"

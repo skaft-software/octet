@@ -810,11 +810,15 @@ mod tests {
         assert!(!directory
             .join(record_file_name(&session_scope(), "w1:p64"))
             .exists());
-        assert!(read_records(&directory).iter().any(|record| {
+        let records = read_records(&directory);
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(records.iter().any(|record| {
             record.pane_id == "w1:p0"
                 && record.session_id == "refreshed"
-                && record.session_dir == "/tmp/sessions"
-                && record.workspace == "/work"
+                // LaunchScope canonicalizes these paths; /tmp can resolve to
+                // /private/tmp on macOS when the directory exists.
+                && record.session_dir == scope.session_dir
+                && record.workspace == scope.workspace
         }));
     }
 

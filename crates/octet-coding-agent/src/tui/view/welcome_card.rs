@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use super::{fit_line, ShellState, TranscriptBlock};
+use crate::tui::layout::PresentationLayout;
 
 fn changelog_hint(state: &ShellState, width: u16) -> String {
     let tip = if state.theme.unicode() {
@@ -79,6 +80,26 @@ pub(super) fn render_welcome_card(
     max_rows: usize,
     now: Instant,
 ) -> Vec<String> {
+    let layout = PresentationLayout::new(&state.theme, width);
+    let inset = " ".repeat(usize::from(layout.inset));
+    render_welcome_content(state, layout.content_width, max_rows, now)
+        .into_iter()
+        .map(|line| {
+            if line.is_empty() {
+                line
+            } else {
+                format!("{inset}{line}")
+            }
+        })
+        .collect()
+}
+
+fn render_welcome_content(
+    state: &ShellState,
+    width: u16,
+    max_rows: usize,
+    now: Instant,
+) -> Vec<String> {
     let Some(started) = state.startup_card_started_at else {
         return Vec::new();
     };
@@ -93,27 +114,42 @@ pub(super) fn render_welcome_card(
         return render_pi_startup(state, width);
     }
 
-    let rows = if state.theme.is_compiled_default() {
-        4
-    } else {
-        6
-    };
+    // Custom themes can opt into the compiled default's smaller splash
+    // geometry with `splash_compact = true`. Everything else keeps the
+    // larger file-theme presentation.
+    let compact_splash = state.theme.is_compiled_default()
+        || state
+            .theme
+            .resolve::<bool>("splash_compact")
+            .unwrap_or(false);
+    let rows = if compact_splash { 4 } else { 6 };
     let elapsed = if state.theme.capabilities().animation && welcome_is_mutable(state) {
         now.saturating_duration_since(started).as_secs_f32()
     } else {
         crate::tui::splash::DURATION
     };
-    let logo_width = if state.theme.is_compiled_default() {
+    let logo_width = if compact_splash {
         16
     } else {
         (usize::from(width) / 3).clamp(14, 24)
     };
-    let adaptive_accent = state
-        .theme
-        .is_compiled_default()
+    // A theme can also keep the default's model-adaptive splash with
+    // `splash_model_adaptive = true`. It owns the whole splash: the byte-mark
+    // follows the active model family and the text falls back to the same
+    // model-accent/foreground treatment a non-`splash` file theme uses, so
+    // the theme's own `splash` colour is not used at all.
+    let compiled_default = state.theme.is_compiled_default();
+    let model_adaptive_splash = !compiled_default
+        && state
+            .theme
+            .resolve::<bool>("splash_model_adaptive")
+            .unwrap_or(false);
+    let adaptive_accent = (compiled_default || model_adaptive_splash)
         .then(|| state.theme.model_rgb(state.model_lab))
         .flatten();
-    let splash_color = state.theme.role_rgb("splash");
+    let splash_color = (!model_adaptive_splash)
+        .then(|| state.theme.role_rgb("splash"))
+        .flatten();
     let logo = crate::tui::splash::render_logo(
         &state.theme,
         logo_width,
@@ -549,7 +585,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_welcome_theme_is_solid_accent_and_framed() {
+    fn custom_welcome_theme_uses_accent_gradient_and_framing() {
+        use std::time::Duration;
+
         let shell =
             InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_from_source(
                 r##"
@@ -561,12 +599,16 @@ mod tests {
                     splash_box = "#d97757"
                 "##,
             ));
-        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+        // Settle past the sweep so the themed gradient is deterministic.
+        shell.state.borrow_mut().startup_card_started_at =
+            Some(Instant::now() - Duration::from_secs(10));
         let rendered = render_welcome_card(&shell.state.borrow(), 80, 10, Instant::now());
-        assert!(
-            rendered.iter().all(|line| line.contains("38;2;217;119;87")),
-            "{rendered:?}"
-        );
+        let joined = rendered.join("\n");
+        // Splash text and frame keep the exact accent.
+        assert!(joined.contains("38;2;217;119;87"), "{rendered:?}");
+        // The byte mark shades the accent into a truecolor column gradient.
+        assert!(joined.contains("38;2;119;65;47"), "{rendered:?}");
+        assert!(joined.contains("38;2;228;159;137"), "{rendered:?}");
         let plain = rendered
             .iter()
             .map(|line| strip_terminal_sequences(line))
@@ -581,6 +623,134 @@ mod tests {
         assert!(rendered
             .iter()
             .all(|line| sexy_tui_rs::visible_width(line) == 80));
+    }
+
+    #[test]
+    fn splash_model_adaptive_token_keeps_the_model_blended_gradient() {
+        use std::time::Duration;
+
+        let theme = crate::tui::theme::test_theme_from_source(
+            r##"
+                [metadata]
+                name = "Adaptive splash fixture"
+                adaptive = false
+                [colors]
+                splash = "#d97757"
+                splash_model_adaptive = "true"
+                model.use_lab_color = "true"
+            "##,
+        );
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_identity("anthropic", "claude-sonnet-4", "high");
+        // Settle past the sweep so only the gradient columns remain.
+        shell.state.borrow_mut().startup_card_started_at =
+            Some(Instant::now() - Duration::from_secs(10));
+        let state = shell.state.borrow();
+        let rendered = render_welcome_card(&state, 80, 10, Instant::now()).join("\n");
+        let accent = state
+            .theme
+            .model_rgb(Some(crate::tui::theme::ModelLab::Anthropic))
+            .expect("anthropic accent");
+        let blended = |gradient: (u8, u8, u8)| {
+            let mix = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * 0.58) as u8;
+            (
+                mix(gradient.0, accent.0),
+                mix(gradient.1, accent.1),
+                mix(gradient.2, accent.2),
+            )
+        };
+        let first = blended((0x4b, 0x8d, 0xff));
+        // The byte-mark follows the model family, not the theme's splash hue.
+        assert!(
+            rendered.contains(&format!("38;2;{};{};{}", first.0, first.1, first.2)),
+            "{rendered:?}"
+        );
+        assert!(!rendered.contains("38;2;119;65;47"), "{rendered:?}");
+        // The splash text follows the model accent too: the theme's own
+        // `splash` colour is not used anywhere in the splash.
+        assert!(!rendered.contains("38;2;217;119;87"), "{rendered:?}");
+        let wordmark = state
+            .theme
+            .model_rgb(Some(crate::tui::theme::ModelLab::Anthropic))
+            .expect("anthropic accent");
+        assert!(
+            rendered.contains(&format!(
+                "38;2;{};{};{}",
+                wordmark.0, wordmark.1, wordmark.2
+            )),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn splash_compact_token_selects_default_splash_geometry() {
+        for (compact, logo_rows) in [(true, 4), (false, 6)] {
+            let source = format!(
+                r##"
+                    [metadata]
+                    name = "Compact fixture"
+                    adaptive = false
+                    [colors]
+                    splash = "#d97757"
+                    splash_compact = {compact}
+                "##,
+            );
+            let shell = InteractiveShell::test_shell_with_theme(
+                crate::tui::theme::test_theme_from_source(&source),
+            );
+            shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+            let rendered = render_welcome_card(&shell.state.borrow(), 80, 10, Instant::now());
+            let marked = rendered
+                .iter()
+                .filter(|line| strip_terminal_sequences(line).contains('█'))
+                .count();
+            assert_eq!(marked, logo_rows, "compact={compact}: {rendered:?}");
+        }
+    }
+
+    #[test]
+    fn still_keeps_the_compact_model_adaptive_splash() {
+        // `Still` ships as a built-in, so its example file is the source of the
+        // compiled selector. The startup mark must stay the compact 4-row byte
+        // that follows the active model family, not the larger file-theme
+        // presentation pinned to a fixed `splash` colour.
+        const STILL: &str = include_str!("../../../../../examples/themes/Still.toml");
+        let theme = crate::tui::theme::test_theme_from_source(STILL);
+        assert_eq!(
+            theme.resolve::<String>("splash_model_adaptive").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("splash_compact").as_deref(),
+            Some("true")
+        );
+        let shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+        let rendered = render_welcome_card(&shell.state.borrow(), 80, 10, Instant::now());
+        let marked = rendered
+            .iter()
+            .filter(|line| strip_terminal_sequences(line).contains('█'))
+            .count();
+        assert_eq!(marked, 4, "Still should use the compact mark: {rendered:?}");
+
+        // The mark is shaded into a column gradient across its byte glyphs, so
+        // one row carries more than a single truecolor foreground.
+        let gradients = rendered
+            .iter()
+            .filter(|line| {
+                let mut shades = line
+                    .split("\x1b[38;2;")
+                    .skip(1)
+                    .filter_map(|rest| rest.split('m').next())
+                    .collect::<Vec<_>>();
+                shades.dedup();
+                shades.len() >= 2
+            })
+            .count();
+        assert!(
+            gradients >= 1,
+            "the mark should shade into a gradient: {rendered:?}"
+        );
     }
 
     #[test]
@@ -603,6 +773,26 @@ mod tests {
             render_welcome_card(&safe_shell.state.borrow(), 80, 10, Instant::now()).join("\n");
         let rendered = strip_terminal_sequences(&rendered);
         assert!(rendered.contains("permissions: safe mode"), "{rendered}");
+    }
+
+    #[test]
+    fn welcome_card_uses_the_centered_reading_column() {
+        let theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncontent_max_width = 112\n[layout]\ntranscript_inset = 2\ncomposer_padding = 1",
+        );
+        let shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+        let state = shell.state.borrow();
+        let width = 160;
+        let layout = PresentationLayout::new(&state.theme, width);
+        assert!(layout.inset > 0);
+        let rows = render_welcome_card(&state, width, 10, Instant::now());
+        for row in rows.iter().filter(|row| !row.is_empty()) {
+            let plain = strip_terminal_sequences(row);
+            assert!(plain.starts_with(&" ".repeat(usize::from(layout.inset))));
+            assert!(sexy_tui_rs::visible_width(row) <= usize::from(width));
+        }
+        assert!(rows.iter().any(|row| row.contains("octet")));
     }
 
     #[test]

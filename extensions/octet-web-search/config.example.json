@@ -12,7 +12,7 @@
     "default_timeout_seconds": 8,
     "max_redirects": 3,
     "max_provider_bytes": 524288,
-    "max_download_bytes": 524288,
+    "max_download_bytes": 4194304,
     "default_content_bytes": 65536,
     "max_content_bytes": 131072,
     "cache_ttl_seconds": 300,

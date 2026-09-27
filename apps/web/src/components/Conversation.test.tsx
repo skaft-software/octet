@@ -1165,7 +1165,7 @@ describe("conversation composer", () => {
     expect(onConfigure).toHaveBeenCalledWith({ reasoning: "low" });
   });
 
-  it("maps exact xhigh and max effort to particles and max to rainbow", async () => {
+  it("maps exact xhigh to particles, max to rainbow, and ultra to purple", async () => {
     const user = userEvent.setup();
     const cases = [
       {
@@ -1188,6 +1188,13 @@ describe("conversation composer", () => {
         max: "true",
         overdrive: "false",
         particles: true,
+      },
+      {
+        effort: "ultra",
+        options: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        max: "false",
+        overdrive: "false",
+        particles: false,
       },
     ];
 
@@ -1220,6 +1227,11 @@ describe("conversation composer", () => {
 
       const slider =
         container.querySelector<HTMLElement>(".power-slider-root")!;
+      expect(slider).toHaveAttribute("data-ultra", String(testCase.effort === "ultra"));
+      if (testCase.effort === "ultra") {
+        expect(screen.getByRole("slider", { name: "Reasoning effort" }))
+          .toHaveAttribute("aria-valuetext", "Ultra");
+      }
       expect(slider).toHaveAttribute("data-max", testCase.max);
       expect(slider).toHaveAttribute("data-overdrive", testCase.overdrive);
       expect(slider.matches('[data-overdrive="true"], [data-max="true"]')).toBe(
@@ -1234,6 +1246,43 @@ describe("conversation composer", () => {
       );
       unmount();
     }
+  });
+
+  it("selects Ultra after Max and returns to rainbow Max", async () => {
+    const user = userEvent.setup();
+    const bootstrap = structuredClone(fixtureBootstrap);
+    const session = structuredClone(fixtureSessions["session-fresh"]!);
+    const model = bootstrap.models.find((entry) => entry.id === session.modelId)!;
+    model.reasoning = ["low", "medium", "high", "xhigh", "max", "ultra"];
+    session.reasoning = "max";
+    const onConfigure = vi.fn(async () => {});
+    const { container } = render(
+      <Conversation
+        session={session}
+        bootstrap={bootstrap}
+        onSubmit={noOp}
+        onInterrupt={noOp}
+        onConfigure={onConfigure}
+        onResolveApproval={noOp}
+        onResolveUserInput={noOp}
+        onOpenOutput={() => {}}
+        onOpenSource={() => {}}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Model and effort/ }));
+    const slider = screen.getByRole("slider", { name: "Reasoning effort" });
+    const root = container.querySelector(".power-slider-root")!;
+    expect(root).toHaveAttribute("data-max", "true");
+    fireEvent.change(slider, { target: { value: "5" } });
+    expect(onConfigure).toHaveBeenLastCalledWith({ reasoning: "ultra" });
+    expect(slider).toHaveAttribute("aria-valuetext", "Ultra");
+    expect(root).toHaveAttribute("data-ultra", "true");
+    expect(root).toHaveAttribute("data-max", "false");
+    fireEvent.change(slider, { target: { value: "4" } });
+    expect(onConfigure).toHaveBeenLastCalledWith({ reasoning: "max" });
+    expect(slider).toHaveAttribute("aria-valuetext", "Max");
+    expect(root).toHaveAttribute("data-max", "true");
+    expect(root).toHaveAttribute("data-ultra", "false");
   });
 
   it("renders a failed outcome without a reasoning or action group", () => {

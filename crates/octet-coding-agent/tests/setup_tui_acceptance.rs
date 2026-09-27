@@ -260,6 +260,7 @@ impl PtyOctet {
             locale,
             offline,
             configured,
+            None,
         )
     }
 
@@ -270,6 +271,7 @@ impl PtyOctet {
         locale: &str,
         offline: bool,
         configured: bool,
+        extra_env: Option<(&str, &str)>,
     ) -> Self {
         let canonical_root = root
             .path()
@@ -343,6 +345,9 @@ impl PtyOctet {
             .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr);
+        if let Some((name, value)) = extra_env {
+            command.env(name, value);
+        }
         // The child needs a controlling terminal for raw input, SIGWINCH, and
         // the same primary-screen path as an interactive user.
         unsafe {
@@ -866,6 +871,231 @@ fn setup_fresh_home_defaults_to_api_key_and_cancellation_never_echoes_or_saves_i
 }
 
 #[test]
+fn setup_command_adds_api_key_to_configured_session_without_switching_model() {
+    let _guard = test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let columns = 120;
+    let mut octet = PtyOctet::spawn(columns, ROWS, "C.UTF-8", true, true);
+    let mut parser = vt100::Parser::new(ROWS, columns, 1024);
+    let mut consumed = 0;
+    let initial = octet.wait_for_text(&mut parser, &mut consumed, columns, "Existing Model");
+    assert!(!initial.contains("Set up a provider"));
+    let config_before = fs::read(octet.config_path()).unwrap();
+
+    octet.terminal.write_input(b"/setup\r");
+    let choices = octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
+    assert_first_run_choices(&choices);
+    open_builtin_key_input(&mut octet, &mut parser, &mut consumed, columns);
+    octet.terminal.write_input(format!("{SECRET}\r").as_bytes());
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Save OpenAI API key?");
+    octet.terminal.write_input(b"\r");
+    let ready = octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
+        screen.contains("Provider saved") && screen.contains("Existing Model")
+    });
+    assert!(ready.contains("/model"));
+    assert!(!ready.contains(SECRET));
+    let key_path = octet.home.join(".octet/credentials/api-keys/openai.json");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&key_path).unwrap()).unwrap()
+            ["api_key"],
+        SECRET
+    );
+    assert_eq!(fs::read(octet.config_path()).unwrap(), config_before);
+
+    octet.terminal.write_input(b"/model\r");
+    let picker = octet.wait_for_text(&mut parser, &mut consumed, columns, "Select model");
+    assert!(picker.contains("OpenAI"), "new provider absent: {picker}");
+    octet.terminal.write_input(b"\x1b");
+    octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
+        screen.contains("Existing Model") && !screen.contains("Select model")
+    });
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    assert_no_secret_outside_store(&octet, Some(&key_path));
+}
+
+#[test]
+fn setup_command_replacement_requires_separate_review() {
+    let _guard = test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let columns = 120;
+    let mut octet = PtyOctet::spawn(columns, ROWS, "C.UTF-8", true, true);
+    let mut parser = vt100::Parser::new(ROWS, columns, 1024);
+    let mut consumed = 0;
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Existing Model");
+    let key_path = octet.home.join(".octet/credentials/api-keys/openai.json");
+    fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+    fs::set_permissions(
+        key_path.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let old = br#"{"version":1,"api_key":"synthetic-existing-key"}"#;
+    fs::write(&key_path, old).unwrap();
+    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    octet.terminal.write_input(b"/setup\r");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
+    octet.terminal.write_input(b"\r");
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "Choose your API-key provider",
+    );
+    octet.terminal.write_input(b"OpenAI\r");
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "An API key is already saved",
+    );
+    assert_eq!(fs::read(&key_path).unwrap(), old);
+    octet.terminal.write_input(b"\x1b");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
+    assert_eq!(fs::read(&key_path).unwrap(), old);
+
+    octet.terminal.write_input(b"\r");
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "Choose your API-key provider",
+    );
+    octet.terminal.write_input(b"OpenAI\r");
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "An API key is already saved",
+    );
+    octet.terminal.write_input(b"\x1b[A\r"); // Explicitly choose replacement, not the default Back.
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "OpenAI API key (input hidden; paste, then Enter):",
+    );
+    octet.terminal.write_input(format!("{SECRET}\r").as_bytes());
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Save OpenAI API key?");
+    assert_eq!(fs::read(&key_path).unwrap(), old);
+    octet.terminal.write_input(b"\r");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Provider saved");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&key_path).unwrap()).unwrap()
+            ["api_key"],
+        SECRET
+    );
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    assert_no_secret_outside_store(&octet, Some(&key_path));
+}
+
+#[test]
+fn setup_command_warns_before_saving_key_overridden_by_environment() {
+    let _guard = test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let columns = 120;
+    let mut octet = PtyOctet::spawn_with_root(
+        Arc::new(tempfile::tempdir().unwrap()),
+        columns,
+        ROWS,
+        "C.UTF-8",
+        true,
+        true,
+        Some(("OPENAI_API_KEY", "synthetic-environment-key")),
+    );
+    let mut parser = vt100::Parser::new(ROWS, columns, 1024);
+    let mut consumed = 0;
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Existing Model");
+    let key_path = octet.home.join(".octet/credentials/api-keys/openai.json");
+    octet.terminal.write_input(b"/setup\r");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
+    octet.terminal.write_input(b"\r");
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "Choose your API-key provider",
+    );
+    octet.terminal.write_input(b"OpenAI\r");
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "Environment key takes precedence",
+    );
+    assert!(!key_path.exists());
+    octet.terminal.write_input(b"\r"); // Back is the safe default.
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
+    assert!(!key_path.exists());
+
+    octet.terminal.write_input(b"\r");
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "Choose your API-key provider",
+    );
+    octet.terminal.write_input(b"OpenAI\r");
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "Environment key takes precedence",
+    );
+    octet.terminal.write_input(b"\x1b[A\r"); // Save fallback anyway.
+    octet.wait_for_text(
+        &mut parser,
+        &mut consumed,
+        columns,
+        "OpenAI API key (input hidden; paste, then Enter):",
+    );
+    octet.terminal.write_input(format!("{SECRET}\r").as_bytes());
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Save OpenAI API key?");
+    octet.terminal.write_input(b"\r");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Provider saved");
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    assert_no_secret_outside_store(&octet, Some(&key_path));
+    assert!(!octet
+        .terminal
+        .output
+        .windows(b"synthetic-environment-key".len())
+        .any(|window| window == b"synthetic-environment-key"));
+}
+
+#[test]
+fn setup_command_cancel_keeps_existing_provider_and_default() {
+    let _guard = test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let columns = 120;
+    let mut octet = PtyOctet::spawn(columns, ROWS, "C.UTF-8", true, true);
+    let mut parser = vt100::Parser::new(ROWS, columns, 1024);
+    let mut consumed = 0;
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Existing Model");
+    let config_before = fs::read(octet.config_path()).unwrap();
+    octet.terminal.write_input(b"/setup\r");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
+    octet.terminal.write_input(b"\x1b");
+    octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
+        screen.contains("Existing Model") && !screen.contains("Set up a provider")
+    });
+    assert_eq!(fs::read(octet.config_path()).unwrap(), config_before);
+    assert!(!octet.home.join(".octet/credentials/api-keys").exists());
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+}
+
+#[test]
 fn setup_builtin_api_key_saves_after_review_selects_native_model_and_survives_restart_offline() {
     let _guard = test_lock()
         .lock()
@@ -927,6 +1157,7 @@ fn setup_builtin_api_key_saves_after_review_selects_native_model_and_survives_re
         "C.UTF-8",
         true,
         false,
+        None,
     );
     let mut restart_parser = vt100::Parser::new(ROWS, columns, 1024);
     let mut restart_consumed = 0;

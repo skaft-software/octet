@@ -110,13 +110,60 @@ fn composition_keeps_text_and_media_in_display_order() {
         composed.transcript_text,
         "before [Image #1] middle expanded paste after"
     );
-    assert_eq!(composed.parts.len(), 3);
-    assert!(matches!(&composed.parts[0], InputPart::Text(text) if text == "before "));
-    assert!(matches!(&composed.parts[1], InputPart::Media(_)));
+    // The transcript keeps the plain chip label; the absolute path reaches only
+    // the model-bound parts, so the human-visible text is unchanged.
     assert!(
-        matches!(&composed.parts[2], InputPart::Text(text) if text == " middle expanded paste after")
+        !composed.transcript_text.contains("photo.png"),
+        "the file path must not leak into the visible transcript"
+    );
+    // Display order is preserved, with a per-attachment annotation naming the
+    // source file inserted immediately before the media it describes. The wire
+    // formats carry no filename for inline media, so this is the only way the
+    // model learns which file the bytes came from.
+    assert_eq!(composed.parts.len(), 4);
+    assert!(matches!(&composed.parts[0], InputPart::Text(text) if text == "before "));
+    assert!(
+        matches!(&composed.parts[1], InputPart::Text(text) if text.contains("photo.png")
+            && text.starts_with("[attached image: "))
+    );
+    assert!(matches!(&composed.parts[2], InputPart::Media(_)));
+    assert!(
+        matches!(&composed.parts[3], InputPart::Text(text) if text == " middle expanded paste after")
     );
     assert!(ledger.is_empty(), "compose drains the ledger");
+}
+
+#[test]
+fn model_text_replacement_keeps_the_media_filename_annotation() {
+    // Template expansion rewrites the free text ahead of media. The filename
+    // annotation must survive that, or the model is left with bare bytes again.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let image = temp.path().join("photo.png");
+    fs::write(&image, b"image").expect("write image");
+
+    let mut ledger = AttachmentLedger::default();
+    let chip = ledger
+        .attach_media(&image, all_modalities())
+        .expect("attach image");
+    let mut composed = compose(format!("look at {chip}"), &mut ledger);
+
+    composed.replace_model_text("expanded prompt".into());
+
+    let annotation = composed.parts.iter().find_map(|part| match part {
+        InputPart::Text(text) if text.contains("photo.png") => Some(text.clone()),
+        _ => None,
+    });
+    assert!(
+        annotation.is_some(),
+        "the attachment path must survive model-text replacement"
+    );
+    assert!(
+        composed
+            .parts
+            .iter()
+            .any(|part| matches!(part, InputPart::Media(_))),
+        "media must survive model-text replacement"
+    );
 }
 
 #[test]
@@ -126,8 +173,19 @@ fn completion_owners_keep_mentions_and_paths_separate() {
         "docs/README.md".into(),
         "src/lib.rs".into(),
     ];
-    assert_eq!(mention_matches(&files, "read", 5), vec!["docs/README.md"]);
+    let index = workspace_index_from(files);
+    assert_eq!(mention_matches(&index, "read", 5), vec!["docs/README.md"]);
     assert_eq!(active_mention("open @src"), Some("src"));
     assert_eq!(active_path("open ./src/"), Some("./src/"));
     assert_eq!(active_path("/model gpt"), None);
+}
+
+/// Build an index over explicit paths, as the workspace walk would.
+///
+/// The walk itself needs a real directory; the ranking and case-folding
+/// behavior under test does not.
+fn workspace_index_from(paths: Vec<String>) -> WorkspaceFileIndex {
+    let mut sorted = paths;
+    sorted.sort();
+    WorkspaceFileIndex::from_paths(sorted)
 }

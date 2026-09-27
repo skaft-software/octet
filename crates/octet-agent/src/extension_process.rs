@@ -223,7 +223,34 @@ const API_0_2_OPTIONAL_FEATURES: &[&str] = &[
 
 const MAX_EXTENSION_AGENT_WAIT_MS: u64 = 60_000;
 const MAX_EXTENSION_SECRET_NAME_BYTES: usize = 64;
-const BROKERED_EXTENSION_ENVIRONMENT: &[&str] = &["SSH_AUTH_SOCK"];
+// These narrowly reviewed session variables let an explicitly configured
+// desktop integration reach the same interactive display/session as its host.
+// Values are forwarded only to an API 0.2+ extension that names them in its
+// manifest; the extension must separately opt each variable into any child
+// process it launches. XAUTHORITY and DBUS_SESSION_BUS_ADDRESS carry access to
+// the user's desktop session and must never become ambient defaults.
+// SYSTEMROOT and WINDIR are the Windows equivalents of the already-admitted
+// USERPROFILE/APPDATA: they locate the system installation and carry no
+// credential. A Windows driver child cannot resolve its own runtime without
+// them, so admitting them here is what makes a declared Windows-native
+// capability installable rather than rejected at manifest validation.
+const BROKERED_EXTENSION_ENVIRONMENT: &[&str] = &[
+    "SSH_AUTH_SOCK",
+    "APPDATA",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "LOCALAPPDATA",
+    "SYSTEMROOT",
+    "USERPROFILE",
+    "WAYLAND_DISPLAY",
+    "WINDIR",
+    "XAUTHORITY",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_DIRS",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+];
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -415,11 +442,20 @@ pub fn sanitized_subprocess_environment() -> BTreeMap<std::ffi::OsString, std::f
 fn brokered_extension_environment(
     names: &[String],
 ) -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+    // The closure keeps `var_os`'s borrow generic enough for the injected
+    // lookup signature; passing the function item directly fails to unify.
+    brokered_extension_environment_from(names, |name| std::env::var_os(name))
+}
+
+fn brokered_extension_environment_from(
+    names: &[String],
+    mut lookup: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
     names
         .iter()
         .filter(|name| BROKERED_EXTENSION_ENVIRONMENT.contains(&name.as_str()))
         .filter_map(|name| {
-            std::env::var_os(name).and_then(|value| {
+            lookup(name).and_then(|value| {
                 if value.is_empty() {
                     None
                 } else {
@@ -21125,22 +21161,65 @@ flags = [
             .replace("api_version = \"0.1\"", "api_version = \"0.2\"")
             .replace(
                 "network = false",
-                "network = false\nenvironment = [\"SSH_AUTH_SOCK\"]",
+                "network = false\nenvironment = [\"SSH_AUTH_SOCK\", \"DISPLAY\", \"WAYLAND_DISPLAY\", \"XDG_RUNTIME_DIR\", \"DBUS_SESSION_BUS_ADDRESS\", \"XAUTHORITY\", \"USERPROFILE\", \"APPDATA\", \"LOCALAPPDATA\"]",
             );
-        let manifest = ExtensionManifest::parse(&declared).expect("reviewed environment name");
-        assert_eq!(manifest.capabilities.environment, ["SSH_AUTH_SOCK"]);
-        let key = std::ffi::OsStr::new("SSH_AUTH_SOCK");
-        assert!(!sanitized_subprocess_environment().contains_key(key));
-        let brokered = brokered_extension_environment(&manifest.capabilities.environment);
-        let expected = std::env::var_os("SSH_AUTH_SOCK").filter(|value| !value.is_empty());
-        assert_eq!(brokered.get(key), expected.as_ref());
+        let manifest = ExtensionManifest::parse(&declared).expect("reviewed environment names");
+        assert_eq!(
+            manifest.capabilities.environment,
+            [
+                "SSH_AUTH_SOCK",
+                "DISPLAY",
+                "WAYLAND_DISPLAY",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XAUTHORITY",
+                "USERPROFILE",
+                "APPDATA",
+                "LOCALAPPDATA",
+            ]
+        );
+        for name in &manifest.capabilities.environment {
+            assert!(!sanitized_subprocess_environment().contains_key(std::ffi::OsStr::new(name)));
+        }
+        let brokered =
+            brokered_extension_environment_from(&manifest.capabilities.environment, |name| {
+                match name {
+                    "DISPLAY" => Some(":42".into()),
+                    "XAUTHORITY" => Some("/private/session/auth".into()),
+                    "AWS_SECRET_ACCESS_KEY" => Some("must-not-pass".into()),
+                    _ => None,
+                }
+            });
+        assert_eq!(
+            brokered.get(std::ffi::OsStr::new("DISPLAY")),
+            Some(&":42".into())
+        );
+        assert_eq!(
+            brokered.get(std::ffi::OsStr::new("XAUTHORITY")),
+            Some(&"/private/session/auth".into())
+        );
+        assert!(!brokered.contains_key(std::ffi::OsStr::new("AWS_SECRET_ACCESS_KEY")));
 
-        let unsupported = declared.replace("SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY");
+        let unsupported = declared.replace("XAUTHORITY", "AWS_SECRET_ACCESS_KEY");
         assert!(matches!(
             ExtensionManifest::parse(&unsupported),
             Err(ExtensionRuntimeError::InvalidManifest(message))
                 if message.contains("unsupported brokered environment variable")
         ));
+        // A Windows-native driver cannot resolve its own runtime without the
+        // system root, so a manifest declaring them must be installable. This
+        // pins the whole allowlist: a name the host rejects is a manifest that
+        // cannot be installed at all, on any host.
+        for name in BROKERED_EXTENSION_ENVIRONMENT {
+            assert!(
+                ExtensionManifest::parse(&declared.replace(
+                    "environment = [\"SSH_AUTH_SOCK\", \"DISPLAY\", \"WAYLAND_DISPLAY\", \"XDG_RUNTIME_DIR\", \"DBUS_SESSION_BUS_ADDRESS\", \"XAUTHORITY\", \"USERPROFILE\", \"APPDATA\", \"LOCALAPPDATA\"]",
+                    &format!("environment = [\"{name}\"]"),
+                ))
+                .is_ok(),
+                "{name} is allowlisted but a manifest declaring only it is rejected"
+            );
+        }
         let legacy = declared.replace("api_version = \"0.2\"", "api_version = \"0.1\"");
         assert!(matches!(
             ExtensionManifest::parse(&legacy),

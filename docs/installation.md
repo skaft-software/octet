@@ -7,15 +7,15 @@
 ## Install native binaries
 
 Native release packages target macOS Apple silicon/Intel and GNU/Linux x86-64.
-See the [v0.8.0 notes](releases/v0.8.0.md) for changes; availability, signed
+See the [v0.8.1 notes](releases/v0.8.1.md) for changes; availability, signed
 assets and public-install verification are recorded on the version-pinned
 GitHub release. Install using the matching installer from the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.0):
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.8.0/install-octet.sh | sh
-octet --version   # octet 0.8.0
+  https://github.com/skaft-software/octet/releases/download/v0.8.1/install-octet.sh | sh
+octet --version   # octet 0.8.1
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
@@ -70,9 +70,9 @@ or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.8.0. Check `octet --version` and use matching
-executable bundles; a source build is not a signed release artifact and does not
-replace an installed binary.
+This checkout targets octet 0.8.1. Check `octet --version` and use matching
+source extension manifests from this checkout. A source build is not a signed
+release artifact and does not replace an installed binary.
 
 On macOS or GNU/Linux, install Rust 1.86+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep). From the source checkout:
@@ -91,10 +91,10 @@ they do not refresh the catalog over the network. Continue with
 
 ## Optional packages
 
-The four official executable bundles and the separate Serve application must
-match the running octet version exactly. Current source packages are `0.8.0`
-and require octet `=0.8.0`. Catalog installation requires verified matching
-published assets and never substitutes another host version:
+Executable extension bundles and the separate Serve application are pinned to
+the host version. Install assets matching octet `0.8.1` from its version-pinned
+release, or run reviewed source extensions from this checkout with
+`--extension-dir ./extensions`. The 0.8.0 bundles require their 0.8.0 host.
 
 ```sh
 octet extension install octet-web-search
@@ -116,17 +116,18 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | Package | Canonical setup and limits |
 | --- | --- |
 | `octet-web-search` | [Brave Search (recommended) or SearXNG](../extensions/octet-web-search/README.md); public search/fetch, not a browser. |
-| `octet-browse` | [Visible isolated browser](../extensions/octet-browse/README.md); authentication is manual. |
+| `octet-browse` | **Deprecated**, still installable. [Visible isolated browser](../extensions/octet-browse/README.md); authentication is manual. Prefer the computer-use extension for new automation; see [deprecation notes](../extensions/octet-browse/README.md#deprecation). |
+| `octet-computer-use` | [Native desktop control](../extensions/octet-computer-use/README.md) (macOS/Windows/Linux) via a locally installed MIT-licensed Cua Driver; provisioning is explicit, OS permissions are yours to grant. |
 | `octet-mcp` | [MCP bridge](../extensions/octet-mcp/README.md); local stdio is supported, remote Streamable HTTP is blocked by default. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
-The four executable bundles in the working tree declare API `0.4`, distribution
-version `0.8.0`, and `requires_octet = "=0.8.0"`. These are independent version
-boundaries; an API number does not bypass the exact host pin. See
-[current authoring](extensions.md) for the Python
-API 0.4 process recipe and retained API 0.3 conformance example; generated
-contract bindings alone are not a process runtime.
+The five executable-bundle manifests declare API `0.4`, distribution version
+`0.8.1`, and require octet `=0.8.1`; older bundles remain pinned to their
+host. Distribution and host versions are independent boundaries; an API number does not bypass the exact
+host pin. See [current authoring](extensions.md) for the Python API 0.4 process
+recipe and retained API 0.3 conformance example; generated contract bindings
+alone are not a process runtime.
 
 ## Container
 

@@ -33,6 +33,7 @@ mod picker;
 
 use attachments::AttachmentLedger;
 use composition::compose;
+use octet_agent::InputPart;
 use octet_ai::{Modality, ModalitySet};
 use std::fs;
 use std::path::Path;
@@ -61,7 +62,13 @@ fn owner_handoffs_preserve_path_to_ledger_to_composition() {
         .attach_media(&dropped.path, all_modalities())
         .expect("ledger admission");
     let composed = compose(format!("see {chip}"), &mut ledger);
-    assert_eq!(composed.parts.len(), 2);
+    // compose() inserts a model-bound filename annotation immediately before
+    // the media part so the model learns which file the bytes came from.
+    assert_eq!(composed.parts.len(), 3);
+    assert!(
+        matches!(&composed.parts[1], InputPart::Text(text) if text.contains("handoff.png")),
+        "the media annotation must name the source file"
+    );
     assert!(ledger.is_empty());
 }
 

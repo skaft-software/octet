@@ -237,10 +237,18 @@ pub async fn attempt_compaction_with_instructions(
         {
             preparation
         }
-        Ok(_) => {
+        Ok(preparation) => {
+            // An empty preparation behind a previous compaction boundary means
+            // there is no new history since the last compaction; without a
+            // previous summary the session genuinely has nothing to summarize.
+            let reason = if preparation.previous_summary.is_some() {
+                "no new history since the last compaction to summarize"
+            } else {
+                "no prior messages to summarize"
+            };
             return Ok(CompactionOutcome::Skipped {
-                reason: "no prior messages to summarize".into(),
-            })
+                reason: reason.into(),
+            });
         }
         Err(error) => {
             return Ok(CompactionOutcome::Skipped {

@@ -16,7 +16,7 @@ from octet_release_identity import CANONICAL_REPOSITORY, LEGACY_RELEASE_COMMIT, 
 SCRIPTS = Path(__file__).resolve().parent
 LEGACY_REPOSITORY = "skaft-software/ygg"
 # Explicitly promoted native release; SDK/registry publication stays independent.
-PUBLISHED_NATIVE_VERSION = "0.8.0"
+PUBLISHED_NATIVE_VERSION = "0.8.1"
 
 
 def load_script(name):
@@ -143,14 +143,14 @@ class SourceDistributionVersionTests(unittest.TestCase):
             self.assertEqual(set(versions), {self.version}, name)
         self.assertIn(f'\nversion = "{self.version}"\n',
                       (self.root / "extensions/octet-serve/Cargo.toml").read_text())
-        # Source package/installer versions follow the candidate. Public download
-        # links are checked separately against the preceding published release.
+        # Source package/installer versions follow the current release. Public download
+        # links are checked separately against the published release.
         self.assertIn(f'\nversion = "{self.version}"\n',
                       (self.root / "sdk/python/pyproject.toml").read_text())
         self.assertEqual(json.loads((self.root / "sdk/typescript/package.json").read_text())["version"],
                          self.version)
         self.assertIn(f'\nversion="{self.version}"\n', (SCRIPTS / "install.sh").read_text())
-        for package in ("octet-browse", "octet-mcp", "octet-subagents", "octet-web-search"):
+        for package in ("octet-browse", "octet-computer-use", "octet-mcp", "octet-subagents", "octet-web-search"):
             manifest = (self.root / "extensions" / package / "extension.toml").read_text()
             with self.subTest(package=package):
                 self.assertIn(f'\nversion = "{self.version}"\n', manifest)

@@ -42,19 +42,54 @@ pub(super) fn restore_without_line() {
     restore_terminal(false);
 }
 
+/// Discard already-queued input without blocking.
+///
+/// Called during teardown to drop Kitty keyboard-protocol repeats/releases
+/// (e.g. the exiting Ctrl+D as `ESC[100;5u`) and stale device-attribute
+/// replies before the parent shell reads them as literal text. Bounded: at
+/// most a handful of polls/reads, never waits for new input.
+fn drain_pending_input() {
+    use std::time::Duration;
+    // Enough to cover a held-key auto-repeat burst plus a DA reply; the loop
+    // exits early as soon as the queue is empty.
+    for _ in 0..32 {
+        match event::poll(Duration::from_millis(0)) {
+            Ok(true) => {
+                // Poll true means a read will not block on the kernel buffer.
+                // Discard whatever it is (key repeat/release, DA reply).
+                if event::read().is_err() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+}
+
 fn restore_terminal(advance_line: bool) {
     let raw_active = RAW_ACTIVE.swap(false, Ordering::SeqCst);
     let keyboard_enhancement_active = KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst);
     if !raw_active && !keyboard_enhancement_active {
+        // Even when modes are already clear, pending input (e.g. a Kitty
+        // CSI-u repeat/release of the exiting Ctrl+D, tail `00;5u`) may still
+        // sit in the kernel buffer and leak into the parent shell. Drain it.
+        drain_pending_input();
         return;
     }
 
     let mut out = std::io::stdout();
     if keyboard_enhancement_active {
         let _ = execute!(out, event::PopKeyboardEnhancementFlags);
+        // Pop leaves any already-emitted key repeats/releases queued behind
+        // it. Discard them before returning to cooked mode so the shell never
+        // echoes a partial `ESC[100;5u` as literal `00;5u`.
+        drain_pending_input();
     }
     if raw_active {
         let _ = terminal::disable_raw_mode();
+        // A release arriving between Pop and raw-mode exit lands here; drain
+        // again now that the terminal is back in cooked mode.
+        drain_pending_input();
         let _ = execute!(
             out,
             event::DisableBracketedPaste,

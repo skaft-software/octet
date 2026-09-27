@@ -61,3 +61,9 @@ DerivedData/
 
 # Local session exports are owner-private artifacts, never committed.
 *.octet-session.json
+
+# Local agent scratch (plans, not source)
+.ygg/
+
+# Stale pre-rename ygg layout left by an old stash; not a workspace member
+crates/ygg-coding-agent/

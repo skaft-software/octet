@@ -1,115 +1,256 @@
-# octet computer-use extension
+# octet computer-use
 
-Source-only API 0.3 entry point, scoped policy boundary, and a **trusted-local,
-mocked-native macOS composition**. This is not an installed/native-qualified
-computer-use product. Standalone startup remains inert.
+**Distribution: 0.8.1.** This bundle requires exactly octet 0.8.1.
+Use the [version-matched installation](../../docs/installation.md) and the
+[0.8.1 release record](../../docs/releases/v0.8.1.md) for signed assets and
+public-install evidence. Windows and Linux desktop parity remain unqualified.
 
-The host stages the executable separately from its sibling Python modules.
-`main.py` resolves those modules through the host-provided `OCTET_EXTENSION_DIR`,
-falling back to its own directory only for direct source execution. Successful
-API negotiation does not install a desktop backend or grant native-input authority.
+Operate native desktop applications on **macOS, Windows, and Linux** through a
+locally installed [Cua Driver](https://github.com/trycua/cua), the MIT-licensed
+open-source computer-use driver. This bundle provisions the driver on request,
+connects to it over local stdio MCP, and republishes a reviewed subset of its
+tools as octet tools.
 
-Read [CONTRACT.md](CONTRACT.md) before embedding. The exact extension wire is
-[API 0.3](../../docs/extensions/API-0.4-REFERENCE.md); capability ownership and
-process trust remain governed by [extensions](../../docs/extensions.md) and
-[security](../../SECURITY.md).
+The driver is a separate open-source project. This bundle does not vendor or
+fork the driver runtime and does not include any part of OpenAI's CUA runtime.
+It includes Cua's MIT-licensed cursor dotLottie source and compiled Octet theme
+variants, with attribution under `themes/`. The driver itself is installed from
+the published `cua-driver` Python distribution.
 
-## Authority boundary
-
-The manifest remains opt-in and declares no filesystem, process or network
-capability. Those declarations are consent metadata, not OS containment.
-API 0.3 currently has **no negotiated automation policy, approval, target-picker,
-or trusted stop/takeover service**. The separate native protocol-1 controlled
-host does not start executable extensions. This implementation does not invent
-those services or downgrade to API 0.2.
-
-A trusted embedding may supply `ComputerUseExtension(..., runtime=...)`, where
-`MacOSRuntime` requires all of:
-
-- explicit `enabled=True`;
-- a host-derived `OwnerIdentity` (session, extension instance, process generation);
-- an exact host-selected native bundle/PID/window/process-start identity;
-- a `PolicyGate` with a matching, bounded, expiring `Scope`; and
-- a lazy owner-local backend factory. There is no default native factory.
-
-The gate requires a trusted local `evaluate_action(binding, *, parent_request_id,
-approval_token)` implementation. **This is not a JSON-RPC method.** Legacy
-`evaluate(intent)` adapters are refused: their intent omits exact arguments and
-observation evidence. The embedding must derive active request identity and
-approval decisions itself; the extension cannot qualify a supplied callback.
-
-Bindings include the exact operation, capability/effect, owner, session, target,
-origin where applicable, scope, process/frame generation, private argument
-digest, observation digest and native-identity digest. Grants are registered
-locally, short-lived, one-use and parent-request-bound. Scope expiry uses the
-gate's monotonic millisecond clock (or the explicitly injected clock), not Unix
-time. Revocation is terminal. ASK retries require the exact issued token and
-binding; no prompt, native permission flag, or cooperative confirmation is allow.
-Credential/authentication classes and protected native controls remain manual.
-Provider credentials, headers, leases and transport authority never enter the
-backend interface.
-
-## Bounded composition
-
-`runtime.py` connects the entry point, existing lifecycle, exact policy gate and
-macOS backend for these operations only:
-
-| Operation | Arguments / constraints |
-| --- | --- |
-| `observe` | `{}`; selected window, value-free bounded AX tree; no screenshot |
-| `click` | `x` and `y`, or `coordinates: {x, y}`; left button; exactly one observed AX node center |
-| `keypress` | One lifecycle navigation `key`; Arrow names map to native navigation keys |
-| `type` | Bounded `text`; exactly one focused editable non-sensitive control |
-| `scroll` | Bounded integer `delta_x`/`delta_y`; native restrictions still apply |
-
-Coordinates are AX screen-space points, not screenshot pixels or an arbitrary
-click surface. API 0.3 inputs are portable integers; fractional inspection values
-are decimal text, never rounded input coordinates. Fractional window dimensions
-are refused by this composition. Native identity and full observation evidence
-stay private; model-returned copies never replace them. Input is revalidated
-after policy, then the native backend rechecks permission, foreground, window
-identity/geometry and AX content/focus after its separate confirmation boundary.
-The final scoped one-use authorization callback runs after those native checks,
-immediately before input, so time spent revalidating cannot extend a grant.
-
-The entry point retains its source tool operation catalog. `start`,
-`double_click`, `drag`, `move`, `wait` and `screenshot` are explicitly denied by
-this composition; they are not silently approximated. The Windows backend and
-screenshot artifact modules remain independent tested source, not integrated
-production dispatch. API 0.3 media projection is deferred. No screenshot bytes,
-arbitrary paths or model-code operations are admitted here.
-
-## Lifetime and qualification
-
-One runtime has one owner/target and serial bounded calls. Trusted local
-`stop()`/`takeover()`, process EOF/shutdown, cancellation and lost response
-transport revoke admission, settle the lifecycle, clear observations and request
-input release. Stop/takeover are not model tools. Late observation completion
-cannot revive settled evidence. Unknown input acknowledgement never permits
-replay; successful input/reobservation is not verified task success.
-
-Cleanup requires an explicit boolean acknowledgement. A missing, truthy-object,
-failed or stuck release is degraded, not success or rollback. The retained
-`MacOSNative.release_all` is best-effort and does not yet supply that qualified
-acknowledgement. The mock fixture does. Physical takeover detection, hard
-process-loss release and real macOS/Windows qualification remain outstanding.
-
-`CodeRuntime.execute`, `ProcessSandbox` and sandbox selection fail closed:
-primitive availability, claimed capability flags and injected objects cannot
-enable model-code execution. No qualified launcher exists. The Linux prototype
-inherited host memory/FDs and did not establish current-process PID/capability
-isolation; its process dispatch has been removed rather than called contained.
-No model source reaches a worker or a supplied sandbox callback.
-
-## Deterministic checks
-
-From this extension directory:
+## Install and use
 
 ```console
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 -m py_compile main.py octet_computer_use/*.py
+octet extension install octet-computer-use
+octet --enable-extension octet-computer-use
 ```
 
-The suites use synthetic native fixtures only. They never open user applications,
-request permissions, run a code worker or contact a provider. These checks
-do not establish Windows/macOS installed-package or native-host qualification.
+Then run the local setup command to provision the driver **and** install the
+bundled model-colored cursor themes:
+
+```console
+/computer-use setup
+```
+
+The `computer_use_setup` agent tool provisions only the driver; it cannot
+install themes. Theme installation is deliberately a trusted local setup
+operation, not an agent tool. The bundle stores the provisioned driver under
+`~/.octet/computer-use` and never touches your Python environment or a global
+Python install. Cua Driver stores installed themes in its own per-user registry.
+Setup is idempotent and reports a theme installation failure rather than
+claiming that the personalized cursor is active.
+
+`computer_use_status` reports whether the driver is present, its version, its
+self-check, and your operating system's permission state. It never prompts.
+
+## Grant operating-system permissions
+
+The driver needs permission to observe and control the desktop. **This bundle
+never grants an operating-system permission for you.** Grant it yourself:
+
+- **macOS** — by default, the signed `/Applications/CuaDriver.app` host needs
+  Accessibility and Screen Recording grants. If it is unavailable or cannot
+  verify its grants, computer use reports `unavailable` rather than silently
+  switching to cursorless direct mode. Set `OCTET_CUA_DESKTOP_HOST=0` only when
+  you explicitly want direct mode, which inherits the grants of the app running
+  octet and has no agent-cursor overlay. Restart octet after changing grants.
+- **Windows** — the driver runs as your user; some stacks need the process to
+  be interactive (an unlocked, visible session).
+- **Linux** — a live display session plus AT-SPI 2 accessibility. X11/XWayland
+  routes more widely than native Wayland.
+
+Until the permission is granted, observation and action calls fail. That is
+expected, and `computer_use_status` will say so along with the runtime in use.
+
+### Runtime modes
+
+`computer_use_status` reports the selected runtime and its binary.
+
+| Runtime | When it is used | Needs | Agent cursor |
+| --- | --- | --- | --- |
+| `desktop-host` | Default on macOS when signed `/Applications/CuaDriver.app` and its grants are live | Grants given to that Cua Driver app | Yes, after cursor-state verification |
+| `direct` | Non-macOS by default, or macOS only with `OCTET_CUA_DESKTOP_HOST=0` | The grants of the app running octet | No |
+| `unavailable` | macOS host is missing or cannot prove live grants while host mode is selected | Install/authorize the signed Cua app, or explicitly opt into direct mode | No |
+
+A missing or unusable macOS host never silently falls back when cursor support
+is required. `OCTET_CUA_DESKTOP_APP` is an explicit developer override; no
+`/Applications/OctetComputerUse.app` dependency is introduced by default.
+
+### Developer override: build the octet host app (macOS)
+
+This repository contains a small optional host app for development and testing.
+It is not selected by default. To explicitly use it, build/install it and set
+`OCTET_CUA_DESKTOP_APP=/Applications/OctetComputerUse.app` before starting octet.
+The app supplies an AppKit main thread and starts `cua-driver serve` under its
+own permission identity.
+
+```console
+bash extensions/octet-computer-use/build-host-app.sh --install
+```
+
+It installs `/Applications/OctetComputerUse.app` with the bundle identifier
+`com.octet.computeruse`, builds from source, and signs with the first
+codesigning identity it finds. Pass `--ad-hoc` for a throwaway build (its
+permission grant resets on every rebuild) or `--identity "..."` to choose one.
+
+The host installs to its own identity rather than Cua's `com.trycua.driver`, so
+its permission grants cannot be confused with Cua's own app. It is never selected
+unless named with `OCTET_CUA_DESKTOP_APP`; if selected but unavailable, macOS
+computer use fails closed rather than falling back silently.
+
+**Menu bar indicator.** Once running, the host shows a pointer glyph in the menu
+bar. It is grey while idle and turns orange while an agent session is live, so
+you can always tell when the agent has control of your screen. The state is read
+from the driver's own session list, not from anything the agent reports.
+
+Clicking it opens **Stop computer use**, which revokes every live session
+immediately. That is the one-click kill switch: an agent that can drive your
+desktop should never be able to do so invisibly.
+
+The app is macOS-only and optional. It is not required for computer use, and it
+is not installed by `octet extension install`.
+
+#### How the macOS permission grant is made to stick
+
+On macOS 27 (Tahoe) the stock `CuaDriver.app` from Cua AI can appear to lose
+its Accessibility/Screen Recording grant on every daemon respawn: the System
+Settings toggle reads ON, yet the driver reports the grants as false and every
+action fails with `permissions_pending`. This is a known upstream issue
+([hermes-agent#99732](https://github.com/NousResearch/hermes-agent/issues/99732),
+duplicate of hermes-agent#78361, tracked against a stale-TCC-row bug in
+trycua/cua).
+
+The cause is the macOS TCC *responsible process* rule, not the app's signature.
+When a driver daemon is started as a direct child of a terminal or agent, macOS
+attributes the grant to that parent rather than to the driver app, so the grant
+does not survive the process that owns it going away. The fix is to start the
+daemon through LaunchServices so the app is its own responsible process, and to
+clear a stale row before re-granting:
+
+```console
+# 1. clear a stale row if grants were previously granted and are misreported
+tccutil reset Accessibility com.trycua.driver
+tccutil reset ScreenCapture com.trycua.driver
+# 2. launch the daemon through LaunchServices, never as a child
+open -n -g -a CuaDriver --args serve
+# 3. grant (a macOS prompt appears; approve it)
+cua-driver permissions grant
+# 4. confirm
+cua-driver permissions status --json
+```
+
+After this, `permissions status` reports `source.attribution: "driver-daemon"` and
+the grants survive respawns and reboots. The extension uses the signed Cua host's
+daemon permission probe and fails closed if the selected host cannot establish them.
+
+## Confirmation and safe mode
+
+octet's security model ([SECURITY.md](../../SECURITY.md)) is that **full access -
+the default - runs with your own permissions and does not ask**, and that
+`--safe-mode` is the mode that asks before every effectful action. Computer use
+inherits that: under full access an agent drives the desktop unattended, and the
+agent cursor is the standing signal that it currently has control.
+
+To ask before every effectful action instead, opt in:
+
+```console
+OCTET_CUA_CONFIRM=1 octet
+```
+
+`OCTET_CUA_CONFIRM=0` turns the gate off explicitly, even under a gated profile.
+
+**This is the boundary that matters.** octet is not a sandbox: an agent with
+computer use can read what is on your screen and press what it can reach, exactly
+as you can. There is no per-app scoping and no incognito-window filtering, because
+macOS gives a Screen Recording grantee no way to hide a window it can see. If that
+matters, run octet inside a VM.
+
+## What the agent can do
+
+| Tool | Driver tool | Notes |
+| --- | --- | --- |
+| `computer_use_status` | local | Provisioning, version, permissions, self-check. |
+| `computer_use_setup` | local | Install the driver from the package index. |
+| `computer_use_installed_apps` | `list_apps` | Read-only. |
+| `computer_use_windows` | `list_windows` | Read-only. |
+| `computer_use_window_state` | `get_window_state` | Read-only. Accessibility tree + screenshot. |
+| `computer_use_desktop_state` | `get_desktop_state` | Read-only. Full-screen capture. |
+| `computer_use_click` | `click` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_type_text` | `type_text` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_press_key` | `press_key` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_hotkey` | `hotkey` | Bounded key chord to a named window. |
+| `computer_use_invoke_menu` | `invoke_menu` | Exact accessible menu path; ambiguous items fail closed. |
+| `computer_use_move_cursor` | `move_cursor` | Moves only the visible overlay, within a named window. |
+| `computer_use_scroll` | `scroll` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_launch_app` | `launch_app` | Effectful; follows Octet's effect-confirmation policy. |
+| `computer_use_start_session` | `start_session` | Starts/switches the session used by later driver actions. |
+| `computer_use_end_session` | `end_session` | Ends the active action session. |
+
+The driver publishes a much larger catalog (58 tools on macOS at the time of
+writing). This bundle republishes a small, reviewed subset so octet's tool
+catalog stays stable across upstream releases. Only reviewed arguments are
+forwarded; an unrecognised argument is dropped rather than passed through.
+
+## Safety model
+
+- **Effect confirmation follows Octet's policy.** In a gated profile (or with
+  `OCTET_CUA_CONFIRM=1`), effectful calls require approval and declined,
+  unavailable, or failed confirmation denies dispatch. Full-access mode does not
+  add per-action prompts by default; `OCTET_CUA_CONFIRM=0` explicitly disables
+  them even in a gated profile. Unknown driver tools are treated as effectful.
+- **Read-only observations.** Observation tools use the driver's read-only
+  classification and do not prompt; actual permission or capture errors remain
+  visible to the caller.
+- **Targeted cursor feedback.** On the macOS host, cursor enablement and motion
+  are verified before any tool call is reported ready. The cursor uses a short,
+  straight 80 ms glide without curved turns and hides after 5 seconds of
+  inactivity. The public cursor-move tool requires a window target and
+  window-local coordinates and cannot move the real OS pointer. The bundled
+  Octet-inspired dotLottie pointer is slightly smaller than Cua's default and
+  uses the same stable, model-adaptive prompt color as Octet's TUI. Each model
+  family has a compiled variant; the extension selects the installed variant
+  at the next tool call after a model switch. If themes have not been installed,
+  it uses Cua's default cursor and reports that fact. Cua's own session badge
+  remains session-colored. Custom user-defined TUI palettes are not compiled
+  into these fixed variants.
+- **One action session.** Cursor setup, public session start/end, and eligible
+  driver actions share one driver session; ending it clears the binding so a
+  subsequent action must establish a new session.
+- **Bounded outputs.** Text and structured driver output are bounded below
+  Octet's 256 KiB structured-content limit while preserving window IDs, snapshot
+  IDs, element tokens, and coordinates. Screenshots are published as artifacts,
+  not inlined as base64.
+- **Least environment.** The driver receives only reviewed, non-secret desktop
+  session variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and the
+  documented equivalents). Provider tokens, `PATH` overrides, and arbitrary
+  ambient variables are not forwarded.
+- **No secrets, no silent installs.** The bundle never types credentials for you
+  and never downloads a driver outside the standard package install you trigger.
+  OS permissions are always yours to grant.
+- **Re-snapshot before acting.** Element indices are replaced by the next window
+  snapshot, so read state before each indexed action. The bundled skill documents
+  the full observe-act-verify loop.
+
+## Relationship to octet-browse
+
+`octet-browse` is [deprecated but still installable](../octet-browse/README.md#deprecation).
+It drives an isolated, Octet-owned Chromium with manual authentication, which
+remains the safer surface for authenticated page work. This bundle drives your
+actual desktop, so it can see anything you can see — including a browser you
+already have open. Prefer Browse for anything involving a login or a saved
+session.
+
+## Tests
+
+The suite runs without a driver; the integration tests skip automatically when
+no local driver is present.
+
+```console
+PYTHONPATH=.:vendor:tests python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+To include the live driver tests, point at an installed binary:
+
+```console
+PYTHONPATH=.:vendor:tests OCTET_CUA_DRIVER_BINARY=/path/to/cua-driver \
+  python3 -m unittest discover -s tests -p 'test_*.py'
+```

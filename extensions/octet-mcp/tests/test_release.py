@@ -22,9 +22,9 @@ class ReleaseSmokeTests(unittest.TestCase):
         self.assertIsNotNone(tomllib)
         manifest = tomllib.loads((ROOT / "extension.toml").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "octet-mcp")
-        self.assertEqual(manifest["version"], "0.8.0")
+        self.assertEqual(manifest["version"], "0.8.1")
         self.assertEqual(manifest["api_version"], "0.4")
-        self.assertEqual(manifest["requires_octet"], "=0.8.0")
+        self.assertEqual(manifest["requires_octet"], "=0.8.1")
         self.assertEqual(manifest["entrypoint"]["command"], "octet-mcp")
         self.assertTrue(manifest["capabilities"]["process"])
         self.assertTrue(manifest["capabilities"]["network"])
@@ -44,7 +44,10 @@ class ReleaseSmokeTests(unittest.TestCase):
             "octet_mcp/streamable_http.py",
             "config.schema.json",
             "config.example.json",
+            "config.cua-driver.example.json",
             "fixtures/configs/real-local.json",
+            "skills/cua-driver/SKILL.md",
+            "REFERENCE.md",
             "README.md",
             "CHANGELOG.md",
         ):

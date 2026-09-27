@@ -30,7 +30,9 @@ class FakeCancellation:
 
 
 class FakeExtension:
-    def __init__(self, scratch: Path, *, policy: str = "deny") -> None:
+    def __init__(
+        self, scratch: Path, *, policy: str = "deny", confirm: Optional[bool] = None
+    ) -> None:
         self.negotiated_features = frozenset(
             {"dynamic_tools", "content_parts", "artifacts", "request_progress", "policy_intents"}
         )
@@ -44,6 +46,9 @@ class FakeExtension:
         self.presentations: list[dict[str, Any]] = []
         self.policy = policy
         self.scratch = scratch
+        # `None` means the confirmation surface is unavailable.
+        self.confirm_answer = confirm
+        self.confirm_calls: list[dict[str, Any]] = []
 
     def register_tools(self, definitions: list[Mapping[str, Any]]) -> dict[str, Any]:
         for definition in definitions:
@@ -78,6 +83,12 @@ class FakeExtension:
         del intent, approval_token
         return {"decision": self.policy}
 
+    def confirm(self, prompt: str, **kwargs: Any) -> bool:
+        self.confirm_calls.append({"prompt": prompt, **kwargs})
+        if self.confirm_answer is None:
+            raise RuntimeError("no interactive confirmation surface")
+        return self.confirm_answer
+
     def publish_presentation(self, snapshot: Mapping[str, Any]) -> None:
         value = dict(snapshot)
         if self.presentations:
@@ -97,6 +108,8 @@ def server_config(
     server_id: str = "fixture",
     extra_args: tuple[str, ...] = (),
     environment: Optional[dict[str, str]] = None,
+    inherited_environment: tuple[str, ...] = (),
+    confirm_unknown_tools: bool = False,
     request_timeout_ms: int = 500,
     startup_timeout_ms: int = 1000,
     max_restarts: int = 1,
@@ -115,6 +128,8 @@ def server_config(
         ),
         cwd=ROOT,
         environment=environment or {},
+        inherited_environment=inherited_environment,
+        confirm_unknown_tools=confirm_unknown_tools,
         enabled=True,
         required=False,
         startup_timeout_ms=startup_timeout_ms,
@@ -124,7 +139,7 @@ def server_config(
     )
 
 
-def real_server_config():
+def real_server_config(*, confirm_unknown_tools: bool = False):
     from octet_mcp.config import ServerConfig
 
     return ServerConfig(
@@ -134,6 +149,7 @@ def real_server_config():
         args=(str(FIXTURES / "real_mcp_server.py"),),
         cwd=ROOT,
         environment={},
+        confirm_unknown_tools=confirm_unknown_tools,
         enabled=True,
         required=True,
         startup_timeout_ms=2000,

@@ -46,11 +46,6 @@ package code or a user-selected adapter command. The host owns destinations and
 writes. A selected source-directory symlink is rejected by the adapter; the CLI
 preserves that boundary for explicit, environment and default source paths.
 
-The optional [octet-import-pi source package](../extensions/octet-import-pi/README.md)
-provides a thin API `0.4` process entrypoint to the same implementation. It requires
-a matching octet installation, introduces no alternate parser or ingestion path,
-and is neither required by nor able to override `octet migrate import pi`.
-
 | Portable data | Import behavior |
 | --- | --- |
 | Model selection | Selects a Pi provider/API-model pair only if it has exactly one match in octet's built-in catalog, then persists the canonical catalog ID. Custom, unknown, and ambiguous pairs are skipped, not guessed. |

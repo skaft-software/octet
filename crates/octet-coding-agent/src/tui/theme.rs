@@ -33,9 +33,44 @@ pub use crate::tui::theme_schema::{
 /// Stable name for octet's compiled-in default theme and legacy selectors.
 pub const DEFAULT_THEME_NAME: &str = "default";
 
+/// Stable selector for the compiled-in `Cards` theme. The file is embedded at
+/// build time from `examples/themes/Cards.toml` and validated by
+/// `cards_example_theme_is_valid_for_every_background_profile`, so the shipped
+/// example and this built-in can never drift apart.
+pub const CARDS_THEME_NAME: &str = "Cards";
+
+/// The embedded source for [`CARDS_THEME_NAME`].
+const CARDS_THEME_SOURCE: &str = include_str!("../../../../examples/themes/Cards.toml");
+
+/// Stable selector for the compiled-in `Still` theme. The file is embedded at
+/// build time from `examples/themes/Still.toml` and validated by
+/// `still_example_theme_is_valid_for_every_background_profile`, so the shipped
+/// example and this built-in can never drift apart.
+pub const STILL_THEME_NAME: &str = "Still";
+
+/// The embedded source for [`STILL_THEME_NAME`].
+const STILL_THEME_SOURCE: &str = include_str!("../../../../examples/themes/Still.toml");
+
+/// Compiles one embedded file theme for a single terminal profile.
+type CompiledFileTheme = fn(TerminalCapabilities, TerminalBackground) -> anyhow::Result<OctetTheme>;
+
+/// Every selector answered by a compiled-in file theme rather than a discovered
+/// file, in the order they are offered in the `/theme` picker. A built-in
+/// selector always wins over a discovered file of the same stem, and the stem is
+/// reserved so a user's `Cards.toml` or `Still.toml` can neither shadow, nor be
+/// shadowed by, the built-in it selects.
+const COMPILED_FILE_THEMES: &[(&str, CompiledFileTheme)] = &[
+    (CARDS_THEME_NAME, cards_theme_for),
+    (STILL_THEME_NAME, still_theme_for),
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThemeSource {
     CompiledDefault,
+    /// The compiled-in `Cards` theme, embedded from `examples/themes/Cards.toml`.
+    CompiledCards,
+    /// The compiled-in `Still` theme, embedded from `examples/themes/Still.toml`.
+    CompiledStill,
     File(PathBuf),
 }
 
@@ -253,6 +288,7 @@ impl TerminalThemeChoice {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn index(self) -> usize {
         match self {
             Self::Auto => 0,
@@ -570,7 +606,9 @@ impl OctetTheme {
     pub fn source_path(&self) -> Option<&Path> {
         match &self.source {
             ThemeSource::File(path) => Some(path),
-            ThemeSource::CompiledDefault => None,
+            ThemeSource::CompiledDefault
+            | ThemeSource::CompiledCards
+            | ThemeSource::CompiledStill => None,
         }
     }
 
@@ -698,6 +736,8 @@ impl OctetTheme {
             ThemeSource::CompiledDefault => {
                 Ok(default_theme_for(self.background, self.capabilities))
             }
+            ThemeSource::CompiledCards => cards_theme_for(self.capabilities, self.background),
+            ThemeSource::CompiledStill => still_theme_for(self.capabilities, self.background),
             ThemeSource::File(path) => {
                 load_theme_path_for(path, self.capabilities, self.background)
             }
@@ -794,10 +834,22 @@ impl OctetTheme {
         )
     }
 
-    /// Only the compiled prompt body opts into compact, provenance-coloured
-    /// highlights. Unknown backgrounds use an unpainted, readable foreground;
-    /// limited palettes use the existing contrast-tested surface treatment.
-    pub(crate) fn prompt_text_highlight(&self, color: Option<&str>, text: &str) -> String {
+    /// Whether prompt rows are painted with each turn's stored model colour as
+    /// a full-cell provenance card. The default theme opts in explicitly; a
+    /// theme that sets `prompt_wash = false` keeps prompt rows on the surface's
+    /// own fill while the chevron retains its prompt colour.
+    pub(crate) fn prompt_wash(&self) -> bool {
+        self.resolve::<bool>("prompt_wash").unwrap_or(true)
+    }
+
+    /// Paint one stored prompt colour as a full-cell provenance card. The
+    /// background covers every cell of the row — padding, blank spacing, and
+    /// trailing canvas included — and the rich renderer's own inline runs are
+    /// layered inside it, so Markdown emphasis, links, and inline code keep
+    /// their styling. Unknown backgrounds and no-colour terminals get the text
+    /// back unpainted; limited palettes use the existing contrast-tested
+    /// surface treatment.
+    pub(crate) fn prompt_provenance_card(&self, color: Option<&str>, text: &str) -> String {
         if text.is_empty() {
             return String::new();
         }
@@ -831,7 +883,7 @@ impl OctetTheme {
             ),
             TerminalBackground::Unknown => unreachable!("handled above"),
         };
-        self.inner.apply_style(
+        self.apply_style_layered(
             TextStyle::plain()
                 .foreground(Color::Rgb(
                     foreground.red,
@@ -1684,6 +1736,10 @@ fn default_theme_for(
     );
     apply_required_surfaces(&mut theme, background);
     apply_standard_technical_palette(&mut theme, background);
+    // The default theme opts into the full-cell model-adaptive prompt card:
+    // every submitted prompt keeps the stored colour of the model that received
+    // it, filling the whole cell. Themes turn it off with `prompt_wash = false`.
+    theme.override_token("prompt_wash", "true");
     // There is no model before the startup picker. Use octet green until the
     // selected model's lab is known.
     let neutral_model_accent = balance_foreground(DEFAULT_ACCENT, background);
@@ -1759,6 +1815,85 @@ pub(crate) fn test_theme_source_with(
     .expect("renderer test theme should compile")
 }
 
+pub(crate) fn is_reserved_theme_name(name: &str) -> bool {
+    is_builtin_theme_name(name) || TerminalThemeChoice::parse(name).is_some()
+}
+
+/// Whether `name` selects a compiled-in file theme such as `Cards` or `Still`.
+/// Their stems are reserved against discovered files, and this is the predicate
+/// that lets configuration accept the built-in under its own name.
+pub(crate) fn is_compiled_file_theme_name(name: &str) -> bool {
+    compiled_file_theme_name(name).is_some()
+}
+
+/// The canonical spelling of a compiled-in file theme selector, so a persisted
+/// `cards.toml` or `Cards` both resolve to the one built-in name.
+pub(crate) fn compiled_file_theme_name(name: &str) -> Option<&'static str> {
+    let stem = name.strip_suffix(".toml").unwrap_or(name);
+    COMPILED_FILE_THEMES
+        .iter()
+        .find(|(built_in, _)| stem.eq_ignore_ascii_case(built_in))
+        .map(|(built_in, _)| *built_in)
+}
+
+/// Every selector answered by a compiled-in theme rather than a discovered
+/// file. Reserving these names keeps a user's `Cards.toml` or `Still.toml` from
+/// shadowing, or being shadowed by, the built-in they select.
+fn is_builtin_theme_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(DEFAULT_THEME_NAME) || compiled_file_theme_for(name).is_some()
+}
+
+/// Selectors for the compiled-in file themes, in the order the `/theme` picker
+/// offers them.
+pub fn compiled_file_theme_names() -> impl Iterator<Item = &'static str> {
+    COMPILED_FILE_THEMES.iter().map(|(name, _)| *name)
+}
+
+/// Resolve a selector, with or without a `.toml` suffix, to the loader for a
+/// compiled-in file theme. Returns `None` for the compiled default and for
+/// discovered-file selectors.
+fn compiled_file_theme_for(name: &str) -> Option<CompiledFileTheme> {
+    let stem = name.strip_suffix(".toml").unwrap_or(name);
+    COMPILED_FILE_THEMES
+        .iter()
+        .find(|(built_in, _)| stem.eq_ignore_ascii_case(built_in))
+        .map(|(_, load)| *load)
+}
+
+/// Compile the embedded `Cards` theme for one background profile. A built-in
+/// that fails to compile is a build-time defect the example test already
+/// covers, so surface it as a load error rather than a silent fallback.
+fn cards_theme_for(
+    capabilities: TerminalCapabilities,
+    background: TerminalBackground,
+) -> anyhow::Result<OctetTheme> {
+    load_theme_source_for(
+        CARDS_THEME_SOURCE,
+        CARDS_THEME_NAME,
+        ThemeSource::CompiledCards,
+        CARDS_THEME_NAME,
+        capabilities,
+        background,
+    )
+}
+
+/// Compile the embedded `Still` theme for one background profile. A built-in
+/// that fails to compile is a build-time defect the example test already
+/// covers, so surface it as a load error rather than a silent fallback.
+fn still_theme_for(
+    capabilities: TerminalCapabilities,
+    background: TerminalBackground,
+) -> anyhow::Result<OctetTheme> {
+    load_theme_source_for(
+        STILL_THEME_SOURCE,
+        STILL_THEME_NAME,
+        ThemeSource::CompiledStill,
+        STILL_THEME_NAME,
+        capabilities,
+        background,
+    )
+}
+
 fn theme_file_name(name: &str) -> Option<String> {
     let name = name.trim();
     if name.is_empty()
@@ -1778,7 +1913,6 @@ fn theme_file_name(name: &str) -> Option<String> {
     })
 }
 
-#[cfg(any(test, feature = "serve"))]
 fn discover_themes(config: &Config) -> crate::resource_resolver::ResourceSnapshot {
     let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
     resolver.discover(ResourceKind::Theme, &config.theme_paths)
@@ -2171,10 +2305,17 @@ pub(crate) fn load_named_theme_for_background(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let capabilities = TerminalCapabilities::detect(config.color, config.plain);
-    if theme_file_name(name)
-        .as_deref()
-        .and_then(|file_name| file_name.strip_suffix(".toml"))
-        .is_some_and(|resource_name| resource_name.eq_ignore_ascii_case(DEFAULT_THEME_NAME))
+    let selector = name.trim();
+    // A built-in selector always wins over a discovered file of the same stem,
+    // and each built-in file theme's stem is reserved so a local copy can never
+    // shadow it.
+    if let Some(compile) = compiled_file_theme_for(selector) {
+        return compile(capabilities, background);
+    }
+    if is_reserved_theme_name(selector)
+        || selector
+            .strip_suffix(".toml")
+            .is_some_and(|stem| stem.eq_ignore_ascii_case(DEFAULT_THEME_NAME))
     {
         return Ok(default_theme_for(background, capabilities));
     }
@@ -2219,11 +2360,36 @@ pub fn load_theme(config: &Config) -> OctetTheme {
     load_theme_for_background(config, terminal_background())
 }
 
+/// Load picker previews from the same precedence-selected, trusted roots as
+/// startup. Invalid files are omitted instead of presenting a broken choice;
+/// a shadowed lower-precedence file is never substituted for an invalid winner.
+pub(crate) fn selectable_file_themes(
+    config: &Config,
+    background: TerminalBackground,
+) -> Vec<(String, OctetTheme)> {
+    let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
+    let capabilities = TerminalCapabilities::detect(config.color, config.plain);
+    discover_themes(config)
+        .resources()
+        .iter()
+        .filter(|resource| {
+            !is_reserved_theme_name(&resource.name) && !resource.name.ends_with(".toml")
+        })
+        .filter_map(|resource| {
+            let source = resolver.read_text(resource).ok()?;
+            let theme =
+                load_resolved_theme_for(&resource.path, &source, capabilities, background).ok()?;
+            Some((resource.name.clone(), theme))
+        })
+        .collect()
+}
+
 /// Return the compiled default and all safe names selected by the shared
 /// resolver. Parsing is deferred to the loader so discovery stays best-effort.
 #[cfg(any(test, feature = "serve"))]
 pub fn available_themes(config: &Config) -> Vec<String> {
     let mut names = BTreeSet::from([DEFAULT_THEME_NAME.to_owned()]);
+    names.extend(compiled_file_theme_names().map(str::to_owned));
     for resource in discover_themes(config).resources() {
         if theme_file_name(&resource.name).is_some() {
             names.insert(resource.name.clone());
@@ -2486,12 +2652,382 @@ mod tests {
     }
 
     #[test]
+    fn picker_loads_only_valid_winning_theme_files_and_reserves_builtin_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().to_owned());
+        let project = config.workspace.join(".octet/themes");
+        let explicit = directory.path().join("explicit-themes");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&explicit).unwrap();
+        std::fs::write(project.join("picker-valid.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(project.join("picker-shared.toml"), "accent = '#111111'").unwrap();
+        std::fs::write(project.join("picker-shadowed.toml"), "accent = '#222222'").unwrap();
+        std::fs::write(explicit.join("picker-shared.toml"), "accent = '#abcdef'").unwrap();
+        std::fs::write(explicit.join("picker-shadowed.toml"), "[invalid").unwrap();
+        std::fs::write(explicit.join("picker-invalid.toml"), "[invalid").unwrap();
+        std::fs::write(explicit.join("dark.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(explicit.join("default.toml"), "accent = '#123456'").unwrap();
+        std::fs::write(
+            explicit.join("picker-double.toml.toml"),
+            "accent = '#123456'",
+        )
+        .unwrap();
+        std::fs::write(
+            explicit.join("picker-too-large.toml"),
+            vec![b' '; MAX_THEME_BYTES as usize + 1],
+        )
+        .unwrap();
+        let standalone = directory.path().join("picker-standalone.toml");
+        std::fs::write(&standalone, "accent = '#654321'").unwrap();
+        config.theme_paths.push(explicit.clone());
+        config.theme_paths.push(standalone);
+
+        let options = selectable_file_themes(&config, TerminalBackground::Dark);
+        let names: Vec<_> = options.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"picker-valid"));
+        assert!(names.contains(&"picker-shared"));
+        assert!(names.contains(&"picker-standalone"));
+        for hidden in [
+            "picker-shadowed",
+            "picker-invalid",
+            "picker-too-large",
+            "dark",
+            "default",
+            "picker-double.toml",
+        ] {
+            assert!(
+                !names.contains(&hidden),
+                "unexpected picker option {hidden}"
+            );
+        }
+        let shared = &options
+            .iter()
+            .find(|(name, _)| name == "picker-shared")
+            .unwrap()
+            .1;
+        assert_eq!(
+            shared.source_path(),
+            Some(
+                explicit
+                    .canonicalize()
+                    .unwrap()
+                    .join("picker-shared.toml")
+                    .as_path()
+            )
+        );
+        assert_eq!(
+            shared.resolve::<String>("accent").as_deref(),
+            Some("#abcdef")
+        );
+        config.theme = Some("dark".into());
+        assert!(
+            load_theme_for_background(&config, TerminalBackground::Unknown).is_compiled_default()
+        );
+        assert_eq!(
+            load_theme_for_background(&config, TerminalBackground::Unknown).background(),
+            TerminalBackground::Dark
+        );
+    }
+
+    #[test]
+    fn cards_example_theme_is_valid_for_every_background_profile() {
+        // `examples/themes/Cards.toml` is the source for the `Cards` built-in.
+        // Every release build compiles it in, so a change to the example must
+        // never break schema validation, the bounded size limit, or any
+        // background profile it claims to support.
+        const CARDS: &str = include_str!("../../../../examples/themes/Cards.toml");
+        assert!(
+            CARDS.len() as u64 <= MAX_THEME_BYTES,
+            "Cards.toml exceeds MAX_THEME_BYTES"
+        );
+        // Only string values are schema-checked for control bytes; ordinary
+        // newlines and tabs in comments and whitespace are fine.
+        for line in CARDS.lines() {
+            if line.trim_start().starts_with('#') {
+                assert!(
+                    !line.chars().any(|ch| ch.is_control() && ch != '\t'),
+                    "control byte in comment: {line:?}"
+                );
+                continue;
+            }
+            assert!(
+                !line.chars().any(char::is_control),
+                "control byte in {CARDS}: {line:?}"
+            );
+        }
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            let theme = load_theme_source_for(
+                CARDS,
+                "Cards",
+                ThemeSource::CompiledCards,
+                "Cards",
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                background,
+            )
+            .expect("Cards example theme must compile for every background");
+            assert_eq!(theme.background(), background);
+            assert_eq!(theme.metadata().name, "Cards");
+            assert!(!theme.is_compiled_default());
+            assert_eq!(
+                theme.resolve::<String>("prompt_wash").as_deref(),
+                Some("false")
+            );
+            assert_eq!(
+                theme.resolve::<String>("splash_compact").as_deref(),
+                Some("true")
+            );
+            assert_eq!(
+                theme.resolve::<String>("splash_model_adaptive").as_deref(),
+                Some("true")
+            );
+            // The adaptive splash claims the whole splash, so `Cards` must not
+            // also pin a `splash` colour.
+            assert_eq!(theme.resolve::<String>("splash"), None);
+        }
+    }
+
+    #[test]
+    fn cards_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().to_owned());
+        let themes = directory.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        // A user's own `Cards.toml` must not replace, or be replaced by, the
+        // compiled-in selector.
+        std::fs::write(
+            themes.join("Cards.toml"),
+            "[metadata]\nname = \"Impostor\"\n[colors]\naccent = '#123456'\n",
+        )
+        .unwrap();
+        config.theme_paths.push(themes);
+
+        let names = available_themes(&config);
+        assert!(names.contains(&CARDS_THEME_NAME.to_owned()));
+        for selector in ["Cards", "cards", "CARDS", "Cards.toml"] {
+            let theme = load_named_theme(selector, &config)
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
+            assert!(!theme.is_compiled_default(), "{selector}");
+            assert_eq!(theme.metadata().name, "Cards", "{selector}");
+            assert!(matches!(theme.source(), ThemeSource::CompiledCards));
+            assert_eq!(theme.source_path(), None, "{selector}");
+        }
+        // The impostor file stays out of the file picker and out of reach.
+        assert!(
+            !selectable_file_themes(&config, TerminalBackground::Unknown)
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(CARDS_THEME_NAME))
+        );
+        assert!(is_reserved_theme_name("Cards"));
+        assert!(is_reserved_theme_name("cards"));
+
+        // Startup honours the selector and keeps its own background profile.
+        config.theme = Some(CARDS_THEME_NAME.to_owned());
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            let theme = load_theme_for_background(&config, background);
+            assert!(!theme.is_compiled_default(), "{background:?}");
+            assert_eq!(theme.background(), background);
+            assert_eq!(theme.metadata().name, "Cards");
+            // A compiled-in theme never creates a reload watcher.
+            assert!(theme.source_path().is_none(), "{background:?}");
+        }
+    }
+
+    #[test]
+    fn still_example_theme_is_valid_for_every_background_profile() {
+        // `examples/themes/Still.toml` is the source for the `Still` built-in.
+        // Every release build compiles it in, so a change to the example must
+        // never break schema validation, the bounded size limit, or any
+        // background profile it claims to support.
+        const STILL: &str = include_str!("../../../../examples/themes/Still.toml");
+        assert!(
+            STILL.len() as u64 <= MAX_THEME_BYTES,
+            "Still.toml exceeds MAX_THEME_BYTES"
+        );
+        // Only string values are schema-checked for control bytes; ordinary
+        // newlines and tabs in comments and whitespace are fine.
+        for line in STILL.lines() {
+            if line.trim_start().starts_with('#') {
+                assert!(
+                    !line.chars().any(|ch| ch.is_control() && ch != '\t'),
+                    "control byte in comment: {line:?}"
+                );
+                continue;
+            }
+            assert!(
+                !line.chars().any(char::is_control),
+                "control byte in {STILL}: {line:?}"
+            );
+        }
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            let theme = load_theme_source_for(
+                STILL,
+                "Still",
+                ThemeSource::CompiledStill,
+                "Still",
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                background,
+            )
+            .expect("Still example theme must compile for every background");
+            assert_eq!(theme.background(), background);
+            assert_eq!(theme.metadata().name, "Still");
+            assert!(!theme.is_compiled_default());
+            // Model-adaptive is the point of this theme: the prompt chevron,
+            // composer marker, and shimmer follow the active model family.
+            assert!(theme.uses_model_lab_color());
+            assert_eq!(
+                theme.resolve::<String>("model.use_lab_color").as_deref(),
+                Some("true")
+            );
+            // The startup splash follows the same rule, in the compact geometry
+            // the compiled default uses. The adaptive splash claims the whole
+            // mark, so Still must not also pin a `splash` colour.
+            assert_eq!(
+                theme.resolve::<String>("splash_model_adaptive").as_deref(),
+                Some("true")
+            );
+            assert_eq!(
+                theme.resolve::<String>("splash_compact").as_deref(),
+                Some("true")
+            );
+            assert_eq!(theme.resolve::<String>("splash"), None);
+            // Still uses one soft prompt band; activity and prose stay plain.
+            for kind in [
+                "assistant",
+                "reasoning",
+                "tool",
+                "notice",
+                "outcome",
+                "shell",
+                "compaction",
+            ] {
+                let surface = theme.surface_for_width(kind, 100);
+                assert_eq!(surface.chrome, ThemeSurfaceChrome::Plain, "{kind}");
+                assert_eq!(surface.padding, 0, "{kind}");
+            }
+            let prompt = theme.surface_for_width("user", 100);
+            assert_eq!(prompt.chrome, ThemeSurfaceChrome::Band);
+            assert_eq!(prompt.padding, 1);
+            assert_eq!(
+                theme.resolve::<String>("composer").as_deref(),
+                Some("shaded")
+            );
+            assert_eq!(theme.resolve::<u16>("content_max_width"), None);
+            assert_eq!(theme.resolve::<u16>("event_marker_gutter"), Some(3));
+            // A live model family overrides the quiet sage `model_accent`.
+            let mut adapted = theme;
+            apply_model_lab(&mut adapted, ModelLab::Anthropic);
+            assert_ne!(
+                adapted.resolve::<String>("model_accent").as_deref(),
+                Some("#6f9182"),
+                "model-adaptive Still must not keep its fixed fallback accent"
+            );
+        }
+    }
+
+    #[test]
+    fn still_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().to_owned());
+        let themes = directory.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        // A user's own `Still.toml` must not replace, or be replaced by, the
+        // compiled-in selector.
+        std::fs::write(
+            themes.join("Still.toml"),
+            "[metadata]\nname = \"Impostor\"\n[colors]\naccent = '#123456'\n",
+        )
+        .unwrap();
+        config.theme_paths.push(themes);
+
+        let names = available_themes(&config);
+        assert!(names.contains(&STILL_THEME_NAME.to_owned()));
+        for selector in ["Still", "still", "STILL", "Still.toml"] {
+            let theme = load_named_theme(selector, &config)
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
+            assert!(!theme.is_compiled_default(), "{selector}");
+            assert_eq!(theme.metadata().name, "Still", "{selector}");
+            assert!(matches!(theme.source(), ThemeSource::CompiledStill));
+            assert_eq!(theme.source_path(), None, "{selector}");
+        }
+        // The impostor file stays out of the file picker and out of reach.
+        assert!(
+            !selectable_file_themes(&config, TerminalBackground::Unknown)
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(STILL_THEME_NAME))
+        );
+        assert!(is_reserved_theme_name("Still"));
+        assert!(is_reserved_theme_name("still"));
+
+        // Startup honours the selector and keeps its own background profile.
+        config.theme = Some(STILL_THEME_NAME.to_owned());
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            let theme = load_theme_for_background(&config, background);
+            assert!(!theme.is_compiled_default(), "{background:?}");
+            assert_eq!(theme.background(), background);
+            assert_eq!(theme.metadata().name, "Still");
+            // A compiled-in theme never creates a reload watcher.
+            assert!(theme.source_path().is_none(), "{background:?}");
+        }
+    }
+
+    /// Every compiled-in file theme must reach `reload` through the same table
+    /// that resolves its selector, so a new built-in cannot compile on first
+    /// load and then silently fall back on reload.
+    #[test]
+    fn every_compiled_file_theme_reloads_from_its_own_embedded_source() {
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            for selector in compiled_file_theme_names() {
+                let theme = load_named_theme_for_background(
+                    selector,
+                    &config(std::env::temp_dir()),
+                    background,
+                )
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
+                assert!(!theme.is_compiled_default(), "{selector}");
+                let reloaded = theme
+                    .reload()
+                    .unwrap_or_else(|error| panic!("{selector} reload: {error}"));
+                assert_eq!(
+                    reloaded.metadata().name,
+                    theme.metadata().name,
+                    "{selector}"
+                );
+                assert_eq!(reloaded.source(), theme.source(), "{selector}");
+                assert_eq!(reloaded.background(), background, "{selector}");
+            }
+        }
+    }
+
+    #[test]
     fn missing_and_legacy_names_keep_the_compiled_default_fallback() {
         let directory = tempfile::tempdir().unwrap();
         let config = config(directory.path().to_owned());
         let names = available_themes(&config);
         assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
         assert!(load_named_theme(DEFAULT_THEME_NAME, &config).is_ok());
+        assert!(load_named_theme("default.toml", &config)
+            .unwrap()
+            .is_compiled_default());
         for name in ["legacy-theme", "custom", "compact"] {
             assert!(
                 load_named_theme(name, &config).is_err(),
@@ -2594,6 +3130,11 @@ mod tests {
 
         assert!(theme_path("untrusted-project", &config).is_none());
         assert!(!available_themes(&config).contains(&"untrusted-project".to_owned()));
+        assert!(
+            !selectable_file_themes(&config, TerminalBackground::Unknown)
+                .iter()
+                .any(|(name, _)| name == "untrusted-project")
+        );
         assert!(theme_discovery_diagnostics(&config)
             .iter()
             .any(|diagnostic| { diagnostic.message.contains("workspace is not trusted") }));
@@ -2626,6 +3167,11 @@ mod tests {
         let names = available_themes(&config);
         assert!(!names.contains(&"linked".to_owned()));
         assert!(!names.contains(&"pipe".to_owned()));
+        assert!(
+            !selectable_file_themes(&config, TerminalBackground::Unknown)
+                .iter()
+                .any(|(name, _)| name == "linked" || name == "pipe")
+        );
         assert!(theme_path("linked", &config).is_none());
         assert!(theme_path("pipe", &config).is_none());
         assert!(theme_discovery_diagnostics(&config)
@@ -2647,6 +3193,37 @@ mod tests {
             theme.metadata.description,
             "Terminal-neutral compiled theme"
         );
+    }
+
+    #[test]
+    fn the_default_theme_opts_into_the_full_cell_prompt_wash() {
+        // The wash is a theme capability, not a compiled-theme special case, so
+        // the default theme declares it like every other theme would.
+        let theme = test_theme();
+        assert_eq!(
+            theme.resolve::<String>("prompt_wash").as_deref(),
+            Some("true")
+        );
+        assert!(theme.prompt_wash());
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            assert!(
+                test_theme_for(
+                    background,
+                    TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                )
+                .prompt_wash(),
+                "{background:?}"
+            );
+        }
+        // A file theme inherits the wash, and `prompt_wash = false` opts out.
+        let inherited = test_theme_from_source("[colors]\naccent = \"#456789\"");
+        assert!(inherited.prompt_wash());
+        let opted_out = test_theme_from_source("[colors]\nprompt_wash = false");
+        assert!(!opted_out.prompt_wash());
     }
 
     #[test]

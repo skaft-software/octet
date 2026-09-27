@@ -100,7 +100,7 @@ pub use model::{
     SessionCatalogState, SessionCursor, SessionItem, SessionLiveState, SessionRetention,
     SessionSnapshot, SessionSummary, SkillSuggestion, SourceKind, SourceRef, ToolActivity,
     ToolActivityStatus, ToolKind, ToolResultSummary, UsageSnapshot, UserMessageDelivery,
-    MAX_MODEL_INPUT_PRICING_TIERS,
+    MAX_MODELS, MAX_MODEL_INPUT_PRICING_TIERS,
 };
 pub use project_registry::{
     ProjectId as RegistryProjectId, ProjectRegistry, ProjectRegistryError, ProjectRoot,

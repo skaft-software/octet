@@ -21,7 +21,8 @@ const MAX_RESOURCES: usize = 2_048;
 const MAX_TAGS: usize = 32;
 const MAX_PLAN_STEPS: usize = 256;
 const MAX_CHOICES: usize = 32;
-const MAX_MODELS: usize = 256;
+/// Maximum models in a host catalog; the serialized bootstrap byte limit also applies.
+pub const MAX_MODELS: usize = 4096;
 const MAX_REASONING_OPTIONS: usize = 32;
 /// Maximum long-context input pricing tiers advertised for one model.
 pub const MAX_MODEL_INPUT_PRICING_TIERS: usize = 32;

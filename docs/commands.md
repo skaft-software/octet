@@ -32,12 +32,13 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/model [id]` | Open the model picker or select an ID. |
 | `/fast [on\|off\|status]` | Toggle/inspect capability-gated Responses priority; active changes wait for a safe boundary. |
 | `/thinking [level]` | Inspect/change [model-supported reasoning](providers.md#reasoning). |
-| `/theme [auto\|light\|dark]` | Choose the terminal appearance; without an argument, open the picker. |
+| `/theme [auto\|light\|dark\|name]` | Choose a built-in appearance or a discovered TOML theme; without an argument, open the filterable picker. |
 | `/answer [instruction]` | Stop tool use at the next safe boundary and answer from gathered evidence. |
 | `/compact [instructions]` | Request compaction at the next safe boundary; bounded custom instructions apply to local summaries, not native Responses compact. |
 | `/verbose [on\|off]` | Expand/collapse retained reasoning, compaction, and bounded tool evidence. |
 | `/reload` | Reload user keybindings, instructions, prompts, skills, and enabled extensions at a safe boundary. Host re-exec is **opt-in**: it happens only on `/reload --force` (or an executable change with `reload_host = true`), and a moved/replaced binary is confirmed before it is probed. Refused while a model turn, tool call, shell child, effect approval, in-flight session write, or delegated worker is active. |
 | `/login [provider]` | Sign in to a subscription provider. |
+| `/setup` | Open the provider setup wizard at any time to add/replace a built-in API key, sign in with a supported subscription, or configure a local endpoint. While a run is active, waits for the idle boundary; the current model/session are not switched. |
 | `/logout [provider]` | Remove its stored credential. |
 | `/status` | Active model, context, capabilities, and diagnostics. |
 | `/session [info]` | Read-only session identity, file, branch, checkpoints and accounting. |
@@ -59,6 +60,11 @@ already admitted effects. [Run control contract](design/octet-agent.md#commit-an
 | `/subagents` | With the trusted, enabled subagents package live, browse workers and read-only transcripts. |
 | `/help [command]` | Local command help and self-documentation. |
 | `/exit` | Exit octet. |
+
+Type `/log…` or `/setu…` in the composer to see both `/login` and
+`/setup` in command suggestions; choose the intended command with Up/Down and
+Enter. An ambiguous partial match does not Tab-complete automatically. Exact
+`/login` and `/setup` retain their separate actions.
 
 Automatic reloads do not add success summaries, startup banners, or debounce
 bookkeeping to the transcript. Host, worker-deferral, extension, provider-catalog,
@@ -85,8 +91,9 @@ call settles, so a call is never separated from its result). `--no-process` or
 The capture is bounded by `max_output_bytes` and `bash_timeout_secs`; it is not
 a persistent shell session.
 
-`/theme` selects a built-in Auto/Light/Dark appearance. This command does not
-load arbitrary theme files. [Theme status](themes.md).
+`/theme` previews and selects built-in Auto/Light/Dark appearances or valid
+TOML files in the trusted theme discovery roots. Cancelling leaves the current
+theme and session unchanged. [Theme discovery and format](themes.md).
 Additional extension commands depend on the enabled, independently trusted
 package; its README is authoritative for arguments.
 
@@ -129,6 +136,7 @@ extension processes stopped. [Discovery and trust](resources.md).
 | --- | --- |
 | Enter | Submit; while active, queue an editable follow-up for after the run. In a picker, select the visible action; in the slash-command popup, invoke the highlighted command. |
 | Shift+Enter | Newline when enhanced terminal key events are available. |
+| Shift+Tab | Cycle through the active model's supported thinking levels from lowest to highest, wrapping at the end. During a run, update the queued selection immediately. |
 | Ctrl+S | Steer at the next model boundary; in the resume picker, cycle sorting. |
 | Escape | Interrupt active work, then dispatch the oldest queued follow-up after settlement (never the draft); close/back out of a panel or slash popup first. |
 | Option+Up / Alt+Up | Recall the newest editable queued steering message or follow-up into an empty composer; no submission or interruption. |

@@ -145,6 +145,10 @@ impl Bootstrap {
         self.codex_context_notes.note_for(model)
     }
 
+    pub(crate) fn merge_catalog_notes(&mut self, notes: CodexContextNotes) {
+        self.codex_context_notes.merge(notes);
+    }
+
     /// Starts only provider-capable API 0.3 extensions when their declarations
     /// are required to resolve an otherwise unknown initial model.
     ///
@@ -371,7 +375,14 @@ const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 // Apple Foundation Models metadata was applied to sparse model responses.
 // Version 8 gives PCC its distinct 32,768-token context window.
 // Version 9 decodes endpoint-owned v1 self-descriptions instead of sparse defaults.
-const CUSTOM_MODEL_CACHE_VERSION: u8 = 9;
+// Version 10 invalidates inventories cached with configured-wins limits so a
+// stale registry `context_window` pin can no longer entomb a live
+// `max_model_len` assertion across restarts and background refreshes.
+// Version 11 invalidates inventories where sparse endpoint metadata had
+// overwritten configured limits with unasserted discovery fallbacks, and starts
+// recording each limit's provenance so a cached inventory re-merges to the same
+// effective limit on the next start.
+const CUSTOM_MODEL_CACHE_VERSION: u8 = 11;
 const PROVIDER_INVENTORY_CACHE_VERSION: u8 = 1;
 const MAX_PROVIDER_INVENTORY_CACHE_BYTES: usize = MAX_DISCOVERY_BODY_BYTES + 1024 * 1024;
 const PROVIDER_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -4035,12 +4046,14 @@ fn schedule_custom_model_cache_refresh_for(
     let _ = std::thread::Builder::new()
         .name(format!("octet-custom-{provider_id}-catalog-refresh"))
         .spawn(move || {
+            let auto_discover = cred.auto_discover;
             let discovered = apply_configured_custom_model_overrides(
                 apply_known_custom_model_defaults(
                     &cred,
                     discover_models_blocking(&cred, &provider_id, false),
                 ),
                 &configured,
+                auto_discover,
             );
             if !discovered.is_empty() {
                 if let Ok(bytes) =
@@ -4067,6 +4080,7 @@ where
     let discovered = apply_configured_custom_model_overrides(
         apply_known_custom_model_defaults(cred, discover(cred)),
         &configured_custom_models(cred),
+        cred.auto_discover,
     );
     if persist_empty || !discovered.is_empty() {
         let _ = bootstrap_check(
@@ -4124,20 +4138,75 @@ fn configured_custom_models(
 fn apply_configured_custom_model_overrides(
     discovered: Vec<crate::auth::custom::CustomModel>,
     configured: &[crate::auth::custom::CustomModel],
+    auto_discover: bool,
 ) -> Vec<crate::auth::custom::CustomModel> {
     if configured.is_empty() {
         return discovered;
     }
+    if !auto_discover {
+        // Explicit opt-out: the registry is truth and the endpoint's
+        // self-description is not consulted for this provider.
+        let mut merged = Vec::with_capacity(discovered.len() + configured.len());
+        for model in discovered {
+            merged.push(
+                configured
+                    .iter()
+                    .find(|override_model| override_model.api_name == model.api_name)
+                    .cloned()
+                    .unwrap_or(model),
+            );
+        }
+        for model in configured {
+            if !merged
+                .iter()
+                .any(|existing| existing.api_name == model.api_name)
+            {
+                merged.push(model.clone());
+            }
+        }
+        return merged;
+    }
 
+    // Custom OpenAI-compatible providers with discovery enabled treat
+    // endpoint-asserted limits as authoritative; the registry is a
+    // seed/fallback. A stale `context_window` pin must never clobber a live
+    // `max_model_len` assertion, otherwise every startup cache write and
+    // hourly refresh re-entombs the stale value and restarts can never
+    // converge after a server profile switch. All non-limit fields keep
+    // configured-wins behavior: the user's file remains the better source
+    // for display names, capability flags, reasoning values, pricing, and
+    // presets. Output is the tighter of both caps, clamped to the live
+    // window, so a vLLM `input+output <= max_model_len` profile shrink is
+    // always honored in the safe (smaller) direction.
     let mut merged = Vec::with_capacity(discovered.len() + configured.len());
     for model in discovered {
-        merged.push(
-            configured
-                .iter()
-                .find(|override_model| override_model.api_name == model.api_name)
-                .cloned()
-                .unwrap_or(model),
-        );
+        match configured
+            .iter()
+            .find(|override_model| override_model.api_name == model.api_name)
+        {
+            Some(configured_model) => {
+                let mut effective = configured_model.clone();
+                if model.context_window_asserted {
+                    effective.context_window = model.context_window;
+                }
+                // Carry the provenance onto the merged model. Registration runs
+                // this merge again over its own output, so a dropped flag would
+                // let that second pass re-apply a stale registry pin on top of
+                // a live assertion.
+                effective.context_window_asserted = model.context_window_asserted;
+                effective.max_output_tokens = if model.max_output_tokens_asserted {
+                    model
+                        .max_output_tokens
+                        .min(configured_model.max_output_tokens)
+                } else {
+                    configured_model.max_output_tokens
+                }
+                .min(effective.context_window);
+                effective.max_output_tokens_asserted = model.max_output_tokens_asserted;
+                merged.push(effective);
+            }
+            None => merged.push(model),
+        }
     }
     for model in configured {
         if !merged
@@ -4406,6 +4475,8 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
         display_name: api_name.to_owned(),
         context_window,
         max_output_tokens: APPLE_FM_MAX_OUTPUT_TOKENS,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
         tools: true,
         parallel_tool_calls: false,
         vision: false,
@@ -4788,6 +4859,7 @@ fn register_custom_openai_provider(
     let models = apply_configured_custom_model_overrides(
         apply_known_custom_model_defaults(&cred, models),
         &configured_overrides,
+        cred.auto_discover,
     );
     if models.is_empty() {
         return Ok(());
@@ -5001,7 +5073,14 @@ fn discover_models_blocking(
                 }
             };
             let entry = described.as_ref().unwrap_or(entry);
-            let ctx = extract_ctx_from_model_entry(entry);
+            // A limit the endpoint did not state is a fallback, not evidence.
+            // Keeping the two apart is what lets a configured pin survive an
+            // inventory that only lists model ids.
+            let asserted_ctx = extract_ctx_from_model_entry(entry);
+            // Sensible default for modern local models.
+            let ctx = asserted_ctx.unwrap_or(262_144);
+            let asserted_output =
+                positive_u64(entry, &["max_output_tokens", "max_completion_tokens"]);
             let vision = entry
                 .get("architecture")
                 .and_then(|a| a.get("input_modalities"))
@@ -5022,15 +5101,14 @@ fn discover_models_blocking(
                         .any(|parameter| parameter.as_str() == Some(name))
                 })
             };
-            let max_output_tokens =
-                positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
-                    .unwrap_or(16_384)
-                    .min(ctx);
+            let max_output_tokens = asserted_output.unwrap_or(16_384).min(ctx);
             let mut model = CustomModel {
                 api_name: id.to_string(),
                 display_name: discovered_display_name(entry, id).unwrap_or_default(),
                 context_window: ctx,
                 max_output_tokens,
+                context_window_asserted: asserted_ctx.is_some(),
+                max_output_tokens_asserted: asserted_output.is_some(),
                 tools: custom_model_metadata_supports_tools(entry),
                 parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"])
                     .unwrap_or_else(|| supports("parallel_tool_calls")),
@@ -5069,7 +5147,12 @@ fn discover_models_blocking(
 /// Walk the model metadata looking for a context length. vLLM emits
 /// `--max-model-len`, while llama.cpp-style servers expose `--ctx-size` or
 /// `meta.n_ctx` through OpenAI-compatible gateways such as hlid.
-fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
+///
+/// Returns `None` when the entry asserts no context length at all, which is
+/// how a sparse inventory is distinguished from one that stated a limit. A
+/// zero or unparsable command-line value is rejected rather than accepted as
+/// a window of nothing.
+fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<u64> {
     let args = match entry
         .get("status")
         .and_then(|s| s.get("args"))
@@ -5092,8 +5175,7 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
                 entry
                     .get("meta")
                     .and_then(|meta| positive_u64(meta, &["n_ctx", "n_ctx_train"]))
-            })
-            .unwrap_or(262_144);
+            });
         }
     };
 
@@ -5102,7 +5184,9 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
         let s = arg.as_str().unwrap_or("");
         if next_is_ctx {
             if let Ok(v) = s.parse::<u64>() {
-                return v;
+                if v > 0 {
+                    return Some(v);
+                }
             }
             next_is_ctx = false;
         }
@@ -5124,7 +5208,6 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
             .get("meta")
             .and_then(|meta| positive_u64(meta, &["n_ctx", "n_ctx_train"]))
     })
-    .unwrap_or(262_144) // sensible default for modern local models
 }
 
 // Codex's checked-in defaults are only a discovery fallback. The authenticated
@@ -6584,7 +6667,7 @@ fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
 /// `process.enter`, `cli.configured`, `selection.resolved`, `catalog.base`,
 /// `catalog.selected`, `catalog.codex`, `catalog.copilot`,
 /// `catalog.fallback`, `catalog.enrich`, `codex.credentials`, `codex.inventory`,
-/// `bootstrap.ready`, `session.resolve`, `session.replay`,
+/// `session.marker`, `catalog.client`, `bootstrap.ready`, `session.resolve`, `session.replay`,
 /// `extensions.provider-preflight`, `extensions.prestart`, `extensions.activate`,
 /// `app.build`, `history.hydrate`, `frame.ready`. `process.enter` starts after
 /// the Tokio runtime has initialized; spawn-to-first-editable-frame latency must
@@ -6747,7 +6830,9 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
         sessions.write_workspace_marker(),
         |error| format!("warning: could not write session workspace marker: {error}"),
     );
+    startup_phase("session.marker");
     let client = AiClient::try_new()?;
+    startup_phase("catalog.client");
     startup_phase("bootstrap.ready");
     Ok(Bootstrap {
         config,

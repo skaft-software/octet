@@ -38,13 +38,13 @@ class ManagerTests(unittest.TestCase):
             manager.shutdown()
         self.temporary.cleanup()
 
-    def manager(self, server, bridge_limits=None, *, policy="deny"):
+    def manager(self, server, bridge_limits=None, *, policy="deny", confirm=None):
         selected_limits = bridge_limits or limits(
             backoff_initial_ms=10,
             backoff_max_ms=20,
             shutdown_timeout_ms=500,
         )
-        extension = FakeExtension(self.scratch, policy=policy)
+        extension = FakeExtension(self.scratch, policy=policy, confirm=confirm)
         manager = BridgeManager(
             extension,
             BridgeConfig(servers=(server,), limits=selected_limits),
@@ -202,6 +202,54 @@ class ManagerTests(unittest.TestCase):
         self.assertNotIn(secret, status)
         self.assertRegex(status, r"^mcp \d+/1 · \d+ tools")
         self.assertEqual(snapshot["revision"], extension.presentations[-1]["revision"])
+
+    def test_confirm_unknown_tools_asks_once_and_denial_does_not_dispatch(self):
+        approved = real_server_config(confirm_unknown_tools=True)
+        extension, manager = self.manager(approved, policy="allow", confirm=True)
+        wait_for(
+            lambda: root_node(manager.snapshot(), "real-fixture")["state"] == "active",
+            message="confirming fixture ready",
+        )
+        name = next(name for name in extension._tools if "fixture_unknown_effect" in name)
+        result = extension._tools[name]["handler"]({}, {})
+        self.assertFalse(result["is_error"])
+        self.assertEqual(len(extension.confirm_calls), 1)
+        call = extension.confirm_calls[0]
+        self.assertIn("Real local fixture", call["detail"])
+        self.assertIn(name, call["detail"])
+        self.assertFalse(call["default"])
+        # An explicitly read-only tool must never raise a confirmation.
+        read_only = next(name for name in extension._tools if "fixture_echo" in name)
+        self.assertFalse(extension._tools[read_only]["handler"]({"value": "x"}, {})["is_error"])
+        self.assertEqual(len(extension.confirm_calls), 1)
+
+        denied = real_server_config(confirm_unknown_tools=True)
+        declined_extension, declined_manager = self.manager(
+            denied, policy="allow", confirm=False
+        )
+        wait_for(
+            lambda: root_node(declined_manager.snapshot(), "real-fixture")["state"] == "active",
+            message="declining fixture ready",
+        )
+        declined_name = next(
+            name for name in declined_extension._tools if "fixture_unknown_effect" in name
+        )
+        declined = declined_extension._tools[declined_name]["handler"]({}, {})
+        self.assertTrue(declined["is_error"])
+        self.assertIn("did not confirm", declined["content"][0]["text"])
+
+    def test_confirm_unknown_tools_without_a_surface_fails_closed(self):
+        server = real_server_config(confirm_unknown_tools=True)
+        # `confirm=None` leaves the fake surface raising, like a headless frontend.
+        extension, manager = self.manager(server, policy="allow", confirm=None)
+        wait_for(
+            lambda: root_node(manager.snapshot(), "real-fixture")["state"] == "active",
+            message="headless fixture ready",
+        )
+        name = next(name for name in extension._tools if "fixture_unknown_effect" in name)
+        result = extension._tools[name]["handler"]({}, {})
+        self.assertTrue(result["is_error"])
+        self.assertIn("confirmation request failed", result["content"][0]["text"])
 
     def test_remote_gate_rejects_before_credentials_dns_or_workers(self):
         remote = ServerConfig(

@@ -2,10 +2,10 @@
 
 Maintainer reference for the optional graphical backend. For local use, start
 with the [Serve guide](../../docs/experimental/octet-serve/README.md).
-Serve remains experimental. Its distribution is **0.8.0**; packages must match
-the host exactly. The [release notes](../../docs/releases/v0.8.0.md) link signed
-assets and public-install evidence. These implementation contracts do not imply
-complete feature or live-provider acceptance.
+This source checkout targets Octet 0.8.1. The backend requires octet
+`=0.8.1`; use a matching published package or the reviewed source checkout.
+These implementation contracts do not imply complete feature or live-provider
+acceptance.
 
 ## Focused checks
 
@@ -88,9 +88,9 @@ The ordinary octet binary owns package management and a small external
 contains the adapter into private `App`. The default TUI, agent, AI, and `sexy-tui-rs` must not
 depend on the web surface. See [architecture](../../docs/experimental/octet-serve/architecture.md).
 
-The source package requires exactly octet `=0.8.0`. Use version-matched published
-assets or a matching local build and reviewed local archive. See
-[distribution channels](../../docs/distribution.md). It declares three targets:
+The source package requires exactly octet `=0.8.1`; published packages are
+version-matched to their host. See [distribution channels](../../docs/distribution.md).
+The backend declares three targets:
 
 - GNU/Linux x86_64: `x86_64-unknown-linux-gnu`;
 - macOS x86_64;

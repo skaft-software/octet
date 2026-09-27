@@ -148,11 +148,17 @@ that configuration but cannot widen it.
 | Tool | Purpose | Hard bounds |
 | --- | --- | --- |
 | `web_search` | Query the selected Brave Search or SearXNG adapter | 512-byte query, 5 requested domains, 10 results, 20 seconds, 512 KiB provider response; Brave credentialed requests do not redirect |
-| `web_fetch` | Normalize one public HTML or plain-text URL | HTTP(S) ports 80/443, 20 seconds, 3 redirects, 512 KiB download, 128 KiB normalized content |
+| `web_fetch` | Normalize one public HTML or plain-text URL | HTTP(S) ports 80/443, 20 seconds, 3 redirects, 4 MiB download, 128 KiB normalized content |
 | `web_find` | Find a literal pattern and return excerpts | 256-byte pattern, 20 matches, 512-byte excerpts, the same fetch bounds as `web_fetch` |
 
 Defaults can be made smaller in configuration. Call arguments may select a
-smaller result, byte, redirect, or time limit but cannot exceed the hard limit.
+smaller result, normalized-content byte, redirect, or time limit but cannot
+exceed the hard limit. `web_fetch`/`web_find` `max_bytes` bounds the returned
+normalized text, not the raw HTTP download. Configurations that explicitly set
+`limits.max_download_bytes` to 512 KiB retain that smaller download limit until
+updated; the new 4 MiB default applies only when the setting is omitted or
+raised.
+
 With the shipped/default configuration, an omitted `web_search` timeout uses
 8 seconds; an explicit 8-second or 20-second argument is passed unchanged
 through the API 0.4 tool boundary. SearXNG and Brave use the same absolute

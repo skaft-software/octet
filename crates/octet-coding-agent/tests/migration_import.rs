@@ -5,9 +5,31 @@ use std::process::Command;
 
 #[test]
 fn pi_adapter_source_package_manifest_validates_without_model_tools() {
-    // Validate the actual source adapter without rewriting its host/API contract.
-    let source = include_str!("../../../extensions/octet-import-pi/extension.toml");
-    let manifest = octet_agent::ExtensionManifest::parse(source).unwrap();
+    // The `octet-import-pi` source adapter was retired; keep its manifest as
+    // an inline fixture so the source-adapter contract stays covered without
+    // rewriting its host/API contract.
+    const SOURCE: &str = concat!(
+        "name = \"octet-import-pi\"\n",
+        "version = \"0.1.0\"\n",
+        "api_version = \"0.3\"\n",
+        "requires_octet = \"=",
+        env!("CARGO_PKG_VERSION"),
+        "\"\n",
+        "description = \"Read-only Pi migration adapter using octet's typed import implementation\"\n",
+        "\n",
+        "[entrypoint]\n",
+        "command = \"extension.sh\"\n",
+        "\n",
+        "[capabilities]\n",
+        "filesystem = \"unrestricted\"\n",
+        "process = false\n",
+        "network = false\n",
+        "\n",
+        "[contributes]\n",
+        "# Migration methods are negotiated, not exposed as model tools.\n",
+        "tools = []\n",
+    );
+    let manifest = octet_agent::ExtensionManifest::parse(SOURCE).unwrap();
     assert_eq!(manifest.name, "octet-import-pi");
     // Source-only adapters use the canonical 0.3 wire, not the official bundles' 0.4 wire.
     assert_eq!(manifest.api_version, "0.3");

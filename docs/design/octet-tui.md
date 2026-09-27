@@ -318,7 +318,11 @@ without replaying missed frames; coalescing has a fixed deadline so incoming
 notifications cannot postpone painting indefinitely. Animation changes style
 rather than text or geometry and invalidates only the active status block.
 The `Working` and `Thinking` labels share a foreground-only moving sweep, with
-`Thinking` travelling a shallower luminance range; activity and reasoning dots
+`Thinking` travelling a shallower luminance range. They also share one
+monotonic status clock, so the sweep phase continues across the transition
+instead of restarting or stalling: the two labels can neither shimmer
+differently nor freeze mid-row. Retry, compaction, and the provider lifecycle
+labels keep their timer without a sweep. Activity and reasoning dots
 keep a solid glyph while their foreground pulses with the label. The known
 Dark/Light TrueColor and ANSI256 physical field parks briefly after crossing
 the label. Elapsed and countdown text update independently; grapheme clusters
@@ -361,7 +365,8 @@ identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning
 and activity dots keep a solid, fixed-size glyph whose foreground pulses with
 the activity-label sweep. `Working` and `Thinking` shimmer in the foreground
-where supported; reduced-motion and no-color paths remain static.
+where supported, from that one shared clock; reduced-motion and no-color paths
+remain static.
 Assistant-response dots remain steady; active tool and shell dots may pulse
 through foreground and muted tones rather than changing size.
 Successful completed event dots use green,
@@ -439,8 +444,8 @@ The picker groups providers alphabetically, then models alphabetically within ea
 provider. Provider names appear once as non-selectable headings; aligned model
 metadata is limited to input/output price, context window, and vision/audio
 support. Tool and reasoning support are omitted from these rows. Thinking
-choices include only the active model's advertised `min_effort..=max_effort`
-range.
+choices preserve the active model's exact supported set and are ordered from
+lowest to highest; Shift+Tab wraps from the last choice to the first.
 
 The context composition bar is ordered left-to-right by semantic model-input
 order: earliest framing at the left, chronological conversation and pending
@@ -487,6 +492,14 @@ bounded actionable reason.
   FIFO delivery projection. Sticky `/answer` input is deliberately not
   retractable because it changes the run's tool policy. The chord neither
   interrupts nor submits, and never overwrites a draft.
+- Shift+Tab advances immediately from the displayed reasoning selection through
+  the active model's exact supported levels in canonical low-to-high order and
+  wraps. During a qualified active Responses run, each press advances from the
+  latest local selection and repaints the footer immediately; superseded unsent
+  control updates and adjacent preference writes coalesce. Preference I/O waits
+  for the idle boundary. The queued label is local state, not provider
+  acknowledgement. Routes without live reasoning updates retain the presses as
+  ordered idle actions.
 - Escape closes the current panel/overlay/slash popup first. At the active
   composer it interrupts and arms queued dispatch only after authoritative
   aborted settlement; it never sends the unqueued draft. Repeated Escape while

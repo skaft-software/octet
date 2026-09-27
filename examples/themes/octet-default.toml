@@ -100,6 +100,11 @@ model_accent = "#16876d"
 model_assistant = "default"
 model.use_lab_color = "true"
 
+# Prompt provenance. `true` paints each historical prompt as a full-cell card
+# in the stored colour of the model that received it; `false` keeps prompt rows
+# on the surface's own fill while the chevron keeps its prompt colour.
+prompt_wash = true
+
 # Semantic roles. Any role name matching the published vocabulary is typed;
 # `extension.<namespace>.<role>` is the open, extension-contributed channel.
 [roles.heading]

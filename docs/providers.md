@@ -101,13 +101,16 @@ unsupported protocol declarations fail closed. This schema cannot enable Lite,
 Ultra/delegation, deferred tools, native budgets/toggles, arbitrary profiles,
 authentication, URLs or transport changes. Explicit legacy endpoint assertions
 (including false/null/unknown) win per field; configured model overrides still
-win over discovery. No capability is borrowed from models.dev. The decoder's
+win over discovery except for custom-provider limits with discovery enabled,
+where the live endpoint window is authoritative (see the custom registry
+contract below). No capability is borrowed from models.dev. The decoder's
 provenance identifies the host-selected endpoint, returned model and codec,
 never an authority or URL claimed by response data.
 
 Built-in raw caches remain URL/account isolated and are decoded on use without
-persisting synthesized fields. Custom normalized caches advance to version 9 so
-old sparse results cannot hide self-descriptions. These are deterministic source
+persisting synthesized fields. Custom normalized caches advance to version 10 so
+old sparse results cannot hide self-descriptions and old configured-wins limit
+pins cannot entomb a live window. These are deterministic source
 contracts, not evidence that any public provider currently emits the extension.
 
 <a id="first-run-setup-unreleased"></a>
@@ -128,8 +131,14 @@ selection, the setup menu offers, in order:
    custom registry change.
 4. **Continue without a provider** — leave setup without saving provider data.
 
-Existing available models and explicit model selections are not replaced by this
-menu. Print/RPC do not open it. Subscription sign-in requires an online launch;
+Existing available models and explicit model selections do not trigger this
+menu automatically. Once inside the TUI, use `/setup` to open the same wizard
+on demand—even with a configured provider. A saved provider refreshes the model
+catalog, but keeps the current session, active model and default model unchanged;
+use `/model` to switch. If you replace the active route's stored key, reselect
+that model to rebuild its current credential. A credential environment variable
+still takes precedence, and the wizard warns before saving a fallback key.
+Print/RPC do not open the wizard. Subscription sign-in requires an online launch;
 `--offline` is not a local-inference guarantee. After saving a credential, the
 catalog is refreshed and model selection uses the ordinary picker. Saving is
 not a successful inference check, and a discovery failure can leave the saved
@@ -473,8 +482,23 @@ with `chmod 600`. Reference keys through environment variables, not literal valu
 
 Each provider is discovered independently. Stable IDs are
 `custom/<provider-id>/<model-id>`; labels appear in the picker and `/status`.
-Configured model metadata overrides matching discovery results. Use
-`auto_discover: false` with an explicit `models` inventory if `GET /v1/models`
+For providers with `auto_discover: true`, endpoint-asserted limits are
+authoritative and the registry is a seed/fallback: a live `max_model_len` (or
+`context_window`/`context_length`) assertion wins over a stale registry
+`context_window` pin, and `max_output_tokens` is the tighter of the endpoint
+and registry caps clamped to the live window, so a vLLM profile switch in
+either direction is followed without editing the registry. Only an *asserted*
+limit is authoritative: a sparse `/v1/models` response that publishes ids and
+nothing else asserts neither limit, so a configured `context_window` and
+`max_output_tokens` survive discovery unchanged instead of being replaced by
+octet's discovery fallbacks, and a model with no configured counterpart keeps
+the fallback. The two limits are recorded independently, so an endpoint that
+reports its served context but no output cap follows the live window while the
+configured output cap survives. Cached inventories carry that provenance, so
+the offline and online paths resolve to the same effective limits. Every other
+registry field — display name, tools/vision flags, reasoning values, pricing,
+presets — keeps configured-wins behavior. Use `auto_discover: false` with an
+explicit `models` inventory to pin the registry as truth when `GET /v1/models`
 is not useful. Legacy single-object files normalize in memory to `custom-openai`
 without breaking existing IDs; new files should use the versioned registry above.
 

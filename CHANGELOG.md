@@ -1,5 +1,222 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.8.1] - 2026-09-27
+
+See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits.
+
+- Split startup tracing around the workspace marker and HTTP-client construction;
+  skip an unchanged private workspace-marker rewrite while retaining no-follow
+  validation and atomic repair. Use indexed model lookup during provider
+  registration and check credentials once per endpoint during model pruning.
+- Avoid cloning full conversation history for the native-steering continuation
+  request, and skip that request entirely for ordinary provider turns.
+
+- Give `Still` the compact model-adaptive startup splash. `splash_model_adaptive`
+  with `splash_compact` replace the larger file-theme mark and the fixed `splash`
+  colour with the compiled default's 16x4 byte that shades from the active model
+  family, matching its model-adaptive prompt chevron and composer marker.
+
+- Group Still's successive exploration and edit/write calls into distinct-file
+  summaries. `Ctrl+O` retains paths and commands, and failures stay visible.
+- Remove `Still`'s 112-column cap so its transcript, splash, composer text,
+  and pickers use the available width instead of sitting in a narrow centered
+  column on wide terminals. Its soft prompt and composer fills are retained.
+- Reserve the detail row beneath a live `Working` status in file themes and
+  beneath Still's in-flight compact tool header, so transitions through
+  two-line `Thinking`, tool calls, and responses do not pull the composer up.
+- Give custom themes that set `content_max_width` a full-bleed filled surface. Their
+  text keeps the centered reading column, but a shaded composer and borderless
+  `band`/`rail` surfaces paint to the terminal edges instead of floating as a
+  narrow island with unpainted bars beside them. Bordered cards, plain text, and
+  themes that only inset their content render as before.
+- Fix `failed to save theme: invalid theme selector "Cards"` (and `"Still"`).
+  `/theme` offers the compiled-in file themes through the same picker variant as
+  a discovered theme, but persistence rejected their reserved stems, so
+  confirming one always failed and the selection was lost on the next start.
+  A reserved stem is now accepted as the built-in it names, canonicalizing case
+  and the `.toml` spelling; the compiled default is still not selectable by name.
+
+- Restore the default theme's full-cell model-adaptive prompt card, lost in
+  v0.8.0 when a hardcoded compiled-theme branch replaced the whole-cell wash
+  with a per-line text tint. The default theme now declares the wash explicitly
+  (`prompt_wash = true`) and the same `prompt_wash` token governs every theme,
+  so `prompt_wash = false` still keeps prompt rows on the theme's own fill. The
+  card fills the entire cell — marker gutter, padding, trailing canvas, and the
+  breathing rows above and below — and is layered under the rich renderer's own
+  inline runs, so bold, italic, and inline code keep their styling inside it
+  instead of being flattened onto one colour. Unknown-background and no-colour
+  terminals stay unpainted, and `Cards` and `Still` are unchanged.
+
+- Render the startup welcome card inside the shared presentation column, at the
+  same `content_width` and with the same leading inset as the transcript,
+  composer, and pickers. A custom theme that caps its reading column centers
+  its splash; themes that request no inset and no width cap are unchanged.
+- Rank `@` mention completions with a bounded top-k heap instead of collecting
+  and sorting every match, and keep one query-scoped result on the workspace
+  file index so a re-render or a selection change no longer rescans the whole
+  index. The returned window and its ordering are identical to the previous
+  full sort.
+- Stop unasserted discovery fallbacks from overwriting configured custom-model
+  limits. Endpoint-asserted context and output limits remain authoritative over
+  a stale registry pin, but a sparse `/v1/models` response that omits both
+  fields now leaves the configured `context_window` and `max_output_tokens`
+  intact instead of replacing them with the 262144/16384 defaults. Cached
+  inventories are versioned 11 so already-merged caches are rebuilt.
+
+- Compile `examples/themes/Still.toml` into every release as the built-in
+  `Still` selector, available after `Cards` in `/theme` and through `--theme`
+  and `OCTET_THEME`. Reserve the `Still` file stem so local theme files cannot
+  shadow the built-in. Still provides a centered reading column with a softly
+  shaded composer and user prompts, compact unboxed tool activity, and aligned
+  prompt/prose/activity indents. Its model-adaptive prompt and composer markers
+  sit over a restrained blue-and-neutral palette. Validate the embedded theme
+  for every supported terminal background.
+- Ship the `Cards` example theme (`examples/themes/Cards.toml`): shaded
+  rail surfaces with quiet stripes, dark/light fills, an amber accent with
+  adaptive model colours, a borderless shaded composer, and a themed splash
+  with compact geometry. Copy it into `~/.octet/themes` to use it. A test
+  fails the build if the example stops validating for any background
+  profile, so the next release that compiles it into the binary keeps the
+  example and the built-in identical.
+- Bound idle Ctrl+D exit to a 2 s extension-shutdown timeout with force-kill
+  fallback (matching the signal path) so a hung extension child cannot make
+  exit feel stuck; bound computer-use `end_session` to 3 s on shutdown.
+- Drain pending terminal input around Kitty keyboard-mode pop and raw-mode
+  exit so a held Ctrl+D repeat/release (`ESC[100;5u`) cannot leak a `00;5u`
+  tail into the parent shell.
+- Parse trailing Kitty image anchors once per transcript-block finish instead
+  of twice, and find compaction cut points with a binary search instead of a
+  linear scan per budget step.
+- Show a cleanup notice if interactive exit takes longer than 150 ms; fast and
+  signal-driven exits remain quiet, and the notice lasts through cleanup.
+- Reuse encoded Kitty image placements across frames, keyed by cell size with
+  bounded retention and payload-replacement invalidation; avoid rebuilding
+  unchanged terminal window titles.
+- Walk the complete workspace file index off-thread for `@` completion and
+  show a scanning indicator until suggestions arrive; cache folded paths for
+  per-keystroke matching instead of silently stopping after 10,000 files.
+- Make computer-use window-state screenshots opt-in and shorten inline element
+  hints to a 20-row sample with the full addressable count and structured-data
+  location; explicitly requested screenshots and complete element data remain
+  available. Full desktop captures remain screenshot-based.
+- Compile `examples/themes/Cards.toml` into every release as the built-in
+  `Cards` selector, so it needs no copy into a discovery root. It appears in
+  `/theme` after the terminal-appearance choices, works with `--theme` and
+  `OCTET_THEME`, and reserves the `Cards` file stem so a local `Cards.toml`
+  can neither shadow nor be shadowed by the built-in.
+- Let custom themes opt out of the model-colour prompt wash with
+  `prompt_wash = false`: prompt rows then render on the surface's own fill
+  while the chevron keeps its prompt colour. The default keeps the wash so
+  model provenance stays visible.
+- Let custom themes opt into the compiled default's smaller splash geometry
+  with `splash_compact = true` (4-tall byte-mark at 16 columns instead of
+  the larger file-theme presentation). Unset themes render as before.
+- Add `splash_model_adaptive = true` so a custom theme can keep the
+  default's model-adaptive splash. It claims the whole splash: the byte-mark
+  gradient and the splash text both follow the active model accent, and a
+  `splash` colour is ignored. `Cards` uses it.
+- Paint `rail` transcript surfaces edge to edge: short rows now pad to the
+  full frame like `band` chrome instead of rendering as ragged text-only
+  highlights, so shaded fills read as cards.
+- Align full-width (`card`/`band`/`rail`) user surfaces with the shared
+  marker gutter in file themes, so prompt cards start and end on the same
+  columns as tool/shell cards. Plain user text and the compiled default
+  keep the historical compact prompt grid.
+- Shade the startup byte-mark into a truecolor column gradient derived from
+  a custom theme's `splash` colour, keeping the travelling sweep on
+  animation-capable terminals. Limited palettes, reduced motion, and themes
+  without `splash` render exactly as before.
+- Give borderless `band`/`rail` transcript surfaces a vertical cushion row
+  above and below their content when the theme sets `padding > 0`, matching
+  the breathing room card surfaces already had, so shaded fills never touch
+  their own edges. Themes with `padding = 0` and the compiled default
+  (all-plain surfaces) render exactly as before.
+- Fix custom OpenAI-compatible providers ignoring live context-window changes:
+  with `auto_discover: true`, endpoint-asserted limits are now authoritative
+  over registry pins (`max_model_len` wins, output is the tighter cap clamped
+  to the live window) so vLLM profile switches converge via background refresh
+  instead of re-entombing a stale pin in every cache write. `auto_discover:
+  false` remains the explicit registry-truth opt-out. Custom model caches
+  advance to version 10 to discard entombed pins.
+- Align the release-candidate bookkeeping with `0.8.1-rc.1`: the Python and
+  TypeScript SDKs, the shell installer, and the four executable-bundle
+  manifests follow the candidate, and the install guides, distribution notes,
+  and `v0.8.1-rc.1` release notes point at it. Refresh the checked-in
+  models.dev pricing, capabilities, and source snapshots and update the
+  deterministic OpenRouter DeepSeek price assertion to the reviewed catalog.
+- Fix the `octet-computer-use` test bootstrap to use the vendored SDK and
+  isolate the ambient TypeSafe key so the Jev suite never reaches the network.
+- Fix the active-run thinking-control test to expect the committed footer
+  label after the wire update is admitted, and format the composer sources
+  for the current toolchain.
+- Fix context compaction reporting no prior messages to summarize when a single
+  oversized entry alone exceeds the keep-recent budget: the boundary walk now
+  cuts at the newest valid turn boundary before the crossing instead of
+  collapsing to the oldest visible entry. A re-compact with no new history now
+  reports that explicitly instead of claiming there were no prior messages.
+- Remove the retired `octet-import-aider` and `octet-import-pi` source
+  extensions and their packaged-doc, installer, and test references; the
+  built-in `octet migrate import pi` host implementation is unchanged.
+
+- Fix Shift+Tab cycling so exact provider choices always sort from lowest to
+  highest and wrap to the lowest; rapid active-run taps advance from the latest
+  selected level, repaint immediately, and defer preference I/O until idle.
+- Fix Serve’s Ultra slider label and purple transition after rainbow Max.
+  Expand the bounded model catalog from 256 to 4,096 entries so large provider
+  inventories no longer hide models at the old cutoff; retain capability gates
+  and bootstrap byte limits.
+- Add the `octet-computer-use` bundle to the official release catalog. It drives
+  native desktop applications on macOS, Windows, and Linux through a locally
+  installed MIT-licensed Cua Driver, provisioning the driver on request and
+  following the active effect-confirmation policy: gated profiles confirm each
+  effectful action; full access does not prompt by default.
+- Deprecate `octet-browse`. It remains published, installable, and unchanged, and
+  is retained because its isolated, Octet-owned Chromium profile with a manual-auth
+  boundary is a safety property the computer-use path does not provide.
+- Refresh reviewed models.dev metadata to 910 pricing routes, 395 canonical names,
+  and 932 capability routes; preserve the [source provenance](crates/octet-ai/models/SOURCES.md).
+  The re-freeze is required because the pre-release freshness gate compares the
+  checked-in snapshots against live models.dev whenever the workspace version
+  changes, so the 0.8.1 bump re-checked a snapshot last reviewed for 0.8.0. All
+  nine changed prices and seven changed context/output limits are OpenRouter
+  routes; canonical display names are unchanged. Builds and runtime remain
+  offline, direct DeepSeek schedule pricing remains excluded/unknown, and public
+  metadata does not establish live inference acceptance.
+- Restrict the four computer-use `.app`-bundle tests to macOS. They inject a
+  `darwin` host candidate and assert `CFBundleExecutable` resolution, which the
+  driver only performs on darwin; off darwin `None` is the correct answer, so
+  the suite now skips them instead of failing there. The other desktop-host
+  tests, which drive the platform-independent `OCTET_CUA_DESKTOP_APP` override,
+  keep running on every platform.
+- Count a loopback AWS-metadata fixture request when it is read rather than after
+  its response is written, so a caller that has already read the final body
+  always observes the final count. The four request-count assertions could
+  otherwise read one short on a loaded runner.
+- Give each `herdr` transport test socket a process-unique path from a counter
+  instead of a sub-millisecond clock residue, which repeated across the parallel
+  test threads sharing one process and failed the second bind with `EADDRINUSE`.
+
+## [0.8.1-rc.1] — local dogfood only (unpublished)
+
+- Add in-session `/setup` provider configuration while preserving the active
+  model and session.
+- Discover user-defined TOML themes in `/theme`.
+- Show the active session name in the terminal window title and keep it
+  synchronized with session changes.
+- Prevent Kitty inline images from advancing the cursor into the composer.
+- Pin source extension manifests to this RC host; the published 0.8.0 bundles
+  remain unchanged and are not compatible with the RC binary.
+- Fix Shift+Tab thinking cycling: the idle and active-run paths now share one
+  ascending, total rule, so the gesture always advances instead of silently
+  doing nothing on a token-budget or no-longer-advertised selection.
+- Give the `Working` and `Thinking` activity labels one shared shimmer clock so
+  they cannot shimmer differently or freeze mid-row; retry, compaction, and
+  provider lifecycle labels stay timer-only.
+
+This candidate is built for local dogfooding; it is not a published release.
+
 ## [0.8.0] - 2026-09-25
 
 See [release notes](docs/releases/v0.8.0.md) for changes, availability and current limits.

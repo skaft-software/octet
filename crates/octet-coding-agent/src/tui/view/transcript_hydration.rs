@@ -57,6 +57,7 @@ pub(super) fn append_hydrated_items(
                 model_lab,
                 prompt_color,
             } => {
+                state.seal_activity_group();
                 state.push_block(TranscriptBlock::User {
                     text,
                     model_lab,
@@ -65,6 +66,7 @@ pub(super) fn append_hydrated_items(
                 });
             }
             TranscriptItem::Assistant(text) => {
+                state.seal_activity_group();
                 state.push_block(TranscriptBlock::Assistant(Box::new(
                     AssistantBlock::finalized(text),
                 )));
@@ -74,7 +76,13 @@ pub(super) fn append_hydrated_items(
                     AssistantBlock::finalized_reasoning(text),
                 )));
             }
+            TranscriptItem::ToolActivityGroup(group) => {
+                if state.activity_groups_enabled() {
+                    state.extend_activity_group(group);
+                }
+            }
             TranscriptItem::ToolCall { id, name, args } => {
+                let grouped = state.grouped_tool_call(&id, &name, &args);
                 if is_subagent_tool(&name) {
                     // Discovery/status calls remain hidden. Actual orchestration
                     // calls restore one bounded lifecycle row from durable
@@ -112,7 +120,7 @@ pub(super) fn append_hydrated_items(
                 let display =
                     summarize_tool_with_workspace(&name, &args, state.workspace.as_deref());
                 let model_lab = state.model_lab;
-                let index = state.push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+                let mut panel = ToolPanel::new(
                     id.clone(),
                     name,
                     args.to_string(),
@@ -122,7 +130,9 @@ pub(super) fn append_hydrated_items(
                     false,
                     None,
                     model_lab,
-                ))));
+                );
+                panel.grouped_child = grouped;
+                let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
                 pending_by_id.entry(id.clone()).or_default().push(index);
                 state.tool_panels.insert(id, index);
             }
@@ -152,6 +162,7 @@ pub(super) fn append_hydrated_items(
                     }
                     continue;
                 }
+                let group_id = id.clone();
                 // Malformed provider output can reuse one call ID within the
                 // same assistant turn. The durable protocol cannot identify
                 // which duplicate a result belongs to, so conservatively close
@@ -199,8 +210,21 @@ pub(super) fn append_hydrated_items(
                     let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
                     state.tool_panels.insert(id, index);
                 }
+                if let Some(index) = state.tool_panels.get(&group_id).copied() {
+                    if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get(index) {
+                        let name = panel.name.clone();
+                        let reason = panel.is_error.then(|| {
+                            panel
+                                .failure_reason
+                                .clone()
+                                .unwrap_or_else(|| "tool failed".into())
+                        });
+                        state.settle_activity_tool(&group_id, &name, reason.as_deref());
+                    }
+                }
             }
             TranscriptItem::CompactionMarker { summary } => {
+                state.seal_activity_group();
                 state.push_block(TranscriptBlock::Compaction(Box::new(CompactionBlock {
                     label: "Context compacted".into(),
                     summary,
@@ -208,6 +232,7 @@ pub(super) fn append_hydrated_items(
                 })));
             }
             TranscriptItem::NativeCompactionMarker => {
+                state.seal_activity_group();
                 state.push_block(TranscriptBlock::Notice(
                     "Context compacted natively · opaque Responses state retained".into(),
                 ));
@@ -220,6 +245,228 @@ pub(super) fn append_hydrated_items(
 mod tests {
     use super::*;
     use octet_ai::ToolCallId;
+    use sexy_tui_rs::strip_terminal_sequences;
+
+    #[test]
+    fn grouped_exploration_replays_mixed_results_and_expands_child_details() {
+        use crate::hydrate::ToolActivityGroup;
+        // `quiet_tool_summaries` gates all activity grouping.
+        let mut state = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(
+                "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+            ),
+            ..Default::default()
+        };
+        let read = ToolCallId("read-one".into());
+        let bash = ToolCallId("bash-one".into());
+        let group = ToolActivityGroup {
+            member_ids: vec![read.clone(), bash.clone()],
+            read_files: 1,
+            searches: 0,
+            commands: 1,
+            file_paths: vec!["src/main.rs".into()],
+            ..Default::default()
+        };
+        append_hydrated_items(
+            &mut state,
+            [
+                TranscriptItem::ToolActivityGroup(group),
+                TranscriptItem::ToolCall {
+                    id: read.clone(),
+                    name: "read".into(),
+                    args: serde_json::json!({"path": "src/main.rs"}),
+                },
+                TranscriptItem::ToolCall {
+                    id: bash.clone(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": "false"}),
+                },
+            ],
+        );
+        append_hydrated_items(
+            &mut state,
+            [
+                TranscriptItem::ToolResult {
+                    id: read.clone(),
+                    text: "content".into(),
+                    is_error: false,
+                    duration_ms: None,
+                    images: Vec::new(),
+                },
+                TranscriptItem::ToolResult {
+                    id: bash.clone(),
+                    text: "permission denied".into(),
+                    is_error: true,
+                    duration_ms: None,
+                    images: Vec::new(),
+                },
+            ],
+        );
+        let compact = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
+        assert!(compact.contains("Explored 1 file · 1 command"), "{compact}");
+        assert!(compact.contains("bash: permission denied"), "{compact}");
+        assert!(!compact.contains("src/main.rs"), "{compact}");
+        assert!(!compact.contains("$ false"), "{compact}");
+        state.verbose_tools = true;
+        state.invalidate_transcript_layout();
+        // Styled tool labels interleave escape sequences, so compare against
+        // the rendered text with those sequences removed.
+        let detailed = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
+        assert!(detailed.contains("src/main.rs"), "{detailed}");
+        assert!(detailed.contains("Bash  false"), "{detailed}");
+    }
+
+    #[test]
+    fn restored_edits_merge_across_responses_and_keep_paths_on_disclosure() {
+        let mut state = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(
+                "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+            ),
+            ..Default::default()
+        };
+        let calls = [
+            ("edit-a", "edit", "src/a.rs"),
+            ("write-a", "write", "src/a.rs"),
+            ("write-b", "write", "src/b.rs"),
+        ];
+        for (id, name, path) in calls {
+            let id = ToolCallId(id.into());
+            append_hydrated_items(
+                &mut state,
+                [TranscriptItem::ToolCall {
+                    id: id.clone(),
+                    name: name.into(),
+                    args: serde_json::json!({"path": path, "content": "new"}),
+                }],
+            );
+            append_hydrated_items(
+                &mut state,
+                [TranscriptItem::ToolResult {
+                    id,
+                    text: if path == "src/b.rs" {
+                        "permission denied"
+                    } else {
+                        "ok"
+                    }
+                    .into(),
+                    is_error: path == "src/b.rs",
+                    duration_ms: None,
+                    images: Vec::new(),
+                }],
+            );
+        }
+        append_hydrated_items(
+            &mut state,
+            [TranscriptItem::User {
+                text: "next".into(),
+                model_lab: None,
+                prompt_color: None,
+            }],
+        );
+        let compact = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
+        assert!(compact.contains("Edited 2 files · 1 failed"), "{compact}");
+        assert!(!compact.contains("src/a.rs"), "{compact}");
+        state.verbose_tools = true;
+        state.invalidate_transcript_layout();
+        let expanded = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
+        assert!(
+            expanded.contains("src/a.rs") && expanded.contains("src/b.rs"),
+            "{expanded}"
+        );
+    }
+
+    #[test]
+    fn activity_group_projection_is_still_only_even_after_theme_change() {
+        let id = ToolCallId("file".into());
+        let group = crate::hydrate::ToolActivityGroup {
+            member_ids: vec![id.clone()],
+            read_files: 1,
+            searches: 0,
+            commands: 0,
+            file_paths: vec!["src/file.rs".into()],
+            ..Default::default()
+        };
+        let items = || {
+            [
+                TranscriptItem::ToolActivityGroup(group.clone()),
+                TranscriptItem::ToolCall {
+                    id: id.clone(),
+                    name: "read".into(),
+                    args: serde_json::json!({"path": "src/file.rs"}),
+                },
+            ]
+        };
+        let mut ordinary = ShellState::default();
+        append_hydrated_items(&mut ordinary, items());
+        let rendered = ordinary.rendered_transcript(100).join("\n");
+        assert!(!rendered.contains("Explored"), "{rendered}");
+        assert!(rendered.contains("src/file.rs"), "{rendered}");
+
+        let mut still = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(
+                "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+            ),
+            ..Default::default()
+        };
+        append_hydrated_items(&mut still, items());
+        let rendered = still.rendered_transcript(100).join("\n");
+        assert!(rendered.contains("Explored"), "{rendered}");
+        assert!(!rendered.contains("file.rs"), "{rendered}");
+        still.theme = crate::tui::theme::test_theme();
+        still.invalidate_transcript_layout();
+        let rendered = still.rendered_transcript(100).join("\n");
+        assert!(!rendered.contains("Explored"), "{rendered}");
+        assert!(rendered.contains("src/file.rs"), "{rendered}");
+    }
+
+    #[test]
+    fn restored_still_command_run_spans_responses_but_stops_at_user_text() {
+        let mut state = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(
+                "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+            ),
+            ..Default::default()
+        };
+        let first = octet_ai::ToolCallId("first-command".into());
+        let second = octet_ai::ToolCallId("second-command".into());
+        let call = |id: &octet_ai::ToolCallId, command: &str| TranscriptItem::ToolCall {
+            id: id.clone(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": command}),
+        };
+        let result = |id: &octet_ai::ToolCallId| TranscriptItem::ToolResult {
+            id: id.clone(),
+            text: "ok".into(),
+            is_error: false,
+            duration_ms: None,
+            images: Vec::new(),
+        };
+        append_hydrated_items(
+            &mut state,
+            [
+                call(&first, "cargo check"),
+                result(&first),
+                call(&second, "cargo test"),
+                result(&second),
+                TranscriptItem::User {
+                    text: "next task".into(),
+                    model_lab: None,
+                    prompt_color: None,
+                },
+            ],
+        );
+        let compact = state.rendered_transcript(100).join("\n");
+        assert!(compact.contains("Ran 2 Commands"), "{compact}");
+        assert!(!compact.contains("cargo check"), "{compact}");
+        assert!(state.activity_groups.is_empty());
+        state.verbose_tools = true;
+        state.invalidate_transcript_layout();
+        let expanded =
+            sexy_tui_rs::strip_terminal_sequences(&state.rendered_transcript(100).join("\n"))
+                .to_owned();
+        assert!(expanded.contains("-> Bash  cargo check"), "{expanded}");
+        assert!(expanded.contains("-> Bash  cargo test"), "{expanded}");
+    }
 
     #[test]
     fn restored_orchestration_settles_without_exposing_arguments_or_worker_output() {

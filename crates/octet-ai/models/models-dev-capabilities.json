@@ -1307,141 +1307,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Flash 0731",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/models/deepseek-v4-flash-vision-exp": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Flash Vision Exp",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/models/deepseek-v4-pro": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Pro",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/models/deepseek-v4-pro-0813": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Pro 0813",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "fireworks/accounts/fireworks/models/deepseek-v4p1-flash": {
     "interleaved": {
       "field": "reasoning_content"
@@ -1512,38 +1377,6 @@
       {
         "min": 1024,
         "type": "budget_tokens"
-      }
-    ],
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/models/glm-5p2": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1048575,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GLM 5.2",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "high",
-          "max"
-        ]
       }
     ],
     "tool_call": true
@@ -1658,58 +1491,6 @@
     "reasoning_options": [],
     "tool_call": true
   },
-  "fireworks/accounts/fireworks/models/kimi-k2p6": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 262000,
-      "output": 262000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Kimi K2.6",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/models/kimi-k2p7-code": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 262000,
-      "output": 262000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Kimi K2.7 Code",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
-  },
   "fireworks/accounts/fireworks/models/kimi-k3": {
     "interleaved": {
       "field": "reasoning_content"
@@ -1750,36 +1531,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "fireworks/accounts/fireworks/models/minimax-m2p7": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 196608,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-M2.7",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    ],
-    "tool_call": true
-  },
   "fireworks/accounts/fireworks/models/minimax-m3": {
     "interleaved": {
       "field": "reasoning_content"
@@ -1808,36 +1559,6 @@
         ]
       }
     ],
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/models/muse-glimmer-30b": {
-    "limit": {
-      "context": 131072,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Muse Glimmer 30B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    ],
-    "structured_output": true,
     "tool_call": true
   },
   "fireworks/accounts/fireworks/models/nemotron-3-ultra-nvfp4": {
@@ -1883,41 +1604,6 @@
       }
     ],
     "structured_output": true,
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/models/qwen3p7-plus": {
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen 3.7 Plus",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high"
-        ]
-      },
-      {
-        "min": 1,
-        "type": "budget_tokens"
-      }
-    ],
     "tool_call": true
   },
   "fireworks/accounts/fireworks/models/qwen3p8-2p4t-a95b": {
@@ -2007,71 +1693,6 @@
       }
     ],
     "structured_output": true,
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/routers/deepseek-pro-latest": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek Pro Latest",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "fireworks/accounts/fireworks/routers/glm-5p2-fast": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1048575,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GLM 5.2 Fast",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "high",
-          "max"
-        ]
-      }
-    ],
     "tool_call": true
   },
   "fireworks/accounts/fireworks/routers/glm-5p3-fast": {
@@ -10454,6 +10075,32 @@
     ],
     "tool_call": true
   },
+  "opencode/longcat-2.5-preview-free": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "LongCat 2.5 Preview Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "tool_call": true
+  },
   "opencode/mimo-v2-flash-free": {
     "interleaved": {
       "field": "reasoning_content"
@@ -11081,6 +10728,29 @@
     "structured_output": true,
     "tool_call": true
   },
+  "opencode/qwen3.8-max": {
+    "limit": {
+      "context": 262144,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3.8 Max",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "tool_call": true
+  },
   "opencode/ring-2.6-1t-free": {
     "interleaved": {
       "field": "reasoning_content"
@@ -11436,25 +11106,6 @@
     "reasoning": false,
     "structured_output": true,
     "tool_call": false
-  },
-  "openrouter/anthropic/claude-3-haiku": {
-    "limit": {
-      "context": 200000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Claude 3 Haiku",
-    "reasoning": false,
-    "structured_output": false,
-    "tool_call": true
   },
   "openrouter/anthropic/claude-fable-5": {
     "limit": {
@@ -12266,7 +11917,7 @@
   "openrouter/deepseek/deepseek-chat": {
     "limit": {
       "context": 163840,
-      "output": 16384
+      "output": 16000
     },
     "modalities": {
       "input": [
@@ -12458,7 +12109,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -12519,7 +12170,7 @@
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 262144
     },
     "modalities": {
       "input": [
@@ -12584,7 +12235,7 @@
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -12615,7 +12266,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 384000
     },
     "modalities": {
       "input": [
@@ -14398,7 +14049,7 @@
   "openrouter/minimax/minimax-m2.7": {
     "limit": {
       "context": 204800,
-      "output": 131072
+      "output": 176947
     },
     "modalities": {
       "input": [
@@ -15022,64 +14673,6 @@
     "structured_output": true,
     "tool_call": false
   },
-  "openrouter/nex-agi/nex-n2.5-mini:free": {
-    "limit": {
-      "context": 262144,
-      "output": 235929
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Nex-N2.5-Mini (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "medium",
-          "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/nex-agi/nex-n2.5-pro:free": {
-    "limit": {
-      "context": 262144,
-      "output": 235929
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Nex-N2.5-Pro (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "medium",
-          "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/nousresearch/hermes-3-llama-3.1-405b": {
     "limit": {
       "context": 131072,
@@ -15373,7 +14966,7 @@
   },
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "limit": {
-      "context": 262144,
+      "context": 1000000,
       "output": 131072
     },
     "modalities": {
@@ -17251,6 +16844,39 @@
     "structured_output": true,
     "tool_call": false
   },
+  "openrouter/perceptron/perceptron-mk1.5": {
+    "limit": {
+      "context": 36864,
+      "output": 8192
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Perceptron Mk1.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/perplexity/sonar": {
     "limit": {
       "context": 127072,
@@ -18084,7 +17710,7 @@
   "openrouter/qwen/qwen3.5-122b-a10b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18284,7 +17910,7 @@
   "openrouter/qwen/qwen3.6-27b": {
     "limit": {
       "context": 262144,
-      "output": 262140
+      "output": 81920
     },
     "modalities": {
       "input": [
@@ -19242,7 +18868,7 @@
   },
   "openrouter/thinkingmachines/inkling": {
     "limit": {
-      "context": 1048576,
+      "context": 524288,
       "output": 471859
     },
     "modalities": {
@@ -19275,7 +18901,7 @@
   },
   "openrouter/thinkingmachines/inkling-small": {
     "limit": {
-      "context": 1048576,
+      "context": 524288,
       "output": 262144
     },
     "modalities": {
@@ -19804,7 +19430,7 @@
   },
   "openrouter/xiaomi/mimo-v2.6-pro": {
     "limit": {
-      "context": 1048576,
+      "context": 1050000,
       "output": 131072
     },
     "modalities": {
@@ -20135,36 +19761,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/z-ai/glm-5.2:free": {
-    "limit": {
-      "context": 32768,
-      "output": 29491
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GLM 5.2 (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "high",
-          "xhigh"
-        ]
-      }
-    ],
-    "structured_output": false,
-    "tool_call": false
-  },
   "openrouter/z-ai/glm-5.3": {
     "limit": {
       "context": 1310720,
@@ -20196,7 +19792,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1310720,
-      "output": 131072
+      "output": 128000
     },
     "modalities": {
       "input": [
@@ -20433,7 +20029,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 384000
     },
     "modalities": {
       "input": [
@@ -20465,7 +20061,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [

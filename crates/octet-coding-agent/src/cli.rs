@@ -237,11 +237,11 @@ pub struct Cli {
     /// Workspace root override.
     #[arg(long)]
     pub workspace: Option<PathBuf>,
-    /// Terminal theme: auto, light, or dark.
+    /// Terminal theme: auto, light, dark, Cards, Still, or a discovered TOML theme name.
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,
-    /// Legacy theme directory option; the current runtime does not load custom themes.
-    #[arg(long = "theme-dir", value_name = "DIR", hide = true)]
+    /// Add a TOML theme file or directory (repeatable).
+    #[arg(long = "theme-dir", value_name = "FILE-OR-DIR")]
     pub theme_dirs: Vec<PathBuf>,
     /// Colour output policy: auto, always, or never.
     #[arg(long, value_name = "WHEN")]
@@ -1252,18 +1252,37 @@ pub fn persist_reasoning(reasoning: &str) -> anyhow::Result<()> {
     persist_key_to_path("reasoning", reasoning, &path)
 }
 
-/// Persist one of the compiled terminal-appearance choices. The value is
-/// deliberately validated here so the interactive picker can never turn the
-/// user config into an arbitrary theme-file selector.
+/// Persist a built-in selector or a resource name already validated and loaded
+/// by the interactive picker. Keep custom names case-sensitive for discovery.
 pub fn persist_theme_choice(choice: &str) -> anyhow::Result<()> {
-    let choice = choice.trim().to_ascii_lowercase();
-    if !matches!(choice.as_str(), "auto" | "light" | "dark") {
-        anyhow::bail!("invalid terminal appearance {choice:?}; use auto, light, or dark")
-    }
+    let key = theme_choice_key(choice)?;
     let path = global_config_path().ok_or_else(|| {
-        anyhow::anyhow!("cannot persist terminal appearance: user home directory is unavailable")
+        anyhow::anyhow!("cannot persist theme: user home directory is unavailable")
     })?;
-    persist_key_to_path("theme", &choice, &path)
+    persist_key_to_path("theme", key, &path)
+}
+
+fn theme_choice_key(choice: &str) -> anyhow::Result<&str> {
+    let choice = choice.trim();
+    if let Some(builtin) = crate::tui::theme::TerminalThemeChoice::parse(choice) {
+        return Ok(builtin.key());
+    }
+    // `Cards` and `Still` are reserved so a discovered file cannot shadow the
+    // built-in, but the built-in itself is selected by that same name. The
+    // reserved stem stays valid here; only `default` and a `.toml` spelling are
+    // rejected, because the config loader resolves them to the fallback or to a
+    // file rather than to the selector the user picked.
+    if crate::tui::theme::is_compiled_file_theme_name(choice) {
+        return Ok(crate::tui::theme::compiled_file_theme_name(choice).unwrap_or(choice));
+    }
+    if crate::resource_resolver::valid_resource_name(choice)
+        && !choice.ends_with(".toml")
+        && !crate::tui::theme::is_reserved_theme_name(choice)
+    {
+        Ok(choice)
+    } else {
+        anyhow::bail!("invalid theme selector {choice:?}")
+    }
 }
 
 /// First-run appearance onboarding is only eligible for a genuinely fresh
@@ -3683,8 +3702,8 @@ max_output_bytes = 4096
         )
         .unwrap();
 
-        for choice in ["light", "dark", "auto"] {
-            persist_theme_to_path(choice, &path).unwrap();
+        for choice in ["light", "dark", "auto", "MyTheme"] {
+            persist_theme_to_path(theme_choice_key(choice).unwrap(), &path).unwrap();
 
             let content = std::fs::read_to_string(&path).unwrap();
             let parsed: toml::Value = toml::from_str(&content).unwrap();
@@ -3699,9 +3718,32 @@ max_output_bytes = 4096
     }
 
     #[test]
-    fn removed_cutline_theme_cannot_be_persisted() {
-        let error = persist_theme_choice("compact").unwrap_err();
-        assert!(error.to_string().contains("use auto, light, or dark"));
+    fn theme_choice_persistence_rejects_unsafe_and_reserved_file_names() {
+        assert_eq!(theme_choice_key(" DARK ").unwrap(), "dark");
+        assert_eq!(theme_choice_key("MyTheme").unwrap(), "MyTheme");
+        for name in ["../other", "a/b", "default", "foo.toml", "", "bad name"] {
+            assert!(theme_choice_key(name).is_err(), "accepted {name:?}");
+        }
+    }
+
+    #[test]
+    fn theme_choice_persistence_accepts_the_compiled_in_file_themes() {
+        // The picker offers `Cards` and `Still` through the same file variant
+        // as a discovered theme, and their stems are reserved so a local file
+        // cannot shadow them. Selecting the built-in must still save, otherwise
+        // the picker reports `invalid theme selector` for a theme it just showed.
+        for (choice, expected) in [("Cards", "Cards"), ("Still", "Still")] {
+            assert_eq!(theme_choice_key(choice).unwrap(), expected);
+            // Case and the `.toml` spelling resolve to the one built-in name.
+            assert_eq!(theme_choice_key(&choice.to_lowercase()).unwrap(), expected);
+            assert_eq!(
+                theme_choice_key(&format!("{choice}.toml")).unwrap(),
+                expected
+            );
+        }
+        // The compiled default is still not a selectable file name: it is the
+        // fallback, not a theme the picker offers.
+        assert!(theme_choice_key("default").is_err());
     }
 
     #[test]

@@ -2105,6 +2105,7 @@ function ReasoningPowerSlider({
   const wheelDeltaRef = useRef(0);
   const selectedEffort = (options[selectedIndex] ?? "").toLowerCase();
   const isMax = selectedEffort === "max";
+  const isUltra = selectedEffort === "ultra";
   const hasFloatingParticles = selectedEffort === "xhigh";
   const thumbOffset = Number((14 - position * 0.28).toFixed(4));
   const visibleValue = formatValue?.(selectedValue) ?? selectedValue;
@@ -2166,6 +2167,7 @@ function ReasoningPowerSlider({
         <div
           className="power-slider-root"
           data-max={isMax}
+          data-ultra={isUltra}
           data-overdrive={hasFloatingParticles}
           data-dragging={dragging || undefined}
           data-disabled={disabled || undefined}
@@ -2238,6 +2240,7 @@ function abstractEffortLabel(
   options: ReasoningEffort[],
   value: ReasoningEffort,
 ): string {
+  if (value.toLowerCase() === "ultra") return "Ultra";
   const selectedIndex = Math.max(0, options.indexOf(value));
   if (options.length > 1 && selectedIndex === options.length - 1) {
     return "Max";

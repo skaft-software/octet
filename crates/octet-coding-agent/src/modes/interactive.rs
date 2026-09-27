@@ -57,7 +57,8 @@ use crate::tui::pickers::{
 use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
-    background_from_terminal_rgb, load_theme, load_theme_for_background, TerminalBackground,
+    background_from_terminal_rgb, is_reserved_theme_name, load_named_theme_for_background,
+    load_theme, load_theme_for_background, selectable_file_themes, TerminalBackground,
     TerminalThemeChoice,
 };
 use crate::tui::view::{
@@ -222,11 +223,15 @@ impl crate::extensions::ExtensionConfirmationHandler for InteractiveExtensionCon
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingIdleAction {
     Login(Option<String>),
+    Setup,
     Logout(Option<String>),
     ChangeModel(ModelId),
     Fast(bool),
     ChangeThinking(ReasoningConfig),
     ChangeThinkingLevel(ThinkingLevel),
+    /// Save the active-run selection as the startup preference at the idle
+    /// boundary. Key handling must never wait on config I/O.
+    PersistThinkingPreference(String),
     CycleThinking,
     PickModel,
     PickThinking,
@@ -256,8 +261,8 @@ pub enum PendingIdleAction {
 }
 
 /// Push an idle action while preserving ordering barriers. Adjacent model or
-/// thinking changes collapse to the latest request; sessions and compaction do
-/// not collapse or disappear.
+/// thinking changes and preference writes collapse to the latest request;
+/// sessions and compaction do not collapse or disappear.
 pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: PendingIdleAction) {
     let same_kind = matches!(
         (&queue.back(), &action),
@@ -266,28 +271,15 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
             PendingIdleAction::ChangeModel(_)
         ) | (Some(PendingIdleAction::Fast(_)), PendingIdleAction::Fast(_))
             | (
-                Some(PendingIdleAction::ChangeThinking(_)),
-                PendingIdleAction::ChangeThinking(_)
-            )
-            | (
-                Some(PendingIdleAction::ChangeThinking(_)),
-                PendingIdleAction::ChangeThinkingLevel(_)
-            )
-            | (
-                Some(PendingIdleAction::ChangeThinkingLevel(_)),
-                PendingIdleAction::ChangeThinking(_)
-            )
-            | (
-                Some(PendingIdleAction::ChangeThinkingLevel(_)),
-                PendingIdleAction::ChangeThinkingLevel(_)
-            )
-            | (
                 Some(
                     PendingIdleAction::ChangeThinking(_)
                         | PendingIdleAction::ChangeThinkingLevel(_)
-                        | PendingIdleAction::CycleThinking
                 ),
-                PendingIdleAction::CycleThinking
+                PendingIdleAction::ChangeThinking(_) | PendingIdleAction::ChangeThinkingLevel(_)
+            )
+            | (
+                Some(PendingIdleAction::PersistThinkingPreference(_)),
+                PendingIdleAction::PersistThinkingPreference(_)
             )
     );
     if same_kind {
@@ -846,6 +838,7 @@ fn answer_now_input(instruction: Option<String>) -> ComposedInput {
 fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> anyhow::Result<()> {
     let action = match command {
         Command::Login(provider) => PendingIdleAction::Login(provider),
+        Command::Setup => PendingIdleAction::Setup,
         Command::Logout(provider) => PendingIdleAction::Logout(provider),
         Command::Model(Some(id)) => PendingIdleAction::ChangeModel(ModelId(id)),
         Command::Model(None) => PendingIdleAction::PickModel,
@@ -1713,6 +1706,47 @@ async fn login_codex(app: &mut App, shell: &mut InteractiveShell) -> anyhow::Res
     Ok(())
 }
 
+/// Reuse the first-run wizard at an idle boundary without replacing the
+/// current session, model selection, or user default.
+async fn setup_provider(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+) -> anyhow::Result<App> {
+    let Some(result) = onboarding::configure(shell, input, &app.config, false).await? else {
+        return Ok(app);
+    };
+    let active_route_updated = result.configured_endpoint == Some(app.model.endpoint.id.0.as_str())
+        || result.model.as_ref() == Some(&app.model.spec.id);
+    let selected = result.model.clone();
+    if let Err(error) = app.apply_provider_setup_catalog(result.catalog, result.notes) {
+        shell.error(format!(
+            "Provider saved, but models could not be loaded: {error}"
+        ));
+        shell.render();
+        return Ok(app);
+    }
+    shell.set_model_cycle(app.model_cycle());
+    shell.clear_error();
+    if active_route_updated {
+        shell.notice(format!(
+            "Provider saved. Reselect /model {} to use the updated credentials; the current session is unchanged.",
+            app.model.spec.id.0
+        ));
+    } else if let Some(model) = selected {
+        shell.notice(format!(
+            "Provider saved. Use /model to select {} (current model unchanged).",
+            model.0
+        ));
+    } else {
+        shell.notice(
+            "Provider saved. Use /model to select one of its models (current model unchanged).",
+        );
+    }
+    shell.render();
+    Ok(app)
+}
+
 /// Remove the octet-owned credential and catalog entries together. If the active
 /// model is a Codex model, choose its replacement before deleting anything so
 /// cancellation leaves both the session and credentials untouched.
@@ -1932,6 +1966,12 @@ pub struct ActiveRunInspection {
     resource_owner: String,
     model: Model,
     catalog: octet_ai::ModelCatalog,
+    /// The committed reasoning selection for this run.
+    ///
+    /// Captured so the thinking cycle can advance from the typed selection
+    /// instead of the footer's display string, which cannot round-trip a token
+    /// budget or a normalized effort.
+    reasoning: ReasoningConfig,
     sessions: crate::session_store::SessionStore,
     /// The launch sandbox policy, so a local shell escape applies the same
     /// process/shell gates and limits as the model `bash` tool.
@@ -1973,6 +2013,7 @@ impl ActiveRunInspection {
             resource_owner: app.agent.session().resource_owner_key(),
             model: app.model.clone(),
             catalog: app.catalog.clone(),
+            reasoning: app.reasoning.clone(),
             sandbox: app.config.sandbox.clone(),
             effect_policy: app.config.effect_policy,
             catalog_is_narrowed: !app.readiness.is_fleet(),
@@ -2219,10 +2260,13 @@ where
         Command::Name(name) => match inspection.session_id() {
             Some(id) => match name {
                 Some(name) => match inspection.sessions.rename(id, &name) {
-                    Ok(metadata) => shell.notice(format!(
-                        "session named {}",
-                        metadata.name.as_deref().unwrap_or("(unnamed)")
-                    )),
+                    Ok(metadata) => {
+                        shell.set_session_name(metadata.name.as_deref());
+                        shell.notice(format!(
+                            "session named {}",
+                            metadata.name.as_deref().unwrap_or("(unnamed)")
+                        ));
+                    }
                     Err(error) => shell.error(error.to_string()),
                 },
                 None => match inspection.sessions.load_metadata(id) {
@@ -2938,9 +2982,15 @@ where
     let mut clipboard_revision = 0;
     let mut clipboard_fallback = None;
     let mut pending_reasoning: Option<ReasoningConfig> = None;
+    // The cycle cursor is updated on keypress, not when the asynchronous control
+    // send is admitted. Rapid Shift+Tab presses therefore each advance once.
+    let mut selected_reasoning = inspection.reasoning.clone();
+    let mut last_control_reasoning = inspection.reasoning.clone();
+    let mut pending_reasoning_announce = true;
     // One pending latest choice and one bounded channel admission; never spawn
     // a control sender that could outlive the caller-driven run.
-    type ReasoningSend = Pin<Box<dyn Future<Output = (ReasoningConfig, Result<(), AgentError>)>>>;
+    type ReasoningSend =
+        Pin<Box<dyn Future<Output = (ReasoningConfig, bool, Result<(), AgentError>)>>>;
     let mut reasoning_send: Option<ReasoningSend> = None;
     let mut aborting = false;
     let mut dispatch_queued = false;
@@ -3027,10 +3077,11 @@ where
 
         if !aborting && reasoning_send.is_none() {
             if let Some(reasoning) = pending_reasoning.take() {
+                let announce = pending_reasoning_announce;
                 let control = control.clone();
                 reasoning_send = Some(Box::pin(async move {
                     let result = control.set_reasoning(reasoning.clone()).await;
-                    (reasoning, result)
+                    (reasoning, announce, result)
                 }));
             }
         }
@@ -3059,17 +3110,50 @@ where
             }
             result = futures_util::future::OptionFuture::from(reasoning_send.as_mut().map(|f| f.as_mut())), if reasoning_send.is_some() => {
                 reasoning_send = None;
-                if let Some((reasoning, result)) = result {
+                if let Some((reasoning, announce, result)) = result {
                     match result {
                         Ok(()) => {
+                            last_control_reasoning = reasoning.clone();
                             let label = reasoning_label(&reasoning);
-                            shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &format!("{label} (queued)"));
-                            shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
-                            if let Err(error) = persist_configuration(Some(executable_extensions), || crate::cli::persist_reasoning(&label)).await {
-                                shell.error(format!("failed to save thinking preference: {error}"));
+                            if selected_reasoning == reasoning {
+                                push_pending_action(
+                                    pending_actions,
+                                    PendingIdleAction::PersistThinkingPreference(label.clone()),
+                                );
+                                if announce {
+                                    shell.set_identity(
+                                        &inspection.model.endpoint.id.0,
+                                        &inspection.model.spec.id.0,
+                                        &format!("{label} (queued)"),
+                                    );
+                                    shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
+                                }
                             }
                         }
-                        Err(error) => shell.error(format!("thinking unchanged: {error}")),
+                        Err(error) if selected_reasoning == reasoning => {
+                            selected_reasoning = last_control_reasoning.clone();
+                            if last_control_reasoning != inspection.reasoning {
+                                push_pending_action(
+                                    pending_actions,
+                                    PendingIdleAction::PersistThinkingPreference(
+                                        reasoning_label(&last_control_reasoning),
+                                    ),
+                                );
+                            }
+                            let label = reasoning_label(&last_control_reasoning);
+                            let display = if last_control_reasoning != inspection.reasoning {
+                                format!("{label} (queued)")
+                            } else {
+                                label
+                            };
+                            shell.set_identity(
+                                &inspection.model.endpoint.id.0,
+                                &inspection.model.spec.id.0,
+                                &display,
+                            );
+                            shell.error(format!("thinking unchanged: {error}"));
+                        }
+                        Err(_) => {}
                     }
                 }
                 shell.render();
@@ -3250,7 +3334,9 @@ where
                                         }
                                     };
                                     if inspection.model.responses_features().reasoning_effort_updates {
+                                        selected_reasoning = reasoning.clone();
                                         pending_reasoning = Some(reasoning);
+                                        pending_reasoning_announce = true;
                                     } else {
                                         push_pending_action(pending_actions, PendingIdleAction::ChangeThinking(reasoning));
                                         shell.notice("thinking change queued for the next idle boundary");
@@ -3489,7 +3575,9 @@ where
                                     if aborting {
                                         shell.error("thinking unchanged: run is settling".into());
                                     } else {
+                                        selected_reasoning = reasoning.clone();
                                         pending_reasoning = Some(reasoning);
+                                        pending_reasoning_announce = true;
                                     }
                                     shell.render();
                                     continue;
@@ -3636,15 +3724,30 @@ where
                     InputAction::CycleThinking => {
                         if inspection.model.responses_features().reasoning_effort_updates {
                             let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
-                            let current = pending_reasoning.as_ref().map(reasoning_label)
-                                .unwrap_or_else(|| shell.selected_identity().1.trim_end_matches(" (queued)").to_owned());
-                            if let Some(index) = levels.iter().position(|level| level.label() == current) {
-                                match requested_thinking_to_reasoning(
-                                    levels[(index + 1) % levels.len()], &inspection.model, inspection.subagents_available,
+                            // Cycle from the latest user selection, including a
+                            // value whose control send is still in flight.
+                            match next_thinking_level(
+                                &levels,
+                                Some(&selected_reasoning),
+                                &inspection.model,
+                            ) {
+                                Ok(level) => match requested_thinking_to_reasoning(
+                                    level, &inspection.model, inspection.subagents_available,
                                 ) {
-                                    Ok(reasoning) => pending_reasoning = Some(reasoning),
+                                    Ok(reasoning) => {
+                                        selected_reasoning = reasoning.clone();
+                                        pending_reasoning = Some(reasoning.clone());
+                                        pending_reasoning_announce = false;
+                                        let label = reasoning_label(&reasoning);
+                                        shell.set_identity(
+                                            &inspection.model.endpoint.id.0,
+                                            &inspection.model.spec.id.0,
+                                            &format!("{label} (queued)"),
+                                        );
+                                    }
                                     Err(error) => shell.error(format!("thinking unchanged: {error}")),
-                                }
+                                },
+                                Err(error) => shell.error(format!("thinking unchanged: {error}")),
                             }
                         } else {
                             push_pending_action(pending_actions, PendingIdleAction::CycleThinking);
@@ -3836,7 +3939,22 @@ fn status_context_estimate(app: &App) -> u64 {
     estimate_next_request_tokens(app, &[])
 }
 
+fn update_session_title(
+    shell: &mut InteractiveShell,
+    store: &crate::session_store::SessionStore,
+    session: &Session,
+) {
+    let name = session
+        .path()
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|id| store.load_metadata(id).ok())
+        .and_then(|metadata| metadata.name);
+    shell.set_session_name(name.as_deref());
+}
+
 fn update_status(shell: &mut InteractiveShell, app: &App) {
+    update_session_title(shell, &app.sessions, app.agent.session());
     let context_estimate = status_context_estimate(app);
     let cache_stats = analyze_session_cache_stats(app.agent.session());
     let endpoint_label = app
@@ -3890,6 +4008,7 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
         .executable_extensions
         .apply_session_host_requests(&mut app.agent, &app.sessions)
     {
+        update_session_title(shell, &app.sessions, app.agent.session());
         shell.notice("extension updated the session metadata");
     }
     let _ = app.executable_extensions.sync_semantic_ui(shell);
@@ -5193,17 +5312,44 @@ async fn extension_management_menu(
     }
 }
 
-fn next_thinking_level(app: &App) -> anyhow::Result<ThinkingLevel> {
-    let levels = supported_levels_with_subagents(&app.model, app.subagents_available());
-    let current = level_from_reasoning(&app.reasoning, &app.model)?;
-    let index = levels
-        .iter()
-        .position(|level| *level == current)
-        .unwrap_or(0);
-    levels
-        .get((index + 1) % levels.len())
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("no thinking levels are available"))
+/// The next thinking level when the user presses the cycle gesture.
+///
+/// One total, typed rule serves both the idle and the active-run paths. It
+/// takes the *current selection* as an optional `ReasoningConfig` and always
+/// returns a level the active model advertises, so:
+/// - a press always advances, including from a selection the model no longer
+///   lists or that has no portable level (an unmapped value starts at the first
+///   advertised level);
+/// - the walk is strictly ascending through the advertised levels and wraps
+///   from the last one back to the first; and
+/// - no lookup can fail, because an unmappable current value is a start
+///   position rather than an error.
+///
+/// The earlier implementations diverged: the active path matched a display
+/// string, so a token-budget or otherwise unlabelled selection silently matched
+/// nothing and never cycled, while the idle path propagated a translation
+/// failure out of the interactive loop.
+fn next_thinking_level(
+    levels: &[ThinkingLevel],
+    current: Option<&ReasoningConfig>,
+    model: &octet_ai::Model,
+) -> anyhow::Result<ThinkingLevel> {
+    let Some(first) = levels.first().copied() else {
+        anyhow::bail!("no thinking levels are available");
+    };
+    // A selection with no portable level is not an error: treat it as "not
+    // positioned yet" so the press lands on the first advertised level.
+    let index = current
+        .and_then(|reasoning| level_from_reasoning(reasoning, model).ok())
+        .and_then(|current| levels.iter().position(|level| *level == current));
+    Ok(match index {
+        Some(index) => levels[(index + 1) % levels.len()],
+        None => first,
+    })
+}
+
+fn app_thinking_levels(app: &App) -> Vec<ThinkingLevel> {
+    supported_levels_with_subagents(&app.model, app.subagents_available())
 }
 
 async fn thinking_configuration_picker(
@@ -6230,6 +6376,9 @@ async fn apply_pending_actions(
                 Ok(_) => unreachable!(),
                 Err(e) => shell.error(e.to_string()),
             },
+            PendingIdleAction::Setup => {
+                app = setup_provider(app, shell, input).await?;
+            }
             PendingIdleAction::Logout(provider) => match validate_provider(provider.as_deref()) {
                 Ok("codex") => {
                     app = logout_codex(app, shell, input).await?;
@@ -6254,8 +6403,22 @@ async fn apply_pending_actions(
                     requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
                 app = select_thinking(app, shell, input, reasoning, None).await?;
             }
+            PendingIdleAction::PersistThinkingPreference(preference) => {
+                if let Err(error) =
+                    persist_configuration(Some(&mut app.executable_extensions), || {
+                        crate::cli::persist_reasoning(&preference)
+                    })
+                    .await
+                {
+                    shell.error(format!("failed to save thinking preference: {error}"));
+                }
+            }
             PendingIdleAction::CycleThinking => {
-                let level = next_thinking_level(&app)?;
+                let level = next_thinking_level(
+                    &app_thinking_levels(&app),
+                    Some(&app.reasoning),
+                    &app.model,
+                )?;
                 let reasoning =
                     requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
                 app = select_thinking(app, shell, input, reasoning, None).await?;
@@ -7525,6 +7688,7 @@ async fn run_idle_command(
             match name {
                 Some(name) => {
                     let metadata = app.sessions.rename(&id, &name)?;
+                    shell.set_session_name(metadata.name.as_deref());
                     shell.notice(format!(
                         "session named {}",
                         metadata.name.as_deref().unwrap_or("(unnamed)")
@@ -7688,6 +7852,9 @@ async fn run_idle_command(
             Ok(_) => unreachable!(),
             Err(e) => shell.error(e.to_string()),
         },
+        Command::Setup => {
+            app = setup_provider(app, shell, input).await?;
+        }
         Command::Logout(provider) => match validate_provider(provider.as_deref()) {
             Ok("codex") => {
                 app = logout_codex(app, shell, input).await?;
@@ -8198,18 +8365,61 @@ fn print_resume_command(command: Option<&str>) {
     }
 }
 
-async fn shutdown_for_exit(app: &mut App) {
-    if crate::tui::terminal::received_shutdown_signal().is_some() {
-        octet_agent::extension_process::terminate_bash_process_groups(Duration::from_millis(400))
+/// How long exit may block before the cleanup is worth reporting on screen.
+/// Deliberately below one human-perceptible pause: a fast exit never disturbs
+/// the final frame with a notice the user will not read.
+const SHUTDOWN_NOTICE_DELAY: Duration = Duration::from_millis(150);
+
+/// Stop the agent's children and release the terminal.
+///
+/// Cleanup is reported rather than hidden: a user who pressed Ctrl+D and sees
+/// nothing for a second cannot tell a working exit from a hang. The notice is
+/// painted only once the wait is long enough to be noticeable, and it stays
+/// visible for as long as the wait actually lasts -- the bound below is a
+/// safety limit against a wedged child, not a guess at how long cleanup
+/// normally takes. A signal-driven exit writes nothing: that path may have no
+/// terminal at all.
+async fn shutdown_for_exit(app: &mut App, shell: &mut InteractiveShell) {
+    let signalled = crate::tui::terminal::received_shutdown_signal().is_some();
+    let cleanup = async {
+        if signalled {
+            octet_agent::extension_process::terminate_bash_process_groups(Duration::from_millis(
+                400,
+            ))
             .await;
-        let _ = tokio::time::timeout(
-            Duration::from_millis(1400),
-            app.executable_extensions.shutdown(),
-        )
-        .await;
+            let _ = tokio::time::timeout(
+                Duration::from_millis(1400),
+                app.executable_extensions.shutdown(),
+            )
+            .await;
+        } else {
+            // Bound the idle Ctrl+D path like the signal path so a hung
+            // extension child cannot make exit feel stuck. 2s covers normal
+            // fleet drain (the inner manager cap is 3s); on timeout fall
+            // through to force-kill like the signal path does.
+            let _ = tokio::time::timeout(
+                Duration::from_millis(2000),
+                app.executable_extensions.shutdown(),
+            )
+            .await;
+        }
         octet_agent::extension_process::force_kill_registered_process_groups();
-    } else {
-        app.executable_extensions.shutdown().await;
+    };
+    if signalled {
+        cleanup.await;
+        return;
+    }
+    tokio::pin!(cleanup);
+    let notice = tokio::time::sleep(SHUTDOWN_NOTICE_DELAY);
+    tokio::pin!(notice);
+    tokio::select! {
+        biased;
+        () = &mut cleanup => {}
+        () = &mut notice => {
+            shell.notice("cleaning up extension processes");
+            shell.render();
+            cleanup.await;
+        }
     }
 }
 
@@ -8270,35 +8480,135 @@ fn terminal_theme_picker_data() -> (Vec<String>, Vec<Option<String>>) {
     (items, descriptions)
 }
 
+/// The compiled-in file themes, offered after the terminal-appearance choices
+/// and before discovered files so they are reachable without copying a theme
+/// into a discovery root. A built-in that fails to compile is skipped rather
+/// than offered as a broken preview.
+fn compiled_file_theme_picker_entries(
+    config: &Config,
+    background: crate::tui::theme::TerminalBackground,
+) -> Vec<(String, Option<String>, String, OctetTheme)> {
+    crate::tui::theme::compiled_file_theme_names()
+        .filter_map(|selector| {
+            let mut preview_config = config.clone();
+            preview_config.theme = Some(selector.to_owned());
+            let theme = load_theme_for_background(&preview_config, background);
+            if theme.is_compiled_default() {
+                return None;
+            }
+            let metadata = theme.metadata();
+            let label = if metadata.name.is_empty() {
+                selector.to_owned()
+            } else {
+                metadata.name.clone()
+            };
+            Some((
+                label,
+                (!metadata.description.is_empty()).then(|| metadata.description.clone()),
+                selector.to_owned(),
+                theme,
+            ))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ThemeSelection {
+    Builtin(TerminalThemeChoice),
+    File(String),
+}
+
+impl ThemeSelection {
+    fn key(&self) -> &str {
+        match self {
+            Self::Builtin(choice) => choice.key(),
+            Self::File(name) => name,
+        }
+    }
+
+    fn label(&self) -> &str {
+        match self {
+            Self::Builtin(choice) => choice.label(),
+            Self::File(name) => name,
+        }
+    }
+}
+
 async fn pick_terminal_theme<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
     config: &Config,
     onboarding: bool,
-) -> anyhow::Result<Option<TerminalThemeChoice>>
+) -> anyhow::Result<Option<ThemeSelection>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    let (items, descriptions) = terminal_theme_picker_data();
-    let current = TerminalThemeChoice::from_config(config).unwrap_or(TerminalThemeChoice::Auto);
+    let (mut items, mut descriptions) = terminal_theme_picker_data();
+    let mut choices: Vec<_> = TerminalThemeChoice::all()
+        .into_iter()
+        .map(ThemeSelection::Builtin)
+        .collect();
     let original = shell.theme();
     let mut preview_config = config.clone();
     preview_config.theme = Some(TerminalThemeChoice::Auto.key().to_owned());
-    // Preserve Auto's already-resolved background, including an earlier OSC
-    // response. Otherwise use environment detection/fallback once; never query
-    // the terminal while the picker owns its input stream.
-    let auto = match current {
-        TerminalThemeChoice::Auto => original.clone(),
-        _ => load_theme(&preview_config),
+    // Preserve an already-resolved Auto background (including OSC 11). For
+    // other active themes, preview the compiled Auto palette against the same
+    // resolved background; never query while the picker owns terminal input.
+    let auto = if TerminalThemeChoice::from_config(config) == Some(TerminalThemeChoice::Auto)
+        && original.is_compiled_default()
+    {
+        original.clone()
+    } else {
+        load_theme_for_background(&preview_config, original.background())
     };
-    let previews = TerminalThemeChoice::all().map(|choice| {
-        if choice == TerminalThemeChoice::Auto {
-            auto.clone()
-        } else {
-            preview_config.theme = Some(choice.key().to_owned());
-            load_theme_for_background(&preview_config, auto.background())
+    let mut previews: Vec<_> = TerminalThemeChoice::all()
+        .into_iter()
+        .map(|choice| {
+            if choice == TerminalThemeChoice::Auto {
+                auto.clone()
+            } else {
+                preview_config.theme = Some(choice.key().to_owned());
+                load_theme_for_background(&preview_config, auto.background())
+            }
+        })
+        .collect();
+    if !onboarding {
+        for (label, description, selector, theme) in
+            compiled_file_theme_picker_entries(config, original.background())
+        {
+            items.push(label);
+            descriptions.push(description);
+            choices.push(ThemeSelection::File(selector));
+            previews.push(theme);
         }
-    });
+        for (name, theme) in selectable_file_themes(config, original.background()) {
+            let metadata = theme.metadata();
+            items.push(if metadata.name.is_empty() || metadata.name == name {
+                name.clone()
+            } else {
+                format!("{name} — {}", metadata.name)
+            });
+            descriptions
+                .push((!metadata.description.is_empty()).then(|| metadata.description.clone()));
+            choices.push(ThemeSelection::File(name));
+            previews.push(theme);
+        }
+    }
+    let current = config
+        .theme
+        .as_deref()
+        .and_then(|key| {
+            let key = TerminalThemeChoice::parse(key)
+                .map(TerminalThemeChoice::key)
+                .unwrap_or_else(|| key.strip_suffix(".toml").unwrap_or(key));
+            choices.iter().position(|choice| choice.key() == key)
+        })
+        .unwrap_or(0);
+    if let Some(ThemeSelection::File(_)) = choices.get(current) {
+        if previews[current].source_path() == original.source_path() {
+            previews[current] = original.clone();
+        }
+    }
     let title = if onboarding {
         "Choose terminal appearance"
     } else {
@@ -8311,7 +8621,7 @@ where
         OrdinarySurfaceMetadata::new(title),
         items,
         descriptions,
-        current.index(),
+        current,
         action,
         |shell, index| {
             let theme = index.map_or(&original, |index| &previews[index]);
@@ -8325,7 +8635,20 @@ where
         shell.set_theme(original);
         shell.render();
     }
-    selected.map(|index| index.map(|index| TerminalThemeChoice::all()[index]))
+    selected.map(|index| index.map(|index| choices[index].clone()))
+}
+
+fn requested_file_theme(
+    name: &str,
+    config: &Config,
+    background: TerminalBackground,
+) -> Option<(String, OctetTheme)> {
+    let theme = load_named_theme_for_background(name, config, background).ok()?;
+    let name = theme.source_path()?.file_stem()?.to_str()?;
+    if is_reserved_theme_name(name) || name.ends_with(".toml") {
+        return None;
+    }
+    Some((name.to_owned(), theme))
 }
 
 async fn configure_terminal_theme<S>(
@@ -8335,39 +8658,54 @@ async fn configure_terminal_theme<S>(
     requested: Option<String>,
     onboarding: bool,
     extensions: Option<&mut crate::extensions::ExecutableExtensions>,
-) -> anyhow::Result<Option<TerminalThemeChoice>>
+) -> anyhow::Result<Option<ThemeSelection>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let used_picker = requested.is_none();
+    let mut requested_theme = None;
     let selected = match requested {
-        Some(value) => match TerminalThemeChoice::parse(&value) {
-            Some(choice) => Some(choice),
-            None => {
+        Some(value) => {
+            if let Some(choice) = TerminalThemeChoice::parse(&value) {
+                Some(ThemeSelection::Builtin(choice))
+            } else if let Some((name, theme)) =
+                requested_file_theme(&value, config, shell.theme().background())
+            {
+                requested_theme = Some(theme);
+                Some(ThemeSelection::File(name))
+            } else {
                 shell.error(format!(
-                    "invalid terminal appearance {value:?}; use /theme auto, /theme light, or /theme dark"
+                    "invalid theme {value:?}; use auto, light, dark, or a discovered valid theme name"
                 ));
                 shell.render();
                 return Ok(None);
             }
-        },
+        }
         None => pick_terminal_theme(shell, input, config, onboarding).await?,
     };
     // A first-run dismissal still commits the recommended default, so a user
     // who leaves from the picker is not forced through the same onboarding on
     // every launch. The caller still honors a pending close request.
-    let Some(choice) = selected.or_else(|| onboarding.then_some(TerminalThemeChoice::Auto)) else {
+    let dismissed = selected.is_none();
+    let Some(choice) = selected
+        .or_else(|| onboarding.then_some(ThemeSelection::Builtin(TerminalThemeChoice::Auto)))
+    else {
         return Ok(None);
     };
 
     config.theme = Some(choice.key().to_owned());
     shell.set_runtime_config(config.clone());
-    // A confirmed picker already installed the compiled appearance. Retain it
-    // so confirming Auto does not discard its cached background resolution.
-    if !used_picker || selected.is_none() {
-        shell.set_theme(load_theme(config));
+    // A confirmed picker already installed its preview. Do not discard the
+    // resolved background or reread a selected file after confirmation.
+    if let Some(theme) = requested_theme {
+        shell.set_theme(theme);
+    } else if !used_picker || dismissed {
+        shell.set_theme(load_theme_for_background(
+            config,
+            shell.theme().background(),
+        ));
     }
-    if choice == TerminalThemeChoice::Auto {
+    if matches!(&choice, ThemeSelection::Builtin(TerminalThemeChoice::Auto)) {
         apply_detected_terminal_background(shell, input, config).await;
     }
     if let Err(error) = persist_configuration(extensions, || {
@@ -8375,9 +8713,14 @@ where
     })
     .await
     {
-        shell.error(format!("failed to save terminal appearance: {error}"));
+        shell.error(format!("failed to save theme: {error}"));
     } else if !onboarding {
-        shell.notice(format!("terminal appearance: {}", choice.label()));
+        let prefix = if matches!(&choice, ThemeSelection::Builtin(_)) {
+            "terminal appearance"
+        } else {
+            "theme"
+        };
+        shell.notice(format!("{prefix}: {}", choice.label()));
     }
     shell.render();
     Ok(Some(choice))
@@ -8416,10 +8759,9 @@ async fn run_interactive_without_model(
     shell.set_workspace(workspace.clone());
     shell.set_input_modalities(octet_ai::ModalitySet::none());
     shell.set_session_telemetry(&session, None);
+    update_session_title(shell, &boot.sessions, &session);
     shell.hydrate(&session)?;
-    shell.notice(
-        "No configured model. Use /login, /model, or /reload to configure one; prompts are disabled until then.",
-    );
+    shell.notice("No configured model. Use /setup or /model; prompts are disabled.");
     // Keep onboarding and model-less prompt/template behavior unchanged, but
     // honor a positional read-only command once the session is ready.
     if boot.config.prompt_template.is_none()
@@ -8536,6 +8878,13 @@ async fn run_interactive_without_model(
                     )
                     .await?;
                 }
+                Command::Setup => {
+                    onboarding::run_setup(shell, input, &mut boot).await?;
+                    if boot.catalog.models().next().is_some() {
+                        shell.notice("Restart octet to start chatting with a configured model");
+                        shell.render();
+                    }
+                }
                 Command::Login(provider) => match validate_provider(provider.as_deref()) {
                     Ok("codex") => {
                         if let Some(catalog) = login_codex_catalog(shell).await? {
@@ -8560,7 +8909,7 @@ async fn run_interactive_without_model(
                 Command::Model(model) => {
                     if boot.catalog.models().next().is_none() {
                         shell.notice(
-                            "no configured models are available; use /login or edit the custom provider, then /reload",
+                            "no configured models are available; use /setup, /login or edit the custom provider, then /reload",
                         );
                     } else {
                         let selected = match model {
@@ -8698,12 +9047,13 @@ fn valid_guided_manual_model(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
 }
 
-/// First-run interactive onboarding for an explicitly selected compatible
-/// endpoint. Every path before `commit_and_rebuild` is in-memory only.
+/// Interactive setup for an explicitly selected compatible endpoint. Every
+/// path before `commit_and_rebuild` is in-memory only.
 async fn guided_provider_setup(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     config: &crate::config::Config,
+    persist_default_model: bool,
 ) -> anyhow::Result<Option<CompletedSetup>> {
     let mut replace_existing = false;
     'setup: loop {
@@ -9067,11 +9417,13 @@ async fn guided_provider_setup(
                 .await
                 {
                     Ok(completed) => {
-                        if let Err(error) = crate::cli::persist_model(&completed.model.0) {
-                            shell.error(format!(
-                                "provider saved, but the selected model preference could not be saved: {error}"
-                            ));
-                            shell.render();
+                        if persist_default_model {
+                            if let Err(error) = crate::cli::persist_model(&completed.model.0) {
+                                shell.error(format!(
+                                    "provider saved, but the selected model preference could not be saved: {error}"
+                                ));
+                                shell.render();
+                            }
                         }
                         return Ok(Some(completed));
                     }
@@ -9337,7 +9689,7 @@ async fn run_interactive_once(
     reload_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     'interactive: loop {
         if shell.close_requested() {
-            shutdown_for_exit(&mut app).await;
+            shutdown_for_exit(&mut app, &mut shell).await;
             break;
         }
         let queued_input = if startup_input.is_none() {
@@ -9365,7 +9717,7 @@ async fn run_interactive_once(
         };
         match idle {
             Idle::Quit => {
-                shutdown_for_exit(&mut app).await;
+                shutdown_for_exit(&mut app, &mut shell).await;
                 break;
             }
             Idle::SessionLifecycle(request) => {
@@ -9427,7 +9779,11 @@ async fn run_interactive_once(
                 }
             }
             Idle::CycleThinking => {
-                let level = next_thinking_level(&app)?;
+                let level = next_thinking_level(
+                    &app_thinking_levels(&app),
+                    Some(&app.reasoning),
+                    &app.model,
+                )?;
                 let reasoning =
                     requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
                 app = select_thinking(app, &mut shell, &mut input, reasoning, None).await?;
@@ -9510,7 +9866,7 @@ async fn run_interactive_once(
                     }
                     IdleCommandOutcome::Quit(next) => {
                         app = *next;
-                        shutdown_for_exit(&mut app).await;
+                        shutdown_for_exit(&mut app, &mut shell).await;
                         break;
                     }
                 }
@@ -9547,7 +9903,7 @@ async fn run_interactive_once(
                             }
                             IdleCommandOutcome::Quit(next) => {
                                 app = *next;
-                                shutdown_for_exit(&mut app).await;
+                                shutdown_for_exit(&mut app, &mut shell).await;
                                 break 'interactive;
                             }
                             IdleCommandOutcome::Submit { app: next, input } => {
@@ -9594,7 +9950,7 @@ async fn run_interactive_once(
                     biased;
                     _ = crate::tui::terminal::wait_for_shutdown_signal() => {
                         shell.restore_composed(composed);
-                        shutdown_for_exit(&mut app).await;
+                        shutdown_for_exit(&mut app, &mut shell).await;
                         break 'interactive;
                     }
                     result = await_with_ctrl_c(
@@ -9734,7 +10090,7 @@ async fn run_interactive_once(
                     .await;
                 app.agent.set_system_prompt(app.system.clone());
                 if crate::tui::terminal::received_shutdown_signal().is_some() {
-                    shutdown_for_exit(&mut app).await;
+                    shutdown_for_exit(&mut app, &mut shell).await;
                     break 'interactive;
                 }
                 let goal_decision = if ended.allows_after_response() {
@@ -9742,7 +10098,7 @@ async fn run_interactive_once(
                     let notifications = tokio::select! {
                         biased;
                         _ = crate::tui::terminal::wait_for_shutdown_signal() => {
-                            shutdown_for_exit(&mut app).await;
+                            shutdown_for_exit(&mut app, &mut shell).await;
                             break 'interactive;
                         }
                         result = await_with_ctrl_c(
@@ -9797,11 +10153,11 @@ async fn run_interactive_once(
                 // action follows to trigger another render.
                 shell.render();
                 if shell.close_requested() {
-                    shutdown_for_exit(&mut app).await;
+                    shutdown_for_exit(&mut app, &mut shell).await;
                     break 'interactive;
                 }
                 if quit_requested {
-                    shutdown_for_exit(&mut app).await;
+                    shutdown_for_exit(&mut app, &mut shell).await;
                     break;
                 }
                 app = apply_pending_actions(
@@ -10387,7 +10743,7 @@ mod tests {
                 pick_terminal_theme(&mut shell, &mut input, &config, false)
                     .await
                     .unwrap(),
-                Some(choice)
+                Some(ThemeSelection::Builtin(choice))
             );
             assert_eq!(
                 shell.theme().background(),
@@ -10406,6 +10762,187 @@ mod tests {
             assert_eq!(config.theme.as_deref(), Some("auto"));
             assert!(!shell.has_panel());
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_theme_picker_filters_file_metadata_and_preserves_active_theme_until_confirmed(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config = terminal_theme_test_config(directory.path().to_owned());
+        let themes = config.workspace.join(".octet/themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        let path = themes.join("picker-amber.toml");
+        std::fs::write(
+            &path,
+            "[metadata]\nname = 'Golden Hour'\ndescription = 'warm orange palette'\n[colors]\naccent = '#aabbcc'\n",
+        )
+        .unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        let original = shell.theme();
+        let mut events: Vec<_> = "warm orange"
+            .chars()
+            .map(|key| theme_picker_key(KeyCode::Char(key)))
+            .collect();
+        events.push(theme_picker_key(KeyCode::Enter));
+        let mut input = tokio_stream::iter(events);
+        assert_eq!(
+            pick_terminal_theme(&mut shell, &mut input, &config, false)
+                .await
+                .unwrap(),
+            Some(ThemeSelection::File("picker-amber".into()))
+        );
+        assert_eq!(
+            shell.theme().source_path(),
+            Some(path.canonicalize().unwrap().as_path())
+        );
+        assert_eq!(
+            shell.theme().resolve::<String>("accent").as_deref(),
+            Some("#aabbcc")
+        );
+        assert!(config.theme.is_none(), "preview must not commit config");
+        assert!(!shell.has_panel());
+
+        let mut selected_config = config.clone();
+        selected_config.theme = Some("picker-amber".into());
+        let prior = shell.theme();
+        std::fs::write(&path, "accent = '#abcdef'").unwrap();
+        let mut input = tokio_stream::iter([theme_picker_key(KeyCode::Enter)]);
+        assert_eq!(
+            pick_terminal_theme(&mut shell, &mut input, &selected_config, false)
+                .await
+                .unwrap(),
+            Some(ThemeSelection::File("picker-amber".into()))
+        );
+        assert_eq!(
+            shell.theme().resolve::<String>("accent"),
+            prior.resolve::<String>("accent")
+        );
+        assert_eq!(selected_config.theme.as_deref(), Some("picker-amber"));
+
+        let mut input = tokio_stream::iter([
+            theme_picker_key(KeyCode::Home),
+            theme_picker_key(KeyCode::Enter),
+        ]);
+        assert_eq!(
+            pick_terminal_theme(&mut shell, &mut input, &selected_config, false)
+                .await
+                .unwrap(),
+            Some(ThemeSelection::Builtin(TerminalThemeChoice::Auto))
+        );
+        assert!(shell.theme().is_compiled_default());
+        assert_eq!(shell.theme().background(), original.background());
+    }
+
+    #[tokio::test]
+    async fn terminal_theme_file_preview_cancel_and_onboarding_keep_the_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = terminal_theme_test_config(directory.path().to_owned());
+        config.theme = Some("light".into());
+        let themes = config.workspace.join(".octet/themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(themes.join("picker-custom.toml"), "accent = '#aabbcc'").unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        let original = shell.theme();
+        let mut events: Vec<_> = "picker-custom"
+            .chars()
+            .map(|key| theme_picker_key(KeyCode::Char(key)))
+            .collect();
+        events.push(theme_picker_key(KeyCode::Esc));
+        let mut input = EventStream::from_stream(tokio_stream::iter(events));
+        assert_eq!(
+            configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(shell.theme().source_path(), original.source_path());
+        assert_eq!(
+            shell.theme().role_rgb("foreground"),
+            original.role_rgb("foreground")
+        );
+        assert_eq!(config.theme.as_deref(), Some("light"));
+        assert!(!shell.has_panel());
+
+        let mut events: Vec<_> = "picker-custom"
+            .chars()
+            .map(|key| theme_picker_key(KeyCode::Char(key)))
+            .collect();
+        events.push(theme_picker_key(KeyCode::Enter));
+        events.push(theme_picker_key(KeyCode::Esc));
+        let mut input = tokio_stream::iter(events);
+        assert_eq!(
+            pick_terminal_theme(&mut shell, &mut input, &config, true)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(shell.theme().source_path(), original.source_path());
+    }
+
+    #[test]
+    fn direct_theme_name_loads_only_valid_selectable_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = terminal_theme_test_config(directory.path().to_owned());
+        let themes = config.workspace.join(".octet/themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(themes.join("picker-custom.toml"), "accent = '#aabbcc'").unwrap();
+        std::fs::write(themes.join("picker-broken.toml"), "[invalid").unwrap();
+        std::fs::write(themes.join("dark.toml"), "accent = '#123456'").unwrap();
+        for name in ["picker-custom", "picker-custom.toml"] {
+            let (key, loaded) =
+                requested_file_theme(name, &config, TerminalBackground::Dark).unwrap();
+            assert_eq!(key, "picker-custom");
+            assert_eq!(
+                loaded.resolve::<String>("accent").as_deref(),
+                Some("#aabbcc")
+            );
+            config.theme = Some(key);
+            assert_eq!(
+                load_theme_for_background(&config, TerminalBackground::Dark).source_path(),
+                loaded.source_path()
+            );
+        }
+        for name in [
+            "picker-broken",
+            "missing",
+            "../picker-custom",
+            "dark.toml",
+            "default",
+        ] {
+            assert!(
+                requested_file_theme(name, &config, TerminalBackground::Dark).is_none(),
+                "accepted {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_direct_theme_selection_keeps_current_config_and_appearance() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = terminal_theme_test_config(directory.path().to_owned());
+        config.theme = Some("light".into());
+        let mut shell = InteractiveShell::test_shell();
+        let original = shell.theme();
+        let mut input = EventStream::from_stream(tokio_stream::empty());
+        assert_eq!(
+            configure_terminal_theme(
+                &mut shell,
+                &mut input,
+                &mut config,
+                Some("missing-theme".into()),
+                false,
+                None,
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        assert_eq!(config.theme.as_deref(), Some("light"));
+        assert_eq!(shell.theme().source_path(), original.source_path());
+        assert_eq!(
+            shell.theme().role_rgb("foreground"),
+            original.role_rgb("foreground")
+        );
     }
 
     #[tokio::test]
@@ -11131,12 +11668,41 @@ mod tests {
     }
 
     #[test]
+    fn active_thinking_preference_writes_coalesce_without_crossing_barriers() {
+        let mut queue = VecDeque::new();
+        push_pending_action(
+            &mut queue,
+            PendingIdleAction::PersistThinkingPreference("low".into()),
+        );
+        push_pending_action(
+            &mut queue,
+            PendingIdleAction::PersistThinkingPreference("medium".into()),
+        );
+        push_pending_action(&mut queue, PendingIdleAction::NewSession);
+        push_pending_action(
+            &mut queue,
+            PendingIdleAction::PersistThinkingPreference("high".into()),
+        );
+
+        assert_eq!(
+            queue,
+            VecDeque::from([
+                PendingIdleAction::PersistThinkingPreference("medium".into()),
+                PendingIdleAction::NewSession,
+                PendingIdleAction::PersistThinkingPreference("high".into()),
+            ])
+        );
+    }
+
+    #[test]
     fn command_queue_parses_reconfiguration_values() {
         let mut queue = VecDeque::new();
         queue_command(Command::Login(None), &mut queue).unwrap();
+        queue_command(Command::Setup, &mut queue).unwrap();
         queue_command(Command::Thinking(Some("high".into())), &mut queue).unwrap();
         queue_command(Command::Resume(Some("id".into())), &mut queue).unwrap();
         assert_eq!(queue.pop_front(), Some(PendingIdleAction::Login(None)));
+        assert_eq!(queue.pop_front(), Some(PendingIdleAction::Setup));
         assert!(matches!(
             queue.pop_front(),
             Some(PendingIdleAction::ChangeThinkingLevel(ThinkingLevel::High))
@@ -13027,6 +13593,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_name_updates_the_foreground_title_without_waiting_for_run_settlement() {
+        let session_dir = tempfile::tempdir().unwrap();
+        let inspection = test_run_inspection_with_session(session_dir.path());
+        let mut shell = InteractiveShell::test_shell();
+        shell.begin_run("test");
+        let (queue, quit_requested) = run_active_command(
+            &mut shell,
+            Command::Name(Some("Release audit".into())),
+            &inspection,
+        )
+        .await;
+        assert!(queue.is_empty());
+        assert!(!quit_requested);
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+
+        // Read-only `/name` does not rename, and a refused rename cannot
+        // replace the title already shown for the current session.
+        run_active_command(&mut shell, Command::Name(None), &inspection).await;
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+        run_active_command(&mut shell, Command::Name(Some("\x07".into())), &inspection).await;
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+        assert_eq!(
+            inspection
+                .sessions
+                .load_metadata("session")
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("Release audit")
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_title_tracks_idle_name_new_resume_fork_and_clear() {
+        let (_workspace, app) = crate::compaction::tests::app_for_estimate();
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = EventStream::from_stream(futures_util::stream::pending());
+        let mut app = transition(app, &mut shell, &mut input, Reconfig::NewSession)
+            .await
+            .unwrap();
+        assert_eq!(shell.debug_session_name(), None);
+        let named_path = app.agent.session().path().to_owned();
+        let named_id = named_path.file_stem().unwrap().to_str().unwrap().to_owned();
+        let mut goal_deadline = None;
+        let mut idle_input = EventStream::new();
+        let mut reload =
+            crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
+        let outcome = run_idle_command(
+            app,
+            &mut shell,
+            &mut idle_input,
+            Command::Name(Some("Release audit".into())),
+            &mut goal_deadline,
+            None,
+            &mut reload,
+        )
+        .await
+        .unwrap();
+        let IdleCommandOutcome::Continue(next) = outcome else {
+            panic!("name command must keep the current app");
+        };
+        app = *next;
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+
+        app = transition(app, &mut shell, &mut input, Reconfig::NewSession)
+            .await
+            .unwrap();
+        assert_eq!(
+            shell.debug_session_name(),
+            None,
+            "a new session must clear the old name"
+        );
+        app = transition(
+            app,
+            &mut shell,
+            &mut input,
+            Reconfig::Resume(named_path.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(shell.debug_session_name().as_deref(), Some("Release audit"));
+
+        let head = app.agent.session().head();
+        let fork_path = app.sessions.new_path("fork-title");
+        fork_active_session(&app.sessions, &named_path, fork_path.clone(), head.as_ref()).unwrap();
+        app = transition(app, &mut shell, &mut input, Reconfig::Resume(fork_path))
+            .await
+            .unwrap();
+        assert_eq!(
+            shell.debug_session_name(),
+            None,
+            "forks do not inherit the name"
+        );
+
+        app.sessions.rename(&named_id, "").unwrap();
+        let _ = transition(app, &mut shell, &mut input, Reconfig::Resume(named_path))
+            .await
+            .unwrap();
+        assert_eq!(
+            shell.debug_session_name(),
+            None,
+            "a cleared name restores the default"
+        );
+    }
+
+    #[tokio::test]
     async fn model_and_thinking_transitions_update_status_without_success_notices() {
         let (_workspace, mut app) = crate::compaction::tests::app_for_estimate();
         let mut shell = InteractiveShell::test_shell();
@@ -13283,6 +13955,7 @@ mod tests {
                 resource_owner: "fixture-owner".into(),
                 model: scripted_model("http://127.0.0.1:1"),
                 catalog: octet_ai::ModelCatalog::default(),
+                reasoning: octet_ai::ReasoningConfig::Off,
                 sessions: crate::session_store::SessionStore::new(&missing, &missing),
                 sandbox: SandboxPolicy::default(),
                 effect_policy: octet_agent::EffectPolicy::UnsafeHost,
@@ -13326,6 +13999,7 @@ mod tests {
             resource_owner,
             model: scripted_model("http://127.0.0.1:1"),
             catalog: octet_ai::ModelCatalog::default(),
+            reasoning: octet_ai::ReasoningConfig::Off,
             sessions: crate::session_store::SessionStore::for_directory(dir, dir),
             sandbox: SandboxPolicy::default(),
             effect_policy: octet_agent::EffectPolicy::UnsafeHost,
@@ -14297,7 +14971,7 @@ mod tests {
             .reasoning_effort_updates = true;
         spec.capabilities.reasoning = Some(octet_ai::ReasoningCapability {
             options: Some(octet_ai::types::ReasoningOptions {
-                values: vec!["none".into(), "low".into(), "high".into()],
+                values: vec!["none".into(), "high".into(), "low".into()],
                 default: Some("low".into()),
             }),
             control: octet_ai::ReasoningControl::Effort,
@@ -14313,6 +14987,77 @@ mod tests {
             .responses_features
             .reasoning_effort_updates = true;
         model
+    }
+
+    /// The cycle gesture walks the advertised levels in ascending order and
+    /// wraps from the last one back to the first.
+    #[test]
+    fn thinking_cycle_walks_the_advertised_levels_in_ascending_order() {
+        let model = reasoning_control_model("http://127.0.0.1:1");
+        let levels = supported_levels_with_subagents(&model, false);
+        assert_eq!(
+            levels,
+            vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High]
+        );
+
+        // From the first level the walk ascends one step per press and wraps.
+        // `levels[0]` is the current level, so the first press yields
+        // `levels[1]`, and the press after the last returns to `levels[0]`.
+        let mut current = Some(octet_ai::ReasoningConfig::Off);
+        let mut visited = Vec::new();
+        for _ in 0..levels.len() {
+            let level = next_thinking_level(&levels, current.as_ref(), &model).unwrap();
+            visited.push(level);
+            current = Some(requested_thinking_to_reasoning(level, &model, false).unwrap());
+        }
+        let mut expected = levels.clone();
+        expected.rotate_left(1);
+        assert_eq!(visited, expected, "each press advances ascending");
+        // `visited` ends on the first level, so the walk wrapped from the last
+        // advertised level rather than stalling at the top.
+        assert_eq!(
+            visited.last().copied(),
+            Some(levels[0]),
+            "the walk must wrap past the last level"
+        );
+    }
+
+    /// A selection with no portable level is a start position, not a failure.
+    ///
+    /// The active path used to compare the footer's display string, so a token
+    /// budget matched nothing and the press silently did nothing; the idle path
+    /// propagated the translation error out of the interactive loop.
+    #[test]
+    fn thinking_cycle_advances_from_a_selection_without_a_portable_level() {
+        let model = reasoning_control_model("http://127.0.0.1:1");
+        let levels = supported_levels_with_subagents(&model, false);
+
+        // `Off` on an effort-only model has a level, so it advances normally.
+        assert_eq!(
+            next_thinking_level(&levels, Some(&octet_ai::ReasoningConfig::Off), &model).unwrap(),
+            ThinkingLevel::Low
+        );
+        // An absent selection starts at the first advertised level.
+        assert_eq!(
+            next_thinking_level(&levels, None, &model).unwrap(),
+            levels[0]
+        );
+        // A budget this model does not publish has no portable level. The press
+        // must still land on an advertised level instead of erroring or
+        // matching nothing.
+        let budget = octet_ai::ReasoningConfig::Budget(999_999);
+        assert_eq!(
+            next_thinking_level(&levels, Some(&budget), &model).unwrap(),
+            levels[0]
+        );
+        // A level the model no longer advertises behaves the same way.
+        let unlisted = octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
+        assert_eq!(
+            next_thinking_level(&levels, Some(&unlisted), &model).unwrap(),
+            levels[0]
+        );
+        // A model with no levels at all still reports the single honest error.
+        assert!(next_thinking_level(&[], None, &model).is_err());
     }
 
     #[tokio::test]
@@ -14339,8 +15084,9 @@ mod tests {
             ("medium", true),
             ("ultra", true),
             ("high", false),
+            ("cycle", true),
         ] {
-            let accepted = requested == "high" && qualified;
+            let accepted = (requested == "high" || requested == "cycle") && qualified;
             let (server, started, release) =
                 HeldApi::start_with_repeat(fast_response(), true).await;
             let mut model = reasoning_control_model(&server.uri);
@@ -14355,14 +15101,20 @@ mod tests {
             inspection.session_path = agent.session().path().to_path_buf();
             let mut shell = InteractiveShell::test_shell();
             shell.set_identity("test", "scripted", "off");
-            let events: Vec<_> = format!("/thinking {requested}")
-                .chars()
-                .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
-                .chain(std::iter::once(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))))
-                .collect();
+            let events: Vec<_> = if requested == "cycle" {
+                (0..2)
+                    .map(|_| Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)))
+                    .collect()
+            } else {
+                format!("/thinking {requested}")
+                    .chars()
+                    .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+                    .chain(std::iter::once(Event::Key(KeyEvent::new(
+                        KeyCode::Enter,
+                        KeyModifiers::NONE,
+                    ))))
+                    .collect()
+            };
             let (sender, receiver) = tokio::sync::mpsc::channel(32);
             let (handled_tx, handled) = tokio::sync::oneshot::channel();
             let mut input = ProbedInput {
@@ -14411,11 +15163,20 @@ mod tests {
             assert_eq!(outcome, HostRunOutcome::Completed);
             drop(run);
             assert!(!quit);
-            if qualified {
-                assert!(
-                    pending.is_empty(),
-                    "qualified control never rebuilds at idle"
+            if qualified && accepted {
+                assert_eq!(
+                    pending,
+                    VecDeque::from([PendingIdleAction::PersistThinkingPreference(
+                        "high".to_owned()
+                    )]),
+                    "active updates defer only the final preference write until idle"
                 );
+                assert!(
+                    !crate::cli::global_config_path().unwrap().exists(),
+                    "active control handling must not persist before the idle boundary"
+                );
+            } else if qualified {
+                assert!(pending.is_empty(), "rejected control must not persist");
             } else {
                 assert_eq!(
                     pending.front(),
@@ -14457,9 +15218,11 @@ mod tests {
                 }
                 continue;
             }
-            assert!(shell
-                .debug_snapshot()
-                .contains("not provider acknowledgement"));
+            if requested != "cycle" {
+                assert!(shell
+                    .debug_snapshot()
+                    .contains("not provider acknowledgement"));
+            }
             assert_eq!(bodies.len(), 2);
             assert_eq!(bodies[0]["reasoning"]["effort"], "none");
             assert_eq!(
@@ -14472,11 +15235,6 @@ mod tests {
                 .iter()
                 .any(|item| item["type"] == "configuration_update"
                     && item["reasoning"]["effort"] == "high"));
-            assert!(
-                std::fs::read_to_string(crate::cli::global_config_path().unwrap())
-                    .unwrap()
-                    .contains("high")
-            );
         }
     }
 

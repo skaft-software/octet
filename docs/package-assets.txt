@@ -132,6 +132,7 @@ text docs/benchmarks/runtime-footprint-2026-08-29/ygg-concurrency-2.json
 text docs/benchmarks/runtime-footprint-2026-08-29/ygg-concurrency-4.json
 text docs/benchmarks/runtime-footprint-2026-08-29/ygg-custom-provider.json
 text docs/benchmarks/runtime-footprint-2026-08-29/ygg-runtime.json
+text docs/benchmarks/startup-phase-audit.py
 text docs/benchmarks/swe-bench-live-lite-v0.6.3/.gitignore
 text docs/benchmarks/swe-bench-live-lite-v0.6.3/README.md
 text docs/benchmarks/swe-bench-live-lite-v0.6.3/data/agent_tasks.jsonl
@@ -253,6 +254,8 @@ text docs/releases/v0.7.4.md
 text docs/releases/v0.7.5.md
 text docs/releases/v0.7.6.md
 text docs/releases/v0.8.0.md
+text docs/releases/v0.8.1-rc.1.md
+text docs/releases/v0.8.1.md
 text docs/resources.md
 text docs/sdk.md
 text docs/session-format.md
@@ -304,14 +307,15 @@ text examples/skills/local-model-review/SKILL.md
 text examples/skills/local-model-review/references/checklist.md
 text examples/skills/pi-migration/SKILL.md
 text examples/skills/repro-first/SKILL.md
+text examples/themes/Cards.toml
 text examples/themes/README.md
+text examples/themes/Still.toml
 text examples/themes/octet-default.toml
 text extensions/octet-browse/CONNECTORS.md
 text extensions/octet-browse/QUALIFICATION.md
 text extensions/octet-browse/README.md
 text extensions/octet-browse/REFERENCE.md
-text extensions/octet-import-aider/README.md
-text extensions/octet-import-pi/README.md
+text extensions/octet-computer-use/README.md
 text extensions/octet-mcp/README.md
 text extensions/octet-mcp/REFERENCE.md
 text extensions/octet-mcp/fixtures/tls/README.md

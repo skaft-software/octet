@@ -5,7 +5,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use octet_agent::{Entry, EntryMetadata, EntryValue, Session};
-use octet_ai::{AssistantPart, ImageSource, Media, Message, ToolCallId, ToolResultPart, UserPart};
+use octet_ai::{
+    AssistantMessage, AssistantPart, ImageSource, Media, Message, ToolCallId, ToolResultPart,
+    UserPart,
+};
 use sexy_tui_rs::{ImageId, ImageLimits, TerminalImage};
 
 use crate::tui::theme::ModelLab;
@@ -282,6 +285,123 @@ pub(crate) fn project_tool_output_images(
     images
 }
 
+/// Activity families presented as one quiet row in Still. A change of family
+/// closes the preceding group even when a model response contains no prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolActivityKind {
+    Explore,
+    Edit,
+}
+
+impl ToolActivityKind {
+    pub(crate) fn for_name(name: &str) -> Option<Self> {
+        match name {
+            "read" | "search" | "bash" | "exec" => Some(Self::Explore),
+            "edit" | "write" => Some(Self::Edit),
+            _ => None,
+        }
+    }
+}
+
+/// Contiguous calls, with unique file paths counted rather than read/edit
+/// chunks. Child tool cards retain the paths and commands for disclosure.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ToolActivityGroup {
+    pub(crate) member_ids: Vec<ToolCallId>,
+    pub(crate) read_files: usize,
+    pub(crate) searches: usize,
+    pub(crate) commands: usize,
+    pub(crate) edited_files: usize,
+    pub(crate) file_paths: Vec<String>,
+}
+
+impl ToolActivityGroup {
+    pub(crate) fn kind(&self) -> ToolActivityKind {
+        if self.edited_files > 0 {
+            ToolActivityKind::Edit
+        } else {
+            ToolActivityKind::Explore
+        }
+    }
+
+    pub(crate) fn add(&mut self, id: ToolCallId, name: &str, args: &serde_json::Value) {
+        match name {
+            "read" | "edit" | "write" => {
+                let path = args
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("<{}>", id.0));
+                if !self.file_paths.contains(&path) {
+                    self.file_paths.push(path);
+                    if name == "read" {
+                        self.read_files += 1;
+                    } else {
+                        self.edited_files += 1;
+                    }
+                }
+            }
+            "search" => self.searches += 1,
+            "bash" | "exec" => self.commands += 1,
+            _ => unreachable!("only activity tools are grouped"),
+        }
+        self.member_ids.push(id);
+    }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        let kind = other.kind();
+        for path in other.file_paths {
+            if !self.file_paths.contains(&path) {
+                self.file_paths.push(path);
+                match kind {
+                    ToolActivityKind::Explore => self.read_files += 1,
+                    ToolActivityKind::Edit => self.edited_files += 1,
+                }
+            }
+        }
+        self.searches += other.searches;
+        self.commands += other.commands;
+        self.member_ids.extend(other.member_ids);
+    }
+}
+
+/// Contiguous same-family calls from one assistant message. The live and
+/// replay projections may extend these groups across tool-only responses.
+pub(crate) fn tool_activity_groups(message: &AssistantMessage) -> Vec<ToolActivityGroup> {
+    let mut groups = Vec::new();
+    let mut current = ToolActivityGroup::default();
+    let mut current_kind = None;
+    let finish = |current: &mut ToolActivityGroup, groups: &mut Vec<ToolActivityGroup>| {
+        if current.member_ids.len() >= 2 {
+            groups.push(std::mem::take(current));
+        } else {
+            *current = ToolActivityGroup::default();
+        }
+    };
+
+    for part in &message.content {
+        let AssistantPart::ToolCall(call) = part else {
+            finish(&mut current, &mut groups);
+            current_kind = None;
+            continue;
+        };
+        let kind = ToolActivityKind::for_name(&call.name);
+        if kind != current_kind {
+            finish(&mut current, &mut groups);
+            current_kind = kind;
+        }
+        if kind.is_some() {
+            current.add(
+                call.id.clone(),
+                &call.name,
+                &call.arguments_value().unwrap_or_default(),
+            );
+        }
+    }
+    finish(&mut current, &mut groups);
+    groups
+}
+
 /// One displayable item reconstructed from a session's active branch.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TranscriptItem {
@@ -300,6 +420,7 @@ pub enum TranscriptItem {
         name: String,
         args: serde_json::Value,
     },
+    ToolActivityGroup(ToolActivityGroup),
     ToolResult {
         id: ToolCallId,
         text: String,
@@ -475,6 +596,7 @@ fn push_message(
             }
         }
         Message::Assistant(assistant) => {
+            let mut groups = tool_activity_groups(assistant).into_iter().peekable();
             for part in &assistant.content {
                 match part {
                     AssistantPart::Text(text) => {
@@ -486,6 +608,14 @@ fn push_message(
                         }
                     }
                     AssistantPart::ToolCall(call) => {
+                        if groups
+                            .peek()
+                            .is_some_and(|group| group.member_ids.first() == Some(&call.id))
+                        {
+                            items.push(TranscriptItem::ToolActivityGroup(
+                                groups.next().expect("peeked activity group"),
+                            ));
+                        }
                         let args = call.arguments_value().unwrap_or(serde_json::Value::Null);
                         items.push(TranscriptItem::ToolCall {
                             id: call.id.clone(),
@@ -786,6 +916,136 @@ mod tests {
             model: ModelId("test".into()),
             protocol: Protocol::OpenAiChat,
         }))
+    }
+
+    #[test]
+    fn exploration_groups_respect_text_and_non_exploration_boundaries() {
+        let call = |id: &str, name: &str| {
+            AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
+                id: ToolCallId(id.into()),
+                name: name.into(),
+                arguments_json: "{}".into(),
+                argument_error: None,
+            })
+        };
+        let message = AssistantMessage {
+            content: vec![
+                call("r1", "read"),
+                call("r2", "read"),
+                call("b1", "bash"),
+                AssistantPart::Text("analysis".into()),
+                call("s1", "search"),
+                call("e1", "edit"),
+                call("s2", "search"),
+                call("b2", "exec"),
+                call("r3", "read"),
+            ],
+            model: ModelId("test".into()),
+            protocol: Protocol::OpenAiChat,
+        };
+        let groups = tool_activity_groups(&message);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups[0].member_ids,
+            ["r1", "r2", "b1"].map(|id| ToolCallId(id.into()))
+        );
+        assert_eq!(
+            (groups[0].read_files, groups[0].searches, groups[0].commands),
+            (2, 0, 1)
+        );
+        assert_eq!(
+            groups[1].member_ids,
+            ["s2", "b2", "r3"].map(|id| ToolCallId(id.into()))
+        );
+        assert_eq!(
+            (groups[1].read_files, groups[1].searches, groups[1].commands),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn activity_groups_count_distinct_paths_and_split_exploration_from_edits() {
+        let call = |id: &str, name: &str, path: &str| {
+            AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
+                id: ToolCallId(id.into()),
+                name: name.into(),
+                arguments_json: serde_json::json!({"path": path}).to_string(),
+                argument_error: None,
+            })
+        };
+        let message = AssistantMessage {
+            content: vec![
+                call("r1", "read", "src/a.rs"),
+                call("r2", "read", "src/a.rs"),
+                call("s1", "search", ""),
+                call("b1", "bash", ""),
+                call("e1", "edit", "src/b.rs"),
+                call("w1", "write", "src/b.rs"),
+                call("e2", "edit", "src/c.rs"),
+                AssistantPart::Text("done".into()),
+                call("w2", "write", "src/d.rs"),
+            ],
+            model: ModelId("test".into()),
+            protocol: Protocol::OpenAiChat,
+        };
+        let groups = tool_activity_groups(&message);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            (groups[0].read_files, groups[0].searches, groups[0].commands),
+            (1, 1, 1)
+        );
+        assert_eq!(groups[0].file_paths, ["src/a.rs"]);
+        assert_eq!(groups[1].edited_files, 2);
+        assert_eq!(groups[1].file_paths, ["src/b.rs", "src/c.rs"]);
+        assert_eq!(groups[1].member_ids.len(), 3);
+    }
+
+    #[test]
+    fn exploration_marker_is_rebuilt_before_its_calls_on_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let call = |id: &str| ToolCall {
+            async_execution: false,
+            id: ToolCallId(id.into()),
+            name: "read".into(),
+            arguments_json: "{\"path\":\"file.rs\"}".into(),
+            argument_error: None,
+        };
+        session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![
+                    AssistantPart::ToolCall(call("a")),
+                    AssistantPart::ToolCall(call("b")),
+                ],
+                model: ModelId("test".into()),
+                protocol: Protocol::OpenAiChat,
+            })))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: ToolCallId("a".into()),
+                    content: vec![ToolResultPart::Text("ok".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                })],
+            })))
+            .unwrap();
+        let items = hydrate_transcript(&session).unwrap();
+        assert!(
+            matches!(&items[0], TranscriptItem::ToolActivityGroup(group) if group.member_ids.len() == 2)
+        );
+        assert!(matches!(&items[1], TranscriptItem::ToolCall { id, .. } if id.0 == "a"));
+        assert!(matches!(&items[2], TranscriptItem::ToolCall { id, .. } if id.0 == "b"));
+        assert!(
+            items
+                .iter()
+                .skip(3)
+                .any(|item| matches!(item, TranscriptItem::ToolResult { id, .. } if id.0 == "a")),
+            "{items:?}"
+        );
     }
 
     fn synthetic_png() -> Media {

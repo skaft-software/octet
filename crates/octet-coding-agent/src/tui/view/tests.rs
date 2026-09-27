@@ -1806,6 +1806,27 @@ fn refreshing_unchanged_slash_catalog_preserves_selection() {
 }
 
 #[test]
+fn login_and_setup_are_discoverable_from_either_partial_query() {
+    for query in ["/logi", "/setu"] {
+        let mut shell = InteractiveShell::test_shell();
+        for character in query.chars() {
+            shell.apply_edit(EditAction::Char(character));
+        }
+        let popup = render_slash_suggestions(&shell.state.borrow(), 120, 100).join("\n");
+        assert!(
+            popup.contains("/login") && popup.contains("/setup"),
+            "{query}: {popup}"
+        );
+        shell.complete_slash_command();
+        assert_eq!(
+            shell.pending(),
+            query,
+            "ambiguous completion must not choose for the user"
+        );
+    }
+}
+
+#[test]
 fn slash_command_menu_lists_commands_and_tab_completes_a_unique_prefix() {
     let mut shell = InteractiveShell::test_shell();
     shell.apply_edit(EditAction::Char('/'));
@@ -1908,6 +1929,8 @@ fn inline_autocomplete_uses_compact_footers_and_the_model_accent() {
     for character in "see @main".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    // The index is walked off-thread; the popup needs the finished walk.
+    shell.settle_file_index();
     let paths = shell_chrome(&shell.state.borrow(), 120, Instant::now()).suggestions;
     let selected = paths
         .iter()
@@ -2053,7 +2076,7 @@ fn model_switch_recolors_only_the_composer_and_future_prompt() {
             .state
             .borrow()
             .theme
-            .prompt_text_highlight(Some(color), "x");
+            .prompt_provenance_card(Some(color), "x");
         let paint = emulate_rows(&[sample], 2)
             .screen()
             .cell(0, 0)
@@ -2202,6 +2225,8 @@ fn mention_completion_inserts_path_reference_for_text_files() {
     for character in "see @main".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    // The index is walked off-thread; completion needs the finished walk.
+    shell.settle_file_index();
     let rendered = render_shell(&shell.state.borrow(), 120);
     assert!(rendered
         .iter()
@@ -2284,6 +2309,8 @@ fn mention_completion_attaches_media_files() {
     for character in "@shot".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    // The index is walked off-thread; completion needs the finished walk.
+    shell.settle_file_index();
     shell.complete_path();
     assert_eq!(shell.pending(), "[Image #1]");
     let composed = shell.drain_composed();
@@ -2303,6 +2330,7 @@ fn set_workspace_keeps_file_index_and_layout_when_the_root_is_unchanged() {
     for character in "@a".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    shell.settle_file_index();
     let generation = {
         let state = shell.state.borrow();
         drop(state.rendered_transcript(80));
@@ -2345,6 +2373,7 @@ fn invalidate_file_index_forces_a_fresh_walk_for_new_files() {
     for character in "@a".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    shell.settle_file_index();
     assert!(shell.state.borrow().file_index.is_some());
 
     // A run may have created files; invalidation makes the next mention
@@ -2353,9 +2382,10 @@ fn invalidate_file_index_forces_a_fresh_walk_for_new_files() {
     shell.invalidate_file_index();
     assert!(shell.state.borrow().file_index.is_none());
     shell.apply_edit(EditAction::Char('_'));
+    shell.settle_file_index();
     let state = shell.state.borrow();
     let files = state.file_index.as_ref().unwrap();
-    assert!(files.iter().any(|file| file == "brand_new.rs"));
+    assert!(files.paths().iter().any(|file| file == "brand_new.rs"));
 }
 
 #[test]
@@ -2368,6 +2398,8 @@ fn unsupported_media_mention_falls_back_to_a_path_and_notice() {
     for character in "@shot".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    // The index is walked off-thread; completion needs the finished walk.
+    shell.settle_file_index();
     shell.complete_path();
 
     assert_eq!(shell.pending(), "@shot.png ");
@@ -7131,10 +7163,17 @@ fn compact_edit_keeps_both_replacement_sides_with_long_paths() {
     let path = format!("/work/{}/pagination.py", "long-directory/".repeat(15));
     let args = serde_json::json!({"path": path});
     let panel = TranscriptBlock::Tool(Box::new(ToolPanel::new(
-        ToolCallId("compact-replacement".into()), "edit".into(), args.to_string(),
+        ToolCallId("compact-replacement".into()),
+        "edit".into(),
+        args.to_string(),
         summarize_tool("edit", &args),
-        format!("--- a/{path}\n+++ b/{path}\n@@ -1,5 +1,5 @@\n context\n context\n-start = page * size\n+start = (page - 1) * size\n context\n context\n"),
-        true, false, None, None,
+        format!(
+            "--- a/{path}\n+++ b/{path}\n@@ -1,5 +1,5 @@\n context\n context\n-start = page * size\n+start = (page - 1) * size\n context\n context\n"
+        ),
+        true,
+        false,
+        None,
+        None,
     )));
     let renderer = theme.rich_renderer();
     for width in [60, 80, 120] {
@@ -7404,11 +7443,47 @@ fn activity_shimmer_clock_can_cross_long_labels() {
     }
 }
 
+/// `Working` and `Thinking` share one shimmer: the same sweep, on the same
+/// monotonic phase, continuing across the transition between them.
+///
+/// The clock used to be gated on the pre-delta `Working` row alone, so the
+/// first reasoning delta froze it and `Thinking` rendered a stalled sweep.
 #[test]
-fn collapsed_thinking_keeps_a_static_label_and_marker() {
+fn collapsed_thinking_shimmers_on_the_shared_working_phase() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "high");
     let run_id = shell.begin_run("codex");
+
+    let row = |shell: &InteractiveShell, label: &str| {
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(80)
+            .iter()
+            .find(|line| strip_terminal_sequences(line).contains(label))
+            .cloned()
+            .unwrap_or_else(|| panic!("{label} status row"))
+    };
+    let marker_prefix = |line: &str| {
+        let marker = line.find('•').expect("reasoning margin marker");
+        line[..marker + '•'.len_utf8()].to_owned()
+    };
+
+    // Before any delta the row is `Working` and the clock is running.
+    let working = row(&shell, "Working");
+    assert!(
+        strip_terminal_sequences(&working).starts_with("• Working ("),
+        "{working:?}"
+    );
+    {
+        let mut state = shell.state.borrow_mut();
+        assert!(state.has_active_status_shimmer());
+        state.advance_status_shimmer_by(4);
+    }
+    let working = row(&shell, "Working");
+
+    // The first reasoning delta turns the same row into `Thinking`. The clock
+    // must keep running, and the label must move.
     shell.on_run_event(
         run_id,
         &AgentEvent::OutputDelta {
@@ -7416,47 +7491,48 @@ fn collapsed_thinking_keeps_a_static_label_and_marker() {
             text: "private trace".into(),
         },
     );
-    let raw = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(80)
-            .iter()
-            .find(|line| strip_terminal_sequences(line).contains("Thinking"))
-            .cloned()
-            .expect("reasoning status row")
-    };
-    let before = raw(&shell);
+    let thinking = row(&shell, "Thinking");
     assert!(
-        strip_terminal_sequences(&before).starts_with("• Thinking ("),
-        "{before:?}"
+        strip_terminal_sequences(&thinking).starts_with("• Thinking ("),
+        "{thinking:?}"
     );
-    let marker_prefix = |line: &str| {
-        let marker = line.find('•').expect("reasoning margin marker");
-        line[..marker + '•'.len_utf8()].to_owned()
-    };
     {
         let mut state = shell.state.borrow_mut();
-        assert!(!event_dot_animating(&state));
-        assert!(!state.has_active_status_shimmer());
-        assert_eq!(state.active_event_blocks, vec![0]);
-        state.advance_status_shimmer();
+        assert!(
+            state.has_active_status_shimmer(),
+            "Thinking must keep the shared status clock running"
+        );
+        let before = state.status_shimmer_frame;
+        state.advance_status_shimmer_by(1);
+        assert_eq!(
+            state.status_shimmer_frame,
+            before + 1,
+            "the phase must advance instead of freezing"
+        );
     }
-    let after = raw(&shell);
+    let thinking = row(&shell, "Thinking");
+
+    // Both labels paint a foreground-only sweep that shares the one phase, and
+    // the margin marker stays a solid glyph on either row.
+    assert_ne!(thinking, working, "the Thinking label must sweep");
     assert!(
-        strip_terminal_sequences(&after).starts_with("• Thinking ("),
-        "{after:?}"
-    );
-    assert_eq!(after, before, "Thinking must not shimmer");
-    assert_eq!(
-        marker_prefix(&after),
-        marker_prefix(&before),
-        "the Thinking marker must remain steady"
+        !thinking.contains("\x1b[48;"),
+        "status shimmer must stay foreground-only: {thinking:?}"
     );
     assert!(
-        !after.contains("\x1b[48;"),
-        "status shimmer must stay foreground-only"
+        !thinking.contains("\x1b[2m"),
+        "the sweep must not dim the label: {thinking:?}"
     );
+    // The marker is a single solid glyph on both labels; it is not part of the
+    // label's text run and never gains a background or a dim attribute.
+    for (label, line) in [("Working", &working), ("Thinking", &thinking)] {
+        let marker = marker_prefix(line);
+        assert!(marker.ends_with('•'), "{label} marker: {marker:?}");
+        assert!(
+            !marker.contains("\x1b[48;") && !marker.contains("\x1b[2m"),
+            "{label} marker must stay a plain foreground glyph: {marker:?}"
+        );
+    }
 }
 
 #[test]
@@ -7632,6 +7708,128 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
             "• Thinking (0s • esc to interrupt)",
             "  └ Verifying reproducibility of evidence package (ctrl+o to expand)",
         ]
+    );
+}
+
+#[test]
+fn still_working_to_thinking_keeps_the_transcript_height_stable() {
+    let theme = crate::tui::theme::test_theme_from_source(include_str!(
+        "../../../../../examples/themes/Still.toml"
+    ));
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    shell.set_size(160, 24);
+    let run_id = shell.begin_run("openai");
+    let rows = |shell: &InteractiveShell| {
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(160)
+            .iter()
+            .map(|row| strip_terminal_sequences(row).to_owned())
+            .collect::<Vec<_>>()
+    };
+    let working = rows(&shell);
+    assert!(
+        working[working.len() - 2].contains("Working"),
+        "{working:?}"
+    );
+    assert!(working.last().is_some_and(String::is_empty), "{working:?}");
+
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "private detail".into(),
+        },
+    );
+    let thinking = rows(&shell);
+    assert_eq!(
+        thinking.len(),
+        working.len(),
+        "status promotion shifted the composer"
+    );
+    assert!(
+        thinking[thinking.len() - 2].contains("Thinking"),
+        "{thinking:?}"
+    );
+    assert!(
+        thinking
+            .last()
+            .is_some_and(|row| row.contains("ctrl+o to expand")),
+        "{thinking:?}"
+    );
+
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "Answer".into(),
+        },
+    );
+    let responding = rows(&shell);
+    assert!(
+        responding.len() >= thinking.len(),
+        "response shrank the transcript: {responding:?}"
+    );
+    assert!(
+        responding[responding.len() - 2].contains("Working"),
+        "{responding:?}"
+    );
+    assert!(
+        responding.last().is_some_and(String::is_empty),
+        "{responding:?}"
+    );
+
+    let tool_id = ToolCallId("still-tool".into());
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::ToolStarted {
+            id: tool_id.clone(),
+            name: "read".into(),
+            args: serde_json::json!({"path": "README.md"}),
+        },
+    );
+    let tool = rows(&shell);
+    assert!(
+        tool.len() >= responding.len(),
+        "tool replaced status with fewer rows: {tool:?}"
+    );
+    assert!(tool.last().is_some_and(String::is_empty), "{tool:?}");
+
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::ToolFinished {
+            id: tool_id,
+            result: Ok(octet_agent::ToolOutput::new("done")),
+            duration: Duration::from_millis(10),
+        },
+    );
+    let finished = rows(&shell);
+    assert!(
+        finished.len() >= tool.len(),
+        "tool completion shrank the transcript: {finished:?}"
+    );
+
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "another private detail".into(),
+        },
+    );
+    let thinking_again = rows(&shell);
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::ToolStarted {
+            id: ToolCallId("next-tool".into()),
+            name: "read".into(),
+            args: serde_json::json!({"path": "Cargo.toml"}),
+        },
+    );
+    let next_tool = rows(&shell);
+    assert!(
+        next_tool.len() >= thinking_again.len(),
+        "tool replaced Thinking with fewer rows: before={thinking_again:?}, after={next_tool:?}"
     );
 }
 
@@ -8469,7 +8667,7 @@ fn prompt_card_keeps_exact_persisted_provenance_across_theme_changes() {
 }
 
 #[test]
-fn persisted_prompt_highlights_only_wrapped_text_cells() {
+fn persisted_prompt_paints_a_full_model_adaptive_card() {
     const WIDTH: u16 = 24;
     let theme = crate::tui::theme::test_theme_for(
         TerminalBackground::Dark,
@@ -8519,42 +8717,34 @@ fn persisted_prompt_highlights_only_wrapped_text_cells() {
             .trim()
             .is_empty()
     );
-    assert!(
-        !rendered[0].contains("48;"),
-        "blank row was painted: {rendered:?}"
-    );
-    assert!(
-        !rendered[3].contains("48;"),
-        "blank row was painted: {rendered:?}"
-    );
-    let painted = emulate_rows(&[theme.prompt_text_highlight(Some("#123456"), "x")], 2)
+    let painted = emulate_rows(&[theme.prompt_provenance_card(Some("#123456"), "x")], 2)
         .screen()
         .cell(0, 0)
-        .expect("highlight sample")
+        .expect("card sample")
         .bgcolor();
     assert_ne!(painted, vt100::Color::Default);
+    // The stored model colour fills the whole cell: marker gutter, padding,
+    // trailing canvas, and both breathing rows. Provenance stays a card, not a
+    // highlight around the wrapped text alone.
     for row in 0..rendered.len() as u16 {
         for column in 0..WIDTH {
-            let inside = match row {
-                1 => (2..12).contains(&column), // › + space, then "first line"
-                2 => (2..13).contains(&column), // continuation gutter, then "second line"
-                _ => false,
-            };
             assert_eq!(
                 terminal
                     .screen()
                     .cell(row, column)
                     .expect("prompt cell")
                     .bgcolor(),
-                if inside {
-                    painted
-                } else {
-                    vt100::Color::Default
-                },
-                "unexpected painted cell at row {row}, column {column}"
+                painted,
+                "prompt card left row {row}, column {column} unpainted: {rendered:?}"
             );
         }
     }
+    assert!(
+        rendered
+            .iter()
+            .all(|row| visible_width(row) <= usize::from(WIDTH)),
+        "{rendered:?}"
+    );
 
     let expected = vt100::Color::Rgb(0x12, 0x34, 0x56);
 
@@ -8642,6 +8832,64 @@ fn unknown_profile_keeps_rich_prompt_styling_on_the_terminal_canvas() {
 }
 
 #[test]
+fn default_prompt_card_keeps_inline_markdown_attributes() {
+    // The card supplies the cell background only. Bold, italic, and inline-code
+    // runs keep their own attributes instead of being flattened onto one
+    // provenance colour.
+    let theme = crate::tui::theme::test_theme_for(
+        TerminalBackground::Dark,
+        crate::tui::terminal::TerminalCapabilities::test(
+            true,
+            true,
+            crate::tui::terminal::ColorDepth::TrueColor,
+        ),
+    );
+    let block = TranscriptBlock::User {
+        text: "run `cargo check` and **fix** the prompt card".into(),
+        model_lab: Some(ModelLab::OpenAi),
+        prompt_color: Some("#123456".into()),
+        persisted: true,
+    };
+    let rendered = render_block(
+        None,
+        &block,
+        &theme,
+        &theme.rich_renderer(),
+        &theme.reasoning_renderer(),
+        48,
+        false,
+    );
+    let body = strip_terminal_sequences(&rendered.join("\n"));
+    assert!(
+        body.contains("run cargo check and fix the prompt card"),
+        "{body:?}"
+    );
+    let row = rendered
+        .iter()
+        .find(|row| strip_terminal_sequences(row).contains("cargo check"))
+        .expect("prompt body row");
+    assert!(row.contains("48;"), "prompt card lost its fill: {row:?}");
+    // The rich runs survive inside the card: the inline code keeps its own
+    // foreground, `fix` keeps its bold, and the card's fill is reopened after
+    // every inline reset instead of being flattened onto one colour.
+    let card = theme.prompt_provenance_card(Some("#123456"), "x");
+    let (open, _) = card.split_once('x').expect("card preserves text");
+    assert!(row.starts_with(open), "card did not open the row: {row:?}");
+    assert!(
+        row.matches(open).count() > 1,
+        "card background was not restored after an inline reset: {row:?}"
+    );
+    let vt100::Color::Rgb(red, green, blue) = role_rgb_color(&theme, "md_code") else {
+        panic!("inline code must resolve to a truecolor role");
+    };
+    assert!(
+        row.contains(&format!("38;2;{red};{green};{blue}m")),
+        "inline code lost its own colour: {row:?}"
+    );
+    assert!(row.contains("\x1b[1mfix\x1b[0m"), "bold lost: {row:?}");
+}
+
+#[test]
 fn compiled_prompt_highlight_preserves_media_labels_unicode_copy_and_terminal_fallbacks() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 
@@ -8694,13 +8942,16 @@ fn compiled_prompt_highlight_preserves_media_labels_unicode_copy_and_terminal_fa
                 }
                 let terminal = emulate_rows(&rendered, 24);
                 let screen = terminal.screen();
-                let painted = screen.cell(1, 2).unwrap().bgcolor();
-                assert_eq!(
-                    painted != vt100::Color::Default,
-                    color != ColorDepth::None && background != TerminalBackground::Unknown
-                );
-                assert_eq!(screen.cell(1, 0).unwrap().bgcolor(), vt100::Color::Default);
-                assert_eq!(screen.cell(1, 23).unwrap().bgcolor(), vt100::Color::Default);
+                // The stored model colour is one card across the whole row, so
+                // the marker gutter and the trailing canvas are painted too.
+                let washed = color != ColorDepth::None && background != TerminalBackground::Unknown;
+                for column in [0, 2, 23] {
+                    assert_eq!(
+                        screen.cell(1, column).unwrap().bgcolor() != vt100::Color::Default,
+                        washed,
+                        "unexpected card coverage at column {column}: {rendered:?}"
+                    );
+                }
             }
         }
     }
@@ -8881,10 +9132,12 @@ fn notice_markers_use_neutral_success_and_error_lifecycle_tones() {
     let approved = TranscriptBlock::NoticeStatus {
         text: "action approved".into(),
         tone: NoticeTone::Success,
+        reserved_rows: 0,
     };
     let denied = TranscriptBlock::NoticeStatus {
         text: "action denied".into(),
         tone: NoticeTone::Error,
+        reserved_rows: 0,
     };
 
     assert_eq!(
@@ -8898,6 +9151,73 @@ fn notice_markers_use_neutral_success_and_error_lifecycle_tones() {
     assert_eq!(
         event_margin_marker(&denied, &theme, false, false),
         Some(theme.settled_event_dot("error", "•"))
+    );
+}
+
+#[test]
+fn still_tool_dots_breathe_smoothly_without_status_colours_or_blinking() {
+    let source = r##"
+        [colors]
+        tool_dot_breathing = true
+        tool_dot_dim = "#646464"
+        tool_dot_bright = "#a0a0a0"
+    "##;
+    let theme = crate::tui::theme::test_theme_from_source(source);
+    let args = serde_json::json!({"path":"src/lib.rs"});
+    let panel = |finished, is_error| {
+        TranscriptBlock::Tool(Box::new(ToolPanel::new(
+            ToolCallId("read".into()),
+            "read".into(),
+            args.to_string(),
+            summarize_tool("read", &args),
+            String::new(),
+            finished,
+            is_error,
+            is_error.then(|| "failed".into()),
+            None,
+        )))
+    };
+    let marker = |block: &TranscriptBlock, frame| {
+        surface_frame::event_margin_marker_with_frame(block, &theme, frame, None, 0, false).unwrap()
+    };
+    let active = panel(false, false);
+    let frames = (0..12)
+        .map(|frame| marker(&active, frame))
+        .collect::<Vec<_>>();
+    assert_eq!(frames[0], frames[10]);
+    assert_eq!(frames[1], frames[9]);
+    assert_ne!(frames[5], frames[11]);
+    for frame in &frames {
+        assert_eq!(strip_terminal_sequences(frame), "•");
+        assert!(!frame.contains("\x1b[5m"));
+    }
+    assert_eq!(
+        marker(&panel(true, false), 0),
+        marker(&panel(true, true), 0)
+    );
+    let group = |tone| TranscriptBlock::NoticeStatus {
+        text: "Explored".into(),
+        tone,
+        reserved_rows: 0,
+    };
+    assert_eq!(marker(&group(NoticeTone::ToolActive), 5), frames[5]);
+    assert_eq!(
+        marker(&group(NoticeTone::ToolSuccess), 0),
+        marker(&group(NoticeTone::ToolError), 0)
+    );
+
+    let ascii = crate::tui::theme::test_theme_source_with(
+        source,
+        crate::tui::terminal::TerminalCapabilities::test(
+            false,
+            false,
+            crate::tui::terminal::ColorDepth::None,
+        ),
+        TerminalBackground::Unknown,
+    );
+    assert_eq!(
+        surface_frame::event_margin_marker_with_frame(&active, &ascii, 1, None, 0, false),
+        Some("*".into())
     );
 }
 
@@ -12528,6 +12848,356 @@ fn ctrl_o_toggles_all_expandable_transcript_blocks() {
 }
 
 #[test]
+fn live_exploration_groups_follow_turn_finished_and_keep_failures_visible() {
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+    );
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    let run = shell.begin_run("test");
+    let read = ToolCallId("live-read".into());
+    let bash = ToolCallId("live-bash".into());
+    let call = |id: ToolCallId, name: &str| octet_ai::ToolCall {
+        async_execution: false,
+        id,
+        name: name.into(),
+        arguments_json: "{}".into(),
+        argument_error: None,
+    };
+    shell.on_run_event(
+        run,
+        &AgentEvent::TurnFinished {
+            message: octet_ai::AssistantMessage {
+                content: vec![
+                    octet_ai::AssistantPart::ToolCall(call(read.clone(), "read")),
+                    octet_ai::AssistantPart::ToolCall(call(bash.clone(), "bash")),
+                ],
+                model: ModelId("test".into()),
+                protocol: octet_ai::Protocol::OpenAiChat,
+            },
+            stop_reason: octet_ai::StopReason::ToolUse,
+            turn_usage: Usage::default(),
+            turn_cost: None,
+            usage: Usage::default(),
+            session_cost_microdollars: None,
+            run_cost_microdollars: 0,
+        },
+    );
+    for (id, name, args) in [
+        (&read, "read", serde_json::json!({"path": "src/one.rs"})),
+        (&bash, "bash", serde_json::json!({"command": "false"})),
+    ] {
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolStarted {
+                id: id.clone(),
+                name: name.into(),
+                args,
+            },
+        );
+    }
+    shell.on_run_event(
+        run,
+        &AgentEvent::ToolFinished {
+            id: read.clone(),
+            result: Ok(octet_agent::ToolOutput::new("content")),
+            duration: Duration::from_millis(1),
+        },
+    );
+    shell.on_run_event(
+        run,
+        &AgentEvent::ToolFinished {
+            id: bash.clone(),
+            result: Err(octet_agent::ToolError::new("permission denied")),
+            duration: Duration::from_millis(1),
+        },
+    );
+    let compact = shell.state.borrow().rendered_transcript(100).join("\n");
+    assert!(compact.contains("Explored 1 file · 1 command"), "{compact}");
+    assert!(compact.contains("bash: permission denied"), "{compact}");
+    assert!(
+        !compact.contains("src/one.rs") && !compact.contains("Bash  false"),
+        "{compact}"
+    );
+    shell.set_verbose_tools(true);
+    let detailed =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"));
+    assert!(
+        detailed.contains("src/one.rs") && detailed.contains("Bash  false"),
+        "{detailed}"
+    );
+}
+
+#[test]
+fn still_groups_edits_by_distinct_path_across_responses_and_discloses_failures() {
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+    );
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    let run = shell.begin_run("test");
+    for (number, name, path) in [
+        (0, "edit", "src/one.rs"),
+        (1, "write", "src/one.rs"),
+        (2, "write", "src/two.rs"),
+    ] {
+        let id = ToolCallId(format!("edit-{number}"));
+        let args = serde_json::json!({"path": path, "content": "new"});
+        shell.on_run_event(
+            run,
+            &AgentEvent::TurnFinished {
+                message: octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        async_execution: false,
+                        id: id.clone(),
+                        name: name.into(),
+                        arguments_json: args.to_string(),
+                        argument_error: None,
+                    })],
+                    model: ModelId("test".into()),
+                    protocol: octet_ai::Protocol::OpenAiChat,
+                },
+                stop_reason: octet_ai::StopReason::ToolUse,
+                turn_usage: Usage::default(),
+                turn_cost: None,
+                usage: Usage::default(),
+                session_cost_microdollars: None,
+                run_cost_microdollars: 0,
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolStarted {
+                id: id.clone(),
+                name: name.into(),
+                args,
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolFinished {
+                id,
+                result: if number == 2 {
+                    Err(octet_agent::ToolError::new("permission denied"))
+                } else {
+                    Ok(octet_agent::ToolOutput::new("ok"))
+                },
+                duration: Duration::from_millis(1),
+            },
+        );
+    }
+    let compact =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"));
+    assert!(compact.contains("Edited 2 files · 1 failed"), "{compact}");
+    assert!(compact.contains("write: permission denied"), "{compact}");
+    assert!(!compact.contains("src/one.rs"), "{compact}");
+    shell.toggle_disclosure();
+    let expanded =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"));
+    assert!(
+        expanded.contains("src/one.rs") && expanded.contains("src/two.rs"),
+        "{expanded}"
+    );
+}
+
+#[test]
+fn still_groups_commands_across_model_responses_and_discloses_each_command() {
+    use octet_agent::{EntryId, FinishReason};
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+    );
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    let run = shell.begin_run("test");
+    for (number, command) in ["cargo check", "cargo fmt --check", "cargo test"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = ToolCallId(format!("command-{number}"));
+        shell.on_run_event(
+            run,
+            &AgentEvent::TurnFinished {
+                message: octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        async_execution: false,
+                        id: id.clone(),
+                        name: "bash".into(),
+                        arguments_json: serde_json::json!({"command": command}).to_string(),
+                        argument_error: None,
+                    })],
+                    model: ModelId("test".into()),
+                    protocol: octet_ai::Protocol::OpenAiChat,
+                },
+                stop_reason: octet_ai::StopReason::ToolUse,
+                turn_usage: Usage::default(),
+                turn_cost: None,
+                usage: Usage::default(),
+                session_cost_microdollars: None,
+                run_cost_microdollars: 0,
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolStarted {
+                id: id.clone(),
+                name: "bash".into(),
+                args: serde_json::json!({"command": command}),
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolFinished {
+                id,
+                result: if number == 2 {
+                    Err(octet_agent::ToolError::new("test failed"))
+                } else {
+                    Ok(octet_agent::ToolOutput::new("ok"))
+                },
+                duration: Duration::from_millis(1),
+            },
+        );
+    }
+    {
+        let state = shell.state.borrow();
+        state.rendered_transcript(100);
+        let index = state.transcript.iter().position(|block| matches!(block, TranscriptBlock::NoticeStatus { text, .. } if text.starts_with("Ran 3 Commands"))).unwrap();
+        let cursor = transcript_commit_cursor(&state, index, FINAL_COMMIT_SEGMENT);
+        assert!(transcript_commit_position(&state, cursor).is_none());
+    }
+    shell.on_run_event(
+        run,
+        &AgentEvent::RunFinished {
+            head: EntryId("head".into()),
+            reason: FinishReason::Completed,
+        },
+    );
+    let compact =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"))
+            .to_owned();
+    assert!(compact.contains("Ran 3 Commands"), "{compact}");
+    assert!(compact.contains("test failed"), "{compact}");
+    assert!(!compact.contains("cargo check"), "{compact}");
+    shell.set_verbose_tools(true);
+    let expanded =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"))
+            .to_owned();
+    for command in ["cargo check", "cargo fmt --check", "cargo test"] {
+        assert!(
+            expanded.contains(&format!("-> Bash  {command}")),
+            "{expanded}"
+        );
+    }
+}
+
+#[test]
+fn still_shows_one_tool_summary_until_disclosure_without_hiding_failures() {
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+    );
+    let renderer = theme.rich_renderer();
+    let args = serde_json::json!({"path": "src/lib.rs"});
+    let edit = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("quiet-edit".into()),
+        "edit".into(),
+        args.to_string(),
+        summarize_tool("edit", &args),
+        "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new".into(),
+        true,
+        false,
+        None,
+        None,
+    )));
+    let render = |block: &TranscriptBlock, expanded| {
+        strip_terminal_sequences(
+            &render_block_planned(
+                None, block, &theme, &renderer, &renderer, 100, expanded, 0, 0,
+            )
+            .lines
+            .join("\n"),
+        )
+        .to_owned()
+    };
+    for width in [48, 100, 160] {
+        let compact = strip_terminal_sequences(
+            &render_block_planned(
+                None, &edit, &theme, &renderer, &renderer, width, false, 0, 0,
+            )
+            .lines
+            .join("\n"),
+        );
+        assert!(
+            compact.contains("Edit")
+                && compact.contains("lib.rs")
+                && !compact.contains("src/lib.rs"),
+            "{width}: {compact}"
+        );
+        assert!(!compact.contains("+new"), "{width}: {compact}");
+    }
+    assert!(render(&edit, true).contains("+new"));
+
+    let failed = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("quiet-failure".into()),
+        "read".into(),
+        args.to_string(),
+        summarize_tool("read", &args),
+        String::new(),
+        true,
+        true,
+        Some("permission denied".into()),
+        None,
+    )));
+    assert!(render(&failed, false).contains("permission denied"));
+
+    let failed_edit = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("quiet-failed-edit".into()),
+        "edit".into(),
+        args.to_string(),
+        summarize_tool("edit", &args),
+        String::new(),
+        true,
+        true,
+        Some("src/lib.rs: no match".into()),
+        None,
+    )));
+    let compact_failure = render(&failed_edit, false);
+    assert!(
+        compact_failure.contains("lib.rs: no match"),
+        "{compact_failure}"
+    );
+    assert!(!compact_failure.contains("src/lib.rs"), "{compact_failure}");
+    assert!(render(&failed_edit, true).contains("src/lib.rs: no match"));
+}
+
+#[test]
+fn theme_can_remove_activity_tree_connectors() {
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[glyphs]\nlast_branch = \" \"\nvertical = \" \"\n[glyphs_ascii]\nlast_branch = \" \"\nvertical = \" \"",
+    );
+    assert_eq!(activity_elbow(&theme), " ");
+    let args = serde_json::json!({"path": "src/lib.rs"});
+    let panel = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("failed-read".into()),
+        "read".into(),
+        args.to_string(),
+        summarize_tool("read", &args),
+        "permission denied".into(),
+        true,
+        true,
+        Some("permission denied".into()),
+        None,
+    )));
+    let renderer = theme.rich_renderer();
+    let rows = render_block(None, &panel, &theme, &renderer, &renderer, 80, false);
+    let plain = rows
+        .iter()
+        .map(|row| strip_terminal_sequences(row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plain.contains("permission denied"), "{plain}");
+    assert!(
+        !plain.contains('└') && !plain.contains('│') && !plain.contains("`-"),
+        "{plain}"
+    );
+}
+
+#[test]
 fn extension_tool_renderer_stays_internal_to_the_tool_record() {
     use octet_agent::extension_process::ToolRenderSegment;
     use octet_agent::ToolOutput;
@@ -13919,6 +14589,79 @@ async fn actual_read_image_reaches_live_shell_and_reopened_session() {
 }
 
 #[test]
+fn default_tool_image_reservation_keeps_following_rows_physically_empty() {
+    use sexy_tui_rs::{ImageAnchor, ImageId, ImageLayout, ImageProtocol};
+
+    let theme = crate::tui::theme::test_theme();
+    let args = serde_json::json!({"path": "comparison-home.png"});
+    let block = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        ToolCallId("read-image".into()),
+        "read".into(),
+        args.to_string(),
+        summarize_tool("read", &args),
+        String::new(),
+        true,
+        false,
+        None,
+        None,
+    )));
+    let plan = compile_surface_plan(None, &block, &theme, 80);
+    let anchor = ImageAnchor::new(
+        ImageProtocol::Kitty,
+        ImageId::new(1).unwrap(),
+        ImageLayout::new(30, 16).unwrap(),
+    )
+    .marker();
+    let mut content = vec![anchor.clone()];
+    content.extend(vec![String::new(); 15]);
+    let rows = super::surface_frame::decorate_surface_with_frame(
+        content, &plan, &theme, 80, None, false, None,
+    );
+    let start = rows.iter().position(|row| row.contains(&anchor)).unwrap();
+    for (offset, row) in rows[start + 1..start + 16].iter().enumerate() {
+        assert_eq!(visible_width(row), 0, "reserved row {offset}: {row:?}");
+    }
+}
+
+#[test]
+fn finish_transcript_block_preserves_trailing_image_reservation_rows() {
+    use sexy_tui_rs::{ImageAnchor, ImageId, ImageLayout, ImageProtocol};
+
+    // A tool panel whose only output is an image ends its rows with the anchor
+    // plus zero-width reservation rows. The generic trailing-blank trim must not
+    // collapse them, or later transcript rows are painted over the image.
+    for reserved in [1usize, 2, 16] {
+        let layout = ImageLayout::new(50, reserved as u16).unwrap();
+        let anchor =
+            ImageAnchor::new(ImageProtocol::Kitty, ImageId::new(42).unwrap(), layout).marker();
+        let mut rows = vec![
+            "Read screenshot.png".to_string(),
+            format!("\u{2514} {anchor}"),
+        ];
+        rows.extend(vec![String::new(); reserved - 1]);
+        let finished = super::finish_transcript_block(rows);
+        assert_eq!(
+            finished.len(),
+            1 + reserved,
+            "reservation of {reserved} rows must survive the trailing trim"
+        );
+        let start = finished
+            .iter()
+            .position(|row| row.contains(&anchor))
+            .unwrap();
+        for (offset, row) in finished[start + 1..].iter().enumerate() {
+            assert_eq!(visible_width(row), 0, "reserved row {offset}: {row:?}");
+        }
+    }
+
+    // A block with no image still trims its decorative trailing blanks.
+    assert_eq!(
+        super::finish_transcript_block(vec!["done".to_string(), String::new()]),
+        vec!["done".to_string()]
+    );
+}
+
+#[test]
 fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
     use sexy_tui_rs::{ImageDimensions, ImageLayout, ImageProtocol};
 
@@ -13928,10 +14671,16 @@ fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
     for width in [46, 80] {
         let viewport = tool_image_viewport(width, kitty);
         let layout = ImageLayout::fit(screenshot, viewport).unwrap();
-        assert_eq!(
-            (layout.columns(), layout.rows()),
-            (8, MAX_TOOL_IMAGE_RENDER_ROWS)
-        );
+        // A tall portrait capture is fitted against the card's column budget and
+        // stays within the row cap. It is no longer forced to the cap regardless
+        // of aspect, and it is no longer squeezed to a tiny column strip: the
+        // earlier (8, 16) expectation encoded the defect, not the intent.
+        assert!(layout.columns() >= 1);
+        assert!(layout.rows() <= MAX_TOOL_IMAGE_RENDER_ROWS);
+        assert!(layout.columns() <= viewport.columns());
+        // A portrait image must still be taller than it is wide.
+        assert!(layout.rows() >= layout.columns() / 2);
+
         let wide = ImageLayout::fit(wide_screenshot, viewport).unwrap();
         assert!(wide.columns() >= 40 && wide.rows() >= 10);
         assert!(wide.columns() <= width && wide.rows() <= MAX_TOOL_IMAGE_RENDER_ROWS);

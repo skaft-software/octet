@@ -239,6 +239,55 @@ the current app catalog. Neither step changes the active model without explicit
 selection. Provider/route readiness and actual latency still require a matched
 startup campaign.
 
+## Startup audit follow-up
+
+The opt-in phase trace now brackets the workspace marker (`session.marker`) and
+HTTP-client construction (`catalog.client`) separately before `bootstrap.ready`.
+A repeated launch with an unchanged workspace path validates the owner-only,
+no-follow marker and skips its atomic replacement. A missing, changed, or
+insecure marker still uses the existing descriptor-bound atomic writer (and
+still fails closed on a symlink). This removes one staged write/rename and its
+permission checks from the common warm launch, not the marker read or first
+launch write. No claim about spawn-to-editable-frame or extension-enabled
+startup follows from these in-process phase timestamps.
+
+Catalog registration checks model identity by indexed resolution rather than
+scanning every model for each discovered/static registration. Credential pruning
+checks each endpoint's authentication once per pass, then retains models by
+endpoint membership; endpoints remain available for later registration. These
+are work reductions, not measured UI or provider latency improvements.
+
+One local matched release-profile comparison used:
+
+```sh
+python3 docs/benchmarks/startup-phase-audit.py \
+  /tmp/octet-perf-audit/baseline-octet target/release/octet
+```
+
+The baseline executable SHA-256 was `ea6ce41e277a8ea253c8052efa1b9dca2887ebac6a17c92df2baffbe34adfce1`;
+the candidate was `6a100e400a3e79ab5bbd635db20b1001d368f5bce134115a147e7128d951d62d`
+(built before the separate agent-turn copy change below). On this macOS host,
+nine alternating-order warm launches per cell (one cold launch per cell
+discarded) gave `catalog.copilot` → `bootstrap.ready` medians of
+6,416 µs before and 148 µs after. Within the candidate, marker work was
+114 µs and `AiClient::try_new()` 29 µs median. Spawn-to-*offline inference
+failure* exit medians were 12,454 and 6,125 µs respectively. This isolates the
+unchanged-marker rewrite as the dominant part of that phase on this host, not
+HTTP-client construction; it does not show a first-frame speedup or characterize
+an extension-enabled/credentialed launch. The script prints the per-trial
+samples and uses an intentionally credential-free environment.
+
+## Agent-turn request copy audit
+
+Ordinary provider turns no longer construct an unused native-steering
+continuation request. On a native-steering turn, the independent continuation
+request still copies settings and tool schemas, but temporarily removes the
+full message history before cloning; the canonical request regains that history
+before dispatch, and the continuation builder fills only trailing tool results
+from the session. The continuation's own later clones remain when required
+input is delivered. This removes one full-history clone per turn, without a
+measured per-turn latency claim or a change to provider-visible messages.
+
 ## Work budgets before wall-clock budgets
 
 Deterministic regression tests run in ordinary CI. Assert the work that should

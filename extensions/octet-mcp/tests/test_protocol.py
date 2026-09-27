@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from octet_mcp.protocol import (
     McpCancelled,
@@ -136,6 +137,34 @@ class ProtocolTests(unittest.TestCase):
         self.assertLessEqual(len(entries), 8)
         self.assertTrue(all("SECRET_FIXTURE_VALUE" not in entry.text for entry in entries))
         self.assertTrue(any("[redacted]" in entry.text for entry in entries))
+
+    def test_inherit_env_forwards_only_named_reviewed_names(self):
+        config = server_config(
+            "stable",
+            inherited_environment=("DISPLAY", "XAUTHORITY"),
+            environment={"FIXTURE_PINNED": "pinned"},
+        )
+        client = self.make_client(config, limits())
+        with mock.patch.dict(
+            os.environ,
+            {"DISPLAY": ":7", "XAUTHORITY": "/tmp/auth", "DBUS_SESSION_BUS_ADDRESS": ":9"},
+        ):
+            environment = client._server_environment()
+        self.assertEqual(environment["DISPLAY"], ":7")
+        self.assertEqual(environment["XAUTHORITY"], "/tmp/auth")
+        # Not requested, so an ambient desktop value must not cross into the child.
+        self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", environment)
+        self.assertEqual(environment["FIXTURE_PINNED"], "pinned")
+
+        # An explicit value still wins over an inherited one.
+        overridden = server_config(
+            "stable",
+            inherited_environment=("DISPLAY",),
+            environment={"DISPLAY": ":1"},
+        )
+        override_client = self.make_client(overridden, limits())
+        with mock.patch.dict(os.environ, {"DISPLAY": ":7"}):
+            self.assertEqual(override_client._server_environment()["DISPLAY"], ":1")
 
     def test_blocked_server_stdin_times_out_without_blocking_the_host_thread(self):
         client = self.make_client(

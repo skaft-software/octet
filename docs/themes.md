@@ -2,18 +2,25 @@
 
 octet's compiled default theme retains model-family accents,
 terminal-background adaptation, and semantic status colours. Auto, Dark, and
-Light share the same default geometry: 16×4 model-blended startup mark, compact
-per-line historical prompt highlights preserving inline Markdown styles,
-model-coloured composer rules, one blinking tool-like subagent transcript row
-while workers run, two-row command previews, and full available prose width
-without narrowing code or tables. The footer may
+Light share the same default geometry: 16×4 model-blended startup mark, a
+full-cell model-adaptive card per historical prompt (the stored colour of the
+model that received it fills the whole cell, cushion rows and inline Markdown
+styling included), model-coloured composer rules, one blinking tool-like
+subagent transcript row while workers run, two-row command previews, and full
+available prose width without narrowing code or tables. The footer may
 omit a redundant catalogue-owned provider prefix, never a configured model
 name. These are compiled presentation policies, not new theme-file fields:
 custom surfaces, composer frames, and loaded theme colours/geometry keep their
 own styling.
 Unknown-background and no-colour terminals retain an unpainted readable prompt.
 
-The built-in theme picker offers:
+A theme that sets `content_max_width` gets a centered reading column for its
+text, but its filled chrome still reaches the terminal edges: a shaded composer
+and borderless `band`/`rail` surfaces paint edge to edge rather than floating as
+a narrow island with unpainted bars beside them. Bordered cards, plain text, and
+themes that only inset their content without capping the column are unchanged.
+
+The first-run appearance picker offers:
 
 - `Auto (recommended)` detects the terminal background through reliable
   environment or terminal capability signals and uses a readable neutral
@@ -23,23 +30,54 @@ The built-in theme picker offers:
 
 Moving through the picker previews each appearance without saving it. Confirming
 persists `theme = "auto"`, `theme = "light"`, or `theme = "dark"` in the
-user config without replacing unrelated settings.
-Use `/theme` later to revisit it. Cancelling
-`/theme` restores the previous appearance; dismissing first-run onboarding uses
-Auto. Existing configured installations do not reopen onboarding, and
+user config without replacing unrelated settings. Dismissing first-run onboarding
+uses Auto. Existing configured installations do not reopen onboarding, and
 print/plain/RPC, redirected, and `TERM=dumb` sessions never open it.
 
-The built-in choices also work with `--theme` and `OCTET_THEME`. Other theme
-names, `--theme-dir`, and arbitrary theme files are accepted only through the
-bounded file loader: a name that resolves through normal resource discovery
-(global `~/.octet/themes`, a trusted project `.octet/themes`, or `--theme-dir`)
-is loaded at startup when named by `--theme`/`OCTET_THEME`, while the
-interactive `/theme` command accepts only `auto`, `light`, and `dark`.
-There is no theme marketplace, and an unrecognized or malformed name falls back
-to the compiled default. An explicit
-`OCTET_COLOR_SCHEME` is also treated as an existing terminal-appearance choice,
-so automation and already-configured shells do not get interrupted by
-onboarding.
+Use `/theme` later to browse the built-in choices **and** valid `.toml` files
+from normal resource discovery (global `~/.octet/themes`, a trusted project
+`.octet/themes`, and directories or files passed with `--theme-dir`). The list
+shows the file stem and optional metadata name/description; typing filters it.
+Selecting a file previews its appearance and confirming persists its file stem
+as `theme = "mine"` in the user config, keeping other settings intact.
+`/theme mine` (or `/theme mine.toml`) selects a discovered, valid file directly.
+`/theme Cards` and `/theme Still` select the compiled-in file themes described
+below.
+Cancelling restores the active theme without modifying the config or session.
+The first-run picker still shows only Auto, Light, and Dark.
+
+Discovery follows global < trusted project < explicit path precedence; duplicate
+file stems show only the winning file, even when that file is invalid. Files that
+fail bounded reads or schema validation are omitted from the interactive list.
+In the interactive picker, file stems `auto`, `light`, `dark`, `default`,
+`Cards`, and `Still` are reserved for built-in selectors and do not appear as
+file choices.
+The built-in choices also work with `--theme` and `OCTET_THEME`; named files may
+be loaded at startup by those selectors. There is no theme marketplace. An
+unrecognized or malformed theme name at startup falls back to the compiled
+default. An explicit `OCTET_COLOR_SCHEME` is also treated as an existing
+terminal-appearance choice, so automation and already-configured shells do not
+get interrupted by onboarding.
+
+## Prompt provenance
+
+Every submitted prompt stores the exact colour of the model that received it, so
+a session keeps its provenance after a model switch or a restart. The default
+theme turns that stored colour into a full-cell card: the background covers the
+whole row — marker gutter, padding, trailing canvas, and the breathing rows above
+and below — and the rich renderer's own bold/italic/inline-code runs are layered
+inside the card rather than flattened onto one colour. Unknown-background and
+no-colour terminals leave the prompt unpainted on the terminal canvas.
+
+One top-level token changes that:
+
+- `prompt_wash` — `false` keeps prompt rows on the surface's own fill (a
+  `[roles."surface.user"]` background, a band, or the terminal canvas) while the
+  chevron keeps its prompt colour. Unset means the model-colour wash. `Cards`
+  and `Still` set it to `false`.
+
+Unknown background profiles are always unpainted, so `prompt_wash` never invents
+a fill where the terminal could be light, dark, or custom.
 
 ## Activity status contrast
 
@@ -85,6 +123,72 @@ documents the accepted sections in one place and is a valid starting point:
 ```console
 cp examples/themes/octet-default.toml ~/.octet/themes/mine.toml
 ```
+
+`examples/themes/Cards.toml` is compiled into every release as the built-in
+`Cards` selector, so it is available without copying anything:
+
+```console
+octet --theme Cards
+OCTET_THEME=Cards octet
+```
+
+`Cards` is a shaded-surfaces theme — flush-left transcript rails and prose
+with one-cell content padding inside the rails, dark/light fills, and
+historical prompts' model-coloured rails and chevrons (rather than amber
+rails), a quiet amber UI accent, a borderless shaded composer, and a themed
+compact splash. Its slash-command choices align with the shaded composer's
+chevron and input text. The `prompt_rail_model_adaptive = true` token opts a
+file theme's user rails into each prompt's stored model colour, falling back
+to its historical model family (or the active accent if none is known). Other surface border roles continue to control their own rail colours.
+It is offered in `/theme` alongside the terminal-appearance choices, and its
+`Cards` stem is reserved so a local `Cards.toml` can neither shadow nor be
+shadowed by the built-in. Editing
+[`examples/themes/Cards.toml`](../examples/themes/Cards.toml) changes the
+built-in; `cards_example_theme_is_valid_for_every_background_profile` in
+`crates/octet-coding-agent/src/tui/theme.rs` fails the build if it stops
+validating for any terminal-background profile.
+
+`examples/themes/Still.toml` is compiled into every release the same way, as the
+built-in `Still` selector:
+
+```console
+octet --theme Still
+OCTET_THEME=Still octet
+```
+
+`Still` uses the available terminal width for its transcript and softly shaded
+composer. A quiet band distinguishes user prompts. One extra breathing cell
+before transcript markers aligns prompt, activity, and prose text. Prose and
+tool activity remain unboxed, with compact adjacent rows and monochrome dots.
+Consecutive reads, searches, and commands share an exploration summary;
+consecutive edits and writes show a distinct-file count. `Ctrl+O` reveals
+all underlying file paths, commands, and failures. Its
+`model.use_lab_color = "true"` token keeps the prompt chevron and composer
+marker model-adaptive, and `splash_model_adaptive` with `splash_compact` give
+it the compact 16x4 startup mark shaded from the active model family. The dark
+UI uses a restrained blue accent over neutral grays. Reasoning is hidden by
+default.
+The reserved row under its live `Working` indicator prevents the composer from
+bouncing as two-line `Thinking` and compact tool activity replace it. It is
+offered in `/theme` after `Cards`, its `Still` stem is reserved, and
+`still_example_theme_is_valid_for_every_background_profile` in
+`crates/octet-coding-agent/src/tui/theme.rs` validates the embedded file for
+every terminal-background profile.
+
+The startup welcome card follows the theme's content width and leading inset,
+just like the transcript, composer, and pickers. Width-capped custom themes
+center the splash; uncapped themes such as `Still` use the available width.
+
+Three optional top-level tokens shape the startup splash:
+
+- `splash` — colour for the byte-mark and splash text. With a truecolor,
+  animation-capable terminal it shades into a column gradient.
+- `splash_compact` — `true` selects the default's smaller geometry (4-tall
+  mark at 16 columns) instead of the larger file-theme presentation.
+- `splash_model_adaptive` — `true` keeps the default's model-adaptive
+  splash: the byte-mark follows the active model family and the splash text
+  uses the model accent. It claims the whole splash, so `splash` is not used.
+  `Cards` uses it.
 
 A theme file is a bounded TOML document (256 KiB) with these typed sections:
 

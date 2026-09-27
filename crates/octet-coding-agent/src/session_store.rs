@@ -1890,11 +1890,16 @@ impl SessionStore {
         };
         std::fs::create_dir_all(&self.dir)?;
         let marker = self.dir.join(WORKSPACE_MARKER);
-        crate::auth::write_private_atomic(
-            &marker,
-            format!("{}\n", workspace.display()).as_bytes(),
-            ".workspace-",
-        )?;
+        let bytes = format!("{}\n", workspace.display());
+        // Only a validated owner-only, no-follow read may skip publication.
+        // Missing, oversized, or insecure markers take the existing atomic
+        // writer path, which repairs or rejects them as before.
+        if octet_agent::secure_fs::read_private_file_bounded(&marker, bytes.len())
+            .is_ok_and(|current| current == bytes.as_bytes())
+        {
+            return Ok(());
+        }
+        crate::auth::write_private_atomic(&marker, bytes.as_bytes(), ".workspace-")?;
         Ok(())
     }
 
@@ -3344,6 +3349,43 @@ mod tests {
         assert_eq!(first.dir(), second.dir());
         assert_ne!(first.dir(), other.dir());
         assert!(first.dir().starts_with(root.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_marker_skips_identical_private_content_but_repairs_changes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(root.path(), workspace.path());
+        store.write_workspace_marker().unwrap();
+        let marker = store.dir().join(WORKSPACE_MARKER);
+        let initial = std::fs::metadata(&marker).unwrap();
+        store.write_workspace_marker().unwrap();
+        assert_eq!(std::fs::metadata(&marker).unwrap().ino(), initial.ino());
+
+        std::fs::write(&marker, b"stale\n").unwrap();
+        store.write_workspace_marker().unwrap();
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            format!("{}\n", workspace.path().display()).as_bytes()
+        );
+
+        // A matching but non-private file must not bypass the secure writer.
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644)).unwrap();
+        store.write_workspace_marker().unwrap();
+        assert_eq!(
+            std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::remove_file(&marker).unwrap();
+        let outside = root.path().join("outside");
+        std::fs::write(&outside, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&outside, &marker).unwrap();
+        assert!(store.write_workspace_marker().is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
     }
 
     #[test]

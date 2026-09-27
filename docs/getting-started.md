@@ -97,7 +97,8 @@ octet --safe-mode
 Choose **Add an API key** (the first choice), **Sign in with ChatGPT / other
 supported OAuth subscriptions**, or **Local/self-hosted models**. You can also
 continue without a provider. Existing model inventories and explicit model
-selections do not reopen this onboarding flow; print/RPC never open it.
+selections do not reopen onboarding automatically; enter `/setup` in the TUI to
+open it on demand. Print/RPC never open it.
 
 For an API key, select a listed provider, paste into the **masked secret input**,
 and review **Save API key**. Do not paste it into the conversation composer.
