@@ -2,11 +2,12 @@
 
 octet's compiled default theme retains model-family accents,
 terminal-background adaptation, and semantic status colours. Auto, Dark, and
-Light share the same default geometry: 16×4 model-blended startup mark, compact
-per-line historical prompt highlights preserving inline Markdown styles,
-model-coloured composer rules, one blinking tool-like subagent transcript row
-while workers run, two-row command previews, and full available prose width
-without narrowing code or tables. The footer may
+Light share the same default geometry: 16×4 model-blended startup mark, a
+full-cell model-adaptive card per historical prompt (the stored colour of the
+model that received it fills the whole cell, cushion rows and inline Markdown
+styling included), model-coloured composer rules, one blinking tool-like
+subagent transcript row while workers run, two-row command previews, and full
+available prose width without narrowing code or tables. The footer may
 omit a redundant catalogue-owned provider prefix, never a configured model
 name. These are compiled presentation policies, not new theme-file fields:
 custom surfaces, composer frames, and loaded theme colours/geometry keep their
@@ -51,6 +52,26 @@ unrecognized or malformed theme name at startup falls back to the compiled
 default. An explicit `OCTET_COLOR_SCHEME` is also treated as an existing
 terminal-appearance choice, so automation and already-configured shells do not
 get interrupted by onboarding.
+
+## Prompt provenance
+
+Every submitted prompt stores the exact colour of the model that received it, so
+a session keeps its provenance after a model switch or a restart. The default
+theme turns that stored colour into a full-cell card: the background covers the
+whole row — marker gutter, padding, trailing canvas, and the breathing rows above
+and below — and the rich renderer's own bold/italic/inline-code runs are layered
+inside the card rather than flattened onto one colour. Unknown-background and
+no-colour terminals leave the prompt unpainted on the terminal canvas.
+
+One top-level token changes that:
+
+- `prompt_wash` — `false` keeps prompt rows on the surface's own fill (a
+  `[roles."surface.user"]` background, a band, or the terminal canvas) while the
+  chevron keeps its prompt colour. Unset means the model-colour wash. `Cards`
+  and `Still` set it to `false`.
+
+Unknown background profiles are always unpainted, so `prompt_wash` never invents
+a fill where the terminal could be light, dark, or custom.
 
 ## Activity status contrast
 

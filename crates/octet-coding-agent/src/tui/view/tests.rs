@@ -2076,7 +2076,7 @@ fn model_switch_recolors_only_the_composer_and_future_prompt() {
             .state
             .borrow()
             .theme
-            .prompt_text_highlight(Some(color), "x");
+            .prompt_provenance_card(Some(color), "x");
         let paint = emulate_rows(&[sample], 2)
             .screen()
             .cell(0, 0)
@@ -8545,7 +8545,7 @@ fn prompt_card_keeps_exact_persisted_provenance_across_theme_changes() {
 }
 
 #[test]
-fn persisted_prompt_highlights_only_wrapped_text_cells() {
+fn persisted_prompt_paints_a_full_model_adaptive_card() {
     const WIDTH: u16 = 24;
     let theme = crate::tui::theme::test_theme_for(
         TerminalBackground::Dark,
@@ -8595,42 +8595,34 @@ fn persisted_prompt_highlights_only_wrapped_text_cells() {
             .trim()
             .is_empty()
     );
-    assert!(
-        !rendered[0].contains("48;"),
-        "blank row was painted: {rendered:?}"
-    );
-    assert!(
-        !rendered[3].contains("48;"),
-        "blank row was painted: {rendered:?}"
-    );
-    let painted = emulate_rows(&[theme.prompt_text_highlight(Some("#123456"), "x")], 2)
+    let painted = emulate_rows(&[theme.prompt_provenance_card(Some("#123456"), "x")], 2)
         .screen()
         .cell(0, 0)
-        .expect("highlight sample")
+        .expect("card sample")
         .bgcolor();
     assert_ne!(painted, vt100::Color::Default);
+    // The stored model colour fills the whole cell: marker gutter, padding,
+    // trailing canvas, and both breathing rows. Provenance stays a card, not a
+    // highlight around the wrapped text alone.
     for row in 0..rendered.len() as u16 {
         for column in 0..WIDTH {
-            let inside = match row {
-                1 => (2..12).contains(&column), // › + space, then "first line"
-                2 => (2..13).contains(&column), // continuation gutter, then "second line"
-                _ => false,
-            };
             assert_eq!(
                 terminal
                     .screen()
                     .cell(row, column)
                     .expect("prompt cell")
                     .bgcolor(),
-                if inside {
-                    painted
-                } else {
-                    vt100::Color::Default
-                },
-                "unexpected painted cell at row {row}, column {column}"
+                painted,
+                "prompt card left row {row}, column {column} unpainted: {rendered:?}"
             );
         }
     }
+    assert!(
+        rendered
+            .iter()
+            .all(|row| visible_width(row) <= usize::from(WIDTH)),
+        "{rendered:?}"
+    );
 
     let expected = vt100::Color::Rgb(0x12, 0x34, 0x56);
 
@@ -8718,6 +8710,64 @@ fn unknown_profile_keeps_rich_prompt_styling_on_the_terminal_canvas() {
 }
 
 #[test]
+fn default_prompt_card_keeps_inline_markdown_attributes() {
+    // The card supplies the cell background only. Bold, italic, and inline-code
+    // runs keep their own attributes instead of being flattened onto one
+    // provenance colour.
+    let theme = crate::tui::theme::test_theme_for(
+        TerminalBackground::Dark,
+        crate::tui::terminal::TerminalCapabilities::test(
+            true,
+            true,
+            crate::tui::terminal::ColorDepth::TrueColor,
+        ),
+    );
+    let block = TranscriptBlock::User {
+        text: "run `cargo check` and **fix** the prompt card".into(),
+        model_lab: Some(ModelLab::OpenAi),
+        prompt_color: Some("#123456".into()),
+        persisted: true,
+    };
+    let rendered = render_block(
+        None,
+        &block,
+        &theme,
+        &theme.rich_renderer(),
+        &theme.reasoning_renderer(),
+        48,
+        false,
+    );
+    let body = strip_terminal_sequences(&rendered.join("\n"));
+    assert!(
+        body.contains("run cargo check and fix the prompt card"),
+        "{body:?}"
+    );
+    let row = rendered
+        .iter()
+        .find(|row| strip_terminal_sequences(row).contains("cargo check"))
+        .expect("prompt body row");
+    assert!(row.contains("48;"), "prompt card lost its fill: {row:?}");
+    // The rich runs survive inside the card: the inline code keeps its own
+    // foreground, `fix` keeps its bold, and the card's fill is reopened after
+    // every inline reset instead of being flattened onto one colour.
+    let card = theme.prompt_provenance_card(Some("#123456"), "x");
+    let (open, _) = card.split_once('x').expect("card preserves text");
+    assert!(row.starts_with(open), "card did not open the row: {row:?}");
+    assert!(
+        row.matches(open).count() > 1,
+        "card background was not restored after an inline reset: {row:?}"
+    );
+    let vt100::Color::Rgb(red, green, blue) = role_rgb_color(&theme, "md_code") else {
+        panic!("inline code must resolve to a truecolor role");
+    };
+    assert!(
+        row.contains(&format!("38;2;{red};{green};{blue}m")),
+        "inline code lost its own colour: {row:?}"
+    );
+    assert!(row.contains("\x1b[1mfix\x1b[0m"), "bold lost: {row:?}");
+}
+
+#[test]
 fn compiled_prompt_highlight_preserves_media_labels_unicode_copy_and_terminal_fallbacks() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 
@@ -8770,13 +8820,16 @@ fn compiled_prompt_highlight_preserves_media_labels_unicode_copy_and_terminal_fa
                 }
                 let terminal = emulate_rows(&rendered, 24);
                 let screen = terminal.screen();
-                let painted = screen.cell(1, 2).unwrap().bgcolor();
-                assert_eq!(
-                    painted != vt100::Color::Default,
-                    color != ColorDepth::None && background != TerminalBackground::Unknown
-                );
-                assert_eq!(screen.cell(1, 0).unwrap().bgcolor(), vt100::Color::Default);
-                assert_eq!(screen.cell(1, 23).unwrap().bgcolor(), vt100::Color::Default);
+                // The stored model colour is one card across the whole row, so
+                // the marker gutter and the trailing canvas are painted too.
+                let washed = color != ColorDepth::None && background != TerminalBackground::Unknown;
+                for column in [0, 2, 23] {
+                    assert_eq!(
+                        screen.cell(1, column).unwrap().bgcolor() != vt100::Color::Default,
+                        washed,
+                        "unexpected card coverage at column {column}: {rendered:?}"
+                    );
+                }
             }
         }
     }

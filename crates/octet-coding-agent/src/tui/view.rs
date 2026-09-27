@@ -2985,6 +2985,9 @@ fn render_user_prompt(
     let render_result = renderer.render(&document, inner_width);
     // New records use their exact persisted source colour; legacy records
     // retain their historical marker fallback without inventing provenance.
+    // The marker is the only colour applied here: the prompt's own cell is
+    // painted by the surface frame, which layers the stored colour under these
+    // rich runs instead of flattening the Markdown styling they carry.
     let marker = if prompt_color.is_some() {
         theme.prompt_color_marker(prompt_color, &marker_glyph)
     } else {
@@ -3001,41 +3004,7 @@ fn render_user_prompt(
         } else {
             continuation_prefix.clone()
         };
-        let content = if theme.is_compiled_default()
-            && prompt_color.is_some()
-            && theme.background() != crate::tui::theme::TerminalBackground::Unknown
-            && theme.capabilities().color != crate::tui::terminal::ColorDepth::None
-        {
-            // Style only visible body cells after rich layout. Leave renderer
-            // padding and the marker gutter on the terminal canvas; never
-            // alter the source or the semantic copy projection.
-            let painted = line.plain.trim_end_matches(' ');
-            // Rich Markdown has already supplied its own foreground and text
-            // attributes. Apply the provenance surface around those escapes,
-            // restoring it after each inline reset rather than replacing the
-            // styled runs with uniformly painted plain text.
-            let mut styled = line.styled.as_str();
-            let mut resets = String::new();
-            // The rich renderer pads some technical rows. Its styled bytes
-            // include SGR controls, so byte lengths cannot be inferred from
-            // `plain`. Trim only actual trailing spaces (and their resets).
-            if painted.len() != line.plain.len() {
-                for _ in 0..line.plain.len() - painted.len() {
-                    while let Some(before) = styled.strip_suffix("\x1b[0m") {
-                        styled = before;
-                        resets.push_str("\x1b[0m");
-                    }
-                    if let Some(before) = styled.strip_suffix(' ') {
-                        styled = before;
-                    }
-                }
-            }
-            let sample = theme.prompt_text_highlight(prompt_color, "X");
-            let (open, close) = sample.split_once('X').expect("highlight preserves text");
-            let mut rich = styled.replace("\x1b[0m", &format!("\x1b[0m{open}"));
-            rich.insert_str(0, open);
-            format!("{rich}{resets}{close}{}", &line.plain[painted.len()..])
-        } else if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
+        let content = if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
             line.plain
         } else {
             line.styled

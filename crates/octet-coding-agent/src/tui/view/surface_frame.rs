@@ -87,28 +87,26 @@ fn render_surface_content_line(
     let content = fit_line(line, plan.geometry.content_width);
     let left_padding = " ".repeat(usize::from(plan.padding));
     let right_padding = " ".repeat(usize::from(plan.padding));
-    // The compiled prompt was highlighted at its wrapped-text boundary.
-    // Padding, blank spacing, and trailing canvas must not inherit its colour.
-    // Custom surfaces without their own fill keep the full-cell/card wash;
-    // surfaces with an explicit background keep it instead (see below).
-    if plan.kind == "user" && theme.is_compiled_default() && prompt_color.is_some() {
-        return if content.is_empty() {
-            String::new()
-        } else {
-            format!("{left_padding}{content}{right_padding}")
-        };
-    }
-    let paint_prompt = |text: String, width: u16| {
-        let text = padded_to_width(&strip_terminal_sequences(&text), width);
-        theme.prompt_color_cell(prompt_color, &text)
-    };
     // Themes can opt out of the model-colour prompt wash with
     // `prompt_wash = false`: prompt rows then render on the surface's own
     // fill while the chevron keeps its prompt colour (rendered upstream),
-    // as do rail stripes and borders. The default keeps the wash so model
+    // as do rail stripes and borders. The default theme keeps the wash so model
     // provenance stays visible.
-    let wash_prompt =
-        prompt_color.is_some() && theme.resolve::<bool>("prompt_wash").unwrap_or(true);
+    let wash_prompt = prompt_color.is_some() && theme.prompt_wash();
+    // A washed prompt fills its whole cell — padding, blank spacing, and the
+    // trailing canvas included — so it reads as a card. The default theme
+    // layers that card under the rich renderer's own inline runs, keeping
+    // Markdown emphasis, links, and inline code; a file theme's wash is the
+    // opaque model-colour cell over the row's own styling.
+    let layered_card = theme.is_compiled_default();
+    let paint_prompt = |text: String, width: u16| {
+        if layered_card {
+            let text = padded_to_width(&text, width);
+            return theme.prompt_provenance_card(prompt_color, &text);
+        }
+        let text = padded_to_width(&strip_terminal_sequences(&text), width);
+        theme.prompt_color_cell(prompt_color, &text)
+    };
     match plan.chrome {
         ThemeSurfaceChrome::Card => {
             let inner_width = plan.frame_width.saturating_sub(2);

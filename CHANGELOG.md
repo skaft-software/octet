@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Restore the default theme's full-cell model-adaptive prompt card, lost in
+  v0.8.0 when a hardcoded compiled-theme branch replaced the whole-cell wash
+  with a per-line text tint. The default theme now declares the wash explicitly
+  (`prompt_wash = true`) and the same `prompt_wash` token governs every theme,
+  so `prompt_wash = false` still keeps prompt rows on the theme's own fill. The
+  card fills the entire cell — marker gutter, padding, trailing canvas, and the
+  breathing rows above and below — and is layered under the rich renderer's own
+  inline runs, so bold, italic, and inline code keep their styling inside it
+  instead of being flattened onto one colour. Unknown-background and no-colour
+  terminals stay unpainted, and `Cards` and `Still` are unchanged.
+
 - Render the startup welcome card inside the shared presentation column, at the
   same `content_width` and with the same leading inset as the transcript,
   composer, and pickers. A theme that centers its reading column - `Still` in

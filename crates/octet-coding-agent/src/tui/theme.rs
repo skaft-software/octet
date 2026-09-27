@@ -834,10 +834,22 @@ impl OctetTheme {
         )
     }
 
-    /// Only the compiled prompt body opts into compact, provenance-coloured
-    /// highlights. Unknown backgrounds use an unpainted, readable foreground;
-    /// limited palettes use the existing contrast-tested surface treatment.
-    pub(crate) fn prompt_text_highlight(&self, color: Option<&str>, text: &str) -> String {
+    /// Whether prompt rows are painted with each turn's stored model colour as
+    /// a full-cell provenance card. The default theme opts in explicitly; a
+    /// theme that sets `prompt_wash = false` keeps prompt rows on the surface's
+    /// own fill while the chevron retains its prompt colour.
+    pub(crate) fn prompt_wash(&self) -> bool {
+        self.resolve::<bool>("prompt_wash").unwrap_or(true)
+    }
+
+    /// Paint one stored prompt colour as a full-cell provenance card. The
+    /// background covers every cell of the row — padding, blank spacing, and
+    /// trailing canvas included — and the rich renderer's own inline runs are
+    /// layered inside it, so Markdown emphasis, links, and inline code keep
+    /// their styling. Unknown backgrounds and no-colour terminals get the text
+    /// back unpainted; limited palettes use the existing contrast-tested
+    /// surface treatment.
+    pub(crate) fn prompt_provenance_card(&self, color: Option<&str>, text: &str) -> String {
         if text.is_empty() {
             return String::new();
         }
@@ -871,7 +883,7 @@ impl OctetTheme {
             ),
             TerminalBackground::Unknown => unreachable!("handled above"),
         };
-        self.inner.apply_style(
+        self.apply_style_layered(
             TextStyle::plain()
                 .foreground(Color::Rgb(
                     foreground.red,
@@ -1724,6 +1736,10 @@ fn default_theme_for(
     );
     apply_required_surfaces(&mut theme, background);
     apply_standard_technical_palette(&mut theme, background);
+    // The default theme opts into the full-cell model-adaptive prompt card:
+    // every submitted prompt keeps the stored colour of the model that received
+    // it, filling the whole cell. Themes turn it off with `prompt_wash = false`.
+    theme.override_token("prompt_wash", "true");
     // There is no model before the startup picker. Use octet green until the
     // selected model's lab is known.
     let neutral_model_accent = balance_foreground(DEFAULT_ACCENT, background);
@@ -3148,6 +3164,37 @@ mod tests {
             theme.metadata.description,
             "Terminal-neutral compiled theme"
         );
+    }
+
+    #[test]
+    fn the_default_theme_opts_into_the_full_cell_prompt_wash() {
+        // The wash is a theme capability, not a compiled-theme special case, so
+        // the default theme declares it like every other theme would.
+        let theme = test_theme();
+        assert_eq!(
+            theme.resolve::<String>("prompt_wash").as_deref(),
+            Some("true")
+        );
+        assert!(theme.prompt_wash());
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            assert!(
+                test_theme_for(
+                    background,
+                    TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                )
+                .prompt_wash(),
+                "{background:?}"
+            );
+        }
+        // A file theme inherits the wash, and `prompt_wash = false` opts out.
+        let inherited = test_theme_from_source("[colors]\naccent = \"#456789\"");
+        assert!(inherited.prompt_wash());
+        let opted_out = test_theme_from_source("[colors]\nprompt_wash = false");
+        assert!(!opted_out.prompt_wash());
     }
 
     #[test]
