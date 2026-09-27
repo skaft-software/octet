@@ -983,11 +983,13 @@ mod transport_tests {
 
     impl TemporarySocket {
         fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % 1_000_000;
+            // Uniqueness comes from a process-wide counter, not a clock reading.
+            // These tests bind a Unix socket, so two sockets that resolve to the
+            // same path fail the second bind with EADDRINUSE. A clock residue
+            // below one millisecond repeats across the parallel test threads
+            // that share this process, so it is not unique enough here.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let directory =
                 std::env::temp_dir().join(format!("octet-herdr-{}-{unique}", std::process::id()));
             std::fs::create_dir_all(&directory).unwrap();

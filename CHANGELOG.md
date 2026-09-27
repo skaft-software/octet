@@ -194,6 +194,9 @@ See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits
   its response is written, so a caller that has already read the final body
   always observes the final count. The four request-count assertions could
   otherwise read one short on a loaded runner.
+- Give each `herdr` transport test socket a process-unique path from a counter
+  instead of a sub-millisecond clock residue, which repeated across the parallel
+  test threads sharing one process and failed the second bind with `EADDRINUSE`.
 
 ## [0.8.1-rc.1] — local dogfood only (unpublished)
 
