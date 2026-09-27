@@ -453,7 +453,9 @@ class ComputerUse:
         if client is not None:
             if session:
                 try:
-                    client.call("end_session", {"session": session})
+                    # Bounded so a hung driver cannot stall TUI exit: the
+                    # session record is best-effort on this path.
+                    client.call("end_session", {"session": session}, timeout=3.0)
                 except Exception:
                     pass
             client.close()

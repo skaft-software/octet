@@ -537,6 +537,8 @@ where
     }
     let budget = keep_recent_tokens.max(1);
     let mut accumulated = 0u64;
+    // `candidates` is built in ascending index order, so a binary search
+    // replaces the linear scan per budget step (O(n log c) not O(n*c)).
     for index in (0..entries.len()).rev() {
         if let EntryValue::Message(message) = &entries[index].value {
             accumulated = accumulated.saturating_add(estimate_message_tokens(message));
@@ -545,7 +547,8 @@ where
         // crossing lands on a non-cut-point, the boundary becomes the newest
         // valid cut point at or before it rather than the oldest candidate.
         if accumulated >= budget {
-            if let Some((_, id)) = candidates.iter().find(|(candidate, _)| *candidate >= index) {
+            let pos = candidates.partition_point(|(candidate, _)| *candidate < index);
+            if let Some((_, id)) = candidates.get(pos) {
                 return Ok(Some(id.clone()));
             }
         }

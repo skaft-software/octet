@@ -2705,20 +2705,23 @@ fn finish_transcript_block(mut lines: Vec<String>) -> Vec<String> {
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
-    if !lines.last().is_some_and(|line| {
-        ImageAnchor::parse_all(line)
+    // Parse the tail line once and reuse it for both the predicate and the
+    // reservation computation.
+    let tail_anchors = lines.last().map(|line| ImageAnchor::parse_all(line));
+    let has_kitty = tail_anchors.as_ref().is_some_and(|anchors| {
+        anchors
             .iter()
             .any(|anchor| anchor.protocol() == ImageProtocol::Kitty)
-    }) {
+    });
+    if !has_kitty {
         return lines;
     }
     // Restore the reserved rows the placement still needs. The anchor's layout
     // records the exact height the terminal will draw, so the reservation and
     // the placement cannot disagree.
-    let reserved = lines
-        .last()
-        .map(|line| {
-            ImageAnchor::parse_all(line)
+    let reserved = tail_anchors
+        .map(|anchors| {
+            anchors
                 .into_iter()
                 .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
                 .map(|anchor| usize::from(anchor.layout().rows()))

@@ -8376,7 +8376,16 @@ async fn shutdown_for_exit(app: &mut App) {
         .await;
         octet_agent::extension_process::force_kill_registered_process_groups();
     } else {
-        app.executable_extensions.shutdown().await;
+        // Bound the idle Ctrl+D path like the signal path so a hung extension
+        // child cannot make exit feel stuck. 2s covers normal fleet drain
+        // (inner 3s manager cap usually resolves faster); on timeout fall
+        // through to force-kill like the signal path does.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(2000),
+            app.executable_extensions.shutdown(),
+        )
+        .await;
+        octet_agent::extension_process::force_kill_registered_process_groups();
     }
 }
 

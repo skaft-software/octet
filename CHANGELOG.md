@@ -5,7 +5,10 @@
 - Ship the `Cards` example theme (`examples/themes/Cards.toml`): shaded
   rail surfaces with quiet stripes, dark/light fills, an amber accent with
   adaptive model colours, a borderless shaded composer, and a themed splash
-  with compact geometry. Copy it into `~/.octet/themes` to use it.
+  with compact geometry. Copy it into `~/.octet/themes` to use it. A test
+  fails the build if the example stops validating for any background
+  profile, so the next release that compiles it into the binary keeps the
+  example and the built-in identical.
 - Bound idle Ctrl+D exit to a 2 s extension-shutdown timeout with force-kill
   fallback (matching the signal path) so a hung extension child cannot make
   exit feel stuck; bound computer-use `end_session` to 3 s on shutdown.
