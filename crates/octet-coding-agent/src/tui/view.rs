@@ -382,6 +382,7 @@ enum TranscriptBlock {
     NoticeStatus {
         text: String,
         tone: NoticeTone,
+        reserved_rows: usize,
     },
     Compaction(Box<CompactionBlock>),
 }
@@ -408,38 +409,51 @@ struct ActivityGroupView {
     index: usize,
     settled: std::collections::HashSet<ToolCallId>,
     failures: Vec<String>,
-    command_run_open: bool,
-    command_run: bool,
+    open: bool,
+    kind: crate::hydrate::ToolActivityKind,
 }
 
 fn activity_group_label(
     group: &crate::hydrate::ToolActivityGroup,
     failures: &[String],
-    command_run: bool,
+    kind: crate::hydrate::ToolActivityKind,
 ) -> String {
-    let mut parts = Vec::new();
-    for (count, singular, plural) in [
-        (group.read_files, "file", "files"),
-        (group.searches, "search", "searches"),
-        (group.commands, "command", "commands"),
-    ] {
-        if count > 0 {
-            let action = if singular == "file" { "read" } else { "ran" };
-            parts.push(format!(
-                "{action} {count} {}",
-                if count == 1 { singular } else { plural }
-            ));
-        }
-    }
-    let mut label = if command_run {
-        format!(
+    let mut label = match kind {
+        crate::hydrate::ToolActivityKind::Explore if group.read_files > 0 => format!(
+            "Explored {} file{}",
+            group.read_files,
+            if group.read_files == 1 { "" } else { "s" }
+        ),
+        crate::hydrate::ToolActivityKind::Explore if group.searches > 0 => format!(
+            "Searched {} time{}",
+            group.searches,
+            if group.searches == 1 { "" } else { "s" }
+        ),
+        crate::hydrate::ToolActivityKind::Explore => format!(
             "Ran {} Command{}",
             group.commands,
             if group.commands == 1 { "" } else { "s" }
-        )
-    } else {
-        format!("Explored → {}", parts.join(", "))
+        ),
+        crate::hydrate::ToolActivityKind::Edit => format!(
+            "Edited {} file{}",
+            group.edited_files,
+            if group.edited_files == 1 { "" } else { "s" }
+        ),
     };
+    if group.read_files > 0 && group.searches > 0 {
+        label.push_str(&format!(
+            " · {} search{}",
+            group.searches,
+            if group.searches == 1 { "" } else { "es" }
+        ));
+    }
+    if group.commands > 0 && (group.read_files > 0 || group.searches > 0) {
+        label.push_str(&format!(
+            " · {} command{}",
+            group.commands,
+            if group.commands == 1 { "" } else { "s" }
+        ));
+    }
     if !failures.is_empty() {
         label.push_str(&format!(" · {} failed", failures.len()));
         for reason in failures {
@@ -2187,17 +2201,11 @@ impl ShellState {
     }
 
     fn start_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
-        self.start_activity_group_kind(group, false);
-    }
-
-    fn start_activity_group_kind(
-        &mut self,
-        group: crate::hydrate::ToolActivityGroup,
-        command_run: bool,
-    ) {
+        let kind = group.kind();
         let index = self.push_block(TranscriptBlock::NoticeStatus {
-            text: activity_group_label(&group, &[], command_run),
+            text: activity_group_label(&group, &[], kind),
             tone: NoticeTone::ToolActive,
+            reserved_rows: 1,
         });
         self.register_active_event(index);
         self.activity_groups.push(ActivityGroupView {
@@ -2205,103 +2213,116 @@ impl ShellState {
             index,
             settled: std::collections::HashSet::new(),
             failures: Vec::new(),
-            command_run_open: command_run,
-            command_run,
+            open: true,
+            kind,
         });
     }
 
-    fn command_runs_enabled(&self) -> bool {
+    fn activity_groups_enabled(&self) -> bool {
         self.theme
             .resolve::<bool>("quiet_tool_summaries")
             .unwrap_or(false)
     }
 
-    fn seal_command_run(&mut self) {
-        let Some(position) = self
-            .activity_groups
-            .iter()
-            .rposition(|view| view.command_run_open)
-        else {
+    fn seal_activity_group(&mut self) {
+        let Some(position) = self.activity_groups.iter().rposition(|view| view.open) else {
             return;
         };
-        self.activity_groups[position].command_run_open = false;
+        self.activity_groups[position].open = false;
         self.refresh_activity_group(position);
     }
 
-    fn grouped_tool_call(&mut self, id: &ToolCallId, name: &str) -> bool {
-        if self.command_runs_enabled() && matches!(name, "bash" | "exec") {
-            if self
-                .activity_groups
-                .iter()
-                .any(|view| !view.command_run && view.group.member_ids.contains(id))
-            {
-                self.seal_command_run();
-                return self.activity_group_for_call(id);
-            }
-            if let Some(position) = self
-                .activity_groups
-                .iter()
-                .rposition(|view| view.command_run_open)
-            {
-                let view = &mut self.activity_groups[position];
-                view.group.member_ids.push(id.clone());
-                view.group.commands += 1;
+    fn extend_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
+        if let Some(position) = self.activity_groups.iter().rposition(|view| view.open) {
+            if self.activity_groups[position].kind == group.kind() {
+                let had_settled = !self.activity_groups[position].settled.is_empty();
+                self.activity_groups[position].group.merge(group);
+                let index = self.activity_groups[position].index;
+                if had_settled {
+                    if let Some(TranscriptBlock::NoticeStatus { reserved_rows, .. }) =
+                        self.transcript.get_mut(index)
+                    {
+                        *reserved_rows = 3;
+                    }
+                }
+                self.register_active_event(index);
                 self.refresh_activity_group(position);
-            } else {
-                self.start_activity_group_kind(
-                    crate::hydrate::ToolActivityGroup {
-                        member_ids: vec![id.clone()],
-                        read_files: 0,
-                        searches: 0,
-                        commands: 1,
-                    },
-                    true,
-                );
+                return;
             }
-            true
-        } else {
-            self.seal_command_run();
-            self.activity_group_for_call(id)
+            self.seal_activity_group();
         }
+        self.start_activity_group(group);
+    }
+
+    fn grouped_tool_call(&mut self, id: &ToolCallId, name: &str, args: &serde_json::Value) -> bool {
+        if !self.activity_groups_enabled()
+            || crate::hydrate::ToolActivityKind::for_name(name).is_none()
+        {
+            self.seal_activity_group();
+            return false;
+        }
+        if let Some(view) = self
+            .activity_groups
+            .iter()
+            .find(|view| view.group.member_ids.contains(id))
+        {
+            let index = view.index;
+            if !view.settled.is_empty() && !view.settled.contains(id) {
+                if let Some(TranscriptBlock::NoticeStatus { reserved_rows, .. }) =
+                    self.transcript.get_mut(index)
+                {
+                    *reserved_rows = 3;
+                }
+                self.touch_block(index);
+            }
+            return true;
+        }
+        let group = if let Some(position) = self
+            .pending_activity_groups
+            .iter()
+            .position(|group| group.member_ids.first() == Some(id))
+        {
+            self.pending_activity_groups.remove(position)
+        } else {
+            let mut group = crate::hydrate::ToolActivityGroup::default();
+            group.add(id.clone(), name, args);
+            group
+        };
+        self.extend_activity_group(group);
+        true
     }
 
     fn refresh_activity_group(&mut self, position: usize) {
         let view = &self.activity_groups[position];
         let index = view.index;
-        let text = activity_group_label(&view.group, &view.failures, view.command_run);
-        let complete = !view.command_run_open && view.settled.len() == view.group.member_ids.len();
-        if let Some(TranscriptBlock::NoticeStatus { text: label, tone }) =
-            self.transcript.get_mut(index)
+        let text = activity_group_label(&view.group, &view.failures, view.kind);
+        let all_settled = view.settled.len() == view.group.member_ids.len();
+        let complete = !view.open && all_settled;
+        if let Some(TranscriptBlock::NoticeStatus {
+            text: label,
+            tone,
+            reserved_rows,
+        }) = self.transcript.get_mut(index)
         {
             *label = text;
-            if complete {
-                *tone = if view.failures.is_empty() {
-                    NoticeTone::ToolSuccess
-                } else {
-                    NoticeTone::ToolError
-                };
+            if all_settled {
+                *reserved_rows = 0;
             }
+            *tone = if !all_settled {
+                NoticeTone::ToolActive
+            } else if view.failures.is_empty() {
+                NoticeTone::ToolSuccess
+            } else {
+                NoticeTone::ToolError
+            };
             self.touch_block(index);
         }
-        if complete {
+        if all_settled {
             self.unregister_active_event(index);
+        }
+        if complete {
             self.activity_groups.remove(position);
         }
-    }
-
-    fn activity_group_for_call(&mut self, id: &ToolCallId) -> bool {
-        if let Some(position) = self
-            .pending_activity_groups
-            .iter()
-            .position(|group| group.member_ids.first() == Some(id))
-        {
-            let group = self.pending_activity_groups.remove(position);
-            self.start_activity_group(group);
-        }
-        self.activity_groups
-            .iter()
-            .rev()
-            .any(|view| view.group.member_ids.contains(id) && !view.settled.contains(id))
     }
 
     fn settle_activity_tool(&mut self, id: &ToolCallId, name: &str, reason: Option<&str>) {
@@ -3813,7 +3834,7 @@ impl InteractiveShell {
             }
             AgentEvent::OutputDelta { channel, text } => {
                 if *channel == OutputChannel::Text && !text.is_empty() {
-                    state.seal_command_run();
+                    state.seal_activity_group();
                 }
                 if state.turn_generation_started_at.is_none() {
                     state.turn_generation_started_at = Some(Instant::now());
@@ -4015,7 +4036,7 @@ impl InteractiveShell {
             }
             AgentEvent::ToolStarted { id, name, args } => {
                 state.close_streaming_blocks();
-                let grouped = state.grouped_tool_call(id, name);
+                let grouped = state.grouped_tool_call(id, name, args);
                 state.event_dot_visible = true;
                 state.event_spinner_frame = 0;
                 if is_subagent_tool(name) {
@@ -4198,13 +4219,10 @@ impl InteractiveShell {
             } => {
                 state.finish_turn_streaming_blocks();
                 if message.content.iter().any(|part| matches!(part, octet_ai::AssistantPart::Text(text) if !text.trim().is_empty())) {
-                    state.seal_command_run();
+                    state.seal_activity_group();
                 }
-                state.pending_activity_groups = if state.command_runs_enabled() {
+                state.pending_activity_groups = if state.activity_groups_enabled() {
                     crate::hydrate::tool_activity_groups(message)
-                        .into_iter()
-                        .filter(|group| group.read_files > 0 || group.searches > 0)
-                        .collect()
                 } else {
                     Vec::new()
                 };
@@ -4250,7 +4268,7 @@ impl InteractiveShell {
             AgentEvent::DelegationUpdated { .. } => {}
             AgentEvent::RunFinished { .. } => {
                 state.close_streaming_blocks();
-                state.seal_command_run();
+                state.seal_activity_group();
                 if let Some(view) = state.subagent_activity.as_ref() {
                     let costs: Vec<_> = if !view.telemetry.is_empty() {
                         view.telemetry
@@ -4358,7 +4376,7 @@ impl InteractiveShell {
     fn push_local_submission(&mut self, prompt: &str, prompt_color: Option<String>) {
         let mut state = self.state.borrow_mut();
         state.close_streaming_blocks();
-        state.seal_command_run();
+        state.seal_activity_group();
         let model_lab = state.model_lab;
         state.push_block(TranscriptBlock::User {
             text: prompt.to_owned(),
@@ -6999,6 +7017,7 @@ impl InteractiveShell {
         state.push_block(TranscriptBlock::NoticeStatus {
             text: message.into(),
             tone: NoticeTone::Success,
+            reserved_rows: 0,
         });
     }
 
@@ -7009,6 +7028,7 @@ impl InteractiveShell {
         state.push_block(TranscriptBlock::NoticeStatus {
             text: message.into(),
             tone: NoticeTone::Error,
+            reserved_rows: 0,
         });
     }
 
@@ -7116,7 +7136,7 @@ impl InteractiveShell {
         if let Some(lab) = state.model_lab {
             crate::tui::theme::apply_model_lab(&mut theme, lab);
         }
-        state.seal_command_run();
+        state.seal_activity_group();
         state.pending_activity_groups.clear();
         state.theme = theme;
         state.theme_epoch = state.theme_epoch.wrapping_add(1);
@@ -7249,7 +7269,7 @@ impl InteractiveShell {
         state.overlay = None;
         state.error = None;
         append_hydrated_items(&mut state, items);
-        state.seal_command_run();
+        state.seal_activity_group();
         state.deferred_session_history = deferred_snapshot.map(|mut deferred| {
             deferred.retained_id_end = state.next_transcript_commit_id.0;
             deferred

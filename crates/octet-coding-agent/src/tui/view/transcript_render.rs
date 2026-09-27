@@ -453,7 +453,15 @@ pub(super) fn render_block_planned_with_rainbow(
             // of `panel.output`, selection, and plain/print projections.
             output_lines.extend(panel.image_rows(nested_width));
             append_nested_tool_output(&mut lines, output_lines, theme, width);
-            finish_transcript_block(lines)
+            let mut lines = finish_transcript_block(lines);
+            // Still's compact in-flight tool header replaces a two-row
+            // Working/Thinking slot. Keep its empty detail row until the
+            // result arrives, so starting a tool cannot pull the tail (and
+            // composer) upward by one cell.
+            if quiet_summary && !panel.finished && lines.len() == 1 {
+                lines.push(String::new());
+            }
+            lines
         }
         TranscriptBlock::Outcome(outcome) => {
             render_outcome(outcome, theme, width, subagents_running)
@@ -465,9 +473,22 @@ pub(super) fn render_block_planned_with_rainbow(
             let text = theme.fg("muted", &sanitize_for_terminal(text));
             finish_transcript_block(wrap_hanging(&text, "", "", width))
         }
-        TranscriptBlock::NoticeStatus { text, .. } => {
+        TranscriptBlock::NoticeStatus {
+            text,
+            tone,
+            reserved_rows,
+        } => {
             let text = theme.fg("muted", &sanitize_for_terminal(text));
-            finish_transcript_block(wrap_hanging(&text, "", "", width))
+            let mut lines = wrap_hanging(&text, "", "", width);
+            if *tone == super::NoticeTone::ToolActive && !verbose_tools {
+                // Keep the Thinking/Working height during tool handoffs. An
+                // existing group needs an additional row when it absorbs a
+                // later call while the previous summary remains visible.
+                lines.extend(std::iter::repeat_n(String::new(), *reserved_rows));
+                lines
+            } else {
+                finish_transcript_block(lines)
+            }
         }
         TranscriptBlock::Compaction(compaction) => {
             let marker = theme.glyph("note");

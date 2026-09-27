@@ -20,6 +20,41 @@ fn horizontal_rule(theme: &OctetTheme, width: usize) -> String {
     theme.glyph("horizontal").repeat(width)
 }
 
+#[cfg(test)]
+pub(super) fn emulate_row_for_test(row: &str, width: u16) -> vt100::Parser {
+    let mut terminal = vt100::Parser::new(1, width, 0);
+    terminal.process(row.as_bytes());
+    terminal
+}
+
+/// Extend one painted surface row out to the terminal edges.
+///
+/// A theme that caps its reading column would otherwise float a narrow island
+/// of fill with terminal-coloured bars beside it. The bleed columns carry the
+/// same fill as the frame, so a band or rail reads as one continuous surface
+/// while its text stays in the column. A marker keeps its position two cells
+/// left of the frame, now sitting on the bled fill.
+fn bleed_row(
+    painted: &str,
+    plan: &SurfacePlan<'_>,
+    marker: Option<&str>,
+    fill: &dyn Fn(&str) -> String,
+) -> String {
+    if !plan.bleeds() {
+        return painted.to_owned();
+    }
+    let lead = usize::from(plan.bleed_left);
+    let gap = marker.map_or(lead, |_| lead.saturating_sub(2));
+    let mut row = " ".repeat(gap);
+    if let Some(marker) = marker {
+        row.push_str(marker);
+        row.push(' ');
+    }
+    row.push_str(painted);
+    row.push_str(&" ".repeat(usize::from(plan.bleed_right)));
+    fill(&row)
+}
+
 fn styled_surface_heading(plan: &SurfacePlan<'_>, theme: &OctetTheme) -> String {
     let (_, border_role, label_role) = surface_roles(plan.kind);
     let frame_width = usize::from(plan.frame_width);
@@ -82,6 +117,7 @@ fn render_surface_content_line(
     theme: &OctetTheme,
     prompt_color: Option<&str>,
     _collapsed_reasoning: bool,
+    marker: Option<&str>,
 ) -> String {
     let (content_role, border_role, _) = surface_roles(plan.kind);
     let content = fit_line(line, plan.geometry.content_width);
@@ -131,11 +167,14 @@ fn render_surface_content_line(
                 &format!("{left_padding}{content}{right_padding}"),
                 plan.frame_width,
             );
-            if wash_prompt {
+            let painted = if wash_prompt {
                 paint_prompt(inner, plan.frame_width)
             } else {
                 theme.apply_semantic_role_layered(content_role, &inner)
-            }
+            };
+            bleed_row(&painted, plan, marker, &|row| {
+                theme.apply_semantic_role_layered(content_role, row)
+            })
         }
         ThemeSurfaceChrome::Rail => {
             let rail = if plan.kind == "user"
@@ -172,7 +211,12 @@ fn render_surface_content_line(
             } else {
                 theme.apply_semantic_role_layered(content_role, &body)
             };
-            fit_line(&format!("{rail}{body}"), plan.frame_width)
+            let painted = fit_line(&format!("{rail}{body}"), plan.frame_width);
+            // The rail glyph is the surface's own left edge, so the bleed keeps
+            // it in place and only carries the fill outward.
+            bleed_row(&painted, plan, marker, &|row| {
+                theme.apply_semantic_role_layered(content_role, row)
+            })
         }
         ThemeSurfaceChrome::Plain | ThemeSurfaceChrome::Rule => {
             let body = format!("{left_padding}{content}{right_padding}");
@@ -386,37 +430,52 @@ pub(super) fn decorate_surface_with_frame(
         rows.push(styled_surface_heading(plan, theme));
     }
     rows.extend(std::iter::repeat_n(
-        render_surface_content_line("", plan, theme, prompt_color, collapsed_reasoning),
+        render_surface_content_line("", plan, theme, prompt_color, collapsed_reasoning, None),
         leading_padding_rows,
     ));
+    // A bleeding surface paints its own leading columns, so the event marker
+    // rides inside the frame row instead of being prefixed outside it.
+    let bleeds = plan.bleeds();
+    let mut marker = marker.as_deref();
     rows.extend(content.iter().map(|line| {
-        render_surface_content_line(line, plan, theme, prompt_color, collapsed_reasoning)
+        let row_marker = if bleeds { marker.take() } else { None };
+        render_surface_content_line(
+            line,
+            plan,
+            theme,
+            prompt_color,
+            collapsed_reasoning,
+            row_marker,
+        )
     }));
     rows.extend(std::iter::repeat_n(
-        render_surface_content_line("", plan, theme, prompt_color, collapsed_reasoning),
+        render_surface_content_line("", plan, theme, prompt_color, collapsed_reasoning, None),
         trailing_padding_rows,
     ));
     if let Some(bottom) = surface_bottom_row(plan, theme) {
         rows.push(bottom);
     }
 
-    let mut marker_pending = true;
+    let mut marker_pending = !bleeds;
     rows.into_iter()
         .enumerate()
         .map(|(row, line)| {
             if row < plan.geometry.transition_rows || line.is_empty() {
                 String::new()
+            } else if bleeds {
+                // The row already spans the terminal, leading columns included.
+                fit_line(&line, outer_width)
             } else {
                 let frame_left = usize::from(plan.frame_left);
-                let prefix = if marker_pending && marker.is_some() {
+                let prefix = if marker_pending {
                     marker_pending = false;
-                    let marker = marker.as_deref().expect("checked above");
-                    if frame_left >= 2 {
-                        format!("{}{marker} ", " ".repeat(frame_left - 2))
-                    } else if frame_left == 1 {
-                        marker.to_owned()
-                    } else {
-                        format!("{marker} ")
+                    match marker {
+                        Some(marker) if frame_left >= 2 => {
+                            format!("{}{marker} ", " ".repeat(frame_left - 2))
+                        }
+                        Some(marker) if frame_left == 1 => marker.to_owned(),
+                        Some(marker) => format!("{marker} "),
+                        None => " ".repeat(frame_left),
                     }
                 } else {
                     " ".repeat(frame_left)
@@ -440,11 +499,16 @@ pub(super) fn decorate_surface_content_suffix(
 ) -> Vec<String> {
     let has_bottom_row = plan.chrome == ThemeSurfaceChrome::Card;
     let trailing_padding_rows = plan.geometry.trailing_rows - usize::from(has_bottom_row);
-    let frame_left = " ".repeat(usize::from(plan.frame_left));
+    // A bleeding row already spans the terminal, so it carries no frame offset.
+    let frame_left = if plan.bleeds() {
+        String::new()
+    } else {
+        " ".repeat(usize::from(plan.frame_left))
+    };
     let mut rows = content_tail
         .iter()
         .map(|line| {
-            render_surface_content_line(line, plan, theme, prompt_color, collapsed_reasoning)
+            render_surface_content_line(line, plan, theme, prompt_color, collapsed_reasoning, None)
         })
         .map(|line| {
             if line.is_empty() {
@@ -456,8 +520,14 @@ pub(super) fn decorate_surface_content_suffix(
         .collect::<Vec<_>>();
     rows.extend(
         std::iter::repeat_with(|| {
-            let line =
-                render_surface_content_line("", plan, theme, prompt_color, collapsed_reasoning);
+            let line = render_surface_content_line(
+                "",
+                plan,
+                theme,
+                prompt_color,
+                collapsed_reasoning,
+                None,
+            );
             if line.is_empty() {
                 String::new()
             } else {

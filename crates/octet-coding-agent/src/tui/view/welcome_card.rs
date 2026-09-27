@@ -709,6 +709,51 @@ mod tests {
     }
 
     #[test]
+    fn still_keeps_the_compact_model_adaptive_splash() {
+        // `Still` ships as a built-in, so its example file is the source of the
+        // compiled selector. The startup mark must stay the compact 4-row byte
+        // that follows the active model family, not the larger file-theme
+        // presentation pinned to a fixed `splash` colour.
+        const STILL: &str = include_str!("../../../../../examples/themes/Still.toml");
+        let theme = crate::tui::theme::test_theme_from_source(STILL);
+        assert_eq!(
+            theme.resolve::<String>("splash_model_adaptive").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("splash_compact").as_deref(),
+            Some("true")
+        );
+        let shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+        let rendered = render_welcome_card(&shell.state.borrow(), 80, 10, Instant::now());
+        let marked = rendered
+            .iter()
+            .filter(|line| strip_terminal_sequences(line).contains('█'))
+            .count();
+        assert_eq!(marked, 4, "Still should use the compact mark: {rendered:?}");
+
+        // The mark is shaded into a column gradient across its byte glyphs, so
+        // one row carries more than a single truecolor foreground.
+        let gradients = rendered
+            .iter()
+            .filter(|line| {
+                let mut shades = line
+                    .split("\x1b[38;2;")
+                    .skip(1)
+                    .filter_map(|rest| rest.split('m').next())
+                    .collect::<Vec<_>>();
+                shades.dedup();
+                shades.len() >= 2
+            })
+            .count();
+        assert!(
+            gradients >= 1,
+            "the mark should shade into a gradient: {rendered:?}"
+        );
+    }
+
+    #[test]
     fn welcome_card_shows_access_mode_and_safe_mode_hint() {
         let shell = InteractiveShell::test_shell();
         shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());

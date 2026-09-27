@@ -65,7 +65,7 @@ pub(super) fn materialize_deferred_session_history(state: &SharedState) -> Resul
     let next_commit_id = state.next_transcript_commit_id;
 
     append_hydrated_items(&mut state, items);
-    state.seal_command_run();
+    state.seal_activity_group();
     state.new_output_count = original_new_output_count;
     let identity_plan = (|| {
         let original_snapshot_len = state.transcript.len();

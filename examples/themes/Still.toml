@@ -2,12 +2,12 @@
 # Visual direction informed by Grok Build's Apache-2.0 TUI:
 # https://github.com/xai-org/grok-build (palette and spacing, not source code).
 #
-# A readable central column, soft prompt and composer fills, compact tool
-# activity, and generous space around prose. The tool dots and status remain
-# monochrome; older terminal-owned scrollback keeps its original styling.
+# Full-width content, soft prompt and composer fills, and compact tool
+# activity. The tool dots and status remain monochrome; older terminal-owned
+# scrollback keeps its original styling.
 #
 # How the look is built (all theme-file supported):
-# - The transcript and composer share a centered reading width. A soft band
+# - The transcript and composer use the available terminal width. A soft band
 #   distinguishes user prompts; tools stay unboxed and tightly stacked.
 # - `model.use_lab_color = "true"` keeps the prompt model-adaptive, while the
 #   rest of the interface remains quiet and neutral.
@@ -19,7 +19,7 @@
 
 [metadata]
 name = "Still"
-description = "A calm, contained interface with soft prompts and compact activity"
+description = "A calm, full-width interface with soft prompts and compact activity"
 author = "Achu"
 version = "1"
 terminal = "light-dark"
@@ -35,7 +35,11 @@ border_idle = "#414944"
 border_focused = "#6f9182"
 composer = "shaded"
 composer_bg = "#242424"
-content_max_width = 112
+# The startup splash follows the active model family, like the prompt chevron
+# and composer marker. It claims the whole splash, so no `splash` colour is set.
+splash_model_adaptive = true
+# The compact 16x4 startup mark rather than the larger file-theme presentation.
+splash_compact = true
 # One breathing cell before the marker aligns activity text with padded prompts.
 event_marker_gutter = 3
 prompt_wash = false
@@ -175,8 +179,8 @@ ellipsis = "..."
 bullet = "*"
 wordmark = "octet"
 
-# A centered reading column. Only user prompts have a soft fill; activity
-# remains unboxed and condensed, with full details available through Ctrl+O.
+# Full-width content. Only user prompts have a soft fill; activity remains
+# unboxed and condensed, with full details available through Ctrl+O.
 [surfaces.user]
 chrome = "band"
 width = "full"

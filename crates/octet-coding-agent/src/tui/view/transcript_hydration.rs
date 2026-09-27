@@ -57,7 +57,7 @@ pub(super) fn append_hydrated_items(
                 model_lab,
                 prompt_color,
             } => {
-                state.seal_command_run();
+                state.seal_activity_group();
                 state.push_block(TranscriptBlock::User {
                     text,
                     model_lab,
@@ -66,7 +66,7 @@ pub(super) fn append_hydrated_items(
                 });
             }
             TranscriptItem::Assistant(text) => {
-                state.seal_command_run();
+                state.seal_activity_group();
                 state.push_block(TranscriptBlock::Assistant(Box::new(
                     AssistantBlock::finalized(text),
                 )));
@@ -77,13 +77,12 @@ pub(super) fn append_hydrated_items(
                 )));
             }
             TranscriptItem::ToolActivityGroup(group) => {
-                if state.command_runs_enabled() && (group.read_files > 0 || group.searches > 0) {
-                    state.seal_command_run();
-                    state.start_activity_group(group);
+                if state.activity_groups_enabled() {
+                    state.extend_activity_group(group);
                 }
             }
             TranscriptItem::ToolCall { id, name, args } => {
-                let grouped = state.grouped_tool_call(&id, &name);
+                let grouped = state.grouped_tool_call(&id, &name, &args);
                 if is_subagent_tool(&name) {
                     // Discovery/status calls remain hidden. Actual orchestration
                     // calls restore one bounded lifecycle row from durable
@@ -225,7 +224,7 @@ pub(super) fn append_hydrated_items(
                 }
             }
             TranscriptItem::CompactionMarker { summary } => {
-                state.seal_command_run();
+                state.seal_activity_group();
                 state.push_block(TranscriptBlock::Compaction(Box::new(CompactionBlock {
                     label: "Context compacted".into(),
                     summary,
@@ -233,7 +232,7 @@ pub(super) fn append_hydrated_items(
                 })));
             }
             TranscriptItem::NativeCompactionMarker => {
-                state.seal_command_run();
+                state.seal_activity_group();
                 state.push_block(TranscriptBlock::Notice(
                     "Context compacted natively · opaque Responses state retained".into(),
                 ));
@@ -251,8 +250,7 @@ mod tests {
     #[test]
     fn grouped_exploration_replays_mixed_results_and_expands_child_details() {
         use crate::hydrate::ToolActivityGroup;
-        // Grouping is a per-theme opt-in: `quiet_tool_summaries` gates
-        // `command_runs_enabled`, which is what starts an activity group.
+        // `quiet_tool_summaries` gates all activity grouping.
         let mut state = ShellState {
             theme: crate::tui::theme::test_theme_from_source(
                 "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
@@ -266,6 +264,8 @@ mod tests {
             read_files: 1,
             searches: 0,
             commands: 1,
+            file_paths: vec!["src/main.rs".into()],
+            ..Default::default()
         };
         append_hydrated_items(
             &mut state,
@@ -303,10 +303,7 @@ mod tests {
             ],
         );
         let compact = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
-        assert!(
-            compact.contains("Explored → read 1 file, ran 1 command"),
-            "{compact}"
-        );
+        assert!(compact.contains("Explored 1 file · 1 command"), "{compact}");
         assert!(compact.contains("bash: permission denied"), "{compact}");
         assert!(!compact.contains("src/main.rs"), "{compact}");
         assert!(!compact.contains("$ false"), "{compact}");
@@ -320,6 +317,65 @@ mod tests {
     }
 
     #[test]
+    fn restored_edits_merge_across_responses_and_keep_paths_on_disclosure() {
+        let mut state = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(
+                "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+            ),
+            ..Default::default()
+        };
+        let calls = [
+            ("edit-a", "edit", "src/a.rs"),
+            ("write-a", "write", "src/a.rs"),
+            ("write-b", "write", "src/b.rs"),
+        ];
+        for (id, name, path) in calls {
+            let id = ToolCallId(id.into());
+            append_hydrated_items(
+                &mut state,
+                [TranscriptItem::ToolCall {
+                    id: id.clone(),
+                    name: name.into(),
+                    args: serde_json::json!({"path": path, "content": "new"}),
+                }],
+            );
+            append_hydrated_items(
+                &mut state,
+                [TranscriptItem::ToolResult {
+                    id,
+                    text: if path == "src/b.rs" {
+                        "permission denied"
+                    } else {
+                        "ok"
+                    }
+                    .into(),
+                    is_error: path == "src/b.rs",
+                    duration_ms: None,
+                    images: Vec::new(),
+                }],
+            );
+        }
+        append_hydrated_items(
+            &mut state,
+            [TranscriptItem::User {
+                text: "next".into(),
+                model_lab: None,
+                prompt_color: None,
+            }],
+        );
+        let compact = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
+        assert!(compact.contains("Edited 2 files · 1 failed"), "{compact}");
+        assert!(!compact.contains("src/a.rs"), "{compact}");
+        state.verbose_tools = true;
+        state.invalidate_transcript_layout();
+        let expanded = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
+        assert!(
+            expanded.contains("src/a.rs") && expanded.contains("src/b.rs"),
+            "{expanded}"
+        );
+    }
+
+    #[test]
     fn activity_group_projection_is_still_only_even_after_theme_change() {
         let id = ToolCallId("file".into());
         let group = crate::hydrate::ToolActivityGroup {
@@ -327,6 +383,8 @@ mod tests {
             read_files: 1,
             searches: 0,
             commands: 0,
+            file_paths: vec!["src/file.rs".into()],
+            ..Default::default()
         };
         let items = || {
             [

@@ -335,6 +335,8 @@ mod tests {
             read_files: 1,
             searches: 0,
             commands: 1,
+            file_paths: vec!["file.rs".into()],
+            ..Default::default()
         });
         state.rendered_transcript(80);
         assert!(state.has_active_event_dot());
@@ -343,6 +345,7 @@ mod tests {
         state.settle_activity_tool(&read, "read", None);
         state.rendered_transcript(80);
         assert!(transcript_commit_position(&state, cursor).is_none());
+        state.seal_activity_group();
         state.settle_activity_tool(&bash, "bash", Some("permission denied"));
         state.rendered_transcript(80);
         assert!(!state.has_active_event_dot());

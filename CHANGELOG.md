@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+- Give `Still` the compact model-adaptive startup splash. `splash_model_adaptive`
+  with `splash_compact` replace the larger file-theme mark and the fixed `splash`
+  colour with the compiled default's 16x4 byte that shades from the active model
+  family, matching its model-adaptive prompt chevron and composer marker.
+
+- Group Still's successive exploration and edit/write calls into distinct-file
+  summaries. `Ctrl+O` retains paths and commands, and failures stay visible.
+- Remove `Still`'s 112-column cap so its transcript, splash, composer text,
+  and pickers use the available width instead of sitting in a narrow centered
+  column on wide terminals. Its soft prompt and composer fills are retained.
+- Reserve the detail row beneath a live `Working` status in file themes and
+  beneath Still's in-flight compact tool header, so transitions through
+  two-line `Thinking`, tool calls, and responses do not pull the composer up.
+- Give custom themes that set `content_max_width` a full-bleed filled surface. Their
+  text keeps the centered reading column, but a shaded composer and borderless
+  `band`/`rail` surfaces paint to the terminal edges instead of floating as a
+  narrow island with unpainted bars beside them. Bordered cards, plain text, and
+  themes that only inset their content render as before.
+- Fix `failed to save theme: invalid theme selector "Cards"` (and `"Still"`).
+  `/theme` offers the compiled-in file themes through the same picker variant as
+  a discovered theme, but persistence rejected their reserved stems, so
+  confirming one always failed and the selection was lost on the next start.
+  A reserved stem is now accepted as the built-in it names, canonicalizing case
+  and the `.toml` spelling; the compiled default is still not selectable by name.
+
 - Restore the default theme's full-cell model-adaptive prompt card, lost in
   v0.8.0 when a hardcoded compiled-theme branch replaced the whole-cell wash
   with a per-line text tint. The default theme now declares the wash explicitly
@@ -15,9 +40,8 @@
 
 - Render the startup welcome card inside the shared presentation column, at the
   same `content_width` and with the same leading inset as the transcript,
-  composer, and pickers. A theme that centers its reading column - `Still` in
-  particular - now centers its splash instead of starting it flush against the
-  terminal edge. Themes that request no inset and no width cap are unchanged.
+  composer, and pickers. A custom theme that caps its reading column centers
+  its splash; themes that request no inset and no width cap are unchanged.
 - Rank `@` mention completions with a bounded top-k heap instead of collecting
   and sorting every match, and keep one query-scoped result on the workspace
   file index so a re-render or a selection change no longer rescans the whole

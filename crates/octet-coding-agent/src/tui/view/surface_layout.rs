@@ -21,7 +21,21 @@ pub(super) struct SurfacePlan<'a> {
     pub(super) padding: u16,
     pub(super) frame_left: u16,
     pub(super) frame_width: u16,
+    /// Columns a borderless filled surface paints to the left of its frame and
+    /// to the right of it, so a theme that caps the reading column still shades
+    /// the full terminal width instead of floating a narrow island. Both are
+    /// zero for bordered cards, text-only surfaces, and uncapped themes, where
+    /// the frame already reaches the terminal edges.
+    pub(super) bleed_left: u16,
+    pub(super) bleed_right: u16,
     pub(super) geometry: SurfaceGeometry,
+}
+
+impl SurfacePlan<'_> {
+    /// Whether this surface paints a fill beyond its own frame.
+    pub(super) fn bleeds(&self) -> bool {
+        self.bleed_left > 0 || self.bleed_right > 0
+    }
 }
 
 fn transcript_surface_kind(block: &TranscriptBlock) -> &'static str {
@@ -294,6 +308,26 @@ pub(super) fn compile_surface_plan<'a>(
     } else {
         transcript_transition_rows(previous, layout.density)
     };
+    // A theme that caps the reading column would otherwise paint its band/rail
+    // fills inside that column only, leaving terminal-coloured bars beside
+    // them on a wide screen. Borderless filled chrome extends its fill to the
+    // terminal edges while the text inside stays in the reading column. Cards
+    // keep their own border, and a heading or bottom row is rendered without
+    // the fill, so neither bleeds.
+    let bleeds = presentation.capped
+        && matches!(chrome, ThemeSurfaceChrome::Band | ThemeSurfaceChrome::Rail)
+        && !has_heading_row
+        && !has_bottom_row;
+    let (bleed_left, bleed_right) = if bleeds {
+        (
+            frame_left,
+            outer_width
+                .saturating_sub(frame_left)
+                .saturating_sub(frame_width),
+        )
+    } else {
+        (0, 0)
+    };
     SurfacePlan {
         kind,
         chrome,
@@ -306,6 +340,8 @@ pub(super) fn compile_surface_plan<'a>(
         padding,
         frame_left,
         frame_width,
+        bleed_left,
+        bleed_right,
         geometry: SurfaceGeometry {
             transition_rows,
             leading_rows,
@@ -330,7 +366,7 @@ mod tests {
     };
 
     #[test]
-    fn still_prompt_and_tool_rows_share_a_centered_column() {
+    fn capped_theme_prompt_and_tool_rows_share_a_centered_column() {
         let theme = test_theme_from_source(
             "[colors]\ncontent_max_width = 112\nevent_marker_gutter = 3\nquiet_tool_summaries = true\n[layout]\ntranscript_inset = 2\n[surfaces.user]\nchrome = \"band\"\npadding = 1\n[surfaces.tool]\nchrome = \"plain\"",
         );
@@ -372,6 +408,109 @@ mod tests {
             assert_eq!((tool.frame_left, tool.frame_width), tool_expected);
             assert_eq!(text_column(&prompt, width), text_column(&prose, width));
         }
+    }
+
+    #[test]
+    fn built_in_still_uses_the_full_terminal_width() {
+        let theme =
+            test_theme_from_source(include_str!("../../../../../examples/themes/Still.toml"));
+        let prompt = TranscriptBlock::User {
+            text: "hello".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        };
+        let prose = TranscriptBlock::Assistant(Box::new(super::super::AssistantBlock::finalized(
+            "hello".into(),
+        )));
+        let activity = tool(
+            "read",
+            serde_json::json!({"path": "src/a.rs"}),
+            String::new(),
+            None,
+        );
+        let renderer = theme.rich_renderer();
+        for width in [48, 160] {
+            let presentation = PresentationLayout::new(&theme, width);
+            assert_eq!((presentation.inset, presentation.content_width), (0, width));
+            let user = compile_surface_plan(None, &prompt, &theme, width);
+            let tool = compile_surface_plan(Some(&prompt), &activity, &theme, width);
+            assert_eq!((user.frame_left, user.frame_width), (0, width));
+            assert_eq!((tool.frame_left, tool.frame_width), (3, width - 3));
+            for block in [&prompt, &prose] {
+                let rows = render_block_planned(
+                    None, block, &theme, &renderer, &renderer, width, false, 0, 0,
+                )
+                .lines;
+                let text_column = rows
+                    .iter()
+                    .find_map(|row| {
+                        let plain = strip_terminal_sequences(row);
+                        plain.find("hello").map(|at| visible_width(&plain[..at]))
+                    })
+                    .expect("prompt/prose text row");
+                assert!(
+                    text_column <= 4,
+                    "Still content was centered at width {width}: {rows:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_capped_prompt_band_bleeds_its_fill_to_the_terminal_edges() {
+        // A width-capped custom theme shades user prompts. Its band must
+        // span the terminal while the text stays in the capped column.
+        let theme = test_theme_from_source(
+            "[colors]\ncontent_max_width = 112\nquiet_tool_summaries = true\n[roles.\"surface.user\"]\nbackground = \"#202020\"\n[surfaces.user]\nchrome = \"band\"\npadding = 1\n[surfaces.tool]\nchrome = \"plain\"",
+        );
+        let prompt = TranscriptBlock::User {
+            text: "hello".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        };
+        let renderer = theme.rich_renderer();
+        let plan = compile_surface_plan(None, &prompt, &theme, 160);
+        assert!(plan.bleeds(), "a capped band should bleed: {plan:?}");
+        let rows = render_block_planned(
+            None, &prompt, &theme, &renderer, &renderer, 160, false, 0, 0,
+        )
+        .lines;
+        // Leading transition rows are inter-block spacing, not part of the band.
+        let band = &rows[plan.geometry.transition_rows..];
+        assert!(!band.is_empty(), "a band must render at least one row");
+        for (index, row) in band.iter().enumerate() {
+            let terminal = super::super::surface_frame::emulate_row_for_test(row, 160);
+            for column in 0..160u16 {
+                assert_ne!(
+                    terminal.screen().cell(0, column).expect("cell").bgcolor(),
+                    vt100::Color::Default,
+                    "band row {index} left column {column} unpainted: {row:?}"
+                );
+            }
+            // The text still lands on the reading column, not at the edge.
+            let plain = strip_terminal_sequences(row);
+            if let Some(start) = plain.find("hello") {
+                assert!(start >= 24, "prompt text left the column: {plain:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_uncapped_band_keeps_its_column_width() {
+        let theme = test_theme_from_source(
+            "[colors]\nquiet_tool_summaries = true\n[surfaces.user]\nchrome = \"band\"\npadding = 1",
+        );
+        let prompt = TranscriptBlock::User {
+            text: "hello".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        };
+        let plan = compile_surface_plan(None, &prompt, &theme, 160);
+        assert!(!plan.bleeds(), "an uncapped band must not bleed: {plan:?}");
+        assert_eq!((plan.bleed_left, plan.bleed_right), (0, 0));
     }
 
     #[test]
@@ -685,6 +824,7 @@ mod tests {
                 TranscriptBlock::NoticeStatus {
                     text: "status".into(),
                     tone: super::super::NoticeTone::Success,
+                    reserved_rows: 0,
                 },
                 TranscriptBlock::Reasoning(Box::new(
                     super::super::AssistantBlock::streaming_reasoning("thinking"),

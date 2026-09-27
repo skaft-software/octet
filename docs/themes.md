@@ -14,6 +14,12 @@ custom surfaces, composer frames, and loaded theme colours/geometry keep their
 own styling.
 Unknown-background and no-colour terminals retain an unpainted readable prompt.
 
+A theme that sets `content_max_width` gets a centered reading column for its
+text, but its filled chrome still reaches the terminal edges: a shaded composer
+and borderless `band`/`rail` surfaces paint edge to edge rather than floating as
+a narrow island with unpainted bars beside them. Bordered cards, plain text, and
+themes that only inset their content without capping the column are unchanged.
+
 The first-run appearance picker offers:
 
 - `Auto (recommended)` detects the terminal background through reliable
@@ -150,23 +156,28 @@ octet --theme Still
 OCTET_THEME=Still octet
 ```
 
-`Still` uses a centered reading column (up to 112 cells) shared with its softly
-shaded composer. A quiet band distinguishes user prompts. One extra breathing
-cell before transcript markers aligns prompt, activity, and prose text. Prose and
-tool activity remain unboxed, with compact adjacent rows and monochrome dots;
-`Ctrl+O` reveals full tool details. Its `model.use_lab_color = "true"` token
-keeps the prompt chevron and composer marker model-adaptive; the dark UI uses a
-restrained blue accent over neutral grays. Reasoning is hidden by default. It is
+`Still` uses the available terminal width for its transcript and softly shaded
+composer. A quiet band distinguishes user prompts. One extra breathing cell
+before transcript markers aligns prompt, activity, and prose text. Prose and
+tool activity remain unboxed, with compact adjacent rows and monochrome dots.
+Consecutive reads, searches, and commands share an exploration summary;
+consecutive edits and writes show a distinct-file count. `Ctrl+O` reveals
+all underlying file paths, commands, and failures. Its
+`model.use_lab_color = "true"` token keeps the prompt chevron and composer
+marker model-adaptive, and `splash_model_adaptive` with `splash_compact` give
+it the compact 16x4 startup mark shaded from the active model family. The dark
+UI uses a restrained blue accent over neutral grays. Reasoning is hidden by
+default.
+The reserved row under its live `Working` indicator prevents the composer from
+bouncing as two-line `Thinking` and compact tool activity replace it. It is
 offered in `/theme` after `Cards`, its `Still` stem is reserved, and
 `still_example_theme_is_valid_for_every_background_profile` in
 `crates/octet-coding-agent/src/tui/theme.rs` validates the embedded file for
 every terminal-background profile.
 
-The startup welcome card is part of that shared column. It renders at the same
-`content_width` and carries the same leading inset as the transcript, composer,
-and pickers, so a theme that centers its reading column centers the splash with
-it instead of starting flush against the terminal edge. A theme that requests no
-inset and no width cap renders exactly as before.
+The startup welcome card follows the theme's content width and leading inset,
+just like the transcript, composer, and pickers. Width-capped custom themes
+center the splash; uncapped themes such as `Still` use the available width.
 
 Three optional top-level tokens shape the startup splash:
 

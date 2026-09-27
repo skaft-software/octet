@@ -38,6 +38,11 @@ pub(crate) enum PickerLayout {
 pub(crate) struct PresentationLayout {
     pub(crate) inset: u16,
     pub(crate) content_width: u16,
+    /// Whether the theme's `content_max_width` actually narrowed the column on
+    /// this terminal. Filled chrome extends past the column only in this case;
+    /// a theme that merely insets its content (every theme, via
+    /// `transcript_inset`) keeps the historical inset look.
+    pub(crate) capped: bool,
     pub(crate) picker: PickerLayout,
     pub(crate) footer_gap: usize,
 }
@@ -69,6 +74,7 @@ impl PresentationLayout {
                 .filter(|limit| *limit >= 12)
                 .unwrap_or(available),
         );
+        let capped = content_width < available;
         let inset = base_inset.saturating_add(available.saturating_sub(content_width) / 2);
         let picker = if resolved.narrow {
             PickerLayout::Compact
@@ -81,6 +87,7 @@ impl PresentationLayout {
         Self {
             inset,
             content_width,
+            capped,
             picker,
             footer_gap: if resolved.narrow { 2 } else { 3 },
         }

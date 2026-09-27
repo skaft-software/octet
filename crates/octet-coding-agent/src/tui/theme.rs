@@ -1819,6 +1819,23 @@ pub(crate) fn is_reserved_theme_name(name: &str) -> bool {
     is_builtin_theme_name(name) || TerminalThemeChoice::parse(name).is_some()
 }
 
+/// Whether `name` selects a compiled-in file theme such as `Cards` or `Still`.
+/// Their stems are reserved against discovered files, and this is the predicate
+/// that lets configuration accept the built-in under its own name.
+pub(crate) fn is_compiled_file_theme_name(name: &str) -> bool {
+    compiled_file_theme_name(name).is_some()
+}
+
+/// The canonical spelling of a compiled-in file theme selector, so a persisted
+/// `cards.toml` or `Cards` both resolve to the one built-in name.
+pub(crate) fn compiled_file_theme_name(name: &str) -> Option<&'static str> {
+    let stem = name.strip_suffix(".toml").unwrap_or(name);
+    COMPILED_FILE_THEMES
+        .iter()
+        .find(|(built_in, _)| stem.eq_ignore_ascii_case(built_in))
+        .map(|(built_in, _)| *built_in)
+}
+
 /// Every selector answered by a compiled-in theme rather than a discovered
 /// file. Reserving these names keeps a user's `Cards.toml` or `Still.toml` from
 /// shadowing, or being shadowed by, the built-in they select.
@@ -2873,6 +2890,18 @@ mod tests {
                 theme.resolve::<String>("model.use_lab_color").as_deref(),
                 Some("true")
             );
+            // The startup splash follows the same rule, in the compact geometry
+            // the compiled default uses. The adaptive splash claims the whole
+            // mark, so Still must not also pin a `splash` colour.
+            assert_eq!(
+                theme.resolve::<String>("splash_model_adaptive").as_deref(),
+                Some("true")
+            );
+            assert_eq!(
+                theme.resolve::<String>("splash_compact").as_deref(),
+                Some("true")
+            );
+            assert_eq!(theme.resolve::<String>("splash"), None);
             // Still uses one soft prompt band; activity and prose stay plain.
             for kind in [
                 "assistant",
@@ -2894,7 +2923,7 @@ mod tests {
                 theme.resolve::<String>("composer").as_deref(),
                 Some("shaded")
             );
-            assert_eq!(theme.resolve::<u16>("content_max_width"), Some(112));
+            assert_eq!(theme.resolve::<u16>("content_max_width"), None);
             assert_eq!(theme.resolve::<u16>("event_marker_gutter"), Some(3));
             // A live model family overrides the quiet sage `model_accent`.
             let mut adapted = theme;

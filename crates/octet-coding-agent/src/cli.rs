@@ -1265,8 +1265,17 @@ pub fn persist_theme_choice(choice: &str) -> anyhow::Result<()> {
 fn theme_choice_key(choice: &str) -> anyhow::Result<&str> {
     let choice = choice.trim();
     if let Some(builtin) = crate::tui::theme::TerminalThemeChoice::parse(choice) {
-        Ok(builtin.key())
-    } else if crate::resource_resolver::valid_resource_name(choice)
+        return Ok(builtin.key());
+    }
+    // `Cards` and `Still` are reserved so a discovered file cannot shadow the
+    // built-in, but the built-in itself is selected by that same name. The
+    // reserved stem stays valid here; only `default` and a `.toml` spelling are
+    // rejected, because the config loader resolves them to the fallback or to a
+    // file rather than to the selector the user picked.
+    if crate::tui::theme::is_compiled_file_theme_name(choice) {
+        return Ok(crate::tui::theme::compiled_file_theme_name(choice).unwrap_or(choice));
+    }
+    if crate::resource_resolver::valid_resource_name(choice)
         && !choice.ends_with(".toml")
         && !crate::tui::theme::is_reserved_theme_name(choice)
     {
@@ -3715,6 +3724,26 @@ max_output_bytes = 4096
         for name in ["../other", "a/b", "default", "foo.toml", "", "bad name"] {
             assert!(theme_choice_key(name).is_err(), "accepted {name:?}");
         }
+    }
+
+    #[test]
+    fn theme_choice_persistence_accepts_the_compiled_in_file_themes() {
+        // The picker offers `Cards` and `Still` through the same file variant
+        // as a discovered theme, and their stems are reserved so a local file
+        // cannot shadow them. Selecting the built-in must still save, otherwise
+        // the picker reports `invalid theme selector` for a theme it just showed.
+        for (choice, expected) in [("Cards", "Cards"), ("Still", "Still")] {
+            assert_eq!(theme_choice_key(choice).unwrap(), expected);
+            // Case and the `.toml` spelling resolve to the one built-in name.
+            assert_eq!(theme_choice_key(&choice.to_lowercase()).unwrap(), expected);
+            assert_eq!(
+                theme_choice_key(&format!("{choice}.toml")).unwrap(),
+                expected
+            );
+        }
+        // The compiled default is still not a selectable file name: it is the
+        // fallback, not a theme the picker offers.
+        assert!(theme_choice_key("default").is_err());
     }
 
     #[test]

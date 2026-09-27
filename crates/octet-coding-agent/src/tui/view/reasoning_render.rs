@@ -1166,6 +1166,19 @@ fn collapsed_reasoning_lines_at(
     collapsed_reasoning_lines_sized(theme, reasoning, shimmer_frame, rainbow_strength, u16::MAX)
 }
 
+fn reasoning_inline_hint(theme: &OctetTheme) -> &'static str {
+    if theme.unicode() {
+        " · Ctrl+O expand"
+    } else {
+        " - Ctrl+O expand"
+    }
+}
+
+fn thinking_hint_fits_inline(theme: &OctetTheme, status: &str, width: u16) -> bool {
+    theme.is_compiled_default()
+        && visible_width(status) + visible_width(reasoning_inline_hint(theme)) <= usize::from(width)
+}
+
 fn collapsed_reasoning_lines_sized(
     theme: &OctetTheme,
     reasoning: &AssistantBlock,
@@ -1181,13 +1194,21 @@ fn collapsed_reasoning_lines_sized(
             .retry_activity
             .as_ref()
             .map(|retry| retry.label_at(Instant::now()));
-        return vec![activity_status_line(
+        let status = activity_status_line(
             theme,
             reasoning,
             label.as_deref().unwrap_or("Working"),
             shimmer_frame,
             rainbow_strength,
-        )];
+        );
+        let mut lines = vec![status];
+        // File themes render the collapsed Thinking hint on a second row.
+        // Reserve that row while Working is live so promotion does not shift
+        // the composer. The compiled default keeps its usual one-row status.
+        if !theme.is_compiled_default() {
+            lines.push(String::new());
+        }
+        return lines;
     }
     if reasoning.text.is_empty() && !reasoning.show_reasoning_hint {
         let retry_label = reasoning
@@ -1214,16 +1235,10 @@ fn collapsed_reasoning_lines_sized(
         0,
     )];
     if reasoning.show_reasoning_hint {
-        let inline_hint = if theme.unicode() {
-            " · Ctrl+O expand"
-        } else {
-            " - Ctrl+O expand"
-        };
-        if theme.is_compiled_default()
-            && reasoning.reasoning_heading.is_none()
-            && visible_width(&lines[0]) + visible_width(inline_hint) <= usize::from(width)
+        if reasoning.reasoning_heading.is_none()
+            && thinking_hint_fits_inline(theme, &lines[0], width)
         {
-            lines[0].push_str(&subdued_text(theme, inline_hint));
+            lines[0].push_str(&subdued_text(theme, reasoning_inline_hint(theme)));
         } else {
             lines.push(reasoning_detail_line(theme, reasoning));
         }
@@ -3165,6 +3180,42 @@ mod tests {
         assert!(lines[1].starts_with("`- A heading"), "{lines:?}");
         assert!(lines.iter().all(|line| visible_width(line) <= 16));
         assert!(lines.iter().all(|line| !line.contains('\x1b')));
+    }
+
+    #[test]
+    fn two_line_thinking_reserves_its_detail_row_while_working() {
+        let still = theme::test_theme_from_source(include_str!(
+            "../../../../../examples/themes/Still.toml"
+        ));
+        let mut activity = AssistantBlock::streaming_reasoning("");
+        activity.reasoning_heading = Some("Working".into());
+        activity.show_reasoning_hint = false;
+        for width in [48, 160] {
+            let working =
+                render_reasoning(&activity, &still.reasoning_renderer(), &still, width, false);
+            assert_eq!(working.len(), 2, "{width}: {working:?}");
+            assert!(strip_terminal_sequences(&working[0]).starts_with("Working"));
+            assert!(
+                working[1].is_empty(),
+                "reserved row must be blank: {working:?}"
+            );
+
+            activity.reasoning_heading = None;
+            activity.show_reasoning_hint = true;
+            activity.append_reasoning("private detail");
+            let thinking =
+                render_reasoning(&activity, &still.reasoning_renderer(), &still, width, false);
+            assert_eq!(
+                thinking.len(),
+                working.len(),
+                "composer would shift at {width}"
+            );
+            assert!(strip_terminal_sequences(&thinking[0]).starts_with("Thinking"));
+            assert!(strip_terminal_sequences(&thinking[1]).contains("ctrl+o to expand"));
+            activity = AssistantBlock::streaming_reasoning("");
+            activity.reasoning_heading = Some("Working".into());
+            activity.show_reasoning_hint = false;
+        }
     }
 
     #[test]

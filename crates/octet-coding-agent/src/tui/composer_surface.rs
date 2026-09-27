@@ -359,30 +359,51 @@ fn render_composer_box(
             )
         )
     };
-    let finish_row = |row: String| -> String {
-        let row = match chrome {
-            ComposerChrome::Boxed | ComposerChrome::Topline => row,
-            ComposerChrome::Framed => {
-                let vertical = theme.rgb_fg(border_rgb, theme.glyph("vertical"));
-                format!("{vertical} {row} {vertical}")
-            }
-            ComposerChrome::Shaded => {
-                let padded = format!(" {row} ");
-                match shaded_bg {
-                    Some(bg) => theme.paint_row_background(bg, &padded),
-                    None => padded,
-                }
-            }
-        };
-        fit_line(&format!("{frame_prefix}{row}"), width)
-    };
-    let blank_shaded_row = || -> String {
-        let padded = " ".repeat(frame_width);
-        let row = match shaded_bg {
+    // A theme that caps its reading column would otherwise float a narrow
+    // shaded composer in the middle of the terminal, with unpainted columns
+    // beside it. The fill reaches the terminal edges instead, while the draft
+    // stays inside the column. A theme that only insets its content keeps the
+    // historical inset rectangle.
+    let bleeds = layout.capped;
+    // One padding cell inside the fill, on both sides of the draft.
+    //
+    // A capped theme keeps its draft on the reading column, so the column offset
+    // is part of the painted row and the fill spans the whole terminal. An
+    // uncapped theme keeps the historical inset rectangle, where the offset
+    // stays outside the fill.
+    let paint_shaded = |lead: &str, row: &str, fill_width: usize| -> String {
+        let painted = format!("{lead} {row} ");
+        let padding = fill_width.saturating_sub(visible_width(&painted));
+        let padded = format!("{painted}{}", " ".repeat(padding));
+        match shaded_bg {
             Some(bg) => theme.paint_row_background(bg, &padded),
             None => padded,
-        };
-        format!("{frame_prefix}{row}")
+        }
+    };
+    let finish_row = |row: String| -> String {
+        match chrome {
+            ComposerChrome::Boxed | ComposerChrome::Topline => {
+                fit_line(&format!("{frame_prefix}{row}"), width)
+            }
+            ComposerChrome::Framed => {
+                let vertical = theme.rgb_fg(border_rgb, theme.glyph("vertical"));
+                fit_line(&format!("{frame_prefix}{vertical} {row} {vertical}"), width)
+            }
+            ComposerChrome::Shaded if bleeds => {
+                fit_line(&paint_shaded(&frame_prefix, &row, terminal_width), width)
+            }
+            ComposerChrome::Shaded => fit_line(
+                &format!("{frame_prefix}{}", paint_shaded("", &row, frame_width)),
+                width,
+            ),
+        }
+    };
+    let blank_shaded_row = || -> String {
+        if bleeds {
+            paint_shaded(&frame_prefix, "", terminal_width)
+        } else {
+            format!("{frame_prefix}{}", paint_shaded("", "", frame_width))
+        }
     };
 
     let mut lines = Vec::with_capacity(content_rows + 2);
@@ -1117,33 +1138,134 @@ fn render_compact(
 mod tests {
     use super::*;
 
+    /// Columns of one rendered row carrying the shaded fill.
+    fn shaded_columns(row: &str, width: u16) -> Vec<u16> {
+        let mut terminal = vt100::Parser::new(1, width, 0);
+        terminal.process(row.as_bytes());
+        (0..width)
+            .filter(|column| {
+                !matches!(
+                    terminal.screen().cell(0, *column).expect("cell").bgcolor(),
+                    vt100::Color::Default
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn shaded_composer_tracks_the_contained_reading_column() {
+    fn built_in_still_composer_uses_full_width_with_left_aligned_draft() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(include_str!(
+            "../../../../examples/themes/Still.toml"
+        ));
+        state.model_display = "Test Model".into();
+        for width in [48, 160] {
+            let rows = render_composer_surface(&state, width, Instant::now());
+            let fill = shaded_columns(&rows[0], width);
+            assert_eq!(
+                fill.len(),
+                usize::from(width),
+                "Still composer fill at {width}"
+            );
+            assert_eq!((fill.first(), fill.last()), (Some(&0), Some(&(width - 1))));
+            let prompt = sexy_tui_rs::strip_terminal_sequences(&rows[1]);
+            assert_eq!(
+                prompt.find(state.theme.glyph("prompt")),
+                Some(1),
+                "{width}: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shaded_composer_fills_the_terminal_while_the_draft_holds_the_reading_column() {
         let mut state = crate::tui::view::ShellState::default();
         state.theme = crate::tui::theme::test_theme_from_source(
             "[colors]\ncomposer = \"shaded\"\ncomposer_bg = \"#202020\"\ncontent_max_width = 112\n[layout]\ntranscript_inset = 2\ncomposer_padding = 1\nshow_footer = true",
         );
         state.model_display = "Test Model".into();
-        for (width, inset, frame_width) in [(160, 24, 112), (48, 0, 48)] {
-            let rows = render_composer_surface(&state, width, Instant::now())
-                .into_iter()
-                .map(|row| sexy_tui_rs::strip_terminal_sequences(&row).to_owned())
-                .collect::<Vec<_>>();
+        for (width, text_column) in [(160, 25), (48, 1)] {
+            let rows = render_composer_surface(&state, width, Instant::now());
             assert!(rows.len() >= 4, "{width}: {rows:?}");
+            // The fill reaches both terminal edges: no unpainted bars beside a
+            // capped theme's shaded composer. The blank rows are used for
+            // whole-row coverage; a row holding the draft carries the hardware
+            // cursor's reverse-video cell, which inverts the rest of its row.
+            for row in [&rows[0], &rows[2]] {
+                let painted = shaded_columns(row, width);
+                assert_eq!(
+                    (
+                        painted.first().copied(),
+                        painted.last().copied(),
+                        painted.len()
+                    ),
+                    (Some(0), width.checked_sub(1), usize::from(width)),
+                    "composer row left bars at width {width}: {row:?}"
+                );
+            }
+            // The draft row starts filled too, so the fill has no left edge.
+            let draft = shaded_columns(&rows[1], width);
             assert_eq!(
-                rows[0].chars().take(inset).collect::<String>(),
-                " ".repeat(inset)
+                draft.first().copied(),
+                Some(0),
+                "draft row left a bar at width {width}: {:?}",
+                rows[1]
             );
-            assert_eq!(visible_width(&rows[0]), inset + frame_width);
-            assert!(
-                rows[1].contains(state.theme.glyph("prompt")),
-                "{width}: {rows:?}"
+            // The draft still starts on the reading column, inset and all.
+            let plain = rows
+                .iter()
+                .map(|row| sexy_tui_rs::strip_terminal_sequences(row).to_owned())
+                .collect::<Vec<_>>();
+            let prompt = plain
+                .iter()
+                .find(|row| row.contains(state.theme.glyph("prompt")))
+                .expect("composer prompt row");
+            assert_eq!(
+                prompt
+                    .find(state.theme.glyph("prompt"))
+                    .expect("prompt cell"),
+                text_column,
+                "{width}: {plain:?}"
             );
             assert!(
-                !rows.iter().any(|row| row.contains('─')),
-                "{width}: {rows:?}"
+                !plain.iter().any(|row| row.contains('─')),
+                "{width}: {plain:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_uncapped_shaded_composer_keeps_its_column_width() {
+        // `Cards` insets its content without capping the column, so its shaded
+        // composer keeps the historical column width instead of bleeding. The
+        // two paths must differ, or the cap check is doing nothing.
+        let render = |max_width: Option<&str>| {
+            let mut state = crate::tui::view::ShellState::default();
+            let cap = max_width.map_or_else(String::new, |width| {
+                format!("content_max_width = {width}\n")
+            });
+            state.theme = crate::tui::theme::test_theme_from_source(&format!(
+                "[colors]\ncomposer = \"shaded\"\ncomposer_bg = \"#202020\"\n{cap}[layout]\ntranscript_inset = 6\ncomposer_padding = 1"
+            ));
+            state.model_display = "Test Model".into();
+            render_composer_surface(&state, 160, Instant::now())
+        };
+        let capped = shaded_columns(&render(Some("112"))[0], 160);
+        let uncapped = shaded_columns(&render(None)[0], 160);
+        assert_eq!(capped.first().copied(), Some(0), "{capped:?}");
+        assert_eq!(
+            capped.len(),
+            160,
+            "a capped fill spans the terminal: {capped:?}"
+        );
+        assert!(
+            uncapped.first().copied().unwrap_or(0) > 0,
+            "an uncapped theme keeps its inset rectangle: {uncapped:?}"
+        );
+        assert!(
+            uncapped.len() < capped.len(),
+            "an uncapped theme must keep its column width"
+        );
     }
 
     #[test]

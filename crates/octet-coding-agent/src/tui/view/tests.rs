@@ -7712,6 +7712,128 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
 }
 
 #[test]
+fn still_working_to_thinking_keeps_the_transcript_height_stable() {
+    let theme = crate::tui::theme::test_theme_from_source(include_str!(
+        "../../../../../examples/themes/Still.toml"
+    ));
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    shell.set_size(160, 24);
+    let run_id = shell.begin_run("openai");
+    let rows = |shell: &InteractiveShell| {
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(160)
+            .iter()
+            .map(|row| strip_terminal_sequences(row).to_owned())
+            .collect::<Vec<_>>()
+    };
+    let working = rows(&shell);
+    assert!(
+        working[working.len() - 2].contains("Working"),
+        "{working:?}"
+    );
+    assert!(working.last().is_some_and(String::is_empty), "{working:?}");
+
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "private detail".into(),
+        },
+    );
+    let thinking = rows(&shell);
+    assert_eq!(
+        thinking.len(),
+        working.len(),
+        "status promotion shifted the composer"
+    );
+    assert!(
+        thinking[thinking.len() - 2].contains("Thinking"),
+        "{thinking:?}"
+    );
+    assert!(
+        thinking
+            .last()
+            .is_some_and(|row| row.contains("ctrl+o to expand")),
+        "{thinking:?}"
+    );
+
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "Answer".into(),
+        },
+    );
+    let responding = rows(&shell);
+    assert!(
+        responding.len() >= thinking.len(),
+        "response shrank the transcript: {responding:?}"
+    );
+    assert!(
+        responding[responding.len() - 2].contains("Working"),
+        "{responding:?}"
+    );
+    assert!(
+        responding.last().is_some_and(String::is_empty),
+        "{responding:?}"
+    );
+
+    let tool_id = ToolCallId("still-tool".into());
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::ToolStarted {
+            id: tool_id.clone(),
+            name: "read".into(),
+            args: serde_json::json!({"path": "README.md"}),
+        },
+    );
+    let tool = rows(&shell);
+    assert!(
+        tool.len() >= responding.len(),
+        "tool replaced status with fewer rows: {tool:?}"
+    );
+    assert!(tool.last().is_some_and(String::is_empty), "{tool:?}");
+
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::ToolFinished {
+            id: tool_id,
+            result: Ok(octet_agent::ToolOutput::new("done")),
+            duration: Duration::from_millis(10),
+        },
+    );
+    let finished = rows(&shell);
+    assert!(
+        finished.len() >= tool.len(),
+        "tool completion shrank the transcript: {finished:?}"
+    );
+
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "another private detail".into(),
+        },
+    );
+    let thinking_again = rows(&shell);
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::ToolStarted {
+            id: ToolCallId("next-tool".into()),
+            name: "read".into(),
+            args: serde_json::json!({"path": "Cargo.toml"}),
+        },
+    );
+    let next_tool = rows(&shell);
+    assert!(
+        next_tool.len() >= thinking_again.len(),
+        "tool replaced Thinking with fewer rows: before={thinking_again:?}, after={next_tool:?}"
+    );
+}
+
+#[test]
 fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "off");
@@ -9010,10 +9132,12 @@ fn notice_markers_use_neutral_success_and_error_lifecycle_tones() {
     let approved = TranscriptBlock::NoticeStatus {
         text: "action approved".into(),
         tone: NoticeTone::Success,
+        reserved_rows: 0,
     };
     let denied = TranscriptBlock::NoticeStatus {
         text: "action denied".into(),
         tone: NoticeTone::Error,
+        reserved_rows: 0,
     };
 
     assert_eq!(
@@ -9074,6 +9198,7 @@ fn still_tool_dots_breathe_smoothly_without_status_colours_or_blinking() {
     let group = |tone| TranscriptBlock::NoticeStatus {
         text: "Explored".into(),
         tone,
+        reserved_rows: 0,
     };
     assert_eq!(marker(&group(NoticeTone::ToolActive), 5), frames[5]);
     assert_eq!(
@@ -12787,10 +12912,7 @@ fn live_exploration_groups_follow_turn_finished_and_keep_failures_visible() {
         },
     );
     let compact = shell.state.borrow().rendered_transcript(100).join("\n");
-    assert!(
-        compact.contains("Explored → read 1 file, ran 1 command"),
-        "{compact}"
-    );
+    assert!(compact.contains("Explored 1 file · 1 command"), "{compact}");
     assert!(compact.contains("bash: permission denied"), "{compact}");
     assert!(
         !compact.contains("src/one.rs") && !compact.contains("Bash  false"),
@@ -12802,6 +12924,77 @@ fn live_exploration_groups_follow_turn_finished_and_keep_failures_visible() {
     assert!(
         detailed.contains("src/one.rs") && detailed.contains("Bash  false"),
         "{detailed}"
+    );
+}
+
+#[test]
+fn still_groups_edits_by_distinct_path_across_responses_and_discloses_failures() {
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+    );
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    let run = shell.begin_run("test");
+    for (number, name, path) in [
+        (0, "edit", "src/one.rs"),
+        (1, "write", "src/one.rs"),
+        (2, "write", "src/two.rs"),
+    ] {
+        let id = ToolCallId(format!("edit-{number}"));
+        let args = serde_json::json!({"path": path, "content": "new"});
+        shell.on_run_event(
+            run,
+            &AgentEvent::TurnFinished {
+                message: octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::ToolCall(octet_ai::ToolCall {
+                        async_execution: false,
+                        id: id.clone(),
+                        name: name.into(),
+                        arguments_json: args.to_string(),
+                        argument_error: None,
+                    })],
+                    model: ModelId("test".into()),
+                    protocol: octet_ai::Protocol::OpenAiChat,
+                },
+                stop_reason: octet_ai::StopReason::ToolUse,
+                turn_usage: Usage::default(),
+                turn_cost: None,
+                usage: Usage::default(),
+                session_cost_microdollars: None,
+                run_cost_microdollars: 0,
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolStarted {
+                id: id.clone(),
+                name: name.into(),
+                args,
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolFinished {
+                id,
+                result: if number == 2 {
+                    Err(octet_agent::ToolError::new("permission denied"))
+                } else {
+                    Ok(octet_agent::ToolOutput::new("ok"))
+                },
+                duration: Duration::from_millis(1),
+            },
+        );
+    }
+    let compact =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"));
+    assert!(compact.contains("Edited 2 files · 1 failed"), "{compact}");
+    assert!(compact.contains("write: permission denied"), "{compact}");
+    assert!(!compact.contains("src/one.rs"), "{compact}");
+    shell.toggle_disclosure();
+    let expanded =
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"));
+    assert!(
+        expanded.contains("src/one.rs") && expanded.contains("src/two.rs"),
+        "{expanded}"
     );
 }
 
