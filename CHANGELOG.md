@@ -18,6 +18,11 @@
 - Parse trailing Kitty image anchors once per transcript-block finish instead
   of twice, and find compaction cut points with a binary search instead of a
   linear scan per budget step.
+- Compile `examples/themes/Cards.toml` into every release as the built-in
+  `Cards` selector, so it needs no copy into a discovery root. It appears in
+  `/theme` after the terminal-appearance choices, works with `--theme` and
+  `OCTET_THEME`, and reserves the `Cards` file stem so a local `Cards.toml`
+  can neither shadow nor be shadowed by the built-in.
 - Let custom themes opt out of the model-colour prompt wash with
   `prompt_wash = false`: prompt rows then render on the surface's own fill
   while the chevron keeps its prompt colour. The default keeps the wash so

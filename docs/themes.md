@@ -34,16 +34,17 @@ shows the file stem and optional metadata name/description; typing filters it.
 Selecting a file previews its appearance and confirming persists its file stem
 as `theme = "mine"` in the user config, keeping other settings intact.
 `/theme mine` (or `/theme mine.toml`) selects a discovered, valid file directly.
+`/theme Cards` selects the compiled-in `Cards` theme described below.
 Cancelling restores the active theme without modifying the config or session.
 The first-run picker still shows only Auto, Light, and Dark.
 
 Discovery follows global < trusted project < explicit path precedence; duplicate
 file stems show only the winning file, even when that file is invalid. Files that
 fail bounded reads or schema validation are omitted from the interactive list.
-In the interactive picker, file stems `auto`, `light`, `dark`, and `default`
-are reserved for built-in selectors and do not appear as file choices. The
-built-in choices also work with `--theme` and `OCTET_THEME`; named files may be
-loaded at startup by those selectors. There is no theme marketplace. An
+In the interactive picker, file stems `auto`, `light`, `dark`, `default`, and
+`Cards` are reserved for built-in selectors and do not appear as file choices.
+The built-in choices also work with `--theme` and `OCTET_THEME`; named files may
+be loaded at startup by those selectors. There is no theme marketplace. An
 unrecognized or malformed theme name at startup falls back to the compiled
 default. An explicit `OCTET_COLOR_SCHEME` is also treated as an existing
 terminal-appearance choice, so automation and already-configured shells do not
@@ -94,18 +95,24 @@ documents the accepted sections in one place and is a valid starting point:
 cp examples/themes/octet-default.toml ~/.octet/themes/mine.toml
 ```
 
-`examples/themes/Cards.toml` is the source for the planned `Cards` built-in
-selector. It is not registered at runtime yet; copy it into a discovery
-directory to use it today:
+`examples/themes/Cards.toml` is compiled into every release as the built-in
+`Cards` selector, so it is available without copying anything:
 
 ```console
-cp examples/themes/Cards.toml ~/.octet/themes/Cards.toml
+octet --theme Cards
+OCTET_THEME=Cards octet
 ```
 
-A release build that compiles it in keeps this example and the built-in in
-sync, and `cards_example_theme_is_valid_for_every_background_profile` in
-`crates/octet-coding-agent/src/tui/theme.rs` fails the build if the example
-stops validating for any terminal-background profile.
+`Cards` is a shaded-surfaces theme — rail chrome with quiet stripes,
+dark/light fills, an amber accent with adaptive model colours, a borderless
+shaded composer, and a themed compact splash. It is offered in `/theme`
+alongside the terminal-appearance choices, and its `Cards` stem is reserved
+so a local `Cards.toml` can neither shadow nor be shadowed by the built-in.
+Editing
+[`examples/themes/Cards.toml`](../examples/themes/Cards.toml) changes the
+built-in; `cards_example_theme_is_valid_for_every_background_profile` in
+`crates/octet-coding-agent/src/tui/theme.rs` fails the build if it stops
+validating for any terminal-background profile.
 
 A theme file is a bounded TOML document (256 KiB) with these typed sections:
 

@@ -8446,6 +8446,32 @@ fn terminal_theme_picker_data() -> (Vec<String>, Vec<Option<String>>) {
     (items, descriptions)
 }
 
+/// The compiled-in `Cards` theme, offered after the terminal-appearance
+/// choices and before discovered files so it is reachable without copying a
+/// theme into a discovery root.
+fn cards_theme_picker_entry(
+    config: &Config,
+    background: crate::tui::theme::TerminalBackground,
+) -> Option<(String, Option<String>, OctetTheme)> {
+    let mut preview_config = config.clone();
+    preview_config.theme = Some(crate::tui::theme::CARDS_THEME_NAME.to_owned());
+    let theme = load_theme_for_background(&preview_config, background);
+    if theme.is_compiled_default() {
+        return None;
+    }
+    let metadata = theme.metadata();
+    let label = if metadata.name.is_empty() {
+        crate::tui::theme::CARDS_THEME_NAME.to_owned()
+    } else {
+        metadata.name.clone()
+    };
+    Some((
+        label,
+        (!metadata.description.is_empty()).then(|| metadata.description.clone()),
+        theme,
+    ))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ThemeSelection {
     Builtin(TerminalThemeChoice),
@@ -8507,6 +8533,16 @@ where
         })
         .collect();
     if !onboarding {
+        if let Some((label, description, theme)) =
+            cards_theme_picker_entry(config, original.background())
+        {
+            items.push(label);
+            descriptions.push(description);
+            choices.push(ThemeSelection::File(
+                crate::tui::theme::CARDS_THEME_NAME.to_owned(),
+            ));
+            previews.push(theme);
+        }
         for (name, theme) in selectable_file_themes(config, original.background()) {
             let metadata = theme.metadata();
             items.push(if metadata.name.is_empty() || metadata.name == name {

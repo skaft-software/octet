@@ -33,9 +33,20 @@ pub use crate::tui::theme_schema::{
 /// Stable name for octet's compiled-in default theme and legacy selectors.
 pub const DEFAULT_THEME_NAME: &str = "default";
 
+/// Stable selector for the compiled-in `Cards` theme. The file is embedded at
+/// build time from `examples/themes/Cards.toml` and validated by
+/// `cards_example_theme_is_valid_for_every_background_profile`, so the shipped
+/// example and this built-in can never drift apart.
+pub const CARDS_THEME_NAME: &str = "Cards";
+
+/// The embedded source for [`CARDS_THEME_NAME`].
+const CARDS_THEME_SOURCE: &str = include_str!("../../../../examples/themes/Cards.toml");
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThemeSource {
     CompiledDefault,
+    /// The compiled-in `Cards` theme, embedded from `examples/themes/Cards.toml`.
+    CompiledCards,
     File(PathBuf),
 }
 
@@ -571,7 +582,7 @@ impl OctetTheme {
     pub fn source_path(&self) -> Option<&Path> {
         match &self.source {
             ThemeSource::File(path) => Some(path),
-            ThemeSource::CompiledDefault => None,
+            ThemeSource::CompiledDefault | ThemeSource::CompiledCards => None,
         }
     }
 
@@ -699,6 +710,7 @@ impl OctetTheme {
             ThemeSource::CompiledDefault => {
                 Ok(default_theme_for(self.background, self.capabilities))
             }
+            ThemeSource::CompiledCards => cards_theme_for(self.capabilities, self.background),
             ThemeSource::File(path) => {
                 load_theme_path_for(path, self.capabilities, self.background)
             }
@@ -1761,7 +1773,31 @@ pub(crate) fn test_theme_source_with(
 }
 
 pub(crate) fn is_reserved_theme_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case(DEFAULT_THEME_NAME) || TerminalThemeChoice::parse(name).is_some()
+    is_builtin_theme_name(name) || TerminalThemeChoice::parse(name).is_some()
+}
+
+/// Every selector answered by a compiled-in theme rather than a discovered
+/// file. Reserving these names keeps a user's `Cards.toml` or `default.toml`
+/// from shadowing, or being shadowed by, the built-in they select.
+fn is_builtin_theme_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(DEFAULT_THEME_NAME) || name.eq_ignore_ascii_case(CARDS_THEME_NAME)
+}
+
+/// Compile the embedded `Cards` theme for one background profile. A built-in
+/// that fails to compile is a build-time defect the example test already
+/// covers, so surface it as a load error rather than a silent fallback.
+fn cards_theme_for(
+    capabilities: TerminalCapabilities,
+    background: TerminalBackground,
+) -> anyhow::Result<OctetTheme> {
+    load_theme_source_for(
+        CARDS_THEME_SOURCE,
+        CARDS_THEME_NAME,
+        ThemeSource::CompiledCards,
+        CARDS_THEME_NAME,
+        capabilities,
+        background,
+    )
 }
 
 fn theme_file_name(name: &str) -> Option<String> {
@@ -2176,6 +2212,15 @@ pub(crate) fn load_named_theme_for_background(
 ) -> anyhow::Result<OctetTheme> {
     let capabilities = TerminalCapabilities::detect(config.color, config.plain);
     let selector = name.trim();
+    // A built-in selector always wins over a discovered file of the same stem,
+    // and `Cards.toml` is reserved so a local copy can never shadow it.
+    if selector.eq_ignore_ascii_case(CARDS_THEME_NAME)
+        || selector
+            .strip_suffix(".toml")
+            .is_some_and(|stem| stem.eq_ignore_ascii_case(CARDS_THEME_NAME))
+    {
+        return cards_theme_for(capabilities, background);
+    }
     if is_reserved_theme_name(selector)
         || selector
             .strip_suffix(".toml")
@@ -2252,7 +2297,7 @@ pub(crate) fn selectable_file_themes(
 /// resolver. Parsing is deferred to the loader so discovery stays best-effort.
 #[cfg(any(test, feature = "serve"))]
 pub fn available_themes(config: &Config) -> Vec<String> {
-    let mut names = BTreeSet::from([DEFAULT_THEME_NAME.to_owned()]);
+    let mut names = BTreeSet::from([DEFAULT_THEME_NAME.to_owned(), CARDS_THEME_NAME.to_owned()]);
     for resource in discover_themes(config).resources() {
         if theme_file_name(&resource.name).is_some() {
             names.insert(resource.name.clone());
@@ -2626,7 +2671,7 @@ mod tests {
             let theme = load_theme_source_for(
                 CARDS,
                 "Cards",
-                ThemeSource::File(PathBuf::from("Cards.toml")),
+                ThemeSource::CompiledCards,
                 "Cards",
                 TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
                 background,
@@ -2643,6 +2688,56 @@ mod tests {
                 theme.resolve::<String>("splash_compact").as_deref(),
                 Some("true")
             );
+        }
+    }
+
+    #[test]
+    fn cards_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().to_owned());
+        let themes = directory.path().join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        // A user's own `Cards.toml` must not replace, or be replaced by, the
+        // compiled-in selector.
+        std::fs::write(
+            themes.join("Cards.toml"),
+            "[metadata]\nname = \"Impostor\"\n[colors]\naccent = '#123456'\n",
+        )
+        .unwrap();
+        config.theme_paths.push(themes);
+
+        let names = available_themes(&config);
+        assert!(names.contains(&CARDS_THEME_NAME.to_owned()));
+        for selector in ["Cards", "cards", "CARDS", "Cards.toml"] {
+            let theme = load_named_theme(selector, &config)
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
+            assert!(!theme.is_compiled_default(), "{selector}");
+            assert_eq!(theme.metadata().name, "Cards", "{selector}");
+            assert!(matches!(theme.source(), ThemeSource::CompiledCards));
+            assert_eq!(theme.source_path(), None, "{selector}");
+        }
+        // The impostor file stays out of the file picker and out of reach.
+        assert!(
+            !selectable_file_themes(&config, TerminalBackground::Unknown)
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(CARDS_THEME_NAME))
+        );
+        assert!(is_reserved_theme_name("Cards"));
+        assert!(is_reserved_theme_name("cards"));
+
+        // Startup honours the selector and keeps its own background profile.
+        config.theme = Some(CARDS_THEME_NAME.to_owned());
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            let theme = load_theme_for_background(&config, background);
+            assert!(!theme.is_compiled_default(), "{background:?}");
+            assert_eq!(theme.background(), background);
+            assert_eq!(theme.metadata().name, "Cards");
+            // A compiled-in theme never creates a reload watcher.
+            assert!(theme.source_path().is_none(), "{background:?}");
         }
     }
 
