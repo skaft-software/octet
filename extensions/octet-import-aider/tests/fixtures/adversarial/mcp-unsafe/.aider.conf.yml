@@ -1,6 +1,0 @@
-mcp-servers:
-  - name: unsafe
-    command: node
-    args:
-      - --token
-      - value
