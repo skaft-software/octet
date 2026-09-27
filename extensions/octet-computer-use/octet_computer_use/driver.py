@@ -92,8 +92,15 @@ class DriverPaths:
         The optional TypeSafe SDK is installed here rather than into octet's own
         interpreter, because that interpreter is not guaranteed to have pip. The
         extension then imports it from this path.
+
+        A Windows venv keeps site-packages unversioned at ``Lib/site-packages``
+        next to ``Scripts/python.exe``, so the POSIX ``lib/pythonX.Y`` layout
+        would name a directory that never exists there and silently make the SDK
+        look uninstalled.
         """
 
+        if platform.system() == "Windows":
+            return self.venv / "Lib" / "site-packages"
         return (
             self.venv
             / "lib"
@@ -223,6 +230,58 @@ def _pip_spec(version: str) -> str:
     return DISTRIBUTION
 
 
+def _release_tuple(version: str) -> Optional[Tuple[int, ...]]:
+    """The dotted numeric release segment, or None for anything else.
+
+    A pre/post/dev/local marker returns None rather than being ordered here:
+    PEP 440 precedence and local ordering are not implemented in this module,
+    and guessing at them would let a mismatched pin pass.
+    """
+
+    parts = version.split(".")
+    if not parts or not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def _versions_match(requested: str, installed: str) -> bool:
+    """Whether an installed version satisfies an exact requested pin.
+
+    PEP 440 compares release segments with zero padding, so ``0.29`` and
+    ``0.29.0`` name the same release and a caller who abbreviates a pin must not
+    trigger a reinstall on every call. Anything carrying a marker falls back to
+    exact text equality.
+    """
+
+    requested = requested.strip()
+    installed = installed.strip()
+    if requested == installed:
+        return True
+    left, right = _release_tuple(requested), _release_tuple(installed)
+    if left is None or right is None:
+        return False
+    width = max(len(left), len(right))
+    return left + (0,) * (width - len(left)) == right + (0,) * (width - len(right))
+
+
+def _satisfies_request(binary: Path, requested: str) -> bool:
+    """Whether an already-installed driver satisfies the caller's request.
+
+    An unpinned request wants the newest release, so an existing install always
+    satisfies it. A pinned request is satisfied only by a matching reported
+    version: reporting a mismatch as provisioned would hand back a runtime the
+    caller did not ask for. An install that cannot report a version at all is
+    treated as unsatisfied, because the pin cannot be confirmed.
+    """
+
+    if not requested:
+        return True
+    reported = driver_version(binary)
+    if reported is None:
+        return False
+    return _versions_match(requested, reported)
+
+
 def provision(
     paths: DriverPaths,
     *,
@@ -231,17 +290,28 @@ def provision(
 ) -> Path:
     """Provision the driver into the octet-owned venv and return its binary.
 
-    This is idempotent: if a driver is already present it is reused. The install
-    performs a network download from the configured package index; the caller is
-    responsible for having obtained user consent for that network access.
+    An unpinned request is idempotent: an installed driver is reused as-is. A
+    pinned request is idempotent only when the installed driver actually reports
+    that version; otherwise the octet-owned venv is cleared and the pinned
+    version installed, so a stale or mismatched runtime is never silently
+    returned. The install performs a network download from the configured
+    package index; the caller is responsible for having obtained user consent
+    for that network access.
     """
 
     _ensure_directories(paths)
+    # Validate the request before anything else. An explicit pin must be checked
+    # against what is installed, never satisfied by whatever happens to be
+    # present, and a malformed pin must not be reported as a successful reuse.
+    spec = _pip_spec(version)
+    requested = version.strip()
     existing = installed_binary(paths)
-    if existing is not None:
+    if existing is not None and _satisfies_request(existing, requested):
         return existing
 
-    spec = _pip_spec(version)
+    # A mismatch between the request and what is installed re-enters the owned
+    # venv from scratch, so a version switch cannot leave a half-upgraded
+    # runtime behind.
     paths.venv.mkdir(parents=True, exist_ok=True)
     environment = _install_environment()
 

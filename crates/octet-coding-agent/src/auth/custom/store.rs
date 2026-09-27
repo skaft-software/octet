@@ -179,6 +179,12 @@ const fn default_registry_version() -> u8 {
     REGISTRY_VERSION
 }
 
+/// Keep absent derived provenance out of a hand-written registry file: a model
+/// the user configured is never a discovery assertion.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// A single model served by the custom endpoint.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CustomModel {
@@ -193,6 +199,15 @@ pub struct CustomModel {
     /// Maximum output tokens.
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u64,
+    /// Whether discovery (rather than a fallback) supplied this context limit.
+    /// Persisted so a cached inventory re-merges to the same effective limit on
+    /// the next start; a cached `false` means the limit came from this file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub context_window_asserted: bool,
+    /// Whether discovery supplied an output limit rather than the fallback.
+    /// Persisted for the same reason as `context_window_asserted`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub max_output_tokens_asserted: bool,
     /// Whether the model supports tools/function calling.
     #[serde(default = "default_true")]
     pub tools: bool,
@@ -314,6 +329,8 @@ impl Default for CustomModel {
             display_name: String::new(),
             context_window: default_context_window(),
             max_output_tokens: default_max_output_tokens(),
+            context_window_asserted: false,
+            max_output_tokens_asserted: false,
             tools: true,
             parallel_tool_calls: false,
             vision: false,

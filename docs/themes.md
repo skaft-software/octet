@@ -141,6 +141,12 @@ offered in `/theme` after `Cards`, its `Still` stem is reserved, and
 `crates/octet-coding-agent/src/tui/theme.rs` validates the embedded file for
 every terminal-background profile.
 
+The startup welcome card is part of that shared column. It renders at the same
+`content_width` and carries the same leading inset as the transcript, composer,
+and pickers, so a theme that centers its reading column centers the splash with
+it instead of starting flush against the terminal edge. A theme that requests no
+inset and no width cap renders exactly as before.
+
 Three optional top-level tokens shape the startup splash:
 
 - `splash` — colour for the byte-mark and splash text. With a truecolor,

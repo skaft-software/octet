@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use super::{fit_line, ShellState, TranscriptBlock};
+use crate::tui::layout::PresentationLayout;
 
 fn changelog_hint(state: &ShellState, width: u16) -> String {
     let tip = if state.theme.unicode() {
@@ -74,6 +75,26 @@ fn render_pi_startup(state: &ShellState, width: u16) -> Vec<String> {
 }
 
 pub(super) fn render_welcome_card(
+    state: &ShellState,
+    width: u16,
+    max_rows: usize,
+    now: Instant,
+) -> Vec<String> {
+    let layout = PresentationLayout::new(&state.theme, width);
+    let inset = " ".repeat(usize::from(layout.inset));
+    render_welcome_content(state, layout.content_width, max_rows, now)
+        .into_iter()
+        .map(|line| {
+            if line.is_empty() {
+                line
+            } else {
+                format!("{inset}{line}")
+            }
+        })
+        .collect()
+}
+
+fn render_welcome_content(
     state: &ShellState,
     width: u16,
     max_rows: usize,
@@ -707,6 +728,26 @@ mod tests {
             render_welcome_card(&safe_shell.state.borrow(), 80, 10, Instant::now()).join("\n");
         let rendered = strip_terminal_sequences(&rendered);
         assert!(rendered.contains("permissions: safe mode"), "{rendered}");
+    }
+
+    #[test]
+    fn welcome_card_uses_the_centered_reading_column() {
+        let theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncontent_max_width = 112\n[layout]\ntranscript_inset = 2\ncomposer_padding = 1",
+        );
+        let shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+        let state = shell.state.borrow();
+        let width = 160;
+        let layout = PresentationLayout::new(&state.theme, width);
+        assert!(layout.inset > 0);
+        let rows = render_welcome_card(&state, width, 10, Instant::now());
+        for row in rows.iter().filter(|row| !row.is_empty()) {
+            let plain = strip_terminal_sequences(row);
+            assert!(plain.starts_with(&" ".repeat(usize::from(layout.inset))));
+            assert!(sexy_tui_rs::visible_width(row) <= usize::from(width));
+        }
+        assert!(rows.iter().any(|row| row.contains("octet")));
     }
 
     #[test]

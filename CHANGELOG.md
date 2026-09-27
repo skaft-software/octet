@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- Render the startup welcome card inside the shared presentation column, at the
+  same `content_width` and with the same leading inset as the transcript,
+  composer, and pickers. A theme that centers its reading column - `Still` in
+  particular - now centers its splash instead of starting it flush against the
+  terminal edge. Themes that request no inset and no width cap are unchanged.
+- Rank `@` mention completions with a bounded top-k heap instead of collecting
+  and sorting every match, and keep one query-scoped result on the workspace
+  file index so a re-render or a selection change no longer rescans the whole
+  index. The returned window and its ordering are identical to the previous
+  full sort.
+- Stop unasserted discovery fallbacks from overwriting configured custom-model
+  limits. Endpoint-asserted context and output limits remain authoritative over
+  a stale registry pin, but a sparse `/v1/models` response that omits both
+  fields now leaves the configured `context_window` and `max_output_tokens`
+  intact instead of replacing them with the 262144/16384 defaults. Cached
+  inventories are versioned 11 so already-merged caches are rebuilt.
+
 - Compile `examples/themes/Still.toml` into every release as the built-in
   `Still` selector, available after `Cards` in `/theme` and through `--theme`
   and `OCTET_THEME`. Reserve the `Still` file stem so local theme files cannot

@@ -46,6 +46,19 @@
   signed Cua host cannot prove its grant, runtime selection fails closed instead
   of silently switching to direct mode.
 
+### Fixed
+
+- `computer_use_setup` honors an explicitly requested driver version. The request
+  is validated before any reuse, and an existing install is reused only when it
+  is unpinned or the installed driver actually reports that version; a mismatch
+  (or an install that cannot report a version) recreates the octet-owned venv
+  and installs the pin. An unpinned request still reuses the installed driver
+  without network access, and an abbreviated release such as `0.29` matches the
+  installed `0.29.0` rather than reinstalling on every call.
+- Resolve the provisioned venv's site-packages on Windows (`Lib/site-packages`)
+  instead of the POSIX `lib/pythonX.Y/site-packages` path, so the optional
+  `typesafe-sdk` no longer reads as uninstalled on Windows.
+
 ### Changed
 
 - Use a short, straight 80 ms cursor glide without pronounced turns or spring

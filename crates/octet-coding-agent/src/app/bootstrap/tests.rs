@@ -594,6 +594,8 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
         api_name: "system".into(),
         context_window: 262_144,
         max_output_tokens: 16_384,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
         tools: true,
         ..Default::default()
     };
@@ -661,6 +663,8 @@ fn custom_endpoint_limits_follow_live_assertions_not_registry_pins() {
         api_name: "qwen38-gptq-mtp4-stable".into(),
         context_window: 161_000,
         max_output_tokens: 16_384,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
         ..Default::default()
     };
     let merged = apply_configured_custom_model_overrides(
@@ -683,6 +687,8 @@ fn custom_endpoint_limits_follow_live_assertions_not_registry_pins() {
         api_name: "qwen38-gptq-mtp4-stable".into(),
         context_window: 32_768,
         max_output_tokens: 16_384,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
         ..Default::default()
     };
     let merged = apply_configured_custom_model_overrides(
@@ -692,6 +698,198 @@ fn custom_endpoint_limits_follow_live_assertions_not_registry_pins() {
     );
     assert_eq!(merged[0].context_window, 32_768);
     assert_eq!(merged[0].max_output_tokens, 16_384);
+}
+
+#[test]
+fn unasserted_discovery_fallbacks_never_overwrite_configured_limits() {
+    use crate::auth::custom::CustomModel;
+
+    let configured = CustomModel {
+        api_name: "system".into(),
+        context_window: 8_192,
+        max_output_tokens: 1_024,
+        ..Default::default()
+    };
+    // A sparse inventory: the entry carries only an id, so both limits are the
+    // discovery fallback rather than something the endpoint said.
+    let sparse = CustomModel {
+        api_name: "system".into(),
+        context_window: 262_144,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![sparse],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 8_192);
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+    assert!(!merged[0].context_window_asserted);
+    assert!(!merged[0].max_output_tokens_asserted);
+
+    // The two limits are asserted independently. A llama.cpp gateway reports
+    // its served context but no output cap, so the window must follow the live
+    // assertion while the configured output cap survives.
+    let context_only = CustomModel {
+        api_name: "system".into(),
+        context_window: 131_072,
+        max_output_tokens: 16_384,
+        context_window_asserted: true,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![context_only],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 131_072);
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+    assert!(merged[0].context_window_asserted);
+    assert!(!merged[0].max_output_tokens_asserted);
+
+    // The mirror case: an asserted output cap is honored, and the unasserted
+    // window keeps the configured pin rather than the 262144 fallback.
+    let output_only = CustomModel {
+        api_name: "system".into(),
+        context_window: 262_144,
+        max_output_tokens: 4_096,
+        max_output_tokens_asserted: true,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![output_only],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 8_192);
+    // min(asserted 4096, configured 1024) clamped to the effective window.
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+    assert!(!merged[0].context_window_asserted);
+    assert!(merged[0].max_output_tokens_asserted);
+
+    // An asserted output cap larger than the configured one still cannot raise
+    // the user's tighter cap; the tighter of the two wins.
+    let generous = CustomModel {
+        api_name: "system".into(),
+        context_window: 262_144,
+        max_output_tokens: 32_000,
+        max_output_tokens_asserted: true,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![generous],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+}
+
+#[test]
+fn merging_twice_keeps_a_live_assertion_over_a_registry_pin() {
+    use crate::auth::custom::CustomModel;
+
+    // Registration runs the merge once while caching and again over that
+    // output. The provenance has to survive the first pass, or the second one
+    // silently restores the stale pin.
+    let configured = CustomModel {
+        api_name: "alpha".into(),
+        context_window: 32_000,
+        ..Default::default()
+    };
+    let discovered = CustomModel {
+        api_name: "alpha".into(),
+        context_window: 64_000,
+        context_window_asserted: true,
+        ..Default::default()
+    };
+    let once = apply_configured_custom_model_overrides(
+        vec![discovered.clone()],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(once[0].context_window, 64_000);
+    assert!(once[0].context_window_asserted);
+
+    let twice =
+        apply_configured_custom_model_overrides(once, std::slice::from_ref(&configured), true);
+    assert_eq!(twice[0].context_window, 64_000);
+    assert!(twice[0].context_window_asserted);
+}
+
+#[test]
+fn a_sparse_id_only_inventory_keeps_configured_limits_through_registration_and_cache() {
+    use crate::auth::custom::{CredentialStore, CustomCredential, CustomModel};
+
+    // The real-world shape: a local OpenAI-compatible gateway whose /v1/models
+    // lists ids and nothing else. Discovery must not replace the user's small
+    // window and output cap with the 262144/16384 fallbacks, and the cached
+    // inventory must carry the same effective limits on the next start.
+    let directory = tempfile::tempdir().unwrap();
+    let store = CredentialStore::new(directory.path().join("custom.json"));
+    let cred = CustomCredential {
+        base_url: "http://127.0.0.1:9/v1/".into(),
+        api_key: "fixture".into(),
+        api_name: String::new(),
+        headers: Vec::new(),
+        models: vec![CustomModel {
+            api_name: "local".into(),
+            display_name: "Local".into(),
+            context_window: 8_192,
+            max_output_tokens: 1_024,
+            tools: true,
+            ..Default::default()
+        }],
+        auto_discover: true,
+    };
+
+    // Stand in for the id-only response: every limit came from a fallback.
+    let sparse = |api_name: &str| CustomModel {
+        api_name: api_name.to_owned(),
+        context_window: 262_144,
+        max_output_tokens: 16_384,
+        context_window_asserted: false,
+        max_output_tokens_asserted: false,
+        ..Default::default()
+    };
+    let discovered = vec![sparse("local"), sparse("local-extra")];
+
+    let merged = apply_configured_custom_model_overrides(
+        apply_known_custom_model_defaults(&cred, discovered),
+        &cred.models,
+        true,
+    );
+    assert_eq!(merged[0].context_window, 8_192);
+    assert_eq!(merged[0].max_output_tokens, 1_024);
+    // A model with no configured counterpart keeps the discovery fallback.
+    assert_eq!(merged[1].api_name, "local-extra");
+    assert_eq!(merged[1].context_window, 262_144);
+
+    // The cached inventory is the already-merged effective limit, so the next
+    // start must read back the same numbers rather than re-deriving them.
+    let fingerprint = "fixture-fingerprint";
+    save_custom_model_cache_for(
+        &store,
+        "local-provider",
+        &cred.base_url,
+        fingerprint,
+        &merged,
+    )
+    .unwrap();
+    let loaded = load_custom_model_cache_for(&store, "local-provider", &cred.base_url, fingerprint)
+        .unwrap()
+        .expect("inventory must round-trip through the cache");
+    let cached = match loaded {
+        CachedCustomInventory::Available(models) => models,
+        CachedCustomInventory::Unavailable => panic!("inventory cached as unavailable"),
+    };
+    assert_eq!(cached[0].api_name, "local");
+    assert_eq!(cached[0].context_window, 8_192);
+    assert_eq!(cached[0].max_output_tokens, 1_024);
+    // The cached limit came from this file, not the endpoint, so the
+    // provenance must round-trip or the next start cannot tell them apart.
+    assert!(!cached[0].context_window_asserted);
+    assert!(!cached[0].max_output_tokens_asserted);
 }
 
 #[test]
@@ -2954,6 +3152,8 @@ fn custom_model_cache_is_scoped_to_endpoint_and_reuses_discovery() {
         display_name: "Local Model".into(),
         context_window: 262_144,
         max_output_tokens: 16_384,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
         tools: true,
         parallel_tool_calls: true,
         vision: false,
@@ -3218,7 +3418,11 @@ fn hlid_llama_cpp_metadata_reports_the_served_context_window() {
         }
     });
 
-    assert_eq!(extract_ctx_from_model_entry(&entry), 131_072);
+    assert_eq!(extract_ctx_from_model_entry(&entry), Some(131_072));
+    assert_eq!(
+        extract_ctx_from_model_entry(&serde_json::json!({"id": "sparse"})),
+        None
+    );
 }
 
 #[test]

@@ -378,7 +378,11 @@ const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 // Version 10 invalidates inventories cached with configured-wins limits so a
 // stale registry `context_window` pin can no longer entomb a live
 // `max_model_len` assertion across restarts and background refreshes.
-const CUSTOM_MODEL_CACHE_VERSION: u8 = 10;
+// Version 11 invalidates inventories where sparse endpoint metadata had
+// overwritten configured limits with unasserted discovery fallbacks, and starts
+// recording each limit's provenance so a cached inventory re-merges to the same
+// effective limit on the next start.
+const CUSTOM_MODEL_CACHE_VERSION: u8 = 11;
 const PROVIDER_INVENTORY_CACHE_VERSION: u8 = 1;
 const MAX_PROVIDER_INVENTORY_CACHE_BYTES: usize = MAX_DISCOVERY_BODY_BYTES + 1024 * 1024;
 const PROVIDER_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -4182,11 +4186,23 @@ fn apply_configured_custom_model_overrides(
         {
             Some(configured_model) => {
                 let mut effective = configured_model.clone();
-                effective.context_window = model.context_window;
-                effective.max_output_tokens = model
-                    .max_output_tokens
-                    .min(configured_model.max_output_tokens)
-                    .min(model.context_window);
+                if model.context_window_asserted {
+                    effective.context_window = model.context_window;
+                }
+                // Carry the provenance onto the merged model. Registration runs
+                // this merge again over its own output, so a dropped flag would
+                // let that second pass re-apply a stale registry pin on top of
+                // a live assertion.
+                effective.context_window_asserted = model.context_window_asserted;
+                effective.max_output_tokens = if model.max_output_tokens_asserted {
+                    model
+                        .max_output_tokens
+                        .min(configured_model.max_output_tokens)
+                } else {
+                    configured_model.max_output_tokens
+                }
+                .min(effective.context_window);
+                effective.max_output_tokens_asserted = model.max_output_tokens_asserted;
                 merged.push(effective);
             }
             None => merged.push(model),
@@ -4459,6 +4475,8 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
         display_name: api_name.to_owned(),
         context_window,
         max_output_tokens: APPLE_FM_MAX_OUTPUT_TOKENS,
+        context_window_asserted: true,
+        max_output_tokens_asserted: true,
         tools: true,
         parallel_tool_calls: false,
         vision: false,
@@ -5055,7 +5073,14 @@ fn discover_models_blocking(
                 }
             };
             let entry = described.as_ref().unwrap_or(entry);
-            let ctx = extract_ctx_from_model_entry(entry);
+            // A limit the endpoint did not state is a fallback, not evidence.
+            // Keeping the two apart is what lets a configured pin survive an
+            // inventory that only lists model ids.
+            let asserted_ctx = extract_ctx_from_model_entry(entry);
+            // Sensible default for modern local models.
+            let ctx = asserted_ctx.unwrap_or(262_144);
+            let asserted_output =
+                positive_u64(entry, &["max_output_tokens", "max_completion_tokens"]);
             let vision = entry
                 .get("architecture")
                 .and_then(|a| a.get("input_modalities"))
@@ -5076,15 +5101,14 @@ fn discover_models_blocking(
                         .any(|parameter| parameter.as_str() == Some(name))
                 })
             };
-            let max_output_tokens =
-                positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
-                    .unwrap_or(16_384)
-                    .min(ctx);
+            let max_output_tokens = asserted_output.unwrap_or(16_384).min(ctx);
             let mut model = CustomModel {
                 api_name: id.to_string(),
                 display_name: discovered_display_name(entry, id).unwrap_or_default(),
                 context_window: ctx,
                 max_output_tokens,
+                context_window_asserted: asserted_ctx.is_some(),
+                max_output_tokens_asserted: asserted_output.is_some(),
                 tools: custom_model_metadata_supports_tools(entry),
                 parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"])
                     .unwrap_or_else(|| supports("parallel_tool_calls")),
@@ -5123,7 +5147,12 @@ fn discover_models_blocking(
 /// Walk the model metadata looking for a context length. vLLM emits
 /// `--max-model-len`, while llama.cpp-style servers expose `--ctx-size` or
 /// `meta.n_ctx` through OpenAI-compatible gateways such as hlid.
-fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
+///
+/// Returns `None` when the entry asserts no context length at all, which is
+/// how a sparse inventory is distinguished from one that stated a limit. A
+/// zero or unparsable command-line value is rejected rather than accepted as
+/// a window of nothing.
+fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<u64> {
     let args = match entry
         .get("status")
         .and_then(|s| s.get("args"))
@@ -5146,8 +5175,7 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
                 entry
                     .get("meta")
                     .and_then(|meta| positive_u64(meta, &["n_ctx", "n_ctx_train"]))
-            })
-            .unwrap_or(262_144);
+            });
         }
     };
 
@@ -5156,7 +5184,9 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
         let s = arg.as_str().unwrap_or("");
         if next_is_ctx {
             if let Ok(v) = s.parse::<u64>() {
-                return v;
+                if v > 0 {
+                    return Some(v);
+                }
             }
             next_is_ctx = false;
         }
@@ -5178,7 +5208,6 @@ fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> u64 {
             .get("meta")
             .and_then(|meta| positive_u64(meta, &["n_ctx", "n_ctx_train"]))
     })
-    .unwrap_or(262_144) // sensible default for modern local models
 }
 
 // Codex's checked-in defaults are only a discovery fallback. The authenticated

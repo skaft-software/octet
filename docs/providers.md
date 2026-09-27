@@ -487,7 +487,15 @@ authoritative and the registry is a seed/fallback: a live `max_model_len` (or
 `context_window`/`context_length`) assertion wins over a stale registry
 `context_window` pin, and `max_output_tokens` is the tighter of the endpoint
 and registry caps clamped to the live window, so a vLLM profile switch in
-either direction is followed without editing the registry. Every other
+either direction is followed without editing the registry. Only an *asserted*
+limit is authoritative: a sparse `/v1/models` response that publishes ids and
+nothing else asserts neither limit, so a configured `context_window` and
+`max_output_tokens` survive discovery unchanged instead of being replaced by
+octet's discovery fallbacks, and a model with no configured counterpart keeps
+the fallback. The two limits are recorded independently, so an endpoint that
+reports its served context but no output cap follows the live window while the
+configured output cap survives. Cached inventories carry that provenance, so
+the offline and online paths resolve to the same effective limits. Every other
 registry field — display name, tools/vision flags, reasoning values, pricing,
 presets — keeps configured-wins behavior. Use `auto_discover: false` with an
 explicit `models` inventory to pin the registry as truth when `GET /v1/models`
