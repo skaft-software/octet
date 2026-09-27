@@ -30,6 +30,20 @@ const RESIZED_ROWS: u16 = 12;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DRAIN_TIME: Duration = Duration::from_millis(35);
+/// Budget for observing one automatic live-reload pass.
+///
+/// The reload supervisor samples the filesystem on `DEFAULT_POLL_INTERVAL`
+/// (1s) and debounces for a further 200ms before it applies a pass at an idle
+/// boundary, so a freshly written prompt cannot appear on the first look. This
+/// deliberately does not reuse `STARTUP_TIMEOUT`: that is a single-frame
+/// budget, and spending it here would leave the retry loop below with less time
+/// than one of its own iterations can take, so the loop could never retry.
+const RELOAD_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per-attempt slice of `RELOAD_TIMEOUT`.
+///
+/// Kept well below the outer budget so several `/prompt` round trips fit
+/// inside it, which is the whole point of the retry loop.
+const RELOAD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const FRAME_BEGIN: &[u8] = b"\x1b[?2026h";
 const FRAME_END: &[u8] = b"\x1b[?2026l";
 const STALE_MARKER: &str = "OCTET_PTY_STALE_STARTUP";
@@ -1021,12 +1035,12 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
     // was printed. /prompt only inspects the loaded catalog; it never reloads
     // resources or submits a provider request. Close it between observations so
     // the watcher can apply its pass at the idle prompt.
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let deadline = Instant::now() + RELOAD_TIMEOUT;
     loop {
         octet.pty.drain_for(Duration::from_millis(350));
         let before = octet.pty.output.len();
         octet.pty.write_input(b"/prompt\r");
-        octet.wait_until(STARTUP_TIMEOUT, |output| {
+        octet.wait_until(RELOAD_ATTEMPT_TIMEOUT, |output| {
             contains_bytes(&output[before..], b"Prompt templates:")
         });
         octet.pty.drain_for(DRAIN_TIME);
