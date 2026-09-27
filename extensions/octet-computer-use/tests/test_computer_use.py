@@ -772,9 +772,6 @@ class CursorThemeTests(unittest.TestCase):
         from unittest import mock
         from octet_computer_use import cursor_theme
 
-        pinned = mock.patch.object(cursor_theme.platform, "system", return_value="Darwin")
-        pinned.start()
-        self.addCleanup(pinned.stop)
         extension, computer = entrypoint.create_extension()
         context = {"host": {"model": "claude-sonnet-4"}}
         with mock.patch.object(computer, "provision", return_value={
@@ -797,42 +794,370 @@ class CursorThemeTests(unittest.TestCase):
             self.assertTrue(failed["is_error"])
             self.assertIn("cursor theme setup failed", failed["content"][0]["text"])
 
-    def test_linux_setup_skips_themes_instead_of_failing(self):
-        # The Linux wheel has no cursor-theme compiler and the direct runtime no
-        # overlay, so setup must provision and report rather than error out.
+    def test_linux_setup_installs_themes_and_the_gnome_helper(self):
+        # The Linux wheel has no cursor-theme compiler, so setup must install
+        # the bundled artifacts itself rather than fail.
         from unittest import mock
-        from octet_computer_use import cursor_theme
+        from octet_computer_use import cursor_theme, gnome_helper
 
         extension, computer = entrypoint.create_extension()
-        with mock.patch.object(cursor_theme.platform, "system", return_value="Linux"), \
-             mock.patch.object(computer, "provision", return_value={
+        with mock.patch.object(computer, "provision", return_value={
                 "provisioned": True, "binary": "/tmp/cua-driver", "version": "0.30.2"}), \
              mock.patch.object(computer, "publish_status", return_value={
                 "installed": True, "permissions": "granted", "runtime": "direct",
                 "platform": "linux", "permission_detail": "Wayland (native) reachable"}), \
              mock.patch.object(entrypoint, "_setup_jev", return_value={"jev_setup": "skipped"}), \
-             mock.patch.object(cursor_theme, "install_bundled_themes") as install:
+             mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24) as install, \
+             mock.patch.object(gnome_helper, "is_gnome_wayland", return_value=True), \
+             mock.patch.object(gnome_helper, "install", return_value={
+                "gnome_helper": "restart-required",
+                "gnome_helper_detail": "log out and back in once"}) as helper:
             result = extension._commands["computer-use"].handler(["setup"], {})
-        install.assert_not_called()
+        install.assert_called_once_with(Path("/tmp/cua-driver"))
+        helper.assert_called_once_with()
         self.assertFalse(result.get("is_error"))
-        self.assertEqual(result["structured_content"]["cursor_themes_installed"], 0)
+        self.assertEqual(result["structured_content"]["cursor_themes_installed"], 24)
+        self.assertEqual(result["structured_content"]["gnome_helper"], "restart-required")
 
     def test_installer_uses_only_bundled_artifacts_and_reports_failure(self):
         from unittest import mock
         from octet_computer_use import cursor_theme
 
-        with mock.patch.object(cursor_theme.subprocess, "run") as run:
-            run.return_value.returncode = 0
-            self.assertEqual(cursor_theme.install_bundled_themes(Path("/tmp/cua-driver")), 24)
-            self.assertEqual(run.call_count, 24)
-            for args, _ in run.call_args_list:
-                command = args[0]
-                self.assertEqual(command[:3], ["/tmp/cua-driver", "cursor-theme", "install"])
-                self.assertEqual(Path(command[3]).parent, cursor_theme.THEMES)
-            run.return_value.returncode = 1
-            run.return_value.stderr = "rejected"
-            with self.assertRaisesRegex(RuntimeError, "rejected"):
-                cursor_theme.install_bundled_themes(Path("/tmp/cua-driver"))
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "cua-driver"
+            binary.write_text("")
+            (Path(directory) / "cua-cursor-theme").write_text("")
+            with mock.patch.object(cursor_theme.subprocess, "run") as run:
+                run.return_value.returncode = 0
+                self.assertEqual(cursor_theme.install_bundled_themes(binary), 24)
+                self.assertEqual(run.call_count, 24)
+                for args, _ in run.call_args_list:
+                    command = args[0]
+                    self.assertEqual(command[:3], [str(binary), "cursor-theme", "install"])
+                    self.assertEqual(Path(command[3]).parent, cursor_theme.THEMES)
+                run.return_value.returncode = 1
+                run.return_value.stderr = "rejected"
+                with self.assertRaisesRegex(RuntimeError, "rejected"):
+                    cursor_theme.install_bundled_themes(binary)
+
+    def test_without_the_compiler_themes_go_straight_into_the_driver_store(self):
+        # Mirrors Cua's own install: <store>/<id>.cua-theme, atomically, with
+        # the driver re-validating on load. No subprocess is involved.
+        from unittest import mock
+        from octet_computer_use import cursor_theme
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Path(directory) / "data" / "cua-driver" / "cursor-themes"
+            env = {"XDG_DATA_HOME": str(Path(directory) / "data"), "HOME": directory}
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(cursor_theme.platform, "system", return_value="Linux"), \
+                 mock.patch.object(cursor_theme.subprocess, "run") as run:
+                binary = Path(directory) / "cua-driver"
+                self.assertEqual(cursor_theme.theme_store_root(), store)
+                self.assertEqual(cursor_theme.installed_theme_ids(binary), {"cua.default"})
+                self.assertEqual(cursor_theme.install_bundled_themes(binary), 24)
+                run.assert_not_called()
+                entry = cursor_theme.PALETTE["anthropic"]
+                target = store / (entry["id"] + ".cua-theme")
+                self.assertEqual(target.read_bytes(),
+                                 (cursor_theme.THEMES / "anthropic.cua-theme").read_bytes())
+                ids = cursor_theme.installed_theme_ids(binary)
+                self.assertEqual(ids, {"cua.default"} | {e["id"] for e in cursor_theme.PALETTE.values()})
+                # Idempotent, and an outdated copy is replaced.
+                target.write_bytes(b"stale")
+                cursor_theme.install_bundled_themes(binary)
+                self.assertEqual(target.read_bytes()[:8], b"CUATHEM3")
+                self.assertEqual([p.name for p in store.iterdir() if p.name.startswith(".")], [])
+
+    def test_store_falls_back_to_home_and_refuses_a_symlinked_store(self):
+        from unittest import mock
+        from octet_computer_use import cursor_theme
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"HOME": directory}, clear=True), \
+                 mock.patch.object(cursor_theme.platform, "system", return_value="Linux"):
+                root = cursor_theme.theme_store_root()
+                self.assertEqual(root, Path(directory) / ".local/share/cua-driver/cursor-themes")
+                root.parent.mkdir(parents=True)
+                elsewhere = Path(directory) / "elsewhere"
+                elsewhere.mkdir()
+                root.symlink_to(elsewhere)
+                with self.assertRaisesRegex(RuntimeError, "symlink"):
+                    cursor_theme.install_bundled_themes(Path(directory) / "cua-driver")
+                self.assertEqual(list(elsewhere.iterdir()), [])
+
+
+class LinuxCursorTests(unittest.TestCase):
+    """Linux's direct runtime draws the model-colored cursor, best-effort."""
+
+    def setUp(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        for target, value in ((driver.platform, "Linux"),):
+            patcher = mock.patch.object(target, "system", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        confirm = mock.patch.dict(os.environ, {"OCTET_CUA_CONFIRM": "0"})
+        confirm.start()
+        self.addCleanup(confirm.stop)
+
+    def _start(self, client, *, theme_ids, installed=None, gnome=False):
+        """Run ComputerUse.client() for a Linux direct runtime with fakes."""
+
+        from unittest import mock
+        from octet_computer_use import cursor_theme, driver, gnome_helper
+
+        computer = ComputerUse(RecordingExtension())
+        computer.select_model({"host": {"model": "claude-sonnet-4"}})
+        inventories = [set(theme_ids), set(installed if installed is not None else theme_ids)]
+        with mock.patch.object(driver, "desktop_app_binary", return_value=None), \
+             mock.patch.object(driver, "installed_binary", return_value=Path("/opt/cua-driver")), \
+             mock.patch.object(entrypoint, "DriverClient", return_value=client), \
+             mock.patch.object(cursor_theme, "installed_theme_ids",
+                               side_effect=lambda binary: inventories.pop(0) if len(inventories) > 1
+                               else inventories[0]), \
+             mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24) as install, \
+             mock.patch.object(gnome_helper, "is_gnome_wayland", return_value=gnome), \
+             mock.patch.object(gnome_helper, "set_theme_color", return_value=True) as color:
+            computer.client()
+        return computer, install, color
+
+    def _client(self, **kwargs):
+        client = CursorSessionTests._CursorClient(**kwargs)
+        client.start = lambda **_: None
+        return client
+
+    def test_direct_runtime_shows_the_model_colored_theme(self):
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client()
+        computer, install, color = self._start(client, theme_ids=every)
+        install.assert_not_called()
+        self.assertFalse(computer._app_daemon)
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.anthropic")
+        color.assert_not_called()
+
+    def test_missing_themes_are_installed_on_first_use(self):
+        # Provisioned through the agent tool, never through /computer-use setup.
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client()
+        computer, install, _ = self._start(client, theme_ids={"cua.default"}, installed=every)
+        install.assert_called_once_with(Path("/opt/cua-driver"))
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.anthropic")
+
+    def test_gnome_pins_the_shell_helper_to_the_model_color(self):
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        computer, _, color = self._start(self._client(), theme_ids=every, gnome=True)
+        color.assert_called_once_with(entrypoint.cursor_theme.PALETTE["anthropic"]["color"])
+
+    def test_a_rejected_theme_falls_back_to_the_default_cursor(self):
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client()
+        original = client.call
+
+        def call(tool, arguments=None, **kwargs):
+            if tool == "set_agent_cursor_theme" and arguments["theme_id"] != "cua.default":
+                client.calls.append((tool, dict(arguments)))
+                return {"isError": True, "content": [{"type": "text", "text": "artifact version"}]}
+            return original(tool, arguments, **kwargs)
+
+        client.call = call
+        computer, _, _ = self._start(client, theme_ids=every)
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "cua.default")
+
+    def test_a_cursor_failure_never_blocks_actions(self):
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client(enabled=False)
+        computer, _, _ = self._start(client, theme_ids=every)
+        self.assertFalse(computer._cursor_ready)
+        self.assertIn("refusing to report readiness", computer._cursor_failure)
+        attempts = sum(tool == "set_agent_cursor_enabled" for tool, _ in client.calls)
+        computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        self.assertIn("click", [tool for tool, _ in client.calls])
+        # The failure is not retried on every action, only after a model switch.
+        self.assertEqual(sum(tool == "set_agent_cursor_enabled" for tool, _ in client.calls), attempts)
+        text = _render_status({"installed": True, "runtime": "direct", "platform": "linux",
+                               "permissions": "granted", "cursor_available": True,
+                               "cursor_enabled": False, "cursor_detail": computer._cursor_failure})
+        self.assertIn("agent cursor: not shown", text)
+
+    def test_native_wayland_readiness_uses_the_setter_acknowledgements(self):
+        # Cua 0.30 reads cursor state back from its X11 overlay, so a pure
+        # Wayland session reports defaults although the layer-shell overlay
+        # draws the configured cursor (verified on headless Sway).
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client()
+
+        def call(tool, arguments=None, **kwargs):
+            args = dict(arguments or {})
+            client.calls.append((tool, args))
+            if tool == "set_agent_cursor_motion":
+                return {"structuredContent": {"motion": {k: v for k, v in args.items() if k != "session"}}}
+            if tool == "set_agent_cursor_theme":
+                return {"structuredContent": {"theme": {"id": args["theme_id"]}}}
+            if tool == "set_agent_cursor_enabled":
+                return {"structuredContent": {"enabled": True}}
+            if tool == "get_agent_cursor_state":
+                return {"structuredContent": {"enabled": True, "motion": {"idle_hide_ms": 20000.0},
+                                              "theme": {"id": "cua.default"}}}
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+        client.call = call
+        computer, _, _ = self._start(client, theme_ids=every)
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.anthropic")
+        # The macOS host never accepts acknowledgements in place of read-back.
+        host = ComputerUse(RecordingExtension())
+        host._app_daemon = True
+        host._theme_ids = every
+        with self.assertRaises(McpError):
+            host._configure_cursor(client, "s")
+
+    def test_status_renders_the_linux_cursor_and_gnome_helper(self):
+        text = _render_status({"installed": True, "runtime": "direct", "platform": "linux",
+                               "permissions": "granted", "cursor_available": True,
+                               "cursor_enabled": True,
+                               "cursor_theme": "com.octet.computeruse.anthropic",
+                               "gnome_helper": "restart-required"})
+        self.assertIn("agent cursor: on (theme com.octet.computeruse.anthropic)", text)
+        self.assertIn("log out and back in", text)
+
+
+class GnomeHelperTests(unittest.TestCase):
+    def test_gnome_wayland_detection_covers_derivatives(self):
+        from unittest import mock
+        from octet_computer_use import gnome_helper
+
+        with mock.patch.object(gnome_helper.platform, "system", return_value="Linux"):
+            for desktop, expected in (("ubuntu:GNOME", True), ("GNOME", True), ("pop:GNOME", True),
+                                      ("Hyprland", False), ("KDE", False)):
+                with self.subTest(desktop=desktop), mock.patch.dict(
+                        os.environ, {"WAYLAND_DISPLAY": "wayland-0",
+                                     "XDG_CURRENT_DESKTOP": desktop}, clear=True):
+                    self.assertEqual(gnome_helper.is_gnome_wayland(), expected)
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME", "DISPLAY": ":0"},
+                                 clear=True):
+                self.assertFalse(gnome_helper.is_gnome_wayland(), "GNOME on Xorg needs no helper")
+
+    def test_bundled_helper_is_the_pinned_release_plus_the_theme_pin(self):
+        from octet_computer_use import gnome_helper
+
+        source = (gnome_helper.BUNDLE / "extension.js").read_text()
+        metadata = __import__("json").loads((gnome_helper.BUNDLE / "metadata.json").read_text())
+        self.assertEqual(metadata["uuid"], gnome_helper.UUID)
+        self.assertEqual(metadata["version"], 8)
+        self.assertIn('<method name="SetThemeColor">', source)
+        self.assertIn("if (this._themeColor) return;", source)
+
+    def test_install_writes_the_bundle_and_enables_it(self):
+        from unittest import mock
+        from octet_computer_use import gnome_helper
+
+        calls = []
+
+        def run(argv):
+            calls.append(argv)
+            result = mock.Mock(returncode=0, stdout="")
+            if argv[:2] == ["gnome-extensions", "enable"]:
+                result.returncode = 2  # not yet known to the running Shell
+            elif argv[:3] == ["gsettings", "get", "org.gnome.shell"] and argv[3] == "enabled-extensions":
+                result.stdout = "['user-theme@gnome-shell-extensions.gcampax.github.com']\n"
+            elif argv[:3] == ["gsettings", "get", "org.gnome.shell"]:
+                result.stdout = "false\n"
+            elif argv[0] == "gdbus":
+                result.returncode = 1  # not loaded until the next login
+            return result
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, {"HOME": directory}, clear=True), \
+                mock.patch.object(gnome_helper, "_run", side_effect=run):
+            outcome = gnome_helper.install()
+            target = Path(directory) / ".local/share/gnome-shell/extensions/winrects@cua"
+            for name in gnome_helper.FILES:
+                self.assertEqual((target / name).read_bytes(),
+                                 (gnome_helper.BUNDLE / name).read_bytes())
+        self.assertEqual(outcome["gnome_helper"], "restart-required")
+        self.assertIn("log out and back in", outcome["gnome_helper_detail"])
+        self.assertIn(["gsettings", "set", "org.gnome.shell", "enabled-extensions",
+                       "['user-theme@gnome-shell-extensions.gcampax.github.com', 'winrects@cua']"],
+                      calls)
+
+    def test_theme_color_is_validated_before_reaching_dbus(self):
+        from unittest import mock
+        from octet_computer_use import gnome_helper
+
+        with mock.patch.object(gnome_helper, "_run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="()")
+            self.assertFalse(gnome_helper.set_theme_color("red; rm -rf ~"))
+            run.assert_not_called()
+            self.assertTrue(gnome_helper.set_theme_color("#a9634c"))
+            self.assertEqual(run.call_args[0][0][-2:], ["org.cua.WinRects.SetThemeColor", "#a9634c"])
+
+
+class PiplessProvisionTests(unittest.TestCase):
+    """Debian/Ubuntu Pythons without python3-venv still provision the driver."""
+
+    def test_wheel_selection_matches_arch_and_requires_a_digest(self):
+        from octet_computer_use import driver
+
+        files = [
+            {"filename": "cua_driver-0.30.2-py3-none-macosx_13_0_universal2.whl",
+             "url": "https://files/a", "digests": {"sha256": "a"}},
+            {"filename": "cua_driver-0.30.2-py3-none-manylinux_2_31_aarch64.whl",
+             "url": "https://files/b", "digests": {"sha256": "b"}},
+            {"filename": "cua_driver-0.30.2-py3-none-manylinux_2_31_x86_64.whl",
+             "url": "http://files/insecure", "digests": {"sha256": "c"}},
+            {"filename": "cua_driver-0.30.2-py3-none-manylinux_2_31_x86_64.whl",
+             "url": "https://files/d", "digests": {"sha256": "d"}},
+        ]
+        self.assertEqual(driver._select_wheel(files, "x86_64")["url"], "https://files/d")
+        self.assertEqual(driver._select_wheel(files, "aarch64")["url"], "https://files/b")
+        with self.assertRaises(driver.ProvisionError):
+            driver._select_wheel(files[:1], "x86_64")
+
+    def test_only_the_driver_package_can_be_extracted(self):
+        from octet_computer_use import driver
+
+        for name in ("cua_driver/bin/cua-driver", "cua_driver-0.30.2.dist-info/RECORD"):
+            self.assertTrue(driver._safe_member(name), name)
+        for name in ("/etc/passwd", "../x", "cua_driver/../../x", "cua_driver/..",
+                     "other/module.py", "cua_driver\\..\\x", "cua_driver_evil/x"):
+            self.assertFalse(driver._safe_member(name), name)
+
+    def test_a_missing_ensurepip_falls_back_to_the_direct_wheel(self):
+        import subprocess
+        from unittest import mock
+        from octet_computer_use import driver
+
+        failed = subprocess.CompletedProcess([], 1, "", "ensurepip is not available")
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(driver, "installed_binary", return_value=None), \
+                mock.patch.object(driver, "_run", return_value=failed), \
+                mock.patch.object(driver.platform, "system", return_value="Linux"), \
+                mock.patch.object(driver.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(driver, "_provision_without_pip",
+                                  return_value=Path("/opt/cua-driver")) as fallback:
+            paths = driver.DriverPaths.for_home(Path(directory))
+            self.assertEqual(driver.provision(paths, version="0.30.2"), Path("/opt/cua-driver"))
+        fallback.assert_called_once()
+        self.assertEqual(fallback.call_args[0][1], "0.30.2")
+
+    def test_other_platforms_still_report_the_venv_failure(self):
+        import subprocess
+        from unittest import mock
+        from octet_computer_use import driver
+
+        failed = subprocess.CompletedProcess([], 1, "", "no venv")
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(driver, "installed_binary", return_value=None), \
+                mock.patch.object(driver, "_run", return_value=failed), \
+                mock.patch.object(driver.platform, "system", return_value="Darwin"), \
+                mock.patch.object(driver, "_provision_without_pip") as fallback:
+            with self.assertRaisesRegex(driver.ProvisionError, "no venv"):
+                driver.provision(driver.DriverPaths.for_home(Path(directory)))
+        fallback.assert_not_called()
 
 
 class CursorSessionTests(unittest.TestCase):

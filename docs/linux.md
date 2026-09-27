@@ -54,23 +54,43 @@ octet --enable-extension octet-computer-use
 
 Linux has no system permission to grant. Computer use is ready when the driver can
 reach your display session, and `/computer-use status` says which one it found.
+Setup also works without `python3-venv` or pip: on Debian and Ubuntu the extension
+installs the published driver wheel directly after verifying its checksum.
+
+| Desktop | Windows and capture | Input | Agent cursor |
+| --- | --- | --- | --- |
+| Hyprland (Omarchy), Sway, labwc, other wlroots | Native Wayland, compositor IPC | wlroots virtual pointer and keyboard | Model-colored, layer-shell overlay |
+| GNOME on Wayland | Cua's GNOME Shell helper, installed by setup | Portal (libei), after the helper verifies focus | Model-colored, drawn by the helper |
+| KDE Plasma on Wayland | AT-SPI and portal | Accessibility actions and portal input | Model-colored, layer-shell overlay |
+| Any X11 session, including GNOME/KDE on Xorg | X11 | X11 | Model-colored, X11 overlay |
 
 - **Start octet inside your graphical session.** Launch it from a terminal on the
   desktop, not over SSH or from a TTY, so `WAYLAND_DISPLAY` or `DISPLAY`,
   `XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS` reach the driver.
 - **Wayland is native.** In a Wayland session octet turns on the driver's native
   Wayland backend, so native Wayland windows are visible, not only XWayland ones.
-  On Hyprland the driver also uses `HYPRLAND_INSTANCE_SIGNATURE` to list windows.
+  The driver identifies the compositor from `XDG_CURRENT_DESKTOP` and uses
+  `HYPRLAND_INSTANCE_SIGNATURE` or `SWAYSOCK` to list windows.
+- **Wayland input targets the focused window.** Wayland has no way to send input
+  to a window in the background, so the agent retries such an action with
+  foreground delivery, which briefly focuses the target window.
+- **GNOME needs one login.** On GNOME Wayland, `/computer-use setup` installs and
+  enables Cua's GNOME Shell helper. GNOME loads it at the next login, so log out
+  and back in once. Until then, status says so.
+- **KDE limits.** Cua's KWin helper must be built against your KWin, so it is not
+  bundled. KDE Wayland works through accessibility actions and the portal, and
+  the driver refuses raw pixel input it cannot aim at the right window.
 - **AT-SPI gives element trees.** Install `at-spi2-core`
-  (`sudo pacman -S at-spi2-core`) and log in again. Without it the driver still
-  captures the screen and acts by pixel, and status says so. Chromium and
-  Electron apps expose their tree only with `--force-renderer-accessibility`;
-  Qt apps need `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`.
+  (`sudo pacman -S at-spi2-core`) and log in again. The driver asks the session to
+  turn accessibility on, so Chromium, Electron, GTK, and Qt apps expose their
+  trees. Without AT-SPI the driver still captures the screen and acts by pixel,
+  and status says so.
 - **Portal prompts are expected.** Where the compositor offers no direct capture
   or input protocol, the driver goes through `xdg-desktop-portal`, which can ask
   for consent once per session.
-- **No agent cursor.** The Linux driver runs direct, without the macOS
-  agent-cursor overlay, so setup skips the cursor themes.
+- **The cursor follows your model.** The agent cursor uses the same color as the
+  model-adaptive prompt in the TUI and switches at the next action after
+  `/model`. The themes install themselves the first time the cursor starts.
 
 Launched apps inherit your `PATH`, `HOME`, and locale, so Omarchy's web-app
 launchers and other user-installed commands start as they do from your desktop.

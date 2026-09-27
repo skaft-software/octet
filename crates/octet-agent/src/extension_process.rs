@@ -234,17 +234,23 @@ const MAX_EXTENSION_SECRET_NAME_BYTES: usize = 64;
 // credential. A Windows driver child cannot resolve its own runtime without
 // them, so admitting them here is what makes a declared Windows-native
 // capability installable rather than rejected at manifest validation.
-// XDG_CURRENT_DESKTOP and HYPRLAND_INSTANCE_SIGNATURE are the Linux equivalent:
-// they name the running desktop and the Hyprland instance whose IPC socket
-// already lives under the brokered XDG_RUNTIME_DIR. Neither is a credential,
-// and a Linux desktop driver cannot enumerate Hyprland windows without them.
+// The Linux desktop-identity names (XDG_CURRENT_DESKTOP, XDG_SESSION_DESKTOP,
+// DESKTOP_SESSION, KDE_FULL_SESSION) and compositor IPC names
+// (HYPRLAND_INSTANCE_SIGNATURE, SWAYSOCK) are the Linux equivalent: they name
+// the running desktop and a compositor socket that already lives under the
+// brokered XDG_RUNTIME_DIR. XDG_STATE_HOME locates per-user state like the
+// other XDG base directories. None is a credential, and a Linux desktop driver
+// cannot select its GNOME, KDE, Hyprland, or Sway route without them.
 const BROKERED_EXTENSION_ENVIRONMENT: &[&str] = &[
     "SSH_AUTH_SOCK",
     "APPDATA",
     "DBUS_SESSION_BUS_ADDRESS",
+    "DESKTOP_SESSION",
     "DISPLAY",
     "HYPRLAND_INSTANCE_SIGNATURE",
+    "KDE_FULL_SESSION",
     "LOCALAPPDATA",
+    "SWAYSOCK",
     "SYSTEMROOT",
     "USERPROFILE",
     "WAYLAND_DISPLAY",
@@ -255,7 +261,9 @@ const BROKERED_EXTENSION_ENVIRONMENT: &[&str] = &[
     "XDG_DATA_DIRS",
     "XDG_DATA_HOME",
     "XDG_RUNTIME_DIR",
+    "XDG_SESSION_DESKTOP",
     "XDG_SESSION_TYPE",
+    "XDG_STATE_HOME",
 ];
 
 fn is_false(value: &bool) -> bool {

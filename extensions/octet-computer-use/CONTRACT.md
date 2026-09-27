@@ -70,9 +70,18 @@ table, and test commands.
   session with the native backend enabled counts as ready, and only a missing
   display holds effectful actions. AT-SPI 2 is reported but not required,
   because the driver can act by pixel. Wayland input is compositor-dependent
-  (wlroots virtual pointer on Hyprland/Sway, portal/libei elsewhere). The
-  Linux runtime is always direct, with no cursor overlay, so cursor themes are
-  not installed.
+  (wlroots virtual pointer on Hyprland/Sway, portal/libei elsewhere), and
+  Wayland input to a window that is not focused needs `delivery_mode:
+  "foreground"`; neither octet nor the driver escalates automatically. The
+  Linux runtime is always direct and draws the model-colored cursor through
+  Cua's own X11 or layer-shell overlay, best-effort: a cursor failure is
+  reported and never blocks an action. The bundled themes are written into
+  the driver's theme store directly (the wheel has no theme compiler), at setup
+  and on first cursor use. GNOME Wayland uses the bundled, Octet-patched Cua
+  WinRects Shell helper (installed by `/computer-use setup`, loaded at the next
+  login), which draws the cursor itself and is pinned to the model color over
+  D-Bus. KDE Plasma's KWin helper must be built against the local KWin, so it
+  is not bundled; KDE Wayland works through AT-SPI and portal input.
 
 ## Not qualified here
 
