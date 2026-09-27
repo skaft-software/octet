@@ -6,6 +6,11 @@
   `[variants.dark]`, and `[variants.light]`, the published semantic role
   vocabulary, the `extension.<namespace>.<role>` contribution channel, typed
   glyphs with ASCII fallbacks, transcript surfaces, and layout.
+- [`Cards.toml`](Cards.toml) (`Cards`) is a ready-to-use shaded-surfaces
+  theme: rail chrome with quiet stripes, dark/light fills, an amber accent
+  with adaptive model colours, a borderless shaded composer, and a themed
+  splash with compact geometry. Copy it into a discovery directory to use
+  it as-is:
 
 It is a reference, not the compiled fallback. octet never reads this file at
 runtime; unknown or partial theme files always fall back to the compiled
@@ -14,6 +19,7 @@ default. Copy it into a discovery directory to start your own theme:
 ```console
 mkdir -p ~/.octet/themes
 cp examples/themes/octet-default.toml ~/.octet/themes/mine.toml
+cp examples/themes/Cards.toml ~/.octet/themes/Cards.toml
 ```
 
 Then name it at startup with `--theme mine` or `OCTET_THEME=mine`. The

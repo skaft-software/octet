@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Ship the `Cards` example theme (`examples/themes/Cards.toml`): shaded
+  rail surfaces with quiet stripes, dark/light fills, an amber accent with
+  adaptive model colours, a borderless shaded composer, and a themed splash
+  with compact geometry. Copy it into `~/.octet/themes` to use it.
+- Bound idle Ctrl+D exit to a 2 s extension-shutdown timeout with force-kill
+  fallback (matching the signal path) so a hung extension child cannot make
+  exit feel stuck; bound computer-use `end_session` to 3 s on shutdown.
+- Drain pending terminal input around Kitty keyboard-mode pop and raw-mode
+  exit so a held Ctrl+D repeat/release (`ESC[100;5u`) cannot leak a `00;5u`
+  tail into the parent shell.
+- Parse trailing Kitty image anchors once per transcript-block finish instead
+  of twice, and find compaction cut points with a binary search instead of a
+  linear scan per budget step.
 - Let custom themes opt out of the model-colour prompt wash with
   `prompt_wash = false`: prompt rows then render on the surface's own fill
   while the chevron keeps its prompt colour. The default keeps the wash so
