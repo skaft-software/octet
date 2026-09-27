@@ -136,6 +136,7 @@ extension processes stopped. [Discovery and trust](resources.md).
 | --- | --- |
 | Enter | Submit; while active, queue an editable follow-up for after the run. In a picker, select the visible action; in the slash-command popup, invoke the highlighted command. |
 | Shift+Enter | Newline when enhanced terminal key events are available. |
+| Shift+Tab | Cycle through the active model's supported thinking levels from lowest to highest, wrapping at the end. During a run, update the queued selection immediately. |
 | Ctrl+S | Steer at the next model boundary; in the resume picker, cycle sorting. |
 | Escape | Interrupt active work, then dispatch the oldest queued follow-up after settlement (never the draft); close/back out of a panel or slash popup first. |
 | Option+Up / Alt+Up | Recall the newest editable queued steering message or follow-up into an empty composer; no submission or interruption. |

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix Shift+Tab cycling so exact provider choices always sort from lowest to
+  highest and wrap to the lowest; rapid active-run taps advance from the latest
+  selected level, repaint immediately, and defer preference I/O until idle.
 - Fix Serve’s Ultra slider label and purple transition after rainbow Max.
   Expand the bounded model catalog from 256 to 4,096 entries so large provider
   inventories no longer hide models at the old cutoff; retain capability gates

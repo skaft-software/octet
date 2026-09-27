@@ -444,8 +444,8 @@ The picker groups providers alphabetically, then models alphabetically within ea
 provider. Provider names appear once as non-selectable headings; aligned model
 metadata is limited to input/output price, context window, and vision/audio
 support. Tool and reasoning support are omitted from these rows. Thinking
-choices include only the active model's advertised `min_effort..=max_effort`
-range.
+choices preserve the active model's exact supported set and are ordered from
+lowest to highest; Shift+Tab wraps from the last choice to the first.
 
 The context composition bar is ordered left-to-right by semantic model-input
 order: earliest framing at the left, chronological conversation and pending
@@ -492,6 +492,14 @@ bounded actionable reason.
   FIFO delivery projection. Sticky `/answer` input is deliberately not
   retractable because it changes the run's tool policy. The chord neither
   interrupts nor submits, and never overwrites a draft.
+- Shift+Tab advances immediately from the displayed reasoning selection through
+  the active model's exact supported levels in canonical low-to-high order and
+  wraps. During a qualified active Responses run, each press advances from the
+  latest local selection and repaints the footer immediately; superseded unsent
+  control updates and adjacent preference writes coalesce. Preference I/O waits
+  for the idle boundary. The queued label is local state, not provider
+  acknowledgement. Routes without live reasoning updates retain the presses as
+  ordered idle actions.
 - Escape closes the current panel/overlay/slash popup first. At the active
   composer it interrupts and arms queued dispatch only after authoritative
   aborted settlement; it never sends the unqueued draft. Repeated Escape while

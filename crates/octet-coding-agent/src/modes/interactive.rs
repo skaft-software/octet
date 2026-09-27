@@ -229,6 +229,9 @@ pub enum PendingIdleAction {
     Fast(bool),
     ChangeThinking(ReasoningConfig),
     ChangeThinkingLevel(ThinkingLevel),
+    /// Save the active-run selection as the startup preference at the idle
+    /// boundary. Key handling must never wait on config I/O.
+    PersistThinkingPreference(String),
     CycleThinking,
     PickModel,
     PickThinking,
@@ -258,8 +261,8 @@ pub enum PendingIdleAction {
 }
 
 /// Push an idle action while preserving ordering barriers. Adjacent model or
-/// thinking changes collapse to the latest request; sessions and compaction do
-/// not collapse or disappear.
+/// thinking changes and preference writes collapse to the latest request;
+/// sessions and compaction do not collapse or disappear.
 pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: PendingIdleAction) {
     let same_kind = matches!(
         (&queue.back(), &action),
@@ -268,28 +271,15 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
             PendingIdleAction::ChangeModel(_)
         ) | (Some(PendingIdleAction::Fast(_)), PendingIdleAction::Fast(_))
             | (
-                Some(PendingIdleAction::ChangeThinking(_)),
-                PendingIdleAction::ChangeThinking(_)
-            )
-            | (
-                Some(PendingIdleAction::ChangeThinking(_)),
-                PendingIdleAction::ChangeThinkingLevel(_)
-            )
-            | (
-                Some(PendingIdleAction::ChangeThinkingLevel(_)),
-                PendingIdleAction::ChangeThinking(_)
-            )
-            | (
-                Some(PendingIdleAction::ChangeThinkingLevel(_)),
-                PendingIdleAction::ChangeThinkingLevel(_)
-            )
-            | (
                 Some(
                     PendingIdleAction::ChangeThinking(_)
                         | PendingIdleAction::ChangeThinkingLevel(_)
-                        | PendingIdleAction::CycleThinking
                 ),
-                PendingIdleAction::CycleThinking
+                PendingIdleAction::ChangeThinking(_) | PendingIdleAction::ChangeThinkingLevel(_)
+            )
+            | (
+                Some(PendingIdleAction::PersistThinkingPreference(_)),
+                PendingIdleAction::PersistThinkingPreference(_)
             )
     );
     if same_kind {
@@ -2992,9 +2982,15 @@ where
     let mut clipboard_revision = 0;
     let mut clipboard_fallback = None;
     let mut pending_reasoning: Option<ReasoningConfig> = None;
+    // The cycle cursor is updated on keypress, not when the asynchronous control
+    // send is admitted. Rapid Shift+Tab presses therefore each advance once.
+    let mut selected_reasoning = inspection.reasoning.clone();
+    let mut last_control_reasoning = inspection.reasoning.clone();
+    let mut pending_reasoning_announce = true;
     // One pending latest choice and one bounded channel admission; never spawn
     // a control sender that could outlive the caller-driven run.
-    type ReasoningSend = Pin<Box<dyn Future<Output = (ReasoningConfig, Result<(), AgentError>)>>>;
+    type ReasoningSend =
+        Pin<Box<dyn Future<Output = (ReasoningConfig, bool, Result<(), AgentError>)>>>;
     let mut reasoning_send: Option<ReasoningSend> = None;
     let mut aborting = false;
     let mut dispatch_queued = false;
@@ -3081,10 +3077,11 @@ where
 
         if !aborting && reasoning_send.is_none() {
             if let Some(reasoning) = pending_reasoning.take() {
+                let announce = pending_reasoning_announce;
                 let control = control.clone();
                 reasoning_send = Some(Box::pin(async move {
                     let result = control.set_reasoning(reasoning.clone()).await;
-                    (reasoning, result)
+                    (reasoning, announce, result)
                 }));
             }
         }
@@ -3113,17 +3110,50 @@ where
             }
             result = futures_util::future::OptionFuture::from(reasoning_send.as_mut().map(|f| f.as_mut())), if reasoning_send.is_some() => {
                 reasoning_send = None;
-                if let Some((reasoning, result)) = result {
+                if let Some((reasoning, announce, result)) = result {
                     match result {
                         Ok(()) => {
+                            last_control_reasoning = reasoning.clone();
                             let label = reasoning_label(&reasoning);
-                            shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &format!("{label} (queued)"));
-                            shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
-                            if let Err(error) = persist_configuration(Some(executable_extensions), || crate::cli::persist_reasoning(&label)).await {
-                                shell.error(format!("failed to save thinking preference: {error}"));
+                            if selected_reasoning == reasoning {
+                                push_pending_action(
+                                    pending_actions,
+                                    PendingIdleAction::PersistThinkingPreference(label.clone()),
+                                );
+                                if announce {
+                                    shell.set_identity(
+                                        &inspection.model.endpoint.id.0,
+                                        &inspection.model.spec.id.0,
+                                        &format!("{label} (queued)"),
+                                    );
+                                    shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
+                                }
                             }
                         }
-                        Err(error) => shell.error(format!("thinking unchanged: {error}")),
+                        Err(error) if selected_reasoning == reasoning => {
+                            selected_reasoning = last_control_reasoning.clone();
+                            if last_control_reasoning != inspection.reasoning {
+                                push_pending_action(
+                                    pending_actions,
+                                    PendingIdleAction::PersistThinkingPreference(
+                                        reasoning_label(&last_control_reasoning),
+                                    ),
+                                );
+                            }
+                            let label = reasoning_label(&last_control_reasoning);
+                            let display = if last_control_reasoning != inspection.reasoning {
+                                format!("{label} (queued)")
+                            } else {
+                                label
+                            };
+                            shell.set_identity(
+                                &inspection.model.endpoint.id.0,
+                                &inspection.model.spec.id.0,
+                                &display,
+                            );
+                            shell.error(format!("thinking unchanged: {error}"));
+                        }
+                        Err(_) => {}
                     }
                 }
                 shell.render();
@@ -3304,7 +3334,9 @@ where
                                         }
                                     };
                                     if inspection.model.responses_features().reasoning_effort_updates {
+                                        selected_reasoning = reasoning.clone();
                                         pending_reasoning = Some(reasoning);
+                                        pending_reasoning_announce = true;
                                     } else {
                                         push_pending_action(pending_actions, PendingIdleAction::ChangeThinking(reasoning));
                                         shell.notice("thinking change queued for the next idle boundary");
@@ -3543,7 +3575,9 @@ where
                                     if aborting {
                                         shell.error("thinking unchanged: run is settling".into());
                                     } else {
+                                        selected_reasoning = reasoning.clone();
                                         pending_reasoning = Some(reasoning);
+                                        pending_reasoning_announce = true;
                                     }
                                     shell.render();
                                     continue;
@@ -3690,20 +3724,27 @@ where
                     InputAction::CycleThinking => {
                         if inspection.model.responses_features().reasoning_effort_updates {
                             let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
-                            // Cycle from the selection this run would actually
-                            // apply: a queued reasoning update when one is
-                            // pending, otherwise the committed selection. Both
-                            // are typed configs, so a budget, a normalized
-                            // effort, or a label the model no longer lists
-                            // still advances instead of matching nothing.
-                            let current = pending_reasoning
-                                .clone()
-                                .or_else(|| Some(inspection.reasoning.clone()));
-                            match next_thinking_level(&levels, current.as_ref(), &inspection.model) {
+                            // Cycle from the latest user selection, including a
+                            // value whose control send is still in flight.
+                            match next_thinking_level(
+                                &levels,
+                                Some(&selected_reasoning),
+                                &inspection.model,
+                            ) {
                                 Ok(level) => match requested_thinking_to_reasoning(
                                     level, &inspection.model, inspection.subagents_available,
                                 ) {
-                                    Ok(reasoning) => pending_reasoning = Some(reasoning),
+                                    Ok(reasoning) => {
+                                        selected_reasoning = reasoning.clone();
+                                        pending_reasoning = Some(reasoning.clone());
+                                        pending_reasoning_announce = false;
+                                        let label = reasoning_label(&reasoning);
+                                        shell.set_identity(
+                                            &inspection.model.endpoint.id.0,
+                                            &inspection.model.spec.id.0,
+                                            &format!("{label} (queued)"),
+                                        );
+                                    }
                                     Err(error) => shell.error(format!("thinking unchanged: {error}")),
                                 },
                                 Err(error) => shell.error(format!("thinking unchanged: {error}")),
@@ -6361,6 +6402,16 @@ async fn apply_pending_actions(
                 let reasoning =
                     requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
                 app = select_thinking(app, shell, input, reasoning, None).await?;
+            }
+            PendingIdleAction::PersistThinkingPreference(preference) => {
+                if let Err(error) =
+                    persist_configuration(Some(&mut app.executable_extensions), || {
+                        crate::cli::persist_reasoning(&preference)
+                    })
+                    .await
+                {
+                    shell.error(format!("failed to save thinking preference: {error}"));
+                }
             }
             PendingIdleAction::CycleThinking => {
                 let level = next_thinking_level(
@@ -11534,6 +11585,33 @@ mod tests {
     }
 
     #[test]
+    fn active_thinking_preference_writes_coalesce_without_crossing_barriers() {
+        let mut queue = VecDeque::new();
+        push_pending_action(
+            &mut queue,
+            PendingIdleAction::PersistThinkingPreference("low".into()),
+        );
+        push_pending_action(
+            &mut queue,
+            PendingIdleAction::PersistThinkingPreference("medium".into()),
+        );
+        push_pending_action(&mut queue, PendingIdleAction::NewSession);
+        push_pending_action(
+            &mut queue,
+            PendingIdleAction::PersistThinkingPreference("high".into()),
+        );
+
+        assert_eq!(
+            queue,
+            VecDeque::from([
+                PendingIdleAction::PersistThinkingPreference("medium".into()),
+                PendingIdleAction::NewSession,
+                PendingIdleAction::PersistThinkingPreference("high".into()),
+            ])
+        );
+    }
+
+    #[test]
     fn command_queue_parses_reconfiguration_values() {
         let mut queue = VecDeque::new();
         queue_command(Command::Login(None), &mut queue).unwrap();
@@ -14810,7 +14888,7 @@ mod tests {
             .reasoning_effort_updates = true;
         spec.capabilities.reasoning = Some(octet_ai::ReasoningCapability {
             options: Some(octet_ai::types::ReasoningOptions {
-                values: vec!["none".into(), "low".into(), "high".into()],
+                values: vec!["none".into(), "high".into(), "low".into()],
                 default: Some("low".into()),
             }),
             control: octet_ai::ReasoningControl::Effort,
@@ -14923,8 +15001,9 @@ mod tests {
             ("medium", true),
             ("ultra", true),
             ("high", false),
+            ("cycle", true),
         ] {
-            let accepted = requested == "high" && qualified;
+            let accepted = (requested == "high" || requested == "cycle") && qualified;
             let (server, started, release) =
                 HeldApi::start_with_repeat(fast_response(), true).await;
             let mut model = reasoning_control_model(&server.uri);
@@ -14939,14 +15018,20 @@ mod tests {
             inspection.session_path = agent.session().path().to_path_buf();
             let mut shell = InteractiveShell::test_shell();
             shell.set_identity("test", "scripted", "off");
-            let events: Vec<_> = format!("/thinking {requested}")
-                .chars()
-                .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
-                .chain(std::iter::once(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))))
-                .collect();
+            let events: Vec<_> = if requested == "cycle" {
+                (0..2)
+                    .map(|_| Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)))
+                    .collect()
+            } else {
+                format!("/thinking {requested}")
+                    .chars()
+                    .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+                    .chain(std::iter::once(Event::Key(KeyEvent::new(
+                        KeyCode::Enter,
+                        KeyModifiers::NONE,
+                    ))))
+                    .collect()
+            };
             let (sender, receiver) = tokio::sync::mpsc::channel(32);
             let (handled_tx, handled) = tokio::sync::oneshot::channel();
             let mut input = ProbedInput {
@@ -14995,11 +15080,20 @@ mod tests {
             assert_eq!(outcome, HostRunOutcome::Completed);
             drop(run);
             assert!(!quit);
-            if qualified {
-                assert!(
-                    pending.is_empty(),
-                    "qualified control never rebuilds at idle"
+            if qualified && accepted {
+                assert_eq!(
+                    pending,
+                    VecDeque::from([PendingIdleAction::PersistThinkingPreference(
+                        "high".to_owned()
+                    )]),
+                    "active updates defer only the final preference write until idle"
                 );
+                assert!(
+                    !crate::cli::global_config_path().unwrap().exists(),
+                    "active control handling must not persist before the idle boundary"
+                );
+            } else if qualified {
+                assert!(pending.is_empty(), "rejected control must not persist");
             } else {
                 assert_eq!(
                     pending.front(),
@@ -15017,7 +15111,7 @@ mod tests {
             );
             assert_eq!(
                 shell.selected_identity().1,
-                if accepted { "high" } else { "off" }
+                if accepted { "high (queued)" } else { "off" }
             );
             let bodies = server.bodies.lock().unwrap();
             if !accepted {
@@ -15041,9 +15135,11 @@ mod tests {
                 }
                 continue;
             }
-            assert!(shell
-                .debug_snapshot()
-                .contains("not provider acknowledgement"));
+            if requested != "cycle" {
+                assert!(shell
+                    .debug_snapshot()
+                    .contains("not provider acknowledgement"));
+            }
             assert_eq!(bodies.len(), 2);
             assert_eq!(bodies[0]["reasoning"]["effort"], "none");
             assert_eq!(
@@ -15056,11 +15152,6 @@ mod tests {
                 .iter()
                 .any(|item| item["type"] == "configuration_update"
                     && item["reasoning"]["effort"] == "high"));
-            assert!(
-                std::fs::read_to_string(crate::cli::global_config_path().unwrap())
-                    .unwrap()
-                    .contains("high")
-            );
         }
     }
 

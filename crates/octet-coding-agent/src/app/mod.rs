@@ -349,11 +349,25 @@ pub fn level_from_reasoning(
     }
 }
 
+fn thinking_level_order(level: ThinkingLevel) -> u8 {
+    match level {
+        ThinkingLevel::Off => 0,
+        ThinkingLevel::On => 1,
+        ThinkingLevel::Minimal => 2,
+        ThinkingLevel::Low => 3,
+        ThinkingLevel::Medium => 4,
+        ThinkingLevel::High => 5,
+        ThinkingLevel::Xhigh => 6,
+        ThinkingLevel::Max => 7,
+        ThinkingLevel::Ultra => 8,
+    }
+}
+
 fn supported_levels_for_model(model: &Model) -> Vec<ThinkingLevel> {
     let Some(capability) = &model.spec.capabilities.reasoning else {
         return vec![ThinkingLevel::Off];
     };
-    capability
+    let mut levels = capability
         .choices()
         .into_iter()
         .filter_map(|choice| match choice {
@@ -363,7 +377,11 @@ fn supported_levels_for_model(model: &Model) -> Vec<ThinkingLevel> {
             ReasoningConfig::Effort(effort) => Some(effort_level(effort)),
             ReasoningConfig::Budget(_) => None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Exact provider inventories can list choices in any order. The user-facing
+    // selector and Shift+Tab always walk the same portable low-to-high order.
+    levels.sort_by_key(|level| thinking_level_order(*level));
+    levels
 }
 
 /// Returns the model's portable thinking levels after applying the product's
@@ -1204,7 +1222,7 @@ mod tests {
             preserves_state: false,
             effort_budgets: None,
             openai_chat_mode: OpenAiChatReasoningMode::ProviderValues {
-                values: vec!["none".into(), "low".into(), "high".into()],
+                values: vec!["none".into(), "high".into(), "low".into()],
                 default: Some("low".into()),
                 system_message: true,
             },
