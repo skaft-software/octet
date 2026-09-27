@@ -94,6 +94,19 @@ documents the accepted sections in one place and is a valid starting point:
 cp examples/themes/octet-default.toml ~/.octet/themes/mine.toml
 ```
 
+`examples/themes/Cards.toml` is the source for the planned `Cards` built-in
+selector. It is not registered at runtime yet; copy it into a discovery
+directory to use it today:
+
+```console
+cp examples/themes/Cards.toml ~/.octet/themes/Cards.toml
+```
+
+A release build that compiles it in keeps this example and the built-in in
+sync, and `cards_example_theme_is_valid_for_every_background_profile` in
+`crates/octet-coding-agent/src/tui/theme.rs` fails the build if the example
+stops validating for any terminal-background profile.
+
 A theme file is a bounded TOML document (256 KiB) with these typed sections:
 
 - `[metadata]` — `name`, `description`, `author`, `version`, `terminal`

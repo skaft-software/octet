@@ -2593,6 +2593,60 @@ mod tests {
     }
 
     #[test]
+    fn cards_example_theme_is_valid_for_every_background_profile() {
+        // `examples/themes/Cards.toml` is the source for the `Cards` built-in.
+        // Every release build compiles it in, so a change to the example must
+        // never break schema validation, the bounded size limit, or any
+        // background profile it claims to support.
+        const CARDS: &str = include_str!("../../../../examples/themes/Cards.toml");
+        assert!(
+            CARDS.len() as u64 <= MAX_THEME_BYTES,
+            "Cards.toml exceeds MAX_THEME_BYTES"
+        );
+        // Only string values are schema-checked for control bytes; ordinary
+        // newlines and tabs in comments and whitespace are fine.
+        for line in CARDS.lines() {
+            if line.trim_start().starts_with('#') {
+                assert!(
+                    !line.chars().any(|ch| ch.is_control() && ch != '\t'),
+                    "control byte in comment: {line:?}"
+                );
+                continue;
+            }
+            assert!(
+                !line.chars().any(char::is_control),
+                "control byte in {CARDS}: {line:?}"
+            );
+        }
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            let theme = load_theme_source_for(
+                CARDS,
+                "Cards",
+                ThemeSource::File(PathBuf::from("Cards.toml")),
+                "Cards",
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                background,
+            )
+            .expect("Cards example theme must compile for every background");
+            assert_eq!(theme.background(), background);
+            assert_eq!(theme.metadata().name, "Cards");
+            assert!(!theme.is_compiled_default());
+            assert_eq!(
+                theme.resolve::<String>("prompt_wash").as_deref(),
+                Some("false")
+            );
+            assert_eq!(
+                theme.resolve::<String>("splash_compact").as_deref(),
+                Some("true")
+            );
+        }
+    }
+
+    #[test]
     fn missing_and_legacy_names_keep_the_compiled_default_fallback() {
         let directory = tempfile::tempdir().unwrap();
         let config = config(directory.path().to_owned());
