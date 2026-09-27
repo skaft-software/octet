@@ -121,8 +121,9 @@ Three optional top-level tokens shape the startup splash:
 - `splash_compact` — `true` selects the default's smaller geometry (4-tall
   mark at 16 columns) instead of the larger file-theme presentation.
 - `splash_model_adaptive` — `true` keeps the default's model-adaptive
-  gradient: the byte-mark follows the active model family instead of shading
-  from `splash`, which still tints the splash text.
+  splash: the byte-mark follows the active model family and the splash text
+  uses the model accent. It claims the whole splash, so `splash` is not used.
+  `Cards` uses it.
 
 A theme file is a bounded TOML document (256 KiB) with these typed sections:
 

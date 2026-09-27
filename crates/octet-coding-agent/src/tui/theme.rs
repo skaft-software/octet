@@ -2692,6 +2692,9 @@ mod tests {
                 theme.resolve::<String>("splash_model_adaptive").as_deref(),
                 Some("true")
             );
+            // The adaptive splash claims the whole splash, so `Cards` must not
+            // also pin a `splash` colour.
+            assert_eq!(theme.resolve::<String>("splash"), None);
         }
     }
 

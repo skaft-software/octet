@@ -112,11 +112,11 @@ pub(super) fn render_welcome_card(
     } else {
         (usize::from(width) / 3).clamp(14, 24)
     };
-    // A theme can also keep the default's model-adaptive splash gradient with
-    // `splash_model_adaptive = true`: the byte-mark follows the active model
-    // family instead of shading from its own `splash` colour, while the
-    // splash text keeps that colour. Themes without it paint a gradient
-    // derived from `splash`.
+    // A theme can also keep the default's model-adaptive splash with
+    // `splash_model_adaptive = true`. It owns the whole splash: the byte-mark
+    // follows the active model family and the text falls back to the same
+    // model-accent/foreground treatment a non-`splash` file theme uses, so
+    // the theme's own `splash` colour is not used at all.
     let compiled_default = state.theme.is_compiled_default();
     let model_adaptive_splash = !compiled_default
         && state
@@ -126,21 +126,16 @@ pub(super) fn render_welcome_card(
     let adaptive_accent = (compiled_default || model_adaptive_splash)
         .then(|| state.theme.model_rgb(state.model_lab))
         .flatten();
-    let splash_color = state.theme.role_rgb("splash");
-    // An adaptive splash has no solid logo colour to apply, so the byte-mark
-    // falls back to the model-blended gradient columns.
-    let logo_splash_color = if model_adaptive_splash {
-        None
-    } else {
-        splash_color
-    };
+    let splash_color = (!model_adaptive_splash)
+        .then(|| state.theme.role_rgb("splash"))
+        .flatten();
     let logo = crate::tui::splash::render_logo(
         &state.theme,
         logo_width,
         rows,
         elapsed,
         adaptive_accent,
-        logo_splash_color,
+        splash_color,
     );
     let splash_text = |text: &str| {
         splash_color
@@ -186,7 +181,7 @@ pub(super) fn render_welcome_card(
                 2,
                 elapsed,
                 adaptive_accent,
-                logo_splash_color,
+                splash_color,
             );
             compact.extend(logo.into_iter().map(|line| fit_line(&line, width)));
         } else {
@@ -650,8 +645,20 @@ mod tests {
             "{rendered:?}"
         );
         assert!(!rendered.contains("38;2;119;65;47"), "{rendered:?}");
-        // The splash text still carries the theme's own colour.
-        assert!(rendered.contains("38;2;217;119;87"), "{rendered:?}");
+        // The splash text follows the model accent too: the theme's own
+        // `splash` colour is not used anywhere in the splash.
+        assert!(!rendered.contains("38;2;217;119;87"), "{rendered:?}");
+        let wordmark = state
+            .theme
+            .model_rgb(Some(crate::tui::theme::ModelLab::Anthropic))
+            .expect("anthropic accent");
+        assert!(
+            rendered.contains(&format!(
+                "38;2;{};{};{}",
+                wordmark.0, wordmark.1, wordmark.2
+            )),
+            "{rendered:?}"
+        );
     }
 
     #[test]

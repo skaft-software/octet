@@ -16,10 +16,11 @@
 #   lab colours (`model.use_lab_color = "true"`), so the composer marker
 #   and shimmer take the active model's colour while the UI accent stays
 #   amber.
-# - `splash` paints the startup byte-mark as a solid accent block and tints
-#   the splash text to match. Without it the hardcoded blue-green gradient
-#   renders no matter the theme. (`splash_box` would box the splash in
-#   borders, so it stays unset.)
+# - `splash_model_adaptive` hands the whole startup splash to the active
+#   model family: the byte-mark uses the model-blended gradient and the
+#   splash text uses the model accent, exactly like the compiled default.
+#   No `splash` colour is set (it would be ignored) and no `splash_box`,
+#   which would border the splash.
 #
 # Use:
 #   octet --theme Cards
@@ -63,18 +64,15 @@ info = "default"
 error = "#cf7079"
 warning = "#c49a54"
 
-# Startup splash: solid amber byte-mark with matching splash text instead
-# of the hardcoded gradient. No `splash_box` (that would border the splash).
-splash = "#d29c54"
+# Startup splash follows the active model family, like the compiled default:
+# the byte-mark uses the model-blended gradient and the splash text uses the
+# model accent. `splash_model_adaptive` claims the whole splash, so no
+# `splash` colour is set here (and no `splash_box`, which would border it).
+splash_model_adaptive = true
 
 # Use the compiled default's smaller splash geometry (4-tall mark at 16
 # columns) instead of the larger file-theme presentation.
 splash_compact = true
-
-# Keep the default's model-adaptive splash gradient: the byte-mark follows
-# the active model family instead of shading from the amber `splash`
-# colour above, which still tints the splash text.
-splash_model_adaptive = true
 
 # Shaded fills. `composer_bg` paints the borderless composer; the
 # `surface.*` roles below paint the transcript bands. All tints of one
@@ -334,7 +332,6 @@ success = "#8fc193"
 error = "#cf7079"
 warning = "#c49a54"
 composer_bg = "#202020"
-splash = "#d29c54"
 user_msg_bg = "#202020"
 tool_output = "#b3b8c0"
 diff_added_marker = "#74a37f"
@@ -402,7 +399,6 @@ accent = "#8a5a00"
 success = "#2e7d4f"
 error = "#a33a45"
 warning = "#8a5f00"
-splash = "#8a5a00"
 composer_bg = "#efebe4"
 user_msg_bg = "#efebe4"
 tool_output = "#4a4f55"
