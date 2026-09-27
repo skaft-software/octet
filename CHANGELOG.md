@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-27
+
+See [release notes](docs/releases/v0.8.1.md) for scope, availability, and limits.
+
 - Split startup tracing around the workspace marker and HTTP-client construction;
   skip an unchanged private workspace-marker rewrite while retaining no-follow
   validation and atomic repair. Use indexed model lookup during provider
@@ -166,7 +170,8 @@
 - Add the `octet-computer-use` bundle to the official release catalog. It drives
   native desktop applications on macOS, Windows, and Linux through a locally
   installed MIT-licensed Cua Driver, provisioning the driver on request and
-  requiring an explicit user confirmation for every effectful action.
+  following the active effect-confirmation policy: gated profiles confirm each
+  effectful action; full access does not prompt by default.
 - Deprecate `octet-browse`. It remains published, installable, and unchanged, and
   is retained because its isolated, Octet-owned Chromium profile with a manual-auth
   boundary is a safety property the computer-use path does not provide.

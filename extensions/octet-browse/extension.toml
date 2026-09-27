@@ -1,7 +1,7 @@
 name = "octet-browse"
-version = "0.8.1-rc.1"
+version = "0.8.1"
 api_version = "0.4"
-requires_octet = "=0.8.1-rc.1"
+requires_octet = "=0.8.1"
 description = "DEPRECATED: always-headful semantic browser automation with an isolated persistent profile and manual-auth boundary. Prefer the computer-use extension (Cua Driver) for new automation; retained for authenticated page work"
 
 [entrypoint]

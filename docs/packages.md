@@ -2,12 +2,12 @@
 
 [Documentation](README.md) · [Extensions](extensions.md) · [Serve](experimental/octet-serve/README.md)
 
-octet installs four executable bundles—Browse, MCP, subagents, and web search—
-and the separate Serve application through `octet extension`. See
+octet installs five executable bundles—Browse, computer use, MCP, subagents,
+and web search—and the separate Serve application through `octet extension`. See
 [executable bundle setup](installation.md#optional-packages) for the tool
 integrations. The application-package format on this page is specifically for
 `octet-serve`; Serve is not an executable-extension activation target.
-The [0.8.0 release record](releases/v0.8.0.md) records matching signed packages
+The [0.8.1 release record](releases/v0.8.1.md) records matching signed packages
 and public-install verification.
 
 ## Commands
@@ -46,8 +46,8 @@ An archive declares a closed manifest (`deny_unknown_fields`):
 ```toml
 schema_version = 1
 id = "octet-serve"
-version = "0.8.0"
-requires_octet = "=0.8.0"
+version = "0.8.1"
+requires_octet = "=0.8.1"
 target = "aarch64-apple-darwin"
 
 [entrypoint]
@@ -72,10 +72,10 @@ Validation rules (`crates/octet-coding-agent/src/extension_package.rs:901`):
 
 ## Source extensions vs. executable bundles
 
-Independent source extensions (for example `octet-computer-use`) are **source
-packages**: a manifest plus a script or module, discovered through the normal
-resource roots and enabled/trusted explicitly. They are not installed by
-`octet extension` and not distributed as release archives.
+Independent source extensions are a manifest plus a script or module, discovered
+through normal resource roots and enabled/trusted explicitly. Unlike the five
+official executable bundles (including `octet-computer-use`), they are not
+installed by `octet extension` or distributed as release archives.
 [Extension authoring](extensions.md) owns the manifest and API contract; the
 [Extension API 0.4 and retained wire reference](extensions/API-0.4-REFERENCE.md) owns the
 protocol.

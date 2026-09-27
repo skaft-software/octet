@@ -43,7 +43,7 @@ See [CLI flags](#api-04-cli-flags) for validation and parsing rules.
 Use the [Python API `0.4` process recipe](../sdk/python/README.md#minimal-api-04-tool)
 for a local tool. The SDK handles framing, negotiated scheduling, cancellation,
 and shutdown; implement only the contributions you need. This is a source recipe
-for **octet 0.8.0**; the SDK is installed from source, not a published registry.
+for **octet 0.8.1**; the SDK is installed from source, not a published registry.
 
 The retained [ordinary-process API `0.3` example](../examples/extensions/api-v03-minimal/README.md)
 uses only Python's standard library and exercises canonical negotiation, an
@@ -141,10 +141,10 @@ for config examples, bounded manifest reads, diagnostics, and resolver APIs.
 Select `api_version = "0.4"` exactly; an extension's own `version` does not select
 the wire. Current source uses `octet_version`, `requires_octet`, `OCTET_*`, and
 `octet_extension`, with no aliases for earlier first-party wire names or imports.
-The local host, SDK source packages, and four executable bundles have distribution
-version **0.8.0**. This does not select an extension API or publish SDK registries.
+The local host, SDK source packages, and five executable bundles have distribution
+version **0.8.1**. This does not select an extension API or publish SDK registries.
 Catalog installation requires version-matched published assets; see
-[installation](installation.md) and the [release notes](releases/v0.8.0.md).
+[installation](installation.md) and the [release notes](releases/v0.8.1.md).
 
 Declare the entrypoint and tools for the implementation you actually supply.
 Return the complete tool/command catalogs and the selected protocol features from

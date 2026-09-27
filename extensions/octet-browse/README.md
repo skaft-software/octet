@@ -1,11 +1,9 @@
 # octet Browse
 
-**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+**Distribution: 0.8.1.** This bundle requires exactly octet 0.8.1.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
-public-install evidence. **This local RC checkout's `extension.toml` instead
-requires `=0.8.1-rc.1`; use `--extension-dir ./extensions` with the candidate.**
-The published bundle remains at distribution `0.8.0` for host `0.8.0`.
+[0.8.1 release record](../../docs/releases/v0.8.1.md) for signed assets and
+public-install evidence.
 
 Use a visible, isolated Chromium window to inspect pages and perform bounded
 browser actions. Sign in manually; octet Browse never uses your normal browser
@@ -41,7 +39,7 @@ Practical guidance:
 
 ## Install the bundle
 
-With [octet 0.8.0](../../docs/installation.md) and verified
+With [octet 0.8.1](../../docs/installation.md) and verified
 matching published assets, the catalog path is:
 
 ```console
@@ -121,8 +119,8 @@ before removing only the locked, sentinel-verified isolated profile.
 ## Reference
 
 The bundled runtime uses API `0.4`; these are usage and implementation
-references, not general extension-authoring tutorials. Bundle `0.8.0` requires
-exactly octet `0.8.0` and `playwright==1.57.0`.
+references, not general extension-authoring tutorials. Bundle `0.8.1` requires
+exactly octet `0.8.1` and `playwright==1.57.0`.
 
 - <a id="install-and-activate"></a>[Install and activate](REFERENCE.md#install-and-activate): inert installation, persistent activation, and skill readiness.
 - <a id="commands"></a>[Commands](REFERENCE.md#commands): setup, status, open, close, and reset.

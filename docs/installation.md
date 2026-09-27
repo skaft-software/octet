@@ -7,15 +7,15 @@
 ## Install native binaries
 
 Native release packages target macOS Apple silicon/Intel and GNU/Linux x86-64.
-See the [v0.8.1-rc.1 notes](releases/v0.8.1-rc.1.md) for changes; availability, signed
+See the [v0.8.1 notes](releases/v0.8.1.md) for changes; availability, signed
 assets and public-install verification are recorded on the version-pinned
 GitHub release. Install using the matching installer from the
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1-rc.1):
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.1):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.8.1-rc.1/install-octet.sh | sh
-octet --version   # octet 0.8.1-rc.1
+  https://github.com/skaft-software/octet/releases/download/v0.8.1/install-octet.sh | sh
+octet --version   # octet 0.8.1
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data remain
@@ -70,9 +70,8 @@ or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.8.1-rc.1 for local dogfooding. Check
-`octet --version` and use matching source extension manifests from this checkout;
-stable published bundles still target 0.8.0. This source build is not a signed
+This checkout targets octet 0.8.1. Check `octet --version` and use matching
+source extension manifests from this checkout. A source build is not a signed
 release artifact and does not replace an installed binary.
 
 On macOS or GNU/Linux, install Rust 1.86+ and
@@ -92,11 +91,10 @@ they do not refresh the catalog over the network. Continue with
 
 ## Optional packages
 
-The published extension bundles and separate Serve application remain
-version-pinned to octet `0.8.0`. In this unpublished `0.8.1-rc.1` checkout,
-local source extension manifests require the RC host; run with
-`--extension-dir ./extensions` rather than installing the published 0.8.0
-bundles. No RC package assets are published.
+Executable extension bundles and the separate Serve application are pinned to
+the host version. Install assets matching octet `0.8.1` from its version-pinned
+release, or run reviewed source extensions from this checkout with
+`--extension-dir ./extensions`. The 0.8.0 bundles require their 0.8.0 host.
 
 ```sh
 octet extension install octet-web-search
@@ -124,10 +122,9 @@ octet version; command forms are in the [CLI reference](cli.md#packages-and-serv
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md); explicit enablement; full-access trust follows host policy. |
 | `octet-serve` | [Loopback graphical interface](experimental/octet-serve/README.md); separate version-matched application package, not an executable-extension activation target. |
 
-The four executable-bundle manifests declare API `0.4`, distribution version
-`0.8.1-rc.1`, and require octet `=0.8.1-rc.1`; the published 0.8.0 bundles remain
-pinned to their host. Distribution and host
-versions are independent boundaries; an API number does not bypass the exact
+The five executable-bundle manifests declare API `0.4`, distribution version
+`0.8.1`, and require octet `=0.8.1`; older bundles remain pinned to their
+host. Distribution and host versions are independent boundaries; an API number does not bypass the exact
 host pin. See [current authoring](extensions.md) for the Python API 0.4 process
 recipe and retained API 0.3 conformance example; generated contract bindings
 alone are not a process runtime.

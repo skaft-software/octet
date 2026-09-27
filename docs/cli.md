@@ -236,11 +236,10 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The four published executable bundles and separate Serve application remain
-version-pinned to the running host exactly. The published 0.8.0 source bundles
-require `=0.8.0`; this unpublished checkout's source manifests instead require
-`=0.8.1-rc.1` for local dogfooding. The RC package assets are not published.
-The [0.8.0 release](https://github.com/skaft-software/octet/releases/tag/v0.8.0)
+The five executable bundles and separate Serve application are pinned to the
+running host exactly. This checkout's source manifests require `=0.8.1`;
+previously published 0.8.0 bundles require `=0.8.0`. The
+[0.8.1 release](https://github.com/skaft-software/octet/releases/tag/v0.8.1)
 records signed assets and public-install evidence. Catalog forms below require
 verified published assets matching the running host version:
 
@@ -250,8 +249,8 @@ octet extension update NAME
 octet extension remove NAME
 ```
 
-The executable catalog is `octet-browse`, `octet-mcp`, `octet-subagents`, and
-`octet-web-search`. Checksummed bundles publish atomically under
+The executable catalog is `octet-browse`, `octet-computer-use`, `octet-mcp`,
+`octet-subagents`, and `octet-web-search`. Checksummed bundles publish atomically under
 `~/.octet/extensions/<id>`; local updates must match the managed package ID.
 No install hook, dependency provisioning, activation, trust, or process launch
 occurs. Packaged skills require explicit loading. [Packaging contract](extensions.md).
