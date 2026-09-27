@@ -40,8 +40,15 @@ If the driver is not installed, run `computer_use_setup` once (or `/computer-use
 after the user agrees to a download from the package index. If the selected host
 lacks an OS permission, `computer_use_status` will say so: the user must grant
 Accessibility/Screen Recording (macOS), an interactive session (Windows), or
-AT-SPI in a live display session (Linux) themselves. Do not attempt to grant an
-OS permission.
+run octet inside a live X11 or Wayland display session (Linux, including
+Hyprland on Omarchy) themselves. Do not attempt to grant an OS permission.
+
+On Linux Wayland (Hyprland, Sway, GNOME, KDE), input cannot reach a window that
+is not focused. When an action returns `background_unavailable`, retry that one
+action with `delivery_mode: "foreground"`; the driver focuses the target, acts,
+and restores focus. Do not use foreground delivery by default. If status reports
+AT-SPI unavailable, window state has no element tree: act by pixel from a fresh
+screenshot instead.
 
 On macOS, `/Applications/CuaDriver.app` is the default desktop host because it
 provides the signed identity and the agent-cursor overlay. The direct runtime is

@@ -35,6 +35,7 @@ see [installation](installation.md) for supported channels.
 - [Shell aliases](shell-aliases.md)
 - [tmux setup](tmux.md)
 - [Herdr integration](herdr.md)
+- [Linux setup (Omarchy/Hyprland)](linux.md)
 - [Windows setup](windows.md)
 - [Termux (Android)](termux.md)
 

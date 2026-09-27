@@ -16,13 +16,17 @@ platform-specific and bundles the ``cua-driver`` executable.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import time
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -321,6 +325,11 @@ def provision(
         timeout=timeout,
     )
     if create.returncode != 0:
+        # Debian and Ubuntu split `ensurepip` into python3-venv, so a stock
+        # interpreter cannot bootstrap pip into a venv. Install the published
+        # wheel directly instead of asking the user to install a system package.
+        if _direct_wheel_supported():
+            return _provision_without_pip(paths, requested, environment, timeout)
         raise ProvisionError(
             f"failed to create runtime venv: {(create.stderr or create.stdout or '').strip()[:400]}"
         )
@@ -341,13 +350,141 @@ def provision(
         timeout=timeout,
     )
     if install.returncode != 0:
+        output = (install.stderr or install.stdout or "")
+        if "No module named pip" in output and _direct_wheel_supported():
+            return _provision_without_pip(paths, requested, environment, timeout)
         raise ProvisionError(
-            f"failed to install {spec}: {(install.stderr or install.stdout or '').strip()[:400]}"
+            f"failed to install {spec}: {output.strip()[:400]}"
         )
 
     binary = installed_binary(paths)
     if binary is None:
         raise ProvisionError(f"{spec} installed but no driver executable was found")
+    return binary
+
+
+# The wheel-only fallback reads the package index's JSON API and downloads the
+# single matching wheel, verified against the index's own SHA-256 digest.
+PACKAGE_INDEX_JSON = "https://pypi.org/pypi"
+_MAX_INDEX_BYTES = 8 * 1024 * 1024
+_MAX_WHEEL_BYTES = 512 * 1024 * 1024
+# Cua publishes manylinux_2_31 wheels, so the host C library must be glibc 2.31+.
+_MANYLINUX_GLIBC = (2, 31)
+_LINUX_ARCHES = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
+
+
+def _direct_wheel_supported() -> bool:
+    return (platform.system().lower() == "linux"
+            and platform.machine().lower() in _LINUX_ARCHES)
+
+
+def _glibc_version() -> Optional[Tuple[int, int]]:
+    library, version = platform.libc_ver()
+    if library != "glibc":
+        return None
+    parts = version.split(".")
+    try:
+        return int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _select_wheel(files: Any, arch: str) -> Mapping[str, Any]:
+    if not isinstance(files, list):
+        raise ProvisionError("the package index returned no release files")
+    for entry in files:
+        if not isinstance(entry, Mapping):
+            continue
+        name = entry.get("filename")
+        digest = (entry.get("digests") or {}).get("sha256") if isinstance(entry.get("digests"), Mapping) else None
+        if (isinstance(name, str) and name.endswith(".whl") and "manylinux" in name
+                and name.endswith(f"_{arch}.whl") and isinstance(entry.get("url"), str)
+                and entry["url"].startswith("https://") and isinstance(digest, str)):
+            return entry
+    raise ProvisionError(f"{DISTRIBUTION} publishes no Linux {arch} wheel for this release")
+
+
+def _safe_member(name: str) -> bool:
+    parts = name.split("/")
+    if name.startswith("/") or "\\" in name or any(part in ("", ".", "..") for part in parts):
+        return False
+    top = parts[0]
+    return top == "cua_driver" or (top.startswith("cua_driver-") and top.endswith(".dist-info"))
+
+
+def _provision_without_pip(
+    paths: DriverPaths, version: str, environment: Mapping[str, str], timeout: int
+) -> Path:
+    """Install the published Linux wheel into a pip-less venv.
+
+    The wheel carries no dependencies and no build step: it is the
+    ``cua_driver`` package, its bundled executable, and its dist-info. Only
+    those paths are extracted, only from the file whose SHA-256 matches the
+    package index's published digest.
+    """
+
+    arch = _LINUX_ARCHES[platform.machine().lower()]
+    glibc = _glibc_version()
+    if glibc is None or glibc < _MANYLINUX_GLIBC:
+        raise ProvisionError(
+            f"{DISTRIBUTION} needs GNU libc {_MANYLINUX_GLIBC[0]}.{_MANYLINUX_GLIBC[1]} or newer"
+        )
+    create = _run(
+        [sys.executable, "-m", "venv", "--clear", "--without-pip", str(paths.venv)],
+        env=environment, timeout=timeout,
+    )
+    if create.returncode != 0:
+        raise ProvisionError(
+            f"failed to create runtime venv: {(create.stderr or create.stdout or '').strip()[:400]}"
+        )
+    url = f"{PACKAGE_INDEX_JSON}/{DISTRIBUTION}/{version}/json" if version else \
+        f"{PACKAGE_INDEX_JSON}/{DISTRIBUTION}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            index = json.loads(response.read(_MAX_INDEX_BYTES + 1)[:_MAX_INDEX_BYTES])
+    except (OSError, ValueError) as error:
+        raise ProvisionError(f"could not read the package index for {DISTRIBUTION}: {error}") from error
+    wheel = _select_wheel(index.get("urls") if isinstance(index, Mapping) else None, arch)
+    archive = paths.root / (".%s.%d.part" % (wheel["filename"], os.getpid()))
+    digest = hashlib.sha256()
+    try:
+        with urllib.request.urlopen(wheel["url"], timeout=timeout) as response, \
+                open(archive, "wb") as sink:
+            size = 0
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > _MAX_WHEEL_BYTES:
+                    raise ProvisionError(f"{wheel['filename']} exceeds the download ceiling")
+                digest.update(chunk)
+                sink.write(chunk)
+        if digest.hexdigest() != wheel["digests"]["sha256"]:
+            raise ProvisionError(f"{wheel['filename']} does not match its published SHA-256")
+        site = paths.site_packages
+        site.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive) as bundle:
+            for member in bundle.infolist():
+                if member.is_dir():
+                    continue
+                if not _safe_member(member.filename):
+                    raise ProvisionError(f"{wheel['filename']} contains an unexpected path")
+                target = site / member.filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with bundle.open(member) as source, open(target, "wb") as sink:
+                    shutil.copyfileobj(source, sink)
+                mode = (member.external_attr >> 16) & 0o777
+                if mode & stat.S_IXUSR:
+                    target.chmod(0o755)
+    except OSError as error:
+        raise ProvisionError(f"failed to install {wheel['filename']}: {error}") from error
+    finally:
+        if archive.exists():
+            archive.unlink()
+    binary = installed_binary(paths)
+    if binary is None:
+        raise ProvisionError(f"{wheel['filename']} installed but no driver executable was found")
     return binary
 
 
@@ -436,6 +573,7 @@ class Health:
             "host_app": self.host_app,
             "cursor_available": self.cursor_available,
             "cursor_enabled": self.cursor_enabled,
+            "platform": host_platform(),
         }
 
 
@@ -495,7 +633,7 @@ def _bundle_executable_name(app: Path) -> Optional[str]:
         completed = _run(
             ["/usr/bin/plutil", "-extract", "CFBundleExecutable", "raw", "-o", "-", str(plist)]
         )
-    except OSError:
+    except (OSError, ProvisionError):
         return None
     if completed.returncode != 0:
         return None
@@ -568,7 +706,7 @@ def desktop_app_display_name(app: Optional[Path] = None) -> Optional[str]:
         completed = _run(
             ["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", str(plist)]
         )
-    except OSError:
+    except (OSError, ProvisionError):
         return None
     if completed.returncode != 0:
         return None
@@ -598,7 +736,18 @@ def start_desktop_app(app: Optional[Path] = None) -> bool:
     return completed.returncode == 0
 
 
+def host_platform() -> str:
+    """``darwin``, ``windows``, ``linux``, or another lowercased system name."""
+
+    return platform.system().lower()
+
+
 def _permission_status(binary: Path) -> str:
+    # `permissions status` reads macOS TCC grants through a CuaDriver daemon.
+    # Elsewhere it has nothing to report, and on Linux it answers with macOS
+    # instructions, so leave the decision to the live session probe.
+    if host_platform() != "darwin":
+        return "unknown"
     completed = _run([str(binary), "permissions", "status", "--json"])
     if completed.returncode != 0:
         return "unknown"
@@ -709,6 +858,8 @@ def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
     the host's behalf.
     """
 
+    if host_platform() == "linux":
+        return _linux_session_state(client)
     arguments: Dict[str, Any] = {"prompt": bool(prompt)}
     if prompt:
         # Staged request: Accessibility + Screen Recording only. Direct-capture
@@ -747,6 +898,69 @@ def permission_state(client: Any, *, prompt: bool = False) -> Dict[str, Any]:
         "screen_recording": screen_recording,
         "detail": detail,
     }
+
+
+def _linux_session_state(client: Any) -> Dict[str, Any]:
+    """Linux readiness is a reachable display session, not a system grant.
+
+    There is no Accessibility or Screen Recording permission to hold on Linux.
+    The driver instead needs an X11 display or a Wayland session with its native
+    backend enabled, and AT-SPI on the session bus for element trees. Without
+    AT-SPI the driver still captures and acts by pixel, so it is reported but
+    does not hold actions back. Nothing here prompts.
+    """
+
+    try:
+        result = client.call("check_permissions", {"prompt": False})
+    except Exception:
+        return {
+            "permissions": "unknown",
+            "detail": "the driver did not answer a desktop-session probe",
+        }
+    structured = result.get("structuredContent") or {}
+    if not isinstance(structured, Mapping):
+        structured = {}
+    x11 = structured.get("x11")
+    wayland = structured.get("wayland")
+    wayland_enabled = structured.get("wayland_enabled")
+    atspi = structured.get("atspi")
+    native_wayland = wayland is True and wayland_enabled is True
+    if x11 is True and native_wayland:
+        display_server = "wayland+x11"
+    elif native_wayland:
+        display_server = "wayland"
+    elif x11 is True:
+        display_server = "x11"
+    else:
+        display_server = None
+
+    if display_server is not None:
+        status = "granted"
+        names = {"wayland+x11": "Wayland (native) and XWayland",
+                 "wayland": "Wayland (native)", "x11": "X11"}
+        detail = names[display_server] + " reachable"
+        if atspi is True:
+            detail += "; AT-SPI accessibility available"
+        elif atspi is False:
+            detail += "; AT-SPI unavailable, so element trees are empty and actions go by pixel"
+    elif x11 is False and wayland is not None:
+        status = "denied"
+        if wayland is True:
+            detail = ("a Wayland session is present but the driver's native Wayland "
+                      "backend is off and no XWayland display is reachable")
+        else:
+            detail = ("no display session is reachable: start octet from a terminal "
+                      "inside your graphical session")
+    else:
+        status = "unknown"
+        detail = "desktop session state is unknown"
+
+    state: Dict[str, Any] = {"permissions": status, "detail": detail,
+                             "display_server": display_server}
+    for key, value in (("x11", x11), ("wayland", wayland), ("atspi", atspi)):
+        if isinstance(value, bool):
+            state[key] = value
+    return state
 
 
 def health(paths: DriverPaths) -> Health:

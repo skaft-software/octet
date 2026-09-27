@@ -1100,8 +1100,8 @@ fn settle_active_clipboard_read(
 
 /// Native **text** clipboard read (parity row 2c.6). Clipboard image capture is
 /// an explicit exclusion, so only text ever leaves the clipboard and nothing in
-/// this module writes to it. The existing write transport (pbcopy plus OSC 52 in
-/// `tui/view.rs`) is untouched and remains the fallback.
+/// this module writes to it. The write transport (the native helper plus OSC 52
+/// in `tui/view.rs`) is separate and mirrors this helper order.
 ///
 /// Every helper is bounded by a deadline and a byte cap, and every failure fails
 /// closed. A helper that blocks — a disconnected display, a wedged Wayland

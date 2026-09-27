@@ -4,6 +4,38 @@
 
 ### Added
 
+- Linux support across X11 and Wayland desktops, including Omarchy (Hyprland),
+  Sway and other wlroots compositors, GNOME, and KDE Plasma. Status and the
+  action gate read the driver's Linux session report (X11, native Wayland,
+  AT-SPI) instead of macOS grants. Wayland sessions enable the driver's native
+  backend, and the child receives the desktop-identity and compositor names it
+  uses to pick a route (`XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP`,
+  `DESKTOP_SESSION`, `KDE_FULL_SESSION`, `HYPRLAND_INSTANCE_SIGNATURE`,
+  `SWAYSOCK`, `XDG_STATE_HOME`). Apps launched on Linux inherit the
+  host-sanitized `PATH`, `HOME`, and locale.
+- The model-adaptive agent cursor on Linux. The direct runtime draws the
+  bundled themes through Cua's X11 or layer-shell overlay, best-effort. Themes
+  are written straight into the driver's store (the wheel has no theme
+  compiler), both at setup and on first cursor use, so they work however the
+  driver was provisioned. Verified on Xvfb and headless Sway, including a
+  model switch recoloring the cursor.
+- GNOME Wayland: bundle Cua's MIT-licensed WinRects GNOME Shell helper from
+  the matching driver release, with a `SetThemeColor` pin for the model color.
+  `/computer-use setup` installs and enables it; status reports when a login is
+  still needed.
+- Provision on Debian and Ubuntu without `python3-venv`: when the host Python
+  cannot bootstrap pip, install the published Linux wheel directly after
+  verifying the package index's SHA-256.
+
+### Fixed
+
+- `/computer-use setup` no longer fails on Linux, whose driver ships no
+  cursor-theme compiler.
+- Status no longer reports null `accessibility`/`screen_recording` fields on
+  hosts that do not have those grants.
+- Desktop-host tests pin Darwin, so their macOS semantics no longer depend on
+  the machine running the suite.
+
 - Bundle 24 MIT-attributed Cua dotLottie cursor themes with an Octet-inspired,
   slightly smaller silhouette and the stable model-adaptive TUI prompt colors.
   `/computer-use setup` installs the compiled themes locally; cursor sessions

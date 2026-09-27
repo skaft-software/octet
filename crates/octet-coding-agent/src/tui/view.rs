@@ -5677,29 +5677,41 @@ impl InteractiveShell {
         self.state.borrow_mut().selection_dragging = false;
     }
 
-    /// Best-effort OSC 52 clipboard transport. The semantic fallback is
-    /// retained separately in `copy_buffer`, so redirected output loses no data.
+    /// Best-effort native helper plus OSC 52 clipboard transport. The semantic
+    /// fallback is retained separately in `copy_buffer`, so redirected output
+    /// loses no data.
     ///
-    /// `pbcopy`'s stdin write plus child wait block the caller, and this runs
+    /// A helper's stdin write plus child wait block the caller, and this runs
     /// from the interactive event loop, so the process handoff happens on a
     /// detached thread. A detached thread (rather than `tokio::spawn`) keeps
     /// this method callable from the synchronous view API and its runtime-less
     /// unit tests. Errors stay ignored: `copy_buffer` remains authoritative.
     fn set_clipboard(text: &str) {
-        #[cfg(target_os = "macos")]
-        {
+        let writers = native_clipboard_writers(|name| std::env::var_os(name).is_some());
+        if !writers.is_empty() {
             let text = text.to_owned();
             let _ = std::thread::Builder::new()
-                .name("clipboard-pbcopy".to_owned())
+                .name("clipboard-write".to_owned())
                 .spawn(move || {
-                    if let Ok(mut child) = std::process::Command::new("pbcopy")
-                        .stdin(std::process::Stdio::piped())
-                        .spawn()
-                    {
+                    // The first helper that accepts the text owns the write.
+                    // `wl-copy` and `xclip` fork to keep serving the selection,
+                    // so their output is discarded rather than held on a pipe.
+                    for (program, args) in writers {
+                        let Ok(mut child) = std::process::Command::new(program)
+                            .args(args)
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                        else {
+                            continue;
+                        };
                         if let Some(mut stdin) = child.stdin.take() {
                             let _ = stdin.write_all(text.as_bytes());
                         }
-                        let _ = child.wait();
+                        if child.wait().is_ok_and(|status| status.success()) {
+                            break;
+                        }
                     }
                 });
         }
@@ -7388,6 +7400,35 @@ impl sexy_tui_rs::Terminal for TestTerminal {
     fn clear_line(&mut self) {}
     fn clear_from_cursor(&mut self) {}
     fn clear_screen(&mut self) {}
+}
+
+/// Native clipboard writers in preference order, mirroring the text reader in
+/// `modes/interactive.rs`. OSC 52 still runs after them, but it is dropped by
+/// tmux without `set-clipboard` and by terminals that disable it, so Linux
+/// desktops (Wayland compositors such as Hyprland, and X11) get their own
+/// helper the way macOS gets `pbcopy`. An environment that declares no display
+/// gets no helper at all.
+fn native_clipboard_writers(
+    has_env: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, &'static [&'static str])> {
+    if cfg!(target_os = "macos") {
+        return vec![("pbcopy", &[])];
+    }
+    if cfg!(windows) {
+        return Vec::new();
+    }
+    let mut writers: Vec<(&'static str, &'static [&'static str])> = Vec::new();
+    if has_env("TERMUX_VERSION") {
+        writers.push(("termux-clipboard-set", &[]));
+    }
+    if has_env("WAYLAND_DISPLAY") {
+        writers.push(("wl-copy", &["--type", "text/plain;charset=utf-8"]));
+    }
+    if has_env("DISPLAY") {
+        writers.push(("xclip", &["-selection", "clipboard", "-in"]));
+        writers.push(("xsel", &["--clipboard", "--input"]));
+    }
+    writers
 }
 
 mod assistant_block;
