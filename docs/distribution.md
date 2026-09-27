@@ -25,7 +25,7 @@ retains its historical version-matched assets and channel evidence.
 | Python distribution / import | `octet-extension-sdk` / `octet_extension` |
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | Executable bundles | `octet-browse`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
-| Independent source extensions | `octet-computer-use`, `octet-import-aider`, `octet-import-pi` |
+| Independent source extensions | `octet-computer-use` |
 | Separate application package | `octet-serve` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
 | Product, SDK, Serve and four executable-bundle distribution versions | `0.8.0`; installed compatibility `requires_octet = "=0.8.0"` |

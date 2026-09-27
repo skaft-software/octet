@@ -486,11 +486,10 @@ extensions/octet-browse/README.md
 extensions/octet-browse/REFERENCE.md
 extensions/octet-browse/CONNECTORS.md
 extensions/octet-browse/QUALIFICATION.md
+extensions/octet-computer-use/README.md
 extensions/octet-mcp/README.md
 extensions/octet-mcp/REFERENCE.md
 extensions/octet-mcp/fixtures/tls/README.md
-extensions/octet-import-aider/README.md
-extensions/octet-import-pi/README.md
 extensions/octet-serve/README.md
 extensions/octet-snap-compact/README.md
 extensions/octet-subagents/README.md

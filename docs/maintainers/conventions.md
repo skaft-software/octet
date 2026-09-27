@@ -19,7 +19,7 @@ conventions agents need in a large, multi-writer checkout.
   (agent runtime, session, tools, extension host), `octet-coding-agent` (CLI,
   TUI, serve, migrate), `octet-extension-host`, `sexy-tui-rs` (renderer).
 - `extensions/` — first-party executable extensions and source packages
-  (`octet-import-*`, `octet-browse`, `octet-mcp`, `octet-subagents`, …).
+  (`octet-computer-use`, `octet-browse`, `octet-mcp`, `octet-subagents`, …).
 - `docs/` — user guides, API contracts, architecture, and release documentation.
 - `scripts/` — release, packaging, generator, and acceptance scripts (Python and
   shell), with fixture-based tests alongside them.

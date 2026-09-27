@@ -254,15 +254,15 @@ for line in sys.stdin:
 #[tokio::test]
 async fn bundled_canonical_extensions_negotiate_with_the_real_host() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
-    // The Cline importer was retired; qualify the retained canonical sources.
-    for name in ["octet-computer-use", "octet-import-aider"] {
+    // The Cline and Aider importers were retired; qualify the retained canonical source.
+    for name in ["octet-computer-use"] {
         let manifest_path = repository
             .join(name)
             .join(EXTENSION_MANIFEST_FILENAME)
             .canonicalize()
             .unwrap();
         let manifest = ExtensionManifest::load(&manifest_path).unwrap();
-        assert_eq!(manifest.api_version, "0.3", "{name}");
+        assert_eq!(manifest.api_version, "0.4", "{name}");
         let workspace = TempDir::new().unwrap();
         let mut config = ExtensionRuntimeConfig::new(workspace.path());
         config.event_bus = Some(std::sync::Arc::new(
@@ -272,7 +272,7 @@ async fn bundled_canonical_extensions_negotiate_with_the_real_host() {
             .await
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert!(process.is_running(), "{name}");
-        assert_eq!(process.api_version(), "0.3");
+        assert_eq!(process.api_version(), "0.4");
         assert!(process.shutdown().await, "{name}");
     }
 }

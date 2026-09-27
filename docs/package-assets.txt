@@ -253,6 +253,7 @@ text docs/releases/v0.7.4.md
 text docs/releases/v0.7.5.md
 text docs/releases/v0.7.6.md
 text docs/releases/v0.8.0.md
+text docs/releases/v0.8.1-rc.1.md
 text docs/resources.md
 text docs/sdk.md
 text docs/session-format.md
@@ -310,8 +311,7 @@ text extensions/octet-browse/CONNECTORS.md
 text extensions/octet-browse/QUALIFICATION.md
 text extensions/octet-browse/README.md
 text extensions/octet-browse/REFERENCE.md
-text extensions/octet-import-aider/README.md
-text extensions/octet-import-pi/README.md
+text extensions/octet-computer-use/README.md
 text extensions/octet-mcp/README.md
 text extensions/octet-mcp/REFERENCE.md
 text extensions/octet-mcp/fixtures/tls/README.md

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Remove the retired `octet-import-aider` and `octet-import-pi` source
+  extensions and their packaged-doc, installer, and test references; the
+  built-in `octet migrate import pi` host implementation is unchanged.
+
 - Fix Shift+Tab cycling so exact provider choices always sort from lowest to
   highest and wrap to the lowest; rapid active-run taps advance from the latest
   selected level, repaint immediately, and defer preference I/O until idle.
