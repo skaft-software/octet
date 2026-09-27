@@ -333,6 +333,19 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
     }
     let matches = input_path_suggestions(state);
     if matches.is_empty() {
+        // A scan in progress is reported rather than drawn as an empty popup:
+        // the walk takes as long as the workspace takes, and silence here reads
+        // as "`@` does not work" rather than "still reading the tree".
+        if state.file_index_scanning
+            && composer::active_mention(state.editor.text())
+                .is_some_and(|query| !composer::is_path_query(query))
+        {
+            let marker = state.theme.glyph("prompt");
+            let label = state
+                .theme
+                .fg("muted", &format!("{marker} scanning project files..."));
+            return vec![fit_line(&format!("  {label}"), width)];
+        }
         return Vec::new();
     }
     let heading_label = if composer::active_mention(state.editor.text())

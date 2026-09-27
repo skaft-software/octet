@@ -1210,9 +1210,23 @@ pub(crate) struct ShellState {
     ledger: composer::AttachmentLedger,
     /// Input modalities of the active model; gates attach attempts.
     pub(crate) input_modalities: ModalitySet,
-    /// Workspace root and its lazily built mention-completion index.
+    /// Workspace root and its mention-completion index.
     pub(crate) workspace: Option<PathBuf>,
-    file_index: Option<Arc<Vec<String>>>,
+    /// Completed mention index, or `None` while a walk is in flight, before one
+    /// has been requested, or after invalidation.
+    file_index: Option<Arc<composer::WorkspaceFileIndex>>,
+    /// A workspace walk is running off-thread. The popup reports this instead of
+    /// silently offering nothing.
+    file_index_scanning: bool,
+    /// Invalidates an in-flight walk. Bumping it retires any walk started under
+    /// an older workspace or before an explicit invalidation, so a late result
+    /// cannot resurrect a stale index.
+    file_index_generation: u64,
+    file_index_tx: Option<mpsc::Sender<(u64, Arc<composer::WorkspaceFileIndex>)>>,
+    file_index_rx: Option<mpsc::Receiver<(u64, Arc<composer::WorkspaceFileIndex>)>>,
+    /// Set by a finished walk so the render loop can test for a result without
+    /// taking the state lock on every idle wake.
+    file_index_ready: Arc<AtomicBool>,
     /// Selected result in the bounded path/mention completion list.
     path_selection: usize,
     /// Cached wrapped transcript lines. Scrolling only slices this cache, and
@@ -2957,6 +2971,78 @@ pub(crate) fn fit_line(line: &str, width: u16) -> String {
     }
 }
 
+/// Retire the mention index, and any walk still in flight for it.
+///
+/// Bumping the generation is what makes a late walk harmless: a finished walk
+/// carries the generation it started under, so one that completes after the
+/// workspace changed is dropped instead of overwriting the new index.
+fn retire_file_index(state: &mut ShellState) {
+    state.file_index = None;
+    state.file_index_scanning = false;
+    state.file_index_generation = state.file_index_generation.wrapping_add(1);
+    state.path_selection = 0;
+    state
+        .file_index_ready
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Start a background workspace walk unless one is already known or in flight.
+///
+/// The walk is unbounded filesystem I/O and used to run inline on the first
+/// `@`, which froze the composer for as long as the tree took to read. It now
+/// runs on its own thread, and the popup reports the scan instead of silently
+/// offering nothing while input stays live.
+fn request_file_index_scan(state: &mut ShellState) {
+    if state.file_index.is_some() || state.file_index_scanning {
+        return;
+    }
+    let Some(root) = state.workspace.clone() else {
+        return;
+    };
+    let (sender, receiver) = mpsc::channel();
+    state.file_index_tx = Some(sender.clone());
+    state.file_index_rx = Some(receiver);
+    state.file_index_scanning = true;
+    let generation = state.file_index_generation;
+    let ready = state.file_index_ready.clone();
+    let _ = thread::Builder::new()
+        .name("octet-file-index".to_owned())
+        .spawn(move || {
+            let index = Arc::new(composer::workspace_files(&root));
+            let _ = sender.send((generation, index));
+            // Published after the value so a reader that sees this flag always
+            // finds the completed walk waiting to be drained.
+            ready.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+}
+
+/// Adopt a finished walk, reporting whether the index changed.
+///
+/// The caller must gate this on `file_index_ready` so the idle render loop
+/// does not take the state lock on every wake just to observe an empty queue.
+pub(super) fn poll_file_index_scan(state: &mut ShellState) -> bool {
+    state
+        .file_index_ready
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let Some(receiver) = state.file_index_rx.as_ref() else {
+        return false;
+    };
+    let mut latest = None;
+    while let Ok((generation, index)) = receiver.try_recv() {
+        latest = Some((generation, index));
+    }
+    let Some((generation, index)) = latest else {
+        return false;
+    };
+    if generation != state.file_index_generation {
+        // Retired walk: the current workspace already superseded it.
+        return false;
+    }
+    state.file_index_scanning = false;
+    state.file_index = Some(index);
+    true
+}
+
 /// Full-screen terminal shell. It owns all terminal I/O and no Agent state.
 pub struct InteractiveShell {
     input_dispatch: input_dispatch::InputDispatch,
@@ -3037,6 +3123,30 @@ impl InteractiveShell {
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             herdr: crate::herdr::PaneReporter::detect(),
         })
+    }
+
+    #[cfg(test)]
+    /// Wait for an in-flight workspace walk to land, then adopt it.
+    ///
+    /// A test shell has no renderer thread, so the loop that normally drains a
+    /// completed scan is absent. Tests drive it explicitly instead of racing
+    /// the walk. Returns immediately when no walk was started: a path-shaped
+    /// query completes from the directory itself and never needs the index.
+    #[cfg(test)]
+    pub(crate) fn settle_file_index(&self) {
+        if !self.state.borrow().file_index_scanning {
+            return;
+        }
+        for _ in 0..2_000 {
+            {
+                let mut state = self.state.borrow_mut();
+                if poll_file_index_scan(&mut state) {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("workspace file index scan did not complete");
     }
 
     #[cfg(test)]
@@ -4384,11 +4494,8 @@ impl InteractiveShell {
         if state.editor.cursor() == state.editor.text().len()
             && composer::active_mention(state.editor.text())
                 .is_some_and(|query| !composer::is_path_query(query))
-            && state.file_index.is_none()
         {
-            if let Some(root) = state.workspace.clone() {
-                state.file_index = Some(Arc::new(composer::workspace_files(&root, 10_000)));
-            }
+            request_file_index_scan(&mut state);
         }
         invalidate_editor_autocomplete(&mut state);
     }
@@ -4483,8 +4590,7 @@ impl InteractiveShell {
     /// workspace. Called after a run ends, when tools may have created files.
     pub fn invalidate_file_index(&mut self) {
         let mut state = self.state.borrow_mut();
-        state.file_index = None;
-        state.path_selection = 0;
+        retire_file_index(&mut state);
     }
 
     /// Update the foreground session name shown in the terminal window title.
@@ -4511,8 +4617,7 @@ impl InteractiveShell {
         if state.workspace.as_deref() == Some(root.as_path()) {
             return;
         }
-        state.file_index = None;
-        state.path_selection = 0;
+        retire_file_index(&mut state);
         state.workspace = Some(root);
         state.refresh_tool_displays();
     }
@@ -4630,17 +4735,16 @@ impl InteractiveShell {
         if state.editor.cursor() != state.editor.text().len() {
             return;
         }
-        let Some(root) = state.workspace.clone() else {
+        if state.workspace.is_none() {
             return;
-        };
+        }
 
         let mention = composer::active_mention(state.editor.text()).map(str::to_owned);
         if mention
             .as_deref()
             .is_some_and(|query| !composer::is_path_query(query))
-            && state.file_index.is_none()
         {
-            state.file_index = Some(Arc::new(composer::workspace_files(&root, 10_000)));
+            request_file_index_scan(&mut state);
         }
         let suggestions = input_path_suggestions(&state);
         let selected = state

@@ -12,9 +12,40 @@ use std::path::{Path, PathBuf};
 
 use super::paste::{looks_like_absolute_path, unescape_for_completion};
 
-/// List workspace files (relative, sorted, gitignore-aware), capped.
-pub fn workspace_files(root: &Path, cap: usize) -> Vec<String> {
-    let mut files = Vec::new();
+/// The workspace's mention-completion index.
+///
+/// Matching runs on every keystroke, so a lowercased copy of every path is
+/// retained alongside the original. Lowercasing inside the match instead cost
+/// one fresh `String` per candidate per character typed.
+#[derive(Clone, Debug)]
+pub struct WorkspaceFileIndex {
+    paths: Vec<String>,
+    lowered: Vec<String>,
+}
+
+impl WorkspaceFileIndex {
+    /// Build an index over already-collected paths.
+    pub fn from_paths(mut paths: Vec<String>) -> Self {
+        paths.sort();
+        let lowered = paths.iter().map(|path| path.to_lowercase()).collect();
+        Self { paths, lowered }
+    }
+
+    /// Every indexed path, sorted.
+    #[cfg(test)]
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+}
+
+/// List workspace files (relative, sorted, gitignore-aware).
+///
+/// The walk is complete and unbounded. A cap here was a silent lie: past the
+/// limit the index quietly stopped offering files and nothing on screen said
+/// so, so `@` completion was quietly wrong on a large workspace. Callers bound
+/// what they *display*; nothing here bounds what is *known*.
+pub fn workspace_files(root: &Path) -> WorkspaceFileIndex {
+    let mut paths = Vec::new();
     // `require_git(false)` honors .gitignore files even when the workspace is
     // not (yet) a git repository, which is also useful for new projects.
     let walker = ignore::WalkBuilder::new(root)
@@ -22,20 +53,16 @@ pub fn workspace_files(root: &Path, cap: usize) -> Vec<String> {
         .require_git(false)
         .build();
     for entry in walker.flatten() {
-        if files.len() >= cap {
-            break;
-        }
         if entry
             .file_type()
             .is_some_and(|file_type| file_type.is_file())
         {
             if let Ok(relative) = entry.path().strip_prefix(root) {
-                files.push(relative.to_string_lossy().into_owned());
+                paths.push(relative.to_string_lossy().into_owned());
             }
         }
     }
-    files.sort();
-    files
+    WorkspaceFileIndex::from_paths(paths)
 }
 
 fn active_token(text: &str) -> Option<&str> {
@@ -84,15 +111,21 @@ pub fn active_path(text: &str) -> Option<&str> {
 }
 
 /// Case-insensitive substring match on relative paths; earlier and shorter
-/// matches rank first.
-pub fn mention_matches<'a>(files: &'a [String], query: &str, limit: usize) -> Vec<&'a str> {
+/// matches rank first. `limit` bounds the returned window, not the scan.
+pub fn mention_matches<'a>(
+    index: &'a WorkspaceFileIndex,
+    query: &str,
+    limit: usize,
+) -> Vec<&'a str> {
     let needle = query.to_lowercase();
-    let mut scored: Vec<(usize, usize, &str)> = files
+    let mut scored: Vec<(usize, usize, &str)> = index
+        .lowered
         .iter()
-        .filter_map(|file| {
-            file.to_lowercase()
+        .zip(&index.paths)
+        .filter_map(|(lowered, path)| {
+            lowered
                 .find(&needle)
-                .map(|at| (at, file.len(), file.as_str()))
+                .map(|at| (at, path.len(), path.as_str()))
         })
         .collect();
     scored.sort();

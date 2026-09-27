@@ -8365,27 +8365,61 @@ fn print_resume_command(command: Option<&str>) {
     }
 }
 
-async fn shutdown_for_exit(app: &mut App) {
-    if crate::tui::terminal::received_shutdown_signal().is_some() {
-        octet_agent::extension_process::terminate_bash_process_groups(Duration::from_millis(400))
+/// How long exit may block before the cleanup is worth reporting on screen.
+/// Deliberately below one human-perceptible pause: a fast exit never disturbs
+/// the final frame with a notice the user will not read.
+const SHUTDOWN_NOTICE_DELAY: Duration = Duration::from_millis(150);
+
+/// Stop the agent's children and release the terminal.
+///
+/// Cleanup is reported rather than hidden: a user who pressed Ctrl+D and sees
+/// nothing for a second cannot tell a working exit from a hang. The notice is
+/// painted only once the wait is long enough to be noticeable, and it stays
+/// visible for as long as the wait actually lasts -- the bound below is a
+/// safety limit against a wedged child, not a guess at how long cleanup
+/// normally takes. A signal-driven exit writes nothing: that path may have no
+/// terminal at all.
+async fn shutdown_for_exit(app: &mut App, shell: &mut InteractiveShell) {
+    let signalled = crate::tui::terminal::received_shutdown_signal().is_some();
+    let cleanup = async {
+        if signalled {
+            octet_agent::extension_process::terminate_bash_process_groups(Duration::from_millis(
+                400,
+            ))
             .await;
-        let _ = tokio::time::timeout(
-            Duration::from_millis(1400),
-            app.executable_extensions.shutdown(),
-        )
-        .await;
+            let _ = tokio::time::timeout(
+                Duration::from_millis(1400),
+                app.executable_extensions.shutdown(),
+            )
+            .await;
+        } else {
+            // Bound the idle Ctrl+D path like the signal path so a hung
+            // extension child cannot make exit feel stuck. 2s covers normal
+            // fleet drain (the inner manager cap is 3s); on timeout fall
+            // through to force-kill like the signal path does.
+            let _ = tokio::time::timeout(
+                Duration::from_millis(2000),
+                app.executable_extensions.shutdown(),
+            )
+            .await;
+        }
         octet_agent::extension_process::force_kill_registered_process_groups();
-    } else {
-        // Bound the idle Ctrl+D path like the signal path so a hung extension
-        // child cannot make exit feel stuck. 2s covers normal fleet drain
-        // (inner 3s manager cap usually resolves faster); on timeout fall
-        // through to force-kill like the signal path does.
-        let _ = tokio::time::timeout(
-            Duration::from_millis(2000),
-            app.executable_extensions.shutdown(),
-        )
-        .await;
-        octet_agent::extension_process::force_kill_registered_process_groups();
+    };
+    if signalled {
+        cleanup.await;
+        return;
+    }
+    tokio::pin!(cleanup);
+    let notice = tokio::time::sleep(SHUTDOWN_NOTICE_DELAY);
+    tokio::pin!(notice);
+    tokio::select! {
+        biased;
+        () = &mut cleanup => {}
+        () = &mut notice => {
+            shell.notice("cleaning up extension processes");
+            shell.render();
+            cleanup.await;
+        }
     }
 }
 
@@ -9651,7 +9685,7 @@ async fn run_interactive_once(
     reload_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     'interactive: loop {
         if shell.close_requested() {
-            shutdown_for_exit(&mut app).await;
+            shutdown_for_exit(&mut app, &mut shell).await;
             break;
         }
         let queued_input = if startup_input.is_none() {
@@ -9679,7 +9713,7 @@ async fn run_interactive_once(
         };
         match idle {
             Idle::Quit => {
-                shutdown_for_exit(&mut app).await;
+                shutdown_for_exit(&mut app, &mut shell).await;
                 break;
             }
             Idle::SessionLifecycle(request) => {
@@ -9828,7 +9862,7 @@ async fn run_interactive_once(
                     }
                     IdleCommandOutcome::Quit(next) => {
                         app = *next;
-                        shutdown_for_exit(&mut app).await;
+                        shutdown_for_exit(&mut app, &mut shell).await;
                         break;
                     }
                 }
@@ -9865,7 +9899,7 @@ async fn run_interactive_once(
                             }
                             IdleCommandOutcome::Quit(next) => {
                                 app = *next;
-                                shutdown_for_exit(&mut app).await;
+                                shutdown_for_exit(&mut app, &mut shell).await;
                                 break 'interactive;
                             }
                             IdleCommandOutcome::Submit { app: next, input } => {
@@ -9912,7 +9946,7 @@ async fn run_interactive_once(
                     biased;
                     _ = crate::tui::terminal::wait_for_shutdown_signal() => {
                         shell.restore_composed(composed);
-                        shutdown_for_exit(&mut app).await;
+                        shutdown_for_exit(&mut app, &mut shell).await;
                         break 'interactive;
                     }
                     result = await_with_ctrl_c(
@@ -10052,7 +10086,7 @@ async fn run_interactive_once(
                     .await;
                 app.agent.set_system_prompt(app.system.clone());
                 if crate::tui::terminal::received_shutdown_signal().is_some() {
-                    shutdown_for_exit(&mut app).await;
+                    shutdown_for_exit(&mut app, &mut shell).await;
                     break 'interactive;
                 }
                 let goal_decision = if ended.allows_after_response() {
@@ -10060,7 +10094,7 @@ async fn run_interactive_once(
                     let notifications = tokio::select! {
                         biased;
                         _ = crate::tui::terminal::wait_for_shutdown_signal() => {
-                            shutdown_for_exit(&mut app).await;
+                            shutdown_for_exit(&mut app, &mut shell).await;
                             break 'interactive;
                         }
                         result = await_with_ctrl_c(
@@ -10115,11 +10149,11 @@ async fn run_interactive_once(
                 // action follows to trigger another render.
                 shell.render();
                 if shell.close_requested() {
-                    shutdown_for_exit(&mut app).await;
+                    shutdown_for_exit(&mut app, &mut shell).await;
                     break 'interactive;
                 }
                 if quit_requested {
-                    shutdown_for_exit(&mut app).await;
+                    shutdown_for_exit(&mut app, &mut shell).await;
                     break;
                 }
                 app = apply_pending_actions(

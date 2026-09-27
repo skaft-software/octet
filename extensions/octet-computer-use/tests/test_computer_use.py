@@ -928,6 +928,66 @@ class TargetingHintTests(unittest.TestCase):
 
         self.assertEqual(_targeting_hint({"snapshot_id": "s1"}), "")
 
+    def test_hint_bounds_the_sample_and_states_the_real_total(self):
+        from octet_computer_use.entrypoint import _TARGETING_HINT_ROWS, _targeting_hint
+
+        total = _TARGETING_HINT_ROWS + 12
+        structured = {
+            "snapshot_id": "s1",
+            "elements": [
+                {
+                    "element_index": index,
+                    "element_token": f"s1:{index}",
+                    "role": "AXButton",
+                    "label": f"Button {index}",
+                }
+                for index in range(1, total + 1)
+            ],
+        }
+        hint = _targeting_hint(structured)
+        rows = [line for line in hint.splitlines() if line.startswith("  token=")]
+        self.assertEqual(len(rows), _TARGETING_HINT_ROWS)
+        # A truncated sample must never read as the whole table: the model has to
+        # be told what it is not seeing and where the rest is.
+        self.assertIn(f"... 12 more addressable elements", hint)
+        self.assertIn("structured_content.elements", hint)
+
+
+class ObservationScreenshotTests(unittest.TestCase):
+    """Window-state reads default to structure; other tools retain their API."""
+
+    def _forwarded(self, tool, values):
+        from octet_computer_use.entrypoint import ComputerUse
+
+        client = FakeClient(read_only=[tool])
+        use = ComputerUse.__new__(ComputerUse)
+        use._client = client
+        use._lock = __import__("threading").Lock()
+        use._app_daemon = False
+        use._cursor_ready = True
+        use._cursor_session = None
+        use._extension = RecordingExtension()
+        use.call(tool, {**values, "pid": 1, "window_id": 1})
+        return client.calls[-1][1]
+
+    def test_screenshot_is_opt_in_on_a_window_read(self):
+        forwarded = self._forwarded("get_window_state", {})
+        self.assertIs(forwarded["include_screenshot"], False)
+
+    def test_an_explicit_screenshot_request_is_honored(self):
+        forwarded = self._forwarded("get_window_state", {"include_screenshot": True})
+        self.assertIs(forwarded["include_screenshot"], True)
+
+    def test_other_observations_keep_their_reviewed_arguments(self):
+        for tool in ("get_desktop_state", "list_windows", "list_apps"):
+            with self.subTest(tool=tool):
+                forwarded = self._forwarded(tool, {})
+                self.assertNotIn("include_screenshot", forwarded)
+
+    def test_an_effectful_tool_is_not_given_a_default(self):
+        forwarded = self._forwarded("click", {})
+        self.assertNotIn("include_screenshot", forwarded)
+
 
 class DesktopHostTests(unittest.TestCase):
     """macOS requires the selected host unless direct mode is explicit.

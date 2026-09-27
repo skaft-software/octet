@@ -173,8 +173,19 @@ fn completion_owners_keep_mentions_and_paths_separate() {
         "docs/README.md".into(),
         "src/lib.rs".into(),
     ];
-    assert_eq!(mention_matches(&files, "read", 5), vec!["docs/README.md"]);
+    let index = workspace_index_from(files);
+    assert_eq!(mention_matches(&index, "read", 5), vec!["docs/README.md"]);
     assert_eq!(active_mention("open @src"), Some("src"));
     assert_eq!(active_path("open ./src/"), Some("./src/"));
     assert_eq!(active_path("/model gpt"), None);
+}
+
+/// Build an index over explicit paths, as the workspace walk would.
+///
+/// The walk itself needs a real directory; the ranking and case-folding
+/// behavior under test does not.
+fn workspace_index_from(paths: Vec<String>) -> WorkspaceFileIndex {
+    let mut sorted = paths;
+    sorted.sort();
+    WorkspaceFileIndex::from_paths(sorted)
 }

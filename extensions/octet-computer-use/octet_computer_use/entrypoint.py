@@ -470,6 +470,14 @@ class ComputerUse:
         arguments = service.sanitize(driver_tool, values)
         client = self.client()
 
+        # A window-state read usually needs the element tree, not its pixels.
+        # The driver attaches a full screenshot by default, which made each
+        # read publish megabytes even when the caller only wanted elements.
+        # Only this tool accepts include_screenshot: desktop_state is itself a
+        # screenshot, while list/health tools have no such argument.
+        if driver_tool == "get_window_state" and "include_screenshot" not in arguments:
+            arguments["include_screenshot"] = False
+
         # A public end may only end the session subsequent actions are attached
         # to. Refuse unrelated names rather than leaving the action binding stale.
         if driver_tool == "end_session":
@@ -889,6 +897,13 @@ def _render_jev_setup(outcome: Mapping[str, Any]) -> str:
     return "Jev setup skipped. Computer use is unaffected."
 
 
+# How many element rows the inline hint spells out before deferring to the
+# structured payload. This bounds what is *displayed*, never what is known: the
+# complete table stays in structured_content, and the hint states the real
+# total, so the model is never left believing it saw everything.
+_TARGETING_HINT_ROWS = 20
+
+
 def _targeting_hint(structured: Mapping[str, Any]) -> str:
     """Spell out how to address an element in this window.
 
@@ -897,6 +912,11 @@ def _targeting_hint(structured: Mapping[str, Any]) -> str:
     cannot click a button by identity and falls back to coordinates or to
     reverse-engineering the driver's source. State the contract once, in the tool
     result the agent is already reading.
+
+    Repeating the whole table here is pure duplication -- it is already in
+    ``structured_content`` -- and on a large window 200 rows crowded out the
+    result the model was actually asking for. A short sample plus the true count
+    carries the same information for a fraction of the tokens.
     """
 
     elements = structured.get("elements")
@@ -909,17 +929,21 @@ def _targeting_hint(structured: Mapping[str, Any]) -> str:
     snapshot = structured.get("snapshot_id")
     if isinstance(snapshot, str) and snapshot:
         lines.append(f"snapshot_id: {snapshot}")
-    for element in elements[:200]:
-        if not isinstance(element, dict):
-            continue
-        token = element.get("element_token")
-        index = element.get("element_index")
-        label = element.get("label")
-        role = element.get("role")
-        if token is None and index is None:
-            continue
+    addressable = [
+        element
+        for element in elements
+        if isinstance(element, dict)
+        and (element.get("element_token") is not None or element.get("element_index") is not None)
+    ]
+    for element in addressable[:_TARGETING_HINT_ROWS]:
         lines.append(
-            f"  token={token} index={index} role={role} label={label}"
+            f"  token={element.get('element_token')} index={element.get('element_index')} "
+            f"role={element.get('role')} label={element.get('label')}"
+        )
+    if len(addressable) > _TARGETING_HINT_ROWS:
+        lines.append(
+            f"  ... {len(addressable) - _TARGETING_HINT_ROWS} more addressable elements; "
+            "the complete table is in structured_content.elements"
         )
     return "\n".join(lines)
 

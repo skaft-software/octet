@@ -1929,6 +1929,8 @@ fn inline_autocomplete_uses_compact_footers_and_the_model_accent() {
     for character in "see @main".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    // The index is walked off-thread; the popup needs the finished walk.
+    shell.settle_file_index();
     let paths = shell_chrome(&shell.state.borrow(), 120, Instant::now()).suggestions;
     let selected = paths
         .iter()
@@ -2223,6 +2225,8 @@ fn mention_completion_inserts_path_reference_for_text_files() {
     for character in "see @main".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    // The index is walked off-thread; completion needs the finished walk.
+    shell.settle_file_index();
     let rendered = render_shell(&shell.state.borrow(), 120);
     assert!(rendered
         .iter()
@@ -2305,6 +2309,8 @@ fn mention_completion_attaches_media_files() {
     for character in "@shot".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    // The index is walked off-thread; completion needs the finished walk.
+    shell.settle_file_index();
     shell.complete_path();
     assert_eq!(shell.pending(), "[Image #1]");
     let composed = shell.drain_composed();
@@ -2324,6 +2330,7 @@ fn set_workspace_keeps_file_index_and_layout_when_the_root_is_unchanged() {
     for character in "@a".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    shell.settle_file_index();
     let generation = {
         let state = shell.state.borrow();
         drop(state.rendered_transcript(80));
@@ -2366,6 +2373,7 @@ fn invalidate_file_index_forces_a_fresh_walk_for_new_files() {
     for character in "@a".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    shell.settle_file_index();
     assert!(shell.state.borrow().file_index.is_some());
 
     // A run may have created files; invalidation makes the next mention
@@ -2374,9 +2382,10 @@ fn invalidate_file_index_forces_a_fresh_walk_for_new_files() {
     shell.invalidate_file_index();
     assert!(shell.state.borrow().file_index.is_none());
     shell.apply_edit(EditAction::Char('_'));
+    shell.settle_file_index();
     let state = shell.state.borrow();
     let files = state.file_index.as_ref().unwrap();
-    assert!(files.iter().any(|file| file == "brand_new.rs"));
+    assert!(files.paths().iter().any(|file| file == "brand_new.rs"));
 }
 
 #[test]
@@ -2389,6 +2398,8 @@ fn unsupported_media_mention_falls_back_to_a_path_and_notice() {
     for character in "@shot".chars() {
         shell.apply_edit(EditAction::Char(character));
     }
+    // The index is walked off-thread; completion needs the finished walk.
+    shell.settle_file_index();
     shell.complete_path();
 
     assert_eq!(shell.pending(), "@shot.png ");

@@ -28,7 +28,7 @@ PUBLISHED_TOOLS: Sequence[Tuple[str, str, str]] = (
     ("computer_use_setup", "provision", "Provision the MIT-licensed Cua Driver into octet-owned state. Downloads from the configured package index."),
     ("computer_use_installed_apps", "list_apps", "List installed and running applications available to the driver."),
     ("computer_use_windows", "list_windows", "List top-level windows currently known to the desktop session."),
-    ("computer_use_window_state", "get_window_state", "Return one window's accessibility tree and screenshot together. Re-snapshot before each element-indexed action."),
+        ("computer_use_window_state", "get_window_state", "Return one window's accessibility tree, with a screenshot when include_screenshot is true. Re-snapshot before each element-indexed action."),
     ("computer_use_desktop_state", "get_desktop_state", "Capture the full desktop in true screen pixels."),
     ("computer_use_click", "click", "Click an element or coordinate in a target window."),
     ("computer_use_type_text", "type_text", "Type text into an element or the focused field of a target window."),

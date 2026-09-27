@@ -74,3 +74,95 @@ fn malformed_dcs_is_suppressed_without_losing_prior_text() {
     backend.write("before\x1bP+octet-image;unterminated");
     assert_eq!(backend.out, b"before");
 }
+
+/// A valid, static 1x33 RGBA PNG generated from 33 filtered scanlines. The
+/// encoder needs a real signature and inspectable dimensions before it will
+/// hand anything to the protocol writer.
+fn png_payload() -> Arc<TerminalImage> {
+    Arc::new(
+        TerminalImage::from_bytes(vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 33,
+            8, 6, 0, 0, 0, 24, 185, 193, 191, 0, 0, 0, 16, 73, 68, 65, 84, 120, 156, 99, 248, 207,
+            192, 240, 159, 97, 144, 19, 0, 49, 155, 65, 191, 162, 42, 52, 239, 0, 0, 0, 0, 73, 69,
+            78, 68, 174, 66, 96, 130,
+        ])
+        .expect("valid png"),
+    )
+}
+
+#[test]
+fn a_repeated_placement_reuses_the_encoded_bytes() {
+    let id = ImageId::new(1).unwrap();
+    let layout = ImageLayout::new(2, 1).unwrap();
+    let marker = ImageAnchor::new(ImageProtocol::Kitty, id, layout).marker();
+    let mut backend = terminal();
+    backend.image_store.register(id, png_payload());
+
+    backend.write(&marker);
+    let first = backend.out.clone();
+    assert!(!first.is_empty(), "first placement wrote nothing");
+
+    // The same image on a later frame must not re-run base64 over the payload.
+    backend.write(&marker);
+    assert_eq!(backend.out, [first.clone(), first].concat());
+
+    let cached = backend.image_store.encoded_len();
+    assert_eq!(cached, 1, "one placement, one cached encoding");
+}
+
+#[test]
+fn a_resized_placement_is_encoded_again_rather_than_reusing_the_old_layout() {
+    let id = ImageId::new(1).unwrap();
+    let mut backend = terminal();
+    backend.image_store.register(id, png_payload());
+
+    let narrow =
+        ImageAnchor::new(ImageProtocol::Kitty, id, ImageLayout::new(2, 1).unwrap()).marker();
+    let wide = ImageAnchor::new(ImageProtocol::Kitty, id, ImageLayout::new(8, 1).unwrap()).marker();
+    backend.write(&narrow);
+    let narrow_bytes = backend.out.clone();
+    backend.write(&wide);
+    let wide_bytes = backend.out[narrow_bytes.len()..].to_vec();
+
+    // The header carries the placement rectangle, so a resized anchor must not
+    // be served the previous size's bytes.
+    assert_ne!(narrow_bytes, wide_bytes);
+    assert!(String::from_utf8_lossy(&wide_bytes).contains("c=8,r=1"));
+    assert_eq!(backend.image_store.encoded_len(), 2);
+}
+
+#[test]
+fn re_registering_an_id_retires_its_cached_encoding() {
+    let id = ImageId::new(1).unwrap();
+    let marker =
+        ImageAnchor::new(ImageProtocol::Kitty, id, ImageLayout::new(2, 1).unwrap()).marker();
+    let mut backend = terminal();
+    backend.image_store.register(id, png_payload());
+    backend.write(&marker);
+    assert_eq!(backend.image_store.encoded_len(), 1);
+
+    // A new payload under the same id must never be served the old bytes.
+    backend.image_store.register(id, png_payload());
+    assert_eq!(backend.image_store.encoded_len(), 0);
+}
+
+#[test]
+fn the_encoded_cache_stays_bounded_across_many_resizes() {
+    let id = ImageId::new(1).unwrap();
+    let mut backend = terminal();
+    backend.image_store.register(id, png_payload());
+    for columns in 1..=(MAX_ENCODED_IMAGES as u16 + 4) {
+        let marker = ImageAnchor::new(
+            ImageProtocol::Kitty,
+            id,
+            ImageLayout::new(columns, 1).unwrap(),
+        )
+        .marker();
+        backend.write(&marker);
+    }
+    assert!(
+        backend.image_store.encoded_len() <= MAX_ENCODED_IMAGES,
+        "encoded cache grew to {}",
+        backend.image_store.encoded_len()
+    );
+}

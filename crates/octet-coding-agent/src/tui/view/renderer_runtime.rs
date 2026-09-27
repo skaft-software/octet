@@ -3,6 +3,7 @@
 use super::renderer_model::{RenderModel, RenderOwner};
 use std::cell::{RefCell, RefMut};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -41,6 +42,9 @@ const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) struct SharedState(
     Arc<Mutex<ShellState>>,
     Arc<Mutex<Option<Arc<super::renderer_geometry::RenderedGeometry>>>>,
+    /// Shared with the shell state so a finished workspace walk is detectable
+    /// without taking the state lock on every renderer wake.
+    Arc<AtomicBool>,
 );
 
 impl SharedState {
@@ -53,7 +57,20 @@ impl SharedState {
     }
 
     pub(super) fn new(state: ShellState) -> Self {
-        Self(Arc::new(Mutex::new(state)), Arc::new(Mutex::new(None)))
+        let mut state = state;
+        let file_index_ready = Arc::new(AtomicBool::new(false));
+        state.file_index_ready = file_index_ready.clone();
+        Self(
+            Arc::new(Mutex::new(state)),
+            Arc::new(Mutex::new(None)),
+            file_index_ready,
+        )
+    }
+
+    /// Lock-free test for a completed workspace walk. Idle wakes with nothing
+    /// new never take the state lock to find out.
+    pub(super) fn file_index_ready(&self) -> bool {
+        self.2.load(Ordering::Relaxed)
     }
 
     fn frame_written(&self) {
@@ -325,21 +342,35 @@ fn coalesce_render_commands(
 
 /// Send OSC 2 only after startup resolved the session, and only when the
 /// desired title differs from this renderer instance's last write.
-fn sync_window_title(tui: &mut TUI<'_>, state: &SharedState, last_title: &mut Option<String>) {
-    let title = {
-        let shell = state.borrow();
-        if shell.startup_pending {
-            return;
-        }
-        shell
-            .session_name
-            .as_deref()
-            .map_or_else(|| "octet".to_owned(), |name| format!("octet · {name}"))
-    };
-    if last_title.as_deref() != Some(title.as_str()) {
-        tui.set_window_title(&title);
-        *last_title = Some(title);
+///
+/// The composed title is built only when the session name actually changed.
+/// This runs on every painted frame, so formatting it unconditionally would
+/// allocate a string per frame to compare against a value that almost never
+/// moved.
+fn sync_window_title(
+    tui: &mut TUI<'_>,
+    state: &SharedState,
+    last_title: &mut Option<(Option<String>, String)>,
+) {
+    let shell = state.borrow();
+    if shell.startup_pending {
+        return;
     }
+    // Compare borrowed names: a session name that has not moved must not cost
+    // a clone or a format on every frame.
+    if last_title
+        .as_ref()
+        .is_some_and(|(previous, _)| *previous == shell.session_name)
+    {
+        return;
+    }
+    let name = shell.session_name.clone();
+    drop(shell);
+    let title = name
+        .as_deref()
+        .map_or_else(|| "octet".to_owned(), |name| format!("octet · {name}"));
+    tui.set_window_title(&title);
+    *last_title = Some((name, title));
 }
 
 /// Flush the retained final frame, restore the process terminal, and
@@ -492,6 +523,14 @@ pub(super) fn render_loop_with_terminal(
     // final frame and the terminal handback belong.
     let mut suspended: Option<mpsc::Sender<()>> = None;
     loop {
+        // A finished workspace walk changes what the mention popup offers, so
+        // admit it as semantic work: the scan indicator has to clear on its own
+        // frame while the composer is otherwise idle. The atomic is tested
+        // first so an idle wake does not take the state lock for nothing.
+        let index_loaded = state.file_index_ready() && {
+            let mut shell = state.borrow_mut();
+            super::poll_file_index_scan(&mut shell)
+        };
         let welcome = {
             let shell = state.borrow();
             let now = Instant::now();
@@ -534,7 +573,8 @@ pub(super) fn render_loop_with_terminal(
         };
         // The idle poll also services diagnostics emitted by lifecycle workers.
         // They enter semantic rows, never the physical terminal stream.
-        let semantic_command = matches!(command, Some(RenderCommand::Render))
+        let semantic_command = index_loaded
+            || matches!(command, Some(RenderCommand::Render))
             || (crate::output::has_tui_diagnostics() && !state.borrow().startup_pending);
         if !render_wake_requires_frame(
             semantic_command,

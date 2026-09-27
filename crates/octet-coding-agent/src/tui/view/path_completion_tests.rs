@@ -27,6 +27,9 @@ fn composer(root: &std::path::Path, draft: &str) -> InteractiveShell {
     let mut shell = InteractiveShell::test_shell();
     shell.set_workspace(root.to_path_buf());
     shell.apply_edit(EditAction::Paste(draft.to_owned()));
+    // The mention index is walked on its own thread; a test shell has no
+    // renderer to drain the result, so wait for it here.
+    shell.settle_file_index();
     shell
 }
 
@@ -95,6 +98,69 @@ fn path_selection_clamps_and_resets_when_query_or_workspace_changes() {
     assert_eq!(shell.state.borrow().path_selection, 0);
     press(&mut shell, KeyCode::Tab, false);
     assert_eq!(shell.pending(), "./item-new.rs ");
+}
+
+#[test]
+fn an_unfinished_mention_scan_is_reported_instead_of_looking_broken() {
+    let dir = workspace();
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_workspace(dir.path().to_path_buf());
+    shell.apply_edit(EditAction::Paste("@item".to_owned()));
+
+    // The walk runs off-thread, so the popup must say so rather than drawing
+    // nothing and reading as "`@` does not work".
+    let state = shell.state.borrow();
+    assert!(
+        state.file_index_scanning,
+        "a mention query must start a walk"
+    );
+    assert!(state.file_index.is_none(), "the walk has not landed yet");
+    let rows = input_overlays::render_input_suggestions(&state, 80, 6);
+    let plain: Vec<String> = rows
+        .iter()
+        .map(|row| strip_terminal_sequences(row))
+        .collect();
+    assert!(
+        plain
+            .iter()
+            .any(|row| row.contains("scanning project files")),
+        "{plain:?}"
+    );
+    drop(state);
+
+    // Once it lands the indicator is gone and real rows are offered.
+    shell.settle_file_index();
+    let state = shell.state.borrow();
+    assert!(!state.file_index_scanning);
+    let rows = input_overlays::render_input_suggestions(&state, 80, 6);
+    let plain: Vec<String> = rows
+        .iter()
+        .map(|row| strip_terminal_sequences(row))
+        .collect();
+    assert!(
+        !plain
+            .iter()
+            .any(|row| row.contains("scanning project files")),
+        "{plain:?}"
+    );
+    assert!(
+        plain.iter().any(|row| row.contains("item0.rs")),
+        "{plain:?}"
+    );
+}
+
+#[test]
+fn a_path_query_never_reports_a_scan_it_did_not_start() {
+    let dir = workspace();
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_workspace(dir.path().to_path_buf());
+    // A path-shaped query completes from the directory itself, so there is no
+    // walk to report and no reason to claim one is running.
+    shell.apply_edit(EditAction::Paste("./item".to_owned()));
+    let state = shell.state.borrow();
+    assert!(!state.file_index_scanning);
+    drop(state);
+    shell.settle_file_index();
 }
 
 #[test]

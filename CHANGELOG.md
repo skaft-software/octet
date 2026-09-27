@@ -18,6 +18,18 @@
 - Parse trailing Kitty image anchors once per transcript-block finish instead
   of twice, and find compaction cut points with a binary search instead of a
   linear scan per budget step.
+- Show a cleanup notice if interactive exit takes longer than 150 ms; fast and
+  signal-driven exits remain quiet, and the notice lasts through cleanup.
+- Reuse encoded Kitty image placements across frames, keyed by cell size with
+  bounded retention and payload-replacement invalidation; avoid rebuilding
+  unchanged terminal window titles.
+- Walk the complete workspace file index off-thread for `@` completion and
+  show a scanning indicator until suggestions arrive; cache folded paths for
+  per-keystroke matching instead of silently stopping after 10,000 files.
+- Make computer-use window-state screenshots opt-in and shorten inline element
+  hints to a 20-row sample with the full addressable count and structured-data
+  location; explicitly requested screenshots and complete element data remain
+  available. Full desktop captures remain screenshot-based.
 - Compile `examples/themes/Cards.toml` into every release as the built-in
   `Cards` selector, so it needs no copy into a discovery root. It appears in
   `/theme` after the terminal-appearance choices, works with `--theme` and

@@ -24,7 +24,7 @@ pub use paste::LARGE_PASTE_LINES;
 pub use paste::{classify_paste, looks_like_absolute_path, PasteKind};
 pub use picker::{
     active_mention, active_path, is_path_query, mention_matches, path_matches, workspace_files,
-    PathSuggestion,
+    PathSuggestion, WorkspaceFileIndex,
 };
 
 #[cfg(test)]

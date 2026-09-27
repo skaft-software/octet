@@ -22,7 +22,25 @@ use super::capabilities::{sexy_terminal_capabilities, ColorMode, TerminalCapabil
 use super::lifecycle;
 use super::TerminalSize;
 
-/// Owned, validated image payloads addressable from semantic image anchors.
+/// Identity of one encoded placement: the same payload at a different cell
+/// size produces different protocol headers, so the layout is part of the key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct EncodedImageKey {
+    id: u32,
+    protocol: ImageProtocol,
+    columns: u16,
+    rows: u16,
+}
+
+/// Bound on retained encoded payloads. A resize mints one new key per visible
+/// image, so an unpruned map would grow with every terminal dimension change.
+/// Entries are cheap to rebuild on the next frame, so exceeding the bound
+/// clears the map rather than tracking recency: a deliberate eviction policy
+/// would add state without changing what the next frame produces.
+const MAX_ENCODED_IMAGES: usize = 64;
+
+/// Owned, validated image payloads addressable from semantic image anchors,
+/// plus the encoded protocol bytes for placements already written once.
 ///
 /// This store is intentionally internal to the interactive renderer. It has no
 /// path, URL, or byte-exposure API: only the terminal adapter can resolve an
@@ -30,6 +48,7 @@ use super::TerminalSize;
 #[derive(Clone, Default)]
 pub(crate) struct TerminalImageStore {
     images: Arc<Mutex<HashMap<u32, Arc<TerminalImage>>>>,
+    encoded: Arc<Mutex<HashMap<EncodedImageKey, Arc<[u8]>>>>,
 }
 
 impl TerminalImageStore {
@@ -39,6 +58,11 @@ impl TerminalImageStore {
             .lock()
             .expect("terminal image store mutex poisoned")
             .insert(id.get(), image);
+        // A re-registered ID must not serve bytes encoded from the old payload.
+        self.encoded
+            .lock()
+            .expect("terminal image store mutex poisoned")
+            .retain(|key, _| key.id != id.get());
     }
 
     fn get(&self, id: ImageId) -> Option<Arc<TerminalImage>> {
@@ -49,9 +73,42 @@ impl TerminalImageStore {
             .cloned()
     }
 
+    /// Number of retained encoded placements. Test-observable so the bound is
+    /// asserted rather than assumed.
+    #[cfg(test)]
+    fn encoded_len(&self) -> usize {
+        self.encoded
+            .lock()
+            .expect("terminal image store mutex poisoned")
+            .len()
+    }
+
+    fn encoded(&self, key: &EncodedImageKey) -> Option<Arc<[u8]>> {
+        self.encoded
+            .lock()
+            .expect("terminal image store mutex poisoned")
+            .get(key)
+            .cloned()
+    }
+
+    fn remember_encoded(&self, key: EncodedImageKey, bytes: Arc<[u8]>) {
+        let mut encoded = self
+            .encoded
+            .lock()
+            .expect("terminal image store mutex poisoned");
+        if encoded.len() >= MAX_ENCODED_IMAGES {
+            encoded.clear();
+        }
+        encoded.insert(key, bytes);
+    }
+
     /// Drop all payload references when a transcript is replaced.
     pub(crate) fn clear(&self) {
         self.images
+            .lock()
+            .expect("terminal image store mutex poisoned")
+            .clear();
+        self.encoded
             .lock()
             .expect("terminal image store mutex poisoned")
             .clear();
@@ -242,8 +299,30 @@ impl<W: Write> OctetTerminal<W> {
         let Some(image) = self.image_store.get(anchor.id()) else {
             return;
         };
+        let layout = anchor.layout();
+        let key = EncodedImageKey {
+            id: anchor.id().get(),
+            protocol: anchor.protocol(),
+            columns: layout.columns(),
+            rows: layout.rows(),
+        };
+        const LOG_MARKER: &[u8] = b"[terminal image omitted]";
+        // A visible image is re-emitted on every frame that touches its row, and
+        // a shimmer or dot tick touches many rows. Re-encoding means re-running
+        // base64 over the whole payload in bounded chunks per frame, so reuse
+        // the bytes once this exact placement has been written.
+        if let Some(encoded) = self.image_store.encoded(&key) {
+            if self.pending.try_reserve(encoded.len()).is_err()
+                || self.pending_log.try_reserve(LOG_MARKER.len()).is_err()
+            {
+                return;
+            }
+            self.pending.extend_from_slice(&encoded);
+            self.pending_log.extend_from_slice(LOG_MARKER);
+            return;
+        }
         let Ok(command) = ImageProtocolEncoder::new(anchor.protocol(), ImageLimits::default())
-            .encode_place(anchor.id(), &image, anchor.layout())
+            .encode_place(anchor.id(), &image, layout)
         else {
             return;
         };
@@ -251,14 +330,16 @@ impl<W: Write> OctetTerminal<W> {
         // before emitting either. An allocation failure therefore cannot leave
         // a partial graphics sequence in a synchronized frame or an image
         // write without its payload-free log replacement.
-        const LOG_MARKER: &[u8] = b"[terminal image omitted]";
         if self.pending.try_reserve(command.encoded_len()).is_err()
             || self.pending_log.try_reserve(LOG_MARKER.len()).is_err()
         {
             return;
         }
-        if command.write_to(&mut self.pending).is_ok() {
+        let mut encoded = Vec::with_capacity(command.encoded_len());
+        if command.write_to(&mut encoded).is_ok() {
+            self.pending.extend_from_slice(&encoded);
             self.pending_log.extend_from_slice(LOG_MARKER);
+            self.image_store.remember_encoded(key, encoded.into());
         }
     }
 
