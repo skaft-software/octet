@@ -9,6 +9,8 @@
   `npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.8.1`.
   README, installation, distribution, getting-started, and release docs now lead
   with the npm lane.
+- Target v0.8.2: omit the redundant `computer_use_` prefix from TUI labels so
+  computer-use actions remain distinguishable within the label width cap.
 
 ## [0.8.1] - 2026-09-27
 
